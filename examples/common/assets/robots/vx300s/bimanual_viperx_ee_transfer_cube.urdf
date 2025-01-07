@@ -1,0 +1,447 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="MuJoCo Model">
+  <link name="world" />
+  <link name="table">
+    <visual>
+      <origin xyz="0 0 0" rpy="0.0 0.0 0.0" />
+      <geometry>
+        <mesh filename="meshes/tabletop.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="table_fixed" type="fixed">
+    <parent link="world" />
+    <child link="table" />
+    <origin xyz="0 0.6 0" rpy="0.0 0.0 0.0" />
+  </joint>
+  <link name="midair" />
+  <joint name="midair_fixed" type="fixed">
+    <parent link="world" />
+    <child link="midair" />
+    <origin xyz="0 0.6 0.2" rpy="0.0 0.0 0.0" />
+  </joint>
+  <link name="vx300s_left">
+    <visual>
+      <origin xyz="0 0 0" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_1_base.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_left_fixed" type="fixed">
+    <parent link="world" />
+    <child link="vx300s_left" />
+    <origin xyz="-0.469 0.5 0" rpy="0.0 0.0 0.0" />
+  </joint>
+  <link name="vx300s_left/shoulder_link">
+    <inertial>
+      <mass value="0.798614" />
+      <origin xyz="0.000259233 -3.3552e-06 0.0116129" />
+      <inertia ixx="0.00120156" iyy="0.00113744" izz="0.0009388" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 -0.003" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_2_shoulder.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_left/waist" type="revolute">
+    <parent link="vx300s_left" />
+    <child link="vx300s_left/shoulder_link" />
+    <origin xyz="0 0 0.079" rpy="0.0 0.0 0.0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-3.14158" upper="3.14158" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_left/upper_arm_link">
+    <inertial>
+      <mass value="0.792592" />
+      <origin xyz="0.0206949 4e-10 0.226459" />
+      <inertia ixx="0.00911338" iyy="0.008925" izz="0.000759317" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_3_upper_arm.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_left/shoulder" type="revolute">
+    <parent link="vx300s_left/shoulder_link" />
+    <child link="vx300s_left/upper_arm_link" />
+    <origin xyz="0 0 0.04805" rpy="0.0 0.0 0.0" />
+    <axis xyz="0 1 0" />
+    <limit lower="-1.85005" upper="1.25664" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_left/upper_forearm_link">
+    <inertial>
+      <mass value="0.322228" />
+      <origin xyz="0.105723 0 0" />
+      <inertia ixx="0.00144107" iyy="0.00134228" izz="0.000152047" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0.0 0.0 0.0" />
+      <geometry>
+        <mesh filename="meshes/vx300s_4_upper_forearm.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_left/elbow" type="revolute">
+    <parent link="vx300s_left/upper_arm_link" />
+    <child link="vx300s_left/upper_forearm_link" />
+    <origin xyz="0.05955 0 0.3" rpy="0.0 0.0 0.0" />
+    <axis xyz="0 1 0" />
+    <limit lower="-1.76278" upper="1.6057" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_left/lower_forearm_link">
+    <inertial>
+      <mass value="0.414823" />
+      <origin xyz="0.0513477 0.00680462 0" />
+      <inertia ixx="0.0005911" iyy="0.000546493" izz="0.000155707" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="3.141592653589793 0.0 0.0" />
+      <geometry>
+        <mesh filename="meshes/vx300s_5_lower_forearm.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_left/forearm_roll" type="revolute">
+    <parent link="vx300s_left/upper_forearm_link" />
+    <child link="vx300s_left/lower_forearm_link" />
+    <origin xyz="0.2 0 0" rpy="0.0 0.0 0.0" />
+    <axis xyz="1 0 0" />
+    <limit lower="-3.14158" upper="3.14158" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_left/wrist_link">
+    <inertial>
+      <mass value="0.115395" />
+      <origin xyz="0.046743 -7.6652e-06 0.010565" />
+      <inertia ixx="5.45707e-05" iyy="4.63101e-05" izz="4.32692e-05" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_6_wrist.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_left/wrist_angle" type="revolute">
+    <parent link="vx300s_left/lower_forearm_link" />
+    <child link="vx300s_left/wrist_link" />
+    <origin xyz="0.1 0 0" rpy="0.0 0.0 0.0" />
+    <axis xyz="0 1 0" />
+    <limit lower="-1.8675" upper="2.23402" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_left/gripper_link">
+    <inertial>
+      <mass value="0.251652" />
+      <origin xyz="0.0395662 -2.56311e-07 0.00400649" />
+      <inertia ixx="0.000689546" iyy="0.000650316" izz="0.000468142" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="-0.02 0 0" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_7_gripper.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.020175 0 0" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_9_gripper_bar.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_left/wrist_rotate" type="revolute">
+    <parent link="vx300s_left/wrist_link" />
+    <child link="vx300s_left/gripper_link" />
+    <origin xyz="0.069744 0 0" rpy="0.0 0.0 0.0" />
+    <axis xyz="1 0 0" />
+    <limit lower="-3.14158" upper="3.14158" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_left/camera_focus" />
+  <joint name="vx300s_left/camera_focus_fixed" type="fixed">
+    <parent link="vx300s_left/gripper_link" />
+    <child link="vx300s_left/camera_focus" />
+    <origin xyz="0.15 0 0.01" rpy="0.0 0.0 0.0" />
+  </joint>
+  <link name="vx300s_left/gripper_prop_link">
+    <inertial>
+      <mass value="0.008009" />
+      <origin xyz="0.002378 2.85e-08 0" />
+      <inertia ixx="4.2979e-06" iyy="2.8868e-06" izz="1.5314e-06" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="-0.0685 0 0" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_8_gripper_prop.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_left/gripper_prop_link_fixed" type="fixed">
+    <parent link="vx300s_left/gripper_link" />
+    <child link="vx300s_left/gripper_prop_link" />
+    <origin xyz="0.0485 0 0" rpy="0.0 0.0 0.0" />
+  </joint>
+  <link name="vx300s_left/left_finger_link">
+    <inertial>
+      <mass value="0.034796" />
+      <origin xyz="0.017344 -0.0060692 0" />
+      <inertia ixx="2.48003e-05" iyy="1.417e-05" izz="1.20797e-05" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0.005 -0.052 0" rpy="2.0343797509709978 -1.5690142288676159 1.1072095617422695" />
+      <geometry>
+        <mesh filename="meshes/vx300s_10_custom_finger_left.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_left/left_finger" type="prismatic">
+    <parent link="vx300s_left/gripper_link" />
+    <child link="vx300s_left/left_finger_link" />
+    <origin xyz="0.0687 0 0" rpy="0.0 0.0 0.0" />
+    <axis xyz="0 1 0" />
+    <limit lower="0.021" upper="0.057" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_left/right_finger_link">
+    <inertial>
+      <mass value="0.034796" />
+      <origin xyz="0.017344 0.0060692 0" />
+      <inertia ixx="2.48002e-05" iyy="1.417e-05" izz="1.20798e-05" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0.005 0.052 0" rpy="2.0343797509709978 -1.5690142288676159 1.1072095617422695" />
+      <geometry>
+        <mesh filename="meshes/vx300s_10_custom_finger_right.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_left/right_finger" type="prismatic">
+    <parent link="vx300s_left/gripper_link" />
+    <child link="vx300s_left/right_finger_link" />
+    <origin xyz="0.0687 0 0" rpy="0.0 0.0 0.0" />
+    <axis xyz="0 1 0" />
+    <limit lower="-0.057" upper="-0.021" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_right">
+    <visual>
+      <origin xyz="0 0 0" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_1_base.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_right_fixed" type="fixed">
+    <parent link="world" />
+    <child link="vx300s_right" />
+    <origin xyz="0.469 0.5 0" rpy="0.0 -0.0 -3.1415853071697932" />
+  </joint>
+  <link name="vx300s_right/shoulder_link">
+    <inertial>
+      <mass value="0.798614" />
+      <origin xyz="0.000259233 -3.3552e-06 0.0116129" />
+      <inertia ixx="0.00120156" iyy="0.00113744" izz="0.0009388" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 -0.003" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_2_shoulder.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_right/waist" type="revolute">
+    <parent link="vx300s_right" />
+    <child link="vx300s_right/shoulder_link" />
+    <origin xyz="0 0 0.079" rpy="0.0 0.0 0.0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-3.14158" upper="3.14158" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_right/upper_arm_link">
+    <inertial>
+      <mass value="0.792592" />
+      <origin xyz="0.0206949 4e-10 0.226459" />
+      <inertia ixx="0.00911338" iyy="0.008925" izz="0.000759317" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_3_upper_arm.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_right/shoulder" type="revolute">
+    <parent link="vx300s_right/shoulder_link" />
+    <child link="vx300s_right/upper_arm_link" />
+    <origin xyz="0 0 0.04805" rpy="0.0 0.0 0.0" />
+    <axis xyz="0 1 0" />
+    <limit lower="-1.85005" upper="1.25664" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_right/upper_forearm_link">
+    <inertial>
+      <mass value="0.322228" />
+      <origin xyz="0.105723 0 0" />
+      <inertia ixx="0.00144107" iyy="0.00134228" izz="0.000152047" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0.0 0.0 0.0" />
+      <geometry>
+        <mesh filename="meshes/vx300s_4_upper_forearm.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_right/elbow" type="revolute">
+    <parent link="vx300s_right/upper_arm_link" />
+    <child link="vx300s_right/upper_forearm_link" />
+    <origin xyz="0.05955 0 0.3" rpy="0.0 0.0 0.0" />
+    <axis xyz="0 1 0" />
+    <limit lower="-1.76278" upper="1.6057" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_right/lower_forearm_link">
+    <inertial>
+      <mass value="0.414823" />
+      <origin xyz="0.0513477 0.00680462 0" />
+      <inertia ixx="0.0005911" iyy="0.000546493" izz="0.000155707" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="3.141592653589793 0.0 0.0" />
+      <geometry>
+        <mesh filename="meshes/vx300s_5_lower_forearm.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_right/forearm_roll" type="revolute">
+    <parent link="vx300s_right/upper_forearm_link" />
+    <child link="vx300s_right/lower_forearm_link" />
+    <origin xyz="0.2 0 0" rpy="0.0 0.0 0.0" />
+    <axis xyz="1 0 0" />
+    <limit lower="-3.14158" upper="3.14158" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_right/wrist_link">
+    <inertial>
+      <mass value="0.115395" />
+      <origin xyz="0.046743 -7.6652e-06 0.010565" />
+      <inertia ixx="5.45707e-05" iyy="4.63101e-05" izz="4.32692e-05" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_6_wrist.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_right/wrist_angle" type="revolute">
+    <parent link="vx300s_right/lower_forearm_link" />
+    <child link="vx300s_right/wrist_link" />
+    <origin xyz="0.1 0 0" rpy="0.0 0.0 0.0" />
+    <axis xyz="0 1 0" />
+    <limit lower="-1.8675" upper="2.23402" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_right/gripper_link">
+    <inertial>
+      <mass value="0.251652" />
+      <origin xyz="0.0395662 -2.56311e-07 0.00400649" />
+      <inertia ixx="0.000689546" iyy="0.000650316" izz="0.000468142" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="-0.02 0 0" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_7_gripper.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.020175 0 0" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_9_gripper_bar.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_right/wrist_rotate" type="revolute">
+    <parent link="vx300s_right/wrist_link" />
+    <child link="vx300s_right/gripper_link" />
+    <origin xyz="0.069744 0 0" rpy="0.0 0.0 0.0" />
+    <axis xyz="1 0 0" />
+    <limit lower="-3.14158" upper="3.14158" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_right/camera_focus" />
+  <joint name="vx300s_right/camera_focus_fixed" type="fixed">
+    <parent link="vx300s_right/gripper_link" />
+    <child link="vx300s_right/camera_focus" />
+    <origin xyz="0.15 0 0.01" rpy="0.0 0.0 0.0" />
+  </joint>
+  <link name="vx300s_right/gripper_prop_link">
+    <inertial>
+      <mass value="0.008009" />
+      <origin xyz="0.002378 2.85e-08 0" />
+      <inertia ixx="4.2979e-06" iyy="2.8868e-06" izz="1.5314e-06" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="-0.0685 0 0" rpy="0.0 0.0 1.5707969456925137" />
+      <geometry>
+        <mesh filename="meshes/vx300s_8_gripper_prop.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_right/gripper_prop_link_fixed" type="fixed">
+    <parent link="vx300s_right/gripper_link" />
+    <child link="vx300s_right/gripper_prop_link" />
+    <origin xyz="0.0485 0 0" rpy="0.0 0.0 0.0" />
+  </joint>
+  <link name="vx300s_right/left_finger_link">
+    <inertial>
+      <mass value="0.034796" />
+      <origin xyz="0.017344 -0.0060692 0" />
+      <inertia ixx="2.48003e-05" iyy="1.417e-05" izz="1.20797e-05" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0.005 -0.052 0" rpy="2.0343797509709978 -1.5690142288676159 1.1072095617422695" />
+      <geometry>
+        <mesh filename="meshes/vx300s_10_custom_finger_left.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_right/left_finger" type="prismatic">
+    <parent link="vx300s_right/gripper_link" />
+    <child link="vx300s_right/left_finger_link" />
+    <origin xyz="0.0687 0 0" rpy="0.0 0.0 0.0" />
+    <axis xyz="0 1 0" />
+    <limit lower="0.021" upper="0.057" effort="1" velocity="1" />
+  </joint>
+  <link name="vx300s_right/right_finger_link">
+    <inertial>
+      <mass value="0.034796" />
+      <origin xyz="0.017344 0.0060692 0" />
+      <inertia ixx="2.48002e-05" iyy="1.417e-05" izz="1.20798e-05" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0.005 0.052 0" rpy="2.0343797509709978 -1.5690142288676159 1.1072095617422695" />
+      <geometry>
+        <mesh filename="meshes/vx300s_10_custom_finger_right.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="vx300s_right/right_finger" type="prismatic">
+    <parent link="vx300s_right/gripper_link" />
+    <child link="vx300s_right/right_finger_link" />
+    <origin xyz="0.0687 0 0" rpy="0.0 0.0 0.0" />
+    <axis xyz="0 1 0" />
+    <limit lower="-0.057" upper="-0.021" effort="1" velocity="1" />
+  </joint>
+  <link name="box">
+    <inertial>
+      <mass value="0.05" />
+      <origin xyz="0 0 0" />
+      <inertia ixx="0.002" iyy="0.002" izz="0.002" ixy="0" ixz="0" iyz="0" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0.0 0.0 0.0" />
+      <geometry>
+        <box size="0.02 0.02 0.02" />
+      </geometry>
+    </visual>
+  </link>
+  <joint name="red_box_joint" type="floating">
+    <parent link="world" />
+    <child link="box" />
+    <origin xyz="0.2 0.5 0.05" rpy="0.0 0.0 0.0" />
+  </joint>
+</robot>
