@@ -243,7 +243,7 @@ class DataStream:
             name: QueueProcessor(
                 name,
                 queue,
-                f"{base_url}/api/robots/ws/{robot_id}/{name}/ingest",
+                f"{base_url}/robots/ws/{robot_id}/{name}/ingest",
                 auth_headers,
             )
             for name, queue in self._queues.items()

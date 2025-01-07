@@ -13,7 +13,7 @@ def generate_api_key():
     # Authenticate user and get an access token
     try:
         auth_response = requests.post(
-            f"{API_URL}/api/auth/token",  # Updated to match the login route
+            f"{API_URL}/auth/token",  # Updated to match the login route
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             data={"username": email, "password": password},  # Send form data
         )
@@ -28,7 +28,7 @@ def generate_api_key():
     try:
         headers = {"Authorization": f"Bearer {access_token}"}
         api_key_response = requests.post(
-            f"{API_URL}/api/auth/api-key",
+            f"{API_URL}/auth/api-key",
             json={"name": "CLI API Key"},  # Name can be customized
             headers=headers,
         )

@@ -35,7 +35,7 @@ class Robot:
             # First check if we already have a robot with the same name
             if not self.overwrite:
                 response = requests.get(
-                    f"{API_URL}/api/robots",
+                    f"{API_URL}/robots",
                     headers=self._auth.get_headers(),
                 )
                 response.raise_for_status()
@@ -48,7 +48,7 @@ class Robot:
 
             logger.info(f"Creating new robot: {self.name}")
             response = requests.post(
-                f"{API_URL}/api/robots",
+                f"{API_URL}/robots",
                 json={"name": self.name, "cameras": []},  # TODO: Add camera support
                 headers=self._auth.get_headers(),
             )
@@ -69,7 +69,7 @@ class Robot:
 
         try:
             response = requests.post(
-                f"{API_URL}/api/recording/start",
+                f"{API_URL}/recording/start",
                 headers=self._auth.get_headers(),
                 json={"robot_id": self.id, "dataset_id": dataset_id},
             )
@@ -90,7 +90,7 @@ class Robot:
 
         try:
             response = requests.post(
-                f"{API_URL}/api/recording/stop?recording_id={recording_id}",
+                f"{API_URL}/recording/stop?recording_id={recording_id}",
                 headers=self._auth.get_headers(),
             )
             response.raise_for_status()
@@ -154,7 +154,7 @@ class Robot:
 
             # Upload the package
             response = requests.put(
-                f"{API_URL}/api/robots/{self.id}/package",
+                f"{API_URL}/robots/{self.id}/package",
                 headers=self._auth.get_headers(),
                 files=files,
             )

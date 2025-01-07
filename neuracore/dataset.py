@@ -28,7 +28,7 @@ class Dataset:
     ):
         auth: Auth = get_auth()
         response = requests.post(
-            f"{API_URL}/api/datasets",
+            f"{API_URL}/datasets",
             headers=auth.get_headers(),
             json={
                 "name": name,
@@ -41,6 +41,6 @@ class Dataset:
 
     def _get_datasets(self):
         auth: Auth = get_auth()
-        response = requests.get(f"{API_URL}/api/datasets", headers=auth.get_headers())
+        response = requests.get(f"{API_URL}/datasets", headers=auth.get_headers())
         response.raise_for_status()
         return response.json()

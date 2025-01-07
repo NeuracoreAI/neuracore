@@ -26,9 +26,7 @@ def test_connect_robot(temp_config_dir, mock_auth_requests, reset_neuracore, moc
     nc.login("test_api_key")
 
     # Mock robot creation endpoint with a full response
-    mock_auth_requests.post(
-        f"{API_URL}/api/robots", json="mock_robot_id", status_code=200
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
 
     # Connect robot
     nc.connect_robot("test_robot", mock_urdf)
@@ -46,9 +44,7 @@ def test_log_actions(
     nc.login("test_api_key")
 
     # Mock robot creation
-    mock_auth_requests.post(
-        f"{API_URL}/api/robots", json="mock_robot_id", status_code=200
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
 
     # Mock WebSocket-related behaviors
     def mock_websockets_connect(*args, **kwargs):
@@ -96,7 +92,7 @@ def test_create_dataset(temp_config_dir, mock_auth_requests, reset_neuracore):
 
     # Mock dataset creation endpoint
     mock_auth_requests.post(
-        f"{API_URL}/api/datasets", json={"id": "test_dataset_id"}, status_code=200
+        f"{API_URL}/datasets", json={"id": "test_dataset_id"}, status_code=200
     )
 
     # Create dataset
@@ -113,14 +109,14 @@ def test_connect_endpoint(temp_config_dir, mock_auth_requests, reset_neuracore):
 
     # Mock endpoint list
     mock_auth_requests.get(
-        f"{API_URL}/api/models/endpoints",
+        f"{API_URL}/models/endpoints",
         json=[{"id": "test_endpoint_id", "name": "test_endpoint", "status": "active"}],
         status_code=200,
     )
 
     # Mock endpoint prediction
     mock_auth_requests.post(
-        f"{API_URL}/api/models/endpoints/test_endpoint_id/predict",
+        f"{API_URL}/models/endpoints/test_endpoint_id/predict",
         json={"predictions": [0.1, 0.2, 0.3]},
         status_code=200,
     )
@@ -200,9 +196,7 @@ def test_stop_functions(
     nc.login("test_api_key")
 
     # Mock robot creation
-    mock_auth_requests.post(
-        f"{API_URL}/api/robots", json="mock_robot_id", status_code=200
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
 
     # Mock WebSocket-related behaviors
     def mock_websockets_connect(*args, **kwargs):

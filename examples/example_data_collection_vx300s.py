@@ -2,11 +2,11 @@ import argparse
 import os
 
 import numpy as np
+from common.constants import BIMANUAL_VIPERX_URDF_PATH
 from common.rollout_utils import rollout_policy
 from common.sim_env import BOX_POSE, make_sim_env
 
 import neuracore as nc
-from examples.common.constants import BIMANUAL_VIPERX_URDF_PATH
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 

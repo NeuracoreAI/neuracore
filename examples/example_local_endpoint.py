@@ -2,10 +2,10 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 from common.constants import EPISODE_LENGTH
+from common.ee_sim_env import sample_box_pose
 from common.sim_env import BOX_POSE, make_sim_env
 
 import neuracore as nc
-from examples.common.ee_sim_env import sample_box_pose
 
 THIS_DIR = Path(__file__).parent
 

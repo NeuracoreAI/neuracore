@@ -33,26 +33,26 @@ def mock_auth_requests():
 
         # Mock token generation
         m.post(
-            f"{API_URL}/api/auth/token",
+            f"{API_URL}/auth/token",
             json={"access_token": "test_token"},
             status_code=200,
         )
 
         # Mock robots endpoint
-        m.get(f"{API_URL}/api/robots", json=[], status_code=200)
+        m.get(f"{API_URL}/robots", json=[], status_code=200)
 
         # Mock robots upload endpoint
         m.put(
-            re.compile(f"{API_URL}/api/robots/.*/package"),
+            re.compile(f"{API_URL}/robots/.*/package"),
             json={"status": "success"},
             status_code=200,
         )
 
         # Mock dataset endpoint
-        m.get(f"{API_URL}/api/datasets", json=[], status_code=200)
+        m.get(f"{API_URL}/datasets", json=[], status_code=200)
 
         # Mock models/endpoints endpoint
-        m.get(f"{API_URL}/api/models/endpoints", json=[], status_code=200)
+        m.get(f"{API_URL}/models/endpoints", json=[], status_code=200)
 
         # Additional mock endpoints can be added here as needed
         yield m

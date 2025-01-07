@@ -116,7 +116,7 @@ def connect_endpoint(name: str) -> EndpointPolicy:
     try:
         # If not found by ID, get all endpoints and search by name
         response = requests.get(
-            f"{API_URL}/api/models/endpoints", headers=auth.get_headers()
+            f"{API_URL}/models/endpoints", headers=auth.get_headers()
         )
         response.raise_for_status()
 
@@ -132,7 +132,7 @@ def connect_endpoint(name: str) -> EndpointPolicy:
             )
 
         return EndpointPolicy(
-            f"{API_URL}/api/models/endpoints/{endpoint['id']}/predict",
+            f"{API_URL}/models/endpoints/{endpoint['id']}/predict",
             auth.get_headers(),
         )
 
