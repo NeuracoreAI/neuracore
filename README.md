@@ -18,7 +18,7 @@ pip install neuracore
 
 ## Quick Start
 
-Ensure you have an account at (https://www.neuracore.app/)[https://www.neuracore.app/]
+Ensure you have an account at [neuracore.app](https://www.neuracore.app/)
 
 ### Authentication
 
