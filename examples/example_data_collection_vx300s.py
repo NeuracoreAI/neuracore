@@ -95,7 +95,7 @@ if __name__ == "__main__":
         "--num_episodes",
         type=int,
         help="Number of episodes to run",
-        default=10,
+        default=50,
     )
     parser.add_argument(
         "--record",
