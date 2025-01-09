@@ -25,7 +25,7 @@ def main(args):
     # Setup parameters
     record = args["record"]
     num_episodes = args["num_episodes"]
-    camera_names = ["top", "angle", "vis"]  # Directly specify cameras
+    camera_names = ["angle"]
 
     if record:
         nc.create_dataset(
