@@ -10,6 +10,7 @@ This contains examples for using Neuracore with a simulated robot environment. Y
 2. [Examples](#examples)
    - [Data Collection](#data-collection)
    - [Local Model Deployment](#local-model-deployment)
+   - [Server Model Deployment](#server-model-deployment)
 
 ## Installation
 
@@ -48,8 +49,7 @@ python example_data_collection_vx300s.py --record True
 
 ### Local Model Deployment
 The local deployment example shows how to:
-- Download a trained model from Neuracore
-- Deploy and run the model locally
+- Deploy and run a model locally
 - Visualize the model's performance
 
 
@@ -79,3 +79,23 @@ Run the local model:
 ```bash
 python example_local_endpoint.py
 ```
+
+
+### Server Model Deployment
+The server deployment example shows how to:
+- Start a model endpoint
+- Visualize the model's performance using that active endpoint
+
+**NOTE: Before running this example:**
+- Collect a dataset following the example: [Data Collection](#data-collection)
+- Go to your [training dashboard ](https://www.neuracore.app/dashboard/training) and start a training run
+- Wait for the training run to finish
+- Go to your [endpoint dashboard ](https://www.neuracore.app/dashboard/endpoints) and start an endpoint. Call it __"MyExampleEndpoint"__
+- Wait for the status to be active
+
+One you have completed the steps above:
+```bash
+python example_server_endpoint.py
+```
+
+Unlike the previous example ([Local Model Deployment](#local-model-deployment)), this endpoint runs on our servers. 
