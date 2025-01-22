@@ -39,6 +39,16 @@ nc.connect_robot(
 )
 ```
 
+You can also upload MuJoCo MJCF rather than URDF. 
+For that, ensure you install extra dependencies: `pip install neuracore[mjcf]`.
+
+```python
+nc.connect_robot(
+    robot_name="MyRobot", 
+    mjcf_path="/path/to/robot.xml"
+)
+```
+
 ### Data Logging
 
 ```python

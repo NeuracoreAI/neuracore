@@ -1,6 +1,7 @@
 import io
 import logging
 import os
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -16,15 +17,40 @@ logger = logging.getLogger(__name__)
 
 class Robot:
     def __init__(
-        self, robot_name: str, urdf_path: str | None = None, overwrite: bool = False
+        self,
+        robot_name: str,
+        urdf_path: str | None = None,
+        mjcf_path: str | None = None,
+        overwrite: bool = False,
     ):
         self.name = robot_name
         self.urdf_path = urdf_path
+        self.mjcf_path = mjcf_path
         self.overwrite = overwrite
         self.id: str = None
         self._auth: Auth = get_auth()
-        if self.urdf_path and not os.path.isfile(self.urdf_path):
-            raise ValidationError(f"URDF file not found: {self.urdf_path}")
+        self._temp_dir = None
+        if urdf_path and mjcf_path:
+            raise ValidationError(
+                "Only one of urdf_path or mjcf_path should be provided."
+            )
+        if urdf_path:
+            if not os.path.isfile(urdf_path):
+                raise ValidationError(f"URDF file not found: {urdf_path}")
+            if not urdf_path.lower().endswith(".urdf"):
+                raise ValidationError("URDF file must have .urdf extension.")
+        if mjcf_path:
+            if not os.path.isfile(mjcf_path):
+                raise ValidationError(f"MJCF file not found: {mjcf_path}")
+            if not mjcf_path.lower().endswith(".xml"):
+                raise ValidationError("MJCF file must have .xml extension.")
+            try:
+                from .mjcf_to_urdf import convert
+            except ImportError:
+                raise ImportError("MJCF to URDF conversion requires mujoco")
+            self._temp_dir = tempfile.TemporaryDirectory(prefix="neuracore")
+            self.urdf_path = os.path.join(self._temp_dir.name, "model.urdf")
+            convert(mjcf_path, self.urdf_path, asset_file_prefix="meshes/")
 
     def init(self) -> None:
         """Initialize robot on the server."""
@@ -58,6 +84,8 @@ class Robot:
             # Upload URDF and meshes if provided
             if self.urdf_path:
                 self._upload_urdf_and_meshes()
+                if self._temp_dir:
+                    self._temp_dir.cleanup()
 
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to initialize robot: {str(e)}")
@@ -145,6 +173,11 @@ class Robot:
                 else:
                     # Handle relative paths
                     mesh_path = os.path.join(urdf_dir, filename)
+                    if not os.path.exists(mesh_path):
+                        # Go up one level and try again
+                        mesh_path = os.path.join(urdf_dir, "..", filename)
+                        if not os.path.exists(mesh_path):
+                            raise RobotError(f"Mesh file not found: {mesh_path}")
                     # Update the filename to point to meshes folder
                     mesh.set(
                         "filename", os.path.join("meshes", os.path.basename(mesh_path))
@@ -210,10 +243,13 @@ _robots = {}
 
 
 def init(
-    robot_name: str, urdf_path: str | None = None, overwrite: bool = False
+    robot_name: str,
+    urdf_path: str | None = None,
+    mjcf_path: str | None = None,
+    overwrite: bool = False,
 ) -> Robot:
     """Initialize a robot globally."""
-    robot = Robot(robot_name, urdf_path, overwrite)
+    robot = Robot(robot_name, urdf_path, mjcf_path, overwrite)
     robot.init()
     _robots[robot_name] = robot
     return robot
