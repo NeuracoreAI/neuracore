@@ -45,7 +45,10 @@ def logout() -> None:
 
 
 def connect_robot(
-    robot_name: str, urdf_path: str | None = None, overwrite: bool = False
+    robot_name: str,
+    urdf_path: str | None = None,
+    mjcf_path: str | None = None,
+    overwrite: bool = False,
 ) -> None:
     """
     Initialize a robot connection.
@@ -53,9 +56,11 @@ def connect_robot(
     Args:
         robot_name: Unique identifier for the robot
         urdf_path: Optional path to robot's URDF file
+        mjcf_path: Optional path to robot's MJCF file
+        overwrite: Whether to overwrite an existing robot with the same name
     """
     global _active_robot
-    _active_robot = _init_robot(robot_name, urdf_path, overwrite)
+    _active_robot = _init_robot(robot_name, urdf_path, mjcf_path, overwrite)
 
 
 def _get_robot(robot_name: str) -> Robot:

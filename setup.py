@@ -47,6 +47,9 @@ setup(
             "dm_control==1.0.14",
             "pyquaternion>=0.9.5",
         ],
+        "mjcf": [
+            "mujoco>3",
+        ],
         "local_endpoint": [
             "torchserve",
             "nvgpu",
