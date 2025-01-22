@@ -98,59 +98,90 @@ class Robot:
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to stop recording: {str(e)}")
 
-    def _upload_urdf_and_meshes(self) -> None:
-        """Upload URDF and associated mesh files as a ZIP package."""
+    def _package_urdf(self) -> dict:
         if not os.path.exists(self.urdf_path):
             raise ValidationError(f"URDF file not found: {self.urdf_path}")
 
-        try:
-            # Read and parse URDF to find all mesh files
-            with open(self.urdf_path) as f:
-                urdf_content = f.read()
+        # Read and parse URDF to find all mesh files
+        with open(self.urdf_path) as f:
+            urdf_content = f.read()
 
-            root = ET.fromstring(urdf_content)
-            urdf_dir = os.path.dirname(os.path.abspath(self.urdf_path))
-            mesh_files: list[str] = []
+        root = ET.fromstring(urdf_content)
+        urdf_dir = os.path.dirname(os.path.abspath(self.urdf_path))
+        mesh_files: list[str] = []
+        package_root_path = None
 
-            # Collect all mesh files
-            for mesh in root.findall(".//mesh"):
-                filename = mesh.get("filename")
-                if filename:
-                    if filename.startswith("package://"):
-                        filename = filename.replace("package://", "")
+        # Collect all mesh files
+        for mesh in root.findall(".//mesh"):
+            filename = mesh.get("filename")
+            if filename:
+                mesh_path = None
+                if filename.startswith("package://"):
+                    # Handle package:// URLs
+                    parts = filename.split("/")
+                    package_name = parts[2]
+                    relative_path = "/".join(parts[3:])
 
+                    if package_root_path is None:
+                        # Go up the tree until we find package dir
+                        package_root_path = urdf_dir
+                        while not os.path.exists(
+                            os.path.join(package_root_path, package_name)
+                        ):
+                            parent = os.path.dirname(package_root_path)
+                            if parent == package_root_path:  # Hit root directory
+                                raise RobotError(
+                                    f"Could not find package root for {package_name}"
+                                )
+                            package_root_path = parent
+
+                    mesh_path = os.path.join(
+                        package_root_path, package_name, relative_path
+                    )
+                    # Update the filename in the URDF to point to the new location
+                    mesh.set(
+                        "filename", os.path.join("meshes", os.path.basename(mesh_path))
+                    )
+                else:
+                    # Handle relative paths
                     mesh_path = os.path.join(urdf_dir, filename)
-                    if mesh_path not in mesh_files:
-                        if os.path.exists(mesh_path):
-                            mesh_files.append(mesh_path)
-                        else:
-                            raise RobotError(f"Mesh file not found: {mesh_path}")
+                    # Update the filename to point to meshes folder
+                    mesh.set(
+                        "filename", os.path.join("meshes", os.path.basename(mesh_path))
+                    )
 
-            # Create ZIP file in memory using BytesIO
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                # Add URDF file as robot.urdf
-                zf.writestr("robot.urdf", urdf_content)
+                if mesh_path and mesh_path not in mesh_files:
+                    if os.path.exists(mesh_path):
+                        mesh_files.append(mesh_path)
+                    else:
+                        raise RobotError(f"Mesh file not found: {mesh_path}")
 
-                # Add mesh files maintaining relative paths
-                for mesh_path in mesh_files:
-                    rel_path = os.path.relpath(mesh_path, urdf_dir)
-                    zf.write(mesh_path, rel_path)
+        # Get the modified URDF content
+        updated_urdf_content = ET.tostring(root, encoding="unicode")
 
-            # Get the zip data
-            zip_buffer.seek(0)
-            zip_data = zip_buffer.getvalue()
+        # Create ZIP file in memory using BytesIO
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            # Add URDF file with updated mesh paths
+            zf.writestr("robot.urdf", updated_urdf_content)
 
-            # Log the ZIP contents for debugging
-            with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
-                logger.info("ZIP contents:")
-                for info in zf.filelist:
-                    logger.info(f"  {info.filename}: {info.file_size} bytes")
+            # Add mesh files in the meshes directory
+            for mesh_path in mesh_files:
+                zf.write(mesh_path, os.path.join("meshes", os.path.basename(mesh_path)))
 
+        # Get the zip data
+        zip_buffer.seek(0)
+        zip_data = zip_buffer.getvalue()
+
+        # Create the files dict with the ZIP data
+        return {"robot_package": ("robot_package.zip", zip_data, "application/zip")}
+
+    def _upload_urdf_and_meshes(self) -> None:
+        """Upload URDF and associated mesh files as a ZIP package."""
+
+        try:
             # Create the files dict with the ZIP data
-            files = {
-                "robot_package": ("robot_package.zip", zip_data, "application/zip")
-            }
+            files = self._package_urdf()
 
             # Upload the package
             response = requests.put(

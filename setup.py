@@ -32,7 +32,7 @@ setup(
     ],
     python_requires=">=3.10",
     install_requires=[
-        "websockets>=12.0",
+        "websockets>=14.0",
         "numpy>=1.24.0",
         "requests>=2.31.0",
         "pillow>=10.0.0",
