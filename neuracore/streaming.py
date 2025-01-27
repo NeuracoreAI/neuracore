@@ -366,6 +366,24 @@ def _encode_image(image: np.ndarray) -> str:
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
+def _encode_depth_image(
+    depth: np.ndarray, min_depth: float = 0, max_depth: float = 10.0
+) -> str:
+    if depth.max() > max_depth:
+        raise ValueError(
+            "Depth image should be in meters. "
+            f"You are attempting to log depth values > {max_depth}. "
+            "The values you are passing in are likely in millimeters."
+        )
+    if len(depth.shape) == 3:
+        depth = depth[:, :, 0]
+    depth_normalized = np.clip((depth - min_depth) / (max_depth - min_depth), 0, 1)
+    pil_image = Image.fromarray((depth_normalized * 65535).astype(np.uint16))
+    buffer = io.BytesIO()
+    pil_image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
 # Global registries and functions
 _streams: dict[str, DataStream] = {}
 _sensor_registers: dict[str, SensorRegister] = {}
@@ -420,18 +438,11 @@ def log_depth(
     sensor_register = _get_or_create_sensor_register(robot.id)
     sensor_register.validate(camera_id, "DEPTH", depth)
 
-    depth = depth / 1000.0 if depth.max() > 100 else depth
-    depth_img = (depth * 1000).astype(np.uint16)
-
-    pil_image = Image.fromarray(depth_img)
-    buffer = io.BytesIO()
-    pil_image.save(buffer, format="PNG")
-
     stream = _get_or_create_stream(robot.id)
     stream.queue_image_data({
         "type": "depth",
         "camera_id": camera_id,
-        "image_data": base64.b64encode(buffer.getvalue()).decode("utf-8"),
+        "image_data": _encode_depth_image(depth),
         "resolution": resolution or [depth.shape[1], depth.shape[0]],
     })
 
