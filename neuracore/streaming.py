@@ -69,10 +69,7 @@ class RateLimitedQueue:
         try:
             if not self.can_put():
                 return False
-
-            message = QueuedMessage(
-                timestamp=time.time(), data=self._message_formatter(raw_data)
-            )
+            message = QueuedMessage(timestamp=time.time(), data=raw_data)
             self._queue.put(message, block=False)
             return True
         except queue.Full:
@@ -81,6 +78,7 @@ class RateLimitedQueue:
     def get(self) -> QueuedMessage | None:
         try:
             message = self._queue.get_nowait()
+            message.data = self._message_formatter(message.data)
             self._last_processed_time = time.time()
             return message
         except queue.Empty:
