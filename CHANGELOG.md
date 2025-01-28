@@ -10,10 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Can upload MJCF in addition to URDF
+- Value/type checks on logging funtions
 
 ### Changed
 
 - Depth encoding always assumes depth in m.
+- Rate limiting default is not DROP rather than BUFFER. Messages will be dropped if logging frequency is too high. 
+- Each camera now has its own websocket
 
 ### Removed
 

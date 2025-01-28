@@ -6,10 +6,9 @@ import logging
 import queue
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Deque
+from typing import Any
 
 import numpy as np
 import websockets
@@ -22,6 +21,8 @@ from .exceptions import StreamingError
 from .robot import Robot
 
 logger = logging.getLogger(__name__)
+
+MAX_DEPTH = 10.0
 
 
 class RateLimitStrategy(Enum):
@@ -42,94 +43,46 @@ class QueuedMessage:
     data: dict
 
 
-class RateEstimator:
-    def __init__(self, window_size: int = 5):
-        self.window_size = window_size
-        self.timestamps: Deque[float] = deque(maxlen=window_size)
-        self._lock = threading.Lock()
-
-    def add_message(self) -> float:
-        with self._lock:
-            now = time.time()
-            self.timestamps.append(now)
-
-            if len(self.timestamps) < 2:
-                return 0.0
-
-            window_duration = now - self.timestamps[0]
-            return (
-                (len(self.timestamps) - 1) / window_duration
-                if window_duration > 0
-                else 0.0
-            )
-
-    def get_sleep_time(self, target_rate: float) -> float:
-        current_rate = self.get_rate()
-        if current_rate <= target_rate:
-            return 0.0
-
-        with self._lock:
-            if len(self.timestamps) < 2:
-                return 0.0
-
-            target_interval = 1.0 / target_rate
-            if len(self.timestamps) >= 2:
-                last_interval = self.timestamps[-1] - self.timestamps[-2]
-                if last_interval < target_interval:
-                    return target_interval - last_interval
-            return 0.0
-
-    def get_rate(self) -> float:
-        with self._lock:
-            if len(self.timestamps) < 2:
-                return 0.0
-            window_duration = self.timestamps[-1] - self.timestamps[0]
-            return (
-                (len(self.timestamps) - 1) / window_duration
-                if window_duration > 0
-                else 0.0
-            )
-
-
 class RateLimitedQueue:
     def __init__(self, name: str, rate_limit: RateLimit, message_formatter):
         self.name = name
         self._message_formatter = message_formatter
         self._queue = queue.Queue(
             maxsize=(
-                rate_limit.max_buffer_size
-                if rate_limit.strategy == RateLimitStrategy.BUFFER
-                else 1
+                2
+                if rate_limit.strategy == RateLimitStrategy.DROP
+                else rate_limit.max_buffer_size
             )
         )
         self._rate_limit = rate_limit
-        self._rate_estimator = RateEstimator()
+        self._last_processed_time = 0.0
+
+    def can_put(self) -> bool:
+        current_time = time.time()
+        if self._rate_limit.strategy == RateLimitStrategy.DROP:
+            min_interval = 1 / self._rate_limit.messages_per_second
+            if current_time - self._last_processed_time < min_interval:
+                return False
+        return True
 
     def put(self, raw_data: Any) -> bool:
-        current_rate = self._rate_estimator.get_rate()
-
-        if current_rate >= self._rate_limit.messages_per_second:
-            if self._rate_limit.strategy == RateLimitStrategy.DROP:
-                logger.debug(
-                    f"{self.name}: Dropping message due to "
-                    f"rate limit ({current_rate:.1f} msgs/sec)"
-                )
+        try:
+            if not self.can_put():
                 return False
 
-        try:
             message = QueuedMessage(
                 timestamp=time.time(), data=self._message_formatter(raw_data)
             )
             self._queue.put(message, block=False)
-            self._rate_estimator.add_message()
             return True
         except queue.Full:
-            logger.warning(f"{self.name}: Buffer full, dropping message")
             return False
 
     def get(self) -> QueuedMessage | None:
         try:
-            return self._queue.get_nowait()
+            message = self._queue.get_nowait()
+            self._last_processed_time = time.time()
+            return message
         except queue.Empty:
             return None
 
@@ -137,7 +90,10 @@ class RateLimitedQueue:
         return self._queue.empty()
 
     def get_sleep_time(self) -> float:
-        return self._rate_estimator.get_sleep_time(self._rate_limit.messages_per_second)
+        if self._rate_limit.strategy == RateLimitStrategy.BUFFER:
+            min_interval = 1 / self._rate_limit.messages_per_second
+            return max(0, self._last_processed_time + min_interval - time.time())
+        return 0
 
 
 class QueueProcessor:
@@ -202,12 +158,15 @@ class QueueProcessor:
 
 
 class DataStream:
-    def __init__(self, robot_id: str):
+    def __init__(self, robot_id: str, stream_type: str):
+
+        assert stream_type in ["states", "actions", "images"]
+
         self._robot_id = robot_id
         self._auth = get_auth()
         self._running = False
         self._rate_limit = RateLimit(
-            messages_per_second=100, strategy=RateLimitStrategy.BUFFER
+            messages_per_second=60, strategy=_rate_limit_strategy
         )
 
         self._thread = None
@@ -216,51 +175,57 @@ class DataStream:
         base_url = API_URL.replace("http://", "ws://").replace("https://", "wss://")
         auth_headers = self._auth.get_headers()
 
-        # Create independent queues with their formatters
-        self._queues = {
-            "states": RateLimitedQueue(
+        if stream_type == "states":
+            self._queue = RateLimitedQueue(
                 "states",
                 self._rate_limit,
                 lambda data: {"joint_positions": data["joint_states"]},
-            ),
-            "actions": RateLimitedQueue(
-                "actions", self._rate_limit, lambda data: {"action": data["action"]}
-            ),
-            "images": RateLimitedQueue(
+            )
+        elif stream_type == "actions":
+            self._queue = RateLimitedQueue(
+                "actions",
+                self._rate_limit,
+                lambda data: {"action": data["action"]},
+            )
+        elif stream_type == "images":
+            self._queue = RateLimitedQueue(
                 "images",
                 self._rate_limit,
                 lambda data: {
                     "type": data["type"],
                     "camera_id": data["camera_id"],
-                    "data": data["image_data"],
+                    "data": (
+                        _encode_image(data["image_data"])
+                        if data["type"] == "rgb"
+                        else _encode_depth_image(data["image_data"])
+                    ),
                     "resolution": data["resolution"],
                     "encoding": data.get("encoding", "jpg"),
                 },
-            ),
-        }
-
-        self._processors = {
-            name: QueueProcessor(
-                name,
-                queue,
-                f"{base_url}/robots/ws/{robot_id}/{name}/ingest",
-                auth_headers,
             )
-            for name, queue in self._queues.items()
-        }
+
+        else:
+            ValueError(f"Invalid stream type: {stream_type}")
+
+        self._processor = QueueProcessor(
+            stream_type,
+            self._queue,
+            f"{base_url}/robots/ws/{robot_id}/{stream_type}/ingest",
+            auth_headers,
+        )
 
     def _run_event_loop(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._start_processors())
+            self._loop.run_until_complete(self._start_processor())
             self._loop.run_forever()
         finally:
             self._stop_event_loop()
 
     def _stop_event_loop(self):
         if self._loop:
-            self._loop.run_until_complete(self._stop_processors())
+            self._loop.run_until_complete(self._stop_processor())
             try:
                 pending = asyncio.all_tasks(self._loop)
                 for task in pending:
@@ -273,15 +238,11 @@ class DataStream:
                 self._loop.close()
                 self._loop = None
 
-    async def _start_processors(self):
-        await asyncio.gather(
-            *[processor.start() for processor in self._processors.values()]
-        )
+    async def _start_processor(self):
+        await self._processor.start()
 
-    async def _stop_processors(self):
-        await asyncio.gather(
-            *[processor.stop() for processor in self._processors.values()]
-        )
+    async def _stop_processor(self):
+        await self._processor.stop()
 
     def start(self):
         if self._running:
@@ -310,17 +271,14 @@ class DataStream:
 
         logger.info("DataStream stopped")
 
-    def queue_state_data(self, data: dict[str, Any]) -> bool:
-        return self._queues["states"].put(data)
+    def can_put(self) -> bool:
+        return self._queue.can_put()
 
-    def queue_action_data(self, data: dict[str, Any]) -> bool:
-        return self._queues["actions"].put(data)
-
-    def queue_image_data(self, data: dict[str, Any]) -> bool:
-        return self._queues["images"].put(data)
+    def queue_data(self, data: dict[str, Any]) -> bool:
+        return self._queue.put(data)
 
     def wait_until_queues_empty(self):
-        while any(not q.empty() for q in self._queues.values()):
+        while not self._queue.empty():
             logger.info("Waiting for queues to empty...")
             time.sleep(0.5)
 
@@ -367,14 +325,8 @@ def _encode_image(image: np.ndarray) -> str:
 
 
 def _encode_depth_image(
-    depth: np.ndarray, min_depth: float = 0, max_depth: float = 10.0
+    depth: np.ndarray, min_depth: float = 0, max_depth: float = MAX_DEPTH
 ) -> str:
-    if depth.max() > max_depth:
-        raise ValueError(
-            "Depth image should be in meters. "
-            f"You are attempting to log depth values > {max_depth}. "
-            "The values you are passing in are likely in millimeters."
-        )
     if len(depth.shape) == 3:
         depth = depth[:, :, 0]
     depth_normalized = np.clip((depth - min_depth) / (max_depth - min_depth), 0, 1)
@@ -387,14 +339,17 @@ def _encode_depth_image(
 # Global registries and functions
 _streams: dict[str, DataStream] = {}
 _sensor_registers: dict[str, SensorRegister] = {}
+_rate_limit_strategy: RateLimitStrategy = RateLimitStrategy.DROP
 
 
-def _get_or_create_stream(robot_id: str) -> DataStream:
-    if robot_id not in _streams:
-        stream = DataStream(robot_id)
+def _get_or_create_stream(
+    robot_id: str, stream_name: str, stream_type: str
+) -> DataStream:
+    if stream_name not in _streams:
+        stream = DataStream(robot_id, stream_type)
         stream.start()
-        _streams[robot_id] = stream
-    return _streams[robot_id]
+        _streams[stream_name] = stream
+    return _streams[stream_name]
 
 
 def _get_or_create_sensor_register(robot_id: str) -> SensorRegister:
@@ -405,13 +360,17 @@ def _get_or_create_sensor_register(robot_id: str) -> SensorRegister:
 
 # Public API functions
 def log_joints(robot: Robot, joint_positions: dict[str, float]):
-    stream = _get_or_create_stream(robot.id)
-    stream.queue_state_data({"joint_states": joint_positions})
+    stream = _get_or_create_stream(robot.id, f"{robot.id}_states", "states")
+    if not stream.can_put():
+        return
+    stream.queue_data({"joint_states": joint_positions})
 
 
 def log_action(robot: Robot, action: dict[str, float]):
-    stream = _get_or_create_stream(robot.id)
-    stream.queue_action_data({"action": action})
+    stream = _get_or_create_stream(robot.id, f"{robot.id}_actions", "actions")
+    if not stream.can_put():
+        return
+    stream.queue_data({"action": action})
 
 
 def log_rgb(
@@ -419,15 +378,13 @@ def log_rgb(
 ):
     sensor_register = _get_or_create_sensor_register(robot.id)
     sensor_register.validate(camera_id, "RGB", image)
-
-    if image.dtype != np.uint8:
-        image = (image * 255 if image.max() <= 1 else image).astype(np.uint8)
-
-    stream = _get_or_create_stream(robot.id)
-    stream.queue_image_data({
+    stream = _get_or_create_stream(robot.id, f"{robot.id}_rgb_{camera_id}", "images")
+    if not stream.can_put():
+        return
+    stream.queue_data({
         "type": "rgb",
         "camera_id": camera_id,
-        "image_data": _encode_image(image),
+        "image_data": image,
         "resolution": resolution or [image.shape[1], image.shape[0]],
     })
 
@@ -437,14 +394,22 @@ def log_depth(
 ):
     sensor_register = _get_or_create_sensor_register(robot.id)
     sensor_register.validate(camera_id, "DEPTH", depth)
-
-    stream = _get_or_create_stream(robot.id)
-    stream.queue_image_data({
+    stream = _get_or_create_stream(robot.id, f"{robot.id}_depth_{camera_id}", "images")
+    if not stream.can_put():
+        return
+    stream.queue_data({
         "type": "depth",
         "camera_id": camera_id,
-        "image_data": _encode_depth_image(depth),
+        "image_data": depth,
         "resolution": resolution or [depth.shape[1], depth.shape[0]],
     })
+
+
+def set_rate_limit_strategy(strategy: RateLimitStrategy):
+    global _rate_limit_strategy
+    _rate_limit_strategy = strategy
+    for stream in _streams.values():
+        stream._rate_limit.strategy = strategy
 
 
 def stop_streaming(robot: Robot):
