@@ -11,6 +11,7 @@ from .endpoint import connect_local_endpoint as _connect_local_endpoint
 from .exceptions import RobotError
 from .robot import Robot, get_robot
 from .robot import init as _init_robot
+from .streaming import MAX_DEPTH
 from .streaming import log_action as _log_action
 from .streaming import log_depth as _log_depth
 from .streaming import log_joints as _log_joints
@@ -88,6 +89,11 @@ def log_joints(positions: dict[str, float], robot_name: str | None = None) -> No
         RobotError: If no robot is active and no robot_name provided
         StreamingError: If logging fails
     """
+    if not isinstance(positions, dict):
+        raise ValueError("Joint positions must be a dictionary of floats")
+    for key, value in positions.items():
+        if not isinstance(value, float):
+            raise ValueError(f"Joint positions must be floats. {key} is not a float.")
     _log_joints(_get_robot(robot_name), positions)
 
 
@@ -103,6 +109,11 @@ def log_action(action: dict[str, float], robot_name: str | None = None) -> None:
         RobotError: If no robot is active and no robot_name provided
         StreamingError: If logging fails
     """
+    if not isinstance(action, dict):
+        raise ValueError("Actions must be a dictionary of floats")
+    for key, value in action.items():
+        if not isinstance(value, float):
+            raise ValueError(f"Actions must be floats. {key} is not a float.")
     _log_action(_get_robot(robot_name), action)
 
 
@@ -120,6 +131,11 @@ def log_rgb(camera_id: str, image: np.ndarray, robot_name: str | None = None) ->
         StreamingError: If logging fails
         ValueError: If image format is invalid
     """
+    # Validate image is numpy array of type uint8
+    if not isinstance(image, np.ndarray):
+        raise ValueError("Image must be a numpy array")
+    if image.dtype != np.uint8:
+        raise ValueError("Image must be uint8 wth range 0-255")
     _log_rgb(_get_robot(robot_name), camera_id, image)
 
 
@@ -137,6 +153,16 @@ def log_depth(camera_id: str, depth: np.ndarray, robot_name: str | None = None) 
         StreamingError: If logging fails
         ValueError: If depth format is invalid
     """
+    if not isinstance(depth, np.ndarray):
+        raise ValueError("Depth image must be a numpy array")
+    if depth.dtype != np.float16 or depth.dtype != np.float32:
+        raise ValueError("Depth image must be float16 or float32")
+    if depth.max() > MAX_DEPTH:
+        raise ValueError(
+            "Depth image should be in meters. "
+            f"You are attempting to log depth values > {MAX_DEPTH}. "
+            "The values you are passing in are likely in millimeters."
+        )
     _log_depth(_get_robot(robot_name), camera_id, depth)
 
 
