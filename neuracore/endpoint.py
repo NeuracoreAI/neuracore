@@ -1,6 +1,8 @@
 import base64
+import json
 import logging
 import subprocess
+import sys
 import tempfile
 import time
 from io import BytesIO
@@ -25,6 +27,7 @@ class EndpointPolicy:
         self._predict_url = predict_url
         self._headers = headers or {}
         self._process = None
+        self._is_local = "localhost" in predict_url
 
     def predict(
         self, joint_positions: list[float], images: dict[str, np.ndarray]
@@ -61,8 +64,13 @@ class EndpointPolicy:
             elif image.shape[2] == 4:  # RGBA
                 image = image[:, :, :3]
 
-            # Encode to base64
             pil_image = Image.fromarray(image)
+            if not self._is_local:
+                if pil_image.size > (224, 224):
+                    # There is a limit on the image size for non-local endpoints
+                    # This is OK as almost all algorithms scale to 224x224
+                    pil_image = pil_image.resize((224, 224))
+
             buffer = BytesIO()
             pil_image.save(buffer, format="PNG")
             encoded_images[camera_id] = base64.b64encode(buffer.getvalue()).decode(
@@ -71,6 +79,17 @@ class EndpointPolicy:
 
         # Prepare request data
         request_data = {"joint_positions": joint_positions, "images": encoded_images}
+
+        if not self._is_local:
+            payload_size = sys.getsizeof(json.dumps(request_data)) / (
+                1024 * 1024
+            )  # Size in MB
+            if payload_size > 1.5:
+                raise ValueError(
+                    f"Payload size ({payload_size:.2f}MB) "
+                    "exceeds server endpoint limit (1.5MB). "
+                    "Please use a local endpoint."
+                )
 
         try:
             # Make prediction request
