@@ -49,22 +49,24 @@ class Dataset:
             self._recordings = recordings
 
     @staticmethod
-    def get(name: str) -> "Dataset":
+    def get(name: str, non_exist_ok: bool = False) -> "Dataset":
         dataset_jsons = Dataset._get_datasets()
         for dataset in dataset_jsons:
             if dataset["name"] == name:
                 return Dataset(dataset)
+        if non_exist_ok:
+            return None
         raise DatasetError(f"Dataset '{name}' not found.")
 
     @staticmethod
     def create(
         name: str, description: str | None = None, tags: list[str] | None = None
     ) -> "Dataset":
-        try:
-            ds = Dataset.get(name)
-            logger.info(f"Dataset '{name}' already exist.")
-        except DatasetError:
+        ds = Dataset.get(name, non_exist_ok=True)
+        if ds is None:
             ds = Dataset._create_dataset(name, description, tags)
+        else:
+            logger.info(f"Dataset '{name}' already exist.")
         return ds
 
     @staticmethod
