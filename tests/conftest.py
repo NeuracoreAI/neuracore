@@ -50,11 +50,11 @@ def mock_auth_requests():
 
         # Mock dataset endpoint
         m.get(f"{API_URL}/datasets", json=[], status_code=200)
+        m.get(f"{API_URL}/datasets/shared", json=[], status_code=200)
 
         # Mock models/endpoints endpoint
         m.get(f"{API_URL}/models/endpoints", json=[], status_code=200)
 
-        # Additional mock endpoints can be added here as needed
         yield m
 
 

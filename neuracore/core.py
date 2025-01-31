@@ -155,8 +155,10 @@ def log_depth(camera_id: str, depth: np.ndarray, robot_name: str | None = None) 
     """
     if not isinstance(depth, np.ndarray):
         raise ValueError("Depth image must be a numpy array")
-    if depth.dtype != np.float16 or depth.dtype != np.float32:
-        raise ValueError("Depth image must be float16 or float32")
+    if depth.dtype not in (np.float16, np.float32):
+        raise ValueError(
+            f"Depth image must be float16 or float32, but got {depth.dtype}"
+        )
     if depth.max() > MAX_DEPTH:
         raise ValueError(
             "Depth image should be in meters. "

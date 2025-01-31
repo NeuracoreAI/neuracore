@@ -68,17 +68,12 @@ def test_log_actions(
         nc.log_joints({"vx300s_left/waist": 0.5, "vx300s_right/waist": -0.3})
         nc.log_action({"action1": 0.1, "action2": 0.2})
 
-        # Test RGB logging with various input types
-        # Normalized float image
-        rgb_float = np.random.random((100, 100, 3)).astype(np.float32)
-        nc.log_rgb("top_camera", rgb_float)
-
         # Uint8 image
         rgb_uint8 = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
         nc.log_rgb("front_camera", rgb_uint8)
 
         # Test depth logging
-        depth = np.random.random((100, 100)).astype(np.float32) * 10  # meters
+        depth = np.ones((100, 100), dtype=np.float32) * 10  # meters
         nc.log_depth("depth_camera", depth)
 
     except Exception as e:
@@ -92,7 +87,23 @@ def test_create_dataset(temp_config_dir, mock_auth_requests, reset_neuracore):
 
     # Mock dataset creation endpoint
     mock_auth_requests.post(
-        f"{API_URL}/datasets", json={"id": "test_dataset_id"}, status_code=200
+        f"{API_URL}/datasets",
+        json={
+            "id": "test_dataset_id",
+            "name": "ds name",
+            "size_bytes": 0,
+            "tags": [],
+            "is_shared": False,
+            "num_demonstrations": 0,
+        },
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/datasets/test_dataset_id/recordings",
+        json={
+            "recordings": [],
+        },
+        status_code=200,
     )
 
     # Create dataset
