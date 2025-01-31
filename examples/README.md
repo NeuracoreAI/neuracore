@@ -11,6 +11,7 @@ This contains examples for using Neuracore with a simulated robot environment. Y
    - [Data Collection](#data-collection)
    - [Local Model Deployment](#local-model-deployment)
    - [Server Model Deployment](#server-model-deployment)
+   - [View Dataset](#view-dataset)
 
 ## Installation
 
@@ -99,3 +100,14 @@ python example_server_endpoint.py
 ```
 
 Unlike the previous example ([Local Model Deployment](#local-model-deployment)), this endpoint runs on our servers. 
+
+
+### View Dataset
+This example shows you how to:
+- Stream data from neuracore to your python application (for saving or training)
+
+```bash
+python example_view_dataset.py
+```
+
+If you want to just view your data, then the best way is via the [web interface](https://www.neuracore.app/dashboard/datasets).

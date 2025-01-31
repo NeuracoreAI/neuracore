@@ -204,6 +204,19 @@ def stop_recording(robot_name: str | None = None) -> None:
     _active_recording_id = None
 
 
+def get_dataset(name: str) -> None:
+    """Get a dataset by name.
+
+    Args:
+        name: Dataset name
+
+    """
+    global _active_dataset_id
+    _active_dataset = Dataset.get(name)
+    _active_dataset_id = _active_dataset.id
+    return _active_dataset
+
+
 def create_dataset(
     name: str, description: str | None = None, tags: list[str] | None = None
 ) -> None:
@@ -219,8 +232,9 @@ def create_dataset(
         DatasetError: If dataset creation fails
     """
     global _active_dataset_id
-    _active_dataset = Dataset(name, description, tags)
+    _active_dataset = Dataset.create(name, description, tags)
     _active_dataset_id = _active_dataset.id
+    return _active_dataset
 
 
 def connect_endpoint(name: str) -> EndpointPolicy:

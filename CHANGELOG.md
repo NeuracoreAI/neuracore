@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Can upload MJCF in addition to URDF
+- Ability to upload MJCF in addition to URDF
 - Value/type checks on logging funtions
+- Ability to stream datasets to python
 
 ### Changed
 
