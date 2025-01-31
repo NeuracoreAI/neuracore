@@ -159,13 +159,46 @@ def connect_endpoint(name: str) -> EndpointPolicy:
         raise EndpointError(f"Failed to connect to endpoint: {str(e)}")
 
 
-def connect_local_endpoint(path_to_model: str) -> EndpointPolicy:
+def connect_local_endpoint(
+    path_to_model: str | None = None, train_run_name: str | None = None
+) -> EndpointPolicy:
     """Connect to a local model.
 
     Args:
-        path_to_model: Path to the local .mar model
+        path_to_model:  Path to the model file
+        train_run_name: Optional train run name
     """
-
+    if path_to_model is None and train_run_name is None:
+        raise ValueError("Must provide either path_to_model or train_run_name")
+    if path_to_model and train_run_name:
+        raise ValueError("Cannot provide both path_to_model and train_run_name")
+    auth = get_auth()
+    if train_run_name:
+        # Get all training runs and search for the job id
+        response = requests.get(f"{API_URL}/training/jobs", headers=auth.get_headers())
+        response.raise_for_status()
+        jobs = response.json()
+        job_id = None
+        for job in jobs:
+            if job["name"] == train_run_name:
+                job_id = job["id"]
+                break
+        if job_id is None:
+            raise EndpointError(f"Training run not found: {train_run_name}")
+        print("Downloading model from training run. This may take a while...")
+        response = requests.get(
+            f"{API_URL}/training/jobs/{job_id}/model",
+            headers=auth.get_headers(),
+            timeout=120,
+            stream=True,
+        )
+        response.raise_for_status()
+        tempdir = tempfile.mkdtemp()
+        path_to_model = Path(tempdir) / f"{train_run_name}.mar"
+        with open(path_to_model, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
     try:
         process = _setup_torchserve(path_to_model)
         health_check = requests.get("http://localhost:8080/ping")

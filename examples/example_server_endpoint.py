@@ -51,10 +51,10 @@ def main():
             if idx_in_horizon == 0:
                 joints = list(ts.observation["qpos"].values())
                 images = ts.observation["images"]
-                images_top_only = {
-                    "top_rgb": images["top"],
+                images_angle_only = {
+                    "angle_rgb": images["angle"],
                 }
-                action = policy.predict(joints, images_top_only)
+                action = policy.predict(joints, images_angle_only)
                 horizon = action.shape[0]
 
             a = action[idx_in_horizon]

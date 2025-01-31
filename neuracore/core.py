@@ -253,12 +253,17 @@ def connect_endpoint(name: str) -> EndpointPolicy:
     return _connect_endpoint(name)
 
 
-def connect_local_endpoint(path_to_model: str) -> EndpointPolicy:
+def connect_local_endpoint(
+    path_to_model: str | None = None, train_run_name: str | None = None
+) -> EndpointPolicy:
     """
     Connect to a local model endpoint.
 
+    Can supply either path_to_model or train_run_name, but not both.
+
     Args:
-        path_to_model: Path to the local model endpoint
+        path_to_model: Path to the local .mar model
+        train_run_name: Optional train run name
 
     Returns:
         EndpointPolicy: Policy object that can be used for predictions
@@ -266,7 +271,7 @@ def connect_local_endpoint(path_to_model: str) -> EndpointPolicy:
     Raises:
         EndpointError: If endpoint connection fails
     """
-    return _connect_local_endpoint(path_to_model)
+    return _connect_local_endpoint(path_to_model, train_run_name)
 
 
 def stop(robot_name: str | None = None) -> None:

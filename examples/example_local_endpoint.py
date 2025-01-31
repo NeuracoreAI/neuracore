@@ -11,7 +11,10 @@ THIS_DIR = Path(__file__).parent
 
 
 def main():
+    nc.login()
     policy = nc.connect_local_endpoint(THIS_DIR / "common" / "assets" / "model.mar")
+    # If you have a train run name, you can use it to connect to a local. E.g.:
+    # policy = nc.connect_local_endpoint(train_run_name="MyTrainRun")
     onscreen_render = True
     render_cam_name = "angle"
 
@@ -39,10 +42,7 @@ def main():
             if idx_in_horizon == 0:
                 joints = list(ts.observation["qpos"].values())
                 images = ts.observation["images"]
-                images_top_only = {
-                    "top_rgb": images["top"],
-                }
-                action = policy.predict(joints, images_top_only)
+                action = policy.predict(joints, images)
                 horizon = action.shape[0]
 
             a = action[idx_in_horizon]
