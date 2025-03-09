@@ -57,6 +57,10 @@ setup(
             "torchvision",
             "torch-model-archiver",
         ],
+        "ml": [
+            "torch",
+            "torchvision",
+        ],
         "dev": [
             "pytest>=6.2.5",
             "pytest-cov>=2.12.1",
