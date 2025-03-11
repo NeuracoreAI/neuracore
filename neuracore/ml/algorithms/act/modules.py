@@ -1,4 +1,5 @@
 import math
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -116,8 +117,8 @@ class TransformerEncoderLayer(nn.Module):
     def forward(
         self,
         src: torch.Tensor,
-        src_mask: torch.Tensor | None = None,
-        src_key_padding_mask: torch.Tensor | None = None,
+        src_mask: Optional[torch.Tensor] = None,
+        src_key_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         src2 = self.norm1(src)
         src2, _ = self.self_attn(
@@ -159,11 +160,11 @@ class TransformerDecoderLayer(nn.Module):
         self,
         tgt: torch.Tensor,
         memory: torch.Tensor,
-        tgt_mask: torch.Tensor | None = None,
-        memory_mask: torch.Tensor | None = None,
-        tgt_key_padding_mask: torch.Tensor | None = None,
-        memory_key_padding_mask: torch.Tensor | None = None,
-        query_pos: torch.Tensor | None = None,
+        tgt_mask: Optional[torch.Tensor] = None,
+        memory_mask: Optional[torch.Tensor] = None,
+        tgt_key_padding_mask: Optional[torch.Tensor] = None,
+        memory_key_padding_mask: Optional[torch.Tensor] = None,
+        query_pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
         q = k = tgt if query_pos is None else tgt + query_pos
@@ -211,8 +212,8 @@ class TransformerEncoder(nn.Module):
     def forward(
         self,
         src: torch.Tensor,
-        mask: torch.Tensor | None = None,
-        src_key_padding_mask: torch.Tensor | None = None,
+        mask: Optional[torch.Tensor] = None,
+        src_key_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         output = src
 
@@ -246,11 +247,11 @@ class TransformerDecoder(nn.Module):
         self,
         tgt: torch.Tensor,
         memory: torch.Tensor,
-        tgt_mask: torch.Tensor | None = None,
-        memory_mask: torch.Tensor | None = None,
-        tgt_key_padding_mask: torch.Tensor | None = None,
-        memory_key_padding_mask: torch.Tensor | None = None,
-        query_pos: torch.Tensor | None = None,
+        tgt_mask: Optional[torch.Tensor] = None,
+        memory_mask: Optional[torch.Tensor] = None,
+        tgt_key_padding_mask: Optional[torch.Tensor] = None,
+        memory_key_padding_mask: Optional[torch.Tensor] = None,
+        query_pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
         output = tgt

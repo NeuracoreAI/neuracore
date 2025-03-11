@@ -31,8 +31,3 @@ repos:
 #             "--convention=google",
 #         ]
 
--   repo: https://github.com/asottile/pyupgrade
-    rev: v3.15.0
-    hooks:
-    -   id: pyupgrade
-        args: [--py310-plus]
