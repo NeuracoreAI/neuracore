@@ -5,7 +5,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
 
-from neuracore import BatchInput, BatchOutput, DatasetDescription, NeuracoreModel
+from neuracore import (
+    BatchedInferenceOutputs,
+    BatchedInferenceSamples,
+    BatchedTrainingOutputs,
+    BatchedTrainingSamples,
+    DatasetDescription,
+    NeuracoreModel,
+)
 from neuracore.ml.algorithms.act.modules import (
     ACTImageEncoder,
     PositionalEncoding,
@@ -108,13 +115,40 @@ class ACT(NeuracoreModel):
         # Additional position embeddings for proprio and latent
         self.additional_pos_embed = nn.Parameter(torch.randn(2, 1, hidden_dim))
 
-        self.transform = T.Compose([
+        self.transform = torch.nn.Sequential(
             T.Resize((224, 224)),
-            T.ToTensor(),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
+        )
 
-    def reparametrize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    def _preprocess_states(self, states: torch.FloatTensor) -> torch.FloatTensor:
+        """Preprocess the states."""
+        return (
+            states - self.dataset_description.state_mean
+        ) / self.dataset_description.state_std
+
+    def _preprocess_actions(self, actions: torch.FloatTensor) -> torch.FloatTensor:
+        """Preprocess the actions."""
+        return (
+            actions - self.dataset_description.action_mean
+        ) / self.dataset_description.action_std
+
+    def _preprocess_camera_images(
+        self, camera_images: torch.FloatTensor
+    ) -> torch.FloatTensor:
+        for cam_id in range(self.dataset_description.max_num_cameras):
+            camera_images[:, cam_id] = self.transform(camera_images[:, cam_id])
+        return camera_images
+
+    def _inference_postprocess(
+        self, output: BatchedInferenceOutputs
+    ) -> BatchedInferenceOutputs:
+        """Postprocess the output of the inference."""
+        predictions = (
+            output.action_predicitons * self.dataset_description.action_std
+        ) + self.dataset_description.action_mean
+        return BatchedInferenceOutputs(action_predicitons=predictions)
+
+    def _reparametrize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         """Sample from latent distribution using reparametrization trick."""
         if self.training:
             std = torch.exp(0.5 * logvar)
@@ -122,7 +156,7 @@ class ACT(NeuracoreModel):
             return mu + eps * std
         return mu
 
-    def encode_latent(
+    def _encode_latent(
         self,
         state: torch.FloatTensor,
         state_mask: torch.FloatTensor,
@@ -169,7 +203,7 @@ class ACT(NeuracoreModel):
         logvar = self.latent_logvar(memory[0])
         return mu, logvar
 
-    def encode_visual(
+    def _encode_visual(
         self,
         states: torch.FloatTensor,
         states_mask: torch.FloatTensor,
@@ -222,7 +256,7 @@ class ACT(NeuracoreModel):
 
         return memory
 
-    def decode(
+    def _decode(
         self,
         latent: torch.FloatTensor,
         memory: torch.FloatTensor,
@@ -251,31 +285,20 @@ class ACT(NeuracoreModel):
 
         return actions
 
-    def forward(self, batch: BatchInput) -> BatchOutput:
-        """Forward pass through model."""
-
-        # Encode inputs to latent space
-        if self.training:
-            mu, logvar = self.encode_latent(
-                batch.states,
-                batch.states_mask,
-                batch.actions,
-                batch.actions_mask,
-                batch.actions_sequence_mask,
-            )
-        else:
-            batch_size = batch.states.shape[0]
-            mu = torch.zeros(batch_size, self.latent_dim, device=self.device)
-            logvar = torch.zeros(batch_size, self.latent_dim, device=self.device)
-
+    def _predict_action(
+        self,
+        mu: torch.FloatTensor,
+        logvar: torch.FloatTensor,
+        batch: BatchedInferenceSamples,
+    ) -> torch.FloatTensor:
         # Sample latent
-        latent_sample = self.reparametrize(mu, logvar)
+        latent_sample = self._reparametrize(mu, logvar)
 
         # Project latent
         latent = self.latent_out_proj(latent_sample)  # [B, H]
 
         # Encode visual features
-        memory = self.encode_visual(
+        memory = self._encode_visual(
             batch.states,
             batch.states_mask,
             batch.camera_images,
@@ -284,30 +307,60 @@ class ACT(NeuracoreModel):
         )
 
         # Decode actions
-        action_preds = self.decode(latent, memory)
+        action_preds = self._decode(latent, memory)
+        return action_preds
 
-        losses = {}
-        metrics = {}
-        if self.training:
-            l1_loss_all = F.l1_loss(action_preds, batch.actions, reduction="none")
-            l1_loss = (
-                l1_loss_all * (1 - batch.actions_sequence_mask).unsqueeze(-1)
-            ).mean()
-            kl_loss = (
-                -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
-            )
-            loss = l1_loss + self.kl_weight * kl_loss
-            losses["l1_and_kl_loss"] = loss
-            metrics["l1_loss"] = l1_loss
-            metrics["kl_loss"] = kl_loss
+    def forward(self, batch: BatchedInferenceSamples) -> BatchedInferenceOutputs:
+        batch_size = batch.states.shape[0]
+        mu = torch.zeros(batch_size, self.latent_dim, device=self.device)
+        logvar = torch.zeros(batch_size, self.latent_dim, device=self.device)
+        preprocessed_batch = BatchedInferenceSamples(
+            states=self._preprocess_states(batch.states),
+            states_mask=batch.states_mask,
+            camera_images=self._preprocess_camera_images(batch.camera_images),
+            camera_images_mask=batch.camera_images_mask,
+        )
+        action_preds = self._predict_action(mu, logvar, preprocessed_batch)
+        return self._inference_postprocess(
+            BatchedInferenceOutputs(action_predicitons=action_preds)
+        )
 
-        return BatchOutput(
+    def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
+        """Training step."""
+        mu, logvar = self._encode_latent(
+            batch.states,
+            batch.states_mask,
+            batch.actions,
+            batch.actions_mask,
+            batch.actions_sequence_mask,
+        )
+        preprocessed_batch = BatchedInferenceSamples(
+            states=self._preprocess_states(batch.states),
+            states_mask=batch.states_mask,
+            camera_images=self._preprocess_camera_images(batch.camera_images),
+            camera_images_mask=batch.camera_images_mask,
+        )
+        action_preds = self._predict_action(mu, logvar, preprocessed_batch)
+        target_actions = self._preprocess_actions(batch.actions)
+
+        l1_loss_all = F.l1_loss(action_preds, target_actions, reduction="none")
+        l1_loss = (l1_loss_all * (1 - batch.actions_sequence_mask).unsqueeze(-1)).mean()
+        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
+        loss = l1_loss + self.kl_weight * kl_loss
+        losses = {
+            "l1_and_kl_loss": loss,
+        }
+        metrics = {
+            "l1_loss": l1_loss,
+            "kl_loss": kl_loss,
+        }
+        return BatchedTrainingOutputs(
             action_predicitons=action_preds,
             losses=losses,
             metrics=metrics,
         )
 
-    def configure_optimizers(self) -> torch.optim.Optimizer:
+    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
         """Configure optimizer with different LRs for different components."""
         backbone_params = []
         other_params = []
@@ -324,24 +377,3 @@ class ACT(NeuracoreModel):
         ]
 
         return torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)
-
-    def process_batch(self, batch: BatchInput) -> BatchInput:
-        """Called by dataloader to process the batch."""
-        camera_images = batch.camera_images
-        for cam_id in range(self.dataset_description.max_num_cameras):
-            camera_images[:, cam_id] = self.transform(batch.camera_images[:, cam_id])
-        states = (
-            batch.states - self.dataset_description.state_mean
-        ) / self.dataset_description.state_std
-        actions = (
-            batch.actions - self.dataset_description.action_mean
-        ) / self.dataset_description.action_std
-        return BatchInput(
-            states=states,
-            states_mask=batch.states_mask,
-            camera_images=camera_images,
-            camera_images_mask=batch.camera_images_mask,
-            actions=actions,
-            actions_mask=batch.actions_mask,
-            actions_sequence_mask=batch.actions_sequence_mask,
-        )

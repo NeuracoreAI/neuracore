@@ -1,9 +1,14 @@
-import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 
-from neuracore import BatchedTrainingOutputs, BatchedTrainingSamples, DatasetDescription
+from neuracore import (
+    BatchedInferenceOutputs,
+    BatchedInferenceSamples,
+    BatchedTrainingOutputs,
+    BatchedTrainingSamples,
+    DatasetDescription,
+)
 from neuracore.ml.algorithms.cnnmlp.cnnmlp import CNNMLP
 
 BS = 2
@@ -19,10 +24,10 @@ def dataset_description() -> DatasetDescription:
         max_num_cameras=CAMS,
         max_state_size=STATE_DIM,
         max_action_size=ACTION_DIM,
-        action_mean=np.ones(ACTION_DIM),
-        action_std=np.ones(ACTION_DIM),
-        state_mean=np.ones(STATE_DIM),
-        state_std=np.ones(STATE_DIM),
+        action_mean=torch.ones(ACTION_DIM, dtype=torch.float32),
+        action_std=torch.ones(ACTION_DIM, dtype=torch.float32),
+        state_mean=torch.ones(STATE_DIM, dtype=torch.float32),
+        state_std=torch.ones(STATE_DIM, dtype=torch.float32),
         action_prediction_horizon=PRED_HORIZON,
     )
 
@@ -35,13 +40,23 @@ def model_config() -> dict:
 @pytest.fixture
 def sample_batch() -> BatchedTrainingSamples:
     return BatchedTrainingSamples(
-        states=torch.randn(BS, STATE_DIM),
-        states_mask=torch.ones(BS, STATE_DIM, dtype=torch.bool),
-        camera_images=torch.randn(BS, CAMS, 3, 224, 224),
-        camera_images_mask=torch.ones(BS, CAMS, dtype=torch.bool),
-        actions=torch.randn(BS, PRED_HORIZON, ACTION_DIM),
+        states=torch.randn(BS, STATE_DIM, dtype=torch.float32),
+        states_mask=torch.ones(BS, STATE_DIM, dtype=torch.float32),
+        camera_images=torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
+        camera_images_mask=torch.ones(BS, CAMS, dtype=torch.float32),
+        actions=torch.randn(BS, PRED_HORIZON, ACTION_DIM, dtype=torch.float32),
         actions_mask=torch.ones(BS, ACTION_DIM, dtype=torch.float32),
-        actions_sequence_mask=torch.ones(BS, PRED_HORIZON, dtype=torch.bool),
+        actions_sequence_mask=torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
+    )
+
+
+@pytest.fixture
+def sample_inference_batch() -> BatchedTrainingSamples:
+    return BatchedInferenceSamples(
+        states=torch.randn(BS, STATE_DIM, dtype=torch.float32),
+        states_mask=torch.ones(BS, STATE_DIM, dtype=torch.float32),
+        camera_images=torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
+        camera_images_mask=torch.ones(BS, CAMS, dtype=torch.float32),
     )
 
 
@@ -73,13 +88,12 @@ def test_model_construction(
 def test_model_forward(
     dataset_description: DatasetDescription,
     model_config: dict,
-    sample_batch: BatchedTrainingSamples,
+    sample_inference_batch: BatchedInferenceSamples,
 ):
     model = CNNMLP(dataset_description, **model_config)
-    output = model(sample_batch)
-    assert isinstance(output, BatchedTrainingOutputs)
+    output = model(sample_inference_batch)
+    assert isinstance(output, BatchedInferenceOutputs)
     assert output.action_predicitons.shape == (BS, PRED_HORIZON, ACTION_DIM)
-    assert len(output.losses.keys()) > 0
 
 
 def test_model_backward(
@@ -88,7 +102,7 @@ def test_model_backward(
     sample_batch: BatchedTrainingSamples,
 ):
     model = CNNMLP(dataset_description, **model_config)
-    output: BatchedTrainingOutputs = model(sample_batch)
+    output: BatchedTrainingOutputs = model.training_step(sample_batch)
 
     # Compute loss
     loss = output.losses["mse_loss"]

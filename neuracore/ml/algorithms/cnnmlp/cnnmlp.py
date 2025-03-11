@@ -2,15 +2,15 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 
-from neuracore import NeuracoreModel
-from neuracore.ml.algorithms.cnnmlp.modules import ImageEncoder
-from neuracore.ml.types import (
+from neuracore import (
     BatchedInferenceOutputs,
     BatchedInferenceSamples,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     DatasetDescription,
+    NeuracoreModel,
 )
+from neuracore.ml.algorithms.cnnmlp.modules import ImageEncoder
 
 
 class CNNMLP(NeuracoreModel):
@@ -59,10 +59,10 @@ class CNNMLP(NeuracoreModel):
             num_layers=num_layers,
         )
 
-        self.transform = T.Compose([
+        self.transform = torch.nn.Sequential(
             T.Resize((224, 224)),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
+        )
 
         self.action_prediction_horizon = (
             self.dataset_description.action_prediction_horizon
@@ -105,7 +105,7 @@ class CNNMLP(NeuracoreModel):
         """Preprocess the actions."""
         return (
             actions - self.dataset_description.action_mean
-        ) / self.dataset_description
+        ) / self.dataset_description.action_std
 
     def _preprocess_camera_images(
         self, camera_images: torch.FloatTensor
@@ -139,7 +139,7 @@ class CNNMLP(NeuracoreModel):
             combined_image_features = torch.cat(image_features, dim=-1)
         else:
             combined_image_features = torch.zeros(
-                batch_size, self.cnn_output_dim, device=self.device
+                batch_size, self.cnn_output_dim, device=self.device, dtype=torch.float32
             )
 
         state_features = self.state_embed(batch.states)
@@ -170,24 +170,22 @@ class CNNMLP(NeuracoreModel):
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Training step."""
-        preprocessed_batch = BatchedTrainingSamples(
+        preprocessed_batch = BatchedInferenceSamples(
             states=self._preprocess_states(batch.states),
             states_mask=batch.states_mask,
             camera_images=self._preprocess_camera_images(batch.camera_images),
             camera_images_mask=batch.camera_images_mask,
-            actions=self._preprocess_actions(batch.actions),
-            actions_mask=batch.actions_mask,
-            actions_sequence_mask=batch.actions_sequence_mask,
         )
+        target_actions = self._preprocess_actions(batch.actions)
         action_predicitons = self._predict_action(preprocessed_batch)
         losses = {}
         metrics = {}
         if self.training:
-            loss = nn.functional.mse_loss(action_predicitons, batch.actions)
+            loss = nn.functional.mse_loss(action_predicitons, target_actions)
             losses["mse_loss"] = loss
 
         return BatchedTrainingOutputs(
-            action_predicitons=action_predicitons.action_predicitons,
+            action_predicitons=action_predicitons,
             losses=losses,
             metrics=metrics,
         )
