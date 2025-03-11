@@ -3,10 +3,8 @@ import pytest
 import torch
 import torch.nn as nn
 
+from neuracore import BatchedTrainingOutputs, BatchedTrainingSamples, DatasetDescription
 from neuracore.ml.algorithms.cnnmlp.cnnmlp import CNNMLP
-from neuracore.ml.batch_input import BatchInput
-from neuracore.ml.batch_output import BatchOutput
-from neuracore.ml.dataset_description import DatasetDescription
 
 BS = 2
 CAMS = 1
@@ -35,8 +33,8 @@ def model_config() -> dict:
 
 
 @pytest.fixture
-def sample_batch() -> BatchInput:
-    return BatchInput(
+def sample_batch() -> BatchedTrainingSamples:
+    return BatchedTrainingSamples(
         states=torch.randn(BS, STATE_DIM),
         states_mask=torch.ones(BS, STATE_DIM, dtype=torch.bool),
         camera_images=torch.randn(BS, CAMS, 3, 224, 224),
@@ -75,11 +73,11 @@ def test_model_construction(
 def test_model_forward(
     dataset_description: DatasetDescription,
     model_config: dict,
-    sample_batch: BatchInput,
+    sample_batch: BatchedTrainingSamples,
 ):
     model = CNNMLP(dataset_description, **model_config)
     output = model(sample_batch)
-    assert isinstance(output, BatchOutput)
+    assert isinstance(output, BatchedTrainingOutputs)
     assert output.action_predicitons.shape == (BS, PRED_HORIZON, ACTION_DIM)
     assert len(output.losses.keys()) > 0
 
@@ -87,10 +85,10 @@ def test_model_forward(
 def test_model_backward(
     dataset_description: DatasetDescription,
     model_config: dict,
-    sample_batch: BatchInput,
+    sample_batch: BatchedTrainingSamples,
 ):
     model = CNNMLP(dataset_description, **model_config)
-    output: BatchOutput = model(sample_batch)
+    output: BatchedTrainingOutputs = model(sample_batch)
 
     # Compute loss
     loss = output.losses["mse_loss"]

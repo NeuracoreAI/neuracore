@@ -3,9 +3,13 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
 
-from .batch_input import BatchInput
-from .batch_output import BatchOutput
-from .dataset_description import DatasetDescription
+from .types import (
+    BatchedInferenceOutputs,
+    BatchedInferenceSamples,
+    BatchedTrainingOutputs,
+    BatchedTrainingSamples,
+    DatasetDescription,
+)
 
 
 class NeuracoreModel(nn.Module, ABC):
@@ -20,21 +24,16 @@ class NeuracoreModel(nn.Module, ABC):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     @abstractmethod
-    def forward(self, batch: BatchInput) -> BatchOutput:
-        """
-        Forward pass of the model.
-        Args:
-            batch: Dictionary containing input tensors
-        Returns:
-            Dictionary containing output tensors and losses
-        """
+    def forward(self, batch: BatchedInferenceSamples) -> BatchedInferenceOutputs:
+        """Inference forward pass."""
         pass
 
     @abstractmethod
-    def configure_optimizers(self) -> torch.optim.Optimizer:
-        """Configure and return optimizer for the model."""
+    def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
+        """Inference forward pass."""
         pass
 
-    def process_batch(self, batch: BatchInput) -> BatchInput:
-        """Called by dataloader to process the batch."""
-        return batch
+    @abstractmethod
+    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
+        """Configure and return optimizer for the model."""
+        pass

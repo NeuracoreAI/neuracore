@@ -2,8 +2,15 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 
-from neuracore import BatchInput, BatchOutput, DatasetDescription, NeuracoreModel
+from neuracore import NeuracoreModel
 from neuracore.ml.algorithms.cnnmlp.modules import ImageEncoder
+from neuracore.ml.types import (
+    BatchedInferenceOutputs,
+    BatchedInferenceSamples,
+    BatchedTrainingOutputs,
+    BatchedTrainingSamples,
+    DatasetDescription,
+)
 
 
 class CNNMLP(NeuracoreModel):
@@ -45,7 +52,7 @@ class CNNMLP(NeuracoreModel):
             self.dataset_description.max_action_size
             * self.dataset_description.action_prediction_horizon
         )
-        self.mlp = self.build_mlp(
+        self.mlp = self._build_mlp(
             input_dim=mlp_input_dim,
             hidden_dim=hidden_dim,
             output_dim=self.action_output_size,
@@ -54,7 +61,6 @@ class CNNMLP(NeuracoreModel):
 
         self.transform = T.Compose([
             T.Resize((224, 224)),
-            T.ToTensor(),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
@@ -63,7 +69,7 @@ class CNNMLP(NeuracoreModel):
         )
         self.max_action_size = self.dataset_description.max_action_size
 
-    def build_mlp(
+    def _build_mlp(
         self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int
     ) -> nn.Sequential:
         """Construct MLP."""
@@ -89,9 +95,36 @@ class CNNMLP(NeuracoreModel):
 
         return nn.Sequential(*layers)
 
-    def forward(self, batch: BatchInput) -> BatchOutput:
-        """Forward pass of the model."""
+    def _preprocess_states(self, states: torch.FloatTensor) -> torch.FloatTensor:
+        """Preprocess the states."""
+        return (
+            states - self.dataset_description.state_mean
+        ) / self.dataset_description.state_std
 
+    def _preprocess_actions(self, actions: torch.FloatTensor) -> torch.FloatTensor:
+        """Preprocess the actions."""
+        return (
+            actions - self.dataset_description.action_mean
+        ) / self.dataset_description
+
+    def _preprocess_camera_images(
+        self, camera_images: torch.FloatTensor
+    ) -> torch.FloatTensor:
+        for cam_id in range(self.dataset_description.max_num_cameras):
+            camera_images[:, cam_id] = self.transform(camera_images[:, cam_id])
+        return camera_images
+
+    def _inference_postprocess(
+        self, output: BatchedInferenceOutputs
+    ) -> BatchedInferenceOutputs:
+        """Postprocess the output of the inference."""
+        predictions = (
+            output.action_predicitons * self.dataset_description.action_std
+        ) + self.dataset_description.action_mean
+        return BatchedInferenceOutputs(action_predicitons=predictions)
+
+    def _predict_action(self, batch: BatchedInferenceSamples) -> torch.FloatTensor:
+        """Predict action for the given batch."""
         batch_size = batch.states.shape[0]
 
         # Process images from each camera
@@ -120,19 +153,47 @@ class CNNMLP(NeuracoreModel):
         action_preds = mlp_out.view(
             batch_size, self.action_prediction_horizon, self.max_action_size
         )
+        return action_preds
 
+    def forward(self, batch: BatchedInferenceSamples) -> BatchedInferenceOutputs:
+        """Forward pass for inference."""
+        preprocessed_batch = BatchedInferenceSamples(
+            states=self._preprocess_states(batch.states),
+            states_mask=batch.states_mask,
+            camera_images=self._preprocess_camera_images(batch.camera_images),
+            camera_images_mask=batch.camera_images_mask,
+        )
+        action_preds = self._predict_action(preprocessed_batch)
+        return self._inference_postprocess(
+            BatchedInferenceOutputs(action_predicitons=action_preds)
+        )
+
+    def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
+        """Training step."""
+        preprocessed_batch = BatchedTrainingSamples(
+            states=self._preprocess_states(batch.states),
+            states_mask=batch.states_mask,
+            camera_images=self._preprocess_camera_images(batch.camera_images),
+            camera_images_mask=batch.camera_images_mask,
+            actions=self._preprocess_actions(batch.actions),
+            actions_mask=batch.actions_mask,
+            actions_sequence_mask=batch.actions_sequence_mask,
+        )
+        action_predicitons = self._predict_action(preprocessed_batch)
         losses = {}
         metrics = {}
         if self.training:
-            loss = nn.functional.mse_loss(action_preds, batch.actions)
+            loss = nn.functional.mse_loss(action_predicitons, batch.actions)
             losses["mse_loss"] = loss
 
-        return BatchOutput(
-            action_predicitons=action_preds, losses=losses, metrics=metrics
+        return BatchedTrainingOutputs(
+            action_predicitons=action_predicitons.action_predicitons,
+            losses=losses,
+            metrics=metrics,
         )
 
-    def configure_optimizers(self) -> torch.optim.Optimizer:
-        """Configure optimizer with different LRs for different components."""
+    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
+        """Configure and return optimizer for the model."""
         backbone_params = []
         other_params = []
 
@@ -146,25 +207,4 @@ class CNNMLP(NeuracoreModel):
             {"params": backbone_params, "lr": self.lr_backbone},
             {"params": other_params, "lr": self.lr},
         ]
-        return torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)
-
-    def process_batch(self, batch: BatchInput) -> BatchInput:
-        """Called by dataloader to process the batch."""
-        camera_images = batch.camera_images
-        for cam_id in range(self.dataset_description.max_num_cameras):
-            camera_images[:, cam_id] = self.transform(batch.camera_images[:, cam_id])
-        states = (
-            batch.states - self.dataset_description.state_mean
-        ) / self.dataset_description.state_std
-        actions = (
-            batch.actions - self.dataset_description.action_mean
-        ) / self.dataset_description.action_std
-        return BatchInput(
-            states=states,
-            states_mask=batch.states_mask,
-            camera_images=camera_images,
-            camera_images_mask=batch.camera_images_mask,
-            actions=actions,
-            actions_mask=batch.actions_mask,
-            actions_sequence_mask=batch.actions_sequence_mask,
-        )
+        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
