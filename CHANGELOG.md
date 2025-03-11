@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - None
 
+## [1.1.1] - 2025-03-11
+
+### Fixed
+
+- Fixed streaming data example
+
 ## [1.1.0] - 2025-01-31
 
 ### Added

@@ -206,7 +206,7 @@ def stop_recording(robot_name: str | None = None) -> None:
     _active_recording_id = None
 
 
-def get_dataset(name: str) -> None:
+def get_dataset(name: str) -> Dataset:
     """Get a dataset by name.
 
     Args:

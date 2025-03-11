@@ -152,10 +152,10 @@ class EpisodeIterator:
         self.recording = recording
         self.id = recording["id"]
         self.size_bytes = recording["total_bytes"]
-        recording_preview = self._get_recording_preview()
-        self.episode_length = recording_preview["statistics"]["total_frames"]
         self._running = False
         self._frame_count = 0
+        recording_preview = self._get_recording_preview()
+        self.episode_length = recording_preview["statistics"]["total_frames"]
 
     def _run_event_loop(self):
         """Run async event loop in separate thread with proper cleanup."""
@@ -165,47 +165,52 @@ class EpisodeIterator:
         finally:
             # Clean up the loop
             self._loop.close()
-            # self._thread_ended.set()  # Signal that the thread has ended
 
     async def _stream_data(self):
         """Stream data from WebSocket with proper cleanup."""
         try:
             auth = get_auth()
             base_url = API_URL.replace("http://", "ws://").replace("https://", "wss://")
-            params = {
-                "window_size_sec": "0.5",
-                "synchronization_max_delay_sec": "0.1",
-                "is_shared": self.dataset.is_shared,
-            }
+
+            # Connect to the new timestep stream endpoint
             url = (
-                f"{base_url}/visualization/ws/demonstrations/{self.recording['id']}"
-                f"/playback?{'&'.join(f'{k}={v}' for k, v in params.items())}"
+                f"{base_url}/visualization/demonstrations/"
+                f"{self.recording['id']}/timestep/stream"
             )
+
             async with websockets.connect(
                 url,
                 additional_headers=auth.get_headers(),
                 max_size=None,
             ) as websocket:
+                # Process frames as they arrive
                 while self._running:
                     try:
                         msg = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                        if msg is None:
-                            continue
                         data = json.loads(msg)
-                        if "type" in data and data["type"] == "window":
-                            window_data = data["data"]
-                            frames = window_data["data"]
-                            for frame in frames:
-                                if not self._running:
-                                    break
-                                processed_data = self._process_frame(frame)
-                                await self._msg_queue.put(processed_data)
-                                self._received_data = True
-                                self._frame_count += 1
+
+                        if data.get("type") == "frame":
+                            frame_data = data.get("data", {})
+                            processed_data = self._process_frame(frame_data)
+                            await self._msg_queue.put(processed_data)
+                            self._frame_count += 1
+
+                            # Break if we've received all frames
                             if self._frame_count >= self.episode_length:
                                 logger.info(f"Received all {self._frame_count} frames")
                                 break
+
+                        elif data.get("type") == "error":
+                            error_msg = data.get("message", "Unknown error")
+                            logger.error(f"WebSocket error: {error_msg}")
+                            await self._msg_queue.put(
+                                DatasetError(f"Stream error: {error_msg}")
+                            )
+                            break
+
                     except asyncio.TimeoutError:
+                        if not self._running:
+                            break
                         continue
 
                     except websockets.exceptions.ConnectionClosed:
@@ -214,12 +219,12 @@ class EpisodeIterator:
 
                     except Exception as e:
                         logger.error(f"Stream processing error: {str(e)}")
-                        # Put error on queue before breaking
                         await self._msg_queue.put(
                             DatasetError(f"Stream error: {str(e)}")
                         )
                         break
 
+                # Signal end of data stream
                 await self._msg_queue.put(None)
 
         except Exception as e:
@@ -257,13 +262,16 @@ class EpisodeIterator:
                 k: float(v) for k, v in frame_data["joint_positions"].items()
             },
         }
+
+        # Process images if present
         if "images" in frame_data:
             processed["images"] = {}
             for cam_id, img_data in frame_data["images"].items():
                 # Decode base64 image
-                img_bytes = base64.b64decode(img_data["bytes"])
+                img_bytes = base64.b64decode(img_data)
                 img = Image.open(io.BytesIO(img_bytes))
                 processed["images"][cam_id] = np.array(img)
+
         return processed
 
     def __next__(self):
