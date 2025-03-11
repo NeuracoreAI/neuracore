@@ -20,8 +20,8 @@ class NeuracoreModel(nn.Module, ABC):
         dataset_description: DatasetDescription,
     ):
         super().__init__()
-        self.dataset_description = dataset_description
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.dataset_description = dataset_description.to(self.device)
 
     @abstractmethod
     def forward(self, batch: BatchedInferenceSamples) -> BatchedInferenceOutputs:

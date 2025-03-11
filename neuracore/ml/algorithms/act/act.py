@@ -1,3 +1,5 @@
+"""ACT: Action Chunking with Transformers."""
+
 import logging
 
 import torch

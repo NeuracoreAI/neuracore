@@ -30,6 +30,19 @@ class DatasetDescription:
         self.state_std = state_std
         self.action_prediction_horizon = action_prediction_horizon
 
+    def to(self, device: torch.device):
+        """Move all tensors to the specified device."""
+        return DatasetDescription(
+            max_num_cameras=self.max_num_cameras,
+            max_state_size=self.max_state_size,
+            max_action_size=self.max_action_size,
+            action_mean=self.action_mean.to(device),
+            action_std=self.action_std.to(device),
+            state_mean=self.state_mean.to(device),
+            state_std=self.state_std.to(device),
+            action_prediction_horizon=self.action_prediction_horizon,
+        )
+
 
 class BatchedTrainingSamples:
 

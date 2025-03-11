@@ -1,3 +1,5 @@
+"""A simple CNN for each camera using a pretrained resnet18 followed by MLP."""
+
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
