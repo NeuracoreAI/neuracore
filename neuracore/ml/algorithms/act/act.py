@@ -376,4 +376,4 @@ class ACT(NeuracoreModel):
             {"params": other_params, "lr": self.lr},
         ]
 
-        return torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)
+        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
