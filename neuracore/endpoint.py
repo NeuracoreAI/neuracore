@@ -7,6 +7,7 @@ import tempfile
 import time
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import requests
@@ -160,7 +161,7 @@ def connect_endpoint(name: str) -> EndpointPolicy:
 
 
 def connect_local_endpoint(
-    path_to_model: str | None = None, train_run_name: str | None = None
+    path_to_model: Optional[str] = None, train_run_name: Optional[str] = None
 ) -> EndpointPolicy:
     """Connect to a local model.
 

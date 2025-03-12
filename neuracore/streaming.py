@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import websockets
@@ -75,7 +75,7 @@ class RateLimitedQueue:
         except queue.Full:
             return False
 
-    def get(self) -> QueuedMessage | None:
+    def get(self) -> Optional[QueuedMessage]:
         try:
             message = self._queue.get_nowait()
             message.data = self._message_formatter(message.data)
@@ -372,7 +372,10 @@ def log_action(robot: Robot, action: dict[str, float]):
 
 
 def log_rgb(
-    robot: Robot, camera_id: str, image: np.ndarray, resolution: list[int] | None = None
+    robot: Robot,
+    camera_id: str,
+    image: np.ndarray,
+    resolution: Optional[list[int]] = None,
 ):
     sensor_register = _get_or_create_sensor_register(robot.id)
     sensor_register.validate(camera_id, "RGB", image)
@@ -388,7 +391,10 @@ def log_rgb(
 
 
 def log_depth(
-    robot: Robot, camera_id: str, depth: np.ndarray, resolution: list[int] | None = None
+    robot: Robot,
+    camera_id: str,
+    depth: np.ndarray,
+    resolution: Optional[list[int]] = None,
 ):
     sensor_register = _get_or_create_sensor_register(robot.id)
     sensor_register.validate(camera_id, "DEPTH", depth)

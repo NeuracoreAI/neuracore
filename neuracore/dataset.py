@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import threading
+from typing import Optional
 
 import numpy as np
 import requests
@@ -60,7 +61,7 @@ class Dataset:
 
     @staticmethod
     def create(
-        name: str, description: str | None = None, tags: list[str] | None = None
+        name: str, description: Optional[str] = None, tags: Optional[list[str]] = None
     ) -> "Dataset":
         ds = Dataset.get(name, non_exist_ok=True)
         if ds is None:
@@ -71,7 +72,7 @@ class Dataset:
 
     @staticmethod
     def _create_dataset(
-        name: str, description: str | None = None, tags: list[str] | None = None
+        name: str, description: Optional[str] = None, tags: Optional[list[str]] = None
     ) -> "Dataset":
         auth: Auth = get_auth()
         response = requests.post(
