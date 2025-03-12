@@ -4,6 +4,7 @@ import os
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
+from typing import Optional
 
 import requests
 
@@ -19,8 +20,8 @@ class Robot:
     def __init__(
         self,
         robot_name: str,
-        urdf_path: str | None = None,
-        mjcf_path: str | None = None,
+        urdf_path: Optional[str] = None,
+        mjcf_path: Optional[str] = None,
         overwrite: bool = False,
     ):
         self.name = robot_name
@@ -244,8 +245,8 @@ _robots = {}
 
 def init(
     robot_name: str,
-    urdf_path: str | None = None,
-    mjcf_path: str | None = None,
+    urdf_path: Optional[str] = None,
+    mjcf_path: Optional[str] = None,
     overwrite: bool = False,
 ) -> Robot:
     """Initialize a robot globally."""

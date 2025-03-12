@@ -1,4 +1,5 @@
 import atexit
+from typing import Optional
 
 import numpy as np
 
@@ -21,12 +22,12 @@ from .streaming import stop_streaming as _stop_streaming
 from .streaming import wait_until_stream_empty
 
 # Global active robot ID - allows us to avoid passing robot_name to every call
-_active_robot: Robot | None = None
-_active_dataset_id: str | None = None
-_active_recording_id: str | None = None
+_active_robot: Optional[Robot] = None
+_active_dataset_id: Optional[str] = None
+_active_recording_id: Optional[str] = None
 
 
-def login(api_key: str | None = None) -> None:
+def login(api_key: Optional[str] = None) -> None:
     """
     Authenticate with NeuraCore server.
 
@@ -47,8 +48,8 @@ def logout() -> None:
 
 def connect_robot(
     robot_name: str,
-    urdf_path: str | None = None,
-    mjcf_path: str | None = None,
+    urdf_path: Optional[str] = None,
+    mjcf_path: Optional[str] = None,
     overwrite: bool = False,
 ) -> None:
     """
@@ -77,7 +78,7 @@ def _get_robot(robot_name: str) -> Robot:
     return robot
 
 
-def log_joints(positions: dict[str, float], robot_name: str | None = None) -> None:
+def log_joints(positions: dict[str, float], robot_name: Optional[str] = None) -> None:
     """
     Log joint positions for a robot.
 
@@ -97,7 +98,7 @@ def log_joints(positions: dict[str, float], robot_name: str | None = None) -> No
     _log_joints(_get_robot(robot_name), positions)
 
 
-def log_action(action: dict[str, float], robot_name: str | None = None) -> None:
+def log_action(action: dict[str, float], robot_name: Optional[str] = None) -> None:
     """
     Log action for a robot.
 
@@ -117,7 +118,9 @@ def log_action(action: dict[str, float], robot_name: str | None = None) -> None:
     _log_action(_get_robot(robot_name), action)
 
 
-def log_rgb(camera_id: str, image: np.ndarray, robot_name: str | None = None) -> None:
+def log_rgb(
+    camera_id: str, image: np.ndarray, robot_name: Optional[str] = None
+) -> None:
     """
     Log RGB image from a camera.
 
@@ -139,7 +142,9 @@ def log_rgb(camera_id: str, image: np.ndarray, robot_name: str | None = None) ->
     _log_rgb(_get_robot(robot_name), camera_id, image)
 
 
-def log_depth(camera_id: str, depth: np.ndarray, robot_name: str | None = None) -> None:
+def log_depth(
+    camera_id: str, depth: np.ndarray, robot_name: Optional[str] = None
+) -> None:
     """
     Log depth image from a camera.
 
@@ -168,7 +173,7 @@ def log_depth(camera_id: str, depth: np.ndarray, robot_name: str | None = None) 
     _log_depth(_get_robot(robot_name), camera_id, depth)
 
 
-def start_recording(robot_name: str | None = None) -> None:
+def start_recording(robot_name: Optional[str] = None) -> None:
     """
     Start recording data for a specific robot.
 
@@ -187,7 +192,7 @@ def start_recording(robot_name: str | None = None) -> None:
     _active_recording_id = robot.start_recording(_active_dataset_id)
 
 
-def stop_recording(robot_name: str | None = None) -> None:
+def stop_recording(robot_name: Optional[str] = None) -> None:
     """
     Stop recording data for a specific robot.
 
@@ -220,7 +225,7 @@ def get_dataset(name: str) -> Dataset:
 
 
 def create_dataset(
-    name: str, description: str | None = None, tags: list[str] | None = None
+    name: str, description: Optional[str] = None, tags: Optional[list[str]] = None
 ) -> None:
     """
     Create a new dataset for robot demonstrations.
@@ -256,7 +261,7 @@ def connect_endpoint(name: str) -> EndpointPolicy:
 
 
 def connect_local_endpoint(
-    path_to_model: str | None = None, train_run_name: str | None = None
+    path_to_model: Optional[str] = None, train_run_name: Optional[str] = None
 ) -> EndpointPolicy:
     """
     Connect to a local model endpoint.
@@ -276,7 +281,7 @@ def connect_local_endpoint(
     return _connect_local_endpoint(path_to_model, train_run_name)
 
 
-def stop(robot_name: str | None = None) -> None:
+def stop(robot_name: Optional[str] = None) -> None:
     """
     Stop streaming for a specific robot.
 

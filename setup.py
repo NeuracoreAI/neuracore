@@ -30,7 +30,7 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
     ],
-    python_requires=">=3.10",
+    python_requires=">=3.8",
     install_requires=[
         "websockets>=14.0",
         "numpy>=1.24.0",

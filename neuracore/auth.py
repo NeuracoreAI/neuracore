@@ -1,6 +1,8 @@
 import json
 import os
+from optparse import Option
 from pathlib import Path
+from typing import Optional
 
 import requests
 
@@ -15,7 +17,7 @@ CONFIG_FILE = "config.json"
 
 class Auth:
     _instance = None
-    _api_key: str | None = None
+    _api_key: Optional[str] = None
 
     def __new__(cls):
         if cls._instance is None:
@@ -41,7 +43,7 @@ class Auth:
         with open(config_file, "w") as f:
             json.dump({"api_key": self._api_key}, f)
 
-    def login(self, api_key: str | None = None) -> None:
+    def login(self, api_key: Optional[str] = None) -> None:
         """
         Authenticate with the NeuraCore server using an API key.
 
@@ -82,12 +84,12 @@ class Auth:
             config_file.unlink()
 
     @property
-    def api_key(self) -> str | None:
+    def api_key(self) -> Option[str]:
         """Get the current API key."""
         return self._api_key
 
     @property
-    def access_token(self) -> str | None:
+    def access_token(self) -> Option[str]:
         """Get the current access token."""
         return self._access_token
 
@@ -110,7 +112,7 @@ class Auth:
 _auth = Auth()
 
 
-def login(api_key: str | None = None) -> None:
+def login(api_key: Option[str] = None) -> None:
     """Global login function."""
     _auth.login(api_key)
 
