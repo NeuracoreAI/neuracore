@@ -1,8 +1,3 @@
-"""Contains the BatchInput class.
-
-Note we have to use NamedTuple instead of dataclass because of torchscript.
-"""
-
 from typing import NamedTuple
 
 import torch

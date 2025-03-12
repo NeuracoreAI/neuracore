@@ -5,12 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-
 ## [Unreleased]
 
 ### Added
 
-- Open source intitial neuracore algorithms
+- None
 
 ### Changed
 
@@ -24,11 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - None
 
+
+## [1.2.0] - 2025-03-12
+
+### Added
+
+- Open source intitial neuracore algorithms
+
+
 ## [1.1.1] - 2025-03-11
 
 ### Fixed
 
 - Fixed streaming data example
+
 
 ## [1.1.0] - 2025-01-31
 
@@ -52,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - None
+
 
 ## [1.0.0] - 2025-01-07
 
