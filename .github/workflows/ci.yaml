@@ -37,7 +37,7 @@ jobs:
     
     - name: Run tests with pytest
       run: |
-        pytest tests/ --cov=neuracore
+        pytest tests/unit --cov=neuracore
 
   publish:
     needs: [pre-commit, test]

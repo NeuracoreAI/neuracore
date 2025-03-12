@@ -226,7 +226,7 @@ def get_dataset(name: str) -> Dataset:
 
 def create_dataset(
     name: str, description: Optional[str] = None, tags: Optional[list[str]] = None
-) -> None:
+) -> Dataset:
     """
     Create a new dataset for robot demonstrations.
 

@@ -4,6 +4,7 @@ import concurrent
 import io
 import json
 import logging
+import queue
 import threading
 from typing import Optional
 
@@ -191,9 +192,10 @@ class EpisodeIterator:
                         data = json.loads(msg)
 
                         if data.get("type") == "frame":
+                            logger.info("Received data in episode iter")
                             frame_data = data.get("data", {})
                             processed_data = self._process_frame(frame_data)
-                            await self._msg_queue.put(processed_data)
+                            self._msg_queue.put(processed_data)
                             self._frame_count += 1
 
                             # Break if we've received all frames
@@ -204,7 +206,7 @@ class EpisodeIterator:
                         elif data.get("type") == "error":
                             error_msg = data.get("message", "Unknown error")
                             logger.error(f"WebSocket error: {error_msg}")
-                            await self._msg_queue.put(
+                            self._msg_queue.put(
                                 DatasetError(f"Stream error: {error_msg}")
                             )
                             break
@@ -220,24 +222,22 @@ class EpisodeIterator:
 
                     except Exception as e:
                         logger.error(f"Stream processing error: {str(e)}")
-                        await self._msg_queue.put(
-                            DatasetError(f"Stream error: {str(e)}")
-                        )
+                        self._msg_queue.put(DatasetError(f"Stream error: {str(e)}"))
                         break
 
                 # Signal end of data stream
-                await self._msg_queue.put(None)
+                self._msg_queue.put(None)
 
         except Exception as e:
             logger.error(f"Stream setup error: {str(e)}")
-            await self._msg_queue.put(DatasetError(f"Stream setup error: {str(e)}"))
+            data = self._msg_queue.get(timeout=5.0)
+            self._msg_queue.put(DatasetError(f"Stream setup error: {str(e)}"))
         finally:
             # Always put None on queue to signal end
             try:
-                await self._msg_queue.put(None)
+                self._msg_queue.put(None)
             except Exception:
                 pass
-            self._running = False
 
     def close(self):
         """Explicitly close with proper cleanup."""
@@ -277,22 +277,22 @@ class EpisodeIterator:
 
     def __next__(self):
         """Get next frame with proper thread state handling and auto-cleanup."""
-        while self._loop.is_running() or self._running:
+        while self._running:
             try:
-                future = asyncio.run_coroutine_threadsafe(
-                    self._msg_queue.get(), self._loop
-                )
-                data = future.result(timeout=1.0)
-            except (asyncio.TimeoutError, concurrent.futures.TimeoutError):
+                data = self._msg_queue.get(timeout=1.0)
+                logger.info("Received data in __next__")
+            except queue.Empty:
+                logger.warning("Timeout waiting for data")
                 continue
             if data is None:
+                logger.info("End of data stream. data is None")
                 self._running = False
                 break
             return data
         raise StopIteration
 
     def __iter__(self):
-        self._msg_queue = asyncio.Queue()
+        self._msg_queue = queue.Queue()
         self._received_data = False
 
         # Thread control
@@ -308,6 +308,7 @@ class EpisodeIterator:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        logger.info("Exiting EpisodeIterator")
         self.close()
 
     def __del__(self):
