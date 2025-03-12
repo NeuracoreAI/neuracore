@@ -3,7 +3,6 @@
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
-from modules import ImageEncoder
 
 from neuracore import (
     BatchedInferenceOutputs,
@@ -13,6 +12,8 @@ from neuracore import (
     DatasetDescription,
     NeuracoreModel,
 )
+
+from .modules import ImageEncoder
 
 
 class CNNMLP(NeuracoreModel):

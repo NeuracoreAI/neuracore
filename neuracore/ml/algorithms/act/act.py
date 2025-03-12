@@ -6,12 +6,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
-from modules import (
-    ACTImageEncoder,
-    PositionalEncoding,
-    TransformerDecoder,
-    TransformerEncoder,
-)
 
 from neuracore import (
     BatchedInferenceOutputs,
@@ -20,6 +14,13 @@ from neuracore import (
     BatchedTrainingSamples,
     DatasetDescription,
     NeuracoreModel,
+)
+
+from .modules import (
+    ACTImageEncoder,
+    PositionalEncoding,
+    TransformerDecoder,
+    TransformerEncoder,
 )
 
 logger = logging.getLogger(__name__)
