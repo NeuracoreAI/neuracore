@@ -1,6 +1,5 @@
 import json
 import os
-from optparse import Option
 from pathlib import Path
 from typing import Optional
 
@@ -84,12 +83,12 @@ class Auth:
             config_file.unlink()
 
     @property
-    def api_key(self) -> Option[str]:
+    def api_key(self) -> Optional[str]:
         """Get the current API key."""
         return self._api_key
 
     @property
-    def access_token(self) -> Option[str]:
+    def access_token(self) -> Optional[str]:
         """Get the current access token."""
         return self._access_token
 
@@ -112,7 +111,7 @@ class Auth:
 _auth = Auth()
 
 
-def login(api_key: Option[str] = None) -> None:
+def login(api_key: Optional[str] = None) -> None:
     """Global login function."""
     _auth.login(api_key)
 
