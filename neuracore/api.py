@@ -98,6 +98,7 @@ def log_joints(positions: dict[str, float], robot_name: Optional[str] = None) ->
     stream = _data_streams.get(str_id)
     if stream is None:
         stream = JointDataStream()
+        _data_streams[str_id] = stream
         if _active_recording_id is not None:
             stream.start_recording(_active_recording_id)
     stream.log(positions)
@@ -123,6 +124,7 @@ def log_action(action: dict[str, float], robot_name: Optional[str] = None) -> No
     stream = _data_streams.get(str_id)
     if stream is None:
         stream = ActionDataStream()
+        _data_streams[str_id] = stream
         if _active_recording_id is not None:
             stream.start_recording(_active_recording_id)
     stream.log(action)
@@ -151,9 +153,8 @@ def log_rgb(
     str_id = f"{robot_name}_rgb_{camera_id}"
     stream = _data_streams.get(str_id)
     if stream is None:
-        stream = RGBDataStream(
-            _get_robot(robot_name), camera_id, image.shape[1], image.shape[0]
-        )
+        stream = RGBDataStream(camera_id, image.shape[1], image.shape[0])
+        _data_streams[str_id] = stream
         if _active_recording_id is not None:
             stream.start_recording(_active_recording_id)
     if stream.width != image.shape[1] or stream.height != image.shape[0]:
@@ -194,9 +195,8 @@ def log_depth(
     str_id = f"{robot_name}_depth_{camera_id}"
     stream = _data_streams.get(str_id)
     if stream is None:
-        stream = DepthDataStream(
-            _get_robot(robot_name), camera_id, depth.shape[1], depth.shape[0]
-        )
+        stream = DepthDataStream(camera_id, depth.shape[1], depth.shape[0])
+        _data_streams[str_id] = stream
         if _active_recording_id is not None:
             stream.start_recording(_active_recording_id)
     if stream.width != depth.shape[1] or stream.height != depth.shape[0]:

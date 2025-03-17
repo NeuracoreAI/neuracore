@@ -44,16 +44,12 @@ class ResumableUpload:
             str: Resumable upload session URI
         """
         auth = get_auth()
-        response = requests.post(
-            f"{API_URL}/recording/{self.recording_id}/resumable_upload",
+        response = requests.get(
+            f"{API_URL}/recording/{self.recording_id}/resumable_upload_url/{self.sensor_type.value}/{self.sensor_name}",
             headers=auth.get_headers(),
-            json={
-                "sensor_type": self.sensor_type.value,
-                "sensor_name": self.sensor_name,
-            },
         )
         response.raise_for_status()
-        return response.json()["session_uri"]
+        return response.json()["url"]
 
     def upload_chunk(self, data: bytes, is_final: bool = False) -> bool:
         """

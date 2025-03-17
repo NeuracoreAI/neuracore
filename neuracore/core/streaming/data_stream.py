@@ -1,16 +1,20 @@
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
 
 import numpy as np
 import requests
 
+from neuracore.core.auth import get_auth
 from neuracore.core.streaming.resumable_upload import ResumableUpload, SensorType
 
 from ..const import API_URL
 from .streaming_video_encoder import StreamingVideoEncoder
 
 MAX_DEPTH = 10.0  # Maximum depth value in meters
+
+logger = logging.getLogger(__name__)
 
 
 class DataStream(ABC):
@@ -42,28 +46,40 @@ class BufferedDataStream(DataStream, ABC):
         super().__init__()
         self._buffer = []
 
-    def log(self, dict_data: dict[str, np.ndarray]):
+    def log(self, dict_data: dict[str, float]):
         """Log data to the buffer if recording is active."""
         if not self.is_recording():
             return
         self._buffer.append(dict_data)
 
-    def start_recording(self):
+    def start_recording(self, recording_id: str):
         """Upload buffered data to storage."""
-        super().start_recording()
+        super().start_recording(recording_id)
         self._buffer = []
 
     def stop_recording(self):
         """Upload buffered data to storage."""
+        recoding_id = self._recording_id
         super().stop_recording()
         if not self._buffer:
             return
-        response = requests.put(self.get_endpoint_name(), json.dumps(self._buffer))
+        # Generate an upload URL
+        upload_url_response = requests.get(
+            f"{API_URL}/recording/{recoding_id}/json_upload_url/{self.get_datatype()}",
+            headers=get_auth().get_headers(),
+        )
+        upload_url_response.raise_for_status()
+        upload_url = upload_url_response.json()["url"]
+        data = json.dumps(self._buffer)
+        logger.info(f"Uploading {len(data)} bytes to {upload_url}")
+        response = requests.put(
+            upload_url, headers={"Content-Length": str(len(data))}, data=data
+        )
         response.raise_for_status()
         self._buffer = []
 
     @abstractmethod
-    def get_endpoint_name(self) -> str:
+    def get_datatype(self) -> str:
         """Get the endpoint name for this stream."""
         raise NotImplementedError()
 
@@ -71,17 +87,17 @@ class BufferedDataStream(DataStream, ABC):
 class ActionDataStream(BufferedDataStream):
     """Stream that logs robot actions."""
 
-    def get_endpoint_name(self) -> str:
+    def get_datatype(self) -> str:
         """Get the endpoint name for this stream."""
-        return f"{API_URL}/recording/{self._recording_id}/upload/actions"
+        return "actions"
 
 
 class JointDataStream(BufferedDataStream):
     """Stream that logs robot actions."""
 
-    def get_endpoint_name(self) -> str:
+    def get_datatype(self) -> str:
         """Get the endpoint name for this stream."""
-        return f"{API_URL}/recording/{self._recording_id}/upload/joints"
+        return "joints"
 
 
 class VideoDataStream(DataStream):
@@ -102,10 +118,10 @@ class VideoDataStream(DataStream):
 
     def stop_recording(self):
         """Stop video recording and finalize encoding."""
-        super().stop_recording()
         if self.is_recording() and self._encoder is not None:
             self._encoder.finish()
         self._encoder = None
+        super().stop_recording()
 
     @abstractmethod
     def get_resumable_upload(self, recording_id: str) -> ResumableUpload:
