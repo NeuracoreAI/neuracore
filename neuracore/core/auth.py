@@ -5,8 +5,7 @@ from typing import Optional
 
 import requests
 
-from neuracore.const import API_URL
-
+from .const import API_URL
 from .exceptions import AuthenticationError
 from .generate_api_key import generate_api_key
 

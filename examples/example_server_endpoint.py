@@ -6,7 +6,7 @@ from common.ee_sim_env import sample_box_pose
 from common.sim_env import BOX_POSE, make_sim_env
 
 import neuracore as nc
-from neuracore.exceptions import EndpointError
+from neuracore import EndpointError
 
 ENDPOINT_NAME = "MyExampleEndpoint"
 

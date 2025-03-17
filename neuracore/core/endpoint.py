@@ -13,9 +13,8 @@ import numpy as np
 import requests
 from PIL import Image
 
-from neuracore.const import API_URL
-
 from .auth import get_auth
+from .const import API_URL
 from .exceptions import EndpointError
 
 logger = logging.getLogger(__name__)

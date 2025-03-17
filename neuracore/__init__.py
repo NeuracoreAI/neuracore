@@ -1,4 +1,5 @@
-from .core import *  # noqa: F403
+from .api import *  # noqa: F403
+from .core.exceptions import *  # noqa: F403
 from .ml.neuracore_model import NeuracoreModel
 from .ml.types import (
     BatchedInferenceOutputs,

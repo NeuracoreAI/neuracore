@@ -7,7 +7,7 @@ import requests_mock
 
 import neuracore
 from neuracore import auth
-from neuracore.const import API_URL
+from neuracore.core.const import API_URL
 
 
 @pytest.fixture
@@ -125,9 +125,9 @@ def reset_neuracore():
     original_auth = neuracore.auth._auth
 
     # Reset global variables in core
-    neuracore.core._active_robot = None
-    neuracore.core._active_dataset_id = None
-    neuracore.core._active_recording_id = None
+    neuracore.api._active_robot = None
+    neuracore.api._active_dataset_id = None
+    neuracore.api._active_recording_id = None
 
     # Reset authentication
     neuracore.auth._auth = neuracore.auth.Auth()

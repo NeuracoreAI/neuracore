@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 import neuracore as nc
-from neuracore.const import API_URL
+from neuracore.core.const import API_URL
 
 
 def test_login_logout(temp_config_dir, mock_auth_requests, reset_neuracore):
@@ -32,8 +32,8 @@ def test_connect_robot(temp_config_dir, mock_auth_requests, reset_neuracore, moc
     nc.connect_robot("test_robot", mock_urdf)
 
     # Verify robot connection
-    assert nc.core._active_robot is not None
-    assert nc.core._active_robot.name == "test_robot"
+    assert nc.api._active_robot is not None
+    assert nc.api._active_robot.name == "test_robot"
 
 
 def test_log_actions(
@@ -110,7 +110,7 @@ def test_create_dataset(temp_config_dir, mock_auth_requests, reset_neuracore):
     nc.create_dataset("Test Dataset")
 
     # Verify dataset was created
-    assert nc.core._active_dataset_id is not None
+    assert nc.api._active_dataset_id is not None
 
 
 def test_connect_endpoint(temp_config_dir, mock_auth_requests, reset_neuracore):
@@ -233,4 +233,4 @@ def test_stop_functions(
         pytest.fail(f"Stop functions raised unexpected exception: {e}")
 
     # Verify global state reset
-    assert nc.core._active_robot is None
+    assert nc.api._active_robot is None

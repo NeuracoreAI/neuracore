@@ -40,6 +40,8 @@ setup(
         "pyyaml>=6.0.1",
         "tqdm>=4.66.0",
         "requests-oauthlib",
+        "av",
+        "aiortc",
     ],
     extras_require={
         "examples": [
@@ -65,6 +67,7 @@ setup(
         "dev": [
             "pytest>=6.2.5",
             "pytest-cov>=2.12.1",
+            "pytest-asyncio>=0.15.1",
             "twine>=3.4.2",
             "requests-mock>=1.9.3",
         ],
