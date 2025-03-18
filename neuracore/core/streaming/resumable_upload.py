@@ -45,7 +45,7 @@ class ResumableUpload:
         """
         auth = get_auth()
         response = requests.get(
-            f"{API_URL}/recording/{self.recording_id}/resumable_upload_url/{self.sensor_type.value}/{self.sensor_name}",
+            f"{API_URL}/recording/{self.recording_id}/resumable_upload_url/{self.sensor_type.value}_{self.sensor_name}",
             headers=auth.get_headers(),
         )
         response.raise_for_status()

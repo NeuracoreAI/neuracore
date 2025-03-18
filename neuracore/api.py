@@ -78,13 +78,18 @@ def _get_robot(robot_name: str) -> Robot:
     return robot
 
 
-def log_joints(positions: dict[str, float], robot_name: Optional[str] = None) -> None:
+def log_joints(
+    positions: dict[str, float],
+    robot_name: Optional[str] = None,
+    timestamp: Optional[float] = None,
+) -> None:
     """
     Log joint positions for a robot.
 
     Args:
         positions: Dictionary mapping joint names to positions (in radians)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        timestamp: Optional timestamp
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -94,23 +99,28 @@ def log_joints(positions: dict[str, float], robot_name: Optional[str] = None) ->
     for key, value in positions.items():
         if not isinstance(value, float):
             raise ValueError(f"Joint positions must be floats. {key} is not a float.")
-    str_id = f"{robot_name}_action"
+    str_id = f"{robot_name}_joints"
     stream = _data_streams.get(str_id)
     if stream is None:
         stream = JointDataStream()
         _data_streams[str_id] = stream
         if _active_recording_id is not None:
             stream.start_recording(_active_recording_id)
-    stream.log(positions)
+    stream.log(positions, timestamp)
 
 
-def log_action(action: dict[str, float], robot_name: Optional[str] = None) -> None:
+def log_action(
+    action: dict[str, float],
+    robot_name: Optional[str] = None,
+    timestamp: Optional[float] = None,
+) -> None:
     """
     Log action for a robot.
 
     Args:
         action: Dictionary mapping joint names to positions (in radians)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        timestamp: Optional timestamp
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -127,11 +137,14 @@ def log_action(action: dict[str, float], robot_name: Optional[str] = None) -> No
         _data_streams[str_id] = stream
         if _active_recording_id is not None:
             stream.start_recording(_active_recording_id)
-    stream.log(action)
+    stream.log(action, timestamp)
 
 
 def log_rgb(
-    camera_id: str, image: np.ndarray, robot_name: Optional[str] = None
+    camera_id: str,
+    image: np.ndarray,
+    robot_name: Optional[str] = None,
+    timestamp: Optional[float] = None,
 ) -> None:
     """
     Log RGB image from a camera.
@@ -140,6 +153,7 @@ def log_rgb(
         camera_id: Unique identifier for the camera
         image: RGB image as numpy array (HxWx3, dtype=uint8 or float32)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        timestamp: Optional timestamp
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -162,11 +176,14 @@ def log_rgb(
             f"RGB image dimensions {image.shape[1]}x{image.shape[0]} do not match "
             f"stream dimensions {stream.width}x{stream.height}"
         )
-    stream.log(image)
+    stream.log(image, timestamp)
 
 
 def log_depth(
-    camera_id: str, depth: np.ndarray, robot_name: Optional[str] = None
+    camera_id: str,
+    depth: np.ndarray,
+    robot_name: Optional[str] = None,
+    timestamp: Optional[float] = None,
 ) -> None:
     """
     Log depth image from a camera.
@@ -175,6 +192,7 @@ def log_depth(
         camera_id: Unique identifier for the camera
         depth: Depth image as numpy array (HxW, dtype=float32, in meters)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        timestamp: Optional timestamp
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -204,7 +222,7 @@ def log_depth(
             f"Depth image dimensions {depth.shape[1]}x{depth.shape[0]} do not match "
             f"stream dimensions {stream.width}x{stream.height}"
         )
-    stream.log(depth)
+    stream.log(depth, timestamp)
 
 
 def start_recording(robot_name: Optional[str] = None) -> None:

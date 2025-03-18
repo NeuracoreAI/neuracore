@@ -56,3 +56,9 @@ class RobotError(NeuraCoreError):
     """
 
     pass
+
+
+class DatasetError(Exception):
+    """Exception raised for errors in the dataset module."""
+
+    pass

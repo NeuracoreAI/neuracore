@@ -1,28 +1,37 @@
 import asyncio
-import base64
 import concurrent
-import io
-import json
 import logging
 import queue
 import threading
 from typing import Optional
 
-import numpy as np
 import requests
-import websockets
-from PIL import Image
+from pydantic import BaseModel
 
 from .auth import Auth, get_auth
 from .const import API_URL
+from .exceptions import DatasetError
+from .utils.video_url_streamer import VideoStreamer
 
 logger = logging.getLogger(__name__)
 
+CHUNK_SIZE = 256 * 1024  # Multiples of 256KB
 
-class DatasetError(Exception):
-    """Exception raised for errors in the dataset module."""
 
-    pass
+class SyncPoint(BaseModel):
+    """Synchronized data point with joint, action, and image data."""
+
+    sync_timestamp: str
+    joint_positions: dict[str, float]
+    actions: dict[str, float] | None = None
+    camera_id_to_frame_idx: dict[str, int] = {}
+
+
+class SyncedData(BaseModel):
+    frames: list[SyncPoint]
+    start_time: float
+    end_time: float
+    frame_count: int
 
 
 class Dataset:
@@ -124,9 +133,9 @@ class Dataset:
             if isinstance(idx, int):
                 if idx < 0:  # Handle negative indices
                     idx += len(self._recordings)
-                if not 0 <= idx < len(self.recordings):
+                if not 0 <= idx < len(self._recordings):
                     raise IndexError("Dataset index out of range")
-                return EpisodeIterator(self, self.recordings[idx])
+                return EpisodeIterator(self, self._recordings[idx])
             raise TypeError(
                 f"Dataset indices must be integers or slices, not {type(idx)}"
             )
@@ -149,89 +158,60 @@ class Dataset:
 
 
 class EpisodeIterator:
+
     def __init__(self, dataset, recording):
         self.dataset = dataset
         self.recording = recording
         self.id = recording["id"]
         self.size_bytes = recording["total_bytes"]
         self._running = False
-        self._frame_count = 0
-        recording_preview = self._get_recording_preview()
-        self.episode_length = recording_preview["statistics"]["total_frames"]
+        self._recording_synced = self._get_synced_data()
+        self._camera_ids = list(
+            self._recording_synced.frames[0].camera_id_to_frame_idx.keys()
+        )
+        self._episode_length = self._recording_synced.frame_count
 
-    def _run_event_loop(self):
+    def _get_synced_data(self) -> SyncedData:
+        """Get synchronized data for the recording."""
+        auth = get_auth()
+        response = requests.post(
+            f"{API_URL}/visualization/demonstrations/{self.recording['id']}/{50}/sync",
+            headers=auth.get_headers(),
+        )
+        response.raise_for_status()
+        return SyncedData.model_validate(response.json())
+
+    def _get_video_url(self, camera_id: str) -> str:
+        """Get video URL for the given camera ID."""
+        auth = get_auth()
+        response = requests.get(
+            f"{API_URL}/recording/{self.recording['id']}/download_url/{camera_id}",
+            headers=auth.get_headers(),
+        )
+        response.raise_for_status()
+        return response.json()["url"]
+
+    def _run_event_loop(self, camera_id: str):
         """Run async event loop in separate thread with proper cleanup."""
         try:
             asyncio.set_event_loop(self._loop)
-            self._loop.run_until_complete(self._stream_data())
+            self._loop.run_until_complete(self._stream_data(camera_id))
         finally:
             # Clean up the loop
             self._loop.close()
 
-    async def _stream_data(self):
-        """Stream data from WebSocket with proper cleanup."""
+    async def _stream_data(self, camera_id: str):
+        """Stream data from the video URL."""
         try:
-            auth = get_auth()
-            base_url = API_URL.replace("http://", "ws://").replace("https://", "wss://")
-
-            # Connect to the new timestep stream endpoint
-            url = (
-                f"{base_url}/visualization/demonstrations/"
-                f"{self.recording['id']}/timestep/stream"
-            )
-
-            async with websockets.connect(
-                url,
-                additional_headers=auth.get_headers(),
-                max_size=None,
-            ) as websocket:
-                # Process frames as they arrive
-                while self._running:
-                    try:
-                        msg = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                        data = json.loads(msg)
-
-                        if data.get("type") == "frame":
-                            logger.info("Received data in episode iter")
-                            frame_data = data.get("data", {})
-                            processed_data = self._process_frame(frame_data)
-                            self._msg_queue.put(processed_data)
-                            self._frame_count += 1
-
-                            # Break if we've received all frames
-                            if self._frame_count >= self.episode_length:
-                                logger.info(f"Received all {self._frame_count} frames")
-                                break
-
-                        elif data.get("type") == "error":
-                            error_msg = data.get("message", "Unknown error")
-                            logger.error(f"WebSocket error: {error_msg}")
-                            self._msg_queue.put(
-                                DatasetError(f"Stream error: {error_msg}")
-                            )
-                            break
-
-                    except asyncio.TimeoutError:
-                        if not self._running:
-                            break
-                        continue
-
-                    except websockets.exceptions.ConnectionClosed:
-                        logger.info("WebSocket connection closed")
-                        break
-
-                    except Exception as e:
-                        logger.error(f"Stream processing error: {str(e)}")
-                        self._msg_queue.put(DatasetError(f"Stream error: {str(e)}"))
-                        break
-
-                # Signal end of data stream
-                self._msg_queue.put(None)
+            camera_url = self._get_video_url(camera_id)
+            with VideoStreamer(camera_url) as streamer:
+                for i, frame in enumerate(streamer):
+                    self._msg_queues[camera_id].put((frame, i))
+            # Signal end of data stream
+            self._msg_queues[camera_id].put(None)
 
         except Exception as e:
             logger.error(f"Stream setup error: {str(e)}")
-            data = self._msg_queue.get(timeout=5.0)
-            self._msg_queue.put(DatasetError(f"Stream setup error: {str(e)}"))
         finally:
             # Always put None on queue to signal end
             try:
@@ -243,65 +223,69 @@ class EpisodeIterator:
         """Explicitly close with proper cleanup."""
         if self._running:
             self._running = False
-            self._thread.join(timeout=2.0)
-
-    def _get_recording_preview(self):
-        """Get preview data for the recording."""
-        auth = get_auth()
-        url = f"{API_URL}/visualization/demonstrations/{self.recording['id']}/preview"
-        if self.dataset.is_shared:
-            url += "?is_shared=true"
-        response = requests.get(url, headers=auth.get_headers())
-        response.raise_for_status()
-        return response.json()
-
-    def _process_frame(self, frame_data: dict) -> dict:
-        """Process raw frame data into numpy arrays."""
-        processed = {
-            "timestamp": frame_data["timestamp"],
-            "joint_positions": {
-                k: float(v) for k, v in frame_data["joint_positions"].items()
-            },
-        }
-
-        # Process images if present
-        if "images" in frame_data:
-            processed["images"] = {}
-            for cam_id, img_data in frame_data["images"].items():
-                # Decode base64 image
-                img_bytes = base64.b64decode(img_data)
-                img = Image.open(io.BytesIO(img_bytes))
-                processed["images"][cam_id] = np.array(img)
-
-        return processed
+            for t in self._threads:
+                t.join(timeout=2.0)
 
     def __next__(self):
         """Get next frame with proper thread state handling and auto-cleanup."""
-        while self._running:
-            try:
-                data = self._msg_queue.get(timeout=1.0)
-                logger.info("Received data in __next__")
-            except queue.Empty:
-                logger.warning("Timeout waiting for data")
-                continue
-            if data is None:
-                logger.info("End of data stream. data is None")
-                self._running = False
-                break
-            return data
-        raise StopIteration
+        if self._iter_idx >= len(self._recording_synced.frames):
+            raise StopIteration
+        try:
+            # Get sync point data
+            sync_point = self._recording_synced.frames[self._iter_idx]
+
+            # Build the frame data
+            frame_data = {
+                "timestamp": sync_point.sync_timestamp,
+                "joint_positions": sync_point.joint_positions,
+                "actions": sync_point.actions,
+                "images": {},
+            }
+
+            # Get images from video streams for all cameras
+            for (
+                camera_id,
+                desired_frame_idx,
+            ) in sync_point.camera_id_to_frame_idx.items():
+                while True:
+                    data = self._msg_queues[camera_id].get(timeout=10.0)
+                    if data is None:
+                        logger.info(f"End of data stream for camera {camera_id}")
+                        break
+                    frame, frame_idx = data
+                    if frame_idx == desired_frame_idx:
+                        logger.info(
+                            f"Received frame {frame_idx} for camera {camera_id}"
+                        )
+                        frame_data["images"][camera_id] = frame
+                        break
+                    else:
+                        logger.info(
+                            f"Skipping frame {frame_idx} for camera {camera_id}"
+                        )
+
+        except queue.Empty:
+            logger.warning("Timeout waiting for data")
+        if data is None:
+            logger.info("End of data stream. data is None")
+            self._running = False
+            return None
+        logger.info(f"Retir frame {self._iter_idx}")
+        self._iter_idx += 1
+        return frame_data
 
     def __iter__(self):
-        self._msg_queue = queue.Queue()
-        self._received_data = False
-
-        # Thread control
-        self._running = True
+        self._msg_queues: dict[str, queue.Queue] = {}
+        self._iter_idx = 0
+        self._threads: list[threading.Thread] = []
         self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._run_event_loop)
-        self._thread.daemon = True
-        self._thread.start()
-
+        for camera_id in self._camera_ids:
+            self._msg_queues[camera_id] = queue.Queue()
+            thread = threading.Thread(target=self._run_event_loop, args=(camera_id,))
+            thread.daemon = True
+            thread.start()
+            self._threads.append(thread)
+        self._running = True
         return self
 
     def __enter__(self):
@@ -317,7 +301,7 @@ class EpisodeIterator:
 
     def __len__(self) -> int:
         """Returns the number of steps in the episode."""
-        return self.episode_length
+        return self._episode_length
 
     def __getitem__(self, idx):
         """Support for indexing and slicing."""
