@@ -42,6 +42,7 @@ setup(
         "requests-oauthlib",
         "av",
         "aiortc",
+        "aiohttp-sse-client"
     ],
     extras_require={
         "examples": [

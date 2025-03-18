@@ -5,7 +5,7 @@ import time
 import av
 import numpy as np
 
-from neuracore.core.streaming.resumable_upload import ResumableUpload
+from neuracore.core.streaming.resumable_upload import Uploader
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +15,7 @@ class StreamingVideoEncoder:
 
     def __init__(
         self,
-        resumable_upload: ResumableUpload,
+        resumable_upload: Uploader,
         width: int,
         height: int,
         codec: str = "h264",
