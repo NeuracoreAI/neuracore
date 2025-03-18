@@ -8,9 +8,8 @@ from typing import Optional
 
 import requests
 
-from neuracore.const import API_URL
-
 from .auth import Auth, get_auth
+from .const import API_URL
 from .exceptions import RobotError, ValidationError
 
 logger = logging.getLogger(__name__)

@@ -1,30 +1,30 @@
-import atexit
 from typing import Optional
 
 import numpy as np
 
-from .auth import login as _login
-from .auth import logout as _logout
-from .dataset import Dataset
-from .endpoint import EndpointPolicy
-from .endpoint import connect_endpoint as _connect_endpoint
-from .endpoint import connect_local_endpoint as _connect_local_endpoint
-from .exceptions import RobotError
-from .robot import Robot, get_robot
-from .robot import init as _init_robot
-from .streaming import MAX_DEPTH
-from .streaming import log_action as _log_action
-from .streaming import log_depth as _log_depth
-from .streaming import log_joints as _log_joints
-from .streaming import log_rgb as _log_rgb
-from .streaming import stop_all_streams as _stop_all_streams
-from .streaming import stop_streaming as _stop_streaming
-from .streaming import wait_until_stream_empty
+from .core.auth import login as _login
+from .core.auth import logout as _logout
+from .core.dataset import Dataset
+from .core.endpoint import EndpointPolicy
+from .core.endpoint import connect_endpoint as _connect_endpoint
+from .core.endpoint import connect_local_endpoint as _connect_local_endpoint
+from .core.exceptions import RobotError
+from .core.robot import Robot, get_robot
+from .core.robot import init as _init_robot
+from .core.streaming.data_stream import (
+    MAX_DEPTH,
+    ActionDataStream,
+    DataStream,
+    DepthDataStream,
+    JointDataStream,
+    RGBDataStream,
+)
 
 # Global active robot ID - allows us to avoid passing robot_name to every call
 _active_robot: Optional[Robot] = None
 _active_dataset_id: Optional[str] = None
 _active_recording_id: Optional[str] = None
+_data_streams: dict[str, DataStream] = {}
 
 
 def login(api_key: Optional[str] = None) -> None:
@@ -88,14 +88,20 @@ def log_joints(positions: dict[str, float], robot_name: Optional[str] = None) ->
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
-        StreamingError: If logging fails
     """
     if not isinstance(positions, dict):
         raise ValueError("Joint positions must be a dictionary of floats")
     for key, value in positions.items():
         if not isinstance(value, float):
             raise ValueError(f"Joint positions must be floats. {key} is not a float.")
-    _log_joints(_get_robot(robot_name), positions)
+    str_id = f"{robot_name}_action"
+    stream = _data_streams.get(str_id)
+    if stream is None:
+        stream = JointDataStream()
+        _data_streams[str_id] = stream
+        if _active_recording_id is not None:
+            stream.start_recording(_active_recording_id)
+    stream.log(positions)
 
 
 def log_action(action: dict[str, float], robot_name: Optional[str] = None) -> None:
@@ -108,14 +114,20 @@ def log_action(action: dict[str, float], robot_name: Optional[str] = None) -> No
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
-        StreamingError: If logging fails
     """
     if not isinstance(action, dict):
         raise ValueError("Actions must be a dictionary of floats")
     for key, value in action.items():
         if not isinstance(value, float):
             raise ValueError(f"Actions must be floats. {key} is not a float.")
-    _log_action(_get_robot(robot_name), action)
+    str_id = f"{robot_name}_action"
+    stream = _data_streams.get(str_id)
+    if stream is None:
+        stream = ActionDataStream()
+        _data_streams[str_id] = stream
+        if _active_recording_id is not None:
+            stream.start_recording(_active_recording_id)
+    stream.log(action)
 
 
 def log_rgb(
@@ -131,7 +143,6 @@ def log_rgb(
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
-        StreamingError: If logging fails
         ValueError: If image format is invalid
     """
     # Validate image is numpy array of type uint8
@@ -139,7 +150,19 @@ def log_rgb(
         raise ValueError("Image must be a numpy array")
     if image.dtype != np.uint8:
         raise ValueError("Image must be uint8 wth range 0-255")
-    _log_rgb(_get_robot(robot_name), camera_id, image)
+    str_id = f"{robot_name}_rgb_{camera_id}"
+    stream = _data_streams.get(str_id)
+    if stream is None:
+        stream = RGBDataStream(camera_id, image.shape[1], image.shape[0])
+        _data_streams[str_id] = stream
+        if _active_recording_id is not None:
+            stream.start_recording(_active_recording_id)
+    if stream.width != image.shape[1] or stream.height != image.shape[0]:
+        raise ValueError(
+            f"RGB image dimensions {image.shape[1]}x{image.shape[0]} do not match "
+            f"stream dimensions {stream.width}x{stream.height}"
+        )
+    stream.log(image)
 
 
 def log_depth(
@@ -155,7 +178,6 @@ def log_depth(
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
-        StreamingError: If logging fails
         ValueError: If depth format is invalid
     """
     if not isinstance(depth, np.ndarray):
@@ -170,7 +192,19 @@ def log_depth(
             f"You are attempting to log depth values > {MAX_DEPTH}. "
             "The values you are passing in are likely in millimeters."
         )
-    _log_depth(_get_robot(robot_name), camera_id, depth)
+    str_id = f"{robot_name}_depth_{camera_id}"
+    stream = _data_streams.get(str_id)
+    if stream is None:
+        stream = DepthDataStream(camera_id, depth.shape[1], depth.shape[0])
+        _data_streams[str_id] = stream
+        if _active_recording_id is not None:
+            stream.start_recording(_active_recording_id)
+    if stream.width != depth.shape[1] or stream.height != depth.shape[0]:
+        raise ValueError(
+            f"Depth image dimensions {depth.shape[1]}x{depth.shape[0]} do not match "
+            f"stream dimensions {stream.width}x{stream.height}"
+        )
+    stream.log(depth)
 
 
 def start_recording(robot_name: Optional[str] = None) -> None:
@@ -190,6 +224,8 @@ def start_recording(robot_name: Optional[str] = None) -> None:
     if _active_dataset_id is None:
         raise RobotError("No active dataset. Call create_dataset() first.")
     _active_recording_id = robot.start_recording(_active_dataset_id)
+    for stream in _data_streams.values():
+        stream.start_recording(_active_recording_id)
 
 
 def stop_recording(robot_name: Optional[str] = None) -> None:
@@ -206,8 +242,9 @@ def stop_recording(robot_name: Optional[str] = None) -> None:
     robot = _get_robot(robot_name)
     if _active_recording_id is None:
         raise RobotError("No active recording. Call start_recording() first.")
-    wait_until_stream_empty(robot)
     robot.stop_recording(_active_recording_id)
+    for stream in _data_streams.values():
+        stream.stop_recording()
     _active_recording_id = None
 
 
@@ -279,29 +316,3 @@ def connect_local_endpoint(
         EndpointError: If endpoint connection fails
     """
     return _connect_local_endpoint(path_to_model, train_run_name)
-
-
-def stop(robot_name: Optional[str] = None) -> None:
-    """
-    Stop streaming for a specific robot.
-
-    Args:
-        robot_name: Optional robot ID. If not provided, uses the last initialized robot
-
-    Raises:
-        RobotError: If no robot is active and no robot_name provided
-    """
-    global _active_robot
-    _stop_streaming(_get_robot(robot_name))
-    if robot_name == _active_robot.name:
-        _active_robot = None
-
-
-def stop_all() -> None:
-    """Stop all active data streams."""
-    global _active_robot
-    _stop_all_streams()
-    _active_robot = None
-
-
-atexit.register(stop_all)

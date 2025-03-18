@@ -2,7 +2,7 @@ from getpass import getpass  # For hidden password input
 
 import requests
 
-from neuracore.const import API_URL
+from .const import API_URL
 
 
 def generate_api_key():

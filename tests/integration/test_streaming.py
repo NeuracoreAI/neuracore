@@ -327,7 +327,6 @@ def run_streaming_test(config):
 @pytest.fixture(autouse=True)
 def run_before_and_after_tests():
     yield
-    nc.stop_all()
 
 
 def test_basic_streaming():

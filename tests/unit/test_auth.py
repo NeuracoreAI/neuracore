@@ -3,8 +3,8 @@ import pathlib
 
 import requests_mock
 
-from neuracore.auth import get_auth, login, logout
-from neuracore.const import API_URL
+from neuracore.core.auth import get_auth, login, logout
+from neuracore.core.const import API_URL
 
 
 def test_login_with_api_key(temp_config_dir, monkeypatch):
