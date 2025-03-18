@@ -361,14 +361,14 @@ def log_joints(robot: Robot, joint_positions: dict[str, float]):
     stream = _get_or_create_stream(robot.id, f"{robot.id}_states", "states")
     if not stream.can_put():
         return
-    stream.queue_data({"joint_states": joint_positions})
+    stream.queue_data({"type": "joints", "joint_states": joint_positions})
 
 
 def log_action(robot: Robot, action: dict[str, float]):
     stream = _get_or_create_stream(robot.id, f"{robot.id}_actions", "actions")
     if not stream.can_put():
         return
-    stream.queue_data({"action": action})
+    stream.queue_data({"type": "action", "action": action})
 
 
 def log_rgb(
@@ -382,12 +382,14 @@ def log_rgb(
     stream = _get_or_create_stream(robot.id, f"{robot.id}_rgb_{camera_id}", "images")
     if not stream.can_put():
         return
-    stream.queue_data({
-        "type": "rgb",
-        "camera_id": camera_id,
-        "image_data": image,
-        "resolution": resolution or [image.shape[1], image.shape[0]],
-    })
+    stream.queue_data(
+        {
+            "type": "rgb",
+            "camera_id": camera_id,
+            "image_data": image,
+            "resolution": resolution or [image.shape[1], image.shape[0]],
+        }
+    )
 
 
 def log_depth(
@@ -401,12 +403,14 @@ def log_depth(
     stream = _get_or_create_stream(robot.id, f"{robot.id}_depth_{camera_id}", "images")
     if not stream.can_put():
         return
-    stream.queue_data({
-        "type": "depth",
-        "camera_id": camera_id,
-        "image_data": depth,
-        "resolution": resolution or [depth.shape[1], depth.shape[0]],
-    })
+    stream.queue_data(
+        {
+            "type": "depth",
+            "camera_id": camera_id,
+            "image_data": depth,
+            "resolution": resolution or [depth.shape[1], depth.shape[0]],
+        }
+    )
 
 
 def set_rate_limit_strategy(strategy: RateLimitStrategy):
