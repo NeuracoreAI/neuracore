@@ -34,31 +34,28 @@ class HandshakeMessage(BaseModel):
     id: str
 
 
-
-
 @dataclass(frozen=True, slots=True)
 class PierToPierConnection:
     local_stream_id: str
     remote_stream_id: str
-    client_session: ClientSession = Field(default_factory=lambda: ClientSession(API_URL))
+    client_session: ClientSession = Field(
+        default_factory=lambda: ClientSession(API_URL)
+    )
     auth: Auth = Field(default_factory=get_auth)
     connection: RTCPeerConnection
 
-
-    async def send_message(
-        self, message_type: MessageType, content: str
-    ):
+    async def send_message(self, message_type: MessageType, content: str):
         await self.client_session.post(
             f"/signalling/submit/{str(message_type)}/from/{self.stream_id}/to/{self.remote_stream_id}",
             headers=self.auth.get_headers(),
             data=content,
         )
-    
+
     async def on_ice(self, ice: str):
         candidate = candidate_from_sdp(ice)
         await self.connection.addIceCandidate(candidate)
 
-    async def on_offer(self, offer:str):
+    async def on_offer(self, offer: str):
         offer = RTCSessionDescription(offer, type="offer")
         await self.connection.setRemoteDescription(offer)
 
@@ -66,33 +63,9 @@ class PierToPierConnection:
         await self.connection.setLocalDescription(answer)
         await self.send_message(MessageType.SDP_ANSWER, answer.sdp)
 
-    @staticmethod
-    async def create_stream(robot_id:str):
-        pc = RTCPeerConnection()
-        pc.addTrack(VideoStreamTrack())
 
-        
+MAXIMUM_CLIENT_FREQUENCY_HZ = 60
 
-        async with websockets.connect("ws://localhost:8000/ws") as ws:
-            offer = await pc.createOffer()
-            await pc.setLocalDescription(offer)
-
-            await ws.send(json.dumps({"type": "offer", "sdp": pc.localDescription.sdp}))
-
-
-            while True:
-                response = json.loads(await ws.recv())
-
-                if response["type"] == "answer":
-                    await pc.setRemoteDescription(
-                        RTCSessionDescription(response["sdp"], "answer")
-                    )
-                elif response["type"] == "candidate":
-                    
-
-
-
-MAXUMIUM_CLIENT_FREQUENCY_HZ = 60
 
 @dataclass(frozen=True, slots=True)
 class ClientStream(Uploader):
@@ -104,16 +77,16 @@ class ClientStream(Uploader):
         pass
 
 
-
 @dataclass(frozen=True, slots=True)
 class ClientStreamingManager:
-    client_session: ClientSession = Field(default_factory=lambda: ClientSession(API_URL))
+    client_session: ClientSession = Field(
+        default_factory=lambda: ClientSession(API_URL)
+    )
     auth: Auth = Field(default_factory=get_auth)
     connections: dict[str, PierToPierConnection] = Field(default_factory=dict)
-    robot_id:str
+    robot_id: str
 
-
-    def start_recording_stream(recording_id:str)-> ClientStream:
+    def start_recording_stream(recording_id: str) -> ClientStream:
         return ClientStream(recording_id)
 
     async def connect_signalling_stream(self):
@@ -134,7 +107,7 @@ class ClientStreamingManager:
                             local_stream_id=message.to_id,
                             remote_stream_id=message.from_id,
                             client_session=self.client_session,
-                            auth=self.auth
+                            auth=self.auth,
                         )
                         self.connections[message.from_id] = connection
 
