@@ -25,6 +25,7 @@ class SyncPoint(BaseModel):
     joint_positions: dict[str, float]
     actions: dict[str, float] | None = None
     camera_id_to_frame_idx: dict[str, int] = {}
+    camera_id_to_frame_timestamp: dict[str, float] = {}
 
 
 class SyncedData(BaseModel):

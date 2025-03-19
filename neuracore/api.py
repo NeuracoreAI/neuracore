@@ -99,7 +99,8 @@ def log_joints(
     for key, value in positions.items():
         if not isinstance(value, float):
             raise ValueError(f"Joint positions must be floats. {key} is not a float.")
-    str_id = f"{robot_name}_joints"
+    robot = _get_robot(robot_name)
+    str_id = f"{robot.name}_joints"
     stream = _data_streams.get(str_id)
     if stream is None:
         stream = JointDataStream()
@@ -130,7 +131,8 @@ def log_action(
     for key, value in action.items():
         if not isinstance(value, float):
             raise ValueError(f"Actions must be floats. {key} is not a float.")
-    str_id = f"{robot_name}_action"
+    robot = _get_robot(robot_name)
+    str_id = f"{robot.name}_action"
     stream = _data_streams.get(str_id)
     if stream is None:
         stream = ActionDataStream()
@@ -164,7 +166,8 @@ def log_rgb(
         raise ValueError("Image must be a numpy array")
     if image.dtype != np.uint8:
         raise ValueError("Image must be uint8 wth range 0-255")
-    str_id = f"{robot_name}_rgb_{camera_id}"
+    robot = _get_robot(robot_name)
+    str_id = f"{robot.name}_rgb_{camera_id}"
     stream = _data_streams.get(str_id)
     if stream is None:
         stream = RGBDataStream(camera_id, image.shape[1], image.shape[0])
@@ -210,7 +213,8 @@ def log_depth(
             f"You are attempting to log depth values > {MAX_DEPTH}. "
             "The values you are passing in are likely in millimeters."
         )
-    str_id = f"{robot_name}_depth_{camera_id}"
+    robot = _get_robot(robot_name)
+    str_id = f"{robot.name}_depth_{camera_id}"
     stream = _data_streams.get(str_id)
     if stream is None:
         stream = DepthDataStream(camera_id, depth.shape[1], depth.shape[0])

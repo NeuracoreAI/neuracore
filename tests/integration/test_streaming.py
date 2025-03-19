@@ -18,6 +18,25 @@ sys.path.append(os.path.join(THIS_DIR, "..", "..", "examples"))
 from common.constants import BIMANUAL_VIPERX_URDF_PATH
 
 TEST_ROBOT = "integration_test_robot"
+JOINT_NAMES = [
+    "vx300s_left/waist",
+    "vx300s_left/shoulder",
+    "vx300s_left/elbow",
+    "vx300s_left/forearm_roll",
+    "vx300s_left/wrist_angle",
+    "vx300s_left/wrist_rotate",
+    "vx300s_left/left_finger",
+    "vx300s_left/right_finger",
+    "vx300s_right/waist",
+    "vx300s_right/shoulder",
+    "vx300s_right/elbow",
+    "vx300s_right/forearm_roll",
+    "vx300s_right/wrist_angle",
+    "vx300s_right/wrist_rotate",
+    "vx300s_right/left_finger",
+    "vx300s_right/right_finger",
+]
+
 
 # Configure logging
 logging.basicConfig(
@@ -108,7 +127,7 @@ def generate_joint_positions(frame_num, fps, num_joints):
     for i in range(num_joints):
         # Use different frequencies for each joint for variety
         freq = 0.5 + i * 0.25
-        joint_positions[f"joint{i+1}"] = math.sin(t * freq)
+        joint_positions[JOINT_NAMES[i]] = math.sin(t * freq)
 
     return joint_positions
 
