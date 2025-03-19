@@ -2,6 +2,7 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
+from typing import Optional
 
 import numpy as np
 import requests
@@ -41,18 +42,23 @@ class DataStream(ABC):
         return self._recording
 
 
-class BufferedDataStream(DataStream, ABC):
+class BufferedDataStream(DataStream):
     """Stream that buffers data locally for later upload."""
 
-    def __init__(self, robot_id: str):
+    def __init__(self, robot_id: str, filename: str):
         super().__init__(robot_id=robot_id)
+        self._filename = filename
         self._buffer = []
 
-    def log(self, dict_data: dict[str, float]):
+    def log(self, dict_data: dict[str, float], timestamp: Optional[float] = None):
         """Log data to the buffer if recording is active."""
+        timestamp = timestamp or time.time()
         if not self.is_recording():
             return
-        self._buffer.append(dict_data)
+        self._buffer.append({
+            "timestamp": timestamp,
+            "data": dict_data,
+        })
 
     def start_recording(self, recording_id: str):
         """Upload buffered data to storage."""
@@ -67,7 +73,7 @@ class BufferedDataStream(DataStream, ABC):
             return
         # Generate an upload URL
         upload_url_response = requests.get(
-            f"{API_URL}/recording/{recoding_id}/json_upload_url/{self.get_datatype()}",
+            f"{API_URL}/recording/{recoding_id}/json_upload_url?filename={self._filename}",
             headers=get_auth().get_headers(),
         )
         upload_url_response.raise_for_status()
@@ -80,26 +86,19 @@ class BufferedDataStream(DataStream, ABC):
         response.raise_for_status()
         self._buffer = []
 
-    @abstractmethod
-    def get_datatype(self) -> str:
-        """Get the endpoint name for this stream."""
-        raise NotImplementedError()
-
 
 class ActionDataStream(BufferedDataStream):
     """Stream that logs robot actions."""
 
-    def get_datatype(self) -> str:
-        """Get the endpoint name for this stream."""
-        return "actions"
+    def __init__(self):
+        super().__init__("actions.json")
 
 
 class JointDataStream(BufferedDataStream):
     """Stream that logs robot actions."""
 
-    def get_datatype(self) -> str:
-        """Get the endpoint name for this stream."""
-        return "joints"
+    def __init__(self):
+        super().__init__("joint_states.json")
 
 
 class VideoDataStream(DataStream):
@@ -133,7 +132,7 @@ class VideoDataStream(DataStream):
         raise NotImplementedError()
 
     @abstractmethod
-    def log(self, data: np.ndarray):
+    def log(self, data: np.ndarray, timestamp: Optional[float] = None):
         raise NotImplementedError()
 
 
@@ -143,8 +142,9 @@ class DepthDataStream(VideoDataStream):
     def get_resumable_upload(self, recording_id):
         return ResumableUpload(recording_id, SensorType.DEPTH, self.camera_id)
 
-    def log(self, data: np.ndarray):
+    def log(self, data: np.ndarray, timestamp: Optional[float] = None):
         """Convert depth to RGB and log as a video frame."""
+        timestamp = timestamp or time.time()
         if not self.is_recording() or self._encoder is None:
             return
 
@@ -158,7 +158,7 @@ class DepthDataStream(VideoDataStream):
         rgb_depth[..., 2] = normalized_depth * 255  # Blue channel (far)
 
         # Add frame to encoder
-        self._encoder.add_frame(rgb_depth, time.time())
+        self._encoder.add_frame(rgb_depth, timestamp)
 
 
 class RGBDataStream(VideoDataStream):
@@ -167,12 +167,13 @@ class RGBDataStream(VideoDataStream):
     def get_resumable_upload(self, recording_id):
         return ResumableUpload(recording_id, SensorType.RGB, self.camera_id)
 
-    def log(self, data: np.ndarray):
+    def log(self, data: np.ndarray, timestamp: Optional[float] = None):
         """Log an RGB frame."""
+        timestamp = timestamp or time.time()
         if not self.is_recording() or self._encoder is None:
             return
 
         get_robot_streaming_manager(robot_id=self.robot_id).get_recording_video_stream(
             self._recording_id, SensorType.RGB, self.camera_id
         ).add_frame(data)
-        self._encoder.add_frame(data, time.time())
+        self._encoder.add_frame(data, timestamp)

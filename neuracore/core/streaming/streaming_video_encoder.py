@@ -1,14 +1,20 @@
 import io
+import json
 import logging
 import time
 from typing import Optional
 
 import av
 import numpy as np
+import requests
 
-from neuracore.core.streaming.resumable_upload import Uploader
+from neuracore.core.auth import get_auth
+from neuracore.core.const import API_URL
+from neuracore.core.streaming.resumable_upload import ResumableUpload
 
 logger = logging.getLogger(__name__)
+
+PTS_FRACT = 1000000  # Timebase for pts in microseconds
 
 
 class StreamingVideoEncoder:
@@ -16,11 +22,11 @@ class StreamingVideoEncoder:
 
     def __init__(
         self,
-        resumable_upload: Uploader,
+        resumable_upload: ResumableUpload,
         width: int,
         height: int,
-        codec: str = "h264",
-        pixel_format: str = "yuv420p",
+        codec: str = "libx264rgb",
+        pixel_format: str = "rgb24",
         chunk_size: int = 256 * 1024,  # 256 KB default chunk size
         framerate_cap: Optional[float] = None,
     ):
@@ -67,11 +73,12 @@ class StreamingVideoEncoder:
         self.stream.width = width
         self.stream.height = height
         self.stream.pix_fmt = pixel_format
+        self.stream.codec_context.options = {"crf": "0", "preset": "ultrafast"}
 
         # Set a very precise timebase (microseconds)
         from fractions import Fraction
 
-        self.stream.time_base = Fraction(1, 1000000)
+        self.stream.time_base = Fraction(1, PTS_FRACT)
 
         # Keep track of timestamps
         self.first_timestamp = None
@@ -85,6 +92,7 @@ class StreamingVideoEncoder:
         # Create a dedicated buffer for upload chunks
         self.upload_buffer = bytearray()
         self.last_write_position = 0
+        self.timestamps = []
 
     def add_frame(self, frame_data: np.ndarray, timestamp: float) -> None:
         """
@@ -107,7 +115,7 @@ class StreamingVideoEncoder:
 
         # Calculate pts in timebase units (microseconds)
         relative_time = timestamp - self.first_timestamp
-        pts = int(relative_time * 1000000)
+        pts = int(relative_time * PTS_FRACT)  # Convert to microseconds
 
         if self.last_pts is not None and pts <= self.last_pts:
             pts = self.last_pts + 1
@@ -131,6 +139,7 @@ class StreamingVideoEncoder:
             self._upload_chunks()
 
         self.total_bytes_written = current_pos
+        self.timestamps.append(timestamp)
 
     def _upload_chunks(self) -> None:
         while len(self.upload_buffer) >= self.chunk_size:
@@ -173,3 +182,24 @@ class StreamingVideoEncoder:
             "Video encoding and upload complete: "
             f"{self.uploader.total_bytes_uploaded} bytes"
         )
+        self._upload_timestamps()
+
+    def _upload_timestamps(self) -> None:
+        """
+        Upload timestamps to the server.
+        """
+        camera_id = f"{self.uploader.sensor_type.value}_{self.uploader.sensor_name}"
+        stream_name = f"cameras/{camera_id}/timestamps.json"
+        upload_url_response = requests.get(
+            f"{API_URL}/recording/{self.uploader.recording_id}/json_upload_url?filename={stream_name}",
+            headers=get_auth().get_headers(),
+        )
+        upload_url_response.raise_for_status()
+        upload_url = upload_url_response.json()["url"]
+        data = json.dumps(self.timestamps)
+        logger.info(f"Uploading {len(data)} bytes to {upload_url}")
+        response = requests.put(
+            upload_url, headers={"Content-Length": str(len(data))}, data=data
+        )
+        response.raise_for_status()
+        self.timestamps = []

@@ -1,8 +1,3 @@
-"""
-Run command:
-pytest --log-level=INFO -s tests/integration
-"""
-
 import logging
 import math
 import os
@@ -43,6 +38,7 @@ class TestConfig:
         num_cameras=1,
         use_depth=False,
         num_joints=16,
+        synched_time=False,
     ):
         self.fps = fps
         self.duration_sec = duration_sec
@@ -54,6 +50,7 @@ class TestConfig:
         self.num_joints = num_joints
         self.robot_name = f"test_robot_{uuid.uuid4().hex[:8]}"
         self.dataset_name = f"test_dataset_{uuid.uuid4().hex[:8]}"
+        self.synched_time = synched_time
 
     def __str__(self):
         return (
@@ -156,7 +153,12 @@ def stream_data(config):
     start_time = time.time()
     frame_count = 0
 
+    # Sleep time to maintain target frame rate
+    sleep_time = 1.0 / float(config.fps)
+
     while time.time() - start_time < config.duration_sec:
+        t = time.time() if config.synched_time else None
+
         # Create and stream camera images
         for cam_idx in range(config.num_cameras):
             camera_id = f"camera_{cam_idx}"
@@ -165,20 +167,20 @@ def stream_data(config):
             rgb_img = encode_frame_number(
                 frame_count, config.image_width, config.image_height
             )
-            nc.log_rgb(camera_id, rgb_img)
+            nc.log_rgb(camera_id, rgb_img, timestamp=t)
 
             # Depth image if needed
             if config.use_depth:
                 depth_img = generate_depth_image(
                     frame_count, config.image_width, config.image_height
                 )
-                nc.log_depth(camera_id, depth_img)
+                nc.log_depth(camera_id, depth_img, timestamp=t)
 
         # Stream joint positions
         joint_positions = generate_joint_positions(
             frame_count, config.fps, config.num_joints
         )
-        nc.log_joints(joint_positions)
+        nc.log_joints(joint_positions, timestamp=t)
 
         # Stream a test action occasionally
         if frame_count % 5 == 0:
@@ -186,24 +188,13 @@ def stream_data(config):
                 f"joint{i+1}": 0.1 * math.sin(frame_count * 0.1 * (i + 1))
                 for i in range(config.num_joints)
             }
-            nc.log_action(action)
+            nc.log_action(action, timestamp=t)
 
         frame_count += 1
 
         # Sleep to maintain target frame rate
-        elapsed = time.time() - start_time
-        target_elapsed = frame_count / config.fps
-        sleep_time = max(0, target_elapsed - elapsed)
-        if sleep_time > 0:
-            time.sleep(sleep_time)
+        time.sleep(sleep_time)
 
-    # Log the actual achieved frame rate
-    actual_fps = frame_count / (time.time() - start_time)
-    logger.info(
-        f"Streamed {frame_count} frames at {actual_fps:.2f} fps (target: {config.fps})"
-    )
-
-    # Stop recording
     time.sleep(5)  # Wait a bit for recording to stop
     nc.stop_recording()
 
@@ -236,12 +227,12 @@ def verify_dataset(config, expected_frame_count):
             # Check for camera images
             if "images" in frame:
                 for cam_idx in range(config.num_cameras):
-                    camera_id = f"camera_{cam_idx}_rgb"
+                    camera_id = f"rgb_camera_{cam_idx}"
                     if camera_id in frame["images"]:
                         img = frame["images"][camera_id]
-                        decoded_frame_num = decode_frame_number(img)
 
-                        print("decoded_frame_num: ", decoded_frame_num)
+                        decoded_frame_num = decode_frame_number(img)
+                        logger.info(f"decoded_frame_num: {decoded_frame_num}")
 
                         # Track this frame
                         if decoded_frame_num in results["unique_frames"]:
@@ -312,7 +303,7 @@ def run_streaming_test(config):
     actual_frame_count = stream_data(config)
 
     # Wait for data to save in the backend
-    time.sleep(20)
+    time.sleep(10)
 
     results = verify_dataset(config, actual_frame_count)
 
@@ -330,7 +321,9 @@ def run_before_and_after_tests():
 
 
 def test_basic_streaming():
-    config = TestConfig(fps=10, duration_sec=2, image_width=640, image_height=480)
+    config = TestConfig(
+        fps=10, duration_sec=2, image_width=640, image_height=480, synched_time=True
+    )
     run_streaming_test(config)
 
 
