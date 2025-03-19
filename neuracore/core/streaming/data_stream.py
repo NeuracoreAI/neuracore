@@ -7,13 +7,11 @@ from typing import Optional
 import numpy as np
 import requests
 
-from neuracore.core.auth import get_auth
-from neuracore.core.streaming.resumable_upload import ResumableUpload, SensorType
-
+from ..auth import get_auth
 from ..const import API_URL
+from ..streaming.resumable_upload import ResumableUpload
+from ..utils.depth_utils import depth_to_rgb
 from .streaming_video_encoder import StreamingVideoEncoder
-
-MAX_DEPTH = 10.0  # Maximum depth value in meters
 
 logger = logging.getLogger(__name__)
 
@@ -136,32 +134,21 @@ class DepthDataStream(VideoDataStream):
     """Stream that encodes and uploads depth data as video."""
 
     def get_resumable_upload(self, recording_id):
-        return ResumableUpload(recording_id, SensorType.DEPTH, self.camera_id)
+        return ResumableUpload(recording_id, self.camera_id)
 
     def log(self, data: np.ndarray, timestamp: Optional[float] = None):
         """Convert depth to RGB and log as a video frame."""
         timestamp = timestamp or time.time()
         if not self.is_recording() or self._encoder is None:
             return
-
-        # Convert depth to RGB representation for video encoding
-        # Scale to 0-255 range for visualization
-        normalized_depth = np.clip(data / MAX_DEPTH, 0, 1)
-
-        # Create a heat map representation (red = close, blue = far)
-        rgb_depth = np.zeros((data.shape[0], data.shape[1], 3), dtype=np.uint8)
-        rgb_depth[..., 0] = (1.0 - normalized_depth) * 255  # Red channel (close)
-        rgb_depth[..., 2] = normalized_depth * 255  # Blue channel (far)
-
-        # Add frame to encoder
-        self._encoder.add_frame(rgb_depth, timestamp)
+        self._encoder.add_frame(depth_to_rgb(data), timestamp)
 
 
 class RGBDataStream(VideoDataStream):
     """Stream that encodes and uploads RGB data as video."""
 
     def get_resumable_upload(self, recording_id):
-        return ResumableUpload(recording_id, SensorType.RGB, self.camera_id)
+        return ResumableUpload(recording_id, self.camera_id)
 
     def log(self, data: np.ndarray, timestamp: Optional[float] = None):
         """Log an RGB frame."""

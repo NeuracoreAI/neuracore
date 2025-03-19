@@ -167,7 +167,6 @@ class VideoStreamer:
         self.container = None
         self.video_stream = None
         self.frame_count = 0
-        self.frames_cache = {}  # Cache for random access by frame index
 
     def __iter__(self) -> Iterator[np.ndarray]:
         """
@@ -215,7 +214,6 @@ class VideoStreamer:
             for frame in self.container.decode(video=0):
                 self.frame_count += 1
                 frame_array = frame.to_rgb().to_ndarray()
-                self.frames_cache[self.frame_count - 1] = frame_array
                 yield frame_array
         except Exception as e:
             logger.error(f"Error during streaming: {e}")

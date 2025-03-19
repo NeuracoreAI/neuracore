@@ -1,7 +1,9 @@
 import io
 import json
 import logging
-import time
+import queue
+import threading
+from fractions import Fraction
 
 import av
 import numpy as np
@@ -14,6 +16,7 @@ from neuracore.core.streaming.resumable_upload import ResumableUpload
 logger = logging.getLogger(__name__)
 
 PTS_FRACT = 1000000  # Timebase for pts in microseconds
+CHUNK_MULTIPLE = 256 * 1024  # Chunk size multiple of 256 KiB
 
 
 class StreamingVideoEncoder:
@@ -26,7 +29,7 @@ class StreamingVideoEncoder:
         height: int,
         codec: str = "libx264",
         pixel_format: str = "yuv444p10le",
-        chunk_size: int = 256 * 1024,  # 256 KB default chunk size
+        chunk_size: int = CHUNK_MULTIPLE,
     ):
         """
         Initialize a streaming video encoder.
@@ -45,11 +48,11 @@ class StreamingVideoEncoder:
         self.pixel_format = pixel_format
 
         # Ensure chunk_size is a multiple of 256 KiB
-        if chunk_size % (256 * 1024) != 0:
-            self.chunk_size = ((chunk_size // (256 * 1024)) + 1) * 256 * 1024
+        if chunk_size % CHUNK_MULTIPLE != 0:
+            self.chunk_size = ((chunk_size // CHUNK_MULTIPLE) + 1) * CHUNK_MULTIPLE
             logger.info(
                 f"Adjusted chunk size to {self.chunk_size/1024:.0f} "
-                "KiB to ensure it's a multiple of 256 KiB"
+                "KiB to ensure it's a multiple of {CHUNK_MULTIPLE} MiB"
             )
         else:
             self.chunk_size = chunk_size
@@ -72,9 +75,6 @@ class StreamingVideoEncoder:
         self.stream.pix_fmt = pixel_format
         self.stream.codec_context.options = {"qp": "0", "preset": "ultrafast"}
 
-        # Set a very precise timebase (microseconds)
-        from fractions import Fraction
-
         self.stream.time_base = Fraction(1, PTS_FRACT)
 
         # Keep track of timestamps
@@ -90,7 +90,62 @@ class StreamingVideoEncoder:
         self.last_write_position = 0
         self.timestamps = []
 
+        self._streaming_done = False
+        self._upload_queue = queue.Queue()
+        self._upload_thread = threading.Thread(target=self._upload_loop)
+        self._upload_thread.start()
+
+    def _upload_loop(self) -> None:
+        """
+        Upload chunks in a separate thread.
+        """
+        while not self._streaming_done:
+            try:
+                frame_data, timestamp = self._upload_queue.get(timeout=0.1)
+                if frame_data is None:
+                    break
+                self._add_frame(frame_data, timestamp)
+            except queue.Empty:
+                continue
+
+        # Flush encoder
+        for packet in self.stream.encode(None):
+            self.container.mux(packet)
+
+        # Close the container to finalize the MP4
+        self.container.close()
+
+        current_pos = self.buffer.tell()
+        current_chunk_size = current_pos - self.last_write_position
+        self.buffer.seek(self.last_write_position)
+        chunk_data = self.buffer.read(current_chunk_size)
+        self.upload_buffer.extend(chunk_data)
+        self.last_write_position = current_pos
+
+        final_chunk = bytes(self.upload_buffer)
+        success = self.uploader.upload_chunk(final_chunk, is_final=True)
+
+        if not success:
+            raise RuntimeError("Failed to upload final chunk")
+
+        logger.info(
+            "Video encoding and upload complete: "
+            f"{self.uploader.total_bytes_uploaded} bytes"
+        )
+        self._upload_timestamps()
+
     def add_frame(self, frame_data: np.ndarray, timestamp: float) -> None:
+        """
+        Add frame to the video with timestamp and stream if buffer large enough.
+
+        Args:
+            frame_data: RGB frame data as numpy array with shape (height, width, 3)
+            timestamp: Frame timestamp in seconds (can be irregular)
+        """
+        self._upload_queue.put((frame_data, timestamp))
+        logger.info(f"Added frame to upload queue at {timestamp}")
+
+    def _add_frame(self, frame_data: np.ndarray, timestamp: float) -> None:
         """
         Add frame to the video with timestamp and stream if buffer large enough.
 
@@ -151,56 +206,24 @@ class StreamingVideoEncoder:
 
             # Upload the chunk
             success = self.uploader.upload_chunk(chunk, is_final=False)
+            logger.info(f"Uploaded {len(chunk)} bytes")
 
             if not success:
-                logger.warning("Failed to upload chunk, retrying once more...")
-                time.sleep(1)
-                success = self.uploader.upload_chunk(chunk, is_final=False)
-                if not success:
-                    logger.error("Failed to upload chunk again, will try later")
-                    self.upload_buffer = bytearray(chunk) + self.upload_buffer
+                raise RuntimeError("Failed to upload chunk")
 
     def finish(self) -> None:
         """
         Finish encoding and upload any remaining data.
         """
-
-        # Flush encoder
-        for packet in self.stream.encode(None):
-            self.container.mux(packet)
-
-        # Close the container to finalize the MP4
-        self.container.close()
-
-        current_pos = self.buffer.tell()
-        current_chunk_size = current_pos - self.last_write_position
-        self.buffer.seek(self.last_write_position)
-        chunk_data = self.buffer.read(current_chunk_size)
-        self.upload_buffer.extend(chunk_data)
-        self.last_write_position = current_pos
-
-        final_chunk = bytes(self.upload_buffer)
-        success = self.uploader.upload_chunk(final_chunk, is_final=True)
-
-        if not success:
-            logger.warning("Failed to upload final chunk, retrying...")
-            time.sleep(1)
-            success = self.uploader.upload_chunk(final_chunk, is_final=True)
-            if not success:
-                logger.error("Failed to upload final chunk.")
-
-        logger.info(
-            "Video encoding and upload complete: "
-            f"{self.uploader.total_bytes_uploaded} bytes"
-        )
-        self._upload_timestamps()
+        self._upload_queue.put((None, None))
+        self._streaming_done = True
+        self._upload_thread.join()
 
     def _upload_timestamps(self) -> None:
         """
         Upload timestamps to the server.
         """
-        camera_id = f"{self.uploader.sensor_type.value}_{self.uploader.sensor_name}"
-        stream_name = f"cameras/{camera_id}/timestamps.json"
+        stream_name = f"cameras/{self.uploader.camera_id}/timestamps.json"
         upload_url_response = requests.get(
             f"{API_URL}/recording/{self.uploader.recording_id}/json_upload_url?filename={stream_name}",
             headers=get_auth().get_headers(),

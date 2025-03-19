@@ -1,6 +1,5 @@
 import logging
 import time
-from enum import Enum
 
 import requests
 
@@ -10,28 +9,21 @@ from ..const import API_URL
 logger = logging.getLogger(__name__)
 
 
-class SensorType(Enum):
-    RGB = "rgb"
-    DEPTH = "depth"
-
-
 class ResumableUpload:
     """
     Handles resumable uploads to Google Cloud Storage.
     """
 
-    def __init__(self, recording_id: str, sensor_type: SensorType, sensor_name: str):
+    def __init__(self, recording_id: str, camera_id: str):
         """
         Initialize a resumable upload to GCS.
 
         Args:
             recording_id: Recording ID
-            sensor_type: Type of sensor
-            sensor_name: Name of the sensor
+            camera_id: Name of the sensor
         """
         self.recording_id = recording_id
-        self.sensor_type = sensor_type
-        self.sensor_name = sensor_name
+        self.camera_id = camera_id
         self.session_uri = self._get_upload_session_uri()
         self.total_bytes_uploaded = 0
         self.max_retries = 5
@@ -45,7 +37,7 @@ class ResumableUpload:
         """
         auth = get_auth()
         response = requests.get(
-            f"{API_URL}/recording/{self.recording_id}/resumable_upload_url/{self.sensor_type.value}_{self.sensor_name}",
+            f"{API_URL}/recording/{self.recording_id}/resumable_upload_url/{self.camera_id}",
             headers=auth.get_headers(),
         )
         response.raise_for_status()

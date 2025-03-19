@@ -1,10 +1,10 @@
 import logging
 import math
+import multiprocessing
 import os
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
@@ -70,6 +70,7 @@ class TestConfig:
         self.robot_name = f"test_robot_{uuid.uuid4().hex[:8]}"
         self.dataset_name = f"test_dataset_{uuid.uuid4().hex[:8]}"
         self.synched_time = synched_time
+        self.max_frames = fps * duration_sec
 
     def __str__(self):
         return (
@@ -133,40 +134,14 @@ def generate_joint_positions(frame_num, fps, num_joints):
 
 
 def generate_depth_image(frame_num, width, height):
-    """Generate a depth image with encoded frame number"""
-    # Create a depth image with a gradient
-    depth = np.ones((height, width), dtype=np.float32) * 2.0  # Base 2m depth
-
-    # Add a gradient
-    x = np.linspace(0, 1, width)
-    y = np.linspace(0, 1, height)
-    xx, yy = np.meshgrid(x, y)
-    gradient = (xx + yy) * 1.5  # 0 to 3m gradient
-    depth += gradient
-
-    # Create a recognizable pattern in the middle based on the frame number
-    radius = min(width, height) // 4
-    center_x, center_y = width // 2, height // 2
-    for i in range(height):
-        for j in range(width):
-            dist = ((i - center_y) ** 2 + (j - center_x) ** 2) ** 0.5
-            if dist < radius:
-                # Create a unique depth pattern based on frame number
-                depth[i, j] = 1.0 + (frame_num % 100) / 100
-
-    # Encode frame number in top left corner
-    for i in range(4):
-        for j in range(4):
-            depth[i, j] = 0.5 + ((frame_num >> (i * 4 + j)) & 1) * 0.1
-
-    return depth
+    """Generate a depth image"""
+    return np.ones((height, width), dtype=np.float32) * 2.0  # Base 2m depth
 
 
 def stream_data(config):
     """Stream test data according to configuration"""
     # Start recording
     nc.start_recording()
-    time.sleep(5)  # Wait a bit for recording to start
 
     # Generate and stream test data
     start_time = time.time()
@@ -177,21 +152,25 @@ def stream_data(config):
 
     while time.time() - start_time < config.duration_sec:
         t = time.time() if config.synched_time else None
-
+        frame_code = frame_count
         # Create and stream camera images
         for cam_idx in range(config.num_cameras):
             camera_id = f"camera_{cam_idx}"
 
+            frame_code = frame_count + (
+                config.num_cameras * cam_idx * config.max_frames
+            )
+
             # RGB image
             rgb_img = encode_frame_number(
-                frame_count, config.image_width, config.image_height
+                frame_code, config.image_width, config.image_height
             )
             nc.log_rgb(camera_id, rgb_img, timestamp=t)
 
             # Depth image if needed
             if config.use_depth:
                 depth_img = generate_depth_image(
-                    frame_count, config.image_width, config.image_height
+                    frame_code, config.image_width, config.image_height
                 )
                 nc.log_depth(camera_id, depth_img, timestamp=t)
 
@@ -214,7 +193,6 @@ def stream_data(config):
         # Sleep to maintain target frame rate
         time.sleep(sleep_time)
 
-    time.sleep(5)  # Wait a bit for recording to stop
     nc.stop_recording()
 
     return frame_count
@@ -222,8 +200,6 @@ def stream_data(config):
 
 def verify_dataset(config, expected_frame_count):
     """Verify the dataset integrity"""
-    # Wait a bit for server processing to complete
-    time.sleep(5)
 
     # Retrieve the dataset
     dataset = nc.get_dataset(config.dataset_name)
@@ -240,7 +216,7 @@ def verify_dataset(config, expected_frame_count):
     # Iterate through the dataset episodes
     for episode in dataset:
         logger.info(f"Verifying episode with {len(episode)} frames")
-        for frame in episode:
+        for frame_idx, frame in enumerate(episode):
             results["retrieved_frames"] += 1
 
             # Check for camera images
@@ -258,22 +234,22 @@ def verify_dataset(config, expected_frame_count):
                             results["duplicate_frames"].append(decoded_frame_num)
                         results["unique_frames"].add(decoded_frame_num)
 
-                        # Verify joint positions
-                        if "joint_positions" in frame:
-                            expected_joints = generate_joint_positions(
-                                decoded_frame_num, config.fps, config.num_joints
-                            )
+            # Verify joint positions
+            if "joint_positions" in frame:
+                expected_joints = generate_joint_positions(
+                    frame_idx, config.fps, config.num_joints
+                )
 
-                            for joint_name, expected_value in expected_joints.items():
-                                if joint_name in frame["joint_positions"]:
-                                    actual_value = frame["joint_positions"][joint_name]
-                                    if abs(expected_value - actual_value) > 1e-5:
-                                        results["joint_mismatches"].append((
-                                            decoded_frame_num,
-                                            joint_name,
-                                            expected_value,
-                                            actual_value,
-                                        ))
+                for joint_name, expected_value in expected_joints.items():
+                    if joint_name in frame["joint_positions"]:
+                        actual_value = frame["joint_positions"][joint_name]
+                        if abs(expected_value - actual_value) > 1e-5:
+                            results["joint_mismatches"].append((
+                                decoded_frame_num,
+                                joint_name,
+                                expected_value,
+                                actual_value,
+                            ))
 
     # Check for missing frames
     expected_frames = set(range(expected_frame_count))
@@ -321,9 +297,6 @@ def run_streaming_test(config):
     # Stream data
     actual_frame_count = stream_data(config)
 
-    # Wait for data to save in the backend
-    time.sleep(10)
-
     results = verify_dataset(config, actual_frame_count)
 
     # Success criteria
@@ -332,6 +305,13 @@ def run_streaming_test(config):
     assert len(results["joint_mismatches"]) == 0
 
     return results
+
+
+def _mp_stream_robot_data(config):
+    nc.login()
+    nc.connect_robot(config.robot_name)
+    nc.create_dataset(config.dataset_name)
+    return stream_data(config)
 
 
 @pytest.fixture(autouse=True)
@@ -347,61 +327,58 @@ def test_basic_streaming():
 
 
 def test_high_framerate():
-    config = TestConfig(fps=200, duration_sec=2, image_width=640, image_height=480)
+    config = TestConfig(
+        fps=200, duration_sec=2, image_width=640, image_height=480, synched_time=True
+    )
     run_streaming_test(config)
 
 
 def test_multiple_cameras():
     config = TestConfig(
-        fps=30, duration_sec=2, image_width=640, image_height=480, num_cameras=3
+        fps=30,
+        duration_sec=2,
+        image_width=640,
+        image_height=480,
+        num_cameras=3,
+        synched_time=True,
     )
     run_streaming_test(config)
 
 
 def test_with_depth():
     config = TestConfig(
-        fps=30, duration_sec=2, image_width=640, image_height=480, use_depth=True
+        fps=30,
+        duration_sec=2,
+        image_width=640,
+        image_height=480,
+        use_depth=True,
+        synched_time=True,
     )
     run_streaming_test(config)
 
 
 def test_multiple_concurrent_robots():
     num_robots = 3
-    configs = [TestConfig(fps=30, duration_sec=4) for _ in range(num_robots)]
-
-    # Set up all robots
+    configs = [
+        TestConfig(fps=30, duration_sec=2, synched_time=True) for _ in range(num_robots)
+    ]
     nc.login()
-    for config in configs:
-        nc.connect_robot(config.robot_name)
-        nc.create_dataset(config.dataset_name)
-
-    # Use threads to stream data concurrently
-    def stream_robot_data(idx):
-        robot_name = configs[idx].robot_name
-        nc.connect_robot(robot_name)  # Reconnect in this thread
-        return stream_data(configs[idx])
 
     # Run concurrent streams
-    with ThreadPoolExecutor(max_workers=num_robots) as executor:
-        frame_counts = list(executor.map(stream_robot_data, range(num_robots)))
+    with multiprocessing.Pool(num_robots) as executor:
+        frame_counts = list(executor.map(_mp_stream_robot_data, configs))
 
     # Verify each dataset
-    all_success = True
     for idx, frame_count in enumerate(frame_counts):
         logger.info(f"Verifying robot {idx+1}/{num_robots}")
         results = verify_dataset(configs[idx], frame_count)
-
-        # Success criteria
-        missing_percentage = len(results["missing_frames"]) / frame_count * 100
-        if missing_percentage > 10:
-            logger.error(f"Robot {idx+1} has {missing_percentage:.1f}% missing frames")
-            all_success = False
-
-    assert all_success, "One or more robots failed data verification"
+        assert len(results["missing_frames"]) == 0
+        assert len(results["duplicate_frames"]) == 0
+        assert len(results["joint_mismatches"]) == 0
 
 
 def test_stop_start_sequences():
-    config = TestConfig(fps=30, duration_sec=10)
+    config = TestConfig(fps=30, duration_sec=2, synched_time=True)
 
     # Set up
     nc.login()
@@ -427,7 +404,7 @@ def test_stop_start_sequences():
             nc.log_rgb("camera_0", img)
 
             joint_positions = generate_joint_positions(
-                frame_num, config.fps, config.num_joints
+                segment_frames, config.fps, config.num_joints
             )
             nc.log_joints(joint_positions)
 
@@ -442,24 +419,21 @@ def test_stop_start_sequences():
 
     # Verify dataset
     results = verify_dataset(config, total_frames)
-
-    # Allow some missing frames for stop/start sequences but not too many
-    missing_percentage = len(results["missing_frames"]) / total_frames * 100
-    assert (
-        missing_percentage == 0
-    ), f"Too many missing frames: {missing_percentage:.1f}%"
-    assert results["retrieved_frames"] > 0, "No frames were retrieved"
+    assert len(results["missing_frames"]) == 0
+    assert len(results["duplicate_frames"]) == 0
+    assert len(results["joint_mismatches"]) == 0
 
 
 def test_high_bandwidth():
     """Test streaming with high bandwidth requirements (high res, high fps)"""
     config = TestConfig(
         fps=60,
-        duration_sec=15,
+        duration_sec=2,
         image_width=1920,
         image_height=1080,
         num_cameras=2,
         use_depth=True,
+        synched_time=True,
     )
 
     # Estimate bandwidth
@@ -486,16 +460,10 @@ def test_high_bandwidth():
 
         # Verify
         results = verify_dataset(config, actual_frame_count)
-
-        # For high bandwidth, allow some missing frames
-        missing_percentage = len(results["missing_frames"]) / actual_frame_count * 100
-        assert (
-            missing_percentage < 20
-        ), f"Too many missing frames: {missing_percentage:.1f}%"
-        assert results["retrieved_frames"] > 0, "No frames were retrieved"
+        assert len(results["missing_frames"]) == 0
+        assert len(results["duplicate_frames"]) == 0
+        assert len(results["joint_mismatches"]) == 0
 
     except Exception as e:
         logger.error(f"High bandwidth test error: {str(e)}")
         pytest.fail(f"High bandwidth test failed: {str(e)}")
-    finally:
-        nc.stop_all()

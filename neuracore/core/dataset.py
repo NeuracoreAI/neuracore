@@ -1,4 +1,3 @@
-import asyncio
 import concurrent
 import logging
 import queue
@@ -7,6 +6,8 @@ from typing import Optional
 
 import requests
 from pydantic import BaseModel
+
+from neuracore.core.utils.depth_utils import rgb_to_depth
 
 from .auth import Auth, get_auth
 from .const import API_URL
@@ -176,7 +177,7 @@ class EpisodeIterator:
         """Get synchronized data for the recording."""
         auth = get_auth()
         response = requests.post(
-            f"{API_URL}/visualization/demonstrations/{self.recording['id']}/{50}/sync",
+            f"{API_URL}/visualization/demonstrations/{self.recording['id']}/sync",
             headers=auth.get_headers(),
         )
         response.raise_for_status()
@@ -192,33 +193,15 @@ class EpisodeIterator:
         response.raise_for_status()
         return response.json()["url"]
 
-    def _run_event_loop(self, camera_id: str):
-        """Run async event loop in separate thread with proper cleanup."""
-        try:
-            asyncio.set_event_loop(self._loop)
-            self._loop.run_until_complete(self._stream_data(camera_id))
-        finally:
-            # Clean up the loop
-            self._loop.close()
-
-    async def _stream_data(self, camera_id: str):
+    def _stream_data_loop(self, camera_id: str):
         """Stream data from the video URL."""
-        try:
+        while self._running:
             camera_url = self._get_video_url(camera_id)
             with VideoStreamer(camera_url) as streamer:
                 for i, frame in enumerate(streamer):
                     self._msg_queues[camera_id].put((frame, i))
             # Signal end of data stream
             self._msg_queues[camera_id].put(None)
-
-        except Exception as e:
-            logger.error(f"Stream setup error: {str(e)}")
-        finally:
-            # Always put None on queue to signal end
-            try:
-                self._msg_queue.put(None)
-            except Exception:
-                pass
 
     def close(self):
         """Explicitly close with proper cleanup."""
@@ -231,62 +214,53 @@ class EpisodeIterator:
         """Get next frame with proper thread state handling and auto-cleanup."""
         if self._iter_idx >= len(self._recording_synced.frames):
             raise StopIteration
-        try:
-            # Get sync point data
-            sync_point = self._recording_synced.frames[self._iter_idx]
+        # Get sync point data
+        sync_point = self._recording_synced.frames[self._iter_idx]
 
-            # Build the frame data
-            frame_data = {
-                "timestamp": sync_point.sync_timestamp,
-                "joint_positions": sync_point.joint_positions,
-                "actions": sync_point.actions,
-                "images": {},
-            }
+        # Build the frame data
+        frame_data = {
+            "timestamp": sync_point.sync_timestamp,
+            "joint_positions": sync_point.joint_positions,
+            "actions": sync_point.actions,
+            "images": {},
+        }
 
-            # Get images from video streams for all cameras
-            for (
-                camera_id,
-                desired_frame_idx,
-            ) in sync_point.camera_id_to_frame_idx.items():
-                while True:
-                    data = self._msg_queues[camera_id].get(timeout=10.0)
-                    if data is None:
-                        logger.info(f"End of data stream for camera {camera_id}")
-                        break
-                    frame, frame_idx = data
-                    if frame_idx == desired_frame_idx:
-                        logger.info(
-                            f"Received frame {frame_idx} for camera {camera_id}"
-                        )
-                        frame_data["images"][camera_id] = frame
-                        break
-                    else:
-                        logger.info(
-                            f"Skipping frame {frame_idx} for camera {camera_id}"
-                        )
+        # Get images from video streams for all cameras
+        for (
+            camera_id,
+            desired_frame_idx,
+        ) in sync_point.camera_id_to_frame_idx.items():
+            while True:
+                data = self._msg_queues[camera_id].get(timeout=10.0)
+                if data is None:
+                    logger.info(f"End of data stream for camera {camera_id}")
+                    break
+                frame, frame_idx = data
+                if frame_idx == desired_frame_idx:
+                    logger.info(f"Received frame {frame_idx} for camera {camera_id}")
+                    # check if name starts with depth
+                    if camera_id.startswith("depth"):
+                        frame = rgb_to_depth(frame)
+                    frame_data["images"][camera_id] = frame
+                    break
+                else:
+                    logger.info(f"Skipping frame {frame_idx} for camera {camera_id}")
 
-        except queue.Empty:
-            logger.warning("Timeout waiting for data")
-        if data is None:
-            logger.info("End of data stream. data is None")
-            self._running = False
-            return None
-        logger.info(f"Retir frame {self._iter_idx}")
+        logger.info(f"Return frame {self._iter_idx}")
         self._iter_idx += 1
         return frame_data
 
     def __iter__(self):
-        self._msg_queues: dict[str, queue.Queue] = {}
         self._iter_idx = 0
+        self._msg_queues: dict[str, queue.Queue] = {}
         self._threads: list[threading.Thread] = []
-        self._loop = asyncio.new_event_loop()
+        self._running = True
         for camera_id in self._camera_ids:
             self._msg_queues[camera_id] = queue.Queue()
-            thread = threading.Thread(target=self._run_event_loop, args=(camera_id,))
+            thread = threading.Thread(target=self._stream_data_loop, args=(camera_id,))
             thread.daemon = True
             thread.start()
             self._threads.append(thread)
-        self._running = True
         return self
 
     def __enter__(self):
