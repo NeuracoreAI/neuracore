@@ -24,8 +24,8 @@ class StreamingVideoEncoder:
         resumable_upload: ResumableUpload,
         width: int,
         height: int,
-        codec: str = "libx264rgb",
-        pixel_format: str = "rgb24",
+        codec: str = "libx264",
+        pixel_format: str = "yuv444p10le",
         chunk_size: int = 256 * 1024,  # 256 KB default chunk size
     ):
         """
@@ -42,6 +42,7 @@ class StreamingVideoEncoder:
         self.uploader = resumable_upload
         self.width = width
         self.height = height
+        self.pixel_format = pixel_format
 
         # Ensure chunk_size is a multiple of 256 KiB
         if chunk_size % (256 * 1024) != 0:
@@ -69,7 +70,7 @@ class StreamingVideoEncoder:
         self.stream.width = width
         self.stream.height = height
         self.stream.pix_fmt = pixel_format
-        self.stream.codec_context.options = {"crf": "0", "preset": "ultrafast"}
+        self.stream.codec_context.options = {"qp": "0", "preset": "ultrafast"}
 
         # Set a very precise timebase (microseconds)
         from fractions import Fraction
@@ -114,6 +115,7 @@ class StreamingVideoEncoder:
 
         # Create video frame from numpy array
         frame = av.VideoFrame.from_ndarray(frame_data, format="rgb24")
+        frame = frame.reformat(format=self.pixel_format)
         frame.pts = pts
 
         # Encode and mux

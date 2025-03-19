@@ -214,7 +214,7 @@ class VideoStreamer:
         try:
             for frame in self.container.decode(video=0):
                 self.frame_count += 1
-                frame_array = frame.to_ndarray(format="rgb24")
+                frame_array = frame.to_rgb().to_ndarray()
                 self.frames_cache[self.frame_count - 1] = frame_array
                 yield frame_array
         except Exception as e:
