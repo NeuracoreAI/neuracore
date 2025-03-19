@@ -1,6 +1,7 @@
 import io
 import logging
 import time
+from typing import Optional
 
 import av
 import numpy as np
@@ -21,6 +22,7 @@ class StreamingVideoEncoder:
         codec: str = "h264",
         pixel_format: str = "yuv420p",
         chunk_size: int = 256 * 1024,  # 256 KB default chunk size
+        framerate_cap: Optional[float] = None,
     ):
         """
         Initialize a streaming video encoder.
@@ -32,10 +34,12 @@ class StreamingVideoEncoder:
             codec: Video codec
             pixel_format: Pixel format
             chunk_size: Size of chunks to upload
+            framerate_cap: Optional framerate cap (frames per second) excessive frames will be dropped
         """
         self.uploader = resumable_upload
         self.width = width
         self.height = height
+        self.min_frame_interval = 0 if framerate_cap is None else 1.0 / self.framerate_cap
 
         # Ensure chunk_size is a multiple of 256 KiB
         if chunk_size % (256 * 1024) != 0:
@@ -72,6 +76,7 @@ class StreamingVideoEncoder:
         # Keep track of timestamps
         self.first_timestamp = None
         self.last_pts = None
+        self.last_frame_time: float = 0.0
 
         # Track bytes and buffer positions
         self.total_bytes_written = 0
@@ -94,25 +99,27 @@ class StreamingVideoEncoder:
         if self.first_timestamp is None:
             self.first_timestamp = timestamp
 
+        # Framerate cap check
+        if timestamp - self.last_frame_time < self.min_frame_interval:
+            return  # Discard frame if below cap
+
+        self.last_frame_time = timestamp
+
         # Calculate pts in timebase units (microseconds)
         relative_time = timestamp - self.first_timestamp
-        pts = int(relative_time * 1000000)  # Convert to microseconds
+        pts = int(relative_time * 1000000)
 
-        # Ensure pts is monotonically increasing (required by most codecs)
         if self.last_pts is not None and pts <= self.last_pts:
             pts = self.last_pts + 1
 
         self.last_pts = pts
 
-        # Create video frame from numpy array
         frame = av.VideoFrame.from_ndarray(frame_data, format="rgb24")
         frame.pts = pts
 
-        # Encode and mux
         for packet in self.stream.encode(frame):
             self.container.mux(packet)
 
-        # Get current buffer position after encoding
         current_pos = self.buffer.tell()
         current_chunk_size = current_pos - self.last_write_position
         if current_chunk_size >= self.chunk_size:
@@ -123,22 +130,12 @@ class StreamingVideoEncoder:
             self.buffer.seek(current_pos)
             self._upload_chunks()
 
-        # Total bytes written
         self.total_bytes_written = current_pos
 
     def _upload_chunks(self) -> None:
-        """
-        Upload chunks of exactly chunk_size bytes if enough data is available.
-        """
-        # Upload complete chunks while we have enough data
         while len(self.upload_buffer) >= self.chunk_size:
-            # Extract a chunk of exactly chunk_size bytes
             chunk = bytes(self.upload_buffer[: self.chunk_size])
-
-            # Remove this chunk from our upload buffer
             self.upload_buffer = self.upload_buffer[self.chunk_size :]
-
-            # Upload the chunk
             success = self.uploader.upload_chunk(chunk, is_final=False)
 
             if not success:
@@ -150,15 +147,9 @@ class StreamingVideoEncoder:
                     self.upload_buffer = bytearray(chunk) + self.upload_buffer
 
     def finish(self) -> None:
-        """
-        Finish encoding and upload any remaining data.
-        """
-
-        # Flush encoder
         for packet in self.stream.encode(None):
             self.container.mux(packet)
 
-        # Close the container to finalize the MP4
         self.container.close()
 
         current_pos = self.buffer.tell()
