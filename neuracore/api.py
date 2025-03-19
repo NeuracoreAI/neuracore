@@ -19,6 +19,7 @@ from .core.streaming.data_stream import (
     JointDataStream,
     RGBDataStream,
 )
+from .core.streaming.client_stream import get_robot_streaming_manager
 
 # Global active robot ID - allows us to avoid passing robot_name to every call
 _active_robot: Optional[Robot] = None
@@ -94,10 +95,12 @@ def log_joints(positions: dict[str, float], robot_name: Optional[str] = None) ->
     for key, value in positions.items():
         if not isinstance(value, float):
             raise ValueError(f"Joint positions must be floats. {key} is not a float.")
-    str_id = f"{robot_name}_action"
+
+    robot = _get_robot(robot_name)
+    str_id = f"{robot.id}_joints"
     stream = _data_streams.get(str_id)
     if stream is None:
-        stream = JointDataStream()
+        stream = JointDataStream(robot.id)
         _data_streams[str_id] = stream
         if _active_recording_id is not None:
             stream.start_recording(_active_recording_id)
@@ -120,10 +123,11 @@ def log_action(action: dict[str, float], robot_name: Optional[str] = None) -> No
     for key, value in action.items():
         if not isinstance(value, float):
             raise ValueError(f"Actions must be floats. {key} is not a float.")
-    str_id = f"{robot_name}_action"
+    robot = _get_robot(robot_name)
+    str_id = f"{robot.id}_action"
     stream = _data_streams.get(str_id)
     if stream is None:
-        stream = ActionDataStream()
+        stream = ActionDataStream(robot.id)
         _data_streams[str_id] = stream
         if _active_recording_id is not None:
             stream.start_recording(_active_recording_id)
@@ -150,10 +154,11 @@ def log_rgb(
         raise ValueError("Image must be a numpy array")
     if image.dtype != np.uint8:
         raise ValueError("Image must be uint8 wth range 0-255")
-    str_id = f"{robot_name}_rgb_{camera_id}"
+    robot = _get_robot(robot_name)
+    str_id = f"{robot.id}_rgb_{camera_id}"
     stream = _data_streams.get(str_id)
     if stream is None:
-        stream = RGBDataStream(camera_id, image.shape[1], image.shape[0])
+        stream = RGBDataStream(robot.id, camera_id, image.shape[1], image.shape[0])
         _data_streams[str_id] = stream
         if _active_recording_id is not None:
             stream.start_recording(_active_recording_id)
@@ -162,6 +167,7 @@ def log_rgb(
             f"RGB image dimensions {image.shape[1]}x{image.shape[0]} do not match "
             f"stream dimensions {stream.width}x{stream.height}"
         )
+
     stream.log(image)
 
 
@@ -192,10 +198,11 @@ def log_depth(
             f"You are attempting to log depth values > {MAX_DEPTH}. "
             "The values you are passing in are likely in millimeters."
         )
-    str_id = f"{robot_name}_depth_{camera_id}"
+    robot = _get_robot(robot_name)
+    str_id = f"{robot.id}_depth_{camera_id}"
     stream = _data_streams.get(str_id)
     if stream is None:
-        stream = DepthDataStream(camera_id, depth.shape[1], depth.shape[0])
+        stream = DepthDataStream(robot.id, camera_id, depth.shape[1], depth.shape[0])
         _data_streams[str_id] = stream
         if _active_recording_id is not None:
             stream.start_recording(_active_recording_id)
@@ -246,6 +253,8 @@ def stop_recording(robot_name: Optional[str] = None) -> None:
     for stream in _data_streams.values():
         stream.stop_recording()
     _active_recording_id = None
+
+    get_robot_streaming_manager(robot.id).close()
 
 
 def get_dataset(name: str) -> Dataset:

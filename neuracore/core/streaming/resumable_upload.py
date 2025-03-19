@@ -17,24 +17,7 @@ class SensorType(Enum):
 
 
 
-class Uploader(ABC):
-
-    @abstractmethod
-    def upload_chunk(self, data: bytes, is_final: bool = False) -> bool:
-        """
-        Upload a chunk of data to the consumer.
-
-        Args:
-            data: Chunk of data to upload
-            is_final: Whether this is the final chunk
-
-        Returns:
-            bool: Whether the upload was successful
-        """
-        raise NotImplementedError()
-
-
-class ResumableUpload(Uploader):
+class ResumableUpload:
     """
     Handles resumable uploads to Google Cloud Storage.
     """

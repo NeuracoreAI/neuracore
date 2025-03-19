@@ -5,9 +5,10 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 import requests
-
-from neuracore.core.auth import get_auth
-from neuracore.core.streaming.resumable_upload import ResumableUpload, SensorType
+from ...core.streaming.client_stream import ClientStreamingManager
+from ...core.streaming.client_stream import get_robot_streaming_manager
+from ...core.auth import get_auth
+from ...core.streaming.resumable_upload import ResumableUpload, SensorType
 
 from ..const import API_URL
 from .streaming_video_encoder import StreamingVideoEncoder
@@ -20,9 +21,10 @@ logger = logging.getLogger(__name__)
 class DataStream(ABC):
     """Base class for data streams."""
 
-    def __init__(self):
+    def __init__(self, robot_id: str):
         self._recording = False
         self._recording_id = None
+        self.robot_id = robot_id
 
     def start_recording(self, recording_id: str):
         """Start recording data."""
@@ -42,8 +44,8 @@ class DataStream(ABC):
 class BufferedDataStream(DataStream, ABC):
     """Stream that buffers data locally for later upload."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, robot_id: str):
+        super().__init__(robot_id=robot_id)
         self._buffer = []
 
     def log(self, dict_data: dict[str, float]):
@@ -103,8 +105,10 @@ class JointDataStream(BufferedDataStream):
 class VideoDataStream(DataStream):
     """Stream that encodes and uploads video data."""
 
-    def __init__(self, camera_id: str, width: int = 640, height: int = 480):
-        super().__init__()
+    def __init__(
+        self, robot_id: str, camera_id: str, width: int = 640, height: int = 480
+    ):
+        super().__init__(robot_id=robot_id)
         self.camera_id = camera_id
         self.width = width
         self.height = height
@@ -167,4 +171,8 @@ class RGBDataStream(VideoDataStream):
         """Log an RGB frame."""
         if not self.is_recording() or self._encoder is None:
             return
+
+        get_robot_streaming_manager(robot_id=self.robot_id).get_recording_video_stream(
+            self._recording_id, SensorType.RGB, self.camera_id
+        ).add_frame(data)
         self._encoder.add_frame(data, time.time())
