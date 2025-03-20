@@ -23,6 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - None
 
+## [1.3.1]
+
+### Added
+
+- None
+
+### Changed
+
+- None
+
+### Removed
+
+- None
+
+### Fixed
+
+- API call to get algorithms.
+
 ## [1.3.0] 
 
 ### Added
