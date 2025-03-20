@@ -42,8 +42,6 @@ async def main():
         overwrite=True,
     )
 
-
-
     nc.create_dataset(
         name="Test Video Dataset", description="This is an test dataset"
     )

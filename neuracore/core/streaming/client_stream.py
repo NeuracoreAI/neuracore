@@ -1,10 +1,9 @@
-from dataclasses import Field, dataclass
+from dataclasses import field, dataclass
 from enum import Enum
 import json
-import uuid
 import asyncio
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 
 from av import VideoFrame
 import numpy as np
@@ -15,11 +14,10 @@ from aiortc import (
     RTCPeerConnection,
     RTCSessionDescription,
     MediaStreamTrack,
-    RTCIceCandidate,
     RTCConfiguration,
     RTCIceServer,
 )
-from aiortc.contrib.media import MediaStreamOutput, MediaBlackhole
+from aiortc.contrib.media import MediaBlackhole
 from aiohttp_sse_client import client as sse_client
 from aiortc.sdp import candidate_from_sdp, candidate_to_sdp
 from aiohttp import ClientSession
@@ -48,11 +46,11 @@ class HandshakeMessage(BaseModel):
 class PierToPierConnection:
     local_stream_id: str
     remote_stream_id: str
-    client_session: ClientSession = Field(
+    client_session: ClientSession = field(
         default_factory=lambda: ClientSession(API_URL)
     )
-    auth: Auth = Field(default_factory=get_auth)
-    connection: RTCPeerConnection = Field(
+    auth: Auth = field(default_factory=get_auth)
+    connection: RTCPeerConnection = field(
         default_factory=lambda: RTCPeerConnection(
             configuration=RTCConfiguration(
                 iceServers=[
@@ -62,7 +60,7 @@ class PierToPierConnection:
             )
         )
     )
-    tracks: Dict[str, MediaStreamTrack] = Field(default_factory=dict)
+    tracks: Dict[str, MediaStreamTrack] = field(default_factory=dict)
     _closed: bool = False
 
     async def setup_connection(self):
@@ -169,7 +167,7 @@ class PierToPierConnection:
 class VideoTrackSource:
     recording_id: str
     sensor_name: str
-    _queue: asyncio.Queue[VideoFrame] = Field(default_factory=asyncio.Queue)
+    _queue: asyncio.Queue[VideoFrame] = field(default_factory=asyncio.Queue)
     _closed = False
 
     """A source for video track data"""
@@ -229,13 +227,13 @@ class VideoTrack(MediaStreamTrack):
 class ClientStreamingManager:
     robot_id: str
     available_for_connections = True
-    client_session: ClientSession = Field(
+    client_session: ClientSession = field(
         default_factory=lambda: ClientSession(API_URL)
     )
-    auth: Auth = Field(default_factory=get_auth)
-    connections: Dict[str, PierToPierConnection] = Field(default_factory=dict)
-    video_sources: Dict[str, VideoTrackSource] = Field(default_factory=dict)
-    video_tracks: Dict[str, VideoTrack] = Field(default_factory=dict)
+    auth: Auth = field(default_factory=get_auth)
+    connections: Dict[str, PierToPierConnection] = field(default_factory=dict)
+    video_sources: Dict[str, VideoTrackSource] = field(default_factory=dict)
+    video_tracks: Dict[str, VideoTrack] = field(default_factory=dict)
 
     def get_recording_video_stream(
         self, recording_id: str, sensor_name: str
