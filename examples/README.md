@@ -42,7 +42,7 @@ python example_data_collection_vx300s.py
 To record demonstrations:
 1. Run with the record flag:
 ```bash
-python example_data_collection_vx300s.py --record True
+python example_data_collection_vx300s.py --record
 ```
 2. The script will automatically start and stop recordings for each demonstration. You can see this process happening in the [robots](https://neuracore.app/dashboard/robots) tab in the app
 3. Navigate to the [data](https://neuracore.app/dashboard/data) tab in the app to see your dataset
