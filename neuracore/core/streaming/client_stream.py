@@ -1,5 +1,6 @@
 from dataclasses import Field, dataclass
 from enum import Enum
+import json
 import uuid
 import asyncio
 import logging
@@ -20,7 +21,7 @@ from aiortc import (
 )
 from aiortc.contrib.media import MediaStreamOutput, MediaBlackhole
 from aiohttp_sse_client import client as sse_client
-from aiortc.sdp import candidate_from_sdp
+from aiortc.sdp import candidate_from_sdp, candidate_to_sdp
 from aiohttp import ClientSession
 from ..const import API_URL
 
@@ -67,22 +68,42 @@ class PierToPierConnection:
     async def setup_connection(self):
         """Set up event handlers for the connection"""
 
-        @self.connection.on("icecandidate")
-        async def on_icecandidate(candidate):
-            if candidate:
-                # Convert candidate to SDP format and send it
-                candidate_sdp = candidate.to_sdp()
-                await self.send_message(MessageType.ICE_CANDIDATE, candidate_sdp)
+        @self.connection.on("signalingstatechange")
+        async def on_signalingstatechange():
+            print("Signaling state change:", self.connection.signalingState)
+
+        @self.connection.on("icegatheringstatechange")
+        async def on_icegatheringstatechange():
+            logger.info(
+                f"ICE gathering state changed to {self.connection.iceGatheringState}"
+            )
+            if self.connection.iceGatheringState == "complete":
+                # candidates are ready
+                iceGatherer = self.connection.sctp.transport.transport.iceGatherer
+                candidates = iceGatherer.getLocalCandidates()
+
+                for candidate in candidates:
+                    self.send_message(
+                        MessageType.ICE_CANDIDATE,
+                        json.dumps(
+                            {
+                                "candidate": candidate_to_sdp(candidate),
+                                "sdpMLineIndex": candidate.sdpMLineIndex,
+                                "sdpMid": candidate.sdpMid,
+                                "usernameFragment": iceGatherer.getLocalParameters().usernameFragment,
+                            }
+                        ),
+                    )
 
         @self.connection.on("connectionstatechange")
         async def on_connectionstatechange():
             logger.info(
                 f"Connection state changed to: {self.connection.connectionState}"
             )
-            if (
-                self.connection.connectionState == "failed"
-                or self.connection.connectionState == "closed"
-            ):
+            if self.connection.iceConnectionState == "failed":
+                await self.connection.restartIce()
+
+            if self.connection.connectionState == "closed":
                 await self.close()
 
         @self.connection.on("track")
