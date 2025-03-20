@@ -81,6 +81,20 @@ Run the local model:
 python example_local_endpoint.py
 ```
 
+### Launching Training
+Launch training example show how to:
+- Launch a training run using python API on the server.
+
+**NOTE: Before running this example:**
+- Collect a dataset following the example: [Data Collection](#data-collection)
+```
+python example_launch_training.py \
+   --name 'My Training Job' \
+   --algorithm_name 'CNNMLP' \
+   --dataset_name 'Example Dataset'
+```
+For more available argumenst run `python example_launch_training.py --help`
+
 
 ### Server Model Deployment
 The server deployment example shows how to:
@@ -89,7 +103,9 @@ The server deployment example shows how to:
 
 **NOTE: Before running this example:**
 - Collect a dataset following the example: [Data Collection](#data-collection)
-- Go to your [training dashboard ](https://www.neuracore.app/dashboard/training) and start a training run
+- Start a training run by:
+   - Go to your [training dashboard ](https://www.neuracore.app/dashboard/training) and start a training run
+   - Or follow [Launching Training](#launching-training) to start a training run
 - Wait for the training run to finish
 - Go to your [endpoint dashboard ](https://www.neuracore.app/dashboard/endpoints) and start an endpoint. Call it __"MyExampleEndpoint"__
 - Wait for the status to be active
