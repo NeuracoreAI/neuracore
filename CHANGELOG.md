@@ -13,6 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- None
+
+### Removed
+
+- None
+
+### Fixed
+
+- None
+
+## [1.3.0] 
+
+### Added
+
+- Ability to launch and monitor training jobs using python.
+- Ability to deploy and terminate model endpoints using python.
+
+### Changed
+
 - Allow python versions >= 3.9
 
 ### Removed
