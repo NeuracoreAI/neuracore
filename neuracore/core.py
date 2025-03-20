@@ -234,13 +234,13 @@ def _get_algorithms() -> list[dict]:
     with concurrent.futures.ThreadPoolExecutor() as executor:
         org_alg_req = executor.submit(
             requests.get,
-            f"{API_URL}/algorithms/",
+            f"{API_URL}/algorithms",
             headers=auth.get_headers(),
             params={"shared": False},
         )
         shared_alg_req = executor.submit(
             requests.get,
-            f"{API_URL}/algorithms/",
+            f"{API_URL}/algorithms",
             headers=auth.get_headers(),
             params={"shared": True},
         )
