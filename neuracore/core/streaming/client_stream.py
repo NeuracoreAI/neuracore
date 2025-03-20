@@ -10,7 +10,6 @@ import numpy as np
 from pydantic import BaseModel
 
 from neuracore.core.auth import Auth, get_auth
-from neuracore.core.streaming.resumable_upload import SensorType, Uploader
 from aiortc import (
     RTCPeerConnection,
     RTCSessionDescription,
@@ -148,7 +147,6 @@ class PierToPierConnection:
 @dataclass(slots=True)
 class VideoTrackSource:
     recording_id: str
-    sensor_type: SensorType
     sensor_name: str
     _queue: asyncio.Queue[VideoFrame] = Field(default_factory=asyncio.Queue)
     _closed = False
@@ -219,7 +217,7 @@ class ClientStreamingManager:
     video_tracks: Dict[str, VideoTrack] = Field(default_factory=dict)
 
     def get_recording_video_stream(
-        self, recording_id: str, sensor_type: SensorType, sensor_name: str
+        self, recording_id: str, sensor_name: str
     ) -> VideoTrackSource:
         """Start a new recording stream"""
         stream_key = f"{recording_id}_{sensor_type.value}_{sensor_name}"

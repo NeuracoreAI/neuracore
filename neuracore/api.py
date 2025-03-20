@@ -2,6 +2,8 @@ from typing import Optional
 
 import numpy as np
 
+from neuracore.core.utils.depth_utils import MAX_DEPTH
+
 from .core.auth import login as _login
 from .core.auth import logout as _logout
 from .core.dataset import Dataset
@@ -12,7 +14,6 @@ from .core.exceptions import RobotError
 from .core.robot import Robot, get_robot
 from .core.robot import init as _init_robot
 from .core.streaming.data_stream import (
-    MAX_DEPTH,
     ActionDataStream,
     DataStream,
     DepthDataStream,
@@ -170,6 +171,7 @@ def log_rgb(
         raise ValueError("Image must be uint8 wth range 0-255")
     robot = _get_robot(robot_name)
     str_id = f"{robot.id}_rgb_{camera_id}"
+    camera_id = f"rgb_{camera_id}"
     stream = _data_streams.get(str_id)
     if stream is None:
         stream = RGBDataStream(robot.id, camera_id, image.shape[1], image.shape[0])
@@ -217,6 +219,7 @@ def log_depth(
         )
     robot = _get_robot(robot_name)
     str_id = f"{robot.id}_depth_{camera_id}"
+    camera_id = f"depth_{camera_id}"
     stream = _data_streams.get(str_id)
     if stream is None:
         stream = DepthDataStream(robot.id, camera_id, depth.shape[1], depth.shape[0])
