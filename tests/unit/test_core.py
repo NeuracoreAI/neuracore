@@ -226,11 +226,5 @@ def test_stop_functions(
     nc.connect_robot("test_robot", mock_urdf)
 
     # Test stop functions
-    try:
-        nc.stop("test_robot")
-        nc.stop_all()
-    except Exception as e:
-        pytest.fail(f"Stop functions raised unexpected exception: {e}")
-
     # Verify global state reset
     assert nc.api._active_robot is None

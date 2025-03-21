@@ -99,7 +99,8 @@ class StreamingVideoEncoder:
         """
         Upload chunks in a separate thread.
         """
-        while not self._streaming_done:
+        # If final has not been called, or we still have items in the queue
+        while not self._streaming_done or self._upload_queue.qsize() > 0:
             try:
                 frame_data, timestamp = self._upload_queue.get(timeout=0.1)
                 if frame_data is None:

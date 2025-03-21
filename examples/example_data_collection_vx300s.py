@@ -86,7 +86,6 @@ def main(args):
     print(
         f"Success rate: {np.mean(success)*100:.1f}% ({np.sum(success)}/{len(success)})"
     )
-    nc.stop_all()
 
 
 if __name__ == "__main__":
