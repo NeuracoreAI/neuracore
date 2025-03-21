@@ -274,6 +274,17 @@ def stop_recording(robot_name: Optional[str] = None) -> None:
         stream.stop_recording()
     _active_recording_id = None
 
+
+def stop_live_data(robot_name: Optional[str] = None):
+    """Stop sharing the live data stream for this robot. This data stream is 
+        used for realtime visualization on neuracore. 
+        
+        Call this method before logging data to disable this feature entirely.
+
+    Args:
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+    """
+    robot = _get_robot(robot_name)
     get_robot_streaming_manager(robot.id).close()
 
 

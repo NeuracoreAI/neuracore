@@ -1,11 +1,10 @@
-
 import asyncio
 import numpy as np
 import neuracore as nc
 from common.constants import BIMANUAL_VIPERX_URDF_PATH
 
 
-async def simulate_camera_frames(num_frames=100, width=640, height=480):
+async def simulate_camera_frames(num_frames=1_000_000, width=640, height=480):
     """Generate test frames with variable timing"""
     t = 0.0
     for i in range(num_frames):
@@ -19,16 +18,15 @@ async def simulate_camera_frames(num_frames=100, width=640, height=480):
         #     dt = 0.001
         # else:
         #     dt = 0.05
-        
+
         # Simulate irregular frame timing
         dt = 0.02 + 0.03 * np.random.random()  # Between 20-50ms
         t += dt
         await asyncio.sleep(dt)
-        
+
         yield frame, t
 
     print("Total time: ", t)
-
 
 
 async def main():
@@ -42,25 +40,19 @@ async def main():
         overwrite=True,
     )
 
-    nc.create_dataset(
-        name="Test Video Dataset", description="This is an test dataset"
-    )
+    nc.create_dataset(name="Test Video Dataset", description="This is an test dataset")
     print("Created Dataset...")
-
 
     nc.start_recording()
 
-        
     async for frame, time in simulate_camera_frames():
-        nc.log_rgb("test", frame,timestamp=time)
-
+        nc.log_rgb("test", frame, timestamp=time)
 
     print("Finishing recording...")
     nc.stop_recording()
     print("Finished recording!")
-
-    
+    nc.stop_live_data()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

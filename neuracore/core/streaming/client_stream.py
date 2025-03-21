@@ -2,7 +2,6 @@ from dataclasses import field, dataclass
 from enum import Enum
 import json
 import asyncio
-import logging
 from typing import Optional, Dict
 
 from av import VideoFrame
@@ -23,8 +22,6 @@ from aiortc.sdp import candidate_from_sdp, candidate_to_sdp
 from aiohttp import ClientSession
 from ..const import API_URL
 
-logger = logging.getLogger(__name__)
-
 
 class MessageType(str, Enum):
     SDP_OFFER = "offer"
@@ -42,13 +39,11 @@ class HandshakeMessage(BaseModel):
     id: str
 
 
-@dataclass(slots=True)
+@dataclass
 class PierToPierConnection:
     local_stream_id: str
     remote_stream_id: str
-    client_session: ClientSession = field(
-        default_factory=lambda: ClientSession(API_URL)
-    )
+    client_session: ClientSession = field(default_factory=ClientSession)
     auth: Auth = field(default_factory=get_auth)
     connection: RTCPeerConnection = field(
         default_factory=lambda: RTCPeerConnection(
@@ -72,12 +67,13 @@ class PierToPierConnection:
 
         @self.connection.on("icegatheringstatechange")
         async def on_icegatheringstatechange():
-            logger.info(
+            print(
                 f"ICE gathering state changed to {self.connection.iceGatheringState}"
             )
             if self.connection.iceGatheringState == "complete":
                 # candidates are ready
                 iceGatherer = self.connection.sctp.transport.transport.iceGatherer
+
                 candidates = iceGatherer.getLocalCandidates()
 
                 for candidate in candidates:
@@ -95,7 +91,7 @@ class PierToPierConnection:
 
         @self.connection.on("connectionstatechange")
         async def on_connectionstatechange():
-            logger.info(
+            print(
                 f"Connection state changed to: {self.connection.connectionState}"
             )
             if self.connection.iceConnectionState == "failed":
@@ -106,7 +102,7 @@ class PierToPierConnection:
 
         @self.connection.on("track")
         async def on_track(track):
-            logger.info(f"Track received: {track.kind}")
+            print(f"Track received: {track.kind}")
             # Record the track for potential processing
             self.tracks[track.kind] = track
 
@@ -129,8 +125,9 @@ class PierToPierConnection:
 
     async def send_message(self, message_type: MessageType, content: str):
         """Send a message to the remote peer through the signaling server"""
+        print(f"Send Message: {message_type}")
         await self.client_session.post(
-            f"/signalling/submit/{str(message_type)}/from/{self.local_stream_id}/to/{self.remote_stream_id}",
+            f"{API_URL}/signalling/submit/{message_type.value}/from/{self.local_stream_id}/to/{self.remote_stream_id}",
             headers=self.auth.get_headers(),
             data=content,
         )
@@ -163,7 +160,7 @@ class PierToPierConnection:
             await self.connection.close()
 
 
-@dataclass(slots=True)
+@dataclass
 class VideoTrackSource:
     recording_id: str
     sensor_name: str
@@ -171,9 +168,6 @@ class VideoTrackSource:
     _closed = False
 
     """A source for video track data"""
-
-    def __init__(self):
-        self._closed = False
 
     def add_frame(self, frame_data: np.ndarray):
         """Add a frame to the queue"""
@@ -223,13 +217,11 @@ class VideoTrack(MediaStreamTrack):
         self.source.close()
 
 
-@dataclass(slots=True)
+@dataclass
 class ClientStreamingManager:
     robot_id: str
-    available_for_connections = True
-    client_session: ClientSession = field(
-        default_factory=lambda: ClientSession(API_URL)
-    )
+    available_for_connections: bool = True
+    client_session: ClientSession = field(default_factory=ClientSession)
     auth: Auth = field(default_factory=get_auth)
     connections: Dict[str, PierToPierConnection] = field(default_factory=dict)
     video_sources: Dict[str, VideoTrackSource] = field(default_factory=dict)
@@ -239,12 +231,12 @@ class ClientStreamingManager:
         self, recording_id: str, sensor_name: str
     ) -> VideoTrackSource:
         """Start a new recording stream"""
-        stream_key = f"{recording_id}_{sensor_type.value}_{sensor_name}"
+        stream_key = f"{recording_id}_{sensor_name}"
 
         if stream_key in self.video_sources:
             return self.video_sources[stream_key]
 
-        video_source = VideoTrackSource()
+        video_source = VideoTrackSource(recording_id, sensor_name)
         self.video_sources[stream_key] = video_source
 
         video_track = VideoTrack(video_source)
@@ -260,6 +252,7 @@ class ClientStreamingManager:
         self, remote_stream_id: str
     ) -> PierToPierConnection:
         """Create a new P2P connection to a remote stream"""
+
         connection = PierToPierConnection(
             local_stream_id=self.robot_id,
             remote_stream_id=remote_stream_id,
@@ -290,6 +283,7 @@ class ClientStreamingManager:
                 ) as event_source:
                     async for event in event_source:
                         message = HandshakeMessage.model_validate_json(event.data)
+                        print(f"Message Received {message}")
                         if not self.available_for_connections:
                             return
 
@@ -318,27 +312,31 @@ class ClientStreamingManager:
                                 pass
 
             except ConnectionError as e:
-                logger.error(f"Connection error: {e}")
-                await asyncio.sleep(5)  # Wait before reconnecting
+                print(f"Connection error: {e}")
+                await asyncio.sleep(5)
             except Exception as e:
-                logger.error(f"Unexpected error: {e}")
-                await asyncio.sleep(5)  # Wait before reconnecting
+                print(f"Unexpected error: {e}")
+                await asyncio.sleep(5)  
 
-    async def close(self):
+    async def close_connections(self):
+        await asyncio.gather(
+            *(connection.close() for connection in self.connections.values())
+        )
+
+    def close(self):
         """Close all connections and streams"""
         self.available_for_connections = False
 
-        for connection in self.connections.values():
-            await connection.close()
-
-        for stream in self.streams.values():
-            await stream.close()
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.close_connections())
+        except RuntimeError:
+            asyncio.run(self.close_connections())
 
         for track in self.video_tracks.values():
             track.stop()
 
         self.connections.clear()
-        self.streams.clear()
         self.video_sources.clear()
         self.video_tracks.clear()
 
