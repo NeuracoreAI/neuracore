@@ -6,7 +6,7 @@ import pytest
 import requests_mock
 
 import neuracore
-from neuracore import auth
+from neuracore.core import auth
 from neuracore.core.const import API_URL
 
 
@@ -122,7 +122,7 @@ def mock_model_mar(tmp_path):
 def reset_neuracore():
     """Reset NeuraCore global state between tests."""
     # Store the original authentication instance
-    original_auth = neuracore.auth._auth
+    original_auth = neuracore.core.auth._auth
 
     # Reset global variables in core
     neuracore.api._active_robot = None
@@ -130,9 +130,9 @@ def reset_neuracore():
     neuracore.api._active_recording_id = None
 
     # Reset authentication
-    neuracore.auth._auth = neuracore.auth.Auth()
+    neuracore.core.auth._auth = neuracore.core.auth.Auth()
 
     yield
 
     # Restore the original authentication instance
-    neuracore.auth._auth = original_auth
+    neuracore.core.auth._auth = original_auth
