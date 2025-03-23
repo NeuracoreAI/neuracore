@@ -17,6 +17,9 @@ sys.path.append(os.path.join(THIS_DIR, "..", "..", "examples"))
 # ruff: noqa: E402
 from common.constants import BIMANUAL_VIPERX_URDF_PATH
 
+# How much time we allow for nc.calls
+TIME_GRACE_S = 0.01
+
 TEST_ROBOT = "integration_test_robot"
 JOINT_NAMES = [
     "vx300s_left/waist",
@@ -43,6 +46,21 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+class Timer:
+
+    def __init__(self, max_time=TIME_GRACE_S):
+        self.max_time = max_time
+
+    def __enter__(self):
+        self.start = time.time()
+        return self
+
+    def __exit__(self, *args):
+        self.end = time.time()
+        self.interval = self.end - self.start
+        assert self.interval < self.max_time, "Function took too long"
 
 
 class TestConfig:
@@ -141,7 +159,8 @@ def generate_depth_image(frame_num, width, height):
 def stream_data(config):
     """Stream test data according to configuration"""
     # Start recording
-    nc.start_recording()
+    with Timer(max_time=5):
+        nc.start_recording()
 
     # Generate and stream test data
     start_time = time.time()
@@ -165,7 +184,8 @@ def stream_data(config):
             rgb_img = encode_frame_number(
                 frame_code, config.image_width, config.image_height
             )
-            nc.log_rgb(camera_id, rgb_img, timestamp=t)
+            with Timer():
+                nc.log_rgb(camera_id, rgb_img, timestamp=t)
 
             # Depth image if needed
             if config.use_depth:
@@ -178,7 +198,8 @@ def stream_data(config):
         joint_positions = generate_joint_positions(
             frame_count, config.fps, config.num_joints
         )
-        nc.log_joints(joint_positions, timestamp=t)
+        with Timer():
+            nc.log_joints(joint_positions, timestamp=t)
 
         # Stream a test action occasionally
         if frame_count % 5 == 0:
@@ -186,14 +207,16 @@ def stream_data(config):
                 f"joint{i+1}": 0.1 * math.sin(frame_count * 0.1 * (i + 1))
                 for i in range(config.num_joints)
             }
-            nc.log_action(action, timestamp=t)
+            with Timer():
+                nc.log_action(action, timestamp=t)
 
         frame_count += 1
 
         # Sleep to maintain target frame rate
         time.sleep(sleep_time)
 
-    nc.stop_recording()
+    with Timer(max_time=5):
+        nc.stop_recording(wait=True)
 
     return frame_count
 
@@ -390,7 +413,8 @@ def test_stop_start_sequences():
 
     for segment in range(segments):
         logger.info(f"Starting recording segment {segment+1}/{segments}")
-        nc.start_recording()
+        with Timer():
+            nc.start_recording()
 
         # Stream for a bit
         start_time = time.time()
@@ -401,18 +425,21 @@ def test_stop_start_sequences():
             img = encode_frame_number(
                 frame_num, config.image_width, config.image_height
             )
-            nc.log_rgb("camera_0", img)
+            with Timer():
+                nc.log_rgb("camera_0", img)
 
             joint_positions = generate_joint_positions(
                 segment_frames, config.fps, config.num_joints
             )
-            nc.log_joints(joint_positions)
+            with Timer():
+                nc.log_joints(joint_positions)
 
             segment_frames += 1
             time.sleep(1 / config.fps)
 
         # Stop recording
-        nc.stop_recording()
+        with Timer(max_time=5):
+            nc.stop_recording(wait=True)
         logger.info(f"Completed segment {segment+1} with {segment_frames} frames")
 
         total_frames += segment_frames

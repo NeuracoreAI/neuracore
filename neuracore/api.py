@@ -1,5 +1,6 @@
 import concurrent
 import json
+from threading import Thread
 from typing import Optional
 
 import numpy as np
@@ -28,8 +29,16 @@ from .core.utils.depth_utils import MAX_DEPTH
 # Global active robot ID - allows us to avoid passing robot_name to every call
 _active_robot: Optional[Robot] = None
 _active_dataset_id: Optional[str] = None
-_active_recording_id: Optional[str] = None
+_active_recording_ids: dict[str, str] = {}
 _data_streams: dict[str, DataStream] = {}
+
+
+def _stop_recording_wait_for_threads(
+    robot: Robot, recording_id: str, threads: list[Thread]
+) -> None:
+    for thread in threads:
+        thread.join()
+    robot.stop_recording(recording_id)
 
 
 def login(api_key: Optional[str] = None) -> None:
@@ -110,8 +119,8 @@ def log_joints(
     if stream is None:
         stream = JointDataStream()
         _data_streams[str_id] = stream
-        if _active_recording_id is not None:
-            stream.start_recording(_active_recording_id)
+        if robot.name in _active_recording_ids:
+            stream.start_recording(_active_recording_ids[robot.name])
     stream.log(positions, timestamp)
 
 
@@ -142,8 +151,8 @@ def log_action(
     if stream is None:
         stream = ActionDataStream()
         _data_streams[str_id] = stream
-        if _active_recording_id is not None:
-            stream.start_recording(_active_recording_id)
+        if robot.name in _active_recording_ids:
+            stream.start_recording(_active_recording_ids[robot.name])
     stream.log(action, timestamp)
 
 
@@ -178,8 +187,8 @@ def log_rgb(
     if stream is None:
         stream = RGBDataStream(camera_id, image.shape[1], image.shape[0])
         _data_streams[str_id] = stream
-        if _active_recording_id is not None:
-            stream.start_recording(_active_recording_id)
+        if robot.name in _active_recording_ids:
+            stream.start_recording(_active_recording_ids[robot.name])
     if stream.width != image.shape[1] or stream.height != image.shape[0]:
         raise ValueError(
             f"RGB image dimensions {image.shape[1]}x{image.shape[0]} do not match "
@@ -226,8 +235,8 @@ def log_depth(
     if stream is None:
         stream = DepthDataStream(camera_id, depth.shape[1], depth.shape[0])
         _data_streams[str_id] = stream
-        if _active_recording_id is not None:
-            stream.start_recording(_active_recording_id)
+        if robot.name in _active_recording_ids:
+            stream.start_recording(_active_recording_ids[robot.name])
     if stream.width != depth.shape[1] or stream.height != depth.shape[0]:
         raise ValueError(
             f"Depth image dimensions {depth.shape[1]}x{depth.shape[0]} do not match "
@@ -246,35 +255,47 @@ def start_recording(robot_name: Optional[str] = None) -> None:
     Raises:
         RobotError: If no robot is active and no robot_name provided
     """
-    global _active_recording_id
-    if _active_recording_id is not None:
-        raise RobotError("Recording already in progress. Call stop_recording() first.")
+    global _active_recording_ids
     robot = _get_robot(robot_name)
+    if robot.name in _active_recording_ids:
+        raise RobotError("Recording already in progress. Call stop_recording() first.")
     if _active_dataset_id is None:
         raise RobotError("No active dataset. Call create_dataset() first.")
-    _active_recording_id = robot.start_recording(_active_dataset_id)
-    for stream in _data_streams.values():
-        stream.start_recording(_active_recording_id)
+    new_active_recording_id = robot.start_recording(_active_dataset_id)
+    for sname, stream in _data_streams.items():
+        if sname.startswith(robot.name):
+            stream.start_recording(new_active_recording_id)
+    _active_recording_ids[robot.name] = new_active_recording_id
 
 
-def stop_recording(robot_name: Optional[str] = None) -> None:
+def stop_recording(robot_name: Optional[str] = None, wait: bool = False) -> None:
     """
     Stop recording data for a specific robot.
 
     Args:
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        wait: Whether to wait for the recording to finish
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
     """
-    global _active_recording_id
+    global _active_recording_ids
     robot = _get_robot(robot_name)
-    if _active_recording_id is None:
+    if robot.name not in _active_recording_ids:
         raise RobotError("No active recording. Call start_recording() first.")
-    robot.stop_recording(_active_recording_id)
-    for stream in _data_streams.values():
-        stream.stop_recording()
-    _active_recording_id = None
+    threads: Thread = []
+    for sname, stream in _data_streams.items():
+        if sname.startswith(robot.name):
+            threads.append(stream.stop_recording())
+    stop_recording_thread = Thread(
+        target=_stop_recording_wait_for_threads,
+        args=(robot, _active_recording_ids[robot.name], threads),
+        daemon=False,
+    )
+    stop_recording_thread.start()
+    _active_recording_ids.pop(robot.name)
+    if wait:
+        stop_recording_thread.join()
 
 
 def get_dataset(name: str) -> Dataset:

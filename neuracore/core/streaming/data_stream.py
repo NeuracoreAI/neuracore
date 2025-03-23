@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 import time
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -9,7 +10,6 @@ import requests
 
 from ..auth import get_auth
 from ..const import API_URL
-from ..streaming.resumable_upload import ResumableUpload
 from ..utils.depth_utils import depth_to_rgb
 from .streaming_video_encoder import StreamingVideoEncoder
 
@@ -20,16 +20,25 @@ class DataStream(ABC):
     """Base class for data streams."""
 
     def __init__(self):
+        """Initialize the data stream.
+
+        This must be kept lightweight and not perform any blocking operations.
+        """
         self._recording = False
         self._recording_id = None
 
     def start_recording(self, recording_id: str):
-        """Start recording data."""
+        """Start recording data.
+
+        This must be kept lightweight and not perform any blocking operations.
+        """
         self._recording = True
         self._recording_id = recording_id
 
-    def stop_recording(self):
+    def stop_recording(self) -> threading.Thread:
         """Stop recording data."""
+        if not self.is_recording():
+            raise ValueError("Not recording")
         self._recording = False
         self._recording_id = None
 
@@ -61,12 +70,8 @@ class BufferedDataStream(DataStream):
         super().start_recording(recording_id)
         self._buffer = []
 
-    def stop_recording(self):
+    def _upload_loop(self, recoding_id: str, json_data: str):
         """Upload buffered data to storage."""
-        recoding_id = self._recording_id
-        super().stop_recording()
-        if not self._buffer:
-            return
         # Generate an upload URL
         upload_url_response = requests.get(
             f"{API_URL}/recording/{recoding_id}/json_upload_url?filename={self._filename}",
@@ -74,13 +79,27 @@ class BufferedDataStream(DataStream):
         )
         upload_url_response.raise_for_status()
         upload_url = upload_url_response.json()["url"]
-        data = json.dumps(self._buffer)
-        logger.info(f"Uploading {len(data)} bytes to {upload_url}")
+        logger.info(f"Uploading {len(json_data)} bytes to {upload_url}")
         response = requests.put(
-            upload_url, headers={"Content-Length": str(len(data))}, data=data
+            upload_url, headers={"Content-Length": str(len(json_data))}, data=json_data
         )
         response.raise_for_status()
         self._buffer = []
+
+    def stop_recording(self) -> threading.Thread:
+        """Upload buffered data to storage."""
+        recoding_id = self._recording_id
+        super().stop_recording()
+        if not self._buffer:
+            return
+        upload_thread = threading.Thread(
+            target=self._upload_loop,
+            args=(recoding_id, json.dumps(self._buffer)),
+            daemon=False,
+        )
+        upload_thread.start()
+        self._buffer = []
+        return upload_thread
 
 
 class ActionDataStream(BufferedDataStream):
@@ -110,20 +129,16 @@ class VideoDataStream(DataStream):
     def start_recording(self, recording_id: str):
         """Start video recording."""
         super().start_recording(recording_id)
-        resumable_upload = self.get_resumable_upload(recording_id)
-        self._encoder = StreamingVideoEncoder(resumable_upload, self.width, self.height)
+        self._encoder = StreamingVideoEncoder(
+            recording_id, self.camera_id, self.width, self.height
+        )
 
-    def stop_recording(self):
+    def stop_recording(self) -> threading.Thread:
         """Stop video recording and finalize encoding."""
-        if self.is_recording() and self._encoder is not None:
-            self._encoder.finish()
-        self._encoder = None
         super().stop_recording()
-
-    @abstractmethod
-    def get_resumable_upload(self, recording_id: str) -> ResumableUpload:
-        """Get a resumable upload object for the current recording."""
-        raise NotImplementedError()
+        upload_thread = self._encoder.finish()
+        self._encoder = None
+        return upload_thread
 
     @abstractmethod
     def log(self, data: np.ndarray, timestamp: Optional[float] = None):
@@ -133,26 +148,27 @@ class VideoDataStream(DataStream):
 class DepthDataStream(VideoDataStream):
     """Stream that encodes and uploads depth data as video."""
 
-    def get_resumable_upload(self, recording_id):
-        return ResumableUpload(recording_id, self.camera_id)
+    def start_recording(self, recording_id: str):
+        """Start video recording."""
+        super(DataStream, self).start_recording(recording_id)
+        self._encoder = StreamingVideoEncoder(
+            recording_id, self.camera_id, self.width, self.height, depth_to_rgb
+        )
 
     def log(self, data: np.ndarray, timestamp: Optional[float] = None):
         """Convert depth to RGB and log as a video frame."""
-        timestamp = timestamp or time.time()
         if not self.is_recording() or self._encoder is None:
             return
-        self._encoder.add_frame(depth_to_rgb(data), timestamp)
+        timestamp = timestamp or time.time()
+        self._encoder.add_frame(data, timestamp)
 
 
 class RGBDataStream(VideoDataStream):
     """Stream that encodes and uploads RGB data as video."""
 
-    def get_resumable_upload(self, recording_id):
-        return ResumableUpload(recording_id, self.camera_id)
-
     def log(self, data: np.ndarray, timestamp: Optional[float] = None):
         """Log an RGB frame."""
-        timestamp = timestamp or time.time()
         if not self.is_recording() or self._encoder is None:
             return
+        timestamp = timestamp or time.time()
         self._encoder.add_frame(data, timestamp)
