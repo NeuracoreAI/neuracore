@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from neuracore.core.auth import Auth, get_auth
 from aiortc import (
+    RTCIceGatherer,
     RTCPeerConnection,
     RTCSessionDescription,
     MediaStreamTrack,
@@ -39,6 +40,12 @@ class HandshakeMessage(BaseModel):
     id: str
 
 
+ICE_SERVERS = [
+    RTCIceServer(urls="stun:stun.l.google.com:19302"),
+    RTCIceServer(urls="stun:stun1.l.google.com:19302"),
+]
+
+
 @dataclass
 class PierToPierConnection:
     local_stream_id: str
@@ -47,16 +54,19 @@ class PierToPierConnection:
     auth: Auth = field(default_factory=get_auth)
     connection: RTCPeerConnection = field(
         default_factory=lambda: RTCPeerConnection(
-            configuration=RTCConfiguration(
-                iceServers=[
-                    RTCIceServer(urls="stun:stun.l.google.com:19302"),
-                    RTCIceServer(urls="stun:stun1.l.google.com:19302"),
-                ]
-            )
+            configuration=RTCConfiguration(iceServers=ICE_SERVERS)
         )
     )
     tracks: Dict[str, MediaStreamTrack] = field(default_factory=dict)
     _closed: bool = False
+
+    async def get_ice_gatherer(self)-> RTCIceGatherer:
+        sctp = self.connection.sctp
+        if sctp is not None:
+            return sctp.transport.transport.iceGatherer
+        iceGather = RTCIceGatherer(iceServers=ICE_SERVERS)
+        await iceGather.gather()
+        return iceGather
 
     async def setup_connection(self):
         """Set up event handlers for the connection"""
@@ -67,33 +77,34 @@ class PierToPierConnection:
 
         @self.connection.on("icegatheringstatechange")
         async def on_icegatheringstatechange():
-            print(
-                f"ICE gathering state changed to {self.connection.iceGatheringState}"
-            )
-            if self.connection.iceGatheringState == "complete":
-                # candidates are ready
-                iceGatherer = self.connection.sctp.transport.transport.iceGatherer
+            print(f"ICE gathering state changed to {self.connection.iceGatheringState}")
+            if self.connection.iceGatheringState != "complete":
+                return
+                # candidates are not ready
 
-                candidates = iceGatherer.getLocalCandidates()
+            print("getting local candidates")
+            iceGatherer = await self.get_ice_gatherer()
+            candidates = iceGatherer.getLocalCandidates()
+            for candidate in candidates:
+                if candidate.sdpMid is None or candidate.sdpMLineIndex is None:
+                    print(f"Warning: Candidate missing sdpMid or sdpMLineIndex, {candidate}")
+                    continue
 
-                for candidate in candidates:
-                    self.send_message(
-                        MessageType.ICE_CANDIDATE,
-                        json.dumps(
-                            {
-                                "candidate": candidate_to_sdp(candidate),
-                                "sdpMLineIndex": candidate.sdpMLineIndex,
-                                "sdpMid": candidate.sdpMid,
-                                "usernameFragment": iceGatherer.getLocalParameters().usernameFragment,
-                            }
-                        ),
-                    )
+                await self.send_message(
+                    MessageType.ICE_CANDIDATE,
+                    json.dumps(
+                        {
+                            "candidate": candidate_to_sdp(candidate),
+                            "sdpMLineIndex": candidate.sdpMLineIndex,
+                            "sdpMid": candidate.sdpMid,
+                            "usernameFragment": iceGatherer.getLocalParameters().usernameFragment,
+                        }
+                    ),
+                )
 
         @self.connection.on("connectionstatechange")
         async def on_connectionstatechange():
-            print(
-                f"Connection state changed to: {self.connection.connectionState}"
-            )
+            print(f"Connection state changed to: {self.connection.connectionState}")
             if self.connection.iceConnectionState == "failed":
                 await self.connection.restartIce()
 
@@ -115,26 +126,30 @@ class PierToPierConnection:
         """Add a track to the connection"""
         self.connection.addTrack(track)
 
-    async def create_offer(self):
-        """Create an offer and set it as local description"""
-        offer = await self.connection.createOffer()
-        await self.connection.setLocalDescription(offer)
-        await self.send_message(
-            MessageType.SDP_OFFER, self.connection.localDescription.sdp
-        )
+    # async def create_offer(self):
+    #     """Create an offer and set it as local description"""
+    #     offer = await self.connection.createOffer()
+    #     await self.connection.setLocalDescription(offer)
+    #     await self.send_message(
+    #         MessageType.SDP_OFFER, self.connection.localDescription.sdp
+    #     )
 
     async def send_message(self, message_type: MessageType, content: str):
         """Send a message to the remote peer through the signaling server"""
-        print(f"Send Message: {message_type}")
+        print(f"Send Message: {message_type}, {self.local_stream_id=} {self.remote_stream_id=}")
         await self.client_session.post(
             f"{API_URL}/signalling/submit/{message_type.value}/from/{self.local_stream_id}/to/{self.remote_stream_id}",
             headers=self.auth.get_headers(),
             data=content,
         )
 
-    async def on_ice(self, ice: str):
+    async def on_ice(self, ice_message: str):
         """Handle received ICE candidate"""
-        candidate = candidate_from_sdp(ice)
+
+        ice_content = json.loads(ice_message)
+        candidate = candidate_from_sdp(ice_content["candidate"])
+        candidate.sdpMid = ice_content["sdpMid"]
+        candidate.sdpMLineIndex = ice_content["sdpMLineIndex"]
         await self.connection.addIceCandidate(candidate)
 
     async def on_offer(self, offer: str):
@@ -143,13 +158,15 @@ class PierToPierConnection:
         await self.connection.setRemoteDescription(offer)
 
         answer = await self.connection.createAnswer()
+
         await self.connection.setLocalDescription(answer)
+        print(f"set local description {self.connection.sctp=}")
         await self.send_message(MessageType.SDP_ANSWER, answer.sdp)
 
-    async def on_answer(self, answer: str):
-        """Handle received SDP answer"""
-        answer = RTCSessionDescription(answer, type="answer")
-        await self.connection.setRemoteDescription(answer)
+    # async def on_answer(self, answer: str):
+    #     """Handle received SDP answer"""
+    #     answer = RTCSessionDescription(answer, type="answer")
+    #     await self.connection.setRemoteDescription(answer)
 
     async def close(self):
         """Close the connection"""
@@ -249,12 +266,12 @@ class ClientStreamingManager:
         return video_source
 
     async def create_new_connection(
-        self, remote_stream_id: str
+        self, local_stream_id: str,remote_stream_id: str
     ) -> PierToPierConnection:
         """Create a new P2P connection to a remote stream"""
 
         connection = PierToPierConnection(
-            local_stream_id=self.robot_id,
+            local_stream_id=local_stream_id,
             remote_stream_id=remote_stream_id,
             client_session=self.client_session,
             auth=self.auth,
@@ -266,9 +283,6 @@ class ClientStreamingManager:
         # Add existing tracks to the connection
         for video_track in self.video_tracks.values():
             await connection.add_track(video_track)
-
-        # Create and send an offer
-        await connection.create_offer()
 
         self.connections[remote_stream_id] = connection
         return connection
@@ -295,6 +309,7 @@ class ClientStreamingManager:
                         connection = self.connections.get(message.from_id)
                         if connection is None:
                             connection = await self.create_new_connection(
+                                message.to_id,
                                 message.from_id
                             )
 
@@ -303,7 +318,8 @@ class ClientStreamingManager:
                             case MessageType.SDP_OFFER:
                                 await connection.on_offer(message.data)
                             case MessageType.SDP_ANSWER:
-                                await connection.on_answer(message.data)
+                                # await connection.on_answer(message.data)
+                                pass
                             case MessageType.ICE_CANDIDATE:
                                 await connection.on_ice(message.data)
                             case MessageType.HEARTBEAT:
@@ -316,7 +332,7 @@ class ClientStreamingManager:
                 await asyncio.sleep(5)
             except Exception as e:
                 print(f"Unexpected error: {e}")
-                await asyncio.sleep(5)  
+                await asyncio.sleep(5)
 
     async def close_connections(self):
         await asyncio.gather(
