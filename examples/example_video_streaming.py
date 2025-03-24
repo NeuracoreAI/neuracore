@@ -10,14 +10,8 @@ async def simulate_camera_frames(num_frames=1_000_000, width=640, height=480):
     for i in range(num_frames):
         # Create a test frame (gradient that changes over time)
         frame = np.zeros((height, width, 3), dtype=np.uint8)
-        frame[:, :, 0] = int(255 * (i / num_frames))  # Red channel
-        frame[:, :, 1] = 255 - int(255 * (i / num_frames))  # Green channel
-
-        # first_half = i < num_frames // 2
-        # if first_half:
-        #     dt = 0.001
-        # else:
-        #     dt = 0.05
+        frame[:, :, 0] = int(255 * (i % 60 / 60))  # Red channel
+        frame[:, :, 1] = 255 - int(255 * (i % 60 / 60))  # Green channel
 
         # Simulate irregular frame timing
         dt = 0.02 + 0.03 * np.random.random()  # Between 20-50ms

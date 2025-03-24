@@ -3,20 +3,19 @@ from enum import Enum
 import json
 import asyncio
 import time
-from typing import Optional, Dict
-
+from typing import Callable, Optional, Dict
 from av import VideoFrame
 import numpy as np
 from pydantic import BaseModel
-
 from neuracore.core.auth import Auth, get_auth
 from aiortc import (
+    MediaStreamTrack,
     RTCIceGatherer,
     RTCPeerConnection,
     RTCSessionDescription,
-    MediaStreamTrack,
     RTCConfiguration,
     RTCIceServer,
+    VideoStreamTrack,
 )
 from aiortc.contrib.media import MediaBlackhole
 from aiohttp_sse_client import client as sse_client
@@ -51,6 +50,7 @@ ICE_SERVERS = [
 class PierToPierConnection:
     local_stream_id: str
     remote_stream_id: str
+    on_close: Callable
     client_session: ClientSession = field(default_factory=ClientSession)
     auth: Auth = field(default_factory=get_auth)
     connection: RTCPeerConnection = field(
@@ -58,10 +58,9 @@ class PierToPierConnection:
             configuration=RTCConfiguration(iceServers=ICE_SERVERS)
         )
     )
-    tracks: Dict[str, MediaStreamTrack] = field(default_factory=dict)
     _closed: bool = False
 
-    async def get_ice_gatherer(self)-> RTCIceGatherer:
+    async def get_ice_gatherer(self) -> RTCIceGatherer:
         sctp = self.connection.sctp
         if sctp is not None:
             return sctp.transport.transport.iceGatherer
@@ -88,7 +87,9 @@ class PierToPierConnection:
             candidates = iceGatherer.getLocalCandidates()
             for candidate in candidates:
                 if candidate.sdpMid is None or candidate.sdpMLineIndex is None:
-                    print(f"Warning: Candidate missing sdpMid or sdpMLineIndex, {candidate}")
+                    print(
+                        f"Warning: Candidate missing sdpMid or sdpMLineIndex, {candidate}"
+                    )
                     continue
 
                 await self.send_message(
@@ -107,18 +108,13 @@ class PierToPierConnection:
         async def on_connectionstatechange():
             print(f"Connection state changed to: {self.connection.connectionState}")
             if self.connection.iceConnectionState == "failed":
-                await self.connection.restartIce()
+                await self.close()
 
             if self.connection.connectionState == "closed":
                 await self.close()
 
         @self.connection.on("track")
         async def on_track(track):
-            print(f"Track received: {track.kind}")
-            # Record the track for potential processing
-            self.tracks[track.kind] = track
-
-            # throw away any incoming media
             blackhole = MediaBlackhole()
             blackhole.addTrack(track)
             await blackhole.start()
@@ -127,17 +123,11 @@ class PierToPierConnection:
         """Add a track to the connection"""
         self.connection.addTrack(track)
 
-    # async def create_offer(self):
-    #     """Create an offer and set it as local description"""
-    #     offer = await self.connection.createOffer()
-    #     await self.connection.setLocalDescription(offer)
-    #     await self.send_message(
-    #         MessageType.SDP_OFFER, self.connection.localDescription.sdp
-    #     )
-
     async def send_message(self, message_type: MessageType, content: str):
         """Send a message to the remote peer through the signaling server"""
-        print(f"Send Message: {message_type}, {self.local_stream_id=} {self.remote_stream_id=}")
+        print(
+            f"Send Message: {message_type}, {self.local_stream_id=} {self.remote_stream_id=}"
+        )
         await self.client_session.post(
             f"{API_URL}/signalling/submit/{message_type.value}/from/{self.local_stream_id}/to/{self.remote_stream_id}",
             headers=self.auth.get_headers(),
@@ -146,7 +136,8 @@ class PierToPierConnection:
 
     async def on_ice(self, ice_message: str):
         """Handle received ICE candidate"""
-
+        if self._closed:
+            return
         ice_content = json.loads(ice_message)
         candidate = candidate_from_sdp(ice_content["candidate"])
         candidate.sdpMid = ice_content["sdpMid"]
@@ -155,6 +146,8 @@ class PierToPierConnection:
 
     async def on_offer(self, offer: str):
         """Handle received SDP offer"""
+        if self._closed:
+            return
         offer = RTCSessionDescription(offer, type="offer")
         await self.connection.setRemoteDescription(offer)
 
@@ -163,11 +156,6 @@ class PierToPierConnection:
         await self.connection.setLocalDescription(answer)
         print(f"set local description {self.connection.sctp=}")
         await self.send_message(MessageType.SDP_ANSWER, answer.sdp)
-
-    # async def on_answer(self, answer: str):
-    #     """Handle received SDP answer"""
-    #     answer = RTCSessionDescription(answer, type="answer")
-    #     await self.connection.setRemoteDescription(answer)
 
     async def close(self):
         """Close the connection"""
@@ -178,28 +166,29 @@ class PierToPierConnection:
             await self.connection.close()
 
 
-MAX_STREAMING_FPS=30
+MAX_STREAMING_FPS = 30
 
-@dataclass
-class VideoTrackSource:
-    recording_id: str
-    sensor_name: str
-    _queue: asyncio.Queue[VideoFrame] = field(default_factory=lambda: asyncio.Queue(maxsize=MAX_STREAMING_FPS))
-    _closed: bool = False
-    _last_frame_time: float = field(default_factory=lambda: time.time())
+class VideoTrack(VideoStreamTrack):
+    """A media stream track for video"""
 
-    """A source for video track data"""
+    def __init__(self):
+        super().__init__()
+        self._ended = False
+        self._last_frame_time: float = time.time()
+        self._queue: asyncio.Queue[VideoFrame] = asyncio.Queue(
+            maxsize=MAX_STREAMING_FPS
+        )
 
     def add_frame(self, frame_data: np.ndarray):
         """Add a frame to the queue with rate limiting and dropping old frames"""
-        if self._closed:
+        if self._ended:
             return
 
         current_time = time.time()
         time_diff = current_time - self._last_frame_time
 
         if time_diff < 1 / MAX_STREAMING_FPS:
-            return # drop frames that are to fast
+            return  # drop frames that are to fast
 
         self._last_frame_time = current_time
 
@@ -210,45 +199,34 @@ class VideoTrackSource:
 
     async def get_frame(self) -> Optional[VideoFrame]:
         """Get the next frame from the queue"""
-        if self._closed:
+        if self._ended:
             return None
 
         try:
-            return await asyncio.wait_for(self._queue.get(), timeout=1.0)
+            return await asyncio.wait_for(self._queue.get(), timeout=1)
         except asyncio.TimeoutError:
             return None
-
-    def close(self):
-        """Close the source"""
-        self._closed = True
-
-
-class VideoTrack(MediaStreamTrack):
-    """A media stream track for video"""
-
-    kind = "video"
-
-    def __init__(self, source: VideoTrackSource):
-        super().__init__()
-        self.source = source
-        self._ended = False
 
     async def recv(self):
         """Receive the next frame"""
         if self._ended:
             raise Exception("Track has ended")
 
-        frame_data = await self.source.get_frame()
+        frame_data = await self.get_frame()
+
+        print(f"send frame {frame_data=}")
         if frame_data is None:
             self._ended = True
             raise Exception("Track has ended")
 
+        pts, time_base = await self.next_timestamp()
+        frame_data.pts = pts
+        frame_data.time_base = time_base
         return frame_data
 
     def stop(self):
         """Stop the track"""
         self._ended = True
-        self.source.close()
 
 
 @dataclass
@@ -258,38 +236,38 @@ class ClientStreamingManager:
     client_session: ClientSession = field(default_factory=ClientSession)
     auth: Auth = field(default_factory=get_auth)
     connections: Dict[str, PierToPierConnection] = field(default_factory=dict)
-    video_sources: Dict[str, VideoTrackSource] = field(default_factory=dict)
     video_tracks: Dict[str, VideoTrack] = field(default_factory=dict)
 
     def get_recording_video_stream(
         self, recording_id: str, sensor_name: str
-    ) -> VideoTrackSource:
+    ) -> VideoTrack:
         """Start a new recording stream"""
         stream_key = f"{recording_id}_{sensor_name}"
 
-        if stream_key in self.video_sources:
-            return self.video_sources[stream_key]
+        if stream_key in self.video_tracks:
+            return self.video_tracks[stream_key]
 
-        video_source = VideoTrackSource(recording_id, sensor_name)
-        self.video_sources[stream_key] = video_source
-
-        video_track = VideoTrack(video_source)
+        video_track = VideoTrack()
         self.video_tracks[stream_key] = video_track
 
         # Add this track to all existing connections
         for connection in self.connections.values():
             connection.add_track(video_track)
 
-        return video_source
+        return video_track
 
     async def create_new_connection(
-        self, local_stream_id: str,remote_stream_id: str
+        self, local_stream_id: str, remote_stream_id: str
     ) -> PierToPierConnection:
         """Create a new P2P connection to a remote stream"""
+
+        def on_close():
+            del self.connections[remote_stream_id]
 
         connection = PierToPierConnection(
             local_stream_id=local_stream_id,
             remote_stream_id=remote_stream_id,
+            on_close=on_close,
             client_session=self.client_session,
             auth=self.auth,
         )
@@ -326,22 +304,16 @@ class ClientStreamingManager:
                         connection = self.connections.get(message.from_id)
                         if connection is None:
                             connection = await self.create_new_connection(
-                                message.to_id,
-                                message.from_id
+                                message.to_id, message.from_id
                             )
 
                         # Process the message
                         match message.type:
                             case MessageType.SDP_OFFER:
                                 await connection.on_offer(message.data)
-                            case MessageType.SDP_ANSWER:
-                                # await connection.on_answer(message.data)
-                                pass
                             case MessageType.ICE_CANDIDATE:
                                 await connection.on_ice(message.data)
-                            case MessageType.HEARTBEAT:
-                                pass
-                            case MessageType.STREAM_INFO:
+                            case _:
                                 pass
 
             except ConnectionError as e:
@@ -370,7 +342,6 @@ class ClientStreamingManager:
             track.stop()
 
         self.connections.clear()
-        self.video_sources.clear()
         self.video_tracks.clear()
 
 
