@@ -143,6 +143,7 @@ class StreamingVideoEncoder:
             frame_data: RGB frame data as numpy array with shape (height, width, 3)
             timestamp: Frame timestamp in seconds (can be irregular)
         """
+        return
         self._upload_queue.put((frame_data, timestamp))
         logger.info(f"Added frame to upload queue at {timestamp}")
 
