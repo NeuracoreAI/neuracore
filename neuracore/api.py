@@ -22,6 +22,7 @@ from .core.streaming.data_stream import (
     DataStream,
     DepthDataStream,
     JointDataStream,
+    LanguageDataStream,
     RGBDataStream,
 )
 from .core.utils.depth_utils import MAX_DEPTH
@@ -154,6 +155,35 @@ def log_action(
         if robot.name in _active_recording_ids:
             stream.start_recording(_active_recording_ids[robot.name])
     stream.log(action, timestamp)
+
+
+def log_language(
+    language: str,
+    robot_name: Optional[str] = None,
+    timestamp: Optional[float] = None,
+) -> None:
+    """
+    Log action for a robot.
+
+    Args:
+        language: A language string associated with this timestep
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        timestamp: Optional timestamp
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+    """
+    if not isinstance(language, str):
+        raise ValueError("Language must be a string")
+    robot = _get_robot(robot_name)
+    str_id = f"{robot.name}_language"
+    stream = _data_streams.get(str_id)
+    if stream is None:
+        stream = LanguageDataStream()
+        _data_streams[str_id] = stream
+        if robot.name in _active_recording_ids:
+            stream.start_recording(_active_recording_ids[robot.name])
+    stream.log(language, timestamp)
 
 
 def log_rgb(

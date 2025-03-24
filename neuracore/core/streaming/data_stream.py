@@ -116,6 +116,13 @@ class JointDataStream(BufferedDataStream):
         super().__init__("joint_states.json")
 
 
+class LanguageDataStream(BufferedDataStream):
+    """Stream that logs robot actions."""
+
+    def __init__(self):
+        super().__init__("language_annotation.json")
+
+
 class VideoDataStream(DataStream):
     """Stream that encodes and uploads video data."""
 
