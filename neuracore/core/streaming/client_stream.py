@@ -2,6 +2,7 @@ from dataclasses import field, dataclass
 from enum import Enum
 import json
 import asyncio
+import time
 from typing import Optional, Dict
 
 from av import VideoFrame
@@ -177,19 +178,35 @@ class PierToPierConnection:
             await self.connection.close()
 
 
+MAX_STREAMING_FPS=30
+
 @dataclass
 class VideoTrackSource:
     recording_id: str
     sensor_name: str
-    _queue: asyncio.Queue[VideoFrame] = field(default_factory=asyncio.Queue)
-    _closed = False
+    _queue: asyncio.Queue[VideoFrame] = field(default_factory=lambda: asyncio.Queue(maxsize=MAX_STREAMING_FPS))
+    _closed: bool = False
+    _last_frame_time: float = field(default_factory=lambda: time.time())
 
     """A source for video track data"""
 
     def add_frame(self, frame_data: np.ndarray):
-        """Add a frame to the queue"""
-        if not self._closed:
-            self._queue.put_nowait(VideoFrame.from_ndarray(frame_data))
+        """Add a frame to the queue with rate limiting and dropping old frames"""
+        if self._closed:
+            return
+
+        current_time = time.time()
+        time_diff = current_time - self._last_frame_time
+
+        if time_diff < 1 / MAX_STREAMING_FPS:
+            return # drop frames that are to fast
+
+        self._last_frame_time = current_time
+
+        if self._queue.full():
+            self._queue.get_nowait()
+
+        self._queue.put_nowait(VideoFrame.from_ndarray(frame_data))
 
     async def get_frame(self) -> Optional[VideoFrame]:
         """Get the next frame from the queue"""
