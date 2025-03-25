@@ -124,6 +124,7 @@ class ClientStreamingManager:
 
         self.connections.clear()
         self.video_tracks.clear()
+        self.client_session.close()
 
 
 _streaming_managers: Dict[str, ClientStreamingManager] = {}

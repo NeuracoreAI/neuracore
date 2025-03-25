@@ -30,7 +30,7 @@ class PierToPierConnection:
     local_stream_id: str
     remote_stream_id: str
     on_close: Callable
-    client_session: ClientSession = field(default_factory=ClientSession)
+    client_session: ClientSession
     auth: Auth = field(default_factory=get_auth)
     connection: RTCPeerConnection = field(
         default_factory=lambda: RTCPeerConnection(
