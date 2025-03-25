@@ -15,6 +15,8 @@ from aiortc import (
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.streaming.client_stream.models import MessageType
 from aiortc.sdp import candidate_from_sdp, candidate_to_sdp
+
+from neuracore.core.streaming.client_stream.video_source import VideoSource
 from ...const import API_URL
 
 ICE_SERVERS = [
@@ -89,9 +91,9 @@ class PierToPierConnection:
                     await self.close()
 
 
-    async def add_track(self, track: MediaStreamTrack):
+    async def add_video_source(self, source: VideoSource):
         """Add a track to the connection"""
-        self.connection.addTrack(track)
+        self.connection.addTrack(source.get_video_track())
 
     async def send_message(self, message_type: MessageType, content: str):
         """Send a message to the remote peer through the signaling server"""

@@ -7,7 +7,7 @@ from aiohttp import ClientSession
 
 from neuracore.core.streaming.client_stream.models import HandshakeMessage, MessageType
 from ...const import API_URL
-from .video_track import VideoTrack
+from .video_source import VideoSource
 from .connection import PierToPierConnection
 
 
@@ -19,23 +19,23 @@ class ClientStreamingManager:
     client_session: ClientSession = field(default_factory=ClientSession)
     auth: Auth = field(default_factory=get_auth)
     connections: Dict[str, PierToPierConnection] = field(default_factory=dict)
-    video_tracks: Dict[str, VideoTrack] = field(default_factory=dict)
+    video_tracks: Dict[str, VideoSource] = field(default_factory=dict)
 
     def get_recording_video_stream(
         self, recording_id: str, sensor_name: str
-    ) -> VideoTrack:
+    ) -> VideoSource:
         """Start a new recording stream"""
         stream_key = f"{recording_id}_{sensor_name}"
 
         if stream_key in self.video_tracks:
             return self.video_tracks[stream_key]
 
-        video_track = VideoTrack()
+        video_track = VideoSource()
         self.video_tracks[stream_key] = video_track
 
         # Add this track to all existing connections
         for connection in self.connections.values():
-            connection.add_track(video_track)
+            connection.add_video_source(video_track)
 
         return video_track
 
@@ -58,7 +58,7 @@ class ClientStreamingManager:
         connection.setup_connection()
 
         for video_track in self.video_tracks.values():
-            await connection.add_track(video_track)
+            await connection.add_video_source(video_track)
 
         self.connections[remote_stream_id] = connection
         return connection
