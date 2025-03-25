@@ -4,6 +4,7 @@ import logging
 import queue
 import threading
 from fractions import Fraction
+from typing import Callable
 
 import av
 import numpy as np
@@ -24,9 +25,11 @@ class StreamingVideoEncoder:
 
     def __init__(
         self,
-        resumable_upload: ResumableUpload,
+        recording_id: str,
+        camera_id: str,
         width: int,
         height: int,
+        transform_frame: Callable[[np.ndarray], np.ndarray] | None = None,
         codec: str = "libx264",
         pixel_format: str = "yuv444p10le",
         chunk_size: int = CHUNK_MULTIPLE,
@@ -35,28 +38,42 @@ class StreamingVideoEncoder:
         Initialize a streaming video encoder.
 
         Args:
-            resumable_upload: Resumable upload handler
+            recording_id: Recording ID
+            camera_id: Camera ID
             width: Frame width
             height: Frame height
+            transform_frame: Frame transformation function
             codec: Video codec
             pixel_format: Pixel format
             chunk_size: Size of chunks to upload
             framerate_cap: Optional framerate cap (frames per second) excessive frames will be dropped
         """
-        self.uploader = resumable_upload
+        self.recording_id = recording_id
+        self.camera_id = camera_id
         self.width = width
         self.height = height
+        self.transform_frame = transform_frame
+        self.codec = codec
         self.pixel_format = pixel_format
+        self.chunk_size = chunk_size
+        self._streaming_done = False
+        self._upload_queue = queue.Queue()
+        # Thread will continue, even if main thread exits
+        self._upload_thread = threading.Thread(target=self._upload_loop, daemon=False)
+        self._upload_thread.start()
+
+    def _thread_setup(self) -> None:
+        """Setup thread for upload loop."""
 
         # Ensure chunk_size is a multiple of 256 KiB
-        if chunk_size % CHUNK_MULTIPLE != 0:
-            self.chunk_size = ((chunk_size // CHUNK_MULTIPLE) + 1) * CHUNK_MULTIPLE
+        if self.chunk_size % CHUNK_MULTIPLE != 0:
+            self.chunk_size = ((self.chunk_size // CHUNK_MULTIPLE) + 1) * CHUNK_MULTIPLE
             logger.info(
                 f"Adjusted chunk size to {self.chunk_size/1024:.0f} "
                 "KiB to ensure it's a multiple of {CHUNK_MULTIPLE} MiB"
             )
-        else:
-            self.chunk_size = chunk_size
+
+        self.uploader = ResumableUpload(self.recording_id, self.camera_id)
 
         # Create in-memory buffer
         self.buffer = io.BytesIO()
@@ -70,10 +87,10 @@ class StreamingVideoEncoder:
         )
 
         # Create video stream
-        self.stream = self.container.add_stream(codec)
-        self.stream.width = width
-        self.stream.height = height
-        self.stream.pix_fmt = pixel_format
+        self.stream = self.container.add_stream(self.codec)
+        self.stream.width = self.width
+        self.stream.height = self.height
+        self.stream.pix_fmt = self.pixel_format
         self.stream.codec_context.options = {"qp": "0", "preset": "ultrafast"}
 
         self.stream.time_base = Fraction(1, PTS_FRACT)
@@ -91,16 +108,13 @@ class StreamingVideoEncoder:
         self.last_write_position = 0
         self.timestamps = []
 
-        self._streaming_done = False
-        self._upload_queue = queue.Queue()
-        self._upload_thread = threading.Thread(target=self._upload_loop)
-        self._upload_thread.start()
-
     def _upload_loop(self) -> None:
         """
         Upload chunks in a separate thread.
         """
-        while not self._streaming_done:
+        self._thread_setup()
+        # If final has not been called, or we still have items in the queue
+        while not self._streaming_done or self._upload_queue.qsize() > 0:
             try:
                 frame_data, timestamp = self._upload_queue.get(timeout=0.1)
                 if frame_data is None:
@@ -156,6 +170,9 @@ class StreamingVideoEncoder:
             timestamp: Frame timestamp in seconds (can be irregular)
         """
 
+        if self.transform_frame is not None:
+            frame_data = self.transform_frame(frame_data)
+
         # Handle first frame timestamp
         if self.first_timestamp is None:
             self.first_timestamp = timestamp
@@ -199,13 +216,14 @@ class StreamingVideoEncoder:
             if not success:
                 raise RuntimeError("Failed to upload chunk")
 
-    def finish(self) -> None:
+    def finish(self) -> threading.Thread:
         """
         Finish encoding and upload any remaining data.
         """
+        # Note we dont join on the (non-daemon) thread as we dont want to block
         self._upload_queue.put((None, None))
         self._streaming_done = True
-        self._upload_thread.join()
+        return self._upload_thread
 
     def _upload_timestamps(self) -> None:
         """

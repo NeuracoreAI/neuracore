@@ -195,13 +195,12 @@ class EpisodeIterator:
 
     def _stream_data_loop(self, camera_id: str):
         """Stream data from the video URL."""
-        while self._running:
-            camera_url = self._get_video_url(camera_id)
-            with VideoStreamer(camera_url) as streamer:
-                for i, frame in enumerate(streamer):
-                    self._msg_queues[camera_id].put((frame, i))
-            # Signal end of data stream
-            self._msg_queues[camera_id].put(None)
+        camera_url = self._get_video_url(camera_id)
+        with VideoStreamer(camera_url) as streamer:
+            for i, frame in enumerate(streamer):
+                self._msg_queues[camera_id].put((frame, i))
+        # Signal end of data stream
+        self._msg_queues[camera_id].put((None, None))
 
     def close(self):
         """Explicitly close with proper cleanup."""
@@ -231,11 +230,13 @@ class EpisodeIterator:
             desired_frame_idx,
         ) in sync_point.camera_id_to_frame_idx.items():
             while True:
-                data = self._msg_queues[camera_id].get(timeout=10.0)
-                if data is None:
+                try:
+                    frame, frame_idx = self._msg_queues[camera_id].get(timeout=10.0)
+                except queue.Empty:
+                    frame = None
+                if frame is None:
                     logger.info(f"End of data stream for camera {camera_id}")
                     break
-                frame, frame_idx = data
                 if frame_idx == desired_frame_idx:
                     logger.info(f"Received frame {frame_idx} for camera {camera_id}")
                     # check if name starts with depth

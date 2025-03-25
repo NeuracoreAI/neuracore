@@ -29,7 +29,7 @@ def main(args):
 
     if record:
         nc.create_dataset(
-            name="Example Dataset", description="This is an example dataset"
+            name="MP4 Dataset V2", description="This is an example dataset"
         )
         print("Created Dataset...")
 
@@ -86,7 +86,6 @@ def main(args):
     print(
         f"Success rate: {np.mean(success)*100:.1f}% ({np.sum(success)}/{len(success)})"
     )
-    nc.stop_all()
 
 
 if __name__ == "__main__":

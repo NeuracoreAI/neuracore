@@ -50,10 +50,7 @@ def rollout_policy(
         plt.close()
 
     # Calculate rewards
-    episode_return = np.sum([ts.reward for ts in episode[1:]])
     episode_max_reward = np.max([ts.reward for ts in episode[1:]])
-
-    print(f"Episode return: {episode_return}, Max reward: {episode_max_reward}")
 
     # Convert joint trajectory to action trajectory
     joint_trajectory = [ts.observation["qpos"] for ts in episode]

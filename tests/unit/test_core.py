@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 import neuracore as nc
+from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 
 
@@ -11,7 +12,7 @@ def test_login_logout(temp_config_dir, mock_auth_requests, reset_neuracore):
     nc.login("test_api_key")
 
     # Check authentication state
-    auth = nc.auth.get_auth()
+    auth = get_auth()
     assert auth.is_authenticated
     assert auth.api_key == "test_api_key"
 
@@ -197,40 +198,3 @@ def test_connect_local_endpoint(
         images={"top": np.zeros((100, 100, 3), dtype=np.uint8)},
     )
     assert isinstance(pred, np.ndarray)
-
-
-def test_stop_functions(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, monkeypatch
-):
-    """Test stop and stop_all functions."""
-    # Ensure login and robot connection
-    nc.login("test_api_key")
-
-    # Mock robot creation
-    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
-
-    # Mock WebSocket-related behaviors
-    def mock_websockets_connect(*args, **kwargs):
-        class MockWebSocket:
-            async def send(self, message):
-                pass
-
-            async def close(self):
-                pass
-
-        return MockWebSocket()
-
-    monkeypatch.setattr("websockets.connect", mock_websockets_connect)
-
-    # Connect robot
-    nc.connect_robot("test_robot", mock_urdf)
-
-    # Test stop functions
-    try:
-        nc.stop("test_robot")
-        nc.stop_all()
-    except Exception as e:
-        pytest.fail(f"Stop functions raised unexpected exception: {e}")
-
-    # Verify global state reset
-    assert nc.api._active_robot is None
