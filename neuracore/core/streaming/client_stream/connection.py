@@ -135,3 +135,4 @@ class PierToPierConnection:
         if not self._closed:
             self._closed = True
             await self.connection.close()
+            self.on_close()
