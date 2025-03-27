@@ -71,6 +71,14 @@ class ClientStreamingManager:
             ).model_dump(mode="json"),
         )
 
+    async def heartbeat_response(self):
+        """Submit new track data"""
+        await self.client_session.post(
+            f"{API_URL}/signalling/alive",
+            headers=self.auth.get_headers(),
+            data="pong"
+        )
+
     async def create_new_connection(
         self, remote_stream_id: str
     ) -> PierToPierConnection:
@@ -104,6 +112,11 @@ class ClientStreamingManager:
                     headers=self.auth.get_headers(),
                 ) as event_source:
                     async for event in event_source:
+                        if event.type == "heartbeat":
+                            await self.heartbeat_response()
+                            continue
+
+
                         message = HandshakeMessage.model_validate_json(event.data)
                         print(f"Message Received {message}")
                         if not self.available_for_connections:

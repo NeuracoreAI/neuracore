@@ -10,7 +10,6 @@ class MessageType(str, Enum):
     SDP_OFFER = "offer"
     SDP_ANSWER = "answer"
     ICE_CANDIDATE = "ice"
-    HEARTBEAT = "heartbeat"
     STREAM_END = "end"
 
 class HandshakeMessage(BaseModel):
