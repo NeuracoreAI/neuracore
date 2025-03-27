@@ -13,7 +13,7 @@ from aiortc import (
 )
 
 from neuracore.core.auth import Auth, get_auth
-from neuracore.core.streaming.client_stream.models import MessageType
+from neuracore.core.streaming.client_stream.models import HandshakeMessage, MessageType
 from aiortc.sdp import candidate_from_sdp, candidate_to_sdp
 
 from neuracore.core.streaming.client_stream.video_source import VideoSource
@@ -90,7 +90,6 @@ class PierToPierConnection:
                 case "closed" | "failed":
                     await self.close()
 
-
     async def add_video_source(self, source: VideoSource):
         """Add a track to the connection"""
         self.connection.addTrack(source.get_video_track())
@@ -101,9 +100,14 @@ class PierToPierConnection:
             f"Send Message: {message_type}, {self.local_stream_id=} {self.remote_stream_id=}"
         )
         await self.client_session.post(
-            f"{API_URL}/signalling/submit/{message_type.value}/from/{self.local_stream_id}/to/{self.remote_stream_id}",
+            f"{API_URL}/signalling/message/submit",
             headers=self.auth.get_headers(),
-            data=content,
+            json=HandshakeMessage(
+                from_id=self.local_stream_id,
+                to_id=self.remote_stream_id,
+                type=message_type,
+                data=content,
+            ).model_dump(mode="json"),
         )
 
     async def on_ice(self, ice_message: str):
@@ -121,7 +125,7 @@ class PierToPierConnection:
         if self._closed:
             print("offer to closed connection")
             return
-            
+
         offer = RTCSessionDescription(offer, type="offer")
         await self.connection.setRemoteDescription(offer)
 

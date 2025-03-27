@@ -1,6 +1,7 @@
 from dataclasses import field, dataclass
 import asyncio
 from typing import Dict, List
+from uuid import uuid4
 from neuracore.core.auth import Auth, get_auth
 from aiohttp_sse_client import client as sse_client
 from aiohttp import ClientSession
@@ -34,9 +35,7 @@ class ClientStreamingManager:
     connections: Dict[str, PierToPierConnection] = field(default_factory=dict)
     video_tracks_cache: Dict[str, VideoSource] = field(default_factory=dict)
     tracks: List[VideoSource] = field(default_factory=list)
-    local_stream_id: asyncio.Future[str] = field(
-        default_factory=lambda: get_loop().create_future()
-    )
+    local_stream_id: str = field(default_factory=lambda: uuid4().hex)
 
     def get_recording_video_stream(self, sensor_name: str) -> VideoSource:
         """Start a new recording stream"""
@@ -59,14 +58,13 @@ class ClientStreamingManager:
 
     async def submit_track(self, mid: str, kind: str, label: str):
         """Submit new track data"""
-        stream_id = await self.local_stream_id
-        print(f"Submit track {stream_id=} {mid=} {kind=} {label=}")
+        print(f"Submit track {self.local_stream_id=} {mid=} {kind=} {label=}")
         await self.client_session.post(
             f"{API_URL}/signalling/track",
             headers=self.auth.get_headers(),
             json=RobotStreamTrack(
                 robot_id=self.robot_id,
-                stream_id=stream_id,
+                stream_id=self.local_stream_id,
                 mid=mid,
                 kind=kind,
                 label=label,
@@ -74,7 +72,7 @@ class ClientStreamingManager:
         )
 
     async def create_new_connection(
-        self, local_stream_id: str, remote_stream_id: str
+        self, remote_stream_id: str
     ) -> PierToPierConnection:
         """Create a new P2P connection to a remote stream"""
 
@@ -82,7 +80,7 @@ class ClientStreamingManager:
             del self.connections[remote_stream_id]
 
         connection = PierToPierConnection(
-            local_stream_id=local_stream_id,
+            local_stream_id=self.local_stream_id,
             remote_stream_id=remote_stream_id,
             on_close=on_close,
             client_session=self.client_session,
@@ -102,7 +100,7 @@ class ClientStreamingManager:
         while self.available_for_connections:
             try:
                 async with sse_client.EventSource(
-                    f"{API_URL}/signalling/notifications/robot/{self.robot_id}",
+                    f"{API_URL}/signalling/notifications/robot/{self.local_stream_id}",
                     headers=self.auth.get_headers(),
                 ) as event_source:
                     async for event in event_source:
@@ -111,17 +109,12 @@ class ClientStreamingManager:
                         if not self.available_for_connections:
                             return
 
-                        if not self.local_stream_id.done():
-                            self.local_stream_id.set_result(message.to_id)
-
                         if message.from_id == "system":
                             continue
 
                         connection = self.connections.get(message.from_id)
                         if connection is None:
-                            connection = await self.create_new_connection(
-                                message.to_id, message.from_id
-                            )
+                            connection = await self.create_new_connection(message.from_id)
 
                         match message.type:
                             case MessageType.SDP_OFFER:
