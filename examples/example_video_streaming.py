@@ -40,7 +40,8 @@ async def main():
     nc.start_recording()
 
     async for frame, time in simulate_camera_frames():
-        nc.log_rgb("test", frame, timestamp=time)
+        nc.log_rgb("Test Camera One", frame, timestamp=time)
+        # nc.log_rgb("Cam Two", frame, timestamp=time)
 
     print("Finishing recording...")
     nc.stop_recording()

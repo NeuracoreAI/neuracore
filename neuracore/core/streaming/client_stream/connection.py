@@ -71,7 +71,7 @@ class PierToPierConnection:
                     )
                     continue
 
-                await self.send_message(
+                await self.send_handshake_message(
                     MessageType.ICE_CANDIDATE,
                     json.dumps(
                         {
@@ -95,7 +95,7 @@ class PierToPierConnection:
         """Add a track to the connection"""
         self.connection.addTrack(source.get_video_track())
 
-    async def send_message(self, message_type: MessageType, content: str):
+    async def send_handshake_message(self, message_type: MessageType, content: str):
         """Send a message to the remote peer through the signaling server"""
         print(
             f"Send Message: {message_type}, {self.local_stream_id=} {self.remote_stream_id=}"
@@ -121,6 +121,7 @@ class PierToPierConnection:
         if self._closed:
             print("offer to closed connection")
             return
+            
         offer = RTCSessionDescription(offer, type="offer")
         await self.connection.setRemoteDescription(offer)
 
@@ -128,7 +129,7 @@ class PierToPierConnection:
 
         await self.connection.setLocalDescription(answer)
         print(f"set local description {self.connection.sctp=}")
-        await self.send_message(MessageType.SDP_ANSWER, answer.sdp)
+        await self.send_handshake_message(MessageType.SDP_ANSWER, answer.sdp)
 
     async def close(self):
         """Close the connection"""

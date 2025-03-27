@@ -187,8 +187,8 @@ class RGBDataStream(VideoDataStream):
             return
 
         get_robot_streaming_manager(robot_id=self.robot_id).get_recording_video_stream(
-            self._recording_id, self.camera_id
+            self.camera_id
         ).add_frame(data)
-        
+
         timestamp = timestamp or time.time()
         self._encoder.add_frame(data, timestamp)

@@ -1,15 +1,28 @@
 from dataclasses import field, dataclass
 import asyncio
-from typing import Dict
+from typing import Dict, List
 from neuracore.core.auth import Auth, get_auth
 from aiohttp_sse_client import client as sse_client
 from aiohttp import ClientSession
-
-from neuracore.core.streaming.client_stream.models import HandshakeMessage, MessageType
+import traceback
+from neuracore.core.streaming.client_stream.models import (
+    HandshakeMessage,
+    MessageType,
+    RobotStreamTrack,
+)
 from ...const import API_URL
 from .video_source import VideoSource
 from .connection import PierToPierConnection
 
+
+def get_loop():
+    try:
+        loop = asyncio.get_running_loop()
+        return loop
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
 
 
 @dataclass
@@ -19,25 +32,46 @@ class ClientStreamingManager:
     client_session: ClientSession = field(default_factory=ClientSession)
     auth: Auth = field(default_factory=get_auth)
     connections: Dict[str, PierToPierConnection] = field(default_factory=dict)
-    video_tracks: Dict[str, VideoSource] = field(default_factory=dict)
+    video_tracks_cache: Dict[str, VideoSource] = field(default_factory=dict)
+    tracks: List[VideoSource] = field(default_factory=list)
+    local_stream_id: asyncio.Future[str] = field(
+        default_factory=lambda: get_loop().create_future()
+    )
 
-    def get_recording_video_stream(
-        self, recording_id: str, sensor_name: str
-    ) -> VideoSource:
+    def get_recording_video_stream(self, sensor_name: str) -> VideoSource:
         """Start a new recording stream"""
-        stream_key = f"{recording_id}_{sensor_name}"
-
-        if stream_key in self.video_tracks:
-            return self.video_tracks[stream_key]
+        if sensor_name in self.video_tracks_cache:
+            return self.video_tracks_cache[sensor_name]
 
         video_track = VideoSource()
-        self.video_tracks[stream_key] = video_track
+        self.video_tracks_cache[sensor_name] = video_track
+        self.tracks.append(video_track)
 
         # Add this track to all existing connections
         for connection in self.connections.values():
             connection.add_video_source(video_track)
 
+        get_loop().create_task(
+            self.submit_track(str(len(self.tracks) - 1), "video", sensor_name)
+        )
+
         return video_track
+
+    async def submit_track(self, mid: str, kind: str, label: str):
+        """Submit new track data"""
+        stream_id = await self.local_stream_id
+        print(f"Submit track {stream_id=} {mid=} {kind=} {label=}")
+        await self.client_session.post(
+            f"{API_URL}/signalling/track",
+            headers=self.auth.get_headers(),
+            json=RobotStreamTrack(
+                robot_id=self.robot_id,
+                stream_id=stream_id,
+                mid=mid,
+                kind=kind,
+                label=label,
+            ).model_dump(mode="json"),
+        )
 
     async def create_new_connection(
         self, local_stream_id: str, remote_stream_id: str
@@ -57,7 +91,7 @@ class ClientStreamingManager:
 
         connection.setup_connection()
 
-        for video_track in self.video_tracks.values():
+        for video_track in self.tracks:
             await connection.add_video_source(video_track)
 
         self.connections[remote_stream_id] = connection
@@ -77,18 +111,18 @@ class ClientStreamingManager:
                         if not self.available_for_connections:
                             return
 
-                        # Skip system messages
+                        if not self.local_stream_id.done():
+                            self.local_stream_id.set_result(message.to_id)
+
                         if message.from_id == "system":
                             continue
 
-                        # Get or create connection
                         connection = self.connections.get(message.from_id)
                         if connection is None:
                             connection = await self.create_new_connection(
                                 message.to_id, message.from_id
                             )
 
-                        # Process the message
                         match message.type:
                             case MessageType.SDP_OFFER:
                                 await connection.on_offer(message.data)
@@ -102,6 +136,7 @@ class ClientStreamingManager:
                 await asyncio.sleep(5)
             except Exception as e:
                 print(f"Unexpected error: {e}")
+                print(traceback.format_exc())
                 await asyncio.sleep(5)
 
     async def close_connections(self):
@@ -113,17 +148,13 @@ class ClientStreamingManager:
         """Close all connections and streams"""
         self.available_for_connections = False
 
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self.close_connections())
-        except RuntimeError:
-            asyncio.run(self.close_connections())
+        get_loop().create_task(self.close_connections())
 
-        for track in self.video_tracks.values():
+        for track in self.video_tracks_cache.values():
             track.stop()
 
         self.connections.clear()
-        self.video_tracks.clear()
+        self.video_tracks_cache.clear()
         self.client_session.close()
 
 
