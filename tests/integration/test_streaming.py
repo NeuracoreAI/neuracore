@@ -199,7 +199,7 @@ def stream_data(config):
             frame_count, config.fps, config.num_joints
         )
         with Timer():
-            nc.log_joints(joint_positions, timestamp=t)
+            nc.log_joint_positions(joint_positions, timestamp=t)
 
         # Stream a test action occasionally
         if frame_count % 5 == 0:
@@ -432,7 +432,7 @@ def test_stop_start_sequences():
                 segment_frames, config.fps, config.num_joints
             )
             with Timer():
-                nc.log_joints(joint_positions)
+                nc.log_joint_positions(joint_positions)
 
             segment_frames += 1
             time.sleep(1 / config.fps)

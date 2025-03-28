@@ -1,4 +1,3 @@
-import matplotlib.pyplot as plt
 import numpy as np
 
 from .constants import EPISODE_LENGTH, PUPPET_GRIPPER_POSITION_NORMALIZE_FN
@@ -32,6 +31,8 @@ def rollout_policy(
 
     # Setup visualization if needed
     if onscreen_render:
+        import matplotlib.pyplot as plt
+
         ax = plt.subplot()
         plt_img = ax.imshow(ts.observation["images"][render_cam_name])
         plt.ion()

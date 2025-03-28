@@ -33,8 +33,7 @@ setup(
     ],
     python_requires=">=3.9",
     install_requires=[
-        "websockets>=14.0",
-        "numpy>=1.24.0",
+        "numpy",
         "requests>=2.31.0",
         "pillow>=10.0.0",
         "pyyaml>=6.0.1",
@@ -43,6 +42,7 @@ setup(
         "pydantic",
         "av",
         "aiortc",
+        "numpy-stl",
     ],
     extras_require={
         "examples": [
@@ -64,6 +64,16 @@ setup(
         "ml": [
             "torch",
             "torchvision",
+        ],
+        "upload": [
+            "robot_descriptions @ git+https://github.com/stepjam/robot_descriptions.py.git@main",
+            "pin",
+            "pin-pink",
+            "lerobot @ git+https://github.com/huggingface/lerobot.git",
+            "tensorflow-datasets",
+            "tensorflow",
+            "gcsfs",
+            "apache_beam",
         ],
         "dev": [
             "pytest>=6.2.5",

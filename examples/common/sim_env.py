@@ -128,9 +128,8 @@ class TransferCubeTask(BimanualViperXTask):
         with physics.reset_context():
             physics.named.data.qpos[:16] = START_ARM_POSE
             np.copyto(physics.data.ctrl, START_ARM_POSE)
-            assert BOX_POSE[0] is not None
-            physics.named.data.qpos[-7:] = BOX_POSE[0]
-            # print(f"{BOX_POSE=}")
+            if BOX_POSE[0] is not None:
+                physics.named.data.qpos[-7:] = BOX_POSE[0]
         super().initialize_episode(physics)
 
     @staticmethod

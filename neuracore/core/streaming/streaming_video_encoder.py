@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 PTS_FRACT = 1000000  # Timebase for pts in microseconds
 CHUNK_MULTIPLE = 256 * 1024  # Chunk size multiple of 256 KiB
+MB_CHUNK = 4 * CHUNK_MULTIPLE
+CHUNK_SIZE = 64 * MB_CHUNK
 
 
 class StreamingVideoEncoder:
@@ -32,7 +34,7 @@ class StreamingVideoEncoder:
         transform_frame: Callable[[np.ndarray], np.ndarray] | None = None,
         codec: str = "libx264",
         pixel_format: str = "yuv444p10le",
-        chunk_size: int = CHUNK_MULTIPLE,
+        chunk_size: int = CHUNK_SIZE,
     ):
         """
         Initialize a streaming video encoder.
@@ -157,7 +159,6 @@ class StreamingVideoEncoder:
             timestamp: Frame timestamp in seconds (can be irregular)
         """
         self._upload_queue.put((frame_data, timestamp))
-        logger.info(f"Added frame to upload queue at {timestamp}")
 
     def _add_frame(self, frame_data: np.ndarray, timestamp: float) -> None:
         """

@@ -66,7 +66,7 @@ def test_log_actions(
     # Test logging functions
     try:
         # Logging with mocked websocket endpoints
-        nc.log_joints({"vx300s_left/waist": 0.5, "vx300s_right/waist": -0.3})
+        nc.log_joint_positions({"vx300s_left/waist": 0.5, "vx300s_right/waist": -0.3})
         nc.log_action({"action1": 0.1, "action2": 0.2})
 
         # Uint8 image

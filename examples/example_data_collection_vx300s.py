@@ -50,7 +50,7 @@ def main(args):
             nc.start_recording()
 
         # Log initial state
-        nc.log_joints(ts.observation["qpos"])
+        nc.log_joint_positions(ts.observation["qpos"])
         for cam_name in camera_names:
             nc.log_rgb(cam_name, ts.observation["images"][cam_name])
 
@@ -59,7 +59,8 @@ def main(args):
         for action in action_traj:
             ts = env.step(list(action.values()))
 
-            nc.log_joints(ts.observation["qpos"])
+            nc.log_joint_positions(ts.observation["qpos"])
+
             nc.log_action(action)
             for cam_name in camera_names:
                 nc.log_rgb(cam_name, ts.observation["images"][cam_name])

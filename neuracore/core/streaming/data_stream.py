@@ -105,15 +105,38 @@ class BufferedDataStream(DataStream):
 class ActionDataStream(BufferedDataStream):
     """Stream that logs robot actions."""
 
-    def __init__(self):
-        super().__init__("actions.json")
+    def __init__(self, group_name: str):
+        super().__init__(f"actions/{group_name}.json")
 
 
 class JointDataStream(BufferedDataStream):
     """Stream that logs robot actions."""
 
-    def __init__(self):
-        super().__init__("joint_states.json")
+    def __init__(self, group_name: str):
+        super().__init__(f"joint_states/{group_name}.json")
+
+    def log(
+        self,
+        dict_data: dict[str, float],
+        additional_urdf_positions: dict[str, float],
+        timestamp: Optional[float] = None,
+    ):
+        """Log data to the buffer if recording is active."""
+        timestamp = timestamp or time.time()
+        if not self.is_recording():
+            return
+        self._buffer.append({
+            "timestamp": timestamp,
+            "data": dict_data,
+            "additional_urdf_positions": additional_urdf_positions,
+        })
+
+
+class GripperOpenAmountsDataStream(BufferedDataStream):
+    """Stream that logs robot actions."""
+
+    def __init__(self, group_name: str):
+        super().__init__(f"gripper_open_amounts/{group_name}.json")
 
 
 class LanguageDataStream(BufferedDataStream):

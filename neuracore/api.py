@@ -1,4 +1,6 @@
+import base64
 import concurrent
+import hashlib
 import json
 from threading import Thread
 from typing import Optional
@@ -21,6 +23,7 @@ from .core.streaming.data_stream import (
     ActionDataStream,
     DataStream,
     DepthDataStream,
+    GripperOpenAmountsDataStream,
     JointDataStream,
     LanguageDataStream,
     RGBDataStream,
@@ -40,6 +43,14 @@ def _stop_recording_wait_for_threads(
     for thread in threads:
         thread.join()
     robot.stop_recording(recording_id)
+
+
+def _create_group_id_from_dict(joint_names: dict[str, float]) -> str:
+    joint_names = list(joint_names.keys())
+    joint_names.sort()
+    return base64.urlsafe_b64encode(
+        hashlib.md5("".join(joint_names).encode()).digest()
+    ).decode()
 
 
 def login(api_key: Optional[str] = None) -> None:
@@ -66,6 +77,7 @@ def connect_robot(
     urdf_path: Optional[str] = None,
     mjcf_path: Optional[str] = None,
     overwrite: bool = False,
+    shared: bool = False,
 ) -> None:
     """
     Initialize a robot connection.
@@ -75,9 +87,10 @@ def connect_robot(
         urdf_path: Optional path to robot's URDF file
         mjcf_path: Optional path to robot's MJCF file
         overwrite: Whether to overwrite an existing robot with the same name
+        shared: Whether the robot is shared
     """
     global _active_robot
-    _active_robot = _init_robot(robot_name, urdf_path, mjcf_path, overwrite)
+    _active_robot = _init_robot(robot_name, urdf_path, mjcf_path, overwrite, shared)
 
 
 def _get_robot(robot_name: str) -> Robot:
@@ -93,8 +106,40 @@ def _get_robot(robot_name: str) -> Robot:
     return robot
 
 
-def log_joints(
+def log_synced_data(
+    joint_positions: dict[str, float],
+    joint_velocities: dict[str, float],
+    gripper_open_amounts: list[float],
+    action: dict[str, float],
+    rgb_data: dict[str, np.ndarray],
+    depth_data: dict[str, np.ndarray],
+    robot_name: Optional[str] = None,
+    timestamp: Optional[float] = None,
+) -> None:
+    """Useful for simulated data, or you are relying on ROS to sync the data"""
+    raise NotImplementedError("log_joint_velocities is not yet implemented")
+
+
+def log_data(
+    name: str,
+    data: np.ndarray,
+    robot_name: Optional[str] = None,
+    timestamp: Optional[float] = None,
+) -> None:
+    """Log arbitrary data for a robot.
+
+    Args:
+        name: Name of the data stream
+        data: Data to log
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        timestamp: Optional timestamp
+    """
+    raise NotImplementedError("log_data is not yet implemented")
+
+
+def log_joint_positions(
     positions: dict[str, float],
+    additional_urdf_positions: Optional[dict[str, float]] = None,
     robot_name: Optional[str] = None,
     timestamp: Optional[float] = None,
 ) -> None:
@@ -103,6 +148,9 @@ def log_joints(
 
     Args:
         positions: Dictionary mapping joint names to positions (in radians)
+        additional_urdf_positions: Dictionary mapping joint names to
+            positions (in radians). These wont ever be included for
+            training, and instead used for visualization purposes
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         timestamp: Optional timestamp
 
@@ -114,15 +162,60 @@ def log_joints(
     for key, value in positions.items():
         if not isinstance(value, float):
             raise ValueError(f"Joint positions must be floats. {key} is not a float.")
+    if additional_urdf_positions:
+        if not isinstance(additional_urdf_positions, dict):
+            raise ValueError(
+                "Additional visual positions must be a dictionary of floats"
+            )
+        for key, value in additional_urdf_positions.items():
+            if not isinstance(value, float):
+                raise ValueError(
+                    f"Additional visual positions must be floats. {key} is not a float."
+                )
+
     robot = _get_robot(robot_name)
-    str_id = f"{robot.name}_joints"
+    joint_group_id = _create_group_id_from_dict(positions)
+    joint_str_id = f"{robot.name}_{joint_group_id}_joints"
+    joint_stream = _data_streams.get(joint_str_id)
+    if joint_stream is None:
+        joint_stream = JointDataStream(joint_group_id)
+        _data_streams[joint_str_id] = joint_stream
+        if robot.name in _active_recording_ids:
+            joint_stream.start_recording(_active_recording_ids[robot.name])
+    joint_stream.log(positions, additional_urdf_positions or {}, timestamp)
+
+
+def log_joint_velocities(
+    velocities: dict[str, float],
+    additional_urdf_velocities: Optional[dict[str, float]] = None,
+    robot_name: Optional[str] = None,
+    timestamp: Optional[float] = None,
+) -> None:
+    raise NotImplementedError("log_joint_velocities is not yet implemented")
+
+
+def log_gripper_open_amounts(
+    open_amounts: dict[str, float],
+    robot_name: Optional[str] = None,
+    timestamp: Optional[float] = None,
+) -> None:
+    if not isinstance(open_amounts, dict):
+        raise ValueError("Gripper open amounts must be a dictionary of floats")
+    for key, value in open_amounts.items():
+        if not isinstance(value, float):
+            raise ValueError(
+                f"Gripper open amounts must be floats. {key} is not a float."
+            )
+    robot = _get_robot(robot_name)
+    group_id = _create_group_id_from_dict(open_amounts)
+    str_id = f"{robot.name}_{group_id}_open_amounts"
     stream = _data_streams.get(str_id)
     if stream is None:
-        stream = JointDataStream()
+        stream = GripperOpenAmountsDataStream(group_id)
         _data_streams[str_id] = stream
         if robot.name in _active_recording_ids:
             stream.start_recording(_active_recording_ids[robot.name])
-    stream.log(positions, timestamp)
+    stream.log(open_amounts, timestamp)
 
 
 def log_action(
@@ -147,10 +240,11 @@ def log_action(
         if not isinstance(value, float):
             raise ValueError(f"Actions must be floats. {key} is not a float.")
     robot = _get_robot(robot_name)
-    str_id = f"{robot.name}_action"
+    joint_group_id = _create_group_id_from_dict(action)
+    str_id = f"{robot.name}_{joint_group_id}_action"
     stream = _data_streams.get(str_id)
     if stream is None:
-        stream = ActionDataStream()
+        stream = ActionDataStream(joint_group_id)
         _data_streams[str_id] = stream
         if robot.name in _active_recording_ids:
             stream.start_recording(_active_recording_ids[robot.name])
@@ -273,6 +367,24 @@ def log_depth(
             f"stream dimensions {stream.width}x{stream.height}"
         )
     stream.log(depth, timestamp)
+
+
+def log_point_cloud(
+    camera_id: str,
+    point_cloud: np.ndarray,
+    camera_extrinsics: np.ndarray,
+    robot_name: Optional[str] = None,
+    timestamp: Optional[float] = None,
+) -> None:
+    if not isinstance(point_cloud, np.ndarray):
+        raise ValueError("Point cloud must be a numpy array")
+    if point_cloud.dtype != np.float32:
+        raise ValueError("Point cloud must be float32")
+    if point_cloud.shape[1] != 3:
+        raise ValueError("Point cloud must have 3 columns")
+    if point_cloud.shape[0] > 307200:
+        raise ValueError("Point cloud must have at most 307200 points")
+    raise NotImplementedError("log_point_cloud is not yet implemented")
 
 
 def start_recording(robot_name: Optional[str] = None) -> None:
@@ -535,7 +647,10 @@ def delete_endpoint(endpoint_id: str) -> None:
 
 
 def create_dataset(
-    name: str, description: Optional[str] = None, tags: Optional[list[str]] = None
+    name: str,
+    description: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    shared: bool = False,
 ) -> Dataset:
     """
     Create a new dataset for robot demonstrations.
@@ -549,7 +664,7 @@ def create_dataset(
         DatasetError: If dataset creation fails
     """
     global _active_dataset_id
-    _active_dataset = Dataset.create(name, description, tags)
+    _active_dataset = Dataset.create(name, description, tags, shared)
     _active_dataset_id = _active_dataset.id
     return _active_dataset
 
