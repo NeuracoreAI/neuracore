@@ -74,7 +74,7 @@ class ClientStreamingManager:
     async def heartbeat_response(self):
         """Submit new track data"""
         await self.client_session.post(
-            f"{API_URL}/signalling/alive",
+            f"{API_URL}/signalling/alive/{self.local_stream_id}",
             headers=self.auth.get_headers(),
             data="pong"
         )
@@ -108,10 +108,11 @@ class ClientStreamingManager:
         while self.available_for_connections:
             try:
                 async with sse_client.EventSource(
-                    f"{API_URL}/signalling/notifications/robot/{self.local_stream_id}",
+                    f"{API_URL}/signalling/notifications/{self.local_stream_id}",
                     headers=self.auth.get_headers(),
                 ) as event_source:
                     async for event in event_source:
+                        print(f"received event {event.type=} {event.message=}")
                         if event.type == "heartbeat":
                             await self.heartbeat_response()
                             continue
