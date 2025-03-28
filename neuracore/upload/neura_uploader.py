@@ -322,7 +322,7 @@ class NeuraUploader:
                         )
 
                     if "gripper_open_amounts" in timestep:
-                        nc.log_gripper_open_amounts(
+                        nc.log_gripper_data(
                             timestep["gripper_open_amounts"], timestamp=timestamp
                         )
 

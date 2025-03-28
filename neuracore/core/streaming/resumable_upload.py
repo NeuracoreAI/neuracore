@@ -14,7 +14,7 @@ class ResumableUpload:
     Handles resumable uploads to Google Cloud Storage.
     """
 
-    def __init__(self, recording_id: str, camera_id: str):
+    def __init__(self, recording_id: str, filepath: str, content_type: str):
         """
         Initialize a resumable upload to GCS.
 
@@ -23,7 +23,8 @@ class ResumableUpload:
             camera_id: Name of the sensor
         """
         self.recording_id = recording_id
-        self.camera_id = camera_id
+        self.filepath = filepath
+        self.content_type = content_type
         self.session_uri = self._get_upload_session_uri()
         self.total_bytes_uploaded = 0
         self.max_retries = 5
@@ -36,8 +37,13 @@ class ResumableUpload:
             str: Resumable upload session URI
         """
         auth = get_auth()
+        params = {
+            "filepath": self.filepath,
+            "content_type": self.content_type,
+        }
         response = requests.get(
-            f"{API_URL}/recording/{self.recording_id}/resumable_upload_url/{self.camera_id}",
+            f"{API_URL}/recording/{self.recording_id}/resumable_upload_url",
+            params=params,
             headers=auth.get_headers(),
         )
         response.raise_for_status()

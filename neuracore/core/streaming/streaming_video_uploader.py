@@ -10,9 +10,10 @@ import av
 import numpy as np
 import requests
 
-from neuracore.core.auth import get_auth
-from neuracore.core.const import API_URL
-from neuracore.core.streaming.resumable_upload import ResumableUpload
+from ..auth import get_auth
+from ..const import API_URL
+from ..nc_types import CameraMetaData
+from ..streaming.resumable_upload import ResumableUpload
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +23,13 @@ MB_CHUNK = 4 * CHUNK_MULTIPLE
 CHUNK_SIZE = 64 * MB_CHUNK
 
 
-class StreamingVideoEncoder:
+class StreamingVideoUploader:
     """A video encoder that handles variable framerate and streams."""
 
     def __init__(
         self,
         recording_id: str,
-        camera_id: str,
+        path: str,
         width: int,
         height: int,
         transform_frame: Callable[[np.ndarray], np.ndarray] | None = None,
@@ -50,7 +51,7 @@ class StreamingVideoEncoder:
             chunk_size: Size of chunks to upload
         """
         self.recording_id = recording_id
-        self.camera_id = camera_id
+        self.path = path
         self.width = width
         self.height = height
         self.transform_frame = transform_frame
@@ -74,7 +75,9 @@ class StreamingVideoEncoder:
                 "KiB to ensure it's a multiple of {CHUNK_MULTIPLE} MiB"
             )
 
-        self.uploader = ResumableUpload(self.recording_id, self.camera_id)
+        self.uploader = ResumableUpload(
+            self.recording_id, f"{self.path}/video.mp4", "video/mp4"
+        )
 
         # Create in-memory buffer
         self.buffer = io.BytesIO()
@@ -107,7 +110,7 @@ class StreamingVideoEncoder:
         # Create a dedicated buffer for upload chunks
         self.upload_buffer = bytearray()
         self.last_write_position = 0
-        self.timestamps = []
+        self.frame_metadatas: list[CameraMetaData] = []
 
     def _upload_loop(self) -> None:
         """
@@ -117,10 +120,10 @@ class StreamingVideoEncoder:
         # If final has not been called, or we still have items in the queue
         while not self._streaming_done or self._upload_queue.qsize() > 0:
             try:
-                frame_data, timestamp = self._upload_queue.get(timeout=0.1)
+                frame_data, json_data = self._upload_queue.get(timeout=0.1)
                 if frame_data is None:
                     break
-                self._add_frame(frame_data, timestamp)
+                self._add_frame(frame_data, json_data)
             except queue.Empty:
                 continue
 
@@ -148,25 +151,27 @@ class StreamingVideoEncoder:
             "Video encoding and upload complete: "
             f"{self.uploader.total_bytes_uploaded} bytes"
         )
-        self._upload_timestamps()
+        self._upload_json_data()
 
-    def add_frame(self, frame_data: np.ndarray, timestamp: float) -> None:
+    def add_frame(self, frame_data: np.ndarray, metadata: CameraMetaData) -> None:
         """
         Add frame to the video with timestamp and stream if buffer large enough.
 
         Args:
             frame_data: RGB frame data as numpy array with shape (height, width, 3)
-            timestamp: Frame timestamp in seconds (can be irregular)
+            json_data: JSON data to log with the frame
         """
-        self._upload_queue.put((frame_data, timestamp))
+        self._upload_queue.put((frame_data, metadata))
 
-    def _add_frame(self, frame_data: np.ndarray, timestamp: float) -> None:
+    def _add_frame(
+        self, frame_data: np.ndarray, frame_metadata: CameraMetaData
+    ) -> None:
         """
         Add frame to the video with timestamp and stream if buffer large enough.
 
         Args:
             frame_data: RGB frame data as numpy array with shape (height, width, 3)
-            timestamp: Frame timestamp in seconds (can be irregular)
+            json_data: JSON data to log with the frame
         """
 
         if self.transform_frame is not None:
@@ -174,10 +179,10 @@ class StreamingVideoEncoder:
 
         # Handle first frame timestamp
         if self.first_timestamp is None:
-            self.first_timestamp = timestamp
+            self.first_timestamp = frame_metadata.timestamp
 
         # Calculate pts in timebase units (microseconds)
-        relative_time = timestamp - self.first_timestamp
+        relative_time = frame_metadata.timestamp - self.first_timestamp
         pts = int(relative_time * PTS_FRACT)  # Convert to microseconds
 
         # Ensure pts is monotonically increasing (required by most codecs)
@@ -208,7 +213,7 @@ class StreamingVideoEncoder:
 
         # Total bytes written
         self.total_bytes_written = current_pos
-        self.timestamps.append(timestamp)
+        self.frame_metadatas.append(frame_metadata)
 
     def _upload_chunks(self) -> None:
         """
@@ -238,21 +243,27 @@ class StreamingVideoEncoder:
         self._streaming_done = True
         return self._upload_thread
 
-    def _upload_timestamps(self) -> None:
+    def _upload_json_data(self) -> None:
         """
         Upload timestamps to the server.
         """
-        stream_name = f"cameras/{self.uploader.camera_id}/timestamps.json"
+        params = {
+            "filepath": f"{self.path}/metadata.json",
+            "content_type": "application/json",
+        }
         upload_url_response = requests.get(
-            f"{API_URL}/recording/{self.uploader.recording_id}/json_upload_url?filename={stream_name}",
+            f"{API_URL}/recording/{self.uploader.recording_id}/resumable_upload_url",
+            params=params,
             headers=get_auth().get_headers(),
         )
         upload_url_response.raise_for_status()
         upload_url = upload_url_response.json()["url"]
-        data = json.dumps(self.timestamps)
+        for i in range(0, len(self.frame_metadatas)):
+            self.frame_metadatas[i].frame_idx = i
+        data = json.dumps([fm.model_dump() for fm in self.frame_metadatas])
         logger.info(f"Uploading {len(data)} bytes to {upload_url}")
         response = requests.put(
             upload_url, headers={"Content-Length": str(len(data))}, data=data
         )
         response.raise_for_status()
-        self.timestamps = []
+        self.frame_metadatas = []
