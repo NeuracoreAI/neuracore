@@ -41,7 +41,26 @@ async def main():
 
     async for frame, time in simulate_camera_frames():
         nc.log_rgb("Test Camera One", frame, timestamp=time)
-        # nc.log_rgb("Cam Two", frame, timestamp=time)
+        nc.log_rgb("Cam Two", frame, timestamp=time)
+
+        # nc.log_rgb("Cam 1", frame, timestamp=time)
+        # nc.log_rgb("Cam 2", frame, timestamp=time)
+        # nc.log_rgb("Cam 3", frame, timestamp=time)
+        # nc.log_rgb("Cam 4", frame, timestamp=time)
+        # nc.log_rgb("Cam 5", frame, timestamp=time)
+        # nc.log_rgb("Cam 6", frame, timestamp=time)
+        # nc.log_rgb("Cam 7", frame, timestamp=time)
+        # nc.log_rgb("Cam 8", frame, timestamp=time)
+        # nc.log_rgb("Cam 9", frame, timestamp=time)
+        # nc.log_rgb("Cam 11", frame, timestamp=time)
+        # nc.log_rgb("Cam 12", frame, timestamp=time)
+        # nc.log_rgb("Cam 13", frame, timestamp=time)
+        # nc.log_rgb("Cam 14", frame, timestamp=time)
+        # nc.log_rgb("Cam 15", frame, timestamp=time)
+        # nc.log_rgb("Cam 16", frame, timestamp=time)
+        # nc.log_rgb("Cam 17", frame, timestamp=time)
+        # nc.log_rgb("Cam 18", frame, timestamp=time)
+        # nc.log_rgb("Cam 19", frame, timestamp=time)
 
     print("Finishing recording...")
     nc.stop_recording()

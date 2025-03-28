@@ -37,6 +37,9 @@ class PierToPierConnection:
             configuration=RTCConfiguration(iceServers=ICE_SERVERS)
         )
     )
+    connection_token: asyncio.Future[str] = field(
+        default_factory=lambda: asyncio.get_event_loop().create_future()
+    )
     _closed: bool = False
 
     async def get_ice_gatherer(self) -> RTCIceGatherer:
@@ -46,6 +49,28 @@ class PierToPierConnection:
         iceGather = RTCIceGatherer(iceServers=ICE_SERVERS)
         await iceGather.gather()
         return iceGather
+
+    async def force_ice_negotiation(self):
+        iceGatherer = await self.get_ice_gatherer()
+        candidates = iceGatherer.getLocalCandidates()
+        for candidate in candidates:
+            if candidate.sdpMid is None or candidate.sdpMLineIndex is None:
+                print(
+                    f"Warning: Candidate missing sdpMid or sdpMLineIndex, {candidate}"
+                )
+                continue
+
+            await self.send_handshake_message(
+                MessageType.ICE_CANDIDATE,
+                json.dumps(
+                    {
+                        "candidate": candidate_to_sdp(candidate),
+                        "sdpMLineIndex": candidate.sdpMLineIndex,
+                        "sdpMid": candidate.sdpMid,
+                        "usernameFragment": iceGatherer.getLocalParameters().usernameFragment,
+                    }
+                ),
+            )
 
     def setup_connection(self):
         """Set up event handlers for the connection"""
@@ -57,31 +82,8 @@ class PierToPierConnection:
         @self.connection.on("icegatheringstatechange")
         async def on_icegatheringstatechange():
             print(f"ICE gathering state changed to {self.connection.iceGatheringState}")
-            if self.connection.iceGatheringState != "complete":
-                return
-                # candidates are not ready
-
-            print("getting local candidates")
-            iceGatherer = await self.get_ice_gatherer()
-            candidates = iceGatherer.getLocalCandidates()
-            for candidate in candidates:
-                if candidate.sdpMid is None or candidate.sdpMLineIndex is None:
-                    print(
-                        f"Warning: Candidate missing sdpMid or sdpMLineIndex, {candidate}"
-                    )
-                    continue
-
-                await self.send_handshake_message(
-                    MessageType.ICE_CANDIDATE,
-                    json.dumps(
-                        {
-                            "candidate": candidate_to_sdp(candidate),
-                            "sdpMLineIndex": candidate.sdpMLineIndex,
-                            "sdpMid": candidate.sdpMid,
-                            "usernameFragment": iceGatherer.getLocalParameters().usernameFragment,
-                        }
-                    ),
-                )
+            if self.connection.iceGatheringState == "complete":
+                await self.force_ice_negotiation()
 
         @self.connection.on("connectionstatechange")
         async def on_connectionstatechange():
@@ -110,6 +112,11 @@ class PierToPierConnection:
             ).model_dump(mode="json"),
         )
 
+    def set_transceiver_direction(self):
+        for transceiver in self.connection.getTransceivers():
+            transceiver.direction="sendonly"
+            transceiver._offerDirection="sendonly"
+
     async def on_ice(self, ice_message: str):
         """Handle received ICE candidate"""
         if self._closed:
@@ -127,13 +134,38 @@ class PierToPierConnection:
             return
 
         offer = RTCSessionDescription(offer, type="offer")
+        self.set_transceiver_direction()
+        print(
+            f"{[{
+            "direction":con.direction,
+            "currentDirection":con.currentDirection,
+            "kind":con.kind,
+            "mid": con.mid
+        } for con in self.connection.getTransceivers()]}"
+        )
         await self.connection.setRemoteDescription(offer)
-
+        self.set_transceiver_direction()
         answer = await self.connection.createAnswer()
-
+        self.set_transceiver_direction()
         await self.connection.setLocalDescription(answer)
+
         print(f"set local description {self.connection.sctp=}")
         await self.send_handshake_message(MessageType.SDP_ANSWER, answer.sdp)
+
+    async def on_token(self, token: str):
+        self.connection_token.set_result(token)
+
+    async def on_answer(self, answer_sdp: str):
+        answer = RTCSessionDescription(answer_sdp, type="answer")
+        self.set_transceiver_direction()
+        await self.connection.setRemoteDescription(answer)
+        await self.force_ice_negotiation()
+
+    async def send_offer(self):
+        self.set_transceiver_direction()
+        offer = await self.connection.createOffer()
+        await self.connection.setLocalDescription(offer)
+        await self.send_handshake_message(MessageType.SDP_OFFER, offer.sdp)
 
     async def close(self):
         """Close the connection"""

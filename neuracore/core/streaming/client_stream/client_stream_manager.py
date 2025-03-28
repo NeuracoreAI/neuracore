@@ -76,7 +76,7 @@ class ClientStreamingManager:
         await self.client_session.post(
             f"{API_URL}/signalling/alive/{self.local_stream_id}",
             headers=self.auth.get_headers(),
-            data="pong"
+            data="pong",
         )
 
     async def create_new_connection(
@@ -117,7 +117,6 @@ class ClientStreamingManager:
                             await self.heartbeat_response()
                             continue
 
-
                         message = HandshakeMessage.model_validate_json(event.data)
                         print(f"Message Received {message}")
                         if not self.available_for_connections:
@@ -128,13 +127,19 @@ class ClientStreamingManager:
 
                         connection = self.connections.get(message.from_id)
                         if connection is None:
-                            connection = await self.create_new_connection(message.from_id)
+                            connection = await self.create_new_connection(
+                                message.from_id
+                            )
 
                         match message.type:
                             case MessageType.SDP_OFFER:
                                 await connection.on_offer(message.data)
                             case MessageType.ICE_CANDIDATE:
                                 await connection.on_ice(message.data)
+                            case MessageType.CONNECTION_TOKEN:
+                                await connection.on_token(message.data)
+                            case MessageType.SDP_ANSWER:
+                                await connection.on_answer(message.data)
                             case _:
                                 pass
 

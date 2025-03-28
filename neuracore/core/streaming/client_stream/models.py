@@ -6,11 +6,11 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 class MessageType(str, Enum):
-    CONNECTION_REQUEST = "request"
     SDP_OFFER = "offer"
     SDP_ANSWER = "answer"
     ICE_CANDIDATE = "ice"
     STREAM_END = "end"
+    CONNECTION_TOKEN="token"
 
 class HandshakeMessage(BaseModel):
     from_id: str
