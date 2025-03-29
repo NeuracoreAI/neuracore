@@ -34,7 +34,7 @@ def _get_robot(robot_name: str) -> Robot:
     """Get a robot by name."""
     robot: Robot = GlobalSingleton()._active_robot
     if robot_name is None:
-        if GlobalSingleton()._active_robot is None:
+        if robot is None:
             raise RobotError(
                 "No active robot. Call init() first or provide robot_name."
             )
@@ -81,7 +81,7 @@ def _log_joint_data(
 
     robot = _get_robot(robot_name)
     joint_group_id = _create_group_id_from_dict(joint_data)
-    joint_str_id = f"{robot.name}_{joint_group_id}_joints"
+    joint_str_id = f"{data_type}_{joint_group_id}_{robot.name}"
     joint_stream = GlobalSingleton()._data_streams.get(joint_str_id)
     if joint_stream is None:
         joint_stream = JsonDataStream(f"{data_type}/{joint_group_id}.json")
@@ -144,8 +144,8 @@ def _log_camera_data(
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name)
     camera_id = f"{camera_type}_{camera_id}"
-    str_id = f"{robot.name}_{camera_id}"
-    stream = GlobalSingleton()._data_streams.get(str_id)
+    stream_id = f"{camera_type}_{robot.name}_{camera_id}"
+    stream = GlobalSingleton()._data_streams.get(stream_id)
     if stream is None:
         if camera_type == "rgb":
             stream = RGBDataStream(camera_id, image.shape[1], image.shape[0])
@@ -153,7 +153,7 @@ def _log_camera_data(
             stream = DepthDataStream(camera_id, image.shape[1], image.shape[0])
         else:
             raise ValueError(f"Invalid camera type: {camera_type}")
-        GlobalSingleton()._data_streams[str_id] = stream
+        GlobalSingleton()._data_streams[stream_id] = stream
         if robot.name in GlobalSingleton()._active_recording_ids:
             stream.start_recording(GlobalSingleton()._active_recording_ids[robot.name])
     if stream.width != image.shape[1] or stream.height != image.shape[0]:
@@ -484,7 +484,7 @@ def log_point_cloud(
         raise ValueError("Point cloud must have 3 columns")
     if points.shape[0] > 307200:
         raise ValueError("Point cloud must have at most 307200 points")
-    if rgb_points:
+    if rgb_points is not None:
         if not isinstance(rgb_points, np.ndarray):
             raise ValueError("RGB point cloud must be a numpy array")
         if rgb_points.dtype != np.uint8:
@@ -495,7 +495,7 @@ def log_point_cloud(
             )
         if rgb_points.shape[1] != 3:
             raise ValueError("RGB point cloud must have 3 columns")
-        rgb_points = rgb_points.to_list()
+        rgb_points = rgb_points.tolist()
 
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name)

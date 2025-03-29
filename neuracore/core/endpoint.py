@@ -13,9 +13,13 @@ import numpy as np
 import requests
 from PIL import Image
 
+from neuracore.core.utils.depth_utils import depth_to_rgb
+
+from ..api.globals import GlobalSingleton
 from .auth import get_auth
 from .const import API_URL
 from .exceptions import EndpointError
+from .nc_types import CameraData, JointData, SyncPoint
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +33,62 @@ class EndpointPolicy:
         self._process = None
         self._is_local = "localhost" in predict_url
 
-    def predict(
-        self, joint_positions: list[float], images: dict[str, np.ndarray]
-    ) -> np.ndarray:
+    def _encode_image(self, image: np.ndarray) -> str:
+        pil_image = Image.fromarray(image)
+        if not self._is_local:
+            if pil_image.size > (224, 224):
+                # There is a limit on the image size for non-local endpoints
+                # This is OK as almost all algorithms scale to 224x224
+                pil_image = pil_image.resize((224, 224))
+        buffer = BytesIO()
+        pil_image.save(buffer, format="PNG")
+        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+    def _maybe_add_exisiting_data(
+        self, existing: JointData, to_add: JointData
+    ) -> JointData:
+        # Check if the joint data already exists
+        if existing is None:
+            return to_add
+        existing.timestamp = to_add.timestamp
+        existing.values.update(to_add.values)
+        if existing.additional_values:
+            existing.additional_values.update(to_add.additional_values)
+        return existing
+
+    def _create_sync_point(self) -> SyncPoint:
+        streams = GlobalSingleton()._data_streams
+        sync_point = SyncPoint(timestamp=time.time())
+        for stream_name, stream in streams.items():
+            if stream_name.startswith("rgb"):
+                stream_data: np.ndarray = stream.get_latest_data()
+                if sync_point.rgb_images is None:
+                    sync_point.rgb_images = {}
+                sync_point.rgb_images[stream_name] = CameraData(
+                    timestamp=time.time(), frame=self._encode_image(stream_data)
+                )
+            elif stream_name.startswith("depth"):
+                stream_data: np.ndarray = stream.get_latest_data()
+                if sync_point.depth_images is None:
+                    sync_point.depth_images = {}
+                sync_point.depth_images[stream_name] = CameraData(
+                    timestamp=time.time(),
+                    frame=self._encode_image(depth_to_rgb(stream_data)),
+                )
+            elif stream_name.startswith("joint_positions"):
+                stream_data: JointData = stream.get_latest_data()
+                sync_point.joint_positions = self._maybe_add_exisiting_data(
+                    sync_point.joint_positions, stream_data
+                )
+            else:
+                raise NotImplementedError(
+                    "Support for this stream type is not implemented yet"
+                )
+        return sync_point
+
+    def predict(self) -> np.ndarray:
         """
         Get action predictions from the model.
-
-        Args:
-            joint_positions: List of joint positions in radians
-            images: Dictionary mapping camera IDs to RGB images (HxWx3 numpy arrays)
 
         Returns:
             numpy.ndarray: Predicted action/joint velocities
@@ -45,41 +96,7 @@ class EndpointPolicy:
         Raises:
             EndpointError: If prediction fails
         """
-        # Encode images as base64
-        encoded_images = {}
-        for camera_id, image in images.items():
-            if not isinstance(image, np.ndarray):
-                raise ValueError(f"Image for camera {camera_id} must be a numpy array")
-
-            # Convert to uint8 if needed
-            if image.dtype != np.uint8:
-                if image.max() <= 1.0:
-                    image = (image * 255).astype(np.uint8)
-                else:
-                    image = image.astype(np.uint8)
-
-            # Ensure RGB format
-            if len(image.shape) == 2:  # Grayscale
-                image = np.stack([image] * 3, axis=-1)
-            elif image.shape[2] == 4:  # RGBA
-                image = image[:, :, :3]
-
-            pil_image = Image.fromarray(image)
-            if not self._is_local:
-                if pil_image.size > (224, 224):
-                    # There is a limit on the image size for non-local endpoints
-                    # This is OK as almost all algorithms scale to 224x224
-                    pil_image = pil_image.resize((224, 224))
-
-            buffer = BytesIO()
-            pil_image.save(buffer, format="PNG")
-            encoded_images[camera_id] = base64.b64encode(buffer.getvalue()).decode(
-                "utf-8"
-            )
-
-        # Prepare request data
-        request_data = {"joint_positions": joint_positions, "images": encoded_images}
-
+        request_data = self._create_sync_point().model_dump()
         if not self._is_local:
             payload_size = sys.getsizeof(json.dumps(request_data)) / (
                 1024 * 1024

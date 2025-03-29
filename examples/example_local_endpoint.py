@@ -38,11 +38,12 @@ def main():
 
         # Run episode
         for i in range(EPISODE_LENGTH):
+            nc.log_joint_positions(ts.observation["qpos"])
+            for key, value in ts.observation["images"].items():
+                nc.log_rgb(key, value)
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
-                joints = list(ts.observation["qpos"].values())
-                images = ts.observation["images"]
-                action = policy.predict(joints, images)
+                action = policy.predict()
                 horizon = action.shape[0]
 
             a = action[idx_in_horizon]

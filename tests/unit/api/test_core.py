@@ -3,7 +3,8 @@ import pathlib
 
 import requests_mock
 
-from neuracore.core.auth import get_auth, login, logout
+import neuracore as nc
+from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 
 
@@ -19,7 +20,7 @@ def test_login_with_api_key(temp_config_dir, monkeypatch):
         )
 
         # Perform login
-        login("test_api_key")
+        nc.login("test_api_key")
 
         # Check config file was created
         config_file = pathlib.Path(temp_config_dir) / ".neuracore" / "config.json"
@@ -48,7 +49,7 @@ def test_logout(temp_config_dir, monkeypatch):
         json.dump({"api_key": "test_key"}, f)
 
     # Perform logout
-    logout()
+    nc.logout()
 
     # Check config file is deleted
     assert not config_file.exists()
@@ -74,7 +75,7 @@ def test_auth_headers(monkeypatch):
         )
 
         # Perform login
-        login("test_api_key")
+        nc.login("test_api_key")
 
     # Get auth instance
     auth = get_auth()
@@ -84,3 +85,34 @@ def test_auth_headers(monkeypatch):
 
     assert "Authorization" in headers
     assert headers["Authorization"] == "Bearer test_token"
+
+
+def test_login_logout(temp_config_dir, mock_auth_requests, reset_neuracore):
+    """Test login and logout functionality."""
+    # Perform login
+    nc.login("test_api_key")
+
+    # Check authentication state
+    auth = get_auth()
+    assert auth.is_authenticated
+    assert auth.api_key == "test_api_key"
+
+    # Logout
+    nc.logout()
+    assert not auth.is_authenticated
+
+
+def test_connect_robot(temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf):
+    """Test robot connection."""
+    # Ensure login first
+    nc.login("test_api_key")
+
+    # Mock robot creation endpoint with a full response
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
+
+    # Connect robot
+    robot = nc.connect_robot("test_robot", mock_urdf)
+
+    # Verify robot connection
+    assert robot is not None
+    assert robot.name == "test_robot"

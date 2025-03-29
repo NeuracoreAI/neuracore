@@ -38,6 +38,11 @@ def mock_auth_requests():
             status_code=200,
         )
 
+        m.post(
+            f"{API_URL}/auth/verify-version",
+            status_code=200,
+        )
+
         # Mock robots endpoint
         m.get(f"{API_URL}/robots", json=[], status_code=200)
 

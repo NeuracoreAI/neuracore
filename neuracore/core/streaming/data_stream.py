@@ -1,6 +1,7 @@
 import logging
 import threading
 from abc import ABC
+from typing import Any
 
 import numpy as np
 
@@ -22,6 +23,7 @@ class DataStream(ABC):
         """
         self._recording = False
         self._recording_id = None
+        self._latest_data = None
 
     def start_recording(self, recording_id: str):
         """Start recording data.
@@ -41,6 +43,10 @@ class DataStream(ABC):
     def is_recording(self) -> bool:
         """Check if recording is active."""
         return self._recording
+
+    def get_latest_data(self) -> Any:
+        """Get the latest data from the stream."""
+        return self._latest_data
 
 
 class JsonDataStream(DataStream):
@@ -66,6 +72,7 @@ class JsonDataStream(DataStream):
 
     def log(self, data: NCData):
         """Convert depth to RGB and log as a video frame."""
+        self._latest_data = data
         if not self.is_recording() or self._streamer is None:
             return
         self._streamer.add_frame(data.model_dump())
@@ -94,6 +101,7 @@ class VideoDataStream(DataStream):
 
     def log(self, data: np.ndarray, metadata: CameraData):
         """Convert depth to RGB and log as a video frame."""
+        self._latest_data = data
         if not self.is_recording() or self._encoder is None:
             return
         self._encoder.add_frame(data, metadata)

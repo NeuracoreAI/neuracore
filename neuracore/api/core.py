@@ -58,6 +58,10 @@ def login(api_key: Optional[str] = None) -> None:
 def logout() -> None:
     """Clear authentication state."""
     get_auth().logout()
+    GlobalSingleton()._active_robot = None
+    GlobalSingleton()._active_recording_ids = {}
+    GlobalSingleton()._active_dataset_id = None
+    GlobalSingleton()._has_validated_version = False
 
 
 def connect_robot(
@@ -66,7 +70,7 @@ def connect_robot(
     mjcf_path: Optional[str] = None,
     overwrite: bool = False,
     shared: bool = False,
-) -> None:
+) -> Robot:
     """
     Initialize a robot connection.
 
@@ -78,9 +82,9 @@ def connect_robot(
         shared: Whether the robot is shared
     """
     validate_version()
-    GlobalSingleton()._active_robot = _init_robot(
-        robot_name, urdf_path, mjcf_path, overwrite, shared
-    )
+    robot = _init_robot(robot_name, urdf_path, mjcf_path, overwrite, shared)
+    GlobalSingleton()._active_robot = robot
+    return robot
 
 
 def start_recording(robot_name: Optional[str] = None) -> None:
