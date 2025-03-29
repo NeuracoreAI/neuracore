@@ -6,6 +6,7 @@ from ..core.streaming.data_stream import DataStream
 
 class GlobalSingleton(object):
     _instance = None
+    _has_validated_version = False
     _active_robot: Optional[Robot] = None
     _active_dataset_id: Optional[str] = None
     _active_recording_ids: dict[str, str] = {}

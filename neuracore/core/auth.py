@@ -81,6 +81,20 @@ class Auth:
         if config_file.exists():
             config_file.unlink()
 
+    def validate_version(self) -> None:
+        """Validate the NeuraCore version."""
+        # Placeholder for version validation logic
+        import neuracore as nc
+
+        response = requests.post(
+            f"{API_URL}/auth/verify-version",
+            json={"version": nc.__version__},
+        )
+        if response.status_code != 200:
+            raise AuthenticationError(
+                f"Version validation failed: {response.json().get('detail')}"
+            )
+
     @property
     def api_key(self) -> Optional[str]:
         """Get the current API key."""
@@ -102,7 +116,6 @@ class Auth:
             raise AuthenticationError("Not authenticated. Please call login() first.")
         return {
             "Authorization": f"Bearer {self._access_token}",
-            # "Content-Type": "application/json",
         }
 
 

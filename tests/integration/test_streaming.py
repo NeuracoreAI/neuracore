@@ -217,8 +217,10 @@ def stream_data(config):
         with Timer():
             nc.log_point_cloud(
                 "camera_0",
-                np.zeros((1000, 3), dtype=np.float32),
+                points=np.zeros((1000, 3), dtype=np.float32),
+                rgb_points=np.zeros((1000, 3), dtype=np.uint8),
                 extrinsics=np.eye(4),
+                intrinsics=np.eye(3),
                 timestamp=t,
             )
 

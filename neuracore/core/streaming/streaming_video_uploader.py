@@ -12,7 +12,7 @@ import requests
 
 from ..auth import get_auth
 from ..const import API_URL
-from ..nc_types import CameraMetaData
+from ..nc_types import CameraData
 from ..streaming.resumable_upload import ResumableUpload
 
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ class StreamingVideoUploader:
         # Create a dedicated buffer for upload chunks
         self.upload_buffer = bytearray()
         self.last_write_position = 0
-        self.frame_metadatas: list[CameraMetaData] = []
+        self.frame_metadatas: list[CameraData] = []
 
     def _upload_loop(self) -> None:
         """
@@ -153,7 +153,7 @@ class StreamingVideoUploader:
         )
         self._upload_json_data()
 
-    def add_frame(self, frame_data: np.ndarray, metadata: CameraMetaData) -> None:
+    def add_frame(self, frame_data: np.ndarray, metadata: CameraData) -> None:
         """
         Add frame to the video with timestamp and stream if buffer large enough.
 
@@ -163,9 +163,7 @@ class StreamingVideoUploader:
         """
         self._upload_queue.put((frame_data, metadata))
 
-    def _add_frame(
-        self, frame_data: np.ndarray, frame_metadata: CameraMetaData
-    ) -> None:
+    def _add_frame(self, frame_data: np.ndarray, frame_metadata: CameraData) -> None:
         """
         Add frame to the video with timestamp and stream if buffer large enough.
 

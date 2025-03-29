@@ -2,14 +2,15 @@ import concurrent
 import logging
 import queue
 import threading
-from typing import Optional
+from typing import Callable, Optional
 
+import numpy as np
 import requests
 
 from .auth import Auth, get_auth
 from .const import API_URL
 from .exceptions import DatasetError
-from .nc_types import SyncedData
+from .nc_types import CameraData, SyncedData, SyncPoint
 from .utils.depth_utils import rgb_to_depth
 from .utils.video_url_streamer import VideoStreamer
 
@@ -162,9 +163,9 @@ class EpisodeIterator:
         self._running = False
         self._recording_synced = self._get_synced_data()
         self._camera_ids = list(
-            self._recording_synced.frames[0].camera_id_to_frame_idx.keys()
-        )
-        self._episode_length = self._recording_synced.frame_count
+            self._recording_synced.frames[0].rgb_images.keys()
+        ) + list(self._recording_synced.frames[0].depth_images.keys())
+        self._episode_length = len(self._recording_synced.frames)
 
     def _get_synced_data(self) -> SyncedData:
         """Get synchronized data for the recording."""
@@ -202,32 +203,12 @@ class EpisodeIterator:
             for t in self._threads:
                 t.join(timeout=2.0)
 
-    def __next__(self):
-        """Get next frame with proper thread state handling and auto-cleanup."""
-        if self._iter_idx >= len(self._recording_synced.frames):
-            raise StopIteration
-        # Get sync point data
-        sync_point = self._recording_synced.frames[self._iter_idx]
-
-        joint_positions = sync_point.joint_positions
-        if sync_point.joint_names_for_training is not None:
-            joint_positions = (
-                {joint_positions[jn] for jn in sync_point.joint_names_for_training},
-            )
-
-        # Build the frame data
-        frame_data = {
-            "timestamp": sync_point.sync_timestamp,
-            "joint_positions": joint_positions,
-            "actions": sync_point.actions,
-            "images": {},
-        }
-
-        # Get images from video streams for all cameras
-        for (
-            camera_id,
-            desired_frame_idx,
-        ) in sync_point.camera_id_to_frame_idx.items():
+    def _populate_video_frames(
+        self,
+        camera_data: dict[str, CameraData],
+        transform_fn: Callable[[np.ndarray], np.ndarray] = None,
+    ):
+        for camera_id, cam_data in camera_data.items():
             while True:
                 try:
                     frame, frame_idx = self._msg_queues[camera_id].get(timeout=10.0)
@@ -236,19 +217,29 @@ class EpisodeIterator:
                 if frame is None:
                     logger.info(f"End of data stream for camera {camera_id}")
                     break
-                if frame_idx == desired_frame_idx:
+                if frame_idx == cam_data.frame_idx:
                     logger.info(f"Received frame {frame_idx} for camera {camera_id}")
-                    # check if name starts with depth
-                    if camera_id.startswith("depth"):
-                        frame = rgb_to_depth(frame)
-                    frame_data["images"][camera_id] = frame
+                    cam_data.frame = transform_fn(frame) if transform_fn else frame
                     break
                 else:
                     logger.info(f"Skipping frame {frame_idx} for camera {camera_id}")
 
+    def __next__(self) -> SyncPoint:
+        """Get next frame with proper thread state handling and auto-cleanup."""
+        if self._iter_idx >= len(self._recording_synced.frames):
+            raise StopIteration
+        # Get sync point data
+        sync_point = self._recording_synced.frames[self._iter_idx]
+        if sync_point.rgb_images is not None:
+            self._populate_video_frames(sync_point.rgb_images)
+        if sync_point.depth_images is not None:
+            self._populate_video_frames(
+                sync_point.depth_images, transform_fn=rgb_to_depth
+            )
+
         logger.info(f"Return frame {self._iter_idx}")
         self._iter_idx += 1
-        return frame_data
+        return sync_point
 
     def __iter__(self):
         self._iter_idx = 0

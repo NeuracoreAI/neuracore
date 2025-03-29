@@ -47,25 +47,11 @@ def test_log_actions(
     # Mock robot creation
     mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
 
-    # Mock WebSocket-related behaviors
-    def mock_websockets_connect(*args, **kwargs):
-        class MockWebSocket:
-            async def send(self, message):
-                pass
-
-            async def close(self):
-                pass
-
-        return MockWebSocket()
-
-    monkeypatch.setattr("websockets.connect", mock_websockets_connect)
-
     # Connect robot
     nc.connect_robot("test_robot", mock_urdf)
 
     # Test logging functions
     try:
-        # Logging with mocked websocket endpoints
         nc.log_joint_positions({"vx300s_left/waist": 0.5, "vx300s_right/waist": -0.3})
         nc.log_action({"action1": 0.1, "action2": 0.2})
 

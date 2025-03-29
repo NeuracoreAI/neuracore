@@ -1,33 +1,44 @@
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 
-from neuracore import (
+from neuracore.core.nc_types import (
+    DataItemStats,
+    DatasetDescription,
+    ModelInitDescription,
+)
+from neuracore.ml import (
+    ActionMaskableData,
     BatchedInferenceOutputs,
     BatchedInferenceSamples,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
-    DatasetDescription,
+    MaskableData,
 )
 from neuracore.ml.algorithms.cnnmlp.cnnmlp import CNNMLP
 
 BS = 2
 CAMS = 1
-STATE_DIM = 32
+JOINT_POSITION_DIM = 32
 ACTION_DIM = 7
 PRED_HORIZON = 10
 
 
 @pytest.fixture
-def dataset_description() -> DatasetDescription:
-    return DatasetDescription(
-        max_num_cameras=CAMS,
-        max_state_size=STATE_DIM,
-        max_action_size=ACTION_DIM,
-        action_mean=torch.ones(ACTION_DIM, dtype=torch.float32),
-        action_std=torch.ones(ACTION_DIM, dtype=torch.float32),
-        state_mean=torch.ones(STATE_DIM, dtype=torch.float32),
-        state_std=torch.ones(STATE_DIM, dtype=torch.float32),
+def model_init_description() -> ModelInitDescription:
+    dataset_description = DatasetDescription(
+        actions=DataItemStats(
+            mean=np.zeros(ACTION_DIM, dtype=float), std=np.ones(ACTION_DIM, dtype=float)
+        ),
+        joint_positions=DataItemStats(
+            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
+            std=np.ones(JOINT_POSITION_DIM, dtype=float),
+        ),
+        max_num_rgb_images=CAMS,
+    )
+    return ModelInitDescription(
+        dataset_description=dataset_description,
         action_prediction_horizon=PRED_HORIZON,
     )
 
@@ -40,23 +51,33 @@ def model_config() -> dict:
 @pytest.fixture
 def sample_batch() -> BatchedTrainingSamples:
     return BatchedTrainingSamples(
-        states=torch.randn(BS, STATE_DIM, dtype=torch.float32),
-        states_mask=torch.ones(BS, STATE_DIM, dtype=torch.float32),
-        camera_images=torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
-        camera_images_mask=torch.ones(BS, CAMS, dtype=torch.float32),
-        actions=torch.randn(BS, PRED_HORIZON, ACTION_DIM, dtype=torch.float32),
-        actions_mask=torch.ones(BS, ACTION_DIM, dtype=torch.float32),
-        actions_sequence_mask=torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
+        joint_positions=MaskableData(
+            torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+            torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+        ),
+        rgb_images=MaskableData(
+            torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
+            torch.ones(BS, CAMS, dtype=torch.float32),
+        ),
+        actions=ActionMaskableData(
+            torch.randn(BS, PRED_HORIZON, ACTION_DIM, dtype=torch.float32),
+            torch.ones(BS, ACTION_DIM, dtype=torch.float32),
+            torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
+        ),
     )
 
 
 @pytest.fixture
 def sample_inference_batch() -> BatchedTrainingSamples:
     return BatchedInferenceSamples(
-        states=torch.randn(BS, STATE_DIM, dtype=torch.float32),
-        states_mask=torch.ones(BS, STATE_DIM, dtype=torch.float32),
-        camera_images=torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
-        camera_images_mask=torch.ones(BS, CAMS, dtype=torch.float32),
+        joint_positions=MaskableData(
+            torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+            torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+        ),
+        rgb_images=MaskableData(
+            torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
+            torch.ones(BS, CAMS, dtype=torch.float32),
+        ),
     )
 
 
@@ -79,29 +100,29 @@ def mock_dataloader(sample_batch):
 
 
 def test_model_construction(
-    dataset_description: DatasetDescription, model_config: dict
+    model_init_description: ModelInitDescription, model_config: dict
 ):
-    model = CNNMLP(dataset_description, **model_config)
+    model = CNNMLP(model_init_description, **model_config)
     assert isinstance(model, nn.Module)
 
 
 def test_model_forward(
-    dataset_description: DatasetDescription,
+    model_init_description: ModelInitDescription,
     model_config: dict,
     sample_inference_batch: BatchedInferenceSamples,
 ):
-    model = CNNMLP(dataset_description, **model_config)
+    model = CNNMLP(model_init_description, **model_config)
     output = model(sample_inference_batch)
     assert isinstance(output, BatchedInferenceOutputs)
     assert output.action_predicitons.shape == (BS, PRED_HORIZON, ACTION_DIM)
 
 
 def test_model_backward(
-    dataset_description: DatasetDescription,
+    model_init_description: ModelInitDescription,
     model_config: dict,
     sample_batch: BatchedTrainingSamples,
 ):
-    model = CNNMLP(dataset_description, **model_config)
+    model = CNNMLP(model_init_description, **model_config)
     output: BatchedTrainingOutputs = model.training_step(sample_batch)
 
     # Compute loss

@@ -7,14 +7,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
 
-from neuracore import (
+from neuracore.core.nc_types import DataType, ModelInitDescription
+from neuracore.ml import (
     BatchedInferenceOutputs,
     BatchedInferenceSamples,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
-    DatasetDescription,
     NeuracoreModel,
 )
+from neuracore.ml.ml_types import MaskableData
 
 from .modules import (
     ACTImageEncoder,
@@ -33,7 +34,7 @@ class ACT(NeuracoreModel):
 
     def __init__(
         self,
-        dataset_description: DatasetDescription,
+        model_init_description: ModelInitDescription,
         hidden_dim: int = 512,
         num_encoder_layers: int = 4,
         num_decoder_layers: int = 7,
@@ -46,7 +47,7 @@ class ACT(NeuracoreModel):
         kl_weight: float = 10.0,
         latent_dim: int = 512,
     ):
-        super().__init__(dataset_description)
+        super().__init__(model_init_description)
         self.hidden_dim = hidden_dim
         self.lr = lr
         self.lr_backbone = lr_backbone
@@ -57,14 +58,14 @@ class ACT(NeuracoreModel):
         # Vision components
         self.image_encoders = nn.ModuleList([
             ACTImageEncoder(output_dim=hidden_dim)
-            for _ in range(self.dataset_description.max_num_cameras)
+            for _ in range(self.dataset_description.max_num_rgb_images)
         ])
         # Input projections
         self.state_embed = nn.Linear(
-            self.dataset_description.max_state_size, hidden_dim
+            self.dataset_description.joint_positions.max_len, hidden_dim
         )
         self.action_embed = nn.Linear(
-            self.dataset_description.max_action_size, hidden_dim
+            self.dataset_description.actions.max_len, hidden_dim
         )
 
         # CLS token embedding for latent encoder
@@ -102,7 +103,7 @@ class ACT(NeuracoreModel):
 
         # Output heads
         self.action_head = nn.Linear(
-            hidden_dim, self.dataset_description.max_action_size
+            hidden_dim, self.dataset_description.actions.max_len
         )
 
         # Latent projections
@@ -112,7 +113,7 @@ class ACT(NeuracoreModel):
 
         # Query embedding for decoding
         self.query_embed = nn.Parameter(
-            torch.randn(dataset_description.action_prediction_horizon, 1, hidden_dim)
+            torch.randn(self.action_prediction_horizon, 1, hidden_dim)
         )
 
         # Additional position embeddings for proprio and latent
@@ -122,23 +123,35 @@ class ACT(NeuracoreModel):
             T.Resize((224, 224)),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         )
+        self.actions_mean = self._to_torch_float_tensor(
+            self.dataset_description.actions.mean
+        )
+        self.actions_std = self._to_torch_float_tensor(
+            self.dataset_description.actions.std
+        )
+        self.joint_positions_mean = self._to_torch_float_tensor(
+            self.dataset_description.joint_positions.mean
+        )
+        self.joint_positions_std = self._to_torch_float_tensor(
+            self.dataset_description.joint_positions.std
+        )
 
-    def _preprocess_states(self, states: torch.FloatTensor) -> torch.FloatTensor:
+    def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
+        """Convert list of floats to torch tensor."""
+        return torch.tensor(data, dtype=torch.float32, device=self.device)
+
+    def _preprocess_joint_pos(self, joint_pos: torch.FloatTensor) -> torch.FloatTensor:
         """Preprocess the states."""
-        return (
-            states - self.dataset_description.state_mean
-        ) / self.dataset_description.state_std
+        return (joint_pos - self.joint_positions_mean) / self.joint_positions_std
 
     def _preprocess_actions(self, actions: torch.FloatTensor) -> torch.FloatTensor:
         """Preprocess the actions."""
-        return (
-            actions - self.dataset_description.action_mean
-        ) / self.dataset_description.action_std
+        return (actions - self.actions_mean) / self.actions_std
 
     def _preprocess_camera_images(
         self, camera_images: torch.FloatTensor
     ) -> torch.FloatTensor:
-        for cam_id in range(self.dataset_description.max_num_cameras):
+        for cam_id in range(self.dataset_description.max_num_rgb_images):
             camera_images[:, cam_id] = self.transform(camera_images[:, cam_id])
         return camera_images
 
@@ -146,9 +159,7 @@ class ACT(NeuracoreModel):
         self, output: BatchedInferenceOutputs
     ) -> BatchedInferenceOutputs:
         """Postprocess the output of the inference."""
-        predictions = (
-            output.action_predicitons * self.dataset_description.action_std
-        ) + self.dataset_description.action_mean
+        predictions = (output.action_predicitons * self.actions_std) + self.actions_mean
         return BatchedInferenceOutputs(action_predicitons=predictions)
 
     def _reparametrize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -302,10 +313,10 @@ class ACT(NeuracoreModel):
 
         # Encode visual features
         memory = self._encode_visual(
-            batch.states,
-            batch.states_mask,
-            batch.camera_images,
-            batch.camera_images_mask,
+            batch.joint_positions.data,
+            batch.joint_positions.mask,
+            batch.rgb_images.data,
+            batch.rgb_images.mask,
             latent,
         )
 
@@ -314,14 +325,18 @@ class ACT(NeuracoreModel):
         return action_preds
 
     def forward(self, batch: BatchedInferenceSamples) -> BatchedInferenceOutputs:
-        batch_size = batch.states.shape[0]
+        batch_size = batch.joint_positions.data.shape[0]
         mu = torch.zeros(batch_size, self.latent_dim, device=self.device)
         logvar = torch.zeros(batch_size, self.latent_dim, device=self.device)
         preprocessed_batch = BatchedInferenceSamples(
-            states=self._preprocess_states(batch.states),
-            states_mask=batch.states_mask,
-            camera_images=self._preprocess_camera_images(batch.camera_images),
-            camera_images_mask=batch.camera_images_mask,
+            joint_positions=MaskableData(
+                self._preprocess_joint_pos(batch.joint_positions.data),
+                batch.joint_positions.mask,
+            ),
+            rgb_images=MaskableData(
+                self._preprocess_camera_images(batch.rgb_images.data),
+                batch.rgb_images.mask,
+            ),
         )
         action_preds = self._predict_action(mu, logvar, preprocessed_batch)
         return self._inference_postprocess(
@@ -331,23 +346,27 @@ class ACT(NeuracoreModel):
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Training step."""
         mu, logvar = self._encode_latent(
-            batch.states,
-            batch.states_mask,
-            batch.actions,
-            batch.actions_mask,
-            batch.actions_sequence_mask,
+            batch.joint_positions.data,
+            batch.joint_positions.mask,
+            batch.actions.data,
+            batch.actions.mask,
+            batch.actions.sequence_mask,
         )
         preprocessed_batch = BatchedInferenceSamples(
-            states=self._preprocess_states(batch.states),
-            states_mask=batch.states_mask,
-            camera_images=self._preprocess_camera_images(batch.camera_images),
-            camera_images_mask=batch.camera_images_mask,
+            joint_positions=MaskableData(
+                self._preprocess_joint_pos(batch.joint_positions.data),
+                batch.joint_positions.mask,
+            ),
+            rgb_images=MaskableData(
+                self._preprocess_camera_images(batch.rgb_images.data),
+                batch.rgb_images.mask,
+            ),
         )
         action_preds = self._predict_action(mu, logvar, preprocessed_batch)
-        target_actions = self._preprocess_actions(batch.actions)
+        target_actions = self._preprocess_actions(batch.actions.data)
 
         l1_loss_all = F.l1_loss(action_preds, target_actions, reduction="none")
-        l1_loss = (l1_loss_all * (1 - batch.actions_sequence_mask).unsqueeze(-1)).mean()
+        l1_loss = (l1_loss_all * (1 - batch.actions.sequence_mask).unsqueeze(-1)).mean()
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
         loss = l1_loss + self.kl_weight * kl_loss
         losses = {
@@ -380,3 +399,11 @@ class ACT(NeuracoreModel):
         ]
 
         return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+
+    def get_supported_data_types(self) -> list[DataType]:
+        """Return the data types supported by the model."""
+        return [
+            DataType.JOINT_POSITIONS,
+            DataType.RGB_IMAGE,
+            DataType.ACTIONS,
+        ]

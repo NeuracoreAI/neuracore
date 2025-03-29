@@ -1,8 +1,7 @@
 from threading import Thread
 from typing import Optional
 
-from ..core.auth import login as _login
-from ..core.auth import logout as _logout
+from ..core.auth import get_auth
 from ..core.exceptions import RobotError
 from ..core.robot import Robot, get_robot
 from ..core.robot import init as _init_robot
@@ -30,6 +29,18 @@ def _stop_recording_wait_for_threads(
     robot.stop_recording(recording_id)
 
 
+def validate_version() -> None:
+    """
+    Validate the NeuraCore version.
+
+    Raises:
+        RobotError: If the NeuraCore version is not compatible
+    """
+    if not GlobalSingleton()._has_validated_version:
+        get_auth().validate_version()
+        GlobalSingleton()._has_validated_version = True
+
+
 def login(api_key: Optional[str] = None) -> None:
     """
     Authenticate with NeuraCore server.
@@ -41,12 +52,12 @@ def login(api_key: Optional[str] = None) -> None:
     Raises:
         AuthenticationError: If authentication fails
     """
-    _login(api_key)
+    get_auth().login(api_key)
 
 
 def logout() -> None:
     """Clear authentication state."""
-    _logout()
+    get_auth().logout()
 
 
 def connect_robot(
@@ -66,6 +77,7 @@ def connect_robot(
         overwrite: Whether to overwrite an existing robot with the same name
         shared: Whether the robot is shared
     """
+    validate_version()
     GlobalSingleton()._active_robot = _init_robot(
         robot_name, urdf_path, mjcf_path, overwrite, shared
     )

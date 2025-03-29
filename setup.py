@@ -81,6 +81,7 @@ setup(
             "pytest-asyncio>=0.15.1",
             "twine>=3.4.2",
             "requests-mock>=1.9.3",
+            "pre-commit",
         ],
     },
     entry_points={

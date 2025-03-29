@@ -4,7 +4,7 @@ from abc import ABC
 
 import numpy as np
 
-from ..nc_types import CameraMetaData, NCData
+from ..nc_types import CameraData, NCData
 from ..streaming.streaming_file_uploader import StreamingJsonUploader
 from ..utils.depth_utils import depth_to_rgb
 from .streaming_video_uploader import StreamingVideoUploader
@@ -48,6 +48,9 @@ class JsonDataStream(DataStream):
 
     def __init__(self, filepath: str):
         super().__init__()
+        # add .json if missing
+        if not filepath.endswith(".json"):
+            filepath += ".json"
         self.filepath = filepath
 
     def start_recording(self, recording_id):
@@ -66,48 +69,6 @@ class JsonDataStream(DataStream):
         if not self.is_recording() or self._streamer is None:
             return
         self._streamer.add_frame(data.model_dump())
-
-
-class JointDataStream(JsonDataStream):
-    """Stream that logs joint data."""
-
-    def __init__(self, sensor_name: str, group_name: str):
-        super().__init__(f"{sensor_name}/{group_name}.json")
-
-
-class ActionDataStream(JsonDataStream):
-    """Stream that logs robot actions."""
-
-    def __init__(self, group_name: str):
-        super().__init__(f"actions/{group_name}.json")
-
-
-class GripperDataStream(JsonDataStream):
-    """Stream that logs gripper open amounts."""
-
-    def __init__(self, group_name: str):
-        super().__init__(f"gripper_open_amounts/{group_name}.json")
-
-
-class LanguageDataStream(JsonDataStream):
-    """Stream that logs language annotations."""
-
-    def __init__(self):
-        super().__init__("language_annotation.json")
-
-
-class PointCloudDataStream(JsonDataStream):
-    """Stream that logs point cloud data."""
-
-    def __init__(self, sensor_name: str):
-        super().__init__(f"point_clouds/{sensor_name}.json")
-
-
-class CustomDataStream(JsonDataStream):
-    """Stream that logs custom data."""
-
-    def __init__(self, stream_name: str):
-        super().__init__(f"custom/{stream_name}.json")
 
 
 class VideoDataStream(DataStream):
@@ -131,7 +92,7 @@ class VideoDataStream(DataStream):
         self._encoder = None
         return upload_thread
 
-    def log(self, data: np.ndarray, metadata: CameraMetaData):
+    def log(self, data: np.ndarray, metadata: CameraData):
         """Convert depth to RGB and log as a video frame."""
         if not self.is_recording() or self._encoder is None:
             return
