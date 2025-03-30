@@ -86,9 +86,13 @@ class EndpointPolicy:
                 )
         return sync_point
 
-    def predict(self) -> np.ndarray:
+    def predict(self, sync_point: SyncPoint | None = None) -> np.ndarray:
         """
         Get action predictions from the model.
+
+        Args:
+            sync_point: SyncPoint object containing the data to be sent to the model.
+                If None, a new SyncPoint will be created with the latest data.
 
         Returns:
             numpy.ndarray: Predicted action/joint velocities
@@ -96,7 +100,9 @@ class EndpointPolicy:
         Raises:
             EndpointError: If prediction fails
         """
-        request_data = self._create_sync_point().model_dump()
+        if sync_point is None:
+            sync_point = self._create_sync_point()
+        request_data = sync_point.model_dump()
         if not self._is_local:
             payload_size = sys.getsizeof(json.dumps(request_data)) / (
                 1024 * 1024

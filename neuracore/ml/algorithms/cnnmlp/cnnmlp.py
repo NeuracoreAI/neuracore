@@ -227,7 +227,8 @@ class CNNMLP(NeuracoreModel):
         ]
         return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
 
-    def get_supported_data_types(self) -> list[DataType]:
+    @staticmethod
+    def get_supported_data_types() -> list[DataType]:
         """Return the data types supported by the model."""
         return [
             DataType.JOINT_POSITIONS,

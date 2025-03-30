@@ -46,7 +46,7 @@ def rgb_to_depth(rgb_img: np.ndarray) -> np.ndarray:
         depth_img: Depth image in meters as float32
     """
     # Convert back to original depth
-    r, g, b = rgb_img[:, :, 0], rgb_img[:, :, 1], rgb_img[:, :, 2]
+    r, g, b = rgb_img[..., 0], rgb_img[..., 1], rgb_img[..., 2]
 
     depth_value = (
         r.astype(np.float32) * 256 * 256

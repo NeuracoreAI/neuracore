@@ -1,3 +1,6 @@
+import inspect
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -17,6 +20,7 @@ from neuracore.ml import (
     MaskableData,
 )
 from neuracore.ml.algorithms.cnnmlp.cnnmlp import CNNMLP
+from neuracore.ml.utils.validate import run_validation
 
 BS = 2
 CAMS = 1
@@ -136,3 +140,12 @@ def test_model_backward(
         if param.requires_grad:
             assert param.grad is not None
             assert torch.isfinite(param.grad).all()
+
+
+def test_run_validation(tmp_path: Path):
+    algorithm_dir = Path(inspect.getfile(CNNMLP)).parent
+    _, error_msg = run_validation(
+        output_dir=tmp_path,
+        algorithm_dir=algorithm_dir,
+    )
+    assert len(error_msg) == 0

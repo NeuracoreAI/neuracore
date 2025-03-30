@@ -20,6 +20,7 @@ class NeuracoreModel(nn.Module, ABC):
         model_init_description: ModelInitDescription,
     ):
         super().__init__()
+        self.model_init_description = model_init_description
         supported, input_data_types = set(self.get_supported_data_types()), set(
             model_init_description.dataset_description.get_data_types()
         )
@@ -49,7 +50,8 @@ class NeuracoreModel(nn.Module, ABC):
         """Configure and return optimizer for the model."""
         pass
 
+    @staticmethod
     @abstractmethod
-    def get_supported_data_types(self) -> list[DataType]:
+    def get_supported_data_types() -> list[DataType]:
         """Return the data types supported by the model."""
         pass

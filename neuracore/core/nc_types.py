@@ -88,13 +88,9 @@ class DataType(Enum):
 
 
 class DataItemStats(BaseModel):
-    mean: list[float] = None
-    std: list[float] = None
-    max_len: str = Field(
-        default_factory=lambda data: (
-            len(data["mean"]) if data["mean"] is not None else 0
-        )
-    )
+    mean: list[float] = Field(default_factory=list)
+    std: list[float] = Field(default_factory=list)
+    max_len: int = Field(default_factory=lambda data: len(data["mean"]))
 
 
 class DatasetDescription(BaseModel):
