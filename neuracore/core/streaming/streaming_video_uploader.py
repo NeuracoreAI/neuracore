@@ -12,7 +12,7 @@ import requests
 
 from ..auth import get_auth
 from ..const import API_URL
-from ..nc_types import CameraMetaData
+from ..nc_types import CameraData
 from ..streaming.resumable_upload import ResumableUpload
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,6 @@ class StreamingVideoUploader:
             codec: Video codec
             pixel_format: Pixel format
             chunk_size: Size of chunks to upload
-            framerate_cap: Optional framerate cap (frames per second) excessive frames will be dropped
         """
         self.recording_id = recording_id
         self.path = path
@@ -111,7 +110,7 @@ class StreamingVideoUploader:
         # Create a dedicated buffer for upload chunks
         self.upload_buffer = bytearray()
         self.last_write_position = 0
-        self.frame_metadatas: list[CameraMetaData] = []
+        self.frame_metadatas: list[CameraData] = []
 
     def _upload_loop(self) -> None:
         """
@@ -154,7 +153,7 @@ class StreamingVideoUploader:
         )
         self._upload_json_data()
 
-    def add_frame(self, frame_data: np.ndarray, metadata: CameraMetaData) -> None:
+    def add_frame(self, frame_data: np.ndarray, metadata: CameraData) -> None:
         """
         Add frame to the video with timestamp and stream if buffer large enough.
 
@@ -164,9 +163,7 @@ class StreamingVideoUploader:
         """
         self._upload_queue.put((frame_data, metadata))
 
-    def _add_frame(
-        self, frame_data: np.ndarray, frame_metadata: CameraMetaData
-    ) -> None:
+    def _add_frame(self, frame_data: np.ndarray, frame_metadata: CameraData) -> None:
         """
         Add frame to the video with timestamp and stream if buffer large enough.
 
@@ -186,18 +183,22 @@ class StreamingVideoUploader:
         relative_time = frame_metadata.timestamp - self.first_timestamp
         pts = int(relative_time * PTS_FRACT)  # Convert to microseconds
 
+        # Ensure pts is monotonically increasing (required by most codecs)
         if self.last_pts is not None and pts <= self.last_pts:
             pts = self.last_pts + 1
 
         self.last_pts = pts
 
+        # Create video frame from numpy array
         frame = av.VideoFrame.from_ndarray(frame_data, format="rgb24")
         frame = frame.reformat(format=self.pixel_format)
         frame.pts = pts
 
+        # Encode and mux
         for packet in self.stream.encode(frame):
             self.container.mux(packet)
 
+        # Get current buffer position after encoding
         current_pos = self.buffer.tell()
         current_chunk_size = current_pos - self.last_write_position
         if current_chunk_size >= self.chunk_size:
@@ -208,13 +209,23 @@ class StreamingVideoUploader:
             self.buffer.seek(current_pos)
             self._upload_chunks()
 
+        # Total bytes written
         self.total_bytes_written = current_pos
         self.frame_metadatas.append(frame_metadata)
 
     def _upload_chunks(self) -> None:
+        """
+        Upload chunks of exactly chunk_size bytes if enough data is available.
+        """
+        # Upload complete chunks while we have enough data
         while len(self.upload_buffer) >= self.chunk_size:
+            # Extract a chunk of exactly chunk_size bytes
             chunk = bytes(self.upload_buffer[: self.chunk_size])
+
+            # Remove this chunk from our upload buffer
             self.upload_buffer = self.upload_buffer[self.chunk_size :]
+
+            # Upload the chunk
             success = self.uploader.upload_chunk(chunk, is_final=False)
             logger.info(f"Uploaded {len(chunk)} bytes")
 
