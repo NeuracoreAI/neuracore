@@ -29,7 +29,7 @@ class CameraData(NCData):
 
 
 class PoseData(NCData):
-    pose: dict[str, float]
+    pose: dict[str, list[float]]
 
 
 class EndEffectorData(NCData):
@@ -62,6 +62,7 @@ class SyncPoint(BaseModel):
     rgb_images: Optional[dict[str, CameraData]] = None
     depth_images: Optional[dict[str, CameraData]] = None
     point_clouds: Optional[dict[str, PointCloudData]] = None
+    language_data: Optional[LanguageData] = None
     custom_data: Optional[dict[str, CustomData]] = None
 
 

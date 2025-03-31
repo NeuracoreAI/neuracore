@@ -15,6 +15,7 @@ from ..core.nc_types import (
     JointData,
     LanguageData,
     PointCloudData,
+    PoseData,
 )
 from ..core.robot import Robot, get_robot
 from ..core.streaming.data_stream import DepthDataStream, JsonDataStream, RGBDataStream
@@ -297,11 +298,11 @@ def log_pose_data(
     str_id = f"{robot.name}_{group_id}_pose_data"
     stream = GlobalSingleton()._data_streams.get(str_id)
     if stream is None:
-        stream = JsonDataStream(group_id)
+        stream = JsonDataStream(f"poses/{group_id}.json")
         GlobalSingleton()._data_streams[str_id] = stream
         if robot.name in GlobalSingleton()._active_recording_ids:
             stream.start_recording(GlobalSingleton()._active_recording_ids[robot.name])
-    stream.log(EndEffectorData(timestamp=timestamp, poses=poses))
+    stream.log(PoseData(timestamp=timestamp, pose=poses))
 
 
 def log_gripper_data(
