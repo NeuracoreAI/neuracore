@@ -22,11 +22,13 @@ class Robot:
         urdf_path: Optional[str] = None,
         mjcf_path: Optional[str] = None,
         overwrite: bool = False,
+        shared: bool = False,
     ):
         self.name = robot_name
         self.urdf_path = urdf_path
         self.mjcf_path = mjcf_path
         self.overwrite = overwrite
+        self.shared = shared
         self.id: str = None
         self._auth: Auth = get_auth()
         self._temp_dir = None
@@ -61,7 +63,7 @@ class Robot:
             # First check if we already have a robot with the same name
             if not self.overwrite:
                 response = requests.get(
-                    f"{API_URL}/robots",
+                    f"{API_URL}/robots?is_shared={self.shared}",
                     headers=self._auth.get_headers(),
                 )
                 response.raise_for_status()
@@ -74,7 +76,7 @@ class Robot:
 
             logger.info(f"Creating new robot: {self.name}")
             response = requests.post(
-                f"{API_URL}/robots",
+                f"{API_URL}/robots?is_shared={self.shared}",
                 json={"name": self.name, "cameras": []},  # TODO: Add camera support
                 headers=self._auth.get_headers(),
             )
@@ -218,7 +220,7 @@ class Robot:
 
             # Upload the package
             response = requests.put(
-                f"{API_URL}/robots/{self.id}/package",
+                f"{API_URL}/robots/{self.id}/package?is_shared={self.shared}",
                 headers=self._auth.get_headers(),
                 files=files,
             )
@@ -247,9 +249,10 @@ def init(
     urdf_path: Optional[str] = None,
     mjcf_path: Optional[str] = None,
     overwrite: bool = False,
+    shared: bool = False,
 ) -> Robot:
     """Initialize a robot globally."""
-    robot = Robot(robot_name, urdf_path, mjcf_path, overwrite)
+    robot = Robot(robot_name, urdf_path, mjcf_path, overwrite, shared)
     robot.init()
     _robots[robot_name] = robot
     return robot

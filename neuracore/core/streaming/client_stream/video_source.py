@@ -19,6 +19,7 @@ TIMESTAMP_DELTA = int(VIDEO_CLOCK_RATE / STREAMING_FPS)
 
 @dataclass
 class VideoSource:
+    pixel_format: str
     _last_frame: np.ndarray[np.uint8] = field(
         default_factory=lambda: np.zeros((480, 640, 3), dtype=np.uint8)
     )
@@ -28,7 +29,7 @@ class VideoSource:
         self._last_frame = frame_data
 
     def get_last_frame(self) -> VideoFrame:
-        return VideoFrame.from_ndarray(self._last_frame, format="rgb24")
+        return VideoFrame.from_ndarray(self._last_frame, format=self.pixel_format)
 
     def get_video_track(self):
         consumer = VideoTrack(self)
@@ -42,10 +43,6 @@ class VideoSource:
 
 
 class VideoTrack(MediaStreamTrack):
-    """
-    A dummy video track which reads green frames.
-    """
-
     kind = "video"
 
     def __init__(self, source: VideoSource):

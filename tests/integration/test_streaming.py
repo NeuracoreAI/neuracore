@@ -199,7 +199,35 @@ def stream_data(config):
             frame_count, config.fps, config.num_joints
         )
         with Timer():
-            nc.log_joints(joint_positions, timestamp=t)
+            nc.log_joint_positions(joint_positions, timestamp=t)
+
+        with Timer():
+            # use the same joint positions for velocities and torques
+            nc.log_joint_velocities(joint_positions, timestamp=t)
+
+        with Timer():
+            # use the same joint positions for velocities and torques
+            nc.log_joint_torques(joint_positions, timestamp=t)
+
+        with Timer():
+            nc.log_gripper_data(
+                {"left_gripper": 0.5, "right_gripper": 0.5}, timestamp=t
+            )
+
+        with Timer():
+            nc.log_point_cloud(
+                "camera_0",
+                np.zeros((1000, 3), dtype=np.float32),
+                extrinsics=np.eye(4),
+                timestamp=t,
+            )
+
+        with Timer():
+            nc.log_custom_data(
+                "test_custom_data",
+                {"frame_num": frame_code, "time": t},
+                timestamp=t,
+            )
 
         # Stream a test action occasionally
         if frame_count % 5 == 0:
@@ -432,7 +460,7 @@ def test_stop_start_sequences():
                 segment_frames, config.fps, config.num_joints
             )
             with Timer():
-                nc.log_joints(joint_positions)
+                nc.log_joint_positions(joint_positions)
 
             segment_frames += 1
             time.sleep(1 / config.fps)

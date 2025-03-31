@@ -5,35 +5,17 @@ import threading
 from typing import Optional
 
 import requests
-from pydantic import BaseModel
-
-from neuracore.core.utils.depth_utils import rgb_to_depth
 
 from .auth import Auth, get_auth
 from .const import API_URL
 from .exceptions import DatasetError
+from .nc_types import SyncedData
+from .utils.depth_utils import rgb_to_depth
 from .utils.video_url_streamer import VideoStreamer
 
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 256 * 1024  # Multiples of 256KB
-
-
-class SyncPoint(BaseModel):
-    """Synchronized data point with joint, action, and image data."""
-
-    sync_timestamp: str
-    joint_positions: dict[str, float]
-    actions: dict[str, float] | None = None
-    camera_id_to_frame_idx: dict[str, int] = {}
-    camera_id_to_frame_timestamp: dict[str, float] = {}
-
-
-class SyncedData(BaseModel):
-    frames: list[SyncPoint]
-    start_time: float
-    end_time: float
-    frame_count: int
 
 
 class Dataset:
@@ -73,24 +55,35 @@ class Dataset:
 
     @staticmethod
     def create(
-        name: str, description: Optional[str] = None, tags: Optional[list[str]] = None
+        name: str,
+        description: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        shared: bool = False,
     ) -> "Dataset":
         ds = Dataset.get(name, non_exist_ok=True)
         if ds is None:
-            ds = Dataset._create_dataset(name, description, tags)
+            ds = Dataset._create_dataset(name, description, tags, shared=shared)
         else:
             logger.info(f"Dataset '{name}' already exist.")
         return ds
 
     @staticmethod
     def _create_dataset(
-        name: str, description: Optional[str] = None, tags: Optional[list[str]] = None
+        name: str,
+        description: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        shared: bool = False,
     ) -> "Dataset":
         auth: Auth = get_auth()
         response = requests.post(
             f"{API_URL}/datasets",
             headers=auth.get_headers(),
-            json={"name": name, "description": description, "tags": tags},
+            json={
+                "name": name,
+                "description": description,
+                "tags": tags,
+                "is_shared": shared,
+            },
         )
         response.raise_for_status()
         dataset_json = response.json()
@@ -216,10 +209,16 @@ class EpisodeIterator:
         # Get sync point data
         sync_point = self._recording_synced.frames[self._iter_idx]
 
+        joint_positions = sync_point.joint_positions
+        if sync_point.joint_names_for_training is not None:
+            joint_positions = (
+                {joint_positions[jn] for jn in sync_point.joint_names_for_training},
+            )
+
         # Build the frame data
         frame_data = {
             "timestamp": sync_point.sync_timestamp,
-            "joint_positions": sync_point.joint_positions,
+            "joint_positions": joint_positions,
             "actions": sync_point.actions,
             "images": {},
         }

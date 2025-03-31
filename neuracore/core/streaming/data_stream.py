@@ -1,17 +1,14 @@
-import json
 import logging
 import threading
-import time
-from abc import ABC, abstractmethod
-from typing import Optional
+from abc import ABC
+from typing import Any
 
 import numpy as np
-import requests
-from ..streaming.client_stream import get_robot_streaming_manager
-from ..auth import get_auth
-from ..const import API_URL
+
+from ..nc_types import CameraData, NCData
+from ..streaming.streaming_file_uploader import StreamingJsonUploader
 from ..utils.depth_utils import depth_to_rgb
-from .streaming_video_encoder import StreamingVideoEncoder
+from .streaming_video_uploader import StreamingVideoUploader
 
 logger = logging.getLogger(__name__)
 
@@ -19,17 +16,14 @@ logger = logging.getLogger(__name__)
 class DataStream(ABC):
     """Base class for data streams."""
 
-    def __init__(self, robot_id: str):
+    def __init__(self):
         """Initialize the data stream.
 
         This must be kept lightweight and not perform any blocking operations.
-
-        Args:
-            robot_id (str): the id of the robot to which the data stream belongs
         """
         self._recording = False
         self._recording_id = None
-        self.robot_id = robot_id
+        self._latest_data = None
 
     def start_recording(self, recording_id: str):
         """Start recording data.
@@ -50,92 +44,45 @@ class DataStream(ABC):
         """Check if recording is active."""
         return self._recording
 
+    def get_latest_data(self) -> Any:
+        """Get the latest data from the stream."""
+        return self._latest_data
 
-class BufferedDataStream(DataStream):
-    """Stream that buffers data locally for later upload."""
 
-    def __init__(self, robot_id: str, filename: str):
-        super().__init__(robot_id=robot_id)
-        self._filename = filename
-        self._buffer = []
+class JsonDataStream(DataStream):
+    """Stream that logs custom data."""
 
-    def log(self, dict_data: dict[str, float], timestamp: Optional[float] = None):
-        """Log data to the buffer if recording is active."""
-        timestamp = timestamp or time.time()
-        if not self.is_recording():
-            return
-        self._buffer.append(
-            {
-                "timestamp": timestamp,
-                "data": dict_data,
-            }
-        )
+    def __init__(self, filepath: str):
+        super().__init__()
+        # add .json if missing
+        if not filepath.endswith(".json"):
+            filepath += ".json"
+        self.filepath = filepath
 
-    def start_recording(self, recording_id: str):
-        """Upload buffered data to storage."""
+    def start_recording(self, recording_id):
         super().start_recording(recording_id)
-        self._buffer = []
-
-    def _upload_loop(self, recoding_id: str, json_data: str):
-        """Upload buffered data to storage."""
-        # Generate an upload URL
-        upload_url_response = requests.get(
-            f"{API_URL}/recording/{recoding_id}/json_upload_url?filename={self._filename}",
-            headers=get_auth().get_headers(),
-        )
-        upload_url_response.raise_for_status()
-        upload_url = upload_url_response.json()["url"]
-        logger.info(f"Uploading {len(json_data)} bytes to {upload_url}")
-        response = requests.put(
-            upload_url, headers={"Content-Length": str(len(json_data))}, data=json_data
-        )
-        response.raise_for_status()
-        self._buffer = []
+        self._streamer = StreamingJsonUploader(recording_id, self.filepath)
 
     def stop_recording(self) -> threading.Thread:
-        """Upload buffered data to storage."""
-        recoding_id = self._recording_id
+        """Stop video recording and finalize encoding."""
         super().stop_recording()
-        if not self._buffer:
-            return
-        upload_thread = threading.Thread(
-            target=self._upload_loop,
-            args=(recoding_id, json.dumps(self._buffer)),
-            daemon=False,
-        )
-        upload_thread.start()
-        self._buffer = []
+        upload_thread = self._streamer.finish()
+        self._streamer = None
         return upload_thread
 
-
-class ActionDataStream(BufferedDataStream):
-    """Stream that logs robot actions."""
-
-    def __init__(self):
-        super().__init__("actions.json")
-
-
-class JointDataStream(BufferedDataStream):
-    """Stream that logs robot actions."""
-
-    def __init__(self):
-        super().__init__("joint_states.json")
-
-
-class LanguageDataStream(BufferedDataStream):
-    """Stream that logs robot actions."""
-
-    def __init__(self):
-        super().__init__("language_annotation.json")
+    def log(self, data: NCData):
+        """Convert depth to RGB and log as a video frame."""
+        self._latest_data = data
+        if not self.is_recording() or self._streamer is None:
+            return
+        self._streamer.add_frame(data.model_dump())
 
 
 class VideoDataStream(DataStream):
     """Stream that encodes and uploads video data."""
 
-    def __init__(
-        self, robot_id: str, camera_id: str, width: int = 640, height: int = 480
-    ):
-        super().__init__(robot_id=robot_id)
+    def __init__(self, camera_id: str, width: int = 640, height: int = 480):
+        super().__init__()
         self.camera_id = camera_id
         self.width = width
         self.height = height
@@ -144,9 +91,6 @@ class VideoDataStream(DataStream):
     def start_recording(self, recording_id: str):
         """Start video recording."""
         super().start_recording(recording_id)
-        self._encoder = StreamingVideoEncoder(
-            recording_id, self.camera_id, self.width, self.height
-        )
 
     def stop_recording(self) -> threading.Thread:
         """Stop video recording and finalize encoding."""
@@ -155,9 +99,12 @@ class VideoDataStream(DataStream):
         self._encoder = None
         return upload_thread
 
-    @abstractmethod
-    def log(self, data: np.ndarray, timestamp: Optional[float] = None):
-        raise NotImplementedError()
+    def log(self, data: np.ndarray, metadata: CameraData):
+        """Convert depth to RGB and log as a video frame."""
+        self._latest_data = data
+        if not self.is_recording() or self._encoder is None:
+            return
+        self._encoder.add_frame(data, metadata)
 
 
 class DepthDataStream(VideoDataStream):
@@ -165,30 +112,22 @@ class DepthDataStream(VideoDataStream):
 
     def start_recording(self, recording_id: str):
         """Start video recording."""
-        super(DataStream, self).start_recording(recording_id)
-        self._encoder = StreamingVideoEncoder(
-            recording_id, self.camera_id, self.width, self.height, depth_to_rgb
+        super().start_recording(recording_id)
+        self._encoder = StreamingVideoUploader(
+            recording_id,
+            f"depths/{self.camera_id}",
+            self.width,
+            self.height,
+            depth_to_rgb,
         )
-
-    def log(self, data: np.ndarray, timestamp: Optional[float] = None):
-        """Convert depth to RGB and log as a video frame."""
-        if not self.is_recording() or self._encoder is None:
-            return
-        timestamp = timestamp or time.time()
-        self._encoder.add_frame(data, timestamp)
 
 
 class RGBDataStream(VideoDataStream):
     """Stream that encodes and uploads RGB data as video."""
 
-    def log(self, data: np.ndarray, timestamp: Optional[float] = None):
-        """Log an RGB frame."""
-        if not self.is_recording() or self._encoder is None:
-            return
-
-        get_robot_streaming_manager(robot_id=self.robot_id).get_recording_video_stream(
-            self.camera_id
-        ).add_frame(data)
-
-        timestamp = timestamp or time.time()
-        self._encoder.add_frame(data, timestamp)
+    def start_recording(self, recording_id: str):
+        """Start video recording."""
+        super().start_recording(recording_id)
+        self._encoder = StreamingVideoUploader(
+            recording_id, f"rgbs/{self.camera_id}", self.width, self.height
+        )

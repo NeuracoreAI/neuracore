@@ -37,12 +37,14 @@ class ClientStreamingManager:
     tracks: List[VideoSource] = field(default_factory=list)
     local_stream_id: str = field(default_factory=lambda: uuid4().hex)
 
-    def get_recording_video_stream(self, sensor_name: str) -> VideoSource:
+    def get_recording_video_stream(self, sensor_name: str, kind: str) -> VideoSource:
         """Start a new recording stream"""
         if sensor_name in self.video_tracks_cache:
             return self.video_tracks_cache[sensor_name]
 
-        video_track = VideoSource()
+        video_track = VideoSource(
+            pixel_format="rgb24" if self.kind == "rgb" else "grey"
+        )
         self.video_tracks_cache[sensor_name] = video_track
         self.tracks.append(video_track)
 
@@ -51,7 +53,7 @@ class ClientStreamingManager:
             connection.add_video_source(video_track)
 
         get_loop().create_task(
-            self.submit_track(str(len(self.tracks) - 1), "video", sensor_name)
+            self.submit_track(str(len(self.tracks) - 1), kind, sensor_name)
         )
 
         return video_track
