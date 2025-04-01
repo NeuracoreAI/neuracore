@@ -26,9 +26,11 @@ from .globals import GlobalSingleton
 def _create_group_id_from_dict(joint_names: dict[str, float]) -> str:
     joint_names = list(joint_names.keys())
     joint_names.sort()
-    return base64.urlsafe_b64encode(
-        hashlib.md5("".join(joint_names).encode()).digest()
-    ).decode()
+    return (
+        base64.urlsafe_b64encode(hashlib.md5("".join(joint_names).encode()).digest())
+        .decode()
+        .rstrip("=")
+    )
 
 
 def _get_robot(robot_name: str) -> Robot:
@@ -82,7 +84,7 @@ def _log_joint_data(
 
     robot = _get_robot(robot_name)
     joint_group_id = _create_group_id_from_dict(joint_data)
-    joint_str_id = f"{data_type}_{joint_group_id}_{robot.name}"
+    joint_str_id = f"{robot.name}_{data_type}_{joint_group_id}"
     joint_stream = GlobalSingleton()._data_streams.get(joint_str_id)
     if joint_stream is None:
         joint_stream = JsonDataStream(f"{data_type}/{joint_group_id}.json")
@@ -145,7 +147,7 @@ def _log_camera_data(
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name)
     camera_id = f"{camera_type}_{camera_id}"
-    stream_id = f"{camera_type}_{robot.name}_{camera_id}"
+    stream_id = f"{robot.name}_{camera_type}_{camera_id}"
     stream = GlobalSingleton()._data_streams.get(stream_id)
     if stream is None:
         if camera_type == "rgb":

@@ -86,9 +86,9 @@ class Auth:
         # Placeholder for version validation logic
         import neuracore as nc
 
-        response = requests.post(
+        response = requests.get(
             f"{API_URL}/auth/verify-version",
-            json={"version": nc.__version__},
+            params={"version": nc.__version__},
         )
         if response.status_code != 200:
             raise AuthenticationError(

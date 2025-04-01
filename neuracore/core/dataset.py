@@ -162,9 +162,10 @@ class EpisodeIterator:
         self.size_bytes = recording["total_bytes"]
         self._running = False
         self._recording_synced = self._get_synced_data()
-        self._camera_ids = list(
-            self._recording_synced.frames[0].rgb_images.keys()
-        ) + list(self._recording_synced.frames[0].depth_images.keys())
+        _rgb = self._recording_synced.frames[0].rgb_images
+        _depth = self._recording_synced.frames[0].depth_images
+        self._camera_ids = list(_rgb.keys()) if _rgb else []
+        self._camera_ids += list(_depth.keys()) if _depth else []
         self._episode_length = len(self._recording_synced.frames)
 
     def _get_synced_data(self) -> SyncedData:

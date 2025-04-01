@@ -216,7 +216,7 @@ def stream_data(config):
 
         with Timer():
             nc.log_point_cloud(
-                "camera_0",
+                "point_cloud_camera_0",
                 points=np.zeros((1000, 3), dtype=np.float32),
                 rgb_points=np.zeros((1000, 3), dtype=np.uint8),
                 extrinsics=np.eye(4),
@@ -269,33 +269,28 @@ def verify_dataset(config, expected_frame_count):
     # Iterate through the dataset episodes
     for episode in dataset:
         logger.info(f"Verifying episode with {len(episode)} frames")
-        for frame_idx, frame in enumerate(episode):
+        for frame_idx, sync_point in enumerate(episode):
             results["retrieved_frames"] += 1
 
             # Check for camera images
-            if "images" in frame:
-                for cam_idx in range(config.num_cameras):
-                    camera_id = f"rgb_camera_{cam_idx}"
-                    if camera_id in frame["images"]:
-                        img = frame["images"][camera_id]
-
-                        decoded_frame_num = decode_frame_number(img)
-                        logger.info(f"decoded_frame_num: {decoded_frame_num}")
-
-                        # Track this frame
-                        if decoded_frame_num in results["unique_frames"]:
-                            results["duplicate_frames"].append(decoded_frame_num)
-                        results["unique_frames"].add(decoded_frame_num)
+            if sync_point.rgb_images:
+                for _, cam_data in sync_point.rgb_images.items():
+                    img = cam_data.frame
+                    decoded_frame_num = decode_frame_number(img)
+                    logger.info(f"decoded_frame_num: {decoded_frame_num}")
+                    if decoded_frame_num in results["unique_frames"]:
+                        results["duplicate_frames"].append(decoded_frame_num)
+                    results["unique_frames"].add(decoded_frame_num)
 
             # Verify joint positions
-            if "joint_positions" in frame:
+            if sync_point.joint_positions:
                 expected_joints = generate_joint_positions(
                     frame_idx, config.fps, config.num_joints
                 )
 
                 for joint_name, expected_value in expected_joints.items():
-                    if joint_name in frame["joint_positions"]:
-                        actual_value = frame["joint_positions"][joint_name]
+                    if joint_name in sync_point.joint_positions.values:
+                        actual_value = sync_point.joint_positions.values[joint_name]
                         if abs(expected_value - actual_value) > 1e-5:
                             results["joint_mismatches"].append((
                                 decoded_frame_num,
@@ -349,6 +344,8 @@ def run_streaming_test(config):
 
     # Stream data
     actual_frame_count = stream_data(config)
+
+    time.sleep(2)  # Allow some time for data to be processed
 
     results = verify_dataset(config, actual_frame_count)
 
