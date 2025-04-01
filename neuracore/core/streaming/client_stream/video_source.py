@@ -5,9 +5,11 @@ import weakref
 from dataclasses import dataclass, field
 from typing import Optional
 
+import av
 import numpy as np
 from aiortc import MediaStreamTrack
-from av import VideoFrame
+
+av.logging.set_level(None)
 
 STREAMING_FPS = 30
 VIDEO_CLOCK_RATE = 90000
@@ -26,8 +28,8 @@ class VideoSource:
     def add_frame(self, frame_data: np.ndarray):
         self._last_frame = frame_data
 
-    def get_last_frame(self) -> VideoFrame:
-        return VideoFrame.from_ndarray(self._last_frame, format=self.pixel_format)
+    def get_last_frame(self) -> av.VideoFrame:
+        return av.VideoFrame.from_ndarray(self._last_frame, format=self.pixel_format)
 
     def get_video_track(self):
         consumer = VideoTrack(self)
@@ -62,7 +64,7 @@ class VideoTrack(MediaStreamTrack):
 
         return self._timestamp
 
-    async def recv(self) -> VideoFrame:
+    async def recv(self) -> av.VideoFrame:
         """Receive the next frame"""
         if self._ended:
             raise Exception("Track has ended")

@@ -214,11 +214,14 @@ def stream_data(config):
                 {"left_gripper": 0.5, "right_gripper": 0.5}, timestamp=t
             )
 
-        with Timer():
+        points = np.zeros((1000, 3), dtype=np.float32)
+        rgb_points = np.zeros((1000, 3), dtype=np.uint8)
+        with Timer(max_time=0.5):
+            # TODO: Speed up this call
             nc.log_point_cloud(
                 "point_cloud_camera_0",
-                points=np.zeros((1000, 3), dtype=np.float32),
-                rgb_points=np.zeros((1000, 3), dtype=np.uint8),
+                points=points,
+                rgb_points=rgb_points,
                 extrinsics=np.eye(4),
                 intrinsics=np.eye(3),
                 timestamp=t,

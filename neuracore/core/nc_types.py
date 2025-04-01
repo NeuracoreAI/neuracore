@@ -4,10 +4,6 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 
-def _get_max_num_items(data: Optional[list[float]]) -> int:
-    return len(data) if data is not None else 0
-
-
 class NCData(BaseModel):
     timestamp: float
 
@@ -39,6 +35,8 @@ class EndEffectorData(NCData):
 class PointCloudData(NCData):
     points: list[list[float]]
     rgb_points: Optional[list[list[int]]] = None
+    extrinsics: Optional[list[list[float]]] = None
+    intrinsics: Optional[list[list[float]]] = None
 
 
 class LanguageData(NCData):
