@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from ..nc_types import CameraData, NCData
+from ..nc_types import CameraMetaData, NCData
 from ..streaming.streaming_file_uploader import StreamingJsonUploader
 from ..utils.depth_utils import depth_to_rgb
 from .streaming_video_uploader import StreamingVideoUploader
@@ -99,7 +99,7 @@ class VideoDataStream(DataStream):
         self._encoder = None
         return upload_thread
 
-    def log(self, data: np.ndarray, metadata: CameraData):
+    def log(self, data: np.ndarray, metadata: CameraMetaData):
         """Convert depth to RGB and log as a video frame."""
         self._latest_data = data
         if not self.is_recording() or self._encoder is None:

@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass, field
 import fractions
+import math
 import time
 from typing import Optional, Tuple
 from uuid import uuid4
@@ -11,6 +12,7 @@ from av import VideoFrame
 import numpy as np
 
 
+
 STREAMING_FPS = 30
 VIDEO_CLOCK_RATE = 90000
 VIDEO_TIME_BASE = fractions.Fraction(1, VIDEO_CLOCK_RATE)
@@ -19,7 +21,7 @@ TIMESTAMP_DELTA = int(VIDEO_CLOCK_RATE / STREAMING_FPS)
 
 @dataclass
 class VideoSource:
-    pixel_format: str
+    id:str
     _last_frame: np.ndarray[np.uint8] = field(
         default_factory=lambda: np.zeros((480, 640, 3), dtype=np.uint8)
     )
@@ -29,9 +31,10 @@ class VideoSource:
         self._last_frame = frame_data
 
     def get_last_frame(self) -> VideoFrame:
-        return VideoFrame.from_ndarray(self._last_frame, format=self.pixel_format)
+        return VideoFrame.from_ndarray(self._last_frame, format="rgb24")
 
     def get_video_track(self):
+        print(f"get video track {self.id=}")
         consumer = VideoTrack(self)
         self._consumers.add(consumer)
         return consumer
@@ -40,6 +43,29 @@ class VideoSource:
         """Stop the source"""
         for consumer in self._consumers:
             consumer.stop()
+
+
+@dataclass
+class DepthVideoSource(VideoSource):
+    _maximum_depth = -math.inf
+    _minimum_depth = math.inf
+
+    def get_last_frame(self) -> VideoFrame:
+        # Ensure _last_frame is in [0, 1] range
+        # print(f"get depth frame {self.id=}")
+        self._maximum_depth = max(self._maximum_depth, self._last_frame.max())
+        self._minimum_depth = min(self._minimum_depth, self._last_frame.min())
+        normalized_frame = np.clip(
+            (self._last_frame- self._minimum_depth) / (self._maximum_depth - self._minimum_depth), 0, 1
+        )
+
+        # Convert to uint8 safely
+        uint8_frame = (normalized_frame * 255).astype(np.uint8)
+
+        # Stack three identical grayscale frames into an RGB image
+        rgb_frame = np.stack([uint8_frame] * 3, axis=-1)
+
+        return VideoFrame.from_ndarray(rgb_frame, format="rgb24")
 
 
 class VideoTrack(MediaStreamTrack):
@@ -68,7 +94,6 @@ class VideoTrack(MediaStreamTrack):
         """Receive the next frame"""
         if self._ended:
             raise Exception("Track has ended")
-
         pts = await self.next_timestamp()
         frame_data = self.source.get_last_frame()
         frame_data.time_base = VIDEO_TIME_BASE

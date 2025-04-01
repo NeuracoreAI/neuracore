@@ -153,6 +153,8 @@ class PierToPierConnection:
         await self.send_handshake_message(MessageType.SDP_ANSWER, answer.sdp)
 
     async def on_token(self, token: str):
+        if self.connection_token.done():
+            return
         self.connection_token.set_result(token)
 
     async def on_answer(self, answer_sdp: str):

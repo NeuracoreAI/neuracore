@@ -3,44 +3,58 @@ import numpy as np
 import neuracore as nc
 from common.constants import BIMANUAL_VIPERX_URDF_PATH
 
-def generate_wave_pattern(width, height, frame_index, camera_id, channel, frequency=0.02, speed=0.1):
-    """Generate a dynamic wave pattern for RGB simulation."""
-    wave_pattern = np.zeros((height, width), dtype=np.uint8)
+
+import numpy as np
+
+def generate_wave_pattern(
+    width, height, frame_index, camera_id, channel, frequency=0.02, speed=0.2
+):
+    """Generate a dynamic wave pattern for RGB simulation using NumPy vectorization."""
     phase_offset = camera_id * np.pi / 2 + channel * np.pi / 3
-    for y in range(height):
-        for x in range(width):
-            wave_pattern[y, x] = int(
-                127.5 * (1 + np.sin(frequency * (x + y) + speed * frame_index + phase_offset))
-            )
-    return wave_pattern
+
+    # Create coordinate grids
+    x, y = np.meshgrid(np.arange(width), np.arange(height))
+
+    # Compute wave pattern using vectorized operations
+    wave_pattern = 127.5 * (1 + np.sin(frequency * (x + y) + speed * frame_index + phase_offset))
+    
+    return wave_pattern.astype(np.uint8)
 
 
-async def simulate_camera_frames(num_frames=1_000_000, width=640, height=480, camera_id=0):
+
+async def simulate_camera_frames(
+    num_frames=1_000_000, width=640, height=480, camera_id=0
+):
     """Generate test frames with variable timing for each camera."""
     t = 0.0
     for i in range(num_frames):
         # Create a test RGB frame using wave patterns for each channel
         frame = np.zeros((height, width, 3), dtype=np.uint8)
         for channel in range(3):
-            frame[:, :, channel] = generate_wave_pattern(width, height, i, camera_id, channel)
+            frame[:, :, channel] = generate_wave_pattern(
+                width, height, i, camera_id, channel
+            )
 
         # Generate animated depth frame
-        depth_frame = generate_wave_pattern(width, height, i, camera_id, channel=0)
+        raw_depth_frame = generate_wave_pattern(width, height, i, camera_id, channel=0)
+        float_depth_frame = (raw_depth_frame / 255.0).astype(np.float16)
 
         # Simulate irregular frame timing
         dt = 0.02 + 0.03 * np.random.random()  # Between 20-50ms
         t += dt
         await asyncio.sleep(dt)
 
-        yield frame, depth_frame, t
+        yield frame, float_depth_frame, t
 
     print(f"Camera {camera_id} Total time: ", t)
 
 
 async def camera_task(camera_id):
     async for frame, depth_frame, time in simulate_camera_frames(camera_id=camera_id):
+        
         nc.log_rgb(f"Camera {camera_id} RGB", frame, timestamp=time)
         nc.log_depth(f"Camera {camera_id} Depth", depth_frame, timestamp=time)
+        
 
 
 async def main():
@@ -60,7 +74,7 @@ async def main():
     nc.start_recording()
 
     # Run four camera streams concurrently
-    await asyncio.gather(*(camera_task(i) for i in range(4)))
+    await asyncio.gather(*(camera_task(i) for i in range(3)))
 
     print("Finishing recording...")
     nc.stop_recording()

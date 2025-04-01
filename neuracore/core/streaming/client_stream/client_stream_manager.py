@@ -12,7 +12,7 @@ from neuracore.core.streaming.client_stream.models import (
     RobotStreamTrack,
 )
 from ...const import API_URL
-from .video_source import VideoSource
+from .video_source import DepthVideoSource, VideoSource
 from .connection import PierToPierConnection
 
 
@@ -39,13 +39,12 @@ class ClientStreamingManager:
 
     def get_recording_video_stream(self, sensor_name: str, kind: str) -> VideoSource:
         """Start a new recording stream"""
-        if sensor_name in self.video_tracks_cache:
-            return self.video_tracks_cache[sensor_name]
+        sensor_key = (sensor_name, kind)
+        if sensor_key in self.video_tracks_cache:
+            return self.video_tracks_cache[sensor_key]
 
-        video_track = VideoSource(
-            pixel_format="rgb24" if self.kind == "rgb" else "grey"
-        )
-        self.video_tracks_cache[sensor_name] = video_track
+        video_track = DepthVideoSource(id=sensor_name) if kind == "depth" else VideoSource(id=sensor_name)
+        self.video_tracks_cache[sensor_key] = video_track
         self.tracks.append(video_track)
 
         # Add this track to all existing connections
