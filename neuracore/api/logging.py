@@ -22,7 +22,11 @@ from ..core.nc_types import (
     PoseData,
 )
 from ..core.robot import Robot, get_robot
-from ..core.streaming.data_stream import DepthDataStream, JsonDataStream, RGBDataStream
+from ..core.streaming.data_stream import (
+    DepthDataStream,
+    JsonDataStream,
+    RGBDataStream,
+)
 from ..core.utils.depth_utils import MAX_DEPTH
 from .globals import GlobalSingleton
 
