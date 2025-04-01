@@ -192,7 +192,7 @@ def mock_video_api(mock_auth_requests, create_test_video):
 
     # Mock video URL endpoint
     mock_auth_requests.get(
-        re.compile(f"{API_URL}/recording/.*/download_url/.*"),
+        re.compile(f"{API_URL}/recording/.*/download_url"),
         json={"url": "https://example.com/test-video.mp4"},
         status_code=200,
     )

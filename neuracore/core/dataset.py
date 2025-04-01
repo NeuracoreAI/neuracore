@@ -164,8 +164,10 @@ class EpisodeIterator:
         self._recording_synced = self._get_synced_data()
         _rgb = self._recording_synced.frames[0].rgb_images
         _depth = self._recording_synced.frames[0].depth_images
-        self._camera_ids = list(_rgb.keys()) if _rgb else []
-        self._camera_ids += list(_depth.keys()) if _depth else []
+        self._camera_ids = {
+            "rgbs": list(_rgb.keys()) if _rgb else [],
+            "depths": list(_depth.keys()) if _depth else [],
+        }
         self._episode_length = len(self._recording_synced.frames)
 
     def _get_synced_data(self) -> SyncedData:
@@ -178,19 +180,20 @@ class EpisodeIterator:
         response.raise_for_status()
         return SyncedData.model_validate(response.json())
 
-    def _get_video_url(self, camera_id: str) -> str:
+    def _get_video_url(self, camera_type: str, camera_id: str) -> str:
         """Get video URL for the given camera ID."""
         auth = get_auth()
         response = requests.get(
-            f"{API_URL}/recording/{self.recording['id']}/download_url/{camera_id}",
+            f"{API_URL}/recording/{self.recording['id']}/download_url",
+            params={"filepath": f"{camera_type}/{camera_id}/video.mp4"},
             headers=auth.get_headers(),
         )
         response.raise_for_status()
         return response.json()["url"]
 
-    def _stream_data_loop(self, camera_id: str):
+    def _stream_data_loop(self, camera_type: str, camera_id: str):
         """Stream data from the video URL."""
-        camera_url = self._get_video_url(camera_id)
+        camera_url = self._get_video_url(camera_type, camera_id)
         with VideoStreamer(camera_url) as streamer:
             for i, frame in enumerate(streamer):
                 self._msg_queues[camera_id].put((frame, i))
@@ -247,12 +250,15 @@ class EpisodeIterator:
         self._msg_queues: dict[str, queue.Queue] = {}
         self._threads: list[threading.Thread] = []
         self._running = True
-        for camera_id in self._camera_ids:
-            self._msg_queues[camera_id] = queue.Queue()
-            thread = threading.Thread(target=self._stream_data_loop, args=(camera_id,))
-            thread.daemon = True
-            thread.start()
-            self._threads.append(thread)
+        for cam_type, camera_ids in self._camera_ids.items():
+            for camera_id in camera_ids:
+                self._msg_queues[camera_id] = queue.Queue()
+                thread = threading.Thread(
+                    target=self._stream_data_loop, args=(cam_type, camera_id)
+                )
+                thread.daemon = True
+                thread.start()
+                self._threads.append(thread)
         return self
 
     def __enter__(self):

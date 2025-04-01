@@ -38,7 +38,7 @@ def mock_auth_requests():
             status_code=200,
         )
 
-        m.post(
+        m.get(
             f"{API_URL}/auth/verify-version",
             status_code=200,
         )

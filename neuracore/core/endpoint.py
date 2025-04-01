@@ -60,14 +60,14 @@ class EndpointPolicy:
         streams = GlobalSingleton()._data_streams
         sync_point = SyncPoint(timestamp=time.time())
         for stream_name, stream in streams.items():
-            if stream_name.startswith("rgb"):
+            if "rgb" in stream_name:
                 stream_data: np.ndarray = stream.get_latest_data()
                 if sync_point.rgb_images is None:
                     sync_point.rgb_images = {}
                 sync_point.rgb_images[stream_name] = CameraData(
                     timestamp=time.time(), frame=self._encode_image(stream_data)
                 )
-            elif stream_name.startswith("depth"):
+            elif "depth" in stream_name:
                 stream_data: np.ndarray = stream.get_latest_data()
                 if sync_point.depth_images is None:
                     sync_point.depth_images = {}
@@ -75,14 +75,14 @@ class EndpointPolicy:
                     timestamp=time.time(),
                     frame=self._encode_image(depth_to_rgb(stream_data)),
                 )
-            elif stream_name.startswith("joint_positions"):
+            elif "joint_positions" in stream_name:
                 stream_data: JointData = stream.get_latest_data()
                 sync_point.joint_positions = self._maybe_add_exisiting_data(
                     sync_point.joint_positions, stream_data
                 )
             else:
                 raise NotImplementedError(
-                    "Support for this stream type is not implemented yet"
+                    f"Support for stream {stream_name} is not implemented yet"
                 )
         return sync_point
 
