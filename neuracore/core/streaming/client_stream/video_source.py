@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 import fractions
 import math
 import time
-from typing import Optional, Tuple
+from typing import Optional
 from uuid import uuid4
 import weakref
 
@@ -12,16 +12,17 @@ from av import VideoFrame
 import numpy as np
 
 
-
 STREAMING_FPS = 30
 VIDEO_CLOCK_RATE = 90000
 VIDEO_TIME_BASE = fractions.Fraction(1, VIDEO_CLOCK_RATE)
 TIMESTAMP_DELTA = int(VIDEO_CLOCK_RATE / STREAMING_FPS)
 
+DEBUG_TEXT = True
+
 
 @dataclass
 class VideoSource:
-    id:str
+    mid: str = field(default_factory=lambda: uuid4().hex)
     _last_frame: np.ndarray[np.uint8] = field(
         default_factory=lambda: np.zeros((480, 640, 3), dtype=np.uint8)
     )
@@ -30,11 +31,40 @@ class VideoSource:
     def add_frame(self, frame_data: np.ndarray):
         self._last_frame = frame_data
 
+    def _add_debug_info(self, frame: np.ndarray):
+        if not DEBUG_TEXT:
+            return
+
+        import cv2
+
+        text = self.mid
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        position = (10, 50)  # Top-left corner
+        font_scale = 1.5
+        color = 255  # White text
+        thickness = 3
+
+        # Outline effect: Draw text in black slightly offset
+        cv2.putText(
+            frame,
+            text,
+            (position[0] + 1, position[1] + 1),
+            font,
+            font_scale,
+            0,
+            thickness + 1,
+            cv2.LINE_AA,
+        )
+        # Draw the actual text in white
+        cv2.putText(
+            frame, text, position, font, font_scale, color, thickness, cv2.LINE_AA
+        )
+
     def get_last_frame(self) -> VideoFrame:
+        self._add_debug_info(self._last_frame)
         return VideoFrame.from_ndarray(self._last_frame, format="rgb24")
 
     def get_video_track(self):
-        print(f"get video track {self.id=}")
         consumer = VideoTrack(self)
         self._consumers.add(consumer)
         return consumer
@@ -56,15 +86,17 @@ class DepthVideoSource(VideoSource):
         self._maximum_depth = max(self._maximum_depth, self._last_frame.max())
         self._minimum_depth = min(self._minimum_depth, self._last_frame.min())
         normalized_frame = np.clip(
-            (self._last_frame- self._minimum_depth) / (self._maximum_depth - self._minimum_depth), 0, 1
+            (self._last_frame - self._minimum_depth)
+            / (self._maximum_depth - self._minimum_depth),
+            0,
+            1,
         )
 
         # Convert to uint8 safely
         uint8_frame = (normalized_frame * 255).astype(np.uint8)
-
         # Stack three identical grayscale frames into an RGB image
         rgb_frame = np.stack([uint8_frame] * 3, axis=-1)
-
+        self._add_debug_info(rgb_frame)
         return VideoFrame.from_ndarray(rgb_frame, format="rgb24")
 
 
@@ -74,9 +106,14 @@ class VideoTrack(MediaStreamTrack):
     def __init__(self, source: VideoSource):
         super().__init__()
         self.source = source
+        self._mid = source.mid
         self._ended: bool = False
         self._start: Optional[float] = None
         self._timestamp: int = 0
+
+    @property
+    def mid(self)->str:
+        return self._mid
 
     async def next_timestamp(self) -> int:
         if self._start is None:

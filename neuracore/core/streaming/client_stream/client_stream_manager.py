@@ -1,5 +1,6 @@
 from dataclasses import field, dataclass
 import asyncio
+import threading
 from typing import Dict, List
 from uuid import uuid4
 from neuracore.core.auth import Auth, get_auth
@@ -23,14 +24,16 @@ def get_loop():
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        threading.Thread(target=lambda: loop.run_forever(), daemon=True).start()
         return loop
 
 
 @dataclass
 class ClientStreamingManager:
     robot_id: str
+    loop: asyncio.AbstractEventLoop
+    client_session: ClientSession
     available_for_connections: bool = True
-    client_session: ClientSession = field(default_factory=ClientSession)
     auth: Auth = field(default_factory=get_auth)
     connections: Dict[str, PierToPierConnection] = field(default_factory=dict)
     video_tracks_cache: Dict[str, VideoSource] = field(default_factory=dict)
@@ -43,7 +46,10 @@ class ClientStreamingManager:
         if sensor_key in self.video_tracks_cache:
             return self.video_tracks_cache[sensor_key]
 
-        video_track = DepthVideoSource(id=sensor_name) if kind == "depth" else VideoSource(id=sensor_name)
+        mid = str(len(self.tracks))
+        video_track = (
+            DepthVideoSource(mid=mid) if kind == "depth" else VideoSource(mid=mid)
+        )
         self.video_tracks_cache[sensor_key] = video_track
         self.tracks.append(video_track)
 
@@ -51,8 +57,9 @@ class ClientStreamingManager:
         for connection in self.connections.values():
             connection.add_video_source(video_track)
 
-        get_loop().create_task(
-            self.submit_track(str(len(self.tracks) - 1), kind, sensor_name)
+        print(f"create stream {sensor_name=}, {self.loop.is_running()=}")
+        asyncio.run_coroutine_threadsafe(
+            self.submit_track(mid, kind, sensor_name), self.loop
         )
 
         return video_track
@@ -94,12 +101,14 @@ class ClientStreamingManager:
             on_close=on_close,
             client_session=self.client_session,
             auth=self.auth,
+            loop=self.loop,
+            connection_token=self.loop.create_future(),
         )
 
         connection.setup_connection()
 
         for video_track in self.tracks:
-            await connection.add_video_source(video_track)
+            connection.add_video_source(video_track)
 
         self.connections[remote_stream_id] = connection
         return connection
@@ -161,7 +170,7 @@ class ClientStreamingManager:
         """Close all connections and streams"""
         self.available_for_connections = False
 
-        get_loop().create_task(self.close_connections())
+        asyncio.run_coroutine_threadsafe(self.close_connections(), self.loop)
 
         for track in self.video_tracks_cache.values():
             track.stop()
@@ -180,8 +189,11 @@ def get_robot_streaming_manager(robot_id: str) -> "ClientStreamingManager":
     if robot_id in _streaming_managers:
         return _streaming_managers[robot_id]
 
-    manager = ClientStreamingManager(robot_id=robot_id)
-    asyncio.create_task(manager.connect_signalling_stream())
+    loop = get_loop()
+    manager = ClientStreamingManager(
+        robot_id=robot_id, loop=loop, client_session=ClientSession(loop=loop)
+    )
+    asyncio.run_coroutine_threadsafe(manager.connect_signalling_stream(), loop)
 
     _streaming_managers[robot_id] = manager
     return manager

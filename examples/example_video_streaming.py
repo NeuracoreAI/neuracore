@@ -1,15 +1,12 @@
-import asyncio
+import time
 import numpy as np
 import neuracore as nc
 from common.constants import BIMANUAL_VIPERX_URDF_PATH
 
-
-import numpy as np
-
 def generate_wave_pattern(
     width, height, frame_index, camera_id, channel, frequency=0.02, speed=0.2
 ):
-    """Generate a dynamic wave pattern for RGB simulation using NumPy vectorization."""
+    """Generate a dynamic wave pattern for grayscale simulation using NumPy vectorization."""
     phase_offset = camera_id * np.pi / 2 + channel * np.pi / 3
 
     # Create coordinate grids
@@ -17,14 +14,11 @@ def generate_wave_pattern(
 
     # Compute wave pattern using vectorized operations
     wave_pattern = 127.5 * (1 + np.sin(frequency * (x + y) + speed * frame_index + phase_offset))
-    
-    return wave_pattern.astype(np.uint8)
+    image = wave_pattern.astype(np.uint8)
 
+    return image
 
-
-async def simulate_camera_frames(
-    num_frames=1_000_000, width=640, height=480, camera_id=0
-):
+def simulate_camera_frames(num_frames=1_000_000, width=640, height=480, camera_id=0):
     """Generate test frames with variable timing for each camera."""
     t = 0.0
     for i in range(num_frames):
@@ -42,24 +36,20 @@ async def simulate_camera_frames(
         # Simulate irregular frame timing
         dt = 0.02 + 0.03 * np.random.random()  # Between 20-50ms
         t += dt
-        await asyncio.sleep(dt)
+        time.sleep(dt)
 
         yield frame, float_depth_frame, t
-
+    
     print(f"Camera {camera_id} Total time: ", t)
 
+def camera_task(camera_id):
+    for frame, depth_frame, timestamp in simulate_camera_frames(camera_id=camera_id):
+        # print("logging depth")
+        nc.log_depth(f"Camera {camera_id} Depth", depth_frame, timestamp=timestamp)
+        nc.log_rgb(f"Camera {camera_id} RGB", frame, timestamp=timestamp)
 
-async def camera_task(camera_id):
-    async for frame, depth_frame, time in simulate_camera_frames(camera_id=camera_id):
-        
-        nc.log_rgb(f"Camera {camera_id} RGB", frame, timestamp=time)
-        nc.log_depth(f"Camera {camera_id} Depth", depth_frame, timestamp=time)
-        
-
-
-async def main():
+def main():
     """Main function for running the robot demo and logging with neuracore."""
-
     # Initialize neuracore
     nc.login()
     nc.connect_robot(
@@ -67,20 +57,25 @@ async def main():
         urdf_path=BIMANUAL_VIPERX_URDF_PATH,
         overwrite=True,
     )
-
     nc.create_dataset(name="Test Video Dataset", description="This is a test dataset")
     print("Created Dataset...")
-
+    
     nc.start_recording()
-
+    
     # Run four camera streams concurrently
-    await asyncio.gather(*(camera_task(i) for i in range(3)))
-
+    from threading import Thread
+    threads = [Thread(target=camera_task, args=(i,)) for i in range(3)]
+    
+    for thread in threads:
+        thread.start()
+    
+    for thread in threads:
+        thread.join()
+    
     print("Finishing recording...")
     nc.stop_recording()
     print("Finished recording!")
     nc.stop_live_data()
 
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
