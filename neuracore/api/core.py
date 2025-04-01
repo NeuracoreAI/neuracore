@@ -1,6 +1,10 @@
 from threading import Thread
 from typing import Optional
 
+from neuracore.core.streaming.client_stream.client_stream_manager import (
+    get_robot_streaming_manager,
+)
+
 from ..core.auth import get_auth
 from ..core.exceptions import RobotError
 from ..core.robot import Robot, get_robot
@@ -138,3 +142,14 @@ def stop_recording(robot_name: Optional[str] = None, wait: bool = False) -> None
     GlobalSingleton()._active_recording_ids.pop(robot.name)
     if wait:
         stop_recording_thread.join()
+
+
+def stop_live_data(robot_name: Optional[str] = None) -> None:
+    """
+    Stop sharing live data for active monitoring from the neuracore platform.
+
+    Args:
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+    """
+    robot = _get_robot(robot_name)
+    get_robot_streaming_manager(robot.id).close()

@@ -6,6 +6,10 @@ from typing import Any, Optional
 
 import numpy as np
 
+from neuracore.core.streaming.client_stream.client_stream_manager import (
+    get_robot_streaming_manager,
+)
+
 from ..core.exceptions import RobotError
 from ..core.nc_types import (
     ActionData,
@@ -427,6 +431,10 @@ def log_rgb(
     _log_camera_data(
         "rgb", camera_id, image, extrinsics, intrinsics, robot_name, timestamp
     )
+    robot = _get_robot(robot_name)
+    get_robot_streaming_manager(robot.id).get_recording_video_stream(
+        camera_id, "rgb"
+    ).add_frame(image)
 
 
 def log_depth(
@@ -467,6 +475,10 @@ def log_depth(
     _log_camera_data(
         "depth", camera_id, depth, extrinsics, intrinsics, robot_name, timestamp
     )
+    robot = _get_robot(robot_name)
+    get_robot_streaming_manager(robot.id).get_recording_video_stream(
+        camera_id, "depth"
+    ).add_frame(depth)
 
 
 def log_point_cloud(

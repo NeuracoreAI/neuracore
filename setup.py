@@ -42,6 +42,7 @@ setup(
         "pydantic",
         "av",
         "aiortc",
+        "aiohttp-sse-client",
         "numpy-stl",
     ],
     extras_require={
