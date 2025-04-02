@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import threading
+import time
 import traceback
 from dataclasses import dataclass, field
 from typing import Dict, List
@@ -233,7 +234,7 @@ def get_robot_streaming_manager(robot_id: str) -> "ClientStreamingManager":
 
     # Wait until recording_connection_established is True
     while not manager.recording_connection_established:
-        asyncio.run_coroutine_threadsafe(asyncio.sleep(0.5), loop)
+        time.sleep(0.5)
 
     _streaming_managers[robot_id] = manager
     return manager
