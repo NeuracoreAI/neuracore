@@ -6,6 +6,7 @@ from typing import Callable
 from aiohttp import ClientSession
 from aiortc import (
     RTCConfiguration,
+    RTCDataChannel,
     RTCIceGatherer,
     RTCIceServer,
     RTCPeerConnection,
@@ -39,6 +40,7 @@ class PierToPierConnection:
             configuration=RTCConfiguration(iceServers=ICE_SERVERS)
         )
     )
+    data_channels: dict[str, RTCDataChannel] = field(default_factory=dict)
 
     _closed: bool = False
 
@@ -62,14 +64,16 @@ class PierToPierConnection:
 
             await self.send_handshake_message(
                 MessageType.ICE_CANDIDATE,
-                json.dumps({
-                    "candidate": candidate_to_sdp(candidate),
-                    "sdpMLineIndex": candidate.sdpMLineIndex,
-                    "sdpMid": candidate.sdpMid,
-                    "usernameFragment": (
-                        iceGatherer.getLocalParameters().usernameFragment
-                    ),
-                }),
+                json.dumps(
+                    {
+                        "candidate": candidate_to_sdp(candidate),
+                        "sdpMLineIndex": candidate.sdpMLineIndex,
+                        "sdpMid": candidate.sdpMid,
+                        "usernameFragment": (
+                            iceGatherer.getLocalParameters().usernameFragment
+                        ),
+                    }
+                ),
             )
 
     def setup_connection(self):
@@ -92,11 +96,26 @@ class PierToPierConnection:
                 case "closed" | "failed":
                     await self.close()
 
+        @self.connection.on("datachannel")
+        def on_datachannel(channel: RTCDataChannel):
+            self.data_channels[channel.label] = channel
+
     def add_video_source(self, source: VideoSource):
         """Add a track to the connection"""
 
         track = source.get_video_track()
         self.connection.addTrack(track)
+
+    async def send_data_chanel_message(self, channel_id: str, message: dict):
+        if self.connection.connectionState != "connected":
+            return
+        if channel_id not in self.data_channels:
+            print(f"creating channel {channel_id=}")
+            self.data_channels[channel_id] = self.connection.createDataChannel(
+                channel_id
+            )
+        channel = self.data_channels[channel_id]
+        channel.send(json.dumps(message).encode("utf-8"))
 
     async def send_handshake_message(self, message_type: MessageType, content: str):
         """Send a message to the remote peer through the signaling server"""
@@ -149,16 +168,6 @@ class PierToPierConnection:
 
         offer = RTCSessionDescription(offer, type="offer")
         self.set_transceiver_direction()
-        print({[
-            {
-                "direction": con.direction,
-                "currentDirection": con.currentDirection,
-                "kind": con.kind,
-                "mid": con.mid,
-                "trackMid": con.sender.track.mid,
-            }
-            for con in self.connection.getTransceivers()
-        ]})
         await self.connection.setRemoteDescription(offer)
         self.set_transceiver_direction()
         answer = await self.connection.createAnswer()

@@ -1,7 +1,7 @@
 import time
 
 import numpy as np
-from common.constants import BIMANUAL_VIPERX_URDF_PATH
+from common.constants import BIMANUAL_VIPERX_URDF_PATH, LEFT_ARM_JOINT_NAMES, RIGHT_ARM_JOINT_NAMES
 
 import neuracore as nc
 
@@ -42,7 +42,7 @@ def simulate_camera_frames(num_frames=1_000_000, width=640, height=480, camera_i
         # Simulate irregular frame timing
         dt = 0.02 + 0.03 * np.random.random()  # Between 20-50ms
         t += dt
-        time.sleep(dt)
+        
 
         yield frame, float_depth_frame, t
 
@@ -55,6 +55,42 @@ def camera_task(camera_id):
         nc.log_depth(f"Camera {camera_id} Depth", depth_frame, timestamp=timestamp)
         nc.log_rgb(f"Camera {camera_id} RGB", frame, timestamp=timestamp)
 
+
+def joint_task():
+    joint_names = LEFT_ARM_JOINT_NAMES + RIGHT_ARM_JOINT_NAMES
+    
+    # Base angles for all joints
+    base_angles = {name: 0.0 for name in joint_names}
+    
+    # Time variable for sinusoidal movement
+    t = 0.0
+    
+    while True:
+        # Select a random subset of joints to update (between 30-70% of all joints)
+        num_joints_to_update = np.random.randint(int(0.3 * len(joint_names)), int(0.7 * len(joint_names)))
+        joints_to_update = np.random.choice(joint_names, num_joints_to_update, replace=False)
+        
+        # Create a new joint position dictionary
+        joint_positions = base_angles.copy()
+        
+        # Update only the selected joints with slightly varying angles
+        for joint in joints_to_update:
+            # Add sinusoidal movement plus small random variation
+            # Different frequencies for different joints based on their position in the list
+            frequency = 0.1 + 0.05 * joint_names.index(joint) / len(joint_names)
+            amplitude = 0.2 + 0.1 * np.random.random()
+            
+            joint_positions[joint] = amplitude * np.sin(frequency * t) + 0.05 * np.random.randn()
+        
+        # Log the joint positions
+        nc.log_joint_positions(joint_positions)
+        
+        # Sleep for a random duration
+        dt = 0.02 + 0.03 * np.random.random()  # Between 20-50ms
+        time.sleep(dt)
+        
+        # Update time
+        t += dt
 
 def main():
     """Main function for running the robot demo and logging with neuracore."""
@@ -74,6 +110,8 @@ def main():
     from threading import Thread
 
     threads = [Thread(target=camera_task, args=(i,)) for i in range(3)]
+
+    threads.append(Thread(target=joint_task))
 
     for thread in threads:
         thread.start()

@@ -97,13 +97,14 @@ def _log_joint_data(
             joint_stream.start_recording(
                 GlobalSingleton()._active_recording_ids[robot.id]
             )
-
-    joint_stream.log(
-        JointData(
-            timestamp=timestamp,
-            values=joint_data,
-            additional_values=additional_urdf_data,
-        )
+    data = JointData(
+        timestamp=timestamp,
+        values=joint_data,
+        additional_values=additional_urdf_data,
+    )
+    joint_stream.log(data=data)
+    get_robot_streaming_manager(robot.id).publish_event(
+        data_type, "joints", data.model_dump(mode="json")
     )
 
 

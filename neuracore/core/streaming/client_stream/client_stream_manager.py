@@ -45,33 +45,55 @@ class ClientStreamingManager:
     auth: Auth = field(default_factory=get_auth)
     connections: Dict[str, PierToPierConnection] = field(default_factory=dict)
     video_tracks_cache: Dict[str, VideoSource] = field(default_factory=dict)
+    data_channels: dict[tuple[str, str], str] = field(default_factory=dict)
+    track_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tracks: List[VideoSource] = field(default_factory=list)
     local_stream_id: str = field(default_factory=lambda: uuid4().hex)
     recording_notification_stream_id: str = field(default_factory=lambda: uuid4().hex)
 
+    async def _create_video_track(self, sensor_name: str, kind: str):
+        sensor_key = (sensor_name, kind)
+        async with self.track_lock:
+            if sensor_key in self.video_tracks_cache:
+                return self.video_tracks_cache[sensor_key]
+            
+            print(f"creating stream {sensor_key=}")
+            mid = str(len(self.tracks))
+            video_track = (
+                DepthVideoSource(mid=mid) if kind == "depth" else VideoSource(mid=mid)
+            )
+            self.video_tracks_cache[sensor_key] = video_track
+            self.tracks.append(video_track)
+
+            # Add this track to all existing connections
+            for connection in self.connections.values():
+                connection.add_video_source(video_track)
+
+            await self.submit_track(mid, kind, sensor_name)
+
+            return video_track
+
     def get_recording_video_stream(self, sensor_name: str, kind: str) -> VideoSource:
         """Start a new recording stream"""
+
+        return asyncio.run_coroutine_threadsafe(
+            self._create_video_track(sensor_name, kind), self.loop
+        ).result()
+
+    def publish_event(self, sensor_name: str, kind: str, event: dict):
         sensor_key = (sensor_name, kind)
-        if sensor_key in self.video_tracks_cache:
-            return self.video_tracks_cache[sensor_key]
+        if sensor_key not in self.data_channels:
+            mid = uuid4().hex
+            self.data_channels[sensor_key] = mid
+            asyncio.run_coroutine_threadsafe(
+                self.submit_track(mid, kind, sensor_name), self.loop
+            )
 
-        mid = str(len(self.tracks))
-        video_track = (
-            DepthVideoSource(mid=mid) if kind == "depth" else VideoSource(mid=mid)
-        )
-        self.video_tracks_cache[sensor_key] = video_track
-        self.tracks.append(video_track)
-
-        # Add this track to all existing connections
-        for connection in self.connections.values():
-            connection.add_video_source(video_track)
-
-        print(f"create stream {sensor_name=}, {self.loop.is_running()=}")
-        asyncio.run_coroutine_threadsafe(
-            self.submit_track(mid, kind, sensor_name), self.loop
-        )
-
-        return video_track
+        key = self.data_channels[sensor_key]
+        for client in self.connections.values():
+            asyncio.run_coroutine_threadsafe(
+                client.send_data_chanel_message(key, event), self.loop
+            )
 
     async def submit_track(self, mid: str, kind: str, label: str):
         """Submit new track data"""
@@ -131,7 +153,10 @@ class ClientStreamingManager:
                     headers=self.auth.get_headers(),
                 ) as event_source:
                     async for event in event_source:
+                        if event.type == "heartbeat":
+                            continue
                         message = RecordingNotification.model_validate_json(event.data)
+
                         if message.recording:
                             GlobalSingleton()._active_recording_ids[
                                 robot_id
@@ -176,6 +201,7 @@ class ClientStreamingManager:
 
                         match message.type:
                             case MessageType.SDP_OFFER:
+                                print(f"{message.data=}")
                                 await connection.on_offer(message.data)
                             case MessageType.ICE_CANDIDATE:
                                 await connection.on_ice(message.data)
