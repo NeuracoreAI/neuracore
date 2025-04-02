@@ -89,6 +89,7 @@ class DataType(Enum):
 class DataItemStats(BaseModel):
     mean: list[float] = Field(default_factory=list)
     std: list[float] = Field(default_factory=list)
+    count: list[int] = Field(default_factory=list)
     max_len: int = Field(default_factory=lambda data: len(data["mean"]))
 
 
