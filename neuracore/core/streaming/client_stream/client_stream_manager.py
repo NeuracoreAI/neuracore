@@ -47,7 +47,7 @@ class ClientStreamingManager:
     video_tracks_cache: Dict[str, VideoSource] = field(default_factory=dict)
     tracks: List[VideoSource] = field(default_factory=list)
     local_stream_id: str = field(default_factory=lambda: uuid4().hex)
-    recording_notification_stream_id: str = field(default_factory=lambda: uuid4().hex)
+    recording_connection_established: bool = False
 
     def get_recording_video_stream(self, sensor_name: str, kind: str) -> VideoSource:
         """Start a new recording stream"""
@@ -125,9 +125,8 @@ class ClientStreamingManager:
     async def connect_recording_notification_stream(self, robot_id: str):
         while self.available_for_connections:
             try:
-                sid = self.recording_notification_stream_id
                 async with sse_client.EventSource(
-                    f"{API_URL}/signalling/recording_notifications/{sid}",
+                    f"{API_URL}/signalling/recording_notifications/{self.local_stream_id}",
                     headers=self.auth.get_headers(),
                 ) as event_source:
                     async for event in event_source:
@@ -154,6 +153,7 @@ class ClientStreamingManager:
                     f"{API_URL}/signalling/notifications/{self.local_stream_id}",
                     headers=self.auth.get_headers(),
                 ) as event_source:
+                    self.recording_connection_established = True
                     async for event in event_source:
                         logger.info(f"received event {event.type=} {event.message=}")
                         if event.type == "heartbeat":
@@ -226,10 +226,14 @@ def get_robot_streaming_manager(robot_id: str) -> "ClientStreamingManager":
     manager = ClientStreamingManager(
         robot_id=robot_id, loop=loop, client_session=ClientSession(loop=loop)
     )
-    asyncio.run_coroutine_threadsafe(manager.connect_signalling_stream(), loop)
     asyncio.run_coroutine_threadsafe(
         manager.connect_recording_notification_stream(robot_id), loop
     )
+    asyncio.run_coroutine_threadsafe(manager.connect_signalling_stream(), loop)
+
+    # Wait until recording_connection_established is True
+    while not manager.recording_connection_established:
+        asyncio.run_coroutine_threadsafe(asyncio.sleep(0.5), loop)
 
     _streaming_managers[robot_id] = manager
     return manager
