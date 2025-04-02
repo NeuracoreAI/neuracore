@@ -70,7 +70,7 @@ class StreamingVideoUploader:
         # Ensure chunk_size is a multiple of 256 KiB
         if self.chunk_size % CHUNK_MULTIPLE != 0:
             self.chunk_size = ((self.chunk_size // CHUNK_MULTIPLE) + 1) * CHUNK_MULTIPLE
-            logger.info(
+            logger.debug(
                 f"Adjusted chunk size to {self.chunk_size/1024:.0f} "
                 "KiB to ensure it's a multiple of {CHUNK_MULTIPLE} MiB"
             )
@@ -147,7 +147,7 @@ class StreamingVideoUploader:
         if not success:
             raise RuntimeError("Failed to upload final chunk")
 
-        logger.info(
+        logger.debug(
             "Video encoding and upload complete: "
             f"{self.uploader.total_bytes_uploaded} bytes"
         )
@@ -227,7 +227,6 @@ class StreamingVideoUploader:
 
             # Upload the chunk
             success = self.uploader.upload_chunk(chunk, is_final=False)
-            logger.info(f"Uploaded {len(chunk)} bytes")
 
             if not success:
                 raise RuntimeError("Failed to upload chunk")
@@ -259,7 +258,6 @@ class StreamingVideoUploader:
         for i in range(0, len(self.frame_metadatas)):
             self.frame_metadatas[i].frame_idx = i
         data = json.dumps([fm.model_dump() for fm in self.frame_metadatas])
-        logger.info(f"Uploading {len(data)} bytes to {upload_url}")
         response = requests.put(
             upload_url, headers={"Content-Length": str(len(data))}, data=data
         )

@@ -2,11 +2,10 @@ import asyncio
 import fractions
 import math
 import time
-from typing import Optional
-from uuid import uuid4
 import weakref
 from dataclasses import dataclass, field
 from typing import Optional
+from uuid import uuid4
 
 import av
 import numpy as np
@@ -114,7 +113,7 @@ class VideoTrack(MediaStreamTrack):
         self._timestamp: int = 0
 
     @property
-    def mid(self)->str:
+    def mid(self) -> str:
         return self._mid
 
     async def next_timestamp(self) -> int:

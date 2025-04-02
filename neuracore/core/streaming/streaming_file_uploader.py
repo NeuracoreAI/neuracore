@@ -46,7 +46,7 @@ class StreamingJsonUploader:
         # Ensure chunk_size is a multiple of 256 KiB
         if self.chunk_size % CHUNK_MULTIPLE != 0:
             self.chunk_size = ((self.chunk_size // CHUNK_MULTIPLE) + 1) * CHUNK_MULTIPLE
-            logger.info(
+            logger.debug(
                 f"Adjusted chunk size to {self.chunk_size/1024:.0f} "
                 f"KiB to ensure it's a multiple of {CHUNK_MULTIPLE/1024:.0f} KiB"
             )
@@ -123,7 +123,7 @@ class StreamingJsonUploader:
             if not success:
                 raise RuntimeError("Failed to upload final chunk")
 
-        logger.info(
+        logger.debug(
             "JSON streaming and upload complete: "
             f"{self.uploader.total_bytes_uploaded} bytes"
         )
@@ -192,7 +192,6 @@ class StreamingJsonUploader:
 
             # Upload the chunk
             success = self.uploader.upload_chunk(chunk, is_final=False)
-            logger.info(f"Uploaded {len(chunk)} bytes")
 
             if not success:
                 raise RuntimeError("Failed to upload chunk")

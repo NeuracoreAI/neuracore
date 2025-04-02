@@ -15,9 +15,8 @@ from aiortc.sdp import candidate_from_sdp, candidate_to_sdp
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.streaming.client_stream.models import HandshakeMessage, MessageType
-from aiortc.sdp import candidate_from_sdp, candidate_to_sdp
-
 from neuracore.core.streaming.client_stream.video_source import VideoSource, VideoTrack
+
 from ...const import API_URL
 
 ICE_SERVERS = [
@@ -40,7 +39,7 @@ class PierToPierConnection:
             configuration=RTCConfiguration(iceServers=ICE_SERVERS)
         )
     )
-    
+
     _closed: bool = False
 
     async def get_ice_gatherer(self) -> RTCIceGatherer:
@@ -128,7 +127,7 @@ class PierToPierConnection:
         for transceiver in self.connection.getTransceivers():
             track = tracks.get(transceiver.mid, None)
             if track is None:
-                continue 
+                continue
             if transceiver.sender.track.id != track.id:
                 transceiver.sender.replaceTrack(track)
 
@@ -150,15 +149,16 @@ class PierToPierConnection:
 
         offer = RTCSessionDescription(offer, type="offer")
         self.set_transceiver_direction()
-        print(
-            f"{[{
-            "direction":con.direction,
-            "currentDirection":con.currentDirection,
-            "kind":con.kind,
-            "mid": con.mid,
-            "trackMid": con.sender.track.mid
-        } for con in self.connection.getTransceivers()]}"
-        )
+        print({[
+            {
+                "direction": con.direction,
+                "currentDirection": con.currentDirection,
+                "kind": con.kind,
+                "mid": con.mid,
+                "trackMid": con.sender.track.mid,
+            }
+            for con in self.connection.getTransceivers()
+        ]})
         await self.connection.setRemoteDescription(offer)
         self.set_transceiver_direction()
         answer = await self.connection.createAnswer()

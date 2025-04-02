@@ -21,6 +21,12 @@ class HandshakeMessage(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex)
 
 
+# TODO: Note all of these can be defined in api, and used by the backend
+class RecordingNotification(BaseModel):
+    recording: bool
+    recording_id: str
+
+
 class RobotStreamTrack(BaseModel):
     robot_id: str
     stream_id: str

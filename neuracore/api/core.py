@@ -88,6 +88,7 @@ def connect_robot(
     validate_version()
     robot = _init_robot(robot_name, urdf_path, mjcf_path, overwrite, shared)
     GlobalSingleton()._active_robot = robot
+    get_robot_streaming_manager(robot.id)  # Initialize streaming manager
     return robot
 
 
@@ -102,7 +103,7 @@ def start_recording(robot_name: Optional[str] = None) -> None:
         RobotError: If no robot is active and no robot_name provided
     """
     robot = _get_robot(robot_name)
-    if robot.name in GlobalSingleton()._active_recording_ids:
+    if robot.id in GlobalSingleton()._active_recording_ids:
         raise RobotError("Recording already in progress. Call stop_recording() first.")
     if GlobalSingleton()._active_dataset_id is None:
         raise RobotError("No active dataset. Call create_dataset() first.")
@@ -110,9 +111,9 @@ def start_recording(robot_name: Optional[str] = None) -> None:
         GlobalSingleton()._active_dataset_id
     )
     for sname, stream in GlobalSingleton()._data_streams.items():
-        if sname.startswith(robot.name):
+        if sname.startswith(robot.id):
             stream.start_recording(new_active_recording_id)
-    GlobalSingleton()._active_recording_ids[robot.name] = new_active_recording_id
+    GlobalSingleton()._active_recording_ids[robot.id] = new_active_recording_id
 
 
 def stop_recording(robot_name: Optional[str] = None, wait: bool = False) -> None:
@@ -127,19 +128,19 @@ def stop_recording(robot_name: Optional[str] = None, wait: bool = False) -> None
         RobotError: If no robot is active and no robot_name provided
     """
     robot = _get_robot(robot_name)
-    if robot.name not in GlobalSingleton()._active_recording_ids:
+    if robot.id not in GlobalSingleton()._active_recording_ids:
         raise RobotError("No active recording. Call start_recording() first.")
     threads: Thread = []
     for sname, stream in GlobalSingleton()._data_streams.items():
-        if sname.startswith(robot.name):
+        if sname.startswith(robot.id):
             threads.append(stream.stop_recording())
     stop_recording_thread = Thread(
         target=_stop_recording_wait_for_threads,
-        args=(robot, GlobalSingleton()._active_recording_ids[robot.name], threads),
+        args=(robot, GlobalSingleton()._active_recording_ids[robot.id], threads),
         daemon=False,
     )
     stop_recording_thread.start()
-    GlobalSingleton()._active_recording_ids.pop(robot.name)
+    GlobalSingleton()._active_recording_ids.pop(robot.id)
     if wait:
         stop_recording_thread.join()
 

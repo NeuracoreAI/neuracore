@@ -219,14 +219,10 @@ class EpisodeIterator:
                 except queue.Empty:
                     frame = None
                 if frame is None:
-                    logger.info(f"End of data stream for camera {camera_id}")
                     break
                 if frame_idx == cam_data.frame_idx:
-                    logger.info(f"Received frame {frame_idx} for camera {camera_id}")
                     cam_data.frame = transform_fn(frame) if transform_fn else frame
                     break
-                else:
-                    logger.info(f"Skipping frame {frame_idx} for camera {camera_id}")
 
     def __next__(self) -> SyncPoint:
         """Get next frame with proper thread state handling and auto-cleanup."""
@@ -240,8 +236,6 @@ class EpisodeIterator:
             self._populate_video_frames(
                 sync_point.depth_images, transform_fn=rgb_to_depth
             )
-
-        logger.info(f"Return frame {self._iter_idx}")
         self._iter_idx += 1
         return sync_point
 
@@ -265,7 +259,6 @@ class EpisodeIterator:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        logger.info("Exiting EpisodeIterator")
         self.close()
 
     def __del__(self):

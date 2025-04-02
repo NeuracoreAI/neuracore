@@ -1,24 +1,28 @@
 import asyncio
+import logging
+import threading
 import traceback
 from dataclasses import dataclass, field
-import threading
 from typing import Dict, List
 from uuid import uuid4
 
 from aiohttp import ClientSession
 from aiohttp_sse_client import client as sse_client
 
+from neuracore.api.globals import GlobalSingleton
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.streaming.client_stream.models import (
     HandshakeMessage,
     MessageType,
+    RecordingNotification,
     RobotStreamTrack,
 )
 
 from ...const import API_URL
-from .video_source import DepthVideoSource, VideoSource
 from .connection import PierToPierConnection
-from .video_source import VideoSource
+from .video_source import DepthVideoSource, VideoSource
+
+logger = logging.getLogger(__name__)
 
 
 def get_loop():
@@ -43,6 +47,7 @@ class ClientStreamingManager:
     video_tracks_cache: Dict[str, VideoSource] = field(default_factory=dict)
     tracks: List[VideoSource] = field(default_factory=list)
     local_stream_id: str = field(default_factory=lambda: uuid4().hex)
+    recording_notification_stream_id: str = field(default_factory=lambda: uuid4().hex)
 
     def get_recording_video_stream(self, sensor_name: str, kind: str) -> VideoSource:
         """Start a new recording stream"""
@@ -117,6 +122,30 @@ class ClientStreamingManager:
         self.connections[remote_stream_id] = connection
         return connection
 
+    async def connect_recording_notification_stream(self, robot_id: str):
+        while self.available_for_connections:
+            try:
+                sid = self.recording_notification_stream_id
+                async with sse_client.EventSource(
+                    f"{API_URL}/signalling/recording_notifications/{sid}",
+                    headers=self.auth.get_headers(),
+                ) as event_source:
+                    async for event in event_source:
+                        message = RecordingNotification.model_validate_json(event.data)
+                        if message.recording:
+                            GlobalSingleton()._active_recording_ids[
+                                robot_id
+                            ] = message.recording_id
+                        else:
+                            GlobalSingleton()._active_recording_ids.pop(robot_id, None)
+            except ConnectionError as e:
+                print(f"Connection error: {e}")
+                await asyncio.sleep(5)
+            except Exception as e:
+                print(f"Unexpected error: {e}")
+                print(traceback.format_exc())
+                await asyncio.sleep(5)
+
     async def connect_signalling_stream(self):
         """Connect to the signaling server and process messages"""
         while self.available_for_connections:
@@ -126,13 +155,13 @@ class ClientStreamingManager:
                     headers=self.auth.get_headers(),
                 ) as event_source:
                     async for event in event_source:
-                        print(f"received event {event.type=} {event.message=}")
+                        logger.info(f"received event {event.type=} {event.message=}")
                         if event.type == "heartbeat":
                             await self.heartbeat_response()
                             continue
 
                         message = HandshakeMessage.model_validate_json(event.data)
-                        print(f"Message Received {message}")
+                        logger.info(f"Message Received {message}")
                         if not self.available_for_connections:
                             return
 
@@ -198,6 +227,9 @@ def get_robot_streaming_manager(robot_id: str) -> "ClientStreamingManager":
         robot_id=robot_id, loop=loop, client_session=ClientSession(loop=loop)
     )
     asyncio.run_coroutine_threadsafe(manager.connect_signalling_stream(), loop)
+    asyncio.run_coroutine_threadsafe(
+        manager.connect_recording_notification_stream(robot_id), loop
+    )
 
     _streaming_managers[robot_id] = manager
     return manager

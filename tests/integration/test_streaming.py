@@ -159,7 +159,8 @@ def generate_depth_image(frame_num, width, height):
 def stream_data(config):
     """Stream test data according to configuration"""
     # Start recording
-    with Timer(max_time=5):
+    # TODO: Note this now takes a long time to start since adding in P2P
+    with Timer(max_time=10):
         nc.start_recording()
 
     # Generate and stream test data
@@ -248,7 +249,7 @@ def stream_data(config):
         # Sleep to maintain target frame rate
         time.sleep(sleep_time)
 
-    with Timer(max_time=5):
+    with Timer(max_time=10):
         nc.stop_recording(wait=True)
 
     return frame_count
@@ -280,7 +281,6 @@ def verify_dataset(config, expected_frame_count):
                 for _, cam_data in sync_point.rgb_images.items():
                     img = cam_data.frame
                     decoded_frame_num = decode_frame_number(img)
-                    logger.info(f"decoded_frame_num: {decoded_frame_num}")
                     if decoded_frame_num in results["unique_frames"]:
                         results["duplicate_frames"].append(decoded_frame_num)
                     results["unique_frames"].add(decoded_frame_num)
