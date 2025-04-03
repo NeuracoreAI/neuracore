@@ -2,24 +2,25 @@
 import sys
 import threading
 
-import numpy as np
 import rclpy
 from cv_bridge import CvBridge
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
-from std_msgs.msg import Float32MultiArray
 
 from .const import QOS_BEST_EFFORT
 
 # ruff: noqa: E402
 sys.path.append("/ros2_ws/src/neuracore/examples")
 from common.constants import (  # CAMERA_NAMES
+    BIMANUAL_VIPERX_URDF_PATH,
     LEFT_ARM_JOINT_NAMES,
     LEFT_GRIPPER_JOINT_NAMES,
     RIGHT_ARM_JOINT_NAMES,
     RIGHT_GRIPPER_JOINT_NAMES,
 )
-from common.sim_env import make_sim_env
+
+import neuracore as nc
 
 CAMERA_NAMES = ["top", "angle", "vis"]
 
@@ -27,6 +28,13 @@ CAMERA_NAMES = ["top", "angle", "vis"]
 class SimulationNode(Node):
     def __init__(self):
         super().__init__("simulation_node")
+
+        nc.login()
+        nc.connect_robot(
+            robot_name="Mujoco VX300s",
+            urdf_path=BIMANUAL_VIPERX_URDF_PATH,
+            overwrite=False,
+        )
 
         # Create publishers for different data streams
         # Joint states at 100Hz
@@ -45,127 +53,151 @@ class SimulationNode(Node):
                 Image, f"/camera/{cam_name}/image_raw", QOS_BEST_EFFORT
             )
 
-        # Subscribe to action commands
-        self.action_sub = self.create_subscription(
-            Float32MultiArray, "/robot/actions", self.action_callback, QOS_BEST_EFFORT
-        )
-
         # Initialize simulation
         self.get_logger().info("Initializing simulation environment...")
-        self.env = make_sim_env()
         self.cv_bridge = CvBridge()
-        self.ts = self.env.reset()
         self.action = None
         self.action_lock = threading.Lock()
 
-        # Create timers for different frequency publishers
-        self.create_timer(1.0 / 40.0, self.publish_joint_states)  # 40Hz
-        self.create_timer(1.0 / 10.0, self.publish_camera_images)  # 10Hz
+        self.env = None
+        self.ts = None
+        self.action_traj = []
+        self.record = True
 
-        # Create timer for simulation step
-        self.create_timer(1.0 / 50.0, self.simulation_step)  # 50Hz
+        # Initialize environment first, before setting up timers
+        self.initialize_environment()
 
-        self.get_logger().info("Simulation node initialized and running")
+        if self.record:
+            dataset_name = "ROS2_BimanualVX300s_Dataset"
+            nc.create_dataset(
+                name=dataset_name, description="ROS2 distributed data collection"
+            )
+            self.get_logger().info(f"Created dataset: {dataset_name}")
 
-    def action_callback(self, msg):
-        with self.action_lock:
-            # Convert ROS message to action format expected by simulation
-            action_array = np.array(msg.data)
+            # Start recording
+            nc.start_recording()
+            self.get_logger().info("Started recording")
 
-            # Process the action into the format expected by the simulation
-            # This depends on the exact format of your action space
-            # For example, if using a dictionary format:
-            left_arm_action = action_array[:6]
-            right_arm_action = action_array[7:13]
-            left_gripper_action = action_array[6]
-            right_gripper_action = action_array[13]
+        # Create all timers in a specific order, with simulation_step last
+        self.joint_states_timer = self.create_timer(
+            1.0 / 40.0, self.publish_joint_states
+        )  # 40Hz
+        self.camera_timer = self.create_timer(
+            1.0 / 10.0, self.publish_camera_images
+        )  # 10Hz
 
-            self.action = {
-                "left_arm": left_arm_action,
-                "left_gripper": left_gripper_action,
-                "right_arm": right_arm_action,
-                "right_gripper": right_gripper_action,
-            }
+        # Create timer for simulation step - must be last to ensure environment is ready
+        self.sim_step_timer = self.create_timer(
+            1.0 / 50.0, self.simulation_step
+        )  # 50Hz
+
+    def initialize_environment(self):
+        """Initialize the environment on the main thread before setting up timers"""
+        try:
+            from common.rollout_utils import rollout_policy
+            from common.sim_env import BOX_POSE, make_sim_env
+
+            self.get_logger().info("Generating a demo action trajectory...")
+            self.action_traj, subtask_info, max_reward = rollout_policy()
+
+            BOX_POSE[0] = subtask_info
+            self.env = make_sim_env()
+            self.ts = self.env.reset()
+
+            self.get_logger().info("Environment initialized successfully")
+        except Exception as e:
+            self.get_logger().error(f"Error initializing environment: {e}")
+            raise
 
     def simulation_step(self):
-        with self.action_lock:
-            if self.action is not None:
-                # Convert action dictionary to the format expected by env.step
-                # This depends on the exact format of your environment
-                action_list = np.concatenate([
-                    self.action["left_arm"],
-                    [self.action["left_gripper"]],
-                    self.action["right_arm"],
-                    [self.action["right_gripper"]],
-                ])
-
-                # Step the simulation
-                self.ts = self.env.step(action_list)
-                self.action = None
+        """Execute one simulation step, keeping GL context on the same thread"""
+        try:
+            if len(self.action_traj) > 0:
+                action = self.action_traj.pop(0)
+                nc.log_action(action)
+                self.ts = self.env.step(list(action.values()))
             else:
-                # If no action received, keep the simulation running
-                # This could be a no-op action or just a physics step
-                # For a real robot, you might want to implement a safety controller here
-                pass
+                self.sim_step_timer.cancel()
+                self.get_logger().info("No more actions in the trajectory")
+                if self.record:
+                    self.get_logger().info("Stopping recording...")
+                    nc.stop_recording()
+                    self.get_logger().info("Recording stopped")
+                self.sim_step_timer.cancel()
+        except Exception as e:
+            self.get_logger().error(f"Error in simulation step: {e}")
 
     def publish_joint_states(self):
-        if not hasattr(self, "ts"):
-            return
+        """Publish joint states without modifying the environment"""
+        try:
+            if not self.ts:
+                return
 
-        # Extract joint positions from the simulation state
-        qpos = self.ts.observation["qpos"]
+            # Extract joint positions from the simulation state
+            qpos = self.ts.observation["qpos"]
 
-        # Create JointState messages
-        left_js = JointState()
-        right_js = JointState()
+            # Create JointState messages
+            left_js = JointState()
+            right_js = JointState()
 
-        # Set header
-        left_js.header.stamp = self.get_clock().now().to_msg()
-        right_js.header.stamp = self.get_clock().now().to_msg()
+            # Set header
+            left_js.header.stamp = self.get_clock().now().to_msg()
+            right_js.header.stamp = self.get_clock().now().to_msg()
 
-        left_js.name = LEFT_ARM_JOINT_NAMES + LEFT_GRIPPER_JOINT_NAMES
-        right_js.name = RIGHT_ARM_JOINT_NAMES + RIGHT_GRIPPER_JOINT_NAMES
+            left_js.name = LEFT_ARM_JOINT_NAMES + LEFT_GRIPPER_JOINT_NAMES
+            right_js.name = RIGHT_ARM_JOINT_NAMES + RIGHT_GRIPPER_JOINT_NAMES
 
-        # Set joint positions
-        # This assumes qpos is a dictionary with joint names as keys
-        left_js.position = [qpos[joint] for joint in left_js.name]
-        right_js.position = [qpos[joint] for joint in right_js.name]
-
-        # Publish
-        self.left_arm_pub.publish(left_js)
-        self.right_arm_pub.publish(right_js)
-
-    def publish_camera_images(self):
-        if not hasattr(self, "ts"):
-            return
-
-        # Extract images from the simulation state
-        images = self.ts.observation["images"]
-
-        # Publish each camera image
-        for cam_name, img in images.items():
-            # Convert to ROS Image message
-            img_msg = self.cv_bridge.cv2_to_imgmsg(img, encoding="rgb8")
-            img_msg.header.stamp = self.get_clock().now().to_msg()
-            img_msg.header.frame_id = f"camera_{cam_name}_frame"
+            # Set joint positions
+            left_js.position = [qpos[joint] for joint in left_js.name]
+            right_js.position = [qpos[joint] for joint in right_js.name]
 
             # Publish
-            self.camera_pubs[cam_name].publish(img_msg)
+            self.left_arm_pub.publish(left_js)
+            self.right_arm_pub.publish(right_js)
+        except Exception as e:
+            self.get_logger().error(f"Error publishing joint states: {e}")
+
+    def publish_camera_images(self):
+        """Publish camera images without modifying the environment"""
+        try:
+            if not self.ts:
+                return
+
+            # Extract images from the simulation state
+            images = self.ts.observation["images"]
+
+            # Publish each camera image
+            for cam_name, img in images.items():
+                # Convert to ROS Image message
+                img_msg = self.cv_bridge.cv2_to_imgmsg(img, encoding="rgb8")
+                img_msg.header.stamp = self.get_clock().now().to_msg()
+                img_msg.header.frame_id = f"camera_{cam_name}_frame"
+
+                # Publish
+                self.camera_pubs[cam_name].publish(img_msg)
+        except Exception as e:
+            self.get_logger().error(f"Error publishing camera images: {e}")
 
 
 def main(args=None):
     rclpy.init(args=args)
+
+    # Create the node
     node = SimulationNode()
 
-    # Use a MultiThreadedExecutor to handle multiple timers concurrently
-    executor = rclpy.executors.MultiThreadedExecutor()
+    # Use a SingleThreadedExecutor to ensure the GL context is on the same thread
+    executor = SingleThreadedExecutor()
     executor.add_node(node)
 
     try:
-        node.get_logger().info("Starting simulation node...")
+        node.get_logger().info(
+            "Starting simulation node with single-threaded executor..."
+        )
         executor.spin()
     except KeyboardInterrupt:
         node.get_logger().info("Keyboard interrupt received")
+    except Exception as e:
+        node.get_logger().error(f"Error during execution: {e}")
     finally:
         node.get_logger().info("Shutting down simulation node")
         executor.shutdown()
