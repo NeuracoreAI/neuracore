@@ -28,12 +28,13 @@ ICE_SERVERS = [
 
 @dataclass
 class PierToPierConnection:
+    id: str
     local_stream_id: str
     remote_stream_id: str
+    connection_token: str  # not used yet
     on_close: Callable
     client_session: ClientSession
     loop: asyncio.AbstractEventLoop
-    connection_token: asyncio.Future[str]
     auth: Auth = field(default_factory=get_auth)
     connection: RTCPeerConnection = field(
         default_factory=lambda: RTCPeerConnection(
@@ -41,7 +42,6 @@ class PierToPierConnection:
         )
     )
     data_channels: dict[str, RTCDataChannel] = field(default_factory=dict)
-
     _closed: bool = False
 
     async def get_ice_gatherer(self) -> RTCIceGatherer:
@@ -120,13 +120,13 @@ class PierToPierConnection:
     async def send_handshake_message(self, message_type: MessageType, content: str):
         """Send a message to the remote peer through the signaling server"""
         print(
-            f"Send Message: {message_type}, "
-            f"{self.local_stream_id=} {self.remote_stream_id=}"
+            f"Send Message: {message_type}, \n {self.local_stream_id=} {self.remote_stream_id=}"
         )
         await self.client_session.post(
             f"{API_URL}/signalling/message/submit",
             headers=self.auth.get_headers(),
             json=HandshakeMessage(
+                connection_id=self.id,
                 from_id=self.local_stream_id,
                 to_id=self.remote_stream_id,
                 type=message_type,
@@ -173,14 +173,7 @@ class PierToPierConnection:
         answer = await self.connection.createAnswer()
         self.set_transceiver_direction()
         await self.connection.setLocalDescription(answer)
-
-        print(f"set local description {self.connection.sctp=}")
         await self.send_handshake_message(MessageType.SDP_ANSWER, answer.sdp)
-
-    async def on_token(self, token: str):
-        if self.connection_token.done():
-            return
-        self.connection_token.set_result(token)
 
     async def on_answer(self, answer_sdp: str):
         answer = RTCSessionDescription(answer_sdp, type="answer")

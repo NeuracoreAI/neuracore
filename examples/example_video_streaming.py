@@ -52,7 +52,7 @@ def simulate_camera_frames(num_frames=1_000_000, width=640, height=480, camera_i
 def camera_task(camera_id):
     for frame, depth_frame, timestamp in simulate_camera_frames(camera_id=camera_id):
         # print("logging depth")
-        nc.log_depth(f"Camera {camera_id} Depth", depth_frame, timestamp=timestamp)
+        # nc.log_depth(f"Camera {camera_id} Depth", depth_frame, timestamp=timestamp)
         nc.log_rgb(f"Camera {camera_id} RGB", frame, timestamp=timestamp)
 
 
@@ -104,14 +104,14 @@ def main():
     nc.create_dataset(name="Test Video Dataset", description="This is a test dataset")
     print("Created Dataset...")
 
-    nc.start_recording()
+    # nc.start_recording()
 
     # Run four camera streams concurrently
     from threading import Thread
 
-    threads = [Thread(target=camera_task, args=(i,)) for i in range(3)]
+    threads = [Thread(target=camera_task, args=(i,)) for i in range(2)]
 
-    threads.append(Thread(target=joint_task))
+    # threads.append(Thread(target=joint_task))
 
     for thread in threads:
         thread.start()
@@ -120,7 +120,7 @@ def main():
         thread.join()
 
     print("Finishing recording...")
-    nc.stop_recording()
+    # nc.stop_recording()
     print("Finished recording!")
     nc.stop_live_data()
 

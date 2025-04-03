@@ -17,6 +17,7 @@ class HandshakeMessage(BaseModel):
     from_id: str
     to_id: str
     data: str
+    connection_id: str
     type: MessageType
     id: str = Field(default_factory=lambda: uuid4().hex)
 

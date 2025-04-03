@@ -56,7 +56,7 @@ class ClientStreamingManager:
         async with self.track_lock:
             if sensor_key in self.video_tracks_cache:
                 return self.video_tracks_cache[sensor_key]
-            
+
             print(f"creating stream {sensor_key=}")
             mid = str(len(self.tracks))
             video_track = (
@@ -64,10 +64,6 @@ class ClientStreamingManager:
             )
             self.video_tracks_cache[sensor_key] = video_track
             self.tracks.append(video_track)
-
-            # Add this track to all existing connections
-            for connection in self.connections.values():
-                connection.add_video_source(video_track)
 
             await self.submit_track(mid, kind, sensor_name)
 
@@ -119,7 +115,10 @@ class ClientStreamingManager:
         )
 
     async def create_new_connection(
-        self, remote_stream_id: str
+        self,
+        remote_stream_id: str,
+        connection_id: str,
+        connection_token: str,
     ) -> PierToPierConnection:
         """Create a new P2P connection to a remote stream"""
 
@@ -129,11 +128,12 @@ class ClientStreamingManager:
         connection = PierToPierConnection(
             local_stream_id=self.local_stream_id,
             remote_stream_id=remote_stream_id,
+            id=connection_id,
+            connection_token=connection_token,
             on_close=on_close,
             client_session=self.client_session,
             auth=self.auth,
             loop=self.loop,
-            connection_token=self.loop.create_future(),
         )
 
         connection.setup_connection()
@@ -142,6 +142,8 @@ class ClientStreamingManager:
             connection.add_video_source(video_track)
 
         self.connections[remote_stream_id] = connection
+
+        await connection.send_offer()
         return connection
 
     async def connect_recording_notification_stream(self, robot_id: str):
@@ -180,13 +182,12 @@ class ClientStreamingManager:
                     headers=self.auth.get_headers(),
                 ) as event_source:
                     async for event in event_source:
-                        logger.info(f"received event {event.type=} {event.message=}")
                         if event.type == "heartbeat":
                             await self.heartbeat_response()
                             continue
 
                         message = HandshakeMessage.model_validate_json(event.data)
-                        logger.info(f"Message Received {message}")
+                        print(f"Message Received {message}")
                         if not self.available_for_connections:
                             return
 
@@ -194,19 +195,23 @@ class ClientStreamingManager:
                             continue
 
                         connection = self.connections.get(message.from_id)
-                        if connection is None:
+
+                        if message.type == MessageType.CONNECTION_TOKEN:
                             connection = await self.create_new_connection(
-                                message.from_id
+                                remote_stream_id=message.from_id,
+                                connection_id=message.connection_id,
+                                connection_token=message.data,
                             )
+                            return
+
+                        if connection is None or connection.id != message.connection_id:
+                            return
 
                         match message.type:
                             case MessageType.SDP_OFFER:
-                                print(f"{message.data=}")
                                 await connection.on_offer(message.data)
                             case MessageType.ICE_CANDIDATE:
                                 await connection.on_ice(message.data)
-                            case MessageType.CONNECTION_TOKEN:
-                                await connection.on_token(message.data)
                             case MessageType.SDP_ANSWER:
                                 await connection.on_answer(message.data)
                             case _:
