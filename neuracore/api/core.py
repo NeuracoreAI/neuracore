@@ -1,3 +1,4 @@
+import logging
 from threading import Thread
 from typing import Optional
 
@@ -10,6 +11,8 @@ from ..core.exceptions import RobotError
 from ..core.robot import Robot, get_robot
 from ..core.robot import init as _init_robot
 from .globals import GlobalSingleton
+
+logger = logging.getLogger(__name__)
 
 
 def _get_robot(robot_name: str) -> Robot:
@@ -129,7 +132,8 @@ def stop_recording(robot_name: Optional[str] = None, wait: bool = False) -> None
     """
     robot = _get_robot(robot_name)
     if robot.id not in GlobalSingleton()._active_recording_ids:
-        raise RobotError("No active recording. Call start_recording() first.")
+        logger.warning("No active recordings to stop.")
+        return
     threads: Thread = []
     for sname, stream in GlobalSingleton()._data_streams.items():
         if sname.startswith(robot.id):

@@ -124,6 +124,7 @@ class ClientStreamingManager:
         return connection
 
     async def connect_recording_notification_stream(self, robot_id: str):
+
         while self.available_for_connections:
             try:
                 async with sse_client.EventSource(
@@ -131,13 +132,25 @@ class ClientStreamingManager:
                     headers=self.auth.get_headers(),
                 ) as event_source:
                     async for event in event_source:
-                        message = RecordingNotification.model_validate_json(event.data)
-                        if message.recording:
-                            GlobalSingleton()._active_recording_ids[
-                                robot_id
-                            ] = message.recording_id
-                        else:
-                            GlobalSingleton()._active_recording_ids.pop(robot_id, None)
+                        if event.type == "data":
+                            message = RecordingNotification.model_validate_json(
+                                event.data
+                            )
+                            if message.recording:
+                                GlobalSingleton()._active_recording_ids[
+                                    robot_id
+                                ] = message.recording_id
+                            else:
+                                rec_id = GlobalSingleton()._active_recording_ids.pop(
+                                    robot_id, None
+                                )
+                                if rec_id:
+                                    for (
+                                        sname,
+                                        stream,
+                                    ) in GlobalSingleton()._data_streams.items():
+                                        if sname.startswith(robot_id):
+                                            stream.stop_recording()
             except ConnectionError as e:
                 print(f"Connection error: {e}")
                 await asyncio.sleep(5)

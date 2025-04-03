@@ -8,7 +8,7 @@ def generate_launch_description():
     """Generate launch description for the bimanual robot data collection setup."""
 
     record = LaunchConfiguration("record")
-    num_episodes = LaunchConfiguration("num_episodes")
+    LaunchConfiguration("num_episodes")
     dataset_name = LaunchConfiguration("dataset_name")
 
     return LaunchDescription([
@@ -38,15 +38,6 @@ def generate_launch_description():
             parameters=[{
                 "record": record,
                 "dataset_name": dataset_name,
-            }],
-        ),
-        Node(
-            package="ros_example",
-            executable="action_generator_node",
-            name="action_generator_node",
-            output="screen",
-            parameters=[{
-                "num_episodes": num_episodes,
             }],
         ),
     ])

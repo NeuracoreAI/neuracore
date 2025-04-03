@@ -93,10 +93,12 @@ def _log_joint_data(
     if joint_stream is None:
         joint_stream = JsonDataStream(f"{data_type}/{joint_group_id}.json")
         GlobalSingleton()._data_streams[joint_str_id] = joint_stream
-        if robot.id in GlobalSingleton()._active_recording_ids:
-            joint_stream.start_recording(
-                GlobalSingleton()._active_recording_ids[robot.id]
-            )
+
+    if (
+        robot.id in GlobalSingleton()._active_recording_ids
+        and not joint_stream.is_recording()
+    ):
+        joint_stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
 
     joint_stream.log(
         JointData(
@@ -161,8 +163,13 @@ def _log_camera_data(
         else:
             raise ValueError(f"Invalid camera type: {camera_type}")
         GlobalSingleton()._data_streams[stream_id] = stream
-        if robot.id in GlobalSingleton()._active_recording_ids:
-            stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
+
+    if (
+        robot.id in GlobalSingleton()._active_recording_ids
+        and not stream.is_recording()
+    ):
+        stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
+
     if stream.width != image.shape[1] or stream.height != image.shape[0]:
         raise ValueError(
             f"Camera image dimensions {image.shape[1]}x{image.shape[0]} do not match "
@@ -224,8 +231,13 @@ def log_custom_data(
     if stream is None:
         stream = JsonDataStream(f"custom/{name}.json")
         GlobalSingleton()._data_streams[str_id] = stream
-        if robot.id in GlobalSingleton()._active_recording_ids:
-            stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
+
+    if (
+        robot.id in GlobalSingleton()._active_recording_ids
+        and not stream.is_recording()
+    ):
+        stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
+
     try:
         json.dumps(data)
     except TypeError:
@@ -306,8 +318,13 @@ def log_pose_data(
     if stream is None:
         stream = JsonDataStream(f"poses/{group_id}.json")
         GlobalSingleton()._data_streams[str_id] = stream
-        if robot.id in GlobalSingleton()._active_recording_ids:
-            stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
+
+    if (
+        robot.id in GlobalSingleton()._active_recording_ids
+        and not stream.is_recording()
+    ):
+        stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
+
     stream.log(PoseData(timestamp=timestamp, pose=poses))
 
 
@@ -331,8 +348,11 @@ def log_gripper_data(
     if stream is None:
         stream = JsonDataStream(f"gripper_open_amounts/{group_id}.json")
         GlobalSingleton()._data_streams[str_id] = stream
-        if robot.id in GlobalSingleton()._active_recording_ids:
-            stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
+    if (
+        robot.id in GlobalSingleton()._active_recording_ids
+        and not stream.is_recording()
+    ):
+        stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
     stream.log(EndEffectorData(timestamp=timestamp, open_amounts=open_amounts))
 
 
@@ -365,8 +385,12 @@ def log_action(
     if stream is None:
         stream = JsonDataStream(f"actions/{joint_group_id}.json")
         GlobalSingleton()._data_streams[str_id] = stream
-        if robot.id in GlobalSingleton()._active_recording_ids:
-            stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
+
+    if (
+        robot.id in GlobalSingleton()._active_recording_ids
+        and not stream.is_recording()
+    ):
+        stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
 
     stream.log(ActionData(timestamp=timestamp, values=action))
 
@@ -396,8 +420,11 @@ def log_language(
     if stream is None:
         stream = JsonDataStream("language_annotation.json")
         GlobalSingleton()._data_streams[str_id] = stream
-        if robot.id in GlobalSingleton()._active_recording_ids:
-            stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
+    if (
+        robot.id in GlobalSingleton()._active_recording_ids
+        and not stream.is_recording()
+    ):
+        stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
     stream.log(LanguageData(timestamp=timestamp, text=language))
 
 
@@ -519,8 +546,13 @@ def log_point_cloud(
     if stream is None:
         stream = JsonDataStream(f"point_clouds/{camera_id}.json")
         GlobalSingleton()._data_streams[str_id] = stream
-        if robot.id in GlobalSingleton()._active_recording_ids:
-            stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
+
+    if (
+        robot.id in GlobalSingleton()._active_recording_ids
+        and not stream.is_recording()
+    ):
+        stream.start_recording(GlobalSingleton()._active_recording_ids[robot.id])
+
     stream.log(
         PointCloudData(
             timestamp=timestamp,

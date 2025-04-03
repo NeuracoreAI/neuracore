@@ -3,13 +3,11 @@ import argparse
 import sys
 from typing import List
 
-import numpy as np
 import rclpy
 from cv_bridge import CvBridge
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
-from std_msgs.msg import Float32MultiArray
 
 import neuracore as nc
 
@@ -46,9 +44,7 @@ class LeftArmLoggerNode(Node):
         # Convert ROS JointState to format expected by neuracore
         joint_positions = {}
         for i, name in enumerate(msg.name):
-            joint_positions[name] = msg.position[i]
-
-        self.get_logger().info(f"Received left arm joint states: {joint_positions}")
+            joint_positions[name] = float(msg.position[i])
 
         # Log only left arm data
         nc.log_joint_positions(joint_positions)
@@ -75,12 +71,10 @@ class RightArmLoggerNode(Node):
         # Convert ROS JointState to format expected by neuracore
         joint_positions = {}
         for i, name in enumerate(msg.name):
-            joint_positions[name] = msg.position[i]
-
-        self.get_logger().info(f"Received right arm joint states: {joint_positions}")
+            joint_positions[name] = float(msg.position[i])
 
         # Log only right arm data
-        nc.log_joint_positions(joint_positions, "right_arm")
+        nc.log_joint_positions(joint_positions)
 
 
 class CameraLoggerNode(Node):
@@ -109,50 +103,10 @@ class CameraLoggerNode(Node):
         try:
             # Convert ROS Image to OpenCV format
             cv_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
-            self.get_logger().info(
-                f"Received {cam_name} camera image with shape: {cv_image.shape}"
-            )
-
             # Log image to neuracore
             nc.log_rgb(cam_name, cv_image)
         except Exception as e:
             self.get_logger().error(f"Error processing {cam_name} camera: {e}")
-
-
-class ActionLoggerNode(Node):
-    """Node dedicated to logging robot actions."""
-
-    def __init__(self):
-        super().__init__("action_logger_node")
-
-        # Subscribe to actions
-        self.action_sub = self.create_subscription(
-            Float32MultiArray, "/robot/actions", self.action_callback, QOS_BEST_EFFORT
-        )
-
-        self.get_logger().info("Action logger node initialized and running")
-
-    def action_callback(self, msg):
-        """Process action commands and log to neuracore."""
-        # Convert ROS Float32MultiArray to format expected by neuracore
-        action_array = np.array(msg.data)
-
-        # Format the action as a dictionary
-        left_arm_action = action_array[:6]
-        right_arm_action = action_array[7:13]
-        left_gripper_action = action_array[6]
-        right_gripper_action = action_array[13]
-
-        action = {
-            "left_arm": left_arm_action.tolist(),
-            "left_gripper": float(left_gripper_action),
-            "right_arm": right_arm_action.tolist(),
-            "right_gripper": float(right_gripper_action),
-        }
-        self.get_logger().info(f"Received action: {action}")
-
-        # Log action to neuracore
-        nc.log_action(action)
 
 
 class NeuracoreManagerNode(Node):
@@ -187,7 +141,7 @@ class NeuracoreManagerNode(Node):
         """Clean shutdown of neuracore."""
         if self.record:
             self.get_logger().info("Stopping recording...")
-            # nc.stop_recording()
+            nc.stop_recording()
             self.get_logger().info("Recording stopped")
 
 
@@ -216,17 +170,15 @@ def main(args=None):
     left_arm_logger = LeftArmLoggerNode()
     right_arm_logger = RightArmLoggerNode()
     camera_logger = CameraLoggerNode(camera_names=CAMERA_NAMES)
-    action_logger = ActionLoggerNode()
 
     # Create a multithreaded executor to spin all nodes concurrently
-    executor = MultiThreadedExecutor()
+    executor = SingleThreadedExecutor()
 
     # Add nodes to the executor
     executor.add_node(neuracore_manager)
     executor.add_node(left_arm_logger)
     executor.add_node(right_arm_logger)
     executor.add_node(camera_logger)
-    executor.add_node(action_logger)
 
     try:
         # Spin all nodes
@@ -242,7 +194,6 @@ def main(args=None):
         left_arm_logger.destroy_node()
         right_arm_logger.destroy_node()
         camera_logger.destroy_node()
-        action_logger.destroy_node()
 
         rclpy.shutdown()
 
