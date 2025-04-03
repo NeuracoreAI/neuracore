@@ -3,6 +3,6 @@
 Example showing how there is no need to synchronise your data across nodes -- Neuracore does this for you!
 
 ```bash
-docker build -t ros_example:latest .
+docker build --file examples/ros_example/Dockerfile   -t ros_example:latest .
 docker run -it --rm -v  ~/.neuracore:/root/.neuracore --network host ros_example:latest
 ```
