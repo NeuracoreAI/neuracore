@@ -70,8 +70,7 @@ class RobotModelHandler(BaseHandler):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if model_pt_path:
             model.load_state_dict(
-                torch.load(model_pt_path, weights_only=True),
-                map_location=self.device,
+                torch.load(model_pt_path, map_location=self.device, weights_only=True),
             )
         return model
 
