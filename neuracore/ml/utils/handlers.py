@@ -67,8 +67,12 @@ class RobotModelHandler(BaseHandler):
         algorithm_loader = AlgorithmLoader(Path(model_dir))
         model_class = algorithm_loader.load_model()
         model = model_class(self.model_init_description)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if model_pt_path:
-            model.load_state_dict(torch.load(model_pt_path, weights_only=True))
+            model.load_state_dict(
+                torch.load(model_pt_path, weights_only=True),
+                map_location=self.device,
+            )
         return model
 
     def initialize(self, context):

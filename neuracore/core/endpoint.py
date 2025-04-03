@@ -217,7 +217,7 @@ def connect_local_endpoint(
         )
         response.raise_for_status()
         tempdir = tempfile.mkdtemp()
-        path_to_model = Path(tempdir) / f"{train_run_name}.mar"
+        path_to_model = Path(tempdir) / f"model.mar"
         with open(path_to_model, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
