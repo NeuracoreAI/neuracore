@@ -52,7 +52,7 @@ def simulate_camera_frames(num_frames=1_000_000, width=640, height=480, camera_i
 def camera_task(camera_id):
     for frame, depth_frame, timestamp in simulate_camera_frames(camera_id=camera_id):
         # print("logging depth")
-        # nc.log_depth(f"Camera {camera_id} Depth", depth_frame, timestamp=timestamp)
+        nc.log_depth(f"Camera {camera_id} Depth", depth_frame, timestamp=timestamp)
         nc.log_rgb(f"Camera {camera_id} RGB", frame, timestamp=timestamp)
 
 
@@ -78,7 +78,7 @@ def joint_task():
             # Add sinusoidal movement plus small random variation
             # Different frequencies for different joints based on their position in the list
             frequency = 0.1 + 0.05 * joint_names.index(joint) / len(joint_names)
-            amplitude = 0.2 + 0.1 * np.random.random()
+            amplitude = 1.5 + 1.5 * np.random.random()
             
             joint_positions[joint] = amplitude * np.sin(frequency * t) + 0.05 * np.random.randn()
         
@@ -109,9 +109,9 @@ def main():
     # Run four camera streams concurrently
     from threading import Thread
 
-    threads = [Thread(target=camera_task, args=(i,)) for i in range(2)]
+    threads = [Thread(target=camera_task, args=(i,)) for i in range(0)]
 
-    # threads.append(Thread(target=joint_task))
+    threads.append(Thread(target=joint_task))
 
     for thread in threads:
         thread.start()

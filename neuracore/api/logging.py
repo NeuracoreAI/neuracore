@@ -103,9 +103,9 @@ def _log_joint_data(
         additional_values=additional_urdf_data,
     )
     joint_stream.log(data=data)
-    get_robot_streaming_manager(robot.id).publish_event(
-        data_type, "joints", data.model_dump(mode="json")
-    )
+    get_robot_streaming_manager(robot.id).get_event_source(
+        data_type, "joints"
+    ).publish(data.model_dump(mode="json"))
 
 
 def _validate_extrinsics_intrinsics(
@@ -433,7 +433,7 @@ def log_rgb(
         "rgb", camera_id, image, extrinsics, intrinsics, robot_name, timestamp
     )
     robot = _get_robot(robot_name)
-    get_robot_streaming_manager(robot.id).get_recording_video_stream(
+    get_robot_streaming_manager(robot.id).get_video_source(
         camera_id, "rgb"
     ).add_frame(image)
 
@@ -477,7 +477,7 @@ def log_depth(
         "depth", camera_id, depth, extrinsics, intrinsics, robot_name, timestamp
     )
     robot = _get_robot(robot_name)
-    get_robot_streaming_manager(robot.id).get_recording_video_stream(
+    get_robot_streaming_manager(robot.id).get_video_source(
         camera_id, "depth"
     ).add_frame(depth)
 

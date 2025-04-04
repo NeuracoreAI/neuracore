@@ -15,6 +15,7 @@ from aiortc import (
 from aiortc.sdp import candidate_from_sdp, candidate_to_sdp
 
 from neuracore.core.auth import Auth, get_auth
+from neuracore.core.streaming.client_stream.event_source import EventSource
 from neuracore.core.streaming.client_stream.models import HandshakeMessage, MessageType
 from neuracore.core.streaming.client_stream.video_source import VideoSource, VideoTrack
 
@@ -41,7 +42,6 @@ class PierToPierConnection:
             configuration=RTCConfiguration(iceServers=ICE_SERVERS)
         )
     )
-    data_channels: dict[str, RTCDataChannel] = field(default_factory=dict)
     _closed: bool = False
 
     async def force_ice_negotiation(self):
@@ -49,7 +49,9 @@ class PierToPierConnection:
             print("ICE gathering state is not complete")
             return
         for transceiver in self.connection.getTransceivers():
-            iceGatherer: RTCIceGatherer = transceiver.sender.transport.transport.iceGatherer
+            iceGatherer: RTCIceGatherer = (
+                transceiver.sender.transport.transport.iceGatherer
+            )
             for candidate in iceGatherer.getLocalCandidates():
                 candidate.sdpMid = transceiver.mid
                 mLineIndex = transceiver._get_mline_index()
@@ -107,16 +109,17 @@ class PierToPierConnection:
         track = source.get_video_track()
         self.connection.addTrack(track)
 
+    def add_event_source(self, source: EventSource):
+        data_channel = self.connection.createDataChannel(source.mid)
+        source.add_listener("event", data_channel.send)
+
     async def send_data_chanel_message(self, channel_id: str, message: dict):
         if self.connection.connectionState != "connected":
             return
         if channel_id not in self.data_channels:
-            print(f"creating channel {channel_id=}")
-            self.data_channels[channel_id] = self.connection.createDataChannel(
-                channel_id
-            )
+            return
         channel = self.data_channels[channel_id]
-        channel.send(json.dumps(message).encode("utf-8"))
+        channel.send(json.dumps(message))
 
     async def send_handshake_message(self, message_type: MessageType, content: str):
         """Send a message to the remote peer through the signaling server"""
@@ -135,7 +138,7 @@ class PierToPierConnection:
             ).model_dump(mode="json"),
         )
 
-    def set_transceiver_direction(self):
+    def fix_mid_ordering(self, when: str = "offer"):
         tracks: dict[str, VideoTrack] = {}
         for transceiver in self.connection.getTransceivers():
             # transceiver.direction = "sendonly"
@@ -149,6 +152,7 @@ class PierToPierConnection:
             if track is None:
                 continue
             if transceiver.sender.track.id != track.id:
+                print(f"updating track ordering {when}")
                 transceiver.sender.replaceTrack(track)
 
     async def on_ice(self, ice_message: str):
@@ -168,23 +172,23 @@ class PierToPierConnection:
             return
 
         offer = RTCSessionDescription(offer, type="offer")
-        self.set_transceiver_direction()
+        self.fix_mid_ordering("before offer")
         await self.connection.setRemoteDescription(offer)
-        self.set_transceiver_direction()
+        self.fix_mid_ordering("after offer")
         answer = await self.connection.createAnswer()
-        self.set_transceiver_direction()
+        self.fix_mid_ordering("after answer")
         await self.connection.setLocalDescription(answer)
         await self.send_handshake_message(MessageType.SDP_ANSWER, answer.sdp)
 
     async def on_answer(self, answer_sdp: str):
         print(f"on_answer {self.local_stream_id=} {self.remote_stream_id=} {self.id=}")
         answer = RTCSessionDescription(answer_sdp, type="answer")
-        self.set_transceiver_direction()
+        self.fix_mid_ordering("before answer")
         await self.connection.setRemoteDescription(answer)
         await self.force_ice_negotiation()
 
     async def send_offer(self):
-        self.set_transceiver_direction()
+        self.fix_mid_ordering("before offer")
         await self.connection.setLocalDescription(await self.connection.createOffer())
         await self.send_handshake_message(
             MessageType.SDP_OFFER, self.connection.localDescription.sdp

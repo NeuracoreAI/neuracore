@@ -3,7 +3,7 @@ import logging
 import threading
 import traceback
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from uuid import uuid4
 
 from aiohttp import ClientSession
@@ -11,6 +11,7 @@ from aiohttp_sse_client import client as sse_client
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.auth import Auth, get_auth
+from neuracore.core.streaming.client_stream.event_source import EventSource
 from neuracore.core.streaming.client_stream.models import (
     HandshakeMessage,
     MessageType,
@@ -45,13 +46,13 @@ class ClientStreamingManager:
     auth: Auth = field(default_factory=get_auth)
     connections: Dict[str, PierToPierConnection] = field(default_factory=dict)
     video_tracks_cache: Dict[str, VideoSource] = field(default_factory=dict)
-    data_channels: dict[tuple[str, str], str] = field(default_factory=dict)
+    event_source_cache: dict[Tuple[str, str], EventSource] = field(default_factory=dict)
     track_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tracks: List[VideoSource] = field(default_factory=list)
     local_stream_id: str = field(default_factory=lambda: uuid4().hex)
     recording_notification_stream_id: str = field(default_factory=lambda: uuid4().hex)
 
-    async def _create_video_track(self, sensor_name: str, kind: str):
+    async def _create_video_source(self, sensor_name: str, kind: str) -> VideoSource:
         sensor_key = (sensor_name, kind)
         async with self.track_lock:
             if sensor_key in self.video_tracks_cache:
@@ -59,37 +60,37 @@ class ClientStreamingManager:
 
             print(f"creating stream {sensor_key=}")
             mid = str(len(self.tracks))
-            video_track = (
+            video_source = (
                 DepthVideoSource(mid=mid) if kind == "depth" else VideoSource(mid=mid)
             )
-            self.video_tracks_cache[sensor_key] = video_track
-            self.tracks.append(video_track)
+            self.video_tracks_cache[sensor_key] = video_source
+            self.tracks.append(video_source)
 
             await self.submit_track(mid, kind, sensor_name)
 
-            return video_track
+            return video_source
 
-    def get_recording_video_stream(self, sensor_name: str, kind: str) -> VideoSource:
+    def get_video_source(self, sensor_name: str, kind: str) -> VideoSource:
         """Start a new recording stream"""
 
         return asyncio.run_coroutine_threadsafe(
-            self._create_video_track(sensor_name, kind), self.loop
+            self._create_video_source(sensor_name, kind), self.loop
         ).result()
 
-    def publish_event(self, sensor_name: str, kind: str, event: dict):
+    def get_event_source(self, sensor_name: str, kind: str) -> EventSource:
         sensor_key = (sensor_name, kind)
-        if sensor_key not in self.data_channels:
-            mid = uuid4().hex
-            self.data_channels[sensor_key] = mid
-            asyncio.run_coroutine_threadsafe(
-                self.submit_track(mid, kind, sensor_name), self.loop
-            )
+        if sensor_key in self.event_source_cache:
+            return self.event_source_cache[sensor_key]
+        
+        mid = uuid4().hex
+        asyncio.run_coroutine_threadsafe(
+            self.submit_track(mid, kind, sensor_name), self.loop
+        )
+       
+        source = EventSource(mid=mid, loop=self.loop)
+        self.event_source_cache[sensor_key] = source
 
-        key = self.data_channels[sensor_key]
-        for client in self.connections.values():
-            asyncio.run_coroutine_threadsafe(
-                client.send_data_chanel_message(key, event), self.loop
-            )
+        return source
 
     async def submit_track(self, mid: str, kind: str, label: str):
         """Submit new track data"""
@@ -141,6 +142,9 @@ class ClientStreamingManager:
         for video_track in self.tracks:
             connection.add_video_source(video_track)
 
+        for data_channel in self.event_source_cache.values():
+            connection.add_event_source(data_channel)
+
         self.connections[remote_stream_id] = connection
 
         await connection.send_offer()
@@ -164,7 +168,9 @@ class ClientStreamingManager:
                                 self.robot_id
                             ] = message.recording_id
                         else:
-                            GlobalSingleton()._active_recording_ids.pop(self.robot_id, None)
+                            GlobalSingleton()._active_recording_ids.pop(
+                                self.robot_id, None
+                            )
             except ConnectionError as e:
                 print(f"Connection error: {e}")
                 await asyncio.sleep(5)
