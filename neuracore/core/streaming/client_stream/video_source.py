@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import av
 import numpy as np
-from aiortc import MediaStreamTrack
+from aiortc import MediaStreamTrack, VideoStreamTrack
 
 av.logging.set_level(None)
 
@@ -66,6 +66,9 @@ class VideoSource:
         return av.VideoFrame.from_ndarray(self._last_frame, format="rgb24")
 
     def get_video_track(self):
+        track = VideoStreamTrack()
+        track.mid = self.mid
+        return track
         consumer = VideoTrack(self)
         self._consumers.add(consumer)
         return consumer
@@ -132,8 +135,13 @@ class VideoTrack(MediaStreamTrack):
         """Receive the next frame"""
         if self._ended:
             raise Exception("Track has ended")
+        
+        print(f"recv video frame {self._mid=}")
         pts = await self.next_timestamp()
         frame_data = self.source.get_last_frame()
+        if frame_data is None:
+            print("No frame data available! Sending dummy frame.")
+            frame_data = av.VideoFrame(width=640, height=480, format="yuv420p")
         frame_data.time_base = VIDEO_TIME_BASE
         frame_data.pts = pts
 

@@ -146,7 +146,7 @@ class ClientStreamingManager:
         await connection.send_offer()
         return connection
 
-    async def connect_recording_notification_stream(self, robot_id: str):
+    async def connect_recording_notification_stream(self):
         while self.available_for_connections:
             try:
                 sid = self.recording_notification_stream_id
@@ -161,10 +161,10 @@ class ClientStreamingManager:
 
                         if message.recording:
                             GlobalSingleton()._active_recording_ids[
-                                robot_id
+                                self.robot_id
                             ] = message.recording_id
                         else:
-                            GlobalSingleton()._active_recording_ids.pop(robot_id, None)
+                            GlobalSingleton()._active_recording_ids.pop(self.robot_id, None)
             except ConnectionError as e:
                 print(f"Connection error: {e}")
                 await asyncio.sleep(5)
@@ -197,15 +197,15 @@ class ClientStreamingManager:
                         connection = self.connections.get(message.from_id)
 
                         if message.type == MessageType.CONNECTION_TOKEN:
-                            connection = await self.create_new_connection(
+                            await self.create_new_connection(
                                 remote_stream_id=message.from_id,
                                 connection_id=message.connection_id,
                                 connection_token=message.data,
                             )
-                            return
+                            continue
 
                         if connection is None or connection.id != message.connection_id:
-                            return
+                            continue
 
                         match message.type:
                             case MessageType.SDP_OFFER:
@@ -247,6 +247,16 @@ class ClientStreamingManager:
 _streaming_managers: Dict[str, ClientStreamingManager] = {}
 
 
+async def create_client_streaming_manager(robot_id):
+    manager = ClientStreamingManager(
+        robot_id=robot_id, loop=asyncio.get_event_loop(), client_session=ClientSession()
+    )
+    asyncio.create_task(manager.connect_signalling_stream())
+    asyncio.create_task(manager.connect_recording_notification_stream())
+
+    return manager
+
+
 def get_robot_streaming_manager(robot_id: str) -> "ClientStreamingManager":
     global _streaming_managers
 
@@ -254,13 +264,10 @@ def get_robot_streaming_manager(robot_id: str) -> "ClientStreamingManager":
         return _streaming_managers[robot_id]
 
     loop = get_loop()
-    manager = ClientStreamingManager(
-        robot_id=robot_id, loop=loop, client_session=ClientSession(loop=loop)
-    )
-    asyncio.run_coroutine_threadsafe(manager.connect_signalling_stream(), loop)
-    asyncio.run_coroutine_threadsafe(
-        manager.connect_recording_notification_stream(robot_id), loop
-    )
+
+    manager = asyncio.run_coroutine_threadsafe(
+        create_client_streaming_manager(robot_id), loop
+    ).result()
 
     _streaming_managers[robot_id] = manager
     return manager

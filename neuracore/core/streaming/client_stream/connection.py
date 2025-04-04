@@ -44,37 +44,37 @@ class PierToPierConnection:
     data_channels: dict[str, RTCDataChannel] = field(default_factory=dict)
     _closed: bool = False
 
-    async def get_ice_gatherer(self) -> RTCIceGatherer:
-        sctp = self.connection.sctp
-        if sctp is not None:
-            return sctp.transport.transport.iceGatherer
-        iceGather = RTCIceGatherer(iceServers=ICE_SERVERS)
-        await iceGather.gather()
-        return iceGather
-
     async def force_ice_negotiation(self):
-        iceGatherer = await self.get_ice_gatherer()
-        candidates = iceGatherer.getLocalCandidates()
-        for candidate in candidates:
-            if candidate.sdpMid is None or candidate.sdpMLineIndex is None:
-                print(
-                    f"Warning: Candidate missing sdpMid or sdpMLineIndex, {candidate}"
+        if self.connection.iceGatheringState != "complete":
+            print("ICE gathering state is not complete")
+            return
+        for transceiver in self.connection.getTransceivers():
+            iceGatherer: RTCIceGatherer = transceiver.sender.transport.transport.iceGatherer
+            for candidate in iceGatherer.getLocalCandidates():
+                candidate.sdpMid = transceiver.mid
+                mLineIndex = transceiver._get_mline_index()
+                candidate.sdpMLineIndex = (
+                    int(transceiver.mid) if mLineIndex is None else mLineIndex
                 )
-                continue
 
-            await self.send_handshake_message(
-                MessageType.ICE_CANDIDATE,
-                json.dumps(
-                    {
-                        "candidate": candidate_to_sdp(candidate),
-                        "sdpMLineIndex": candidate.sdpMLineIndex,
-                        "sdpMid": candidate.sdpMid,
-                        "usernameFragment": (
-                            iceGatherer.getLocalParameters().usernameFragment
-                        ),
-                    }
-                ),
-            )
+                if candidate.sdpMid is None or candidate.sdpMLineIndex is None:
+                    print(
+                        f"Warning: Candidate missing sdpMid or sdpMLineIndex, {candidate=}, {transceiver=}"
+                    )
+                    continue
+                await self.send_handshake_message(
+                    MessageType.ICE_CANDIDATE,
+                    json.dumps(
+                        {
+                            "candidate": f"candidate:{candidate_to_sdp(candidate)}",
+                            "sdpMLineIndex": candidate.sdpMLineIndex,
+                            "sdpMid": candidate.sdpMid,
+                            "usernameFragment": (
+                                iceGatherer.getLocalParameters().usernameFragment
+                            ),
+                        }
+                    ),
+                )
 
     def setup_connection(self):
         """Set up event handlers for the connection"""
@@ -87,7 +87,8 @@ class PierToPierConnection:
         async def on_icegatheringstatechange():
             print(f"ICE gathering state changed to {self.connection.iceGatheringState}")
             if self.connection.iceGatheringState == "complete":
-                await self.force_ice_negotiation()
+                # await self.force_ice_negotiation()
+                pass
 
         @self.connection.on("connectionstatechange")
         async def on_connectionstatechange():
@@ -137,8 +138,8 @@ class PierToPierConnection:
     def set_transceiver_direction(self):
         tracks: dict[str, VideoTrack] = {}
         for transceiver in self.connection.getTransceivers():
-            transceiver.direction = "sendonly"
-            transceiver._offerDirection = "sendonly"
+            # transceiver.direction = "sendonly"
+            # transceiver._offerDirection = "sendonly"
             track = transceiver.sender.track
             if track is not None:
                 tracks[track.mid] = track
@@ -176,6 +177,7 @@ class PierToPierConnection:
         await self.send_handshake_message(MessageType.SDP_ANSWER, answer.sdp)
 
     async def on_answer(self, answer_sdp: str):
+        print(f"on_answer {self.local_stream_id=} {self.remote_stream_id=} {self.id=}")
         answer = RTCSessionDescription(answer_sdp, type="answer")
         self.set_transceiver_direction()
         await self.connection.setRemoteDescription(answer)
@@ -183,13 +185,15 @@ class PierToPierConnection:
 
     async def send_offer(self):
         self.set_transceiver_direction()
-        offer = await self.connection.createOffer()
-        await self.connection.setLocalDescription(offer)
-        await self.send_handshake_message(MessageType.SDP_OFFER, offer.sdp)
+        await self.connection.setLocalDescription(await self.connection.createOffer())
+        await self.send_handshake_message(
+            MessageType.SDP_OFFER, self.connection.localDescription.sdp
+        )
 
     async def close(self):
         """Close the connection"""
         if not self._closed:
+            print("close connection")
             self._closed = True
             await self.connection.close()
             self.on_close()
