@@ -2,8 +2,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
-
 # Ensure neuracore is installed
 # ruff: noqa: E402
 subprocess.check_call([
@@ -34,6 +32,7 @@ from neuracore.core.nc_types import (
     ModelInitDescription,
     SyncPoint,
 )
+from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml import BatchedInferenceOutputs, BatchedInferenceSamples, MaskableData
 
 logger = logging.getLogger(__name__)
