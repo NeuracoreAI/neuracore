@@ -163,7 +163,7 @@ class RobotModelHandler(BaseHandler):
         """Run model inference."""
         with torch.no_grad():
             batch_output: BatchedInferenceOutputs = self.model(data)
-            return batch_output.action_predicitons[0]
+            return batch_output.action_predicitons
 
     def postprocess(self, inference_output):
         """Postprocess model output."""
