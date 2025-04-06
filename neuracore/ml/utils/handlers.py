@@ -9,7 +9,7 @@ subprocess.check_call([
     "-m",
     "pip",
     "install",
-    "neuracore",
+    "neuracore @ git+https://git@github.com/Neuraco/neuracore.git@fix/processing_training_data",
 ])
 
 
