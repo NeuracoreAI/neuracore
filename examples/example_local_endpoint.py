@@ -1,22 +1,30 @@
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from common.constants import EPISODE_LENGTH
+from common.constants import BIMANUAL_VIPERX_URDF_PATH, EPISODE_LENGTH
 from common.ee_sim_env import sample_box_pose
 from common.sim_env import BOX_POSE, make_sim_env
 
 import neuracore as nc
 
 THIS_DIR = Path(__file__).parent
+TRAINING_JOB_NAME = "MyTrainingJob"
 
 
 def main():
     nc.login()
-    policy = nc.connect_local_endpoint(THIS_DIR / "common" / "assets" / "model.mar")
+    nc.connect_robot(
+        robot_name="Mujoco VX300s",
+        urdf_path=BIMANUAL_VIPERX_URDF_PATH,
+        overwrite=False,
+    )
     # If you have a train run name, you can use it to connect to a local. E.g.:
-    # policy = nc.connect_local_endpoint(train_run_name="MyTrainRun")
+    policy = nc.connect_local_endpoint(train_run_name=TRAINING_JOB_NAME)
+    # If you know the path to the local model.mar file, you can use it directly as:
+    # policy = nc.connect_local_endpoint(THIS_DIR / "common" / "assets" / "model.mar")
     onscreen_render = True
     render_cam_name = "angle"
+    obs_camera_names = ["angle"]
 
     success = 0
     for episode_idx in range(1):
@@ -35,17 +43,16 @@ def main():
 
         episode_max = 0
         horizon = 1
-
         # Run episode
         for i in range(EPISODE_LENGTH):
             nc.log_joint_positions(ts.observation["qpos"])
             for key, value in ts.observation["images"].items():
-                nc.log_rgb(key, value)
+                if key in obs_camera_names:
+                    nc.log_rgb(key, value)
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
                 action = policy.predict()
                 horizon = action.shape[0]
-
             a = action[idx_in_horizon]
             ts = env.step(a)
             episode_max = max(episode_max, ts.reward)

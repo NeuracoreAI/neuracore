@@ -89,6 +89,7 @@ class DataType(Enum):
 class DataItemStats(BaseModel):
     mean: list[float] = Field(default_factory=list)
     std: list[float] = Field(default_factory=list)
+    count: list[int] = Field(default_factory=list)
     max_len: int = Field(default_factory=lambda data: len(data["mean"]))
 
 
@@ -118,6 +119,37 @@ class DatasetDescription(BaseModel):
         if self.max_num_depth_images > 0:
             data_types.append(DataType.DEPTH_IMAGE)
         if self.max_num_point_clouds > 0:
+            data_types.append(DataType.POINT_CLOUD)
+        return data_types
+
+
+class RecordingDescription(BaseModel):
+    actions: DataItemStats = Field(default_factory=lambda: DataItemStats())
+    joint_positions: DataItemStats = Field(default_factory=lambda: DataItemStats())
+    joint_velocitys: DataItemStats = Field(default_factory=lambda: DataItemStats())
+    joint_torques: DataItemStats = Field(default_factory=lambda: DataItemStats())
+    end_effector_states: DataItemStats = Field(default_factory=lambda: DataItemStats())
+    poses: DataItemStats = Field(default_factory=lambda: DataItemStats())
+    num_rgb_images: int = 0
+    num_depth_images: int = 0
+    num_point_clouds: int = 0
+    episode_length: int = 0
+
+    def get_data_types(self) -> list[DataType]:
+        data_types = []
+        if self.joint_positions.max_len > 0:
+            data_types.append(DataType.JOINT_POSITIONS)
+        if self.joint_velocitys.max_len > 0:
+            data_types.append(DataType.JOINT_VELOCITIES)
+        if self.joint_torques.max_len > 0:
+            data_types.append(DataType.JOINT_TORQUES)
+        if self.actions.max_len > 0:
+            data_types.append(DataType.ACTIONS)
+        if self.num_rgb_images > 0:
+            data_types.append(DataType.RGB_IMAGE)
+        if self.num_depth_images > 0:
+            data_types.append(DataType.DEPTH_IMAGE)
+        if self.num_point_clouds > 0:
             data_types.append(DataType.POINT_CLOUD)
         return data_types
 
