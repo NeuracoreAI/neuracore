@@ -133,6 +133,7 @@ class EndpointPolicy:
                 self._predict_url,
                 headers=self._headers,
                 json=request_data,
+                timeout=10,
             )
             response.raise_for_status()
 
