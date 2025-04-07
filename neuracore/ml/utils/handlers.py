@@ -32,8 +32,8 @@ from neuracore.core.nc_types import (
     ModelInitDescription,
     SyncPoint,
 )
-from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml import BatchedInferenceOutputs, BatchedInferenceSamples, MaskableData
+from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 
 logger = logging.getLogger(__name__)
 
