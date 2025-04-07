@@ -37,6 +37,8 @@ class PierToPierConnection:
     client_session: ClientSession
     loop: asyncio.AbstractEventLoop
     auth: Auth = field(default_factory=get_auth)
+    event_sources: set[EventSource] = field(default_factory=set)
+    data_channel_callback: dict[str, Callable] = field(default_factory=dict)
     connection: RTCPeerConnection = field(
         default_factory=lambda: RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=ICE_SERVERS)
@@ -48,6 +50,7 @@ class PierToPierConnection:
         if self.connection.iceGatheringState != "complete":
             print("ICE gathering state is not complete")
             return
+
         for transceiver in self.connection.getTransceivers():
             iceGatherer: RTCIceGatherer = (
                 transceiver.sender.transport.transport.iceGatherer
@@ -62,6 +65,28 @@ class PierToPierConnection:
                 if candidate.sdpMid is None or candidate.sdpMLineIndex is None:
                     print(
                         f"Warning: Candidate missing sdpMid or sdpMLineIndex, {candidate=}, {transceiver=}"
+                    )
+                    continue
+                await self.send_handshake_message(
+                    MessageType.ICE_CANDIDATE,
+                    json.dumps(
+                        {
+                            "candidate": f"candidate:{candidate_to_sdp(candidate)}",
+                            "sdpMLineIndex": candidate.sdpMLineIndex,
+                            "sdpMid": candidate.sdpMid,
+                            "usernameFragment": (
+                                iceGatherer.getLocalParameters().usernameFragment
+                            ),
+                        }
+                    ),
+                )
+
+        if self.connection.sctp is not None:
+            iceGatherer = self.connection.sctp.transport.transport.iceGatherer
+            for candidate in iceGatherer.getLocalCandidates():
+                if candidate.sdpMid is None or candidate.sdpMLineIndex is None:
+                    print(
+                        f"Warning: Candidate missing sdpMid or sdpMLineIndex, {candidate=}"
                     )
                     continue
                 await self.send_handshake_message(
@@ -99,10 +124,6 @@ class PierToPierConnection:
                 case "closed" | "failed":
                     await self.close()
 
-        @self.connection.on("datachannel")
-        def on_datachannel(channel: RTCDataChannel):
-            self.data_channels[channel.label] = channel
-
     def add_video_source(self, source: VideoSource):
         """Add a track to the connection"""
 
@@ -111,15 +132,17 @@ class PierToPierConnection:
 
     def add_event_source(self, source: EventSource):
         data_channel = self.connection.createDataChannel(source.mid)
-        source.add_listener("event", data_channel.send)
 
-    async def send_data_chanel_message(self, channel_id: str, message: dict):
-        if self.connection.connectionState != "connected":
-            return
-        if channel_id not in self.data_channels:
-            return
-        channel = self.data_channels[channel_id]
-        channel.send(json.dumps(message))
+        @source.on("event")
+        async def on_event(event: str):
+            if self._closed:
+                return
+            if data_channel.readyState != "open":
+                return
+            data_channel.send(event)
+
+        self.event_sources.add(source)
+        self.data_channel_callback[source.mid] = on_event
 
     async def send_handshake_message(self, message_type: MessageType, content: str):
         """Send a message to the remote peer through the signaling server"""
@@ -200,4 +223,6 @@ class PierToPierConnection:
             print("close connection")
             self._closed = True
             await self.connection.close()
+            for source in self.event_sources:
+                source.remove_listener("event", self.data_channel_callback[source.mid])
             self.on_close()

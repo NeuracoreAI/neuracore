@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 from uuid import uuid4
 
-from aiohttp import ClientSession
+from aiohttp import ClientSession, ClientTimeout
 from aiohttp_sse_client import client as sse_client
 
 from neuracore.api.globals import GlobalSingleton
@@ -81,12 +81,12 @@ class ClientStreamingManager:
         sensor_key = (sensor_name, kind)
         if sensor_key in self.event_source_cache:
             return self.event_source_cache[sensor_key]
-        
+
         mid = uuid4().hex
         asyncio.run_coroutine_threadsafe(
             self.submit_track(mid, kind, sensor_name), self.loop
         )
-       
+
         source = EventSource(mid=mid, loop=self.loop)
         self.event_source_cache[sensor_key] = source
 
@@ -124,7 +124,7 @@ class ClientStreamingManager:
         """Create a new P2P connection to a remote stream"""
 
         def on_close():
-            del self.connections[remote_stream_id]
+            self.connections.pop(remote_stream_id, None)
 
         connection = PierToPierConnection(
             local_stream_id=self.local_stream_id,
@@ -181,6 +181,7 @@ class ClientStreamingManager:
 
     async def connect_signalling_stream(self):
         """Connect to the signaling server and process messages"""
+        backoff = 0
         while self.available_for_connections:
             try:
                 async with sse_client.EventSource(
@@ -188,6 +189,7 @@ class ClientStreamingManager:
                     headers=self.auth.get_headers(),
                 ) as event_source:
                     async for event in event_source:
+                        backoff = max(0, backoff - 1)
                         if event.type == "heartbeat":
                             await self.heartbeat_response()
                             continue
@@ -222,14 +224,20 @@ class ClientStreamingManager:
                                 await connection.on_answer(message.data)
                             case _:
                                 pass
-
+            except asyncio.TimeoutError:
+                print("Timeout error: Retrying connection...")
+                await asyncio.sleep(2^backoff)
+                backoff += 1
+                continue
             except ConnectionError as e:
                 print(f"Connection error: {e}")
-                await asyncio.sleep(5)
+                await asyncio.sleep(2^backoff)
+                backoff += 1
             except Exception as e:
                 print(f"Unexpected error: {e}")
                 print(traceback.format_exc())
-                await asyncio.sleep(5)
+                await asyncio.sleep(2^backoff)
+                backoff += 1
 
     async def close_connections(self):
         await asyncio.gather(
@@ -254,8 +262,10 @@ _streaming_managers: Dict[str, ClientStreamingManager] = {}
 
 
 async def create_client_streaming_manager(robot_id):
+    # We want to keep the signalling connection alive for as long as possible
+    timeout = ClientTimeout(sock_read=None, total=None)
     manager = ClientStreamingManager(
-        robot_id=robot_id, loop=asyncio.get_event_loop(), client_session=ClientSession()
+        robot_id=robot_id, loop=asyncio.get_event_loop(), client_session=ClientSession(timeout)
     )
     asyncio.create_task(manager.connect_signalling_stream())
     asyncio.create_task(manager.connect_recording_notification_stream())
