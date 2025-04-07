@@ -88,17 +88,24 @@ def joint_task():
 
         # Update only the selected joints with slightly varying angles
         for joint in joints_to_update:
+
+            gen = np.random.default_rng(
+                np.frombuffer(joint.encode("utf-8"), dtype=np.uint8)
+            )
             # Add sinusoidal movement plus small random variation
             # Different frequencies for different joints based on their position in the list
-            frequency = 0.1 + 0.05 * joint_names.index(joint) / len(joint_names)
-            amplitude = 1.5 + 1.5 * np.random.random()
+            frequency = 0.1 + 0.05 * gen.random()
+            amplitude = 1.5 + 1.5 * gen.random()
 
             joint_positions[joint] = (
-                amplitude * np.sin(frequency * t) + 0.05 * np.random.randn()
+                amplitude * np.sin(frequency * t + gen.random() * np.pi * 2)
+                + 0.05 * gen.random()
             )
 
         # Log the joint positions
-        nc.log_joint_positions(joint_positions)
+        nc.log_joint_positions(
+            {joint: joint_positions[joint] for joint in joints_to_update}
+        )
 
         # Sleep for a random duration
         dt = 0.02 + 0.03 * np.random.random()  # Between 20-50ms

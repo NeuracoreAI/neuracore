@@ -151,13 +151,16 @@ class ClientStreamingManager:
         return connection
 
     async def connect_recording_notification_stream(self):
+        backoff = 0
         while self.available_for_connections:
             try:
                 sid = self.recording_notification_stream_id
                 async with sse_client.EventSource(
                     f"{API_URL}/signalling/recording_notifications/{sid}",
+                    session=self.client_session,
                     headers=self.auth.get_headers(),
                 ) as event_source:
+                    backoff = max(0, backoff - 1)
                     async for event in event_source:
                         if event.type == "heartbeat":
                             continue
@@ -171,13 +174,21 @@ class ClientStreamingManager:
                             GlobalSingleton()._active_recording_ids.pop(
                                 self.robot_id, None
                             )
+
+            except asyncio.TimeoutError:
+                print("Timeout error: Retrying connection...")
+                await asyncio.sleep(2^backoff)
+                backoff += 1
+                continue
             except ConnectionError as e:
                 print(f"Connection error: {e}")
-                await asyncio.sleep(5)
+                await asyncio.sleep(2^backoff)
+                backoff += 1
             except Exception as e:
                 print(f"Unexpected error: {e}")
                 print(traceback.format_exc())
-                await asyncio.sleep(5)
+                await asyncio.sleep(2^backoff)
+                backoff += 1
 
     async def connect_signalling_stream(self):
         """Connect to the signaling server and process messages"""
@@ -186,6 +197,7 @@ class ClientStreamingManager:
             try:
                 async with sse_client.EventSource(
                     f"{API_URL}/signalling/notifications/{self.local_stream_id}",
+                    session=self.client_session,
                     headers=self.auth.get_headers(),
                 ) as event_source:
                     async for event in event_source:
@@ -265,7 +277,7 @@ async def create_client_streaming_manager(robot_id):
     # We want to keep the signalling connection alive for as long as possible
     timeout = ClientTimeout(sock_read=None, total=None)
     manager = ClientStreamingManager(
-        robot_id=robot_id, loop=asyncio.get_event_loop(), client_session=ClientSession(timeout)
+        robot_id=robot_id, loop=asyncio.get_event_loop(), client_session=ClientSession(timeout=timeout)
     )
     asyncio.create_task(manager.connect_signalling_stream())
     asyncio.create_task(manager.connect_recording_notification_stream())
