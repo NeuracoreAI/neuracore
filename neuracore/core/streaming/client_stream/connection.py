@@ -153,8 +153,6 @@ class PierToPierConnection:
     def fix_mid_ordering(self, when: str = "offer"):
         tracks: dict[str, VideoTrack] = {}
         for transceiver in self.connection.getTransceivers():
-            # transceiver.direction = "sendonly"
-            # transceiver._offerDirection = "sendonly"
             track = transceiver.sender.track
             if track is not None:
                 tracks[track.mid] = track
@@ -194,11 +192,28 @@ class PierToPierConnection:
 
     async def on_answer(self, answer_sdp: str):
         answer = RTCSessionDescription(answer_sdp, type="answer")
+        if self._closed:
+            print("answer to closed connection")
+            return
+        
+        if self.connection.signalingState != "have-local-offer":
+            print("Not Ready for answer")
+            return
+        
         self.fix_mid_ordering("before answer")
         await self.connection.setRemoteDescription(answer)
         await self.force_ice_negotiation()
 
     async def send_offer(self):
+        if self._closed:
+            print("Cannot send offer from closed connection")
+            return
+        
+        if self.connection.signalingState != "stable":
+            print("Not ready to send offer")
+            return
+
+
         self.fix_mid_ordering("before offer")
         await self.connection.setLocalDescription(await self.connection.createOffer())
         await self.send_handshake_message(
