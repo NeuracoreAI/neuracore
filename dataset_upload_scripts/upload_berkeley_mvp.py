@@ -89,7 +89,7 @@ def _process_episode_chunks(
         for idx, step in enumerate(steps):
             timestamp = base_time + (idx / FREQUENCY)
             _record_step(step, timestamp)
-        nc.stop_recording()
+        nc.stop_recording(wait=True)
 
 
 def upload_berkeley_mvp():
