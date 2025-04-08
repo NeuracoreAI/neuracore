@@ -123,7 +123,7 @@ class ClientStreamingManager:
         self.connections[remote_stream_id] = connection
         return connection
 
-    async def connect_recording_notification_stream(self, robot_id: str):
+    async def connect_recording_notification_stream(self, instanced_robot_id: str):
 
         while self.available_for_connections:
             try:
@@ -136,21 +136,27 @@ class ClientStreamingManager:
                             message = RecordingNotification.model_validate_json(
                                 event.data
                             )
+                            if message.robot_id != instanced_robot_id:
+                                continue
                             if message.recording:
                                 GlobalSingleton()._active_recording_ids[
-                                    robot_id
+                                    instanced_robot_id
                                 ] = message.recording_id
                             else:
                                 rec_id = GlobalSingleton()._active_recording_ids.pop(
-                                    robot_id, None
+                                    instanced_robot_id, None
                                 )
-                                if rec_id:
+                                if rec_id == message.recording_id:
                                     for (
                                         sname,
                                         stream,
                                     ) in GlobalSingleton()._data_streams.items():
-                                        if sname.startswith(robot_id):
-                                            stream.stop_recording()
+                                        with stream.lock:
+                                            if (
+                                                sname.startswith(instanced_robot_id)
+                                                and stream.is_recording()
+                                            ):
+                                                stream.stop_recording()
             except ConnectionError as e:
                 print(f"Connection error: {e}")
                 await asyncio.sleep(5)
@@ -169,7 +175,6 @@ class ClientStreamingManager:
                 ) as event_source:
                     self.recording_connection_established = True
                     async for event in event_source:
-                        logger.info(f"received event {event.type=} {event.message=}")
                         if event.type == "heartbeat":
                             await self.heartbeat_response()
                             continue
@@ -230,18 +235,18 @@ class ClientStreamingManager:
 _streaming_managers: Dict[str, ClientStreamingManager] = {}
 
 
-def get_robot_streaming_manager(robot_id: str) -> "ClientStreamingManager":
+def get_robot_streaming_manager(instanced_robot_id: str) -> "ClientStreamingManager":
     global _streaming_managers
 
-    if robot_id in _streaming_managers:
-        return _streaming_managers[robot_id]
+    if instanced_robot_id in _streaming_managers:
+        return _streaming_managers[instanced_robot_id]
 
     loop = get_loop()
     manager = ClientStreamingManager(
-        robot_id=robot_id, loop=loop, client_session=ClientSession(loop=loop)
+        robot_id=instanced_robot_id, loop=loop, client_session=ClientSession(loop=loop)
     )
     asyncio.run_coroutine_threadsafe(
-        manager.connect_recording_notification_stream(robot_id), loop
+        manager.connect_recording_notification_stream(instanced_robot_id), loop
     )
     asyncio.run_coroutine_threadsafe(manager.connect_signalling_stream(), loop)
 
@@ -249,5 +254,5 @@ def get_robot_streaming_manager(robot_id: str) -> "ClientStreamingManager":
     while not manager.recording_connection_established:
         time.sleep(0.5)
 
-    _streaming_managers[robot_id] = manager
+    _streaming_managers[instanced_robot_id] = manager
     return manager

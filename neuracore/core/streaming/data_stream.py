@@ -24,6 +24,7 @@ class DataStream(ABC):
         self._recording = False
         self._recording_id = None
         self._latest_data = None
+        self.lock = threading.Lock()
 
     def start_recording(self, recording_id: str):
         """Start recording data.

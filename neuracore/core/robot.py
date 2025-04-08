@@ -19,17 +19,20 @@ class Robot:
     def __init__(
         self,
         robot_name: str,
+        instance: int = 0,
         urdf_path: Optional[str] = None,
         mjcf_path: Optional[str] = None,
         overwrite: bool = False,
         shared: bool = False,
     ):
         self.name = robot_name
+        self.instance = instance
         self.urdf_path = urdf_path
         self.mjcf_path = mjcf_path
         self.overwrite = overwrite
         self.shared = shared
         self.id: str = None
+        self.instanced_id: str = None
         self._auth: Auth = get_auth()
         self._temp_dir = None
         if urdf_path and mjcf_path:
@@ -71,6 +74,7 @@ class Robot:
                 for robot in robots:
                     if robot["name"] == self.name:
                         self.id = robot["id"]
+                        self.instanced_id = f"{self.id}_{self.instance}"
                         logger.info(f"Found existing robot: {self.name}")
                         return
 
@@ -82,6 +86,8 @@ class Robot:
             )
             response.raise_for_status()
             self.id = response.json()
+            # Allows multiple instances of the same robot to record at once
+            self.instanced_id = f"{self.id}_{self.instance}"
 
             # Upload URDF and meshes if provided
             if self.urdf_path:
@@ -94,14 +100,14 @@ class Robot:
 
     def start_recording(self, dataset_id: str) -> str:
         """Start recording robot data."""
-        if not self.id:
+        if not self.instanced_id:
             raise RobotError("Robot not initialized. Call init() first.")
 
         try:
             response = requests.post(
                 f"{API_URL}/recording/start",
                 headers=self._auth.get_headers(),
-                json={"robot_id": self.id, "dataset_id": dataset_id},
+                json={"robot_id": self.instanced_id, "dataset_id": dataset_id},
             )
             response.raise_for_status()
             return response.json()
@@ -246,13 +252,14 @@ _robots = {}
 
 def init(
     robot_name: str,
+    instance: int = 0,
     urdf_path: Optional[str] = None,
     mjcf_path: Optional[str] = None,
     overwrite: bool = False,
     shared: bool = False,
 ) -> Robot:
     """Initialize a robot globally."""
-    robot = Robot(robot_name, urdf_path, mjcf_path, overwrite, shared)
+    robot = Robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     robot.init()
     _robots[robot_name] = robot
     return robot

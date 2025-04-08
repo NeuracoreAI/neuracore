@@ -24,6 +24,7 @@ class HandshakeMessage(BaseModel):
 # TODO: Note all of these can be defined in api, and used by the backend
 class RecordingNotification(BaseModel):
     recording: bool
+    robot_id: str
     recording_id: str
 
 

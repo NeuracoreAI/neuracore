@@ -83,7 +83,6 @@ class DepthVideoSource(VideoSource):
 
     def get_last_frame(self) -> av.VideoFrame:
         # Ensure _last_frame is in [0, 1] range
-        # print(f"get depth frame {self.id=}")
         self._maximum_depth = max(self._maximum_depth, self._last_frame.max())
         self._minimum_depth = min(self._minimum_depth, self._last_frame.min())
         normalized_frame = np.clip(
