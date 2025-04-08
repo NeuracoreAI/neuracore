@@ -106,17 +106,6 @@ class PierToPierConnection:
     def setup_connection(self):
         """Set up event handlers for the connection"""
 
-        @self.connection.on("signalingstatechange")
-        async def on_signalingstatechange():
-            print("Signaling state change:", self.connection.signalingState)
-
-        @self.connection.on("icegatheringstatechange")
-        async def on_icegatheringstatechange():
-            print(f"ICE gathering state changed to {self.connection.iceGatheringState}")
-            if self.connection.iceGatheringState == "complete":
-                # await self.force_ice_negotiation()
-                pass
-
         @self.connection.on("connectionstatechange")
         async def on_connectionstatechange():
             print(f"Connection state changed to: {self.connection.connectionState}")
@@ -204,7 +193,6 @@ class PierToPierConnection:
         await self.send_handshake_message(MessageType.SDP_ANSWER, answer.sdp)
 
     async def on_answer(self, answer_sdp: str):
-        print(f"on_answer {self.local_stream_id=} {self.remote_stream_id=} {self.id=}")
         answer = RTCSessionDescription(answer_sdp, type="answer")
         self.fix_mid_ordering("before answer")
         await self.connection.setRemoteDescription(answer)
@@ -220,7 +208,6 @@ class PierToPierConnection:
     async def close(self):
         """Close the connection"""
         if not self._closed:
-            print("close connection")
             self._closed = True
             await self.connection.close()
             for source in self.event_sources:

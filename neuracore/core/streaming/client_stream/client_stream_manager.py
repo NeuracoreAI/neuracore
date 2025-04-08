@@ -58,7 +58,6 @@ class ClientStreamingManager:
             if sensor_key in self.video_tracks_cache:
                 return self.video_tracks_cache[sensor_key]
 
-            print(f"creating stream {sensor_key=}")
             mid = str(len(self.tracks))
             video_source = (
                 DepthVideoSource(mid=mid) if kind == "depth" else VideoSource(mid=mid)
@@ -94,7 +93,6 @@ class ClientStreamingManager:
 
     async def submit_track(self, mid: str, kind: str, label: str):
         """Submit new track data"""
-        print(f"Submit track {self.local_stream_id=} {mid=} {kind=} {label=}")
         await self.client_session.post(
             f"{API_URL}/signalling/track",
             headers=self.auth.get_headers(),
@@ -176,7 +174,6 @@ class ClientStreamingManager:
                             )
 
             except asyncio.TimeoutError:
-                print("Timeout error: Retrying connection...")
                 await asyncio.sleep(2^backoff)
                 backoff += 1
                 continue
@@ -207,7 +204,6 @@ class ClientStreamingManager:
                             continue
 
                         message = HandshakeMessage.model_validate_json(event.data)
-                        print(f"Message Received {message}")
                         if not self.available_for_connections:
                             return
 
@@ -237,7 +233,6 @@ class ClientStreamingManager:
                             case _:
                                 pass
             except asyncio.TimeoutError:
-                print("Timeout error: Retrying connection...")
                 await asyncio.sleep(2^backoff)
                 backoff += 1
                 continue

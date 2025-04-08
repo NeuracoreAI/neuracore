@@ -132,7 +132,7 @@ def main():
     # Run four camera streams concurrently
     from threading import Thread
 
-    threads = [Thread(target=camera_task, args=(i,)) for i in range(0)]
+    threads = [Thread(target=camera_task, args=(i,)) for i in range(5)]
 
     threads.append(Thread(target=joint_task))
 
