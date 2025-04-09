@@ -102,6 +102,19 @@ class EndpointPolicy:
         """
         if sync_point is None:
             sync_point = self._create_sync_point()
+        else:
+            if sync_point.rgb_images:
+                for key in sync_point.rgb_images:
+                    if isinstance(sync_point.rgb_images[key].frame, np.ndarray):
+                        sync_point.rgb_images[key].frame = self._encode_image(
+                            sync_point.rgb_images[key].frame
+                        )
+            if sync_point.depth_images:
+                for key in sync_point.depth_images:
+                    if isinstance(sync_point.depth_images[key].frame, np.ndarray):
+                        sync_point.depth_images[key].frame = self._encode_image(
+                            sync_point.depth_images[key].frame
+                        )
         request_data = sync_point.model_dump()
         if not self._is_local:
             payload_size = sys.getsizeof(json.dumps(request_data)) / (
@@ -120,6 +133,7 @@ class EndpointPolicy:
                 self._predict_url,
                 headers=self._headers,
                 json=request_data,
+                timeout=10,
             )
             response.raise_for_status()
 
@@ -217,7 +231,7 @@ def connect_local_endpoint(
         )
         response.raise_for_status()
         tempdir = tempfile.mkdtemp()
-        path_to_model = Path(tempdir) / f"{train_run_name}.mar"
+        path_to_model = Path(tempdir) / "model.mar"
         with open(path_to_model, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:

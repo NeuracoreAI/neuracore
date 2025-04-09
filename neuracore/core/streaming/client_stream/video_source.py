@@ -22,7 +22,7 @@ TIMESTAMP_DELTA = int(VIDEO_CLOCK_RATE / STREAMING_FPS)
 @dataclass
 class VideoSource:
     mid: str = field(default_factory=lambda: uuid4().hex)
-    _last_frame: np.ndarray[np.uint8] = field(
+    _last_frame: np.ndarray = field(
         default_factory=lambda: np.zeros((480, 640, 3), dtype=np.uint8)
     )
     _consumers: weakref.WeakSet["VideoTrack"] = field(default_factory=weakref.WeakSet)

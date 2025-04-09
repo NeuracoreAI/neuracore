@@ -2,8 +2,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
-
 # Ensure neuracore is installed
 # ruff: noqa: E402
 subprocess.check_call([
@@ -35,6 +33,7 @@ from neuracore.core.nc_types import (
     SyncPoint,
 )
 from neuracore.ml import BatchedInferenceOutputs, BatchedInferenceSamples, MaskableData
+from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +66,11 @@ class RobotModelHandler(BaseHandler):
         algorithm_loader = AlgorithmLoader(Path(model_dir))
         model_class = algorithm_loader.load_model()
         model = model_class(self.model_init_description)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if model_pt_path:
-            model.load_state_dict(torch.load(model_pt_path, weights_only=True))
+            model.load_state_dict(
+                torch.load(model_pt_path, map_location=self.device, weights_only=True),
+            )
         return model
 
     def initialize(self, context):
@@ -160,7 +162,7 @@ class RobotModelHandler(BaseHandler):
         """Run model inference."""
         with torch.no_grad():
             batch_output: BatchedInferenceOutputs = self.model(data)
-            return batch_output.action_predicitons[0]
+            return batch_output.action_predicitons
 
     def postprocess(self, inference_output):
         """Postprocess model output."""

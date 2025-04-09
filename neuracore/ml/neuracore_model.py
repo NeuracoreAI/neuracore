@@ -1,3 +1,4 @@
+import logging
 from abc import ABC, abstractmethod
 
 import torch
@@ -10,6 +11,8 @@ from .ml_types import (
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class NeuracoreModel(nn.Module, ABC):
@@ -26,8 +29,8 @@ class NeuracoreModel(nn.Module, ABC):
         )
         # input_data_types must be within support
         if not input_data_types.issubset(supported):
-            raise ValueError(
-                f"Model does not support data types: {input_data_types - supported}"
+            logger.warning(
+                f"Model does not support all data types: {input_data_types - supported}"
             )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.dataset_description = model_init_description.dataset_description

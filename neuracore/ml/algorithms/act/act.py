@@ -366,7 +366,7 @@ class ACT(NeuracoreModel):
         target_actions = self._preprocess_actions(batch.actions.data)
 
         l1_loss_all = F.l1_loss(action_preds, target_actions, reduction="none")
-        l1_loss = (l1_loss_all * (1 - batch.actions.sequence_mask).unsqueeze(-1)).mean()
+        l1_loss = (l1_loss_all * batch.actions.sequence_mask.unsqueeze(-1)).mean()
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
         loss = l1_loss + self.kl_weight * kl_loss
         losses = {

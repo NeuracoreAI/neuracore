@@ -5,5 +5,9 @@ set -e
 source /opt/ros/humble/setup.bash
 source /ros2_ws/install/setup.bash
 
-# Execute the command passed to docker run
-exec "$@"
+Xvfb :97 &
+XVFB_PROC=$!
+sleep 1
+export DISPLAY=:99
+"$@"
+kill $XVFB_PROC

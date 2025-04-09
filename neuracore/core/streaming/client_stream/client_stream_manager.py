@@ -1,6 +1,8 @@
 import asyncio
+from concurrent.futures import Future
 import logging
 import threading
+import time
 import traceback
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
@@ -38,13 +40,14 @@ def get_loop():
 
 
 # must be less than zero -> a reconnection delay of more than one second is considered dead
-# TODO: resubmit tracks if connection is re-established after more than one second 
+# TODO: resubmit tracks if connection is re-established after more than one second
 MINIMUM_BACKOFF_LEVEL = -2
 
 
 @dataclass
 class ClientStreamingManager:
     robot_id: str
+    robot_instance: int
     loop: asyncio.AbstractEventLoop
     client_session: ClientSession
     available_for_connections: bool = True
@@ -55,7 +58,6 @@ class ClientStreamingManager:
     track_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tracks: List[VideoSource] = field(default_factory=list)
     local_stream_id: str = field(default_factory=lambda: uuid4().hex)
-    recording_notification_stream_id: str = field(default_factory=lambda: uuid4().hex)
 
     async def _create_video_source(self, sensor_name: str, kind: str) -> VideoSource:
         sensor_key = (sensor_name, kind)
@@ -63,6 +65,7 @@ class ClientStreamingManager:
             if sensor_key in self.video_tracks_cache:
                 return self.video_tracks_cache[sensor_key]
 
+            print(f"create vid source {sensor_key=}")
             mid = str(len(self.tracks))
             video_source = (
                 DepthVideoSource(mid=mid) if kind == "depth" else VideoSource(mid=mid)
@@ -76,7 +79,6 @@ class ClientStreamingManager:
 
     def get_video_source(self, sensor_name: str, kind: str) -> VideoSource:
         """Start a new recording stream"""
-
         return asyncio.run_coroutine_threadsafe(
             self._create_video_source(sensor_name, kind), self.loop
         ).result()
@@ -103,6 +105,7 @@ class ClientStreamingManager:
             headers=self.auth.get_headers(),
             json=RobotStreamTrack(
                 robot_id=self.robot_id,
+                robot_instance=self.robot_instance,
                 stream_id=self.local_stream_id,
                 mid=mid,
                 kind=kind,
@@ -157,31 +160,38 @@ class ClientStreamingManager:
         backoff = MINIMUM_BACKOFF_LEVEL
         while self.available_for_connections:
             try:
-                sid = self.recording_notification_stream_id
                 async with sse_client.EventSource(
-                    f"{API_URL}/signalling/recording_notifications/{sid}",
-                    session=self.client_session,
+                    f"{API_URL}/signalling/recording_notifications/{self.local_stream_id}",
                     headers=self.auth.get_headers(),
                 ) as event_source:
                     backoff = max(MINIMUM_BACKOFF_LEVEL, backoff - 1)
                     async for event in event_source:
-                        if event.type == "heartbeat":
-                            continue
-                        message = RecordingNotification.model_validate_json(event.data)
-
-                        if message.recording:
-                            GlobalSingleton()._active_recording_ids[
-                                self.robot_id
-                            ] = message.recording_id
-                        else:
-                            GlobalSingleton()._active_recording_ids.pop(
-                                self.robot_id, None
+                        if event.type == "data":
+                            message = RecordingNotification.model_validate_json(
+                                event.data
                             )
 
-            except asyncio.TimeoutError:
-                await asyncio.sleep(2 ^ backoff)
-                backoff += 1
-                continue
+                            if message.recording:
+                                GlobalSingleton()._active_recording_ids[
+                                    message.robot_id
+                                ] = message.recording_id
+                            else:
+                                rec_id = GlobalSingleton()._active_recording_ids.pop(
+                                    message.robot_id, None
+                                )
+                                if rec_id is None:
+                                    continue
+
+                                for (
+                                    sname,
+                                    stream,
+                                ) in GlobalSingleton()._data_streams.items():
+                                    with stream.lock:
+                                        if (
+                                            sname.startswith(message.robot_id)
+                                            and stream.is_recording()
+                                        ):
+                                            stream.stop_recording()
             except ConnectionError as e:
                 print(f"Connection error: {e}")
                 await asyncio.sleep(2 ^ backoff)
@@ -273,14 +283,15 @@ class ClientStreamingManager:
         self.client_session.close()
 
 
-_streaming_managers: Dict[str, ClientStreamingManager] = {}
+_streaming_managers: Dict[(str, int), Future[ClientStreamingManager]] = {}
 
 
-async def create_client_streaming_manager(robot_id):
+async def create_client_streaming_manager(robot_id: str, instance: int):
     # We want to keep the signalling connection alive for as long as possible
     timeout = ClientTimeout(sock_read=None, total=None)
     manager = ClientStreamingManager(
         robot_id=robot_id,
+        robot_instance=instance,
         loop=asyncio.get_event_loop(),
         client_session=ClientSession(timeout=timeout),
     )
@@ -290,17 +301,17 @@ async def create_client_streaming_manager(robot_id):
     return manager
 
 
-def get_robot_streaming_manager(robot_id: str) -> "ClientStreamingManager":
+def get_robot_streaming_manager(
+    robot_id: str, instance: int
+) -> "ClientStreamingManager":
     global _streaming_managers
-
-    if robot_id in _streaming_managers:
-        return _streaming_managers[robot_id]
+    key = (robot_id, instance)
+    if key in _streaming_managers:
+        return _streaming_managers[key].result()
 
     loop = get_loop()
-
     manager = asyncio.run_coroutine_threadsafe(
-        create_client_streaming_manager(robot_id), loop
-    ).result()
-
-    _streaming_managers[robot_id] = manager
-    return manager
+        create_client_streaming_manager(robot_id, instance), loop
+    )
+    _streaming_managers[key] = manager
+    return manager.result()
