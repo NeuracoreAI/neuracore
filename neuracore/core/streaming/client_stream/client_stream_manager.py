@@ -37,6 +37,11 @@ def get_loop():
         return loop
 
 
+# must be less than zero -> a reconnection delay of more than one second is considered dead
+# TODO: resubmit tracks if connection is re-established after more than one second 
+MINIMUM_BACKOFF_LEVEL = -2
+
+
 @dataclass
 class ClientStreamingManager:
     robot_id: str
@@ -149,7 +154,7 @@ class ClientStreamingManager:
         return connection
 
     async def connect_recording_notification_stream(self):
-        backoff = 0
+        backoff = MINIMUM_BACKOFF_LEVEL
         while self.available_for_connections:
             try:
                 sid = self.recording_notification_stream_id
@@ -158,7 +163,7 @@ class ClientStreamingManager:
                     session=self.client_session,
                     headers=self.auth.get_headers(),
                 ) as event_source:
-                    backoff = max(0, backoff - 1)
+                    backoff = max(MINIMUM_BACKOFF_LEVEL, backoff - 1)
                     async for event in event_source:
                         if event.type == "heartbeat":
                             continue
@@ -174,22 +179,22 @@ class ClientStreamingManager:
                             )
 
             except asyncio.TimeoutError:
-                await asyncio.sleep(2^backoff)
+                await asyncio.sleep(2 ^ backoff)
                 backoff += 1
                 continue
             except ConnectionError as e:
                 print(f"Connection error: {e}")
-                await asyncio.sleep(2^backoff)
+                await asyncio.sleep(2 ^ backoff)
                 backoff += 1
             except Exception as e:
                 print(f"Unexpected error: {e}")
                 print(traceback.format_exc())
-                await asyncio.sleep(2^backoff)
+                await asyncio.sleep(2 ^ backoff)
                 backoff += 1
 
     async def connect_signalling_stream(self):
         """Connect to the signaling server and process messages"""
-        backoff = 0
+        backoff = MINIMUM_BACKOFF_LEVEL
         while self.available_for_connections:
             try:
                 async with sse_client.EventSource(
@@ -198,52 +203,55 @@ class ClientStreamingManager:
                     headers=self.auth.get_headers(),
                 ) as event_source:
                     async for event in event_source:
-                        backoff = max(0, backoff - 1)
-                        if event.type == "heartbeat":
-                            await self.heartbeat_response()
+                        try:
+                            backoff = max(MINIMUM_BACKOFF_LEVEL, backoff - 1)
+                            if event.type == "heartbeat":
+                                await self.heartbeat_response()
+                                continue
+
+                            message = HandshakeMessage.model_validate_json(event.data)
+                            if not self.available_for_connections:
+                                return
+
+                            if message.from_id == "system":
+                                continue
+
+                            connection = self.connections.get(message.from_id)
+
+                            if message.type == MessageType.CONNECTION_TOKEN:
+                                await self.create_new_connection(
+                                    remote_stream_id=message.from_id,
+                                    connection_id=message.connection_id,
+                                    connection_token=message.data,
+                                )
+                                continue
+
+                            if (
+                                connection is None
+                                or connection.id != message.connection_id
+                            ):
+                                continue
+
+                            match message.type:
+                                case MessageType.SDP_OFFER:
+                                    await connection.on_offer(message.data)
+                                case MessageType.ICE_CANDIDATE:
+                                    await connection.on_ice(message.data)
+                                case MessageType.SDP_ANSWER:
+                                    await connection.on_answer(message.data)
+                                case _:
+                                    pass
+                        except asyncio.TimeoutError:
+                            await asyncio.sleep(2 ^ backoff)
+                            backoff += 1
                             continue
-
-                        message = HandshakeMessage.model_validate_json(event.data)
-                        if not self.available_for_connections:
-                            return
-
-                        if message.from_id == "system":
-                            continue
-
-                        connection = self.connections.get(message.from_id)
-
-                        if message.type == MessageType.CONNECTION_TOKEN:
-                            await self.create_new_connection(
-                                remote_stream_id=message.from_id,
-                                connection_id=message.connection_id,
-                                connection_token=message.data,
-                            )
-                            continue
-
-                        if connection is None or connection.id != message.connection_id:
-                            continue
-
-                        match message.type:
-                            case MessageType.SDP_OFFER:
-                                await connection.on_offer(message.data)
-                            case MessageType.ICE_CANDIDATE:
-                                await connection.on_ice(message.data)
-                            case MessageType.SDP_ANSWER:
-                                await connection.on_answer(message.data)
-                            case _:
-                                pass
-            except asyncio.TimeoutError:
-                await asyncio.sleep(2^backoff)
-                backoff += 1
-                continue
-            except ConnectionError as e:
-                print(f"Connection error: {e}")
-                await asyncio.sleep(2^backoff)
-                backoff += 1
+                        except Exception as e:
+                            print(f"Application error: {e}")
+                            await asyncio.sleep(2 ^ backoff)
+                            backoff += 1
             except Exception as e:
-                print(f"Unexpected error: {e}")
-                print(traceback.format_exc())
-                await asyncio.sleep(2^backoff)
+                print(f"Connection error: {e}")
+                await asyncio.sleep(2 ^ backoff)
                 backoff += 1
 
     async def close_connections(self):
@@ -272,7 +280,9 @@ async def create_client_streaming_manager(robot_id):
     # We want to keep the signalling connection alive for as long as possible
     timeout = ClientTimeout(sock_read=None, total=None)
     manager = ClientStreamingManager(
-        robot_id=robot_id, loop=asyncio.get_event_loop(), client_session=ClientSession(timeout=timeout)
+        robot_id=robot_id,
+        loop=asyncio.get_event_loop(),
+        client_session=ClientSession(timeout=timeout),
     )
     asyncio.create_task(manager.connect_signalling_stream())
     asyncio.create_task(manager.connect_recording_notification_stream())

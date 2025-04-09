@@ -36,6 +36,8 @@ class PierToPierConnection:
     on_close: Callable
     client_session: ClientSession
     loop: asyncio.AbstractEventLoop
+    has_received_answer: bool = False
+    has_sent_offer: bool = False
     auth: Auth = field(default_factory=get_auth)
     event_sources: set[EventSource] = field(default_factory=set)
     data_channel_callback: dict[str, Callable] = field(default_factory=dict)
@@ -108,7 +110,6 @@ class PierToPierConnection:
 
         @self.connection.on("connectionstatechange")
         async def on_connectionstatechange():
-            print(f"Connection state changed to: {self.connection.connectionState}")
             match self.connection.connectionState:
                 case "closed" | "failed":
                     await self.close()
@@ -135,9 +136,6 @@ class PierToPierConnection:
 
     async def send_handshake_message(self, message_type: MessageType, content: str):
         """Send a message to the remote peer through the signaling server"""
-        print(
-            f"Send Message: {message_type}, \n {self.local_stream_id=} {self.remote_stream_id=}"
-        )
         await self.client_session.post(
             f"{API_URL}/signalling/message/submit",
             headers=self.auth.get_headers(),
@@ -191,34 +189,49 @@ class PierToPierConnection:
         await self.send_handshake_message(MessageType.SDP_ANSWER, answer.sdp)
 
     async def on_answer(self, answer_sdp: str):
-        answer = RTCSessionDescription(answer_sdp, type="answer")
+        if self.has_received_answer:
+            return
+        self.has_received_answer = True
+
         if self._closed:
             print("answer to closed connection")
             return
-        
+
         if self.connection.signalingState != "have-local-offer":
             print("Not Ready for answer")
             return
-        
+
+        answer = RTCSessionDescription(answer_sdp, type="answer")
+
         self.fix_mid_ordering("before answer")
-        await self.connection.setRemoteDescription(answer)
-        await self.force_ice_negotiation()
+        try:
+            await self.connection.setRemoteDescription(answer)
+            await self.force_ice_negotiation()
+        except Exception as e:
+            self.has_received_answer = False
 
     async def send_offer(self):
         if self._closed:
             print("Cannot send offer from closed connection")
             return
-        
+        if self.has_sent_offer:
+            return
+        self.has_sent_offer = True
+
         if self.connection.signalingState != "stable":
             print("Not ready to send offer")
             return
 
-
         self.fix_mid_ordering("before offer")
-        await self.connection.setLocalDescription(await self.connection.createOffer())
-        await self.send_handshake_message(
-            MessageType.SDP_OFFER, self.connection.localDescription.sdp
-        )
+        try:
+            await self.connection.setLocalDescription(
+                await self.connection.createOffer()
+            )
+            await self.send_handshake_message(
+                MessageType.SDP_OFFER, self.connection.localDescription.sdp
+            )
+        except Exception as e:
+            self.has_sent_offer = False
 
     async def close(self):
         """Close the connection"""
