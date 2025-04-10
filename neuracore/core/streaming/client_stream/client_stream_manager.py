@@ -283,7 +283,7 @@ class ClientStreamingManager:
         self.client_session.close()
 
 
-_streaming_managers: Dict[(str, int), Future[ClientStreamingManager]] = {}
+_streaming_managers: Dict[tuple[str, int], Future[ClientStreamingManager]] = {}
 
 
 async def create_client_streaming_manager(robot_id: str, instance: int):

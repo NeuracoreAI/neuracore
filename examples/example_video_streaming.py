@@ -13,6 +13,7 @@ from functools import cache
 
 FRAME_LOOP = 50
 
+
 @cache
 def generate_wave_pattern(width, height, phase_key: int, frequency=0.02):
     """Generate a dynamic wave pattern for grayscale simulation."""
@@ -59,7 +60,6 @@ def simulate_camera_frames(num_frames=1_000_000, width=50, height=50, camera_id=
 
 def camera_task(camera_id):
     for frame, depth_frame, timestamp in simulate_camera_frames(camera_id=camera_id):
-        # print("logging depth")
         nc.log_depth(f"Camera {camera_id} Depth", depth_frame, timestamp=timestamp)
         nc.log_rgb(f"Camera {camera_id} RGB", frame, timestamp=timestamp)
 
@@ -122,6 +122,7 @@ def main():
         robot_name="Test Video Robot 2",
         urdf_path=BIMANUAL_VIPERX_URDF_PATH,
         overwrite=True,
+        instance=0
     )
     # nc.create_dataset(name="Test Video Dataset", description="This is a test dataset")
     # print("Created Dataset...")
