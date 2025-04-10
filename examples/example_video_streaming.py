@@ -11,7 +11,7 @@ import neuracore as nc
 from functools import cache
 
 
-FRAME_LOOP = 50
+FRAME_LOOP = 30*2
 
 
 @cache
@@ -38,19 +38,21 @@ def simulate_camera_frames(num_frames=1_000_000, width=50, height=50, camera_id=
         # Create a test RGB frame using wave patterns for each channel
         frame = np.zeros((height, width, 3), dtype=np.uint8)
         for channel in range(3):
-
+            offset = int(gen.random() * FRAME_LOOP)
+            phase_key=(i + offset) % FRAME_LOOP
             frame[:, :, channel] = generate_wave_pattern(
-                width, height, (i + gen.random() * FRAME_LOOP) % FRAME_LOOP
+                width, height, phase_key
             )
 
         # Generate animated depth frame
         raw_depth_frame = generate_wave_pattern(
-            width, height, (i + gen.random() * FRAME_LOOP) % FRAME_LOOP
+            width, height, (i + int(gen.random() * FRAME_LOOP)) % FRAME_LOOP
         )
         float_depth_frame = (raw_depth_frame / 255.0).astype(np.float16)
 
         # Simulate irregular frame timing
         dt = 0.02 + 0.03 * np.random.random()  # Between 20-50ms
+        time.sleep(dt)
         t += dt
 
         yield frame, float_depth_frame, t
@@ -119,11 +121,12 @@ def main():
     # Initialize neuracore
     nc.login()
     nc.connect_robot(
-        robot_name="Test Video Robot 2",
+        robot_name="Test Video Robot",
         urdf_path=BIMANUAL_VIPERX_URDF_PATH,
         overwrite=True,
-        instance=0
+        instance=0,
     )
+
     # nc.create_dataset(name="Test Video Dataset", description="This is a test dataset")
     # print("Created Dataset...")
 
