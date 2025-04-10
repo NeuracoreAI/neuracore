@@ -261,12 +261,15 @@ def init(
     """Initialize a robot globally."""
     robot = Robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     robot.init()
-    _robots[robot_name] = robot
+    _robots[(robot_name, instance)] = robot
     return robot
 
 
-def get_robot(robot_name: str) -> Robot:
+def get_robot(robot_name: str, instance: int = 0) -> Robot:
     """Get a registered robot instance."""
-    if robot_name not in _robots:
-        raise RobotError(f"Robot {robot_name} not initialized. Call init() first.")
-    return _robots[robot_name]
+    key = (robot_name, instance)
+    if key not in _robots:
+        raise RobotError(
+            f"Robot {robot_name}:{instance} not initialized. Call init() first."
+        )
+    return _robots[key]

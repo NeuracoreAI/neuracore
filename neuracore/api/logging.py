@@ -6,11 +6,10 @@ from typing import Any, Optional
 
 import numpy as np
 
+from neuracore.api.core import _get_robot
 from neuracore.core.streaming.client_stream.client_stream_manager import (
     get_robot_streaming_manager,
 )
-
-from ..core.exceptions import RobotError
 from ..core.nc_types import (
     ActionData,
     CameraData,
@@ -21,7 +20,6 @@ from ..core.nc_types import (
     PointCloudData,
     PoseData,
 )
-from ..core.robot import Robot, get_robot
 from ..core.streaming.data_stream import DepthDataStream, JsonDataStream, RGBDataStream
 from ..core.utils.depth_utils import MAX_DEPTH
 from .globals import GlobalSingleton
@@ -37,24 +35,12 @@ def _create_group_id_from_dict(joint_names: dict[str, float]) -> str:
     )
 
 
-def _get_robot(robot_name: str) -> Robot:
-    """Get a robot by name."""
-    robot: Robot = GlobalSingleton()._active_robot
-    if robot_name is None:
-        if robot is None:
-            raise RobotError(
-                "No active robot. Call init() first or provide robot_name."
-            )
-    else:
-        robot = get_robot(robot_name)
-    return robot
-
-
 def _log_joint_data(
     data_type: str,
     joint_data: dict[str, float],
     additional_urdf_data: Optional[dict[str, float]] = None,
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """
@@ -66,6 +52,7 @@ def _log_joint_data(
             joint data. These wont ever be included for
             training, and instead used for visualization purposes
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
         timestamp: Optional timestamp
 
     Raises:
@@ -86,7 +73,7 @@ def _log_joint_data(
                     f"Additional visual data must be floats. {key} is not a float."
                 )
 
-    robot = _get_robot(robot_name)
+    robot = _get_robot(robot_name, instance)
     joint_group_id = _create_group_id_from_dict(joint_data)
     joint_str_id = f"{robot.instanced_id}_{data_type}_{joint_group_id}"
     joint_stream = GlobalSingleton()._data_streams.get(joint_str_id)
@@ -101,14 +88,16 @@ def _log_joint_data(
         joint_stream.start_recording(
             GlobalSingleton()._active_recording_ids[robot.instanced_id]
         )
-
-    joint_stream.log(
-        JointData(
-            timestamp=timestamp,
-            values=joint_data,
-            additional_values=additional_urdf_data,
-        )
+    data = JointData(
+        timestamp=timestamp,
+        values=joint_data,
+        additional_values=additional_urdf_data,
     )
+
+    joint_stream.log(data=data)
+    get_robot_streaming_manager(robot.id, robot.instance).get_event_source(
+        data_type, "joints"
+    ).publish(data.model_dump(mode="json"))
 
 
 def _validate_extrinsics_intrinsics(
@@ -133,6 +122,7 @@ def _log_camera_data(
     extrinsics: Optional[np.ndarray] = None,
     intrinsics: Optional[np.ndarray] = None,
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """
@@ -145,6 +135,7 @@ def _log_camera_data(
         extrinsics: Optional extrinsics matrix (4x4)
         intrinsics: Optional intrinsics matrix (3x3)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
         timestamp: Optional timestamp
 
     Raises:
@@ -153,7 +144,7 @@ def _log_camera_data(
     """
     timestamp = timestamp or time.time()
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
-    robot = _get_robot(robot_name)
+    robot = _get_robot(robot_name, instance)
     camera_id = f"{camera_type}_{camera_id}"
     stream_id = f"{robot.instanced_id}_{camera_type}_{camera_id}"
     stream = GlobalSingleton()._data_streams.get(stream_id)
@@ -195,22 +186,50 @@ def log_synced_data(
     depth_data: dict[str, np.ndarray],
     point_cloud_data: dict[str, np.ndarray],
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Useful for simulated data, or you are relying on ROS to sync the data"""
     timestamp = timestamp or time.time()
-    log_joint_positions(joint_positions, robot_name=robot_name, timestamp=timestamp)
-    log_joint_velocities(joint_velocities, robot_name=robot_name, timestamp=timestamp)
-    log_joint_torques(joint_torques, robot_name=robot_name, timestamp=timestamp)
-    log_gripper_data(gripper_open_amounts, robot_name=robot_name, timestamp=timestamp)
-    log_action(action, robot_name=robot_name, timestamp=timestamp)
+    log_joint_positions(
+        joint_positions, robot_name=robot_name, instance=instance, timestamp=timestamp
+    )
+    log_joint_velocities(
+        joint_velocities, robot_name=robot_name, instance=instance, timestamp=timestamp
+    )
+    log_joint_torques(
+        joint_torques, robot_name=robot_name, instance=instance, timestamp=timestamp
+    )
+    log_gripper_data(
+        gripper_open_amounts,
+        robot_name=robot_name,
+        instance=instance,
+        timestamp=timestamp,
+    )
+    log_action(action, robot_name=robot_name, instance=instance, timestamp=timestamp)
     for camera_id, image in rgb_data.items():
-        log_rgb(camera_id, image, robot_name=robot_name, timestamp=timestamp)
+        log_rgb(
+            camera_id,
+            image,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=timestamp,
+        )
     for camera_id, depth in depth_data.items():
-        log_depth(camera_id, depth, robot_name=robot_name, timestamp=timestamp)
+        log_depth(
+            camera_id,
+            depth,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=timestamp,
+        )
     for camera_id, point_cloud in point_cloud_data.items():
         log_point_cloud(
-            camera_id, point_cloud, robot_name=robot_name, timestamp=timestamp
+            camera_id,
+            point_cloud,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=timestamp,
         )
 
 
@@ -218,6 +237,7 @@ def log_custom_data(
     name: str,
     data: Any,
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log arbitrary data for a robot.
@@ -226,10 +246,11 @@ def log_custom_data(
         name: Name of the data stream
         data: Data to log (numpy array of arbitrary shape and dtype)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
         timestamp: Optional timestamp
     """
     timestamp = timestamp or time.time()
-    robot = _get_robot(robot_name)
+    robot = _get_robot(robot_name, instance)
     str_id = f"{robot.instanced_id}_{name}_custom"
     stream = GlobalSingleton()._data_streams.get(str_id)
     if stream is None:
@@ -257,6 +278,7 @@ def log_joint_positions(
     positions: dict[str, float],
     additional_urdf_positions: Optional[dict[str, float]] = None,
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """
@@ -268,13 +290,19 @@ def log_joint_positions(
             positions (in radians). These wont ever be included for
             training, and instead used for visualization purposes
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
         timestamp: Optional timestamp
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
     """
     _log_joint_data(
-        "joint_positions", positions, additional_urdf_positions, robot_name, timestamp
+        "joint_positions",
+        positions,
+        additional_urdf_positions,
+        robot_name,
+        instance,
+        timestamp,
     )
 
 
@@ -282,6 +310,7 @@ def log_joint_velocities(
     velocities: dict[str, float],
     additional_urdf_velocities: Optional[dict[str, float]] = None,
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     _log_joint_data(
@@ -289,6 +318,7 @@ def log_joint_velocities(
         velocities,
         additional_urdf_velocities,
         robot_name,
+        instance,
         timestamp,
     )
 
@@ -297,16 +327,23 @@ def log_joint_torques(
     torques: dict[str, float],
     additional_urdf_torques: Optional[dict[str, float]] = None,
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     _log_joint_data(
-        "joint_torques", torques, additional_urdf_torques, robot_name, timestamp
+        "joint_torques",
+        torques,
+        additional_urdf_torques,
+        robot_name,
+        instance,
+        timestamp,
     )
 
 
 def log_pose_data(
     poses: dict[str, list[float]],
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     timestamp = timestamp or time.time()
@@ -317,7 +354,7 @@ def log_pose_data(
             raise ValueError(f"Poses must be lists. {key} is not a list.")
         if len(value) != 7:
             raise ValueError(f"Poses must be lists of length 7. {key} is not length 7.")
-    robot = _get_robot(robot_name)
+    robot = _get_robot(robot_name, instance)
     group_id = _create_group_id_from_dict(poses)
     str_id = f"{robot.instanced_id}_{group_id}_pose_data"
     stream = GlobalSingleton()._data_streams.get(str_id)
@@ -339,6 +376,7 @@ def log_pose_data(
 def log_gripper_data(
     open_amounts: dict[str, float],
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     timestamp = timestamp or time.time()
@@ -349,7 +387,7 @@ def log_gripper_data(
             raise ValueError(
                 f"Gripper open amounts must be floats. {key} is not a float."
             )
-    robot = _get_robot(robot_name)
+    robot = _get_robot(robot_name, instance)
     group_id = _create_group_id_from_dict(open_amounts)
     str_id = f"{robot.instanced_id}_{group_id}_gripper_data"
     stream = GlobalSingleton()._data_streams.get(str_id)
@@ -369,6 +407,7 @@ def log_gripper_data(
 def log_action(
     action: dict[str, float],
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """
@@ -377,6 +416,7 @@ def log_action(
     Args:
         action: Dictionary mapping joint names to positions (in radians)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
         timestamp: Optional timestamp
 
     Raises:
@@ -388,7 +428,7 @@ def log_action(
     for key, value in action.items():
         if not isinstance(value, float):
             raise ValueError(f"Actions must be floats. {key} is not a float.")
-    robot = _get_robot(robot_name)
+    robot = _get_robot(robot_name, instance)
     joint_group_id = _create_group_id_from_dict(action)
     str_id = f"{robot.instanced_id}_{joint_group_id}_action"
     stream = GlobalSingleton()._data_streams.get(str_id)
@@ -410,6 +450,7 @@ def log_action(
 def log_language(
     language: str,
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """
@@ -418,6 +459,7 @@ def log_language(
     Args:
         language: A language string associated with this timestep
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
         timestamp: Optional timestamp
 
     Raises:
@@ -426,7 +468,7 @@ def log_language(
     timestamp = timestamp or time.time()
     if not isinstance(language, str):
         raise ValueError("Language must be a string")
-    robot = _get_robot(robot_name)
+    robot = _get_robot(robot_name, instance)
     str_id = f"{robot.instanced_id}_language"
     stream = GlobalSingleton()._data_streams.get(str_id)
     if stream is None:
@@ -448,6 +490,7 @@ def log_rgb(
     extrinsics: Optional[np.ndarray] = None,
     intrinsics: Optional[np.ndarray] = None,
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """
@@ -459,6 +502,7 @@ def log_rgb(
         extrinsics: Optional extrinsics matrix (4x4)
         intrinsics: Optional intrinsics matrix (3x3)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
         timestamp: Optional timestamp
 
     Raises:
@@ -470,10 +514,10 @@ def log_rgb(
     if image.dtype != np.uint8:
         raise ValueError("Image must be uint8 wth range 0-255")
     _log_camera_data(
-        "rgb", camera_id, image, extrinsics, intrinsics, robot_name, timestamp
+        "rgb", camera_id, image, extrinsics, intrinsics, robot_name, instance, timestamp
     )
-    robot = _get_robot(robot_name)
-    get_robot_streaming_manager(robot.instanced_id).get_recording_video_stream(
+    robot = _get_robot(robot_name, instance)
+    get_robot_streaming_manager(robot.id, robot.instance).get_video_source(
         camera_id, "rgb"
     ).add_frame(image)
 
@@ -484,6 +528,7 @@ def log_depth(
     extrinsics: Optional[np.ndarray] = None,
     intrinsics: Optional[np.ndarray] = None,
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """
@@ -495,6 +540,7 @@ def log_depth(
         extrinsics: Optional extrinsics matrix (4x4)
         intrinsics: Optional intrinsics matrix (3x3)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
         timestamp: Optional timestamp
 
     Raises:
@@ -514,10 +560,17 @@ def log_depth(
             "The values you are passing in are likely in millimeters."
         )
     _log_camera_data(
-        "depth", camera_id, depth, extrinsics, intrinsics, robot_name, timestamp
+        "depth",
+        camera_id,
+        depth,
+        extrinsics,
+        intrinsics,
+        robot_name,
+        instance,
+        timestamp,
     )
-    robot = _get_robot(robot_name)
-    get_robot_streaming_manager(robot.instanced_id).get_recording_video_stream(
+    robot = _get_robot(robot_name, instance)
+    get_robot_streaming_manager(robot.id, robot.instance).get_video_source(
         camera_id, "depth"
     ).add_frame(depth)
 
@@ -529,6 +582,7 @@ def log_point_cloud(
     extrinsics: Optional[np.ndarray] = None,
     intrinsics: Optional[np.ndarray] = None,
     robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     timestamp = timestamp or time.time()
@@ -554,7 +608,7 @@ def log_point_cloud(
         rgb_points = rgb_points.tolist()
 
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
-    robot = _get_robot(robot_name)
+    robot = _get_robot(robot_name, instance)
     str_id = f"{robot.instanced_id}_point_cloud_{camera_id}"
     stream = GlobalSingleton()._data_streams.get(str_id)
     if stream is None:

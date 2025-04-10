@@ -9,7 +9,6 @@ def generate_api_key():
     # Prompt the user for credentials
     email = input("Enter your registered email: ")
     password = getpass("Enter your password: ")
-
     # Authenticate user and get an access token
     try:
         auth_response = requests.post(

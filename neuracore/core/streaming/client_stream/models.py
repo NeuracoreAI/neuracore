@@ -17,6 +17,7 @@ class HandshakeMessage(BaseModel):
     from_id: str
     to_id: str
     data: str
+    connection_id: str
     type: MessageType
     id: str = Field(default_factory=lambda: uuid4().hex)
 
@@ -30,6 +31,7 @@ class RecordingNotification(BaseModel):
 
 class RobotStreamTrack(BaseModel):
     robot_id: str
+    robot_instance:int
     stream_id: str
     kind: str
     label: str

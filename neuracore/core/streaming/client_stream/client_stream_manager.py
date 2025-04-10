@@ -1,17 +1,19 @@
 import asyncio
+from concurrent.futures import Future
 import logging
 import threading
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from uuid import uuid4
 
-from aiohttp import ClientSession
+from aiohttp import ClientSession, ClientTimeout
 from aiohttp_sse_client import client as sse_client
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.auth import Auth, get_auth
+from neuracore.core.streaming.client_stream.event_source import EventSource
 from neuracore.core.streaming.client_stream.models import (
     HandshakeMessage,
     MessageType,
@@ -37,51 +39,73 @@ def get_loop():
         return loop
 
 
+# must be less than zero -> a reconnection delay of more than one second is considered dead
+# TODO: resubmit tracks if connection is re-established after more than one second
+MINIMUM_BACKOFF_LEVEL = -2
+
+
 @dataclass
 class ClientStreamingManager:
     robot_id: str
+    robot_instance: int
     loop: asyncio.AbstractEventLoop
     client_session: ClientSession
     available_for_connections: bool = True
     auth: Auth = field(default_factory=get_auth)
     connections: Dict[str, PierToPierConnection] = field(default_factory=dict)
     video_tracks_cache: Dict[str, VideoSource] = field(default_factory=dict)
+    event_source_cache: dict[Tuple[str, str], EventSource] = field(default_factory=dict)
+    track_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tracks: List[VideoSource] = field(default_factory=list)
     local_stream_id: str = field(default_factory=lambda: uuid4().hex)
-    recording_connection_established: bool = False
 
-    def get_recording_video_stream(self, sensor_name: str, kind: str) -> VideoSource:
-        """Start a new recording stream"""
+    async def _create_video_source(self, sensor_name: str, kind: str) -> VideoSource:
         sensor_key = (sensor_name, kind)
-        if sensor_key in self.video_tracks_cache:
-            return self.video_tracks_cache[sensor_key]
+        async with self.track_lock:
+            if sensor_key in self.video_tracks_cache:
+                return self.video_tracks_cache[sensor_key]
 
-        mid = str(len(self.tracks))
-        video_track = (
-            DepthVideoSource(mid=mid) if kind == "depth" else VideoSource(mid=mid)
-        )
-        self.video_tracks_cache[sensor_key] = video_track
-        self.tracks.append(video_track)
+            print(f"create vid source {sensor_key=}")
+            mid = str(len(self.tracks))
+            video_source = (
+                DepthVideoSource(mid=mid) if kind == "depth" else VideoSource(mid=mid)
+            )
+            self.video_tracks_cache[sensor_key] = video_source
+            self.tracks.append(video_source)
 
-        # Add this track to all existing connections
-        for connection in self.connections.values():
-            connection.add_video_source(video_track)
+            await self.submit_track(mid, kind, sensor_name)
 
-        print(f"create stream {sensor_name=}, {self.loop.is_running()=}")
+            return video_source
+
+    def get_video_source(self, sensor_name: str, kind: str) -> VideoSource:
+        """Start a new recording stream"""
+        return asyncio.run_coroutine_threadsafe(
+            self._create_video_source(sensor_name, kind), self.loop
+        ).result()
+
+    def get_event_source(self, sensor_name: str, kind: str) -> EventSource:
+        sensor_key = (sensor_name, kind)
+        if sensor_key in self.event_source_cache:
+            return self.event_source_cache[sensor_key]
+
+        mid = uuid4().hex
         asyncio.run_coroutine_threadsafe(
             self.submit_track(mid, kind, sensor_name), self.loop
         )
 
-        return video_track
+        source = EventSource(mid=mid, loop=self.loop)
+        self.event_source_cache[sensor_key] = source
+
+        return source
 
     async def submit_track(self, mid: str, kind: str, label: str):
         """Submit new track data"""
-        print(f"Submit track {self.local_stream_id=} {mid=} {kind=} {label=}")
         await self.client_session.post(
             f"{API_URL}/signalling/track",
             headers=self.auth.get_headers(),
             json=RobotStreamTrack(
                 robot_id=self.robot_id,
+                robot_instance=self.robot_instance,
                 stream_id=self.local_stream_id,
                 mid=mid,
                 kind=kind,
@@ -98,21 +122,25 @@ class ClientStreamingManager:
         )
 
     async def create_new_connection(
-        self, remote_stream_id: str
+        self,
+        remote_stream_id: str,
+        connection_id: str,
+        connection_token: str,
     ) -> PierToPierConnection:
         """Create a new P2P connection to a remote stream"""
 
         def on_close():
-            del self.connections[remote_stream_id]
+            self.connections.pop(remote_stream_id, None)
 
         connection = PierToPierConnection(
             local_stream_id=self.local_stream_id,
             remote_stream_id=remote_stream_id,
+            id=connection_id,
+            connection_token=connection_token,
             on_close=on_close,
             client_session=self.client_session,
             auth=self.auth,
             loop=self.loop,
-            connection_token=self.loop.create_future(),
         )
 
         connection.setup_connection()
@@ -120,98 +148,121 @@ class ClientStreamingManager:
         for video_track in self.tracks:
             connection.add_video_source(video_track)
 
+        for data_channel in self.event_source_cache.values():
+            connection.add_event_source(data_channel)
+
         self.connections[remote_stream_id] = connection
+
+        await connection.send_offer()
         return connection
 
-    async def connect_recording_notification_stream(self, instanced_robot_id: str):
-
+    async def connect_recording_notification_stream(self):
+        backoff = MINIMUM_BACKOFF_LEVEL
         while self.available_for_connections:
             try:
                 async with sse_client.EventSource(
                     f"{API_URL}/signalling/recording_notifications/{self.local_stream_id}",
                     headers=self.auth.get_headers(),
                 ) as event_source:
+                    backoff = max(MINIMUM_BACKOFF_LEVEL, backoff - 1)
                     async for event in event_source:
                         if event.type == "data":
                             message = RecordingNotification.model_validate_json(
                                 event.data
                             )
-                            if message.robot_id != instanced_robot_id:
-                                continue
+
                             if message.recording:
                                 GlobalSingleton()._active_recording_ids[
-                                    instanced_robot_id
+                                    message.robot_id
                                 ] = message.recording_id
                             else:
                                 rec_id = GlobalSingleton()._active_recording_ids.pop(
-                                    instanced_robot_id, None
+                                    message.robot_id, None
                                 )
-                                if rec_id == message.recording_id:
-                                    for (
-                                        sname,
-                                        stream,
-                                    ) in GlobalSingleton()._data_streams.items():
-                                        with stream.lock:
-                                            if (
-                                                sname.startswith(instanced_robot_id)
-                                                and stream.is_recording()
-                                            ):
-                                                stream.stop_recording()
+                                if rec_id is None:
+                                    continue
+
+                                for (
+                                    sname,
+                                    stream,
+                                ) in GlobalSingleton()._data_streams.items():
+                                    with stream.lock:
+                                        if (
+                                            sname.startswith(message.robot_id)
+                                            and stream.is_recording()
+                                        ):
+                                            stream.stop_recording()
             except ConnectionError as e:
                 print(f"Connection error: {e}")
-                await asyncio.sleep(5)
+                await asyncio.sleep(2 ^ backoff)
+                backoff += 1
             except Exception as e:
                 print(f"Unexpected error: {e}")
                 print(traceback.format_exc())
-                await asyncio.sleep(5)
+                await asyncio.sleep(2 ^ backoff)
+                backoff += 1
 
     async def connect_signalling_stream(self):
         """Connect to the signaling server and process messages"""
+        backoff = MINIMUM_BACKOFF_LEVEL
         while self.available_for_connections:
             try:
                 async with sse_client.EventSource(
                     f"{API_URL}/signalling/notifications/{self.local_stream_id}",
+                    session=self.client_session,
                     headers=self.auth.get_headers(),
                 ) as event_source:
-                    self.recording_connection_established = True
                     async for event in event_source:
-                        if event.type == "heartbeat":
-                            await self.heartbeat_response()
+                        try:
+                            backoff = max(MINIMUM_BACKOFF_LEVEL, backoff - 1)
+                            if event.type == "heartbeat":
+                                await self.heartbeat_response()
+                                continue
+
+                            message = HandshakeMessage.model_validate_json(event.data)
+                            if not self.available_for_connections:
+                                return
+
+                            if message.from_id == "system":
+                                continue
+
+                            connection = self.connections.get(message.from_id)
+
+                            if message.type == MessageType.CONNECTION_TOKEN:
+                                await self.create_new_connection(
+                                    remote_stream_id=message.from_id,
+                                    connection_id=message.connection_id,
+                                    connection_token=message.data,
+                                )
+                                continue
+
+                            if (
+                                connection is None
+                                or connection.id != message.connection_id
+                            ):
+                                continue
+
+                            match message.type:
+                                case MessageType.SDP_OFFER:
+                                    await connection.on_offer(message.data)
+                                case MessageType.ICE_CANDIDATE:
+                                    await connection.on_ice(message.data)
+                                case MessageType.SDP_ANSWER:
+                                    await connection.on_answer(message.data)
+                                case _:
+                                    pass
+                        except asyncio.TimeoutError:
+                            await asyncio.sleep(2 ^ backoff)
+                            backoff += 1
                             continue
-
-                        message = HandshakeMessage.model_validate_json(event.data)
-                        logger.info(f"Message Received {message}")
-                        if not self.available_for_connections:
-                            return
-
-                        if message.from_id == "system":
-                            continue
-
-                        connection = self.connections.get(message.from_id)
-                        if connection is None:
-                            connection = await self.create_new_connection(
-                                message.from_id
-                            )
-
-                        match message.type:
-                            case MessageType.SDP_OFFER:
-                                await connection.on_offer(message.data)
-                            case MessageType.ICE_CANDIDATE:
-                                await connection.on_ice(message.data)
-                            case MessageType.CONNECTION_TOKEN:
-                                await connection.on_token(message.data)
-                            case MessageType.SDP_ANSWER:
-                                await connection.on_answer(message.data)
-                            case _:
-                                pass
-
-            except ConnectionError as e:
-                print(f"Connection error: {e}")
-                await asyncio.sleep(5)
+                        except Exception as e:
+                            print(f"Application error: {e}")
+                            await asyncio.sleep(2 ^ backoff)
+                            backoff += 1
             except Exception as e:
-                print(f"Unexpected error: {e}")
-                print(traceback.format_exc())
-                await asyncio.sleep(5)
+                print(f"Connection error: {e}")
+                await asyncio.sleep(2 ^ backoff)
+                backoff += 1
 
     async def close_connections(self):
         await asyncio.gather(
@@ -232,27 +283,35 @@ class ClientStreamingManager:
         self.client_session.close()
 
 
-_streaming_managers: Dict[str, ClientStreamingManager] = {}
+_streaming_managers: Dict[tuple[str, int], Future[ClientStreamingManager]] = {}
 
 
-def get_robot_streaming_manager(instanced_robot_id: str) -> "ClientStreamingManager":
+async def create_client_streaming_manager(robot_id: str, instance: int):
+    # We want to keep the signalling connection alive for as long as possible
+    timeout = ClientTimeout(sock_read=None, total=None)
+    manager = ClientStreamingManager(
+        robot_id=robot_id,
+        robot_instance=instance,
+        loop=asyncio.get_event_loop(),
+        client_session=ClientSession(timeout=timeout),
+    )
+    asyncio.create_task(manager.connect_signalling_stream())
+    asyncio.create_task(manager.connect_recording_notification_stream())
+
+    return manager
+
+
+def get_robot_streaming_manager(
+    robot_id: str, instance: int
+) -> "ClientStreamingManager":
     global _streaming_managers
-
-    if instanced_robot_id in _streaming_managers:
-        return _streaming_managers[instanced_robot_id]
+    key = (robot_id, instance)
+    if key in _streaming_managers:
+        return _streaming_managers[key].result()
 
     loop = get_loop()
-    manager = ClientStreamingManager(
-        robot_id=instanced_robot_id, loop=loop, client_session=ClientSession(loop=loop)
+    manager = asyncio.run_coroutine_threadsafe(
+        create_client_streaming_manager(robot_id, instance), loop
     )
-    asyncio.run_coroutine_threadsafe(
-        manager.connect_recording_notification_stream(instanced_robot_id), loop
-    )
-    asyncio.run_coroutine_threadsafe(manager.connect_signalling_stream(), loop)
-
-    # Wait until recording_connection_established is True
-    while not manager.recording_connection_established:
-        time.sleep(0.5)
-
-    _streaming_managers[instanced_robot_id] = manager
-    return manager
+    _streaming_managers[key] = manager
+    return manager.result()

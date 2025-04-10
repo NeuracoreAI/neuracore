@@ -18,8 +18,6 @@ VIDEO_CLOCK_RATE = 90000
 VIDEO_TIME_BASE = fractions.Fraction(1, VIDEO_CLOCK_RATE)
 TIMESTAMP_DELTA = int(VIDEO_CLOCK_RATE / STREAMING_FPS)
 
-DEBUG_TEXT = True
-
 
 @dataclass
 class VideoSource:
@@ -32,37 +30,8 @@ class VideoSource:
     def add_frame(self, frame_data: np.ndarray):
         self._last_frame = frame_data
 
-    def _add_debug_info(self, frame: np.ndarray):
-        if not DEBUG_TEXT:
-            return
-
-        import cv2
-
-        text = self.mid
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        position = (10, 50)  # Top-left corner
-        font_scale = 1.5
-        color = 255  # White text
-        thickness = 3
-
-        # Outline effect: Draw text in black slightly offset
-        cv2.putText(
-            frame,
-            text,
-            (position[0] + 1, position[1] + 1),
-            font,
-            font_scale,
-            0,
-            thickness + 1,
-            cv2.LINE_AA,
-        )
-        # Draw the actual text in white
-        cv2.putText(
-            frame, text, position, font, font_scale, color, thickness, cv2.LINE_AA
-        )
 
     def get_last_frame(self) -> av.VideoFrame:
-        self._add_debug_info(self._last_frame)
         return av.VideoFrame.from_ndarray(self._last_frame, format="rgb24")
 
     def get_video_track(self):
@@ -85,6 +54,7 @@ class DepthVideoSource(VideoSource):
         # Ensure _last_frame is in [0, 1] range
         self._maximum_depth = max(self._maximum_depth, self._last_frame.max())
         self._minimum_depth = min(self._minimum_depth, self._last_frame.min())
+
         normalized_frame = np.clip(
             (self._last_frame - self._minimum_depth)
             / (self._maximum_depth - self._minimum_depth),
@@ -96,7 +66,6 @@ class DepthVideoSource(VideoSource):
         uint8_frame = (normalized_frame * 255).astype(np.uint8)
         # Stack three identical grayscale frames into an RGB image
         rgb_frame = np.stack([uint8_frame] * 3, axis=-1)
-        self._add_debug_info(rgb_frame)
         return av.VideoFrame.from_ndarray(rgb_frame, format="rgb24")
 
 
@@ -129,14 +98,18 @@ class VideoTrack(MediaStreamTrack):
 
     async def recv(self) -> av.VideoFrame:
         """Receive the next frame"""
-        if self._ended:
-            raise Exception("Track has ended")
-        pts = await self.next_timestamp()
-        frame_data = self.source.get_last_frame()
-        frame_data.time_base = VIDEO_TIME_BASE
-        frame_data.pts = pts
+        try:
+            if self._ended:
+                raise Exception("Track has ended")
+            pts = await self.next_timestamp()
+            frame_data = self.source.get_last_frame()
+            frame_data.time_base = VIDEO_TIME_BASE
+            frame_data.pts = pts
 
-        return frame_data
+            return frame_data
+        except Exception as e:
+            print(f"Error in receiving frame: {self.mid=} {e}")
+            raise
 
     def stop(self):
         """Stop the track"""
