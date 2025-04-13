@@ -93,7 +93,9 @@ def connect_robot(
     validate_version()
     robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     GlobalSingleton()._active_robot = robot
-    get_robot_streaming_manager(robot.id, robot.instance)  # Initialize streaming manager
+    get_robot_streaming_manager(
+        robot.id, robot.instance
+    )  # Initialize streaming manager
     return robot
 
 

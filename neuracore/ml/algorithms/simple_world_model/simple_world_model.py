@@ -80,7 +80,8 @@ class SimpleWorldModel(NeuracoreModel):
         self.image_predictors = nn.ModuleList([
             UNet(
                 input_channels=3,  # RGB channels
-                output_channels=3,  # RGB channels
+                output_channels=3
+                * self.model_init_description.output_prediction_horizon,  # RGB channels
                 feature_map_sizes=[64, 128, 256, 512],
                 condition_dim=condition_dim,  # state + action + image encoding
             )
@@ -149,14 +150,6 @@ class SimpleWorldModel(NeuracoreModel):
             return (actions - self.actions_mean) / self.actions_std
         return actions
 
-    def _postprocess_camera_images(
-        self, camera_images: torch.FloatTensor
-    ) -> torch.FloatTensor:
-        """Apply inverse transformations to predicted camera images."""
-        for cam_id in range(self.dataset_description.max_num_rgb_images):
-            camera_images[:, cam_id] = self.inverse_transform(camera_images[:, cam_id])
-        return camera_images
-
     def _predict_future_images(
         self, batch: BatchedInferenceSamples
     ) -> torch.FloatTensor:
@@ -208,7 +201,7 @@ class SimpleWorldModel(NeuracoreModel):
         future_images = torch.zeros(
             batch_size,
             num_cameras,
-            3,
+            3 * self.model_init_description.output_prediction_horizon,
             224,
             224,
             device=self.device,
@@ -239,17 +232,23 @@ class SimpleWorldModel(NeuracoreModel):
 
             future_images[:, cam_id] = future_image
 
-        return future_images
+        # [B, CAMS, 3 * T, H, W] -> [B, T, CAMS, 3, H, W]
+        b, cams, c, h, w = future_images.shape
+        t = self.model_init_description.output_prediction_horizon
+        return future_images.view(b, cams, t, -1, h, w).transpose(1, 2)
 
     def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
         """Forward pass for inference."""
         t = time.time()
         future_images = self._predict_future_images(batch)
         prediction_time = time.time() - t
-        future_images = self._postprocess_camera_images(future_images)
-        # [B, CAMS, 3, H, W) -> [B, 1, CAMS, 3, H, W]
-        predictions_np = future_images.unsqueeze(1).detach().cpu().numpy()
-        # [B, 1, CAMS, 3, H, W] -> [B, 1, CAMS, H, W, 3]
+        # [B, T, CAMS, 3, H, W] -> [B * T * CAMS, 3, H, W]
+        b, t, cams, c, h, w = future_images.shape
+        flattened_predictions = future_images.reshape(-1, c, h, w)
+        flattened_predictions = self.inverse_transform(flattened_predictions)
+        # [B * T * CAMS, 3, H, W] -> [B, T, CAMS, 3, H, W]
+        future_images = flattened_predictions.view(b, t, cams, c, h, w)
+        predictions_np = future_images.detach().cpu().numpy()
         predictions_np = np.transpose(predictions_np, (0, 1, 2, 4, 5, 3))
         cam_data = np.clip(predictions_np * 255.0, 0, 255).astype(np.uint8)
         return ModelPrediction(
@@ -280,30 +279,30 @@ class SimpleWorldModel(NeuracoreModel):
         metrics = {}
 
         if self.training:
-            # Image reconstruction loss (per camera)
-            reconstruction_loss = 0
-            for cam_id in range(self.dataset_description.max_num_rgb_images):
-                target_future_image = self.transform(target_future_images[:, cam_id])
-                masked_target_future_image = (
-                    target_future_image
-                    * batch.outputs.rgb_images.mask[:, cam_id].view(-1, 1, 1, 1)
-                )
-                cam_loss = nn.functional.mse_loss(
-                    predicted_future_images[:, cam_id], masked_target_future_image
-                )
-                reconstruction_loss += cam_loss
+            # [B, T, CAMS, 3, H, W] -> [B * T * CAMS, 3, H, W]
+            _, _, _, c, h, w = target_future_images.shape
+            target_future_image = self.transform(
+                target_future_images.reshape(-1, c, h, w)
+            )
+            masked_target_future_image = (
+                target_future_image
+                * batch.outputs.rgb_images.mask.flatten().reshape(-1, 1, 1, 1)
+            )
+            reconstruction_loss = nn.functional.mse_loss(
+                predicted_future_images.reshape(-1, c, h, w), masked_target_future_image
+            )
 
-                # Compute additional metrics like PSNR
-                with torch.no_grad():
-                    mse = torch.mean(
-                        (
-                            predicted_future_images[:, cam_id]
-                            - masked_target_future_image
-                        )
-                        ** 2
+            # Compute additional metrics like PSNR
+            with torch.no_grad():
+                mse = (
+                    torch.mean(
+                        predicted_future_images.reshape(-1, c, h, w)
+                        - masked_target_future_image
                     )
-                    psnr = 10 * torch.log10(1 / mse) if mse > 0 else torch.tensor(100.0)
-                    metrics[f"psnr_cam_{cam_id}"] = psnr
+                    ** 2
+                )
+                psnr = 10 * torch.log10(1 / mse) if mse > 0 else torch.tensor(100.0)
+                metrics["psnr"] = psnr
 
             losses["reconstruction_loss"] = reconstruction_loss
 

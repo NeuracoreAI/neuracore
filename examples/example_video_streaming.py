@@ -1,4 +1,5 @@
 import time
+from functools import cache
 
 import numpy as np
 from common.constants import (
@@ -8,10 +9,8 @@ from common.constants import (
 )
 
 import neuracore as nc
-from functools import cache
 
-
-FRAME_LOOP = 30*2
+FRAME_LOOP = 30 * 2
 
 
 @cache
@@ -39,10 +38,8 @@ def simulate_camera_frames(num_frames=1_000_000, width=50, height=50, camera_id=
         frame = np.zeros((height, width, 3), dtype=np.uint8)
         for channel in range(3):
             offset = int(gen.random() * FRAME_LOOP)
-            phase_key=(i + offset) % FRAME_LOOP
-            frame[:, :, channel] = generate_wave_pattern(
-                width, height, phase_key
-            )
+            phase_key = (i + offset) % FRAME_LOOP
+            frame[:, :, channel] = generate_wave_pattern(width, height, phase_key)
 
         # Generate animated depth frame
         raw_depth_frame = generate_wave_pattern(
@@ -94,7 +91,8 @@ def joint_task():
                 np.frombuffer(joint.encode("utf-8"), dtype=np.uint8)
             )
             # Add sinusoidal movement plus small random variation
-            # Different frequencies for different joints based on their position in the list
+            # Different frequencies for different joints
+            # based on their position in the list
             frequency = 0.1 + 0.05 * gen.random()
             amplitude = 1.5 + 1.5 * gen.random()
 

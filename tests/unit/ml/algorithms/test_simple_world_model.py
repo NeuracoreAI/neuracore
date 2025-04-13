@@ -28,6 +28,7 @@ from neuracore.ml.utils.validate import run_validation
 BS = 2
 CAMS = 1
 JOINT_POSITION_DIM = 32
+PRED_HORIZON = 10
 
 
 @pytest.fixture
@@ -61,6 +62,7 @@ def model_init_description() -> ModelInitDescription:
             DataType.RGB_IMAGE,
         ],
         output_data_types=[DataType.RGB_IMAGE],
+        output_prediction_horizon=PRED_HORIZON,
     )
 
 
@@ -96,8 +98,8 @@ def sample_batch() -> BatchedTrainingSamples:
         ),
         outputs=BatchedData(
             rgb_images=MaskableData(
-                torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
-                torch.ones(BS, CAMS, dtype=torch.float32),
+                torch.randn(BS, PRED_HORIZON, CAMS, 3, 224, 224, dtype=torch.float32),
+                torch.ones(BS, PRED_HORIZON, CAMS, dtype=torch.float32),
             ),
         ),
     )
@@ -163,7 +165,14 @@ def test_model_forward(
     output = model(sample_inference_batch)
     assert isinstance(output, ModelPrediction)
     assert DataType.RGB_IMAGE in output.outputs
-    assert output.outputs[DataType.RGB_IMAGE].shape == (BS, 1, CAMS, 224, 224, 3)
+    assert output.outputs[DataType.RGB_IMAGE].shape == (
+        BS,
+        PRED_HORIZON,
+        CAMS,
+        224,
+        224,
+        3,
+    )
 
 
 def test_model_backward(

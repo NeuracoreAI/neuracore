@@ -3,6 +3,7 @@ import pytest
 
 import neuracore as nc
 from neuracore.core.const import API_URL
+from neuracore.core.nc_types import DataType, ModelPrediction
 
 
 def test_connect_endpoint(temp_config_dir, mock_auth_requests, reset_neuracore):
@@ -22,7 +23,11 @@ def test_connect_endpoint(temp_config_dir, mock_auth_requests, reset_neuracore):
     # Mock endpoint prediction
     mock_auth_requests.post(
         f"{API_URL}/models/endpoints/test_endpoint_id/predict",
-        json={"predictions": [0.1, 0.2, 0.3]},
+        json={
+            "predictions": ModelPrediction(
+                outputs={DataType.JOINT_TARGET_POSITIONS: [0.1, 0.2, 0.3]}
+            ).model_dump()
+        },
         status_code=200,
     )
 
@@ -33,9 +38,9 @@ def test_connect_endpoint(temp_config_dir, mock_auth_requests, reset_neuracore):
 
     # Test prediction
     pred = endpoint.predict()
-    assert isinstance(pred, np.ndarray)
-    assert pred.shape == (3,)
-    assert list(pred) == [0.1, 0.2, 0.3]
+    assert isinstance(pred, ModelPrediction)
+    assert pred.outputs[DataType.JOINT_TARGET_POSITIONS].shape == (3,)
+    assert list(pred.outputs[DataType.JOINT_TARGET_POSITIONS]) == [0.1, 0.2, 0.3]
 
 
 def test_connect_nonexistent_endpoint(
@@ -105,9 +110,11 @@ def test_connect_local_endpoint(
 
     mock_auth_requests.post(
         "http://localhost:8080/predictions/robot_model",
-        json=[{
-            "predictions": [0.1, 0.2, 0.3],
-        }],
+        json={
+            "predictions": ModelPrediction(
+                outputs={DataType.JOINT_TARGET_POSITIONS: [0.1, 0.2, 0.3]}
+            ).model_dump()
+        },
         status_code=200,
     )
 
@@ -124,7 +131,7 @@ def test_connect_local_endpoint(
 
     # Test prediction
     pred = local_endpoint.predict()
-    assert isinstance(pred, np.ndarray)
+    assert isinstance(pred, ModelPrediction)
 
 
 def test_deploy_model(temp_config_dir, mock_auth_requests, reset_neuracore):
@@ -242,9 +249,11 @@ def test_connect_local_endpoint_with_train_run(
 
     mock_auth_requests.post(
         "http://localhost:8080/predictions/robot_model",
-        json=[{
-            "predictions": [0.1, 0.2, 0.3],
-        }],
+        json={
+            "predictions": ModelPrediction(
+                outputs={DataType.JOINT_TARGET_POSITIONS: [0.1, 0.2, 0.3]}
+            ).model_dump()
+        },
         status_code=200,
     )
 
@@ -273,7 +282,7 @@ def test_connect_local_endpoint_with_train_run(
 
     # Test prediction
     pred = local_endpoint.predict()
-    assert isinstance(pred, np.ndarray)
+    assert isinstance(pred, ModelPrediction)
 
 
 def test_connect_local_endpoint_invalid_args(

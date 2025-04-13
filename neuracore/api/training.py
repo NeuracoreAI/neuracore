@@ -72,14 +72,14 @@ def start_training_run(
             algorithm_id = algorithm_json["id"]
             if input_data_types is None:
                 input_data_types = [
-                    DataType[supported_input_data_type]
+                    DataType(supported_input_data_type)
                     for supported_input_data_type in algorithm_json[
                         "supported_input_data_types"
                     ]
                 ]
             if output_data_types is None:
                 output_data_types = [
-                    DataType[supported_output_data_type]
+                    DataType(supported_output_data_type)
                     for supported_output_data_type in algorithm_json[
                         "supported_output_data_types"
                     ]

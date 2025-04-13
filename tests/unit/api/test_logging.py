@@ -1,4 +1,3 @@
-from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
@@ -105,7 +104,7 @@ def test_log_custom_data(
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
-    nc.connect_robot("test_robot",urdf_path=mock_urdf)
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Log custom data
     custom_data = {

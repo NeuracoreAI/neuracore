@@ -1,10 +1,10 @@
-from asyncio import AbstractEventLoop
 import asyncio
 import json
 import time
+from asyncio import AbstractEventLoop
 from typing import Optional
-from pyee.asyncio import AsyncIOEventEmitter
 
+from pyee.asyncio import AsyncIOEventEmitter
 
 MAXIMUM_EVENT_FREQUENCY_HZ = 10
 MINIMUM_EVENT_DELTA = 1 / MAXIMUM_EVENT_FREQUENCY_HZ
@@ -30,13 +30,12 @@ class EventSource(AsyncIOEventEmitter):
         """Submit an event to the server"""
 
         remaining_time = self._last_event_time + MINIMUM_EVENT_DELTA - time.time()
-        
+
         if remaining_time > 0:
             await asyncio.sleep(remaining_time)
         if self._last_event is None:
             return
 
-       
         message = json.dumps(self._last_event)
         self._last_event_time = time.time()
         await self.emit("event", message)
