@@ -19,7 +19,7 @@ from ..api.globals import GlobalSingleton
 from .auth import get_auth
 from .const import API_URL
 from .exceptions import EndpointError
-from .nc_types import CameraData, JointData, SyncPoint
+from .nc_types import CameraData, DataType, JointData, ModelPrediction, SyncPoint
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,13 @@ class EndpointPolicy:
         buffer = BytesIO()
         pil_image.save(buffer, format="PNG")
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+    def _decode_image(self, encoded_image: str) -> np.ndarray:
+        """Decode base64 image string to numpy array."""
+        img_bytes = base64.b64decode(encoded_image)
+        buffer = BytesIO(img_bytes)
+        pil_image = Image.open(buffer)
+        return np.array(pil_image)
 
     def _maybe_add_exisiting_data(
         self, existing: JointData, to_add: JointData
@@ -86,7 +93,7 @@ class EndpointPolicy:
                 )
         return sync_point
 
-    def predict(self, sync_point: SyncPoint | None = None) -> np.ndarray:
+    def predict(self, sync_point: SyncPoint | None = None) -> ModelPrediction:
         """
         Get action predictions from the model.
 
@@ -144,12 +151,21 @@ class EndpointPolicy:
 
             # Parse response
             result = response.json()
+
             if isinstance(result, dict) and "predictions" in result:
                 result = result["predictions"]
-            else:
-                result = result[0]  # One item in batch
 
-            return np.array(result)
+            model_pred = ModelPrediction.model_validate(result)
+            if DataType.RGB_IMAGE in model_pred.outputs:
+                rgb_batch = model_pred.outputs[DataType.RGB_IMAGE]
+                # Will be [B, T, CAMs, H, W, C]
+                for b_idx in range(len(rgb_batch)):
+                    for t_idx in range(len(rgb_batch[b_idx])):
+                        for cam_idx in range(len(rgb_batch[b_idx][t_idx])):
+                            rgb_batch[b_idx][t_idx][cam_idx] = self._decode_image(
+                                rgb_batch[b_idx][t_idx][cam_idx]
+                            )
+            return model_pred
 
         except requests.exceptions.RequestException as e:
             raise EndpointError(f"Failed to get prediction from endpoint: {str(e)}")

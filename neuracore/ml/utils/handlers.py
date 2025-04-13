@@ -1,6 +1,5 @@
 import subprocess
 import sys
-from pathlib import Path
 
 # Ensure neuracore is installed
 # ruff: noqa: E402
@@ -12,27 +11,31 @@ subprocess.check_call([
     "neuracore",
 ])
 
-
 import base64
 import io
 import json
 import logging
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
 import torchvision.transforms as T
 from PIL import Image
+from transformers import AutoTokenizer
 from ts.torch_handler.base_handler import BaseHandler
 
+from neuracore.core.nc_types import LanguageData  # Import LanguageData
 from neuracore.core.nc_types import (
     CameraData,
     DatasetDescription,
+    DataType,
     JointData,
     ModelInitDescription,
+    ModelPrediction,
     SyncPoint,
 )
-from neuracore.ml import BatchedInferenceOutputs, BatchedInferenceSamples, MaskableData
+from neuracore.ml import BatchedInferenceSamples, MaskableData
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 
 logger = logging.getLogger(__name__)
@@ -46,6 +49,7 @@ class RobotModelHandler(BaseHandler):
         self.initialized = False
         self.normalization_stats = None
         self.dataset_description: DatasetDescription = None
+        self.tokenizer = None
 
     def _load_pickled_model(self, model_dir, model_file, model_pt_path):
         """
@@ -89,6 +93,15 @@ class RobotModelHandler(BaseHandler):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
         self.model.eval()
+
+        # Initialize tokenizer if language data is supported
+        if DataType.LANGUAGE_DATA in self.model_init_description.input_data_types:
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+                logger.info("Tokenizer initialized!")
+            except Exception as e:
+                logger.error(f"Error loading tokenizer: {e}")
+
         self.initialized = True
         logger.info("Model initialized!")
 
@@ -98,6 +111,13 @@ class RobotModelHandler(BaseHandler):
         buffer = io.BytesIO(img_bytes)
         pil_image = Image.open(buffer)
         return np.array(pil_image)
+
+    def _encode_image(self, image: np.ndarray) -> str:
+        """Encode image as base64 string."""
+        pil_image = Image.fromarray(image.astype("uint8"))
+        buffer = io.BytesIO()
+        pil_image.save(buffer, format="PNG")
+        return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
     def _process_joint_data(
         self, joint_data: list[JointData], max_len: int
@@ -133,6 +153,36 @@ class RobotModelHandler(BaseHandler):
             torch.tensor(mask, dtype=torch.float32),
         )
 
+    def _process_language_data(
+        self, language_data: list[LanguageData], max_len: int = 32
+    ) -> MaskableData:
+        """Process language data using tokenizer."""
+        if self.tokenizer is None:
+            logger.warning("Tokenizer not initialized but language data received")
+            return None
+
+        len(language_data)
+
+        # Tokenize all texts in the batch
+        texts = [ld.text for ld in language_data]
+
+        encoded = self.tokenizer(
+            texts,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=max_len,
+        )
+
+        # Get input ids and attention mask
+        input_ids = encoded["input_ids"]
+        attention_mask = encoded["attention_mask"]
+
+        return MaskableData(
+            torch.tensor(input_ids, dtype=torch.long),
+            torch.tensor(attention_mask, dtype=torch.float32),
+        )
+
     def preprocess(self, requests):
         """Preprocess batch of requests."""
         batch = BatchedInferenceSamples()
@@ -150,21 +200,67 @@ class RobotModelHandler(BaseHandler):
                 [sp.joint_positions for sp in sync_points],
                 self.dataset_description.joint_positions.max_len,
             )
+        if sync_points[0].joint_torques:
+            batch.joint_torques = self._process_joint_data(
+                [sp.joint_torques for sp in sync_points],
+                self.dataset_description.joint_torques.max_len,
+            )
+        if sync_points[0].joint_velocities:
+            batch.joint_velocities = self._process_joint_data(
+                [sp.joint_velocities for sp in sync_points],
+                self.dataset_description.joint_velocities.max_len,
+            )
+        if sync_points[0].joint_target_positions:
+            batch.joint_target_positions = self._process_joint_data(
+                [sp.joint_target_positions for sp in sync_points],
+                self.dataset_description.joint_target_positions.max_len,
+            )
 
         if sync_points[0].rgb_images:
             batch.rgb_images = self._process_image_data(
                 [sp.rgb_images for sp in sync_points],
                 self.dataset_description.max_num_rgb_images,
             )
+
+        # Process language data if available
+        if sync_points[0].language_data:
+            batch.language_tokens = self._process_language_data(
+                [sp.language_data for sp in sync_points],
+                max_len=32,  # Can be parameterized from dataset description
+            )
+
         return batch.to(self.device)
 
-    def inference(self, data: BatchedInferenceSamples) -> torch.Tensor:
+    def inference(self, data: BatchedInferenceSamples) -> ModelPrediction:
         """Run model inference."""
         with torch.no_grad():
-            batch_output: BatchedInferenceOutputs = self.model(data)
-            return batch_output.action_predicitons
+            batch_output: ModelPrediction = self.model(data)
+            return batch_output
 
-    def postprocess(self, inference_output):
+    def postprocess(self, inference_output: ModelPrediction) -> list[dict]:
         """Postprocess model output."""
-        predictions_np = inference_output.cpu().numpy()
-        return [predictions_np.tolist()]
+        if DataType.RGB_IMAGE in inference_output.outputs:
+            # Shape: [B, T, CAMS, 224, 224, 3]
+            rgbs = inference_output.outputs[DataType.RGB_IMAGE]
+            str_rets = [
+                [[] for _ in range(rgbs.shape[1])] for _ in range(rgbs.shape[0])
+            ]
+            for b_idx in range(rgbs.shape[0]):
+                for t_idx in range(rgbs.shape[1]):
+                    for cam_idx in range(rgbs.shape[2]):
+                        image = rgbs[b_idx, t_idx, cam_idx]
+                        if image.shape[0] == 3:
+                            image = np.transpose(image, (1, 2, 0))
+                        if image.dtype != np.uint8:
+                            image = np.clip(image, 0, 255).astype(np.uint8)
+                        str_rets[b_idx][t_idx].append(self._encode_image(image))
+            inference_output.outputs[DataType.RGB_IMAGE] = str_rets
+        if DataType.JOINT_TARGET_POSITIONS in inference_output.outputs:
+            # Shape: [B, T, DIM]
+            joint_target_positions = inference_output.outputs[
+                DataType.JOINT_TARGET_POSITIONS
+            ]
+            inference_output.outputs[DataType.JOINT_TARGET_POSITIONS] = (
+                joint_target_positions.tolist()
+            )
+        return [inference_output.model_dump()]

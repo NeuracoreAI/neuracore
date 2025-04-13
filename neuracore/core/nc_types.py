@@ -1,3 +1,4 @@
+import time
 from enum import Enum
 from typing import Any, Optional
 
@@ -5,16 +6,12 @@ from pydantic import BaseModel, Field
 
 
 class NCData(BaseModel):
-    timestamp: float
+    timestamp: float = Field(default_factory=lambda: time.time())
 
 
 class JointData(NCData):
     values: dict[str, float]
     additional_values: Optional[dict[str, float]] = None
-
-
-class ActionData(NCData):
-    values: dict[str, float]
 
 
 class CameraData(NCData):
@@ -50,13 +47,13 @@ class CustomData(NCData):
 class SyncPoint(BaseModel):
     """Synchronized data point."""
 
-    timestamp: float
+    timestamp: float = Field(default_factory=lambda: time.time())
     joint_positions: Optional[JointData] = None
     joint_velocities: Optional[JointData] = None
     joint_torques: Optional[JointData] = None
+    joint_target_positions: Optional[JointData] = None
     end_effectors: Optional[EndEffectorData] = None
     poses: Optional[dict[str, PoseData]] = None
-    actions: Optional[ActionData] = None
     rgb_images: Optional[dict[str, CameraData]] = None
     depth_images: Optional[dict[str, CameraData]] = None
     point_clouds: Optional[dict[str, PointCloudData]] = None
@@ -70,20 +67,25 @@ class SyncedData(BaseModel):
     end_time: float
 
 
-class DataType(Enum):
+class DataType(str, Enum):
 
     # Robot state
     JOINT_POSITIONS = "joint_positions"
     JOINT_VELOCITIES = "joint_velocities"
     JOINT_TORQUES = "joint_torques"
-
-    # Actions
-    ACTIONS = "actions"
+    JOINT_TARGET_POSITIONS = "joint_target_positions"
+    END_EFFECTORS = "end_effectors"
 
     # Vision
     RGB_IMAGE = "rgb_image"
     DEPTH_IMAGE = "depth_image"
     POINT_CLOUD = "point_cloud"
+
+    # Other
+    POSES = "poses"
+    LANGUAGE = "language"
+    CUSTOM = "custom"
+    LANGUAGE_DATA = "language_data"
 
 
 class DataItemStats(BaseModel):
@@ -94,10 +96,13 @@ class DataItemStats(BaseModel):
 
 
 class DatasetDescription(BaseModel):
-    actions: DataItemStats = Field(default_factory=lambda: DataItemStats())
     joint_positions: DataItemStats = Field(default_factory=lambda: DataItemStats())
-    joint_velocitys: DataItemStats = Field(default_factory=lambda: DataItemStats())
+    joint_velocities: DataItemStats = Field(default_factory=lambda: DataItemStats())
     joint_torques: DataItemStats = Field(default_factory=lambda: DataItemStats())
+    joint_target_positions: DataItemStats = Field(
+        default_factory=lambda: DataItemStats()
+    )
+    language_data: DataItemStats = Field(default_factory=lambda: DataItemStats())
     end_effector_states: DataItemStats = Field(default_factory=lambda: DataItemStats())
     poses: DataItemStats = Field(default_factory=lambda: DataItemStats())
     max_num_rgb_images: int = 0
@@ -108,26 +113,30 @@ class DatasetDescription(BaseModel):
         data_types = []
         if self.joint_positions.max_len > 0:
             data_types.append(DataType.JOINT_POSITIONS)
-        if self.joint_velocitys.max_len > 0:
+        if self.joint_velocities.max_len > 0:
             data_types.append(DataType.JOINT_VELOCITIES)
         if self.joint_torques.max_len > 0:
             data_types.append(DataType.JOINT_TORQUES)
-        if self.actions.max_len > 0:
-            data_types.append(DataType.ACTIONS)
+        if self.joint_target_positions.max_len > 0:
+            data_types.append(DataType.JOINT_TARGET_POSITIONS)
         if self.max_num_rgb_images > 0:
             data_types.append(DataType.RGB_IMAGE)
         if self.max_num_depth_images > 0:
             data_types.append(DataType.DEPTH_IMAGE)
         if self.max_num_point_clouds > 0:
             data_types.append(DataType.POINT_CLOUD)
+        if self.language_data.max_len > 0:
+            data_types.append(DataType.LANGUAGE_DATA)
         return data_types
 
 
 class RecordingDescription(BaseModel):
-    actions: DataItemStats = Field(default_factory=lambda: DataItemStats())
     joint_positions: DataItemStats = Field(default_factory=lambda: DataItemStats())
     joint_velocitys: DataItemStats = Field(default_factory=lambda: DataItemStats())
     joint_torques: DataItemStats = Field(default_factory=lambda: DataItemStats())
+    joint_target_positions: DataItemStats = Field(
+        default_factory=lambda: DataItemStats()
+    )
     end_effector_states: DataItemStats = Field(default_factory=lambda: DataItemStats())
     poses: DataItemStats = Field(default_factory=lambda: DataItemStats())
     num_rgb_images: int = 0
@@ -143,8 +152,8 @@ class RecordingDescription(BaseModel):
             data_types.append(DataType.JOINT_VELOCITIES)
         if self.joint_torques.max_len > 0:
             data_types.append(DataType.JOINT_TORQUES)
-        if self.actions.max_len > 0:
-            data_types.append(DataType.ACTIONS)
+        if self.joint_target_positions.max_len > 0:
+            data_types.append(DataType.JOINT_TARGET_POSITIONS)
         if self.num_rgb_images > 0:
             data_types.append(DataType.RGB_IMAGE)
         if self.num_depth_images > 0:
@@ -158,4 +167,13 @@ class ModelInitDescription(BaseModel):
     """Description of a Neuracore model."""
 
     dataset_description: DatasetDescription
-    action_prediction_horizon: int = 1
+    input_data_types: list[DataType]
+    output_data_types: list[DataType]
+    output_prediction_horizon: int = 1
+
+
+class ModelPrediction(BaseModel):
+    """Synchronized data point."""
+
+    outputs: dict[DataType, Any] = Field(default_factory=dict)
+    prediction_time: Optional[float] = None

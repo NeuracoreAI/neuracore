@@ -13,7 +13,6 @@ from neuracore.core.const import API_URL
 from neuracore.core.dataset import Dataset, EpisodeIterator
 from neuracore.core.exceptions import DatasetError
 from neuracore.core.nc_types import (
-    ActionData,
     CameraData,
     JointData,
     SyncedData,
@@ -138,7 +137,7 @@ def synced_data():
     frame1 = SyncPoint(
         timestamp=1000.0,
         joint_positions=JointData(timestamp=1000.0, values={"joint1": 0.5}),
-        actions=ActionData(timestamp=1000.0, values={"action1": 1.0}),
+        joint_target_positions=JointData(timestamp=2000.0, values={"joint1": 1.0}),
         rgb_images={"cam1": camera1},
         depth_images={"cam2": camera2},
     )
@@ -146,7 +145,7 @@ def synced_data():
     frame2 = SyncPoint(
         timestamp=2000.0,
         joint_positions=JointData(timestamp=2000.0, values={"joint1": 0.7}),
-        actions=ActionData(timestamp=2000.0, values={"action1": 1.2}),
+        joint_target_positions=JointData(timestamp=2000.0, values={"joint1": 1.2}),
         rgb_images={"cam1": CameraData(timestamp=2000.0, frame_idx=1)},
         depth_images={"cam2": CameraData(timestamp=2000.0, frame_idx=1)},
     )

@@ -111,7 +111,7 @@ def test_connect_robot(temp_config_dir, mock_auth_requests, reset_neuracore, moc
     mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
 
     # Connect robot
-    robot = nc.connect_robot("test_robot", mock_urdf)
+    robot = nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Verify robot connection
     assert robot is not None

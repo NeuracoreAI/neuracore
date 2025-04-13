@@ -9,33 +9,43 @@ import torch.nn as nn
 from neuracore.core.nc_types import (
     DataItemStats,
     DatasetDescription,
+    DataType,
     ModelInitDescription,
+    ModelPrediction,
 )
 from neuracore.ml import (
-    ActionMaskableData,
-    BatchedInferenceOutputs,
     BatchedInferenceSamples,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     MaskableData,
 )
 from neuracore.ml.algorithms.cnnmlp.cnnmlp import CNNMLP
+from neuracore.ml.ml_types import BatchedData
 from neuracore.ml.utils.validate import run_validation
 
 BS = 2
 CAMS = 1
 JOINT_POSITION_DIM = 32
-ACTION_DIM = 7
+OUTPUT_PRED_DIM = JOINT_POSITION_DIM
 PRED_HORIZON = 10
 
 
 @pytest.fixture
 def model_init_description() -> ModelInitDescription:
     dataset_description = DatasetDescription(
-        actions=DataItemStats(
-            mean=np.zeros(ACTION_DIM, dtype=float), std=np.ones(ACTION_DIM, dtype=float)
-        ),
         joint_positions=DataItemStats(
+            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
+            std=np.ones(JOINT_POSITION_DIM, dtype=float),
+        ),
+        joint_target_positions=DataItemStats(
+            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
+            std=np.ones(JOINT_POSITION_DIM, dtype=float),
+        ),
+        joint_velocities=DataItemStats(
+            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
+            std=np.ones(JOINT_POSITION_DIM, dtype=float),
+        ),
+        joint_torques=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
         ),
@@ -43,7 +53,14 @@ def model_init_description() -> ModelInitDescription:
     )
     return ModelInitDescription(
         dataset_description=dataset_description,
-        action_prediction_horizon=PRED_HORIZON,
+        input_data_types=[
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+            DataType.RGB_IMAGE,
+        ],
+        output_data_types=[DataType.JOINT_TARGET_POSITIONS],
+        output_prediction_horizon=PRED_HORIZON,
     )
 
 
@@ -55,26 +72,46 @@ def model_config() -> dict:
 @pytest.fixture
 def sample_batch() -> BatchedTrainingSamples:
     return BatchedTrainingSamples(
-        joint_positions=MaskableData(
-            torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+        inputs=BatchedData(
+            joint_positions=MaskableData(
+                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+            ),
+            joint_velocities=MaskableData(
+                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+            ),
+            joint_torques=MaskableData(
+                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+            ),
+            rgb_images=MaskableData(
+                torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
+                torch.ones(BS, CAMS, dtype=torch.float32),
+            ),
         ),
-        rgb_images=MaskableData(
-            torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
-            torch.ones(BS, CAMS, dtype=torch.float32),
+        outputs=BatchedData(
+            joint_target_positions=MaskableData(
+                torch.randn(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
+                torch.ones(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
+            )
         ),
-        actions=ActionMaskableData(
-            torch.randn(BS, PRED_HORIZON, ACTION_DIM, dtype=torch.float32),
-            torch.ones(BS, ACTION_DIM, dtype=torch.float32),
-            torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
-        ),
+        output_predicition_mask=torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
     )
 
 
 @pytest.fixture
-def sample_inference_batch() -> BatchedTrainingSamples:
+def sample_inference_batch() -> BatchedInferenceSamples:
     return BatchedInferenceSamples(
         joint_positions=MaskableData(
+            torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+            torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+        ),
+        joint_velocities=MaskableData(
+            torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+            torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+        ),
+        joint_torques=MaskableData(
             torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
             torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
         ),
@@ -117,8 +154,13 @@ def test_model_forward(
 ):
     model = CNNMLP(model_init_description, **model_config)
     output = model(sample_inference_batch)
-    assert isinstance(output, BatchedInferenceOutputs)
-    assert output.action_predicitons.shape == (BS, PRED_HORIZON, ACTION_DIM)
+    assert isinstance(output, ModelPrediction)
+    assert DataType.JOINT_TARGET_POSITIONS in output.outputs
+    assert output.outputs[DataType.JOINT_TARGET_POSITIONS].shape == (
+        BS,
+        PRED_HORIZON,
+        OUTPUT_PRED_DIM,
+    )
 
 
 def test_model_backward(

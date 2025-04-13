@@ -6,6 +6,7 @@ import requests
 from ..core.auth import get_auth
 from ..core.const import API_URL
 from ..core.dataset import Dataset
+from ..core.nc_types import DataType
 
 
 def _get_algorithms() -> list[dict]:
@@ -37,6 +38,8 @@ def start_training_run(
     gpu_type: str,
     num_gpus: int,
     frequency: int,
+    input_data_types: list[DataType] = None,
+    output_data_types: list[DataType] = None,
 ) -> dict:
     """
     Start a new training run.
@@ -67,6 +70,20 @@ def start_training_run(
     for algorithm_json in algorithm_jsons:
         if algorithm_json["name"] == algorithm_name:
             algorithm_id = algorithm_json["id"]
+            if input_data_types is None:
+                input_data_types = [
+                    DataType[supported_input_data_type]
+                    for supported_input_data_type in algorithm_json[
+                        "supported_input_data_types"
+                    ]
+                ]
+            if output_data_types is None:
+                output_data_types = [
+                    DataType[supported_output_data_type]
+                    for supported_output_data_type in algorithm_json[
+                        "supported_output_data_types"
+                    ]
+                ]
             break
 
     if algorithm_id is None:
@@ -80,6 +97,8 @@ def start_training_run(
         "gpu_type": gpu_type,
         "num_gpus": num_gpus,
         "frequency": str(frequency),
+        "input_data_types": input_data_types,
+        "output_data_types": output_data_types,
     }
 
     auth = get_auth()
