@@ -3,20 +3,17 @@ from typing import Optional
 
 import numpy as np
 import torch
-import torchvision.transforms as T
-from torch.utils.data import Dataset
-from transformers import AutoTokenizer
 
 from neuracore.core.nc_types import DataItemStats, DatasetDescription, DataType
 from neuracore.ml import BatchedTrainingSamples, MaskableData
-from neuracore.ml.ml_types import BatchedData
+from neuracore.ml.utils.neuracore_dataset import NeuracoreDataset
 
 logger = logging.getLogger(__name__)
 
 TrainingSample = BatchedTrainingSamples
 
 
-class DummyDataset(Dataset):
+class DummyDataset(NeuracoreDataset):
     """
     A small dummy dataset for validating algorithm plumbing.
 
@@ -32,6 +29,7 @@ class DummyDataset(Dataset):
         num_episodes: int = 10,
         output_prediction_horizon: int = 5,
         language_model_name: str = "bert-base-uncased",
+        language_max_token_length: int = 512,
     ):
         """
         Initialize the dummy dataset.
@@ -44,28 +42,17 @@ class DummyDataset(Dataset):
             output_prediction_horizon: Length of the action sequence
             language_model_name: Name of the language model for tokenization
         """
-        self.input_data_types = input_data_types
-        self.output_data_types = output_data_types
+        super().__init__(
+            input_data_types=input_data_types,
+            output_data_types=output_data_types,
+            output_prediction_horizon=output_prediction_horizon,
+            language_model_name=language_model_name,
+            language_max_token_length=language_max_token_length,
+        )
         self.num_samples = num_samples
         self.num_episodes = num_episodes
-        self.output_prediction_horizon = output_prediction_horizon
-        self.language_model_name = language_model_name
-
-        self.data_types = set(input_data_types + output_data_types)
-
-        # Setup camera transform to match EpisodicDataset
-        self.camera_transform = T.Compose([
-            T.Resize((224, 224)),
-            T.ToTensor(),
-        ])
 
         self.image_size = (224, 224)
-
-        # Create tokenizer if language data is used
-        self.tokenizer = None
-        if DataType.LANGUAGE_DATA in self.data_types:
-            self.tokenizer = AutoTokenizer.from_pretrained(language_model_name)
-            self.max_token_length = 32  # Max token length for dummy data
 
         # Sample instructions for dummy data
         self.sample_instructions = [
@@ -103,33 +90,13 @@ class DummyDataset(Dataset):
         if DataType.LANGUAGE_DATA in self.data_types:
             # Add language data stats to dataset description
             self.dataset_description.language_data = DataItemStats(
-                mean=np.zeros(1), std=np.ones(1), max_len=self.max_token_length
+                mean=np.zeros(1), std=np.ones(1), max_len=self.language_max_token_length
             )
 
         self._error_count = 0
         self._max_error_count = 1
 
-    def _tokenize_text(self, text: str) -> tuple[torch.Tensor, torch.Tensor]:
-        """Tokenize text using the specified tokenizer."""
-        if self.tokenizer is None:
-            raise ValueError("Tokenizer not initialized but language data requested")
-
-        # Tokenize the text
-        tokens = self.tokenizer(
-            text,
-            padding="max_length",
-            max_length=self.max_token_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-
-        # Extract token ids and attention mask
-        input_ids = tokens["input_ids"].squeeze(0)
-        attention_mask = tokens["attention_mask"].squeeze(0)
-
-        return input_ids, attention_mask
-
-    def _load_sample(
+    def load_sample(
         self, episode_idx: int, timestep: Optional[int] = None
     ) -> TrainingSample:
         """Generate a random sample in the format of EpisodicDataset."""
@@ -222,82 +189,28 @@ class DummyDataset(Dataset):
     def __len__(self) -> int:
         return self.num_samples
 
-    def __getitem__(self, idx: int) -> TrainingSample:
-        """Get a sample from the dataset."""
-        while self._error_count < self._max_error_count:
-            try:
-                episode_idx = idx % self.num_episodes
-                return self._load_sample(episode_idx)
-            except Exception as e:
-                self._error_count += 1
-                logger.error(f"Error loading item {idx}: {str(e)}")
-                if self._error_count >= self._max_error_count:
-                    raise e
-
-    def _collate_fn(
-        self, samples: list[BatchedData], data_types: list[DataType], expand_data: bool
-    ) -> BatchedData:
-        """Collate a list of samples into a single batch."""
-        bd = BatchedData()
-        if DataType.JOINT_POSITIONS in data_types:
-            bd.joint_positions = MaskableData(
-                torch.stack([s.joint_positions.data for s in samples]),
-                torch.stack([s.joint_positions.mask for s in samples]),
-            )
-        if DataType.JOINT_VELOCITIES in data_types:
-            bd.joint_velocities = MaskableData(
-                torch.stack([s.joint_velocities.data for s in samples]),
-                torch.stack([s.joint_velocities.mask for s in samples]),
-            )
-        if DataType.JOINT_TORQUES in data_types:
-            bd.joint_torques = MaskableData(
-                torch.stack([s.joint_torques.data for s in samples]),
-                torch.stack([s.joint_torques.mask for s in samples]),
-            )
-        if DataType.JOINT_TARGET_POSITIONS in data_types:
-            bd.joint_target_positions = MaskableData(
-                torch.stack([s.joint_target_positions.data for s in samples]),
-                torch.stack([s.joint_target_positions.mask for s in samples]),
-            )
-        if DataType.RGB_IMAGE in data_types:
-            bd.rgb_images = MaskableData(
-                torch.stack([s.rgb_images.data for s in samples]),
-                torch.stack([s.rgb_images.mask for s in samples]),
-            )
-        if DataType.LANGUAGE_DATA in data_types:
-            bd.language_tokens = MaskableData(
-                torch.cat([s.language_tokens.data for s in samples]),
-                torch.cat([s.language_tokens.mask for s in samples]),
-            )
-
-        if expand_data:
-            for key in bd.__dict__.keys():
-                if bd.__dict__[key] is not None:
-                    if isinstance(bd.__dict__[key], MaskableData):
-                        # Skip language tokens for expansion
-                        if key == "language_tokens":
-                            continue
-                        data = bd.__dict__[key].data.unsqueeze(1)
-                        data = data.expand(
-                            -1, self.output_prediction_horizon, *data.shape[2:]
-                        )
-                        mask = bd.__dict__[key].mask.unsqueeze(1)
-                        mask = mask.expand(
-                            -1, self.output_prediction_horizon, *mask.shape[2:]
-                        )
-                        bd.__dict__[key].data = data
-                        bd.__dict__[key].mask = mask
-        return bd
-
     def collate_fn(self, samples: list[TrainingSample]) -> BatchedTrainingSamples:
         """Collate a list of samples into a single batch."""
+        bd = self._collate_fn([s.outputs for s in samples], self.output_data_types)
+        for key in bd.__dict__.keys():
+            if bd.__dict__[key] is not None:
+                if isinstance(bd.__dict__[key], MaskableData):
+                    # Skip language tokens for expansion
+                    if key == "language_tokens":
+                        continue
+                    data = bd.__dict__[key].data.unsqueeze(1)
+                    data = data.expand(
+                        -1, self.output_prediction_horizon, *data.shape[2:]
+                    )
+                    mask = bd.__dict__[key].mask.unsqueeze(1)
+                    mask = mask.expand(
+                        -1, self.output_prediction_horizon, *mask.shape[2:]
+                    )
+                    bd.__dict__[key].data = data
+                    bd.__dict__[key].mask = mask
         return BatchedTrainingSamples(
-            inputs=self._collate_fn(
-                [s.inputs for s in samples], self.input_data_types, False
-            ),
-            outputs=self._collate_fn(
-                [s.outputs for s in samples], self.output_data_types, True
-            ),
+            inputs=self._collate_fn([s.inputs for s in samples], self.input_data_types),
+            outputs=bd,
             output_predicition_mask=torch.stack(
                 [sample.output_predicition_mask for sample in samples]
             ),

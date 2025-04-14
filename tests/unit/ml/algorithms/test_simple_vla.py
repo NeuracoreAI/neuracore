@@ -28,7 +28,7 @@ CAMS = 1
 JOINT_POSITION_DIM = 32
 OUTPUT_PRED_DIM = JOINT_POSITION_DIM
 PRED_HORIZON = 10
-LANGUAGE_MAX_LEN = 32  # Maximum length for language tokens
+LANGUAGE_MAX_LEN = 512  # Maximum length for language tokens
 
 
 @pytest.fixture

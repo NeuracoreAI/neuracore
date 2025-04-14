@@ -60,11 +60,16 @@ class CNNMLP(NeuracoreModel):
             + hidden_state_dim
         )
 
+        self.action_data_type = self.model_init_description.output_data_types[0]
+        self.output_prediction_horizon = self.output_prediction_horizon
+        if DataType.JOINT_TARGET_POSITIONS == self.action_data_type:
+            action_data_item_stats = self.dataset_description.joint_target_positions
+        else:
+            action_data_item_stats = self.dataset_description.joint_positions
+        self.max_output_size = action_data_item_stats.max_len
+
         # Predict entire sequence at once
-        self.output_size = (
-            self.dataset_description.joint_target_positions.max_len
-            * self.output_prediction_horizon
-        )
+        self.output_size = self.max_output_size * self.output_prediction_horizon
         self.mlp = self._build_mlp(
             input_dim=mlp_input_dim,
             hidden_dim=hidden_dim,
@@ -76,9 +81,6 @@ class CNNMLP(NeuracoreModel):
             T.Resize((224, 224)),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         )
-
-        self.output_prediction_horizon = self.output_prediction_horizon
-        self.max_output_size = self.dataset_description.joint_target_positions.max_len
 
         state_mean = np.concatenate([
             self.dataset_description.joint_positions.mean,
@@ -92,13 +94,8 @@ class CNNMLP(NeuracoreModel):
         ])
         self.joint_state_mean = self._to_torch_float_tensor(state_mean)
         self.joint_state_std = self._to_torch_float_tensor(state_std)
-
-        self.joint_target_mean = self._to_torch_float_tensor(
-            self.dataset_description.joint_target_positions.mean
-        )
-        self.joint_target_std = self._to_torch_float_tensor(
-            self.dataset_description.joint_target_positions.std
-        )
+        self.action_mean = self._to_torch_float_tensor(action_data_item_stats.mean)
+        self.action_std = self._to_torch_float_tensor(action_data_item_stats.std)
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
         """Convert list of floats to torch tensor."""
@@ -136,11 +133,9 @@ class CNNMLP(NeuracoreModel):
         """Preprocess the states."""
         return (joint_state - self.joint_state_mean) / self.joint_state_std
 
-    def _preprocess_target_joint_pos(
-        self, target_joint_pos: torch.FloatTensor
-    ) -> torch.FloatTensor:
+    def _preprocess_actions(self, actions: torch.FloatTensor) -> torch.FloatTensor:
         """Preprocess the actions."""
-        return (target_joint_pos - self.joint_target_mean) / self.joint_target_std
+        return (actions - self.action_mean) / self.action_std
 
     def _predict_action(self, batch: BatchedInferenceSamples) -> torch.FloatTensor:
         """Predict action for the given batch."""
@@ -194,10 +189,10 @@ class CNNMLP(NeuracoreModel):
         t = time.time()
         action_preds = self._predict_action(batch)
         prediction_time = time.time() - t
-        predictions = (action_preds * self.joint_target_std) + self.joint_target_mean
+        predictions = (action_preds * self.action_std) + self.action_mean
         predictions = predictions.detach().cpu().numpy()
         return ModelPrediction(
-            outputs={DataType.JOINT_TARGET_POSITIONS: predictions},
+            outputs={self.action_data_type: predictions},
             prediction_time=prediction_time,
         )
 
@@ -209,9 +204,12 @@ class CNNMLP(NeuracoreModel):
             joint_torques=batch.inputs.joint_torques,
             rgb_images=batch.inputs.rgb_images,
         )
-        target_actions = self._preprocess_target_joint_pos(
-            batch.outputs.joint_target_positions.data
-        )
+        if self.action_data_type == DataType.JOINT_TARGET_POSITIONS:
+            action_data = batch.outputs.joint_target_positions.data
+        else:
+            action_data = batch.outputs.joint_positions.data
+
+        target_actions = self._preprocess_actions(action_data)
         action_predicitons = self._predict_action(inference_sample)
         losses, metrics = {}, {}
         if self.training:
@@ -254,4 +252,4 @@ class CNNMLP(NeuracoreModel):
     @staticmethod
     def get_supported_output_data_types() -> list[DataType]:
         """Return the data types supported by the model."""
-        return [DataType.JOINT_TARGET_POSITIONS]
+        return [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]

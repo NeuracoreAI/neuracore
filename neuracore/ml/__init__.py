@@ -1,4 +1,5 @@
 from .ml_types import (
+    BatchedData,
     BatchedInferenceSamples,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
@@ -12,4 +13,5 @@ __all__ = [
     "BatchedTrainingSamples",
     "BatchedTrainingOutputs",
     "MaskableData",
+    "BatchedData",
 ]
