@@ -20,7 +20,7 @@ from ...core.nc_types import (
     ModelInitDescription,
     SyncPoint,
 )
-from ..ml_types import BatchedTrainingOutputs, BatchedTrainingSamples
+from ..ml_types import BatchedTrainingOutputs, BatchedTrainingSamples, MaskableData
 from .algorithm_loader import AlgorithmLoader
 from .dummy_dataset import DummyDataset
 from .mar import create_mar
@@ -57,6 +57,18 @@ def _encode_image(image: np.ndarray) -> str:
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
+def _create_joint_data(maskable_data: MaskableData) -> JointData:
+    """Convert MaskableData to JointData."""
+    t = time.time()
+    return JointData(
+        timestamp=t,
+        values={
+            f"joint{i}": v
+            for i, v in enumerate(maskable_data.data[0].cpu().numpy().tolist())
+        },
+    )
+
+
 def run_validation(
     output_dir: Path,
     algorithm_dir: Path,
@@ -82,11 +94,18 @@ def run_validation(
         logger.info(f"Loaded model class: {model_class.__name__}")
         algo_check.successfully_loaded_file = True
 
-        supported_data_types: list[DataType] = model_class.get_supported_data_types()
+        supported_input_data_types: list[DataType] = (
+            model_class.get_supported_input_data_types()
+        )
+        supported_output_data_types: list[DataType] = (
+            model_class.get_supported_output_data_types()
+        )
 
         dataset = DummyDataset(
             num_samples=5,
-            data_types=supported_data_types,
+            input_data_types=supported_input_data_types,
+            output_data_types=supported_output_data_types,
+            language_model_name=model_class.get_language_model_name(),
         )
 
         # Create a minimal dataloader
@@ -101,7 +120,9 @@ def run_validation(
 
         model_init_description = ModelInitDescription(
             dataset_description=dataset.dataset_description,
-            action_prediction_horizon=dataset.action_sequence_length,
+            input_data_types=supported_input_data_types,
+            output_data_types=supported_output_data_types,
+            output_prediction_horizon=dataset.output_prediction_horizon,
         )
 
         # Check 1: Can initialize the model
@@ -171,7 +192,6 @@ def run_validation(
         logger.info("Testing TorchScript export")
         with tempfile.TemporaryDirectory():
             try:
-                # artifacts_dir = Path(tmp_dir)
                 artifacts_dir = output_dir
                 create_mar(model, artifacts_dir)
 
@@ -182,6 +202,7 @@ def run_validation(
                 logger.error(f"TorchScript export failed: {str(e)}")
                 raise ValueError(f"Model cannot be exported to TorchScript: {str(e)}")
 
+            policy = None
             try:
                 # Check if the exported model can be loaded
                 policy = nc.connect_local_endpoint(
@@ -189,28 +210,46 @@ def run_validation(
                 )
 
                 # Log some data to send to the model
-                t = time.time()
-                jp = batch.joint_positions.data[0].cpu().numpy().tolist()
-                jp = JointData(
-                    timestamp=t, values={f"joint{i}": v for i, v in enumerate(jp)}
-                )
-                rgbs = (
-                    batch.rgb_images.data[0].cpu().numpy().transpose(0, 2, 3, 1) * 255
-                ).astype(np.uint8)
-                rgbs = {
-                    f"camera{i}": CameraData(timestamp=t, frame=_encode_image(v))
-                    for i, v in enumerate(rgbs)
-                }
-                sync_point = SyncPoint(
-                    timestamp=t,
-                    joint_positions=jp,
-                    rgb_images=rgbs,
-                )
+                sync_point = SyncPoint(timestamp=time.time())
+                if batch.inputs.joint_positions:
+                    sync_point.joint_positions = _create_joint_data(
+                        batch.inputs.joint_positions
+                    )
+                if batch.inputs.joint_velocities:
+                    sync_point.joint_velocities = _create_joint_data(
+                        batch.inputs.joint_velocities
+                    )
+                if batch.inputs.joint_torques:
+                    sync_point.joint_torques = _create_joint_data(
+                        batch.inputs.joint_torques
+                    )
+                if batch.inputs.joint_target_positions:
+                    sync_point.joint_target_positions = _create_joint_data(
+                        batch.inputs.joint_target_positions
+                    )
+                if batch.inputs.rgb_images:
+                    rgbs = (
+                        batch.inputs.rgb_images.data[0]
+                        .cpu()
+                        .numpy()
+                        .transpose(0, 2, 3, 1)
+                        * 255
+                    ).astype(np.uint8)
+                    rgbs = {
+                        f"camera{i}": CameraData(
+                            timestamp=time.time(), frame=_encode_image(v)
+                        )
+                        for i, v in enumerate(rgbs)
+                    }
+                    sync_point.rgb_images = rgbs
+
                 action = policy.predict(sync_point)
                 logger.info(f"Exported model loaded successfully, action: {action}")
                 policy.disconnect()
                 algo_check.successfully_launched_endpoint = True
             except Exception as e:
+                if policy:
+                    policy.disconnect()
                 logger.error(f"Failed to load exported model: {str(e)}")
                 raise ValueError(f"Model cannot be loaded from export: {str(e)}")
 

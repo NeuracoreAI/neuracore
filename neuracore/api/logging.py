@@ -10,8 +10,8 @@ from neuracore.api.core import _get_robot
 from neuracore.core.streaming.client_stream.client_stream_manager import (
     get_robot_streaming_manager,
 )
+
 from ..core.nc_types import (
-    ActionData,
     CameraData,
     CustomData,
     EndEffectorData,
@@ -181,7 +181,7 @@ def log_synced_data(
     joint_velocities: dict[str, float],
     joint_torques: dict[str, float],
     gripper_open_amounts: dict[str, float],
-    action: dict[str, float],
+    joint_target_positions: dict[str, float],
     rgb_data: dict[str, np.ndarray],
     depth_data: dict[str, np.ndarray],
     point_cloud_data: dict[str, np.ndarray],
@@ -200,13 +200,18 @@ def log_synced_data(
     log_joint_torques(
         joint_torques, robot_name=robot_name, instance=instance, timestamp=timestamp
     )
+    log_joint_target_positions(
+        joint_target_positions,
+        robot_name=robot_name,
+        instance=instance,
+        timestamp=timestamp,
+    )
     log_gripper_data(
         gripper_open_amounts,
         robot_name=robot_name,
         instance=instance,
         timestamp=timestamp,
     )
-    log_action(action, robot_name=robot_name, instance=instance, timestamp=timestamp)
     for camera_id, image in rgb_data.items():
         log_rgb(
             camera_id,
@@ -299,6 +304,38 @@ def log_joint_positions(
     _log_joint_data(
         "joint_positions",
         positions,
+        additional_urdf_positions,
+        robot_name,
+        instance,
+        timestamp,
+    )
+
+
+def log_joint_target_positions(
+    target_positions: dict[str, float],
+    additional_urdf_positions: Optional[dict[str, float]] = None,
+    robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
+    timestamp: Optional[float] = None,
+) -> None:
+    """
+    Log joint target positions for a robot.
+
+    Args:
+        target_positions: Dictionary mapping joint names to positions (in radians)
+        additional_urdf_positions: Dictionary mapping joint names to
+            positions (in radians). These wont ever be included for
+            training, and instead used for visualization purposes
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+    """
+    _log_joint_data(
+        "joint_target_positions",
+        target_positions,
         additional_urdf_positions,
         robot_name,
         instance,
@@ -404,49 +441,6 @@ def log_gripper_data(
     stream.log(EndEffectorData(timestamp=timestamp, open_amounts=open_amounts))
 
 
-def log_action(
-    action: dict[str, float],
-    robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
-    timestamp: Optional[float] = None,
-) -> None:
-    """
-    Log action for a robot.
-
-    Args:
-        action: Dictionary mapping joint names to positions (in radians)
-        robot_name: Optional robot ID. If not provided, uses the last initialized robot
-        instance: Optional instance number of the robot
-        timestamp: Optional timestamp
-
-    Raises:
-        RobotError: If no robot is active and no robot_name provided
-    """
-    timestamp = timestamp or time.time()
-    if not isinstance(action, dict):
-        raise ValueError("Actions must be a dictionary of floats")
-    for key, value in action.items():
-        if not isinstance(value, float):
-            raise ValueError(f"Actions must be floats. {key} is not a float.")
-    robot = _get_robot(robot_name, instance)
-    joint_group_id = _create_group_id_from_dict(action)
-    str_id = f"{robot.instanced_id}_{joint_group_id}_action"
-    stream = GlobalSingleton()._data_streams.get(str_id)
-    if stream is None:
-        stream = JsonDataStream(f"actions/{joint_group_id}.json")
-        GlobalSingleton()._data_streams[str_id] = stream
-
-    if (
-        robot.instanced_id in GlobalSingleton()._active_recording_ids
-        and not stream.is_recording()
-    ):
-        stream.start_recording(
-            GlobalSingleton()._active_recording_ids[robot.instanced_id]
-        )
-
-    stream.log(ActionData(timestamp=timestamp, values=action))
-
-
 def log_language(
     language: str,
     robot_name: Optional[str] = None,
@@ -454,7 +448,7 @@ def log_language(
     timestamp: Optional[float] = None,
 ) -> None:
     """
-    Log action for a robot.
+    Log language for a robot.
 
     Args:
         language: A language string associated with this timestep

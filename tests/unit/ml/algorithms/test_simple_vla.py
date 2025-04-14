@@ -19,7 +19,7 @@ from neuracore.ml import (
     BatchedTrainingSamples,
     MaskableData,
 )
-from neuracore.ml.algorithms.act.act import ACT
+from neuracore.ml.algorithms.simple_vla.simple_vla import SimpleVLA
 from neuracore.ml.ml_types import BatchedData
 from neuracore.ml.utils.validate import run_validation
 
@@ -28,6 +28,7 @@ CAMS = 1
 JOINT_POSITION_DIM = 32
 OUTPUT_PRED_DIM = JOINT_POSITION_DIM
 PRED_HORIZON = 10
+LANGUAGE_MAX_LEN = 512  # Maximum length for language tokens
 
 
 @pytest.fixture
@@ -36,20 +37,29 @@ def model_init_description() -> ModelInitDescription:
         joint_positions=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
+            max_len=JOINT_POSITION_DIM,
         ),
         joint_target_positions=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
+            max_len=JOINT_POSITION_DIM,
         ),
         joint_velocities=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
+            max_len=JOINT_POSITION_DIM,
         ),
         joint_torques=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
+            max_len=JOINT_POSITION_DIM,
         ),
         max_num_rgb_images=CAMS,
+        language_data=DataItemStats(
+            mean=np.zeros(1, dtype=float),
+            std=np.ones(1, dtype=float),
+            max_len=LANGUAGE_MAX_LEN,
+        ),
     )
     return ModelInitDescription(
         dataset_description=dataset_description,
@@ -58,6 +68,7 @@ def model_init_description() -> ModelInitDescription:
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
             DataType.RGB_IMAGE,
+            DataType.LANGUAGE_DATA,
         ],
         output_data_types=[DataType.JOINT_TARGET_POSITIONS],
         output_prediction_horizon=PRED_HORIZON,
@@ -89,6 +100,10 @@ def sample_batch() -> BatchedTrainingSamples:
                 torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
                 torch.ones(BS, CAMS, dtype=torch.float32),
             ),
+            language_tokens=MaskableData(  # Add language tokens input
+                torch.randint(0, 1000, (BS, LANGUAGE_MAX_LEN), dtype=torch.long),
+                torch.ones(BS, LANGUAGE_MAX_LEN, dtype=torch.float32),
+            ),
         ),
         outputs=BatchedData(
             joint_target_positions=MaskableData(
@@ -119,6 +134,10 @@ def sample_inference_batch() -> BatchedInferenceSamples:
             torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
             torch.ones(BS, CAMS, dtype=torch.float32),
         ),
+        language_tokens=MaskableData(  # Add language tokens for inference
+            torch.randint(0, 1000, (BS, LANGUAGE_MAX_LEN), dtype=torch.long),
+            torch.ones(BS, LANGUAGE_MAX_LEN, dtype=torch.float32),
+        ),
     )
 
 
@@ -143,7 +162,7 @@ def mock_dataloader(sample_batch):
 def test_model_construction(
     model_init_description: ModelInitDescription, model_config: dict
 ):
-    model = ACT(model_init_description, **model_config)
+    model = SimpleVLA(model_init_description, **model_config)
     assert isinstance(model, nn.Module)
 
 
@@ -152,7 +171,7 @@ def test_model_forward(
     model_config: dict,
     sample_inference_batch: BatchedInferenceSamples,
 ):
-    model = ACT(model_init_description, **model_config)
+    model = SimpleVLA(model_init_description, **model_config)
     output = model(sample_inference_batch)
     assert isinstance(output, ModelPrediction)
     assert DataType.JOINT_TARGET_POSITIONS in output.outputs
@@ -168,11 +187,11 @@ def test_model_backward(
     model_config: dict,
     sample_batch: BatchedTrainingSamples,
 ):
-    model = ACT(model_init_description, **model_config)
+    model = SimpleVLA(model_init_description, **model_config)
     output: BatchedTrainingOutputs = model.training_step(sample_batch)
 
     # Compute loss
-    loss = output.losses["l1_and_kl_loss"]
+    loss = output.losses["mse_loss"]
 
     # Perform backward pass
     loss.backward()
@@ -185,7 +204,7 @@ def test_model_backward(
 
 
 def test_run_validation(tmp_path: Path):
-    algorithm_dir = Path(inspect.getfile(ACT)).parent
+    algorithm_dir = Path(inspect.getfile(SimpleVLA)).parent
     _, error_msg = run_validation(
         output_dir=tmp_path,
         algorithm_dir=algorithm_dir,

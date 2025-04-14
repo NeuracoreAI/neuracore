@@ -31,7 +31,7 @@ class RecordingNotification(BaseModel):
 
 class RobotStreamTrack(BaseModel):
     robot_id: str
-    robot_instance:int
+    robot_instance: int
     stream_id: str
     kind: str
     label: str

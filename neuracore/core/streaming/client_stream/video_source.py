@@ -30,7 +30,6 @@ class VideoSource:
     def add_frame(self, frame_data: np.ndarray):
         self._last_frame = frame_data
 
-
     def get_last_frame(self) -> av.VideoFrame:
         return av.VideoFrame.from_ndarray(self._last_frame, format="rgb24")
 

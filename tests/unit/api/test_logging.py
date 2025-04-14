@@ -6,7 +6,7 @@ from neuracore.core.const import API_URL
 from neuracore.core.exceptions import RobotError
 
 
-def test_log_actions(
+def test_log_joints_and_cams(
     temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, monkeypatch
 ):
     """Test logging actions and sensor data."""
@@ -17,12 +17,11 @@ def test_log_actions(
     mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
 
     # Connect robot
-    nc.connect_robot("test_robot", mock_urdf)
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Test logging functions
     try:
         nc.log_joint_positions({"vx300s_left/waist": 0.5, "vx300s_right/waist": -0.3})
-        nc.log_action({"action1": 0.1, "action2": 0.2})
 
         # Uint8 image
         rgb_uint8 = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
@@ -43,7 +42,7 @@ def test_log_with_extrinsics_intrinsics(
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
-    nc.connect_robot("test_robot", mock_urdf)
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Create test data
     rgb_uint8 = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
@@ -65,7 +64,7 @@ def test_log_gripper_data(
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
-    nc.connect_robot("test_robot", mock_urdf)
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Log gripper data
     nc.log_gripper_data({"gripper1": 0.5, "gripper2": 0.7})
@@ -78,7 +77,7 @@ def test_log_joint_velocities_and_torques(
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
-    nc.connect_robot("test_robot", mock_urdf)
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Log joint velocities
     nc.log_joint_velocities({"joint1": 0.5, "joint2": -0.3})
@@ -92,7 +91,7 @@ def test_log_language(temp_config_dir, mock_auth_requests, reset_neuracore, mock
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
-    nc.connect_robot("test_robot", mock_urdf)
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Log language
     nc.log_language("Pick up the red cube")
@@ -105,7 +104,7 @@ def test_log_custom_data(
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
-    nc.connect_robot("test_robot", mock_urdf)
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Log custom data
     custom_data = {
@@ -124,7 +123,7 @@ def test_log_point_cloud(
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
-    nc.connect_robot("test_robot", mock_urdf)
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Create a small point cloud (1000 points x 3 dimensions)
     points = np.random.rand(1000, 3).astype(np.float32)
@@ -143,14 +142,13 @@ def test_log_synced_data(
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
-    nc.connect_robot("test_robot", mock_urdf)
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Prepare test data
     joint_positions = {"joint1": 0.5, "joint2": -0.3}
     joint_velocities = {"joint1": 0.1, "joint2": -0.2}
     joint_torques = {"joint1": 1.0, "joint2": 2.0}
     gripper_open_amounts = {"gripper1": 0.5}
-    action = {"action1": 0.1, "action2": 0.2}
 
     # RGB images
     rgb_data = {"cam1": np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)}
@@ -166,8 +164,8 @@ def test_log_synced_data(
         joint_positions=joint_positions,
         joint_velocities=joint_velocities,
         joint_torques=joint_torques,
+        joint_target_positions=joint_positions,
         gripper_open_amounts=gripper_open_amounts,
-        action=action,
         rgb_data=rgb_data,
         depth_data=depth_data,
         point_cloud_data=point_cloud_data,
@@ -192,7 +190,7 @@ def test_log_invalid_data_format(
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
-    nc.connect_robot("test_robot", mock_urdf)
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Test invalid joint positions (not float)
     with pytest.raises(ValueError, match="Joint data must be floats"):

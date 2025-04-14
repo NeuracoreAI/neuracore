@@ -6,7 +6,6 @@ from typing import Callable
 from aiohttp import ClientSession
 from aiortc import (
     RTCConfiguration,
-    RTCDataChannel,
     RTCIceGatherer,
     RTCIceServer,
     RTCPeerConnection,
@@ -66,21 +65,20 @@ class PierToPierConnection:
 
                 if candidate.sdpMid is None or candidate.sdpMLineIndex is None:
                     print(
-                        f"Warning: Candidate missing sdpMid or sdpMLineIndex, {candidate=}, {transceiver=}"
+                        "Warning: Candidate missing sdpMid or sdpMLineIndex, "
+                        f"{candidate=}, {transceiver=}"
                     )
                     continue
                 await self.send_handshake_message(
                     MessageType.ICE_CANDIDATE,
-                    json.dumps(
-                        {
-                            "candidate": f"candidate:{candidate_to_sdp(candidate)}",
-                            "sdpMLineIndex": candidate.sdpMLineIndex,
-                            "sdpMid": candidate.sdpMid,
-                            "usernameFragment": (
-                                iceGatherer.getLocalParameters().usernameFragment
-                            ),
-                        }
-                    ),
+                    json.dumps({
+                        "candidate": f"candidate:{candidate_to_sdp(candidate)}",
+                        "sdpMLineIndex": candidate.sdpMLineIndex,
+                        "sdpMid": candidate.sdpMid,
+                        "usernameFragment": (
+                            iceGatherer.getLocalParameters().usernameFragment
+                        ),
+                    }),
                 )
 
         if self.connection.sctp is not None:
@@ -88,21 +86,20 @@ class PierToPierConnection:
             for candidate in iceGatherer.getLocalCandidates():
                 if candidate.sdpMid is None or candidate.sdpMLineIndex is None:
                     print(
-                        f"Warning: Candidate missing sdpMid or sdpMLineIndex, {candidate=}"
+                        "Warning: Candidate missing sdpMid or "
+                        f"sdpMLineIndex, {candidate=}"
                     )
                     continue
                 await self.send_handshake_message(
                     MessageType.ICE_CANDIDATE,
-                    json.dumps(
-                        {
-                            "candidate": f"candidate:{candidate_to_sdp(candidate)}",
-                            "sdpMLineIndex": candidate.sdpMLineIndex,
-                            "sdpMid": candidate.sdpMid,
-                            "usernameFragment": (
-                                iceGatherer.getLocalParameters().usernameFragment
-                            ),
-                        }
-                    ),
+                    json.dumps({
+                        "candidate": f"candidate:{candidate_to_sdp(candidate)}",
+                        "sdpMLineIndex": candidate.sdpMLineIndex,
+                        "sdpMid": candidate.sdpMid,
+                        "usernameFragment": (
+                            iceGatherer.getLocalParameters().usernameFragment
+                        ),
+                    }),
                 )
 
     def setup_connection(self):
@@ -207,7 +204,7 @@ class PierToPierConnection:
         try:
             await self.connection.setRemoteDescription(answer)
             await self.force_ice_negotiation()
-        except Exception as e:
+        except Exception:
             self.has_received_answer = False
 
     async def send_offer(self):
@@ -230,7 +227,7 @@ class PierToPierConnection:
             await self.send_handshake_message(
                 MessageType.SDP_OFFER, self.connection.localDescription.sdp
             )
-        except Exception as e:
+        except Exception:
             self.has_sent_offer = False
 
     async def close(self):

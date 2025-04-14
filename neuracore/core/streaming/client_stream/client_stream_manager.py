@@ -1,9 +1,8 @@
 import asyncio
-from concurrent.futures import Future
 import logging
 import threading
-import time
 import traceback
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 from uuid import uuid4
@@ -39,8 +38,10 @@ def get_loop():
         return loop
 
 
-# must be less than zero -> a reconnection delay of more than one second is considered dead
-# TODO: resubmit tracks if connection is re-established after more than one second
+# must be less than zero -> a reconnection delay of more
+# than one second is considered dead
+# TODO: resubmit tracks if connection is re-established
+# after more than one second
 MINIMUM_BACKOFF_LEVEL = -2
 
 

@@ -2,6 +2,7 @@ import pytest
 
 import neuracore as nc
 from neuracore.core.const import API_URL
+from neuracore.core.nc_types import DataType
 
 
 @pytest.fixture
@@ -27,12 +28,22 @@ def algorithm_list_response():
             "name": "cnnmlp",
             "description": "CNN + MLP",
             "is_shared": True,
+            "supported_input_data_types": [
+                DataType.RGB_IMAGE,
+                DataType.JOINT_POSITIONS,
+            ],
+            "supported_output_data_types": [DataType.JOINT_TARGET_POSITIONS],
         },
         {
             "id": "algo_456",
             "name": "act",
             "description": "Action Chunking with Transformers",
             "is_shared": True,
+            "supported_input_data_types": [
+                DataType.RGB_IMAGE,
+                DataType.JOINT_POSITIONS,
+            ],
+            "supported_output_data_types": [DataType.JOINT_TARGET_POSITIONS],
         },
     ]
 
