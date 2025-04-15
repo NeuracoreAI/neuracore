@@ -281,7 +281,7 @@ class ClientStreamingManager:
 
         self.connections.clear()
         self.video_tracks_cache.clear()
-        self.client_session.close()
+        asyncio.run_coroutine_threadsafe(self.client_session.close(), self.loop)
 
 
 _streaming_managers: Dict[tuple[str, int], Future[ClientStreamingManager]] = {}
