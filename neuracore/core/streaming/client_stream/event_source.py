@@ -38,4 +38,4 @@ class EventSource(AsyncIOEventEmitter):
 
         message = json.dumps(self._last_event)
         self._last_event_time = time.time()
-        await self.emit("event", message)
+        self.emit("event", message)
