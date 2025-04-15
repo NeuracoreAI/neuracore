@@ -14,11 +14,11 @@ class GlobalSingleton(object):
     _active_recording_ids: dict[str, str] = {}
     _data_streams: dict[str, DataStream] = {}
 
-    def add_data_stream(self, stream_id:str, stream: DataStream):
+    def add_data_stream(self, stream_id: str, stream: DataStream):
         if len(self._data_streams) > MAX_DATA_STREAMS:
-            raise RuntimeError(f"Excessive number of data streams")
+            raise RuntimeError("Excessive number of data streams")
         if stream_id in self._data_streams:
-            raise ValueError(f"Stream already exists")
+            raise ValueError("Stream already exists")
         self._data_streams[stream_id] = stream
         return stream
 
