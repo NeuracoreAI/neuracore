@@ -67,9 +67,6 @@ To reduce load:
 > ```
 > This will not affect recording in any way.
 
-
-
-
 #### Distribute Data Collection
 
 You can log different sensor data from separate machines for the same robot instance. This can help balance resource usage. To ensure all data is associated correctly, use the same `robot_name` and `instance` number across machines.

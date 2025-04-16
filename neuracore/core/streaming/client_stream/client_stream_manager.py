@@ -45,20 +45,35 @@ def get_loop():
 MINIMUM_BACKOFF_LEVEL = -2
 
 
-@dataclass
 class ClientStreamingManager:
-    robot_id: str
-    robot_instance: int
-    loop: asyncio.AbstractEventLoop
-    client_session: ClientSession
-    available_for_connections: bool = True
-    auth: Auth = field(default_factory=get_auth)
-    connections: Dict[str, PierToPierConnection] = field(default_factory=dict)
-    video_tracks_cache: Dict[str, VideoSource] = field(default_factory=dict)
-    event_source_cache: dict[Tuple[str, str], EventSource] = field(default_factory=dict)
-    track_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    tracks: List[VideoSource] = field(default_factory=list)
-    local_stream_id: str = field(default_factory=lambda: uuid4().hex)
+    def __init__(
+        self,
+        robot_id: str,
+        robot_instance: int,
+        loop: asyncio.AbstractEventLoop,
+        client_session: ClientSession,
+        auth: Auth = None,
+    ):
+        self.robot_id = robot_id
+        self.robot_instance = robot_instance
+        self.loop = loop
+        self.client_session = client_session
+        self.auth = auth if auth is not None else get_auth()
+        self.available_for_connections = True
+
+        self.connections: Dict[str, PierToPierConnection] = {}
+        self.video_tracks_cache: Dict[str, VideoSource] = {}
+        self.event_source_cache: Dict[Tuple[str, str], EventSource] = {}
+        self.track_lock = asyncio.Lock()
+        self.tracks: List[VideoSource] = []
+        self.local_stream_id = uuid4().hex
+
+        self.signalling_stream_future: Future = asyncio.run_coroutine_threadsafe(
+            self.connect_signalling_stream(), self.loop
+        )
+        self.recording_stream_future: Future = asyncio.run_coroutine_threadsafe(
+            self.connect_recording_notification_stream(), self.loop
+        )
 
     async def _create_video_source(self, sensor_name: str, kind: str) -> VideoSource:
         sensor_key = (sensor_name, kind)
@@ -216,13 +231,13 @@ class ClientStreamingManager:
                     async for event in event_source:
                         try:
                             backoff = max(MINIMUM_BACKOFF_LEVEL, backoff - 1)
+                            if not self.available_for_connections:
+                                return
                             if event.type == "heartbeat":
                                 await self.heartbeat_response()
                                 continue
 
                             message = HandshakeMessage.model_validate_json(event.data)
-                            if not self.available_for_connections:
-                                return
 
                             if message.from_id == "system":
                                 continue
@@ -274,6 +289,11 @@ class ClientStreamingManager:
         """Close all connections and streams"""
         self.available_for_connections = False
 
+        if self.signalling_stream_future.running():
+            self.signalling_stream_future.cancel()
+        if self.recording_stream_future.running():
+            self.recording_stream_future.cancel()
+        
         asyncio.run_coroutine_threadsafe(self.close_connections(), self.loop)
 
         for track in self.video_tracks_cache.values():
@@ -296,8 +316,6 @@ async def create_client_streaming_manager(robot_id: str, instance: int):
         loop=asyncio.get_event_loop(),
         client_session=ClientSession(timeout=timeout),
     )
-    asyncio.create_task(manager.connect_signalling_stream())
-    asyncio.create_task(manager.connect_recording_notification_stream())
 
     return manager
 
