@@ -1,39 +1,75 @@
-# Limitations 
+<!-- omit in toc -->
+# Limitations
 
-While we make every effort to make the neuracore platform as flexible as possible there are a number of real world practical limitations. 
+While we strive to make the **Neuracore** platform as powerful and flexible as possible, certain limitations are inevitable due to real-world hardware constraints. This document outlines those limitations and provides guidance on how to mitigate them.
 
+<!-- omit in toc -->
+## Contents
+
+- [Data Logging Limits](#data-logging-limits)
+  - [Bandwidth \& Buffering](#bandwidth--buffering)
+  - [Processing Overhead](#processing-overhead)
+    - [Enable Hardware Acceleration](#enable-hardware-acceleration)
+    - [Live Data Monitoring](#live-data-monitoring)
+    - [Distribute Data Collection](#distribute-data-collection)
 
 ## Data Logging Limits
 
-When logging your data it is streamed live to the neuracore platform, this means your data is immediately available and it eliminates your storage requirements. However streaming live data comes with its own limitations and considerations:
+Neuracore streams data live as it is collected, eliminating the need for local storage and enabling real-time monitoring. However, live streaming introduces several considerations:
 
-### Bandwidth and Buffering
+### Bandwidth & Buffering
 
-The internet connection for the datasource sufficient for the for the frequency and size of data provided. Logged data that is waiting to be sent is buffered, if your connection is inconsistent or insufficient these buffers will use memory. If your finding the buffers are overflowing consider these options:
+A stable and sufficiently fast internet connection is required to support the frequency and volume of data being streamed. Data awaiting transmission is buffered in memory, and buffer overflows can occur if the connection is too slow or unstable.
 
- - Increasing the available memory
- - Using a Faster/More stable connection, try using a wired connection where possible.
- - Lowering the frequency that you log data.
-    - Check that you are not logging duplicates or redundant data points.
- - Lowering the quantity of data logged
-    - Check that you are logging cameras at the correct resolution.
-    - Check you are not logging any stationary or anomalous joints.
+If you're encountering buffer overflows, try the following:
 
-> [!NOTE]
->
-> Try to be consistent in which joints that you are logging, each collection of joints is logged separately
+- **Increase available memory** to accommodate larger buffers.
+- **Improve connection quality**, preferably using a wired connection.
+- **Reduce logging frequency**:
+  - Avoid logging redundant or duplicate data points.
+- **Reduce data volume**:
+  - Ensure camera streams are logged at the appropriate resolution.
+  - Avoid logging stationary joints.
+
+> **Note:**  
+> Be consistent with which joints you log. Each unique combination of joints is treated as a separate data stream. A maximum of 50 concurrent streams are supported per instance.
+
+### Processing Overhead
+
+Video streams (e.g., RGB or depth) can be significantly larger than other types of data. To mitigate bandwidth usage, Neuracore uses lossless `h264` compression. However, encoding high-resolution video can be CPU-intensive.
+
+If video encoding is creating a performance bottleneck, consider the following:
+
+#### Enable Hardware Acceleration
+
+By default, PyAV (used for video encoding) utilizes a software-based FFmpeg build for compatibility. For improved performance, compile FFmpeg with hardware acceleration.
+
+Useful resources:
+
+- [NVIDIA FFmpeg Transcoding Guide](https://developer.nvidia.com/blog/nvidia-ffmpeg-transcoding-guide/)
+- [StackOverflow: PyAV & FFmpeg Hardware Support](https://stackoverflow.com/questions/71618462/why-pyav-package-in-python-can-not-recognize-h264-cuvid-codec-while-ffmpeg-can-d)
+- [PyAV Hardware Acceleration Discussion](https://github.com/PyAV-Org/PyAV/issues/307)
+
+#### Live Data Monitoring
+
+Each viewer connected to the robot via the [Neuracore dashboard](https://www.neuracore.app/dashboard/robots) adds an additional video stream. Although monitoring uses lossy compression and is capped at 30 FPS, it increases encoding load—especially when combined with recording.
+
+To reduce load:
+
+- Limit the number of simultaneous viewers.
+- Disable live data sharing if not needed
+
+> **Info:**
+> You can disable live data sharing at any time with:
+> ```python
+>  nc.stop_live_data(robot_name, instance)
+>  # If `robot_name` and `instance` are omitted, the last active robot will be used.
+> ```
+> This will not affect recording in any way.
 
 
-### Processing
-
-Video data is especially bandwidth intensive, we use lossless `h264` compression to reduce your bandwidth requirements. With many high resolution streams the processor may not be able to keep up. If you are finding the CPU utilization is too high while encoding your video stream here are some options:
 
 
- - *Hardware Acceleration*: We use PyAv to do this encoding, by default for compatibility reasons this comes with a version of FFmpeg that uses software rendering. Building your own hardware enabled version can offer performance improvements.
-    - [nvidia-ffmpeg-transcoding-guide](https://developer.nvidia.com/blog/nvidia-ffmpeg-transcoding-guide/)
-    - [py-av-ffmpeg-build](https://stackoverflow.com/questions/71618462/why-pyav-package-in-python-can-not-recognize-h264-cuvid-codec-while-ffmpeg-can-d)
-    - [py-av-hwaccel-discussion](https://github.com/PyAV-Org/PyAV/issues/307)
- - *Live Data sharing*: Data provided to the web interface needs to be encoded differently if recording at the same time this essentially doubles the encoding work. you can disable live data sharing at any time by calling `nc.stop_live_data()` this will use the currently active robot instance unless specified.
+#### Distribute Data Collection
 
-
-
+You can log different sensor data from separate machines for the same robot instance. This can help balance resource usage. To ensure all data is associated correctly, use the same `robot_name` and `instance` number across machines.
