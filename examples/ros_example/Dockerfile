@@ -30,7 +30,7 @@ RUN . /opt/ros/humble/setup.sh && \
     . install/setup.sh && \
     apt-get update && rosdep install --from-paths src --ignore-src -r -y
 
-RUN pip3 install "neuracore[examples] @ git+https://git@github.com/Neuraco/neuracore.git@v2dev"
+RUN pip3 install "neuracore[examples] @ git+https://git@github.com/Neuraco/neuracore.git@staging"
 # Patch numpy for ROS
 RUN pip3 install numpy==1.21.5 
 
