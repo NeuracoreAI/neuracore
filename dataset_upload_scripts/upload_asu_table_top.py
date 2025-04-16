@@ -56,7 +56,6 @@ def _record_step(step: dict, timestamp: float) -> None:
     state = observation["state"].numpy()
     joint_positions = (JOINT_DIRECTION * state[:DOF]) + JOINT_OFFSETS
     joint_positions_dict = dict(zip(ROBOT.joint_names[:DOF], joint_positions))
-    # visual_joint_positions_dict = dict(zip(ROBOT.joint_names[DOF:], joint_positions))
     visual_joint_positions_dict = {}
     gripper_closed_amount = np.clip(state[-1], 0.0, 1.0).item()
     (lower, upper) = ROBOT.joint_limits["finger_joint"]
@@ -118,7 +117,6 @@ def upload_asu_table_top():
         robot_name=ROBOT.robot_info.name,
         urdf_path=ROBOT.robot_info.urdf_path,
         mjcf_path=ROBOT.robot_info.mjcf_path,
-        # overwrite=True,
         shared=True,
     )
     nc.create_dataset(

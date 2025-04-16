@@ -242,7 +242,7 @@ def stream_data(config):
                 for i in range(config.num_joints)
             }
             with Timer():
-                nc.log_action(action, timestamp=t)
+                nc.log_joint_target_positions(action, timestamp=t)
 
         frame_count += 1
 

@@ -114,7 +114,7 @@ class SimulationNode(Node):
         try:
             if len(self.action_traj) > 0:
                 action = self.action_traj.pop(0)
-                nc.log_action(action)
+                nc.log_joint_target_positions(action)
                 self.ts = self.env.step(list(action.values()))
             else:
                 self.sim_step_timer.cancel()

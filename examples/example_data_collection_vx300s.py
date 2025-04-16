@@ -61,7 +61,7 @@ def main(args):
 
             nc.log_joint_positions(ts.observation["qpos"])
 
-            nc.log_action(action)
+            nc.log_joint_target_positions(action)
             for cam_name in camera_names:
                 nc.log_rgb(cam_name, ts.observation["images"][cam_name])
 
