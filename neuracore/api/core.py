@@ -1,10 +1,12 @@
 import logging
+import time
 from threading import Thread
 from typing import Optional
 
 from neuracore.core.streaming.client_stream.client_stream_manager import (
     get_robot_streaming_manager,
 )
+from neuracore.core.utils import backend_utils
 
 from ..core.auth import get_auth
 from ..core.exceptions import RobotError
@@ -26,14 +28,6 @@ def _get_robot(robot_name: str, instance: Optional[int] = 0) -> Robot:
     else:
         robot = get_robot(robot_name, instance)
     return robot
-
-
-def _stop_recording_wait_for_threads(
-    robot: Robot, recording_id: str, threads: list[Thread]
-) -> None:
-    for thread in threads:
-        thread.join()
-    robot.stop_recording(recording_id)
 
 
 def validate_version() -> None:
@@ -152,19 +146,10 @@ def stop_recording(
             with stream.lock:
                 if stream.is_recording():
                     threads.append(stream.stop_recording())
-    stop_recording_thread = Thread(
-        target=_stop_recording_wait_for_threads,
-        args=(
-            robot,
-            GlobalSingleton()._active_recording_ids[robot.instanced_id],
-            threads,
-        ),
-        daemon=False,
-    )
-    stop_recording_thread.start()
-    GlobalSingleton()._active_recording_ids.pop(robot.instanced_id)
+    robot.stop_recording(GlobalSingleton()._active_recording_ids[robot.instanced_id])
     if wait:
-        stop_recording_thread.join()
+        while backend_utils.get_num_active_streams() > 0:
+            time.sleep(2.0)
 
 
 def stop_live_data(

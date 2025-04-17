@@ -10,10 +10,12 @@ import av
 import numpy as np
 import requests
 
-from ..auth import get_auth
-from ..const import API_URL
-from ..nc_types import CameraData
-from ..streaming.resumable_upload import ResumableUpload
+from neuracore.core.auth import get_auth
+from neuracore.core.const import API_URL
+from neuracore.core.nc_types import CameraData
+
+from .bucket_uploader import BucketUploader
+from .resumable_upload import ResumableUpload
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +25,7 @@ MB_CHUNK = 4 * CHUNK_MULTIPLE
 CHUNK_SIZE = 64 * MB_CHUNK
 
 
-class StreamingVideoUploader:
+class StreamingVideoUploader(BucketUploader):
     """A video encoder that handles variable framerate and streams."""
 
     def __init__(
@@ -50,7 +52,7 @@ class StreamingVideoUploader:
             pixel_format: Pixel format
             chunk_size: Size of chunks to upload
         """
-        self.recording_id = recording_id
+        super().__init__(recording_id)
         self.path = path
         self.width = width
         self.height = height
@@ -117,6 +119,8 @@ class StreamingVideoUploader:
         Upload chunks in a separate thread.
         """
         self._thread_setup()
+        self._update_num_active_streams(1)
+
         # If final has not been called, or we still have items in the queue
         while not self._streaming_done or self._upload_queue.qsize() > 0:
             try:
@@ -152,6 +156,7 @@ class StreamingVideoUploader:
             f"{self.uploader.total_bytes_uploaded} bytes"
         )
         self._upload_json_data()
+        self._update_num_active_streams(-1)
 
     def add_frame(self, frame_data: np.ndarray, metadata: CameraData) -> None:
         """

@@ -1,5 +1,7 @@
 FROM ros:humble-ros-base
 
+ENV MUJOCO_GL="osmesa"
+
 # Set working directory
 WORKDIR /ros2_ws
 

@@ -54,7 +54,6 @@ class SimulationNode(Node):
             )
 
         # Initialize simulation
-        self.get_logger().info("Initializing simulation environment...")
         self.cv_bridge = CvBridge()
         self.action = None
         self.action_lock = threading.Lock()
@@ -74,7 +73,6 @@ class SimulationNode(Node):
             )
             self.get_logger().info(f"Created dataset: {dataset_name}")
 
-            # Start recording
             nc.start_recording()
             self.get_logger().info("Started recording")
 
@@ -97,14 +95,19 @@ class SimulationNode(Node):
             from common.rollout_utils import rollout_policy
             from common.sim_env import BOX_POSE, make_sim_env
 
-            self.get_logger().info("Generating a demo action trajectory...")
+            self.get_logger().info(
+                "Generating a demo action trajectory. This will take a few moments..."
+            )
             self.action_traj, subtask_info, max_reward = rollout_policy()
+            self.get_logger().info(
+                "Demo action trajectory generated successfully! "
+                "This will now be replayed as if a human is controlling the robot."
+            )
 
             BOX_POSE[0] = subtask_info
             self.env = make_sim_env()
             self.ts = self.env.reset()
 
-            self.get_logger().info("Environment initialized successfully")
         except Exception as e:
             self.get_logger().error(f"Error initializing environment: {e}")
             raise
@@ -118,9 +121,7 @@ class SimulationNode(Node):
                 self.ts = self.env.step(list(action.values()))
             else:
                 self.sim_step_timer.cancel()
-                self.get_logger().info("No more actions in the trajectory")
                 if self.record:
-                    self.get_logger().info("Stopping recording...")
                     nc.stop_recording()
                     self.get_logger().info("Recording stopped")
                 self.sim_step_timer.cancel()
@@ -190,9 +191,6 @@ def main(args=None):
     executor.add_node(node)
 
     try:
-        node.get_logger().info(
-            "Starting simulation node with single-threaded executor..."
-        )
         executor.spin()
     except KeyboardInterrupt:
         node.get_logger().info("Keyboard interrupt received")

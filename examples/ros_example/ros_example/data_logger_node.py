@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-import argparse
 import sys
 from typing import List
 
@@ -15,7 +13,6 @@ from .const import QOS_BEST_EFFORT
 
 # ruff: noqa: E402
 sys.path.append("/ros2_ws/src/neuracore/examples")
-from common.constants import BIMANUAL_VIPERX_URDF_PATH
 
 CAMERA_NAMES = ["top", "angle", "vis"]
 
@@ -27,6 +24,7 @@ class LeftArmLoggerNode(Node):
         super().__init__("left_arm_logger_node")
 
         # Connect to our robot in this node
+        nc.login()
         nc.connect_robot("Mujoco VX300s")
 
         # Subscribe to left arm joint states
@@ -36,8 +34,6 @@ class LeftArmLoggerNode(Node):
             self.left_arm_callback,
             QOS_BEST_EFFORT,
         )
-
-        self.get_logger().info("Left arm logger node initialized and running")
 
     def left_arm_callback(self, msg):
         """Process left arm joint states and log to neuracore."""
@@ -56,6 +52,10 @@ class RightArmLoggerNode(Node):
     def __init__(self):
         super().__init__("right_arm_logger_node")
 
+        # Connect to our robot in this node
+        nc.login()
+        nc.connect_robot("Mujoco VX300s")
+
         # Subscribe to right arm joint states
         self.right_arm_sub = self.create_subscription(
             JointState,
@@ -63,8 +63,6 @@ class RightArmLoggerNode(Node):
             self.right_arm_callback,
             QOS_BEST_EFFORT,
         )
-
-        self.get_logger().info("Right arm logger node initialized and running")
 
     def right_arm_callback(self, msg):
         """Process right arm joint states and log to neuracore."""
@@ -83,6 +81,10 @@ class CameraLoggerNode(Node):
     def __init__(self, camera_names: List[str]):
         super().__init__("camera_logger_node")
 
+        # Connect to our robot in this node
+        nc.login()
+        nc.connect_robot("Mujoco VX300s")
+
         # Initialize CV bridge for image conversion
         self.cv_bridge = CvBridge()
 
@@ -96,8 +98,6 @@ class CameraLoggerNode(Node):
                 QOS_BEST_EFFORT,
             )
 
-        self.get_logger().info("Camera logger node initialized and running")
-
     def camera_callback(self, msg, cam_name):
         """Process camera images and log to neuracore."""
         try:
@@ -109,64 +109,10 @@ class CameraLoggerNode(Node):
             self.get_logger().error(f"Error processing {cam_name} camera: {e}")
 
 
-class NeuracoreManagerNode(Node):
-    """Node to handle Neuracore initialization and recording management."""
-
-    def __init__(self, record: bool = False, dataset_name: str = "ROS2 Dataset"):
-        super().__init__("neuracore_manager_node")
-
-        self.record = record
-
-        # Initialize neuracore
-        self.get_logger().info("Initializing neuracore...")
-        nc.login()
-        nc.connect_robot(
-            robot_name="Mujoco VX300s",
-            urdf_path=BIMANUAL_VIPERX_URDF_PATH,
-            overwrite=False,
-        )
-
-        # Setup recording
-        if self.record:
-            nc.create_dataset(
-                name=dataset_name, description="ROS2 distributed data collection"
-            )
-            self.get_logger().info(f"Created dataset: {dataset_name}")
-
-            # Start recording
-            nc.start_recording()
-            self.get_logger().info("Started recording")
-
-    def shutdown(self):
-        """Clean shutdown of neuracore."""
-        if self.record:
-            self.get_logger().info("Stopping recording...")
-            nc.stop_recording()
-            self.get_logger().info("Recording stopped")
-
-
 def main(args=None):
     rclpy.init(args=args)
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--record",
-        action="store_true",
-        help="Whether to record with neuracore",
-        default=False,
-    )
-    parser.add_argument(
-        "--dataset_name",
-        type=str,
-        help="Name of the dataset to create",
-        default="ROS2 Dataset",
-    )
-    parsed_args, remaining = parser.parse_known_args()
-
     # Create all nodes
-    neuracore_manager = NeuracoreManagerNode(
-        record=parsed_args.record, dataset_name=parsed_args.dataset_name
-    )
     left_arm_logger = LeftArmLoggerNode()
     right_arm_logger = RightArmLoggerNode()
     camera_logger = CameraLoggerNode(camera_names=CAMERA_NAMES)
@@ -175,7 +121,6 @@ def main(args=None):
     executor = SingleThreadedExecutor()
 
     # Add nodes to the executor
-    executor.add_node(neuracore_manager)
     executor.add_node(left_arm_logger)
     executor.add_node(right_arm_logger)
     executor.add_node(camera_logger)
@@ -186,11 +131,6 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        # Clean shutdown
-        neuracore_manager.shutdown()
-
-        # Destroy all nodes
-        neuracore_manager.destroy_node()
         left_arm_logger.destroy_node()
         right_arm_logger.destroy_node()
         camera_logger.destroy_node()

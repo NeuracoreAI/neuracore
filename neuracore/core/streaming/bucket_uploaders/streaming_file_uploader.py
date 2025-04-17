@@ -5,7 +5,8 @@ import queue
 import threading
 from typing import Any, Dict
 
-from neuracore.core.streaming.resumable_upload import ResumableUpload
+from .bucket_uploader import BucketUploader
+from .resumable_upload import ResumableUpload
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ MB_CHUNK = 4 * CHUNK_MULTIPLE
 CHUNK_SIZE = 64 * MB_CHUNK
 
 
-class StreamingJsonUploader:
+class StreamingJsonUploader(BucketUploader):
     """A JSON data streamer that handles chunked uploads."""
 
     def __init__(
@@ -31,7 +32,7 @@ class StreamingJsonUploader:
             stream_id: Stream ID
             chunk_size: Size of chunks to upload
         """
-        self.recording_id = recording_id
+        super().__init__(recording_id)
         self.filepath = filepath
         self.chunk_size = chunk_size
         self._streaming_done = False
@@ -76,6 +77,7 @@ class StreamingJsonUploader:
         Upload chunks in a separate thread.
         """
         self._thread_setup()
+        self._update_num_active_streams(1)
 
         # Write the opening bracket of the JSON array
         self.buffer.write(b"[")
@@ -127,6 +129,7 @@ class StreamingJsonUploader:
             "JSON streaming and upload complete: "
             f"{self.uploader.total_bytes_uploaded} bytes"
         )
+        self._update_num_active_streams(-1)
 
     def add_frame(self, data_entry: Dict[str, Any]) -> None:
         """

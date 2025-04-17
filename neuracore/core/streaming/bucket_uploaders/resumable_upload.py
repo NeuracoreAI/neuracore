@@ -3,8 +3,8 @@ import time
 
 import requests
 
-from ..auth import get_auth
-from ..const import API_URL
+from neuracore.core.auth import get_auth
+from neuracore.core.const import API_URL
 
 logger = logging.getLogger(__name__)
 
