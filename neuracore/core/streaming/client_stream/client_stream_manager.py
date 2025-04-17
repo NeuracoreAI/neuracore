@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 import logging
 import threading
 import traceback
@@ -164,6 +165,7 @@ class ClientStreamingManager:
                 async with sse_client.EventSource(
                     f"{API_URL}/signalling/recording_notifications/{self.local_stream_id}",
                     headers=self.auth.get_headers(),
+                    reconnection_time=timedelta(seconds=0.1)
                 ) as event_source:
                     backoff = max(MINIMUM_BACKOFF_LEVEL, backoff - 1)
                     async for event in event_source:
@@ -212,6 +214,7 @@ class ClientStreamingManager:
                     f"{API_URL}/signalling/notifications/{self.local_stream_id}",
                     session=self.client_session,
                     headers=self.auth.get_headers(),
+                    reconnection_time=timedelta(seconds=0.1)
                 ) as event_source:
                     async for event in event_source:
                         try:
