@@ -86,9 +86,6 @@ class PierToPierConnection:
             for candidate in iceGatherer.getLocalCandidates():
                 if candidate.sdpMid is None or candidate.sdpMLineIndex is None:
                     # TODO: fix sctp ice candidates
-                    # print(
-                    #     "Warning: Candidate missing sdpMid or "
-                    #     f"sdpMLineIndex, {candidate=}"
                     # )
                     continue
                 await self.send_handshake_message(
