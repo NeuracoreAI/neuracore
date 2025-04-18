@@ -1,3 +1,4 @@
+import random
 import time
 from functools import cache
 
@@ -25,6 +26,8 @@ def generate_wave_pattern(width, height, phase_key: int, frequency=0.02):
     image = wave_pattern.astype(np.uint8)
 
     return image
+
+
 
 
 def simulate_camera_frames(num_frames=1_000_000, width=50, height=50, camera_id=0):
@@ -63,8 +66,13 @@ def camera_task(camera_id):
         nc.log_rgb(f"Camera {camera_id} RGB", frame, timestamp=timestamp)
 
 
-def joint_task():
+def joint_task(num_frames=250):
     joint_names = LEFT_ARM_JOINT_NAMES + RIGHT_ARM_JOINT_NAMES
+
+    # Partition joints into 5 groups
+    random.shuffle(joint_names)
+    num_groups = 5
+    joint_groups = [joint_names[i::num_groups] for i in range(num_groups)]
 
     # Base angles for all joints
     base_angles = {name: 0.0 for name in joint_names}
@@ -72,27 +80,17 @@ def joint_task():
     # Time variable for sinusoidal movement
     t = 0.0
 
-    while True:
-        # Select a random subset of joints to update (between 30-70% of all joints)
-        num_joints_to_update = np.random.randint(
-            int(0.3 * len(joint_names)), int(0.7 * len(joint_names))
-        )
-        joints_to_update = np.random.choice(
-            joint_names, num_joints_to_update, replace=False
-        )
+    for _ in range(num_frames):
+        # Pick a random group of joints to update
+        joints_to_update = random.choice(joint_groups)
 
         # Create a new joint position dictionary
         joint_positions = base_angles.copy()
 
-        # Update only the selected joints with slightly varying angles
         for joint in joints_to_update:
-
             gen = np.random.default_rng(
                 np.frombuffer(joint.encode("utf-8"), dtype=np.uint8)
             )
-            # Add sinusoidal movement plus small random variation
-            # Different frequencies for different joints
-            # based on their position in the list
             frequency = 0.1 + 0.05 * gen.random()
             amplitude = 1.5 + 1.5 * gen.random()
 
@@ -114,6 +112,7 @@ def joint_task():
         t += dt
 
 
+
 def main():
     """Main function for running the robot demo and logging with neuracore."""
     # Initialize neuracore
@@ -125,15 +124,15 @@ def main():
         instance=0,
     )
 
-    # nc.create_dataset(name="Test Video Dataset", description="This is a test dataset")
-    # print("Created Dataset...")
+    nc.create_dataset(name="Test Video Dataset", description="This is a test dataset", tags=["test"])
+    print("Created Dataset...")
 
-    # nc.start_recording()
+    nc.start_recording()
 
     # Run four camera streams concurrently
     from threading import Thread
 
-    threads = [Thread(target=camera_task, args=(i,)) for i in range(5)]
+    threads = [Thread(target=camera_task, args=(i,)) for i in range(0)]
 
     threads.append(Thread(target=joint_task))
 
@@ -144,7 +143,7 @@ def main():
         thread.join()
 
     print("Finishing recording...")
-    # nc.stop_recording()
+    nc.stop_recording()
     print("Finished recording!")
     nc.stop_live_data()
 

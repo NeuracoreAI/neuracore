@@ -62,6 +62,10 @@ nc.log_joints({
 nc.log_rgb("top_camera", image_array)
 ```
 
+## Documentation
+
+ - [Limitations](./docs/limitations.md)
+
 ## Development
 
 To set up for development:
