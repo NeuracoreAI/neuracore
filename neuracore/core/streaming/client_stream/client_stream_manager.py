@@ -3,7 +3,6 @@ import logging
 import threading
 import traceback
 from concurrent.futures import Future
-from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from uuid import uuid4
@@ -296,7 +295,7 @@ class ClientStreamingManager:
             self.signalling_stream_future.cancel()
         if self.recording_stream_future.running():
             self.recording_stream_future.cancel()
-        
+
         asyncio.run_coroutine_threadsafe(self.close_connections(), self.loop)
 
         for track in self.video_tracks_cache.values():

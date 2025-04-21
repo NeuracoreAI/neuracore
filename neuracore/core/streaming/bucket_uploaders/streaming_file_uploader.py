@@ -40,6 +40,7 @@ class StreamingJsonUploader(BucketUploader):
         # Thread will continue, even if main thread exits
         self._upload_thread = threading.Thread(target=self._upload_loop, daemon=False)
         self._upload_thread.start()
+        self._update_num_active_streams(1)
 
     def _thread_setup(self) -> None:
         """Setup thread for upload loop."""
@@ -77,7 +78,6 @@ class StreamingJsonUploader(BucketUploader):
         Upload chunks in a separate thread.
         """
         self._thread_setup()
-        self._update_num_active_streams(1)
 
         # Write the opening bracket of the JSON array
         self.buffer.write(b"[")

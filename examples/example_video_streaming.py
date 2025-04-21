@@ -28,8 +28,6 @@ def generate_wave_pattern(width, height, phase_key: int, frequency=0.02):
     return image
 
 
-
-
 def simulate_camera_frames(num_frames=1_000_000, width=50, height=50, camera_id=0):
     """Generate test frames with variable timing for each camera."""
     t = 0.0
@@ -112,7 +110,6 @@ def joint_task(num_frames=250):
         t += dt
 
 
-
 def main():
     """Main function for running the robot demo and logging with neuracore."""
     # Initialize neuracore
@@ -124,7 +121,9 @@ def main():
         instance=0,
     )
 
-    nc.create_dataset(name="Test Video Dataset", description="This is a test dataset", tags=["test"])
+    nc.create_dataset(
+        name="Test Video Dataset", description="This is a test dataset", tags=["test"]
+    )
     print("Created Dataset...")
 
     nc.start_recording()
