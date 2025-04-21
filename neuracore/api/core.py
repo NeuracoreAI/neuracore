@@ -147,6 +147,7 @@ def stop_recording(
                 if stream.is_recording():
                     threads.append(stream.stop_recording())
     robot.stop_recording(GlobalSingleton()._active_recording_ids[robot.instanced_id])
+    GlobalSingleton()._active_recording_ids.pop(robot.instanced_id, None)
     if wait:
         while backend_utils.get_num_active_streams() > 0:
             time.sleep(2.0)
