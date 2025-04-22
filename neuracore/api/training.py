@@ -139,7 +139,7 @@ def get_training_job_data(job_id: str) -> dict:
         raise ValueError(f"Error accessing job: {e}")
 
 
-def get_training_job_status(job_id: str) -> dict:
+def get_training_job_status(job_id: str) -> str:
     """
     Check if a training job exists and return its status.
 

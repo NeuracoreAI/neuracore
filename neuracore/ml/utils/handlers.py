@@ -8,7 +8,7 @@ subprocess.check_call([
     "-m",
     "pip",
     "install",
-    "neuracore",
+    "--index-url https://test.pypi.org/simple/" "neuracore",
 ])
 
 import base64
