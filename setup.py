@@ -62,7 +62,7 @@ setup(
             "torchvision",
             "torch-model-archiver",
         ],
-        "ml": ["torch", "torchvision", "transformers"],
+        "ml": ["torch", "torchvision", "torch-model-archiver", "transformers"],
         "upload": [
             "robot_descriptions @ git+https://github.com/stepjam/robot_descriptions.py.git@main",
             "pin",
