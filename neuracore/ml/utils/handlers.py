@@ -1,15 +1,18 @@
+import importlib.util
 import subprocess
 import sys
 
 # Ensure neuracore is installed
 # ruff: noqa: E402
-subprocess.check_call([
-    sys.executable,
-    "-m",
-    "pip",
-    "install",
-    "--index-url https://test.pypi.org/simple/" "neuracore",
-])
+if importlib.util.find_spec("neuracore") is None:
+    subprocess.check_call([
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--index-url https://test.pypi.org/simple/",
+        "neuracore",
+    ])
 
 import base64
 import io
