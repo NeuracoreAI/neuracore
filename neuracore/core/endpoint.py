@@ -262,10 +262,19 @@ def connect_local_endpoint(
                     f.write(chunk)
     try:
         process = _setup_torchserve(path_to_model, port=port)
-        health_check = requests.get(f"http://localhost:{port}/ping")
-        if health_check.status_code == 200:
-            logging.info("TorchServe is running...")
-        else:
+        attemps = 3
+        while attemps > 0:
+            try:
+                # Check if the server is running
+                health_check = requests.get(f"http://localhost:{port}/ping", timeout=10)
+                if health_check.status_code == 200:
+                    logging.info("TorchServe is running...")
+                    break
+            except requests.exceptions.RequestException:
+                pass
+            attemps -= 1
+            time.sleep(5)
+        if health_check.status_code != 200:
             raise EndpointError("TorchServe is not running")
 
         endpoint = EndpointPolicy(f"http://localhost:{port}/predictions/robot_model")
