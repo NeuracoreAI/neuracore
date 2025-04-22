@@ -27,7 +27,9 @@ def connect_endpoint(name: str) -> EndpointPolicy:
 
 
 def connect_local_endpoint(
-    path_to_model: Optional[str] = None, train_run_name: Optional[str] = None
+    path_to_model: Optional[str] = None,
+    train_run_name: Optional[str] = None,
+    port: int = 8080,
 ) -> EndpointPolicy:
     """
     Connect to a local model endpoint.
@@ -37,6 +39,7 @@ def connect_local_endpoint(
     Args:
         path_to_model: Path to the local .mar model
         train_run_name: Optional train run name
+        port: Port to connect to the local endpoint
 
     Returns:
         EndpointPolicy: Policy object that can be used for predictions
@@ -44,7 +47,7 @@ def connect_local_endpoint(
     Raises:
         EndpointError: If endpoint connection fails
     """
-    return _connect_local_endpoint(path_to_model, train_run_name)
+    return _connect_local_endpoint(path_to_model, train_run_name, port)
 
 
 def deploy_model(job_id: str, name: str) -> dict:

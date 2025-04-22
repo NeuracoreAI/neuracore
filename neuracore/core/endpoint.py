@@ -218,13 +218,16 @@ def connect_endpoint(name: str) -> EndpointPolicy:
 
 
 def connect_local_endpoint(
-    path_to_model: Optional[str] = None, train_run_name: Optional[str] = None
+    path_to_model: Optional[str] = None,
+    train_run_name: Optional[str] = None,
+    port: int = 8080,
 ) -> EndpointPolicy:
     """Connect to a local model.
 
     Args:
         path_to_model:  Path to the model file
         train_run_name: Optional train run name
+        port: Port to run the local endpoint on
     """
     if path_to_model is None and train_run_name is None:
         raise ValueError("Must provide either path_to_model or train_run_name")
@@ -258,14 +261,14 @@ def connect_local_endpoint(
                 if chunk:
                     f.write(chunk)
     try:
-        process = _setup_torchserve(path_to_model)
-        health_check = requests.get("http://localhost:8080/ping")
+        process = _setup_torchserve(path_to_model, port=port)
+        health_check = requests.get(f"http://localhost:{port}/ping")
         if health_check.status_code == 200:
             logging.info("TorchServe is running...")
         else:
             raise EndpointError("TorchServe is not running")
 
-        endpoint = EndpointPolicy("http://localhost:8080/predictions/robot_model")
+        endpoint = EndpointPolicy(f"http://localhost:{port}/predictions/robot_model")
         endpoint._process = process
         return endpoint
 
@@ -275,13 +278,19 @@ def connect_local_endpoint(
         raise EndpointError(f"Error processing local endpoint response: {str(e)}")
 
 
-def _setup_torchserve(path_to_model: str):
+def _setup_torchserve(path_to_model: str, port: int = 8080) -> subprocess.Popen:
     """Setup and start TorchServe with our model."""
     model_path = Path(path_to_model)
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
     # Create config file
-    config = {"default_workers_per_model": 1, "default_response_timeout": 120}
+    config = {
+        "default_workers_per_model": 1,
+        "default_response_timeout": 120,
+        "inference_address": f"http://localhost:{port}",
+        "management_address": f"http://localhost:{port+1}",
+        "metrics_address": f"http://localhost:{port+2}",
+    }
     config_path = Path(tempfile.gettempdir()) / "config.properties"
     with config_path.open("w") as f:
         for key, value in config.items():

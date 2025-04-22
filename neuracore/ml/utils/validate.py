@@ -72,6 +72,7 @@ def _create_joint_data(maskable_data: MaskableData) -> JointData:
 def run_validation(
     output_dir: Path,
     algorithm_dir: Path,
+    port: int = 8080,
 ) -> tuple[AlgorthmCheck, str]:
     """Run the minimal validation process to check if an algorithm works."""
 
@@ -206,7 +207,8 @@ def run_validation(
             try:
                 # Check if the exported model can be loaded
                 policy = nc.connect_local_endpoint(
-                    path_to_model=str(artifacts_dir / "model.mar")
+                    path_to_model=str(artifacts_dir / "model.mar"),
+                    port=port,
                 )
 
                 # Log some data to send to the model

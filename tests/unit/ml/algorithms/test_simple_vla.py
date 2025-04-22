@@ -1,4 +1,5 @@
 import inspect
+import random
 from pathlib import Path
 
 import numpy as np
@@ -208,5 +209,6 @@ def test_run_validation(tmp_path: Path):
     _, error_msg = run_validation(
         output_dir=tmp_path,
         algorithm_dir=algorithm_dir,
+        port=random.randint(10000, 20000),
     )
     assert len(error_msg) == 0
