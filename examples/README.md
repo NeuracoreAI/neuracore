@@ -56,7 +56,7 @@ The local deployment example shows how to:
 
 For local model deployment, you'll need additional packages:
 ```bash
-pip install "neuracore[local_endpoint]"
+pip install "neuracore[ml]"
 ```
 
 Local model deployment also requires a Java JRE.
