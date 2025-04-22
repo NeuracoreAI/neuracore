@@ -132,7 +132,7 @@ class DatasetDescription(BaseModel):
 
 class RecordingDescription(BaseModel):
     joint_positions: DataItemStats = Field(default_factory=lambda: DataItemStats())
-    joint_velocitys: DataItemStats = Field(default_factory=lambda: DataItemStats())
+    joint_velocities: DataItemStats = Field(default_factory=lambda: DataItemStats())
     joint_torques: DataItemStats = Field(default_factory=lambda: DataItemStats())
     joint_target_positions: DataItemStats = Field(
         default_factory=lambda: DataItemStats()
@@ -148,7 +148,7 @@ class RecordingDescription(BaseModel):
         data_types = []
         if self.joint_positions.max_len > 0:
             data_types.append(DataType.JOINT_POSITIONS)
-        if self.joint_velocitys.max_len > 0:
+        if self.joint_velocities.max_len > 0:
             data_types.append(DataType.JOINT_VELOCITIES)
         if self.joint_torques.max_len > 0:
             data_types.append(DataType.JOINT_TORQUES)
