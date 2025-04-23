@@ -62,7 +62,7 @@ class SimpleVLA(NeuracoreModel):
         # Language encoder
         self.language_encoder = LanguageEncoder(
             output_dim=self.language_output_dim, model_name=LANGUAGE_MODEL_NAME
-        ).to(self.device)
+        )
 
         # State processing
         state_input_dim = (
