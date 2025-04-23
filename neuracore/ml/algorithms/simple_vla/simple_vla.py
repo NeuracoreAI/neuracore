@@ -19,7 +19,7 @@ from neuracore.ml import (
 
 from .modules import ImageEncoder, LanguageEncoder, MultimodalFusion
 
-LANGUAGE_MODEL_NAME = "bert-base-uncased"
+LANGUAGE_MODEL_NAME = "distilbert-base-uncased"
 _tokenizer = None
 
 
@@ -62,7 +62,7 @@ class SimpleVLA(NeuracoreModel):
         # Language encoder
         self.language_encoder = LanguageEncoder(
             output_dim=self.language_output_dim, model_name=LANGUAGE_MODEL_NAME
-        )
+        ).to(self.device)
 
         # State processing
         state_input_dim = (

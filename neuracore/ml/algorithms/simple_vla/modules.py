@@ -57,7 +57,8 @@ class LanguageEncoder(nn.Module):
             Encoded features of shape (batch, output_dim)
         """
         # Get outputs from the language model
-        outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
+        with torch.no_grad():
+            outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
         # Use the [CLS] token representation as the sequence representation
         sequence_output = outputs.last_hidden_state[:, 0, :].detach()
         return self.proj(sequence_output)
