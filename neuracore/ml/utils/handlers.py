@@ -1,19 +1,3 @@
-import importlib.util
-import subprocess
-import sys
-
-# Ensure neuracore is installed
-# ruff: noqa: E402
-if importlib.util.find_spec("neuracore") is None:
-    subprocess.check_call([
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "--index-url https://test.pypi.org/simple/",
-        "neuracore",
-    ])
-
 import base64
 import io
 import json
@@ -98,7 +82,7 @@ class RobotModelHandler(BaseHandler):
         self.model.eval()
 
         # Initialize tokenizer if language data is supported
-        if DataType.LANGUAGE_DATA in self.model_init_description.input_data_types:
+        if DataType.LANGUAGE in self.model_init_description.input_data_types:
             try:
                 self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
                 logger.info("Tokenizer initialized!")

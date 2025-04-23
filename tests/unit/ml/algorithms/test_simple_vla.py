@@ -69,7 +69,7 @@ def model_init_description() -> ModelInitDescription:
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
             DataType.RGB_IMAGE,
-            DataType.LANGUAGE_DATA,
+            DataType.LANGUAGE,
         ],
         output_data_types=[DataType.JOINT_TARGET_POSITIONS],
         output_prediction_horizon=PRED_HORIZON,

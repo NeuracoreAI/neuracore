@@ -57,7 +57,7 @@ class NeuracoreDataset(Dataset, ABC):
 
         # Create tokenizer if language data is used
         self.tokenizer = None
-        if DataType.LANGUAGE_DATA in self.data_types:
+        if DataType.LANGUAGE in self.data_types:
             self.tokenizer = AutoTokenizer.from_pretrained(language_model_name)
 
         self._error_count = 0
@@ -135,7 +135,7 @@ class NeuracoreDataset(Dataset, ABC):
                 torch.stack([s.rgb_images.data for s in samples]),
                 torch.stack([s.rgb_images.mask for s in samples]),
             )
-        if DataType.LANGUAGE_DATA in data_types:
+        if DataType.LANGUAGE in data_types:
             bd.language_tokens = MaskableData(
                 torch.cat([s.language_tokens.data for s in samples]),
                 torch.cat([s.language_tokens.mask for s in samples]),

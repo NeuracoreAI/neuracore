@@ -165,11 +165,14 @@ class EndpointPolicy:
                             rgb_batch[b_idx][t_idx][cam_idx] = self._decode_image(
                                 rgb_batch[b_idx][t_idx][cam_idx]
                             )
+                model_pred.outputs[DataType.RGB_IMAGE] = np.array(rgb_batch)
             for key, value in model_pred.outputs.items():
                 if DataType.RGB_IMAGE == key:
                     continue
                 if isinstance(value, list):
                     model_pred.outputs[key] = np.array(value)
+                # Remove batch dimension
+                model_pred.outputs[key] = model_pred.outputs[key][0]
             return model_pred
 
         except requests.exceptions.RequestException as e:

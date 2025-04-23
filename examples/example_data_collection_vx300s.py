@@ -29,7 +29,8 @@ def main(args):
 
     if record:
         nc.create_dataset(
-            name="My Example Dataset", description="This is an example dataset"
+            name="My Example Dataset",
+            description="This is an example dataset",
         )
         print("Created Dataset...")
 
@@ -51,6 +52,8 @@ def main(args):
 
         # Log initial state
         nc.log_joint_positions(ts.observation["qpos"])
+        nc.log_joint_velocities(ts.observation["qvel"])
+        nc.log_language("Pick up the cube and pass it to the other robot")
         for cam_name in camera_names:
             nc.log_rgb(cam_name, ts.observation["images"][cam_name])
 
@@ -60,6 +63,8 @@ def main(args):
             ts = env.step(list(action.values()))
 
             nc.log_joint_positions(ts.observation["qpos"])
+            nc.log_joint_velocities(ts.observation["qvel"])
+            nc.log_language("Pick up the cube and pass it to the other robot")
 
             nc.log_joint_target_positions(action)
             for cam_name in camera_names:

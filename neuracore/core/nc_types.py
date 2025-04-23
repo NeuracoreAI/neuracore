@@ -85,7 +85,6 @@ class DataType(str, Enum):
     POSES = "poses"
     LANGUAGE = "language"
     CUSTOM = "custom"
-    LANGUAGE_DATA = "language_data"
 
 
 class DataItemStats(BaseModel):
@@ -126,7 +125,7 @@ class DatasetDescription(BaseModel):
         if self.max_num_point_clouds > 0:
             data_types.append(DataType.POINT_CLOUD)
         if self.language_data.max_len > 0:
-            data_types.append(DataType.LANGUAGE_DATA)
+            data_types.append(DataType.LANGUAGE)
         return data_types
 
 

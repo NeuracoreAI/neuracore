@@ -343,7 +343,7 @@ class SimpleVLA(NeuracoreModel):
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
             DataType.RGB_IMAGE,
-            DataType.LANGUAGE_DATA,
+            DataType.LANGUAGE,
         ]
 
     @staticmethod

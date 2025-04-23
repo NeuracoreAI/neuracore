@@ -87,7 +87,7 @@ class DummyDataset(NeuracoreDataset):
             self.dataset_description.joint_target_positions = DataItemStats(
                 mean=np.zeros(7), std=np.ones(7), max_len=7
             )
-        if DataType.LANGUAGE_DATA in self.data_types:
+        if DataType.LANGUAGE in self.data_types:
             # Add language data stats to dataset description
             self.dataset_description.language_data = DataItemStats(
                 mean=np.zeros(1), std=np.ones(1), max_len=self.language_max_token_length
@@ -164,7 +164,7 @@ class DummyDataset(NeuracoreDataset):
                 if DataType.JOINT_TARGET_POSITIONS in self.output_data_types:
                     sample.outputs.joint_target_positions = joint_target_positions
 
-            if DataType.LANGUAGE_DATA in self.data_types:
+            if DataType.LANGUAGE in self.data_types:
                 # Randomly select an instruction
                 instruction = np.random.choice(self.sample_instructions)
                 # Tokenize the instruction
@@ -175,9 +175,9 @@ class DummyDataset(NeuracoreDataset):
                     attention_mask.unsqueeze(0),  # Add batch dimension
                 )
 
-                if DataType.LANGUAGE_DATA in self.input_data_types:
+                if DataType.LANGUAGE in self.input_data_types:
                     sample.inputs.language_tokens = language_tokens
-                if DataType.LANGUAGE_DATA in self.output_data_types:
+                if DataType.LANGUAGE in self.output_data_types:
                     sample.outputs.language_tokens = language_tokens
 
             return sample
