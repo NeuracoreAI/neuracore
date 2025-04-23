@@ -60,7 +60,7 @@ setup(
             "torch",
             "torchvision",
             "torch-model-archiver",
-            "transformers==4.51.2",
+            "transformers",
         ],
         "dev": [
             "pytest>=6.2.5",
