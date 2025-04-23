@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torchvision.transforms as T
 from PIL import Image
-from transformers import AutoTokenizer
 from ts.torch_handler.base_handler import BaseHandler
 
 from neuracore.core.nc_types import LanguageData  # Import LanguageData
@@ -36,7 +35,6 @@ class RobotModelHandler(BaseHandler):
         self.initialized = False
         self.normalization_stats = None
         self.dataset_description: DatasetDescription = None
-        self.tokenizer = None
 
     def _load_pickled_model(self, model_dir, model_file, model_pt_path):
         """
@@ -80,14 +78,6 @@ class RobotModelHandler(BaseHandler):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
         self.model.eval()
-
-        # Initialize tokenizer if language data is supported
-        if DataType.LANGUAGE in self.model_init_description.input_data_types:
-            try:
-                self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-                logger.info("Tokenizer initialized!")
-            except Exception as e:
-                logger.error(f"Error loading tokenizer: {e}")
 
         self.initialized = True
         logger.info("Model initialized!")
@@ -140,29 +130,11 @@ class RobotModelHandler(BaseHandler):
             torch.tensor(mask, dtype=torch.float32),
         )
 
-    def _process_language_data(
-        self, language_data: list[LanguageData], max_len: int = 512
-    ) -> MaskableData:
+    def _process_language_data(self, language_data: list[LanguageData]) -> MaskableData:
         """Process language data using tokenizer."""
-        if self.tokenizer is None:
-            logger.warning("Tokenizer not initialized but language data received")
-            return None
-
         # Tokenize all texts in the batch
         texts = [ld.text for ld in language_data]
-
-        encoded = self.tokenizer(
-            texts,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=max_len,
-        )
-
-        # Get input ids and attention mask
-        input_ids = encoded["input_ids"]
-        attention_mask = encoded["attention_mask"]
-
+        input_ids, attention_mask = self.model.tokenize_text(texts)
         return MaskableData(
             torch.tensor(input_ids, dtype=torch.long),
             torch.tensor(attention_mask, dtype=torch.float32),

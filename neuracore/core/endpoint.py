@@ -306,7 +306,7 @@ def connect_local_endpoint(
 
     try:
         process = _setup_torchserve(path_to_model, port=port)
-        attemps = 3
+        attemps = 5
         while attemps > 0:
             try:
                 # Check if the server is running

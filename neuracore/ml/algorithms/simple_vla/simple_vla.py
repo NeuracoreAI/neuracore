@@ -19,6 +19,9 @@ from neuracore.ml import (
 
 from .modules import ImageEncoder, LanguageEncoder, MultimodalFusion
 
+LANGUAGE_MODEL_NAME = "bert-base-uncased"
+_tokenizer = None
+
 
 class SimpleVLA(NeuracoreModel):
     """
@@ -39,7 +42,6 @@ class SimpleVLA(NeuracoreModel):
         lr: float = 1e-4,
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
-        language_model_name: str = "bert-base-uncased",
     ):
         super().__init__(model_init_description)
         self.hidden_dim = hidden_dim
@@ -50,7 +52,6 @@ class SimpleVLA(NeuracoreModel):
         self.lr = lr
         self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
-        self.language_model_name = language_model_name
 
         # Vision encoders - one for each camera
         self.image_encoders = nn.ModuleList([
@@ -60,11 +61,8 @@ class SimpleVLA(NeuracoreModel):
 
         # Language encoder
         self.language_encoder = LanguageEncoder(
-            output_dim=self.language_output_dim, model_name=self.language_model_name
+            output_dim=self.language_output_dim, model_name=LANGUAGE_MODEL_NAME
         )
-
-        # Get the tokenizer for language processing
-        self.tokenizer = AutoTokenizer.from_pretrained(self.language_model_name)
 
         # State processing
         state_input_dim = (
@@ -350,3 +348,24 @@ class SimpleVLA(NeuracoreModel):
     def get_supported_output_data_types() -> list[DataType]:
         """Return the data types supported by the model."""
         return [DataType.JOINT_TARGET_POSITIONS]
+
+    @staticmethod
+    def tokenize_text(text: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Tokenize text."""
+        global _tokenizer
+        if _tokenizer is None:
+            _tokenizer = AutoTokenizer.from_pretrained(LANGUAGE_MODEL_NAME)
+
+        # Tokenize the text
+        tokens = _tokenizer(
+            text,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+
+        # Extract token ids and attention mask
+        input_ids = tokens["input_ids"]
+        attention_mask = tokens["attention_mask"]
+
+        return input_ids, attention_mask
