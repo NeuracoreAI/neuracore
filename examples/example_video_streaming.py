@@ -64,7 +64,7 @@ def camera_task(camera_id):
         nc.log_rgb(f"Camera {camera_id} RGB", frame, timestamp=timestamp)
 
 
-def joint_task(num_frames=250):
+def joint_task(num_frames=1_000_000):
     joint_names = LEFT_ARM_JOINT_NAMES + RIGHT_ARM_JOINT_NAMES
 
     # Partition joints into 5 groups
@@ -126,12 +126,12 @@ def main():
     )
     print("Created Dataset...")
 
-    nc.start_recording()
+    # nc.start_recording()
 
     # Run four camera streams concurrently
     from threading import Thread
 
-    threads = [Thread(target=camera_task, args=(i,)) for i in range(0)]
+    threads = [Thread(target=camera_task, args=(i,)) for i in range(1)]
 
     threads.append(Thread(target=joint_task))
 
@@ -142,7 +142,7 @@ def main():
         thread.join()
 
     print("Finishing recording...")
-    nc.stop_recording()
+    # nc.stop_recording()
     print("Finished recording!")
     nc.stop_live_data()
 

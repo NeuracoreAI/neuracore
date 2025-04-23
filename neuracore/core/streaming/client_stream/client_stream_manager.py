@@ -81,7 +81,6 @@ class ClientStreamingManager:
             if sensor_key in self.video_tracks_cache:
                 return self.video_tracks_cache[sensor_key]
 
-            print(f"create vid source {sensor_key=}")
             mid = str(len(self.tracks))
             video_source = (
                 DepthVideoSource(mid=mid) if kind == "depth" else VideoSource(mid=mid)
@@ -178,6 +177,7 @@ class ClientStreamingManager:
             try:
                 async with sse_client.EventSource(
                     f"{API_URL}/signalling/recording_notifications/{self.local_stream_id}",
+                    session=self.client_session,
                     headers=self.auth.get_headers(),
                     reconnection_time=timedelta(seconds=0.1),
                 ) as event_source:
