@@ -101,12 +101,12 @@ class DatasetDescription(BaseModel):
     joint_target_positions: DataItemStats = Field(
         default_factory=lambda: DataItemStats()
     )
-    language_data: DataItemStats = Field(default_factory=lambda: DataItemStats())
     end_effector_states: DataItemStats = Field(default_factory=lambda: DataItemStats())
     poses: DataItemStats = Field(default_factory=lambda: DataItemStats())
     max_num_rgb_images: int = 0
     max_num_depth_images: int = 0
     max_num_point_clouds: int = 0
+    max_language_length: int = 0
 
     def get_data_types(self) -> list[DataType]:
         data_types = []
@@ -124,7 +124,7 @@ class DatasetDescription(BaseModel):
             data_types.append(DataType.DEPTH_IMAGE)
         if self.max_num_point_clouds > 0:
             data_types.append(DataType.POINT_CLOUD)
-        if self.language_data.max_len > 0:
+        if self.max_language_length > 0:
             data_types.append(DataType.LANGUAGE)
         return data_types
 
@@ -141,6 +141,7 @@ class RecordingDescription(BaseModel):
     num_rgb_images: int = 0
     num_depth_images: int = 0
     num_point_clouds: int = 0
+    max_language_length: int = 0
     episode_length: int = 0
 
     def get_data_types(self) -> list[DataType]:
@@ -159,6 +160,8 @@ class RecordingDescription(BaseModel):
             data_types.append(DataType.DEPTH_IMAGE)
         if self.num_point_clouds > 0:
             data_types.append(DataType.POINT_CLOUD)
+        if self.max_language_length > 0:
+            data_types.append(DataType.LANGUAGE)
         return data_types
 
 

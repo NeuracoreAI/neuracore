@@ -9,7 +9,7 @@ import neuracore as nc
 from neuracore.core.nc_types import DataType
 
 THIS_DIR = Path(__file__).parent
-TRAINING_JOB_NAME = "MyWorldModelTrainingJob"
+TRAINING_JOB_NAME = "VideoPredBS16PredHorizon1V2"
 
 
 def main():
@@ -53,12 +53,11 @@ def main():
         prediction = endpoint.predict()
         # Produces (T, CAMERAS, ...)
         future_frames = prediction.outputs[DataType.RGB_IMAGE]
-        future_frames[0, 0]
+        future_frame = future_frames[0, 0]
 
         # Show future
-        plt_img.set_data(ts.observation["images"][render_cam_name])
+        plt_img.set_data(future_frame)
         plt.pause(0.002)
-        plt.close()
 
     plt.close()
     endpoint.disconnect()

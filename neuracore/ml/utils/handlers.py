@@ -141,14 +141,12 @@ class RobotModelHandler(BaseHandler):
         )
 
     def _process_language_data(
-        self, language_data: list[LanguageData], max_len: int = 32
+        self, language_data: list[LanguageData], max_len: int = 512
     ) -> MaskableData:
         """Process language data using tokenizer."""
         if self.tokenizer is None:
             logger.warning("Tokenizer not initialized but language data received")
             return None
-
-        len(language_data)
 
         # Tokenize all texts in the batch
         texts = [ld.text for ld in language_data]
@@ -213,7 +211,6 @@ class RobotModelHandler(BaseHandler):
         if sync_points[0].language_data:
             batch.language_tokens = self._process_language_data(
                 [sp.language_data for sp in sync_points],
-                max_len=32,  # Can be parameterized from dataset description
             )
 
         return batch.to(self.device)
