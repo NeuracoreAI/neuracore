@@ -62,16 +62,6 @@ setup(
             "torch-model-archiver",
             "transformers",
         ],
-        "upload": [
-            "robot_descriptions @ git+https://github.com/stepjam/robot_descriptions.py.git@main",
-            "pin",
-            "pin-pink",
-            "lerobot @ git+https://github.com/huggingface/lerobot.git",
-            "tensorflow-datasets",
-            "tensorflow",
-            "gcsfs",
-            "apache_beam",
-        ],
         "dev": [
             "pytest>=6.2.5",
             "pytest-cov>=2.12.1",

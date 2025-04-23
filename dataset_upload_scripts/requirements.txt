@@ -1,0 +1,8 @@
+robot_descriptions @ git+https://github.com/stepjam/robot_descriptions.py.git@main
+lerobot @ git+https://github.com/huggingface/lerobot.git
+pin
+pin-pink
+tensorflow-datasets
+tensorflow
+gcsfs
+apache_beam
