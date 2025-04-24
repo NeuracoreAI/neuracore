@@ -29,6 +29,12 @@ class SimulationNode(Node):
     def __init__(self):
         super().__init__("simulation_node")
 
+        # Declare parameters
+        self.declare_parameter("max_episodes", 10)
+        self.max_episodes = self.get_parameter("max_episodes").value
+        self.current_episode = 0
+        self.is_complete = False
+
         nc.login()
         nc.connect_robot(
             robot_name="Mujoco VX300s",
@@ -61,6 +67,7 @@ class SimulationNode(Node):
         self.env = None
         self.ts = None
         self.action_traj = []
+        self.current_action_traj = []
         self.record = True
 
         # Initialize environment first, before setting up timers
@@ -89,6 +96,8 @@ class SimulationNode(Node):
             1.0 / 50.0, self.simulation_step
         )  # 50Hz
 
+        self.get_logger().info(f"Simulation will run for {self.max_episodes} episodes")
+
     def initialize_environment(self):
         """Initialize the environment on the main thread before setting up timers"""
         try:
@@ -99,6 +108,7 @@ class SimulationNode(Node):
                 "Generating a demo action trajectory. This will take a few moments..."
             )
             self.action_traj, subtask_info, max_reward = rollout_policy()
+            self.current_action_traj = self.action_traj.copy()
             self.get_logger().info(
                 "Demo action trajectory generated successfully! "
                 "This will now be replayed as if a human is controlling the robot."
@@ -115,23 +125,45 @@ class SimulationNode(Node):
     def simulation_step(self):
         """Execute one simulation step, keeping GL context on the same thread"""
         try:
-            if len(self.action_traj) > 0:
-                action = self.action_traj.pop(0)
+            if self.is_complete:
+                return
+
+            if len(self.current_action_traj) > 0:
+                action = self.current_action_traj.pop(0)
                 nc.log_joint_target_positions(action)
                 self.ts = self.env.step(list(action.values()))
             else:
-                self.sim_step_timer.cancel()
                 if self.record:
                     nc.stop_recording()
                     self.get_logger().info("Recording stopped")
-                self.sim_step_timer.cancel()
+
+                # Increment episode counter
+                self.current_episode += 1
+                self.get_logger().info(
+                    f"Completed episode {self.current_episode} of {self.max_episodes}"
+                )
+
+                # Check if we've reached the maximum number of episodes
+                if self.current_episode >= self.max_episodes:
+                    self.is_complete = True
+                    self.get_logger().info("All episodes completed. CTRL-C to stop.")
+                    return
+
+                # Reset the action trajectory
+                self.ts = self.env.reset()
+                self.current_action_traj = self.action_traj.copy()
+
+                if self.record:
+                    nc.start_recording()
+                    self.get_logger().info("Recording Started")
+
         except Exception as e:
             self.get_logger().error(f"Error in simulation step: {e}")
 
     def publish_joint_states(self):
         """Publish joint states without modifying the environment"""
         try:
-            if not self.ts:
+            if not self.ts or self.is_complete:
                 return
 
             # Extract joint positions from the simulation state
@@ -161,7 +193,7 @@ class SimulationNode(Node):
     def publish_camera_images(self):
         """Publish camera images without modifying the environment"""
         try:
-            if not self.ts:
+            if not self.ts or self.is_complete:
                 return
 
             # Extract images from the simulation state

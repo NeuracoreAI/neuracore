@@ -5,7 +5,7 @@ set -e
 source /opt/ros/humble/setup.bash
 source /ros2_ws/install/setup.bash
 
-Xvfb :97 &
+Xvfb :99 &
 XVFB_PROC=$!
 sleep 1
 export DISPLAY=:99
