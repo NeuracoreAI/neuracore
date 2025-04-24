@@ -25,7 +25,7 @@ def test_connect_endpoint(temp_config_dir, mock_auth_requests, reset_neuracore):
         f"{API_URL}/models/endpoints/test_endpoint_id/predict",
         json={
             "predictions": ModelPrediction(
-                outputs={DataType.JOINT_TARGET_POSITIONS: [0.1, 0.2, 0.3]}
+                outputs={DataType.JOINT_TARGET_POSITIONS: [[0.1, 0.2, 0.3]]}
             ).model_dump()
         },
         status_code=200,
