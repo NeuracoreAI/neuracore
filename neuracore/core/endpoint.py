@@ -12,6 +12,7 @@ from typing import Optional
 import numpy as np
 import requests
 from PIL import Image
+from tqdm import tqdm
 
 from neuracore.core.utils.depth_utils import depth_to_rgb
 
@@ -19,7 +20,14 @@ from ..api.globals import GlobalSingleton
 from .auth import get_auth
 from .const import API_URL
 from .exceptions import EndpointError
-from .nc_types import CameraData, DataType, JointData, ModelPrediction, SyncPoint
+from .nc_types import (
+    CameraData,
+    DataType,
+    JointData,
+    LanguageData,
+    ModelPrediction,
+    SyncPoint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +95,14 @@ class EndpointPolicy:
                 sync_point.joint_positions = self._maybe_add_exisiting_data(
                     sync_point.joint_positions, stream_data
                 )
+            elif "joint_velocities" in stream_name:
+                stream_data: JointData = stream.get_latest_data()
+                sync_point.joint_velocities = self._maybe_add_exisiting_data(
+                    sync_point.joint_velocities, stream_data
+                )
+            elif "language" in stream_name:
+                stream_data: LanguageData = stream.get_latest_data()
+                sync_point.language_data = stream_data
             else:
                 raise NotImplementedError(
                     f"Support for stream {stream_name} is not implemented yet"
@@ -165,11 +181,12 @@ class EndpointPolicy:
                             rgb_batch[b_idx][t_idx][cam_idx] = self._decode_image(
                                 rgb_batch[b_idx][t_idx][cam_idx]
                             )
+                model_pred.outputs[DataType.RGB_IMAGE] = np.array(rgb_batch)
             for key, value in model_pred.outputs.items():
-                if DataType.RGB_IMAGE == key:
-                    continue
                 if isinstance(value, list):
                     model_pred.outputs[key] = np.array(value)
+                # Remove batch dimension
+                model_pred.outputs[key] = model_pred.outputs[key][0]
             return model_pred
 
         except requests.exceptions.RequestException as e:
@@ -246,7 +263,8 @@ def connect_local_endpoint(
                 break
         if job_id is None:
             raise EndpointError(f"Training run not found: {train_run_name}")
-        print("Downloading model from training run. This may take a while...")
+
+        print(f"Downloading model '{train_run_name}' from training run...")
         response = requests.get(
             f"{API_URL}/training/jobs/{job_id}/model",
             headers=auth.get_headers(),
@@ -254,15 +272,41 @@ def connect_local_endpoint(
             stream=True,
         )
         response.raise_for_status()
+
+        # Get total file size
+        total_size = int(response.headers.get("Content-Length", 0))
+
+        # Create a temporary directory and file path
         tempdir = tempfile.mkdtemp()
         path_to_model = Path(tempdir) / "model.mar"
+
+        # Create progress bar based on file size
+        progress_bar = tqdm(
+            total=total_size,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            desc=f"Downloading model {train_run_name}",
+            bar_format=(
+                "{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} "
+                "[{elapsed}<{remaining}, {rate_fmt}]"
+            ),
+        )
+
+        # Write the file with progress updates
         with open(path_to_model, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
+                    progress_bar.update(len(chunk))
+
+        # Close the progress bar
+        progress_bar.close()
+        print(f"Model download complete. Saved to {path_to_model}")
+
     try:
         process = _setup_torchserve(path_to_model, port=port)
-        attemps = 3
+        attemps = 5
         while attemps > 0:
             try:
                 # Check if the server is running

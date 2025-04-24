@@ -10,7 +10,6 @@ from .constants import (
     DT,
     PUPPET_GRIPPER_POSITION_CLOSE,
     PUPPET_GRIPPER_POSITION_UNNORMALIZE_FN,
-    PUPPET_GRIPPER_VELOCITY_NORMALIZE_FN,
     START_ARM_POSE,
     VX300S_DIR,
 )
@@ -124,15 +123,11 @@ class BimanualViperXEETask(base.Task):
     @staticmethod
     def get_qvel(physics):
         qvel_raw = physics.data.qvel.copy()
-        left_qvel_raw = qvel_raw[:8]
-        right_qvel_raw = qvel_raw[8:16]
-        left_arm_qvel = left_qvel_raw[:6]
-        right_arm_qvel = right_qvel_raw[:6]
-        left_gripper_qvel = [PUPPET_GRIPPER_VELOCITY_NORMALIZE_FN(left_qvel_raw[6])]
-        right_gripper_qvel = [PUPPET_GRIPPER_VELOCITY_NORMALIZE_FN(right_qvel_raw[6])]
-        return np.concatenate(
-            [left_arm_qvel, left_gripper_qvel, right_arm_qvel, right_gripper_qvel]
-        )
+        joint_dict = {}
+        for i in range(16):
+            joint_name = physics.model.id2name(i, "joint")
+            joint_dict[joint_name] = qvel_raw[i]
+        return joint_dict
 
     @staticmethod
     def get_env_state(physics):

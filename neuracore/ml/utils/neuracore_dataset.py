@@ -1,11 +1,10 @@
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 import torchvision.transforms as T
 from torch.utils.data import Dataset
-from transformers import AutoTokenizer
 
 from neuracore.core.nc_types import DataType
 from neuracore.ml import BatchedTrainingSamples, MaskableData
@@ -29,8 +28,7 @@ class NeuracoreDataset(Dataset, ABC):
         input_data_types: list[DataType],
         output_data_types: list[DataType],
         output_prediction_horizon: int = 5,
-        language_model_name: str = "bert-base-uncased",
-        language_max_token_length: int = 125,
+        tokenize_text: Callable[[list[str]], tuple[torch.Tensor, torch.Tensor]] = None,
     ):
         """
         Initialize the dummy dataset.
@@ -39,13 +37,10 @@ class NeuracoreDataset(Dataset, ABC):
             input_data_types: List of supported input data types
             output_data_types: List of supported output data types
             output_prediction_horizon: Length of the action sequence
-            language_model_name: Name of the language model for tokenization
         """
         self.input_data_types = input_data_types
         self.output_data_types = output_data_types
         self.output_prediction_horizon = output_prediction_horizon
-        self.language_model_name = language_model_name
-        self.language_max_token_length = language_max_token_length
 
         self.data_types = set(input_data_types + output_data_types)
 
@@ -56,32 +51,15 @@ class NeuracoreDataset(Dataset, ABC):
         ])
 
         # Create tokenizer if language data is used
-        self.tokenizer = None
-        if DataType.LANGUAGE_DATA in self.data_types:
-            self.tokenizer = AutoTokenizer.from_pretrained(language_model_name)
+        self.tokenize_text = tokenize_text
+        if DataType.LANGUAGE in self.data_types and tokenize_text is None:
+            raise ValueError(
+                "Tokenizer not provided but language data requested. "
+                "Please provide a tokenizer function."
+            )
 
         self._error_count = 0
         self._max_error_count = 1
-
-    def _tokenize_text(self, text: str) -> tuple[torch.Tensor, torch.Tensor]:
-        """Tokenize text using the specified tokenizer."""
-        if self.tokenizer is None:
-            raise ValueError("Tokenizer not initialized but language data requested")
-
-        # Tokenize the text
-        tokens = self.tokenizer(
-            text,
-            padding="max_length",
-            max_length=self.language_max_token_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-
-        # Extract token ids and attention mask
-        input_ids = tokens["input_ids"].squeeze(0)
-        attention_mask = tokens["attention_mask"].squeeze(0)
-
-        return input_ids, attention_mask
 
     @abstractmethod
     def load_sample(
@@ -135,7 +113,7 @@ class NeuracoreDataset(Dataset, ABC):
                 torch.stack([s.rgb_images.data for s in samples]),
                 torch.stack([s.rgb_images.mask for s in samples]),
             )
-        if DataType.LANGUAGE_DATA in data_types:
+        if DataType.LANGUAGE in data_types:
             bd.language_tokens = MaskableData(
                 torch.cat([s.language_tokens.data for s in samples]),
                 torch.cat([s.language_tokens.mask for s in samples]),

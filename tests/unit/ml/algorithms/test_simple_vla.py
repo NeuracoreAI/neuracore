@@ -56,11 +56,7 @@ def model_init_description() -> ModelInitDescription:
             max_len=JOINT_POSITION_DIM,
         ),
         max_num_rgb_images=CAMS,
-        language_data=DataItemStats(
-            mean=np.zeros(1, dtype=float),
-            std=np.ones(1, dtype=float),
-            max_len=LANGUAGE_MAX_LEN,
-        ),
+        max_language_length=LANGUAGE_MAX_LEN,
     )
     return ModelInitDescription(
         dataset_description=dataset_description,
@@ -69,7 +65,7 @@ def model_init_description() -> ModelInitDescription:
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
             DataType.RGB_IMAGE,
-            DataType.LANGUAGE_DATA,
+            DataType.LANGUAGE,
         ],
         output_data_types=[DataType.JOINT_TARGET_POSITIONS],
         output_prediction_horizon=PRED_HORIZON,

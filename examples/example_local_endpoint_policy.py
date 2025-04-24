@@ -6,6 +6,7 @@ from common.ee_sim_env import sample_box_pose
 from common.sim_env import BOX_POSE, make_sim_env
 
 import neuracore as nc
+from neuracore.core.nc_types import DataType
 
 THIS_DIR = Path(__file__).parent
 TRAINING_JOB_NAME = "MyTrainingJob"
@@ -51,7 +52,8 @@ def main():
                     nc.log_rgb(key, value)
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
-                action = policy.predict()
+                prediction = policy.predict()
+                action = prediction.outputs[DataType.JOINT_TARGET_POSITIONS]
                 horizon = action.shape[0]
             a = action[idx_in_horizon]
             ts = env.step(a)

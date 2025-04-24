@@ -13,8 +13,6 @@ from .ml_types import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LANGUAGE_MODEL_NAME = "bert-base-uncased"
-
 
 class NeuracoreModel(nn.Module, ABC):
     """Abstract base class for robot learning models."""
@@ -85,6 +83,11 @@ class NeuracoreModel(nn.Module, ABC):
         pass
 
     @staticmethod
+    def tokenize_text(self, text: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Tokenize text."""
+        raise NotImplementedError("User needs to implement this method")
+
+    @staticmethod
     @abstractmethod
     def get_supported_input_data_types() -> list[DataType]:
         """Return the input data types supported by the model."""
@@ -95,8 +98,3 @@ class NeuracoreModel(nn.Module, ABC):
     def get_supported_output_data_types() -> list[DataType]:
         """Return the output data types supported by the model."""
         pass
-
-    @staticmethod
-    def get_language_model_name() -> str:
-        """Get the tokenizer for the language model."""
-        return DEFAULT_LANGUAGE_MODEL_NAME

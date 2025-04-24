@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -28,8 +28,9 @@ class DummyDataset(NeuracoreDataset):
         num_samples: int = 50,
         num_episodes: int = 10,
         output_prediction_horizon: int = 5,
-        language_model_name: str = "bert-base-uncased",
-        language_max_token_length: int = 512,
+        tokenize_text: Optional[
+            Callable[[list[str]], tuple[torch.Tensor, torch.Tensor]]
+        ] = None,
     ):
         """
         Initialize the dummy dataset.
@@ -40,14 +41,13 @@ class DummyDataset(NeuracoreDataset):
             num_samples: Number of samples in the dataset
             num_episodes: Number of episodes in the dataset
             output_prediction_horizon: Length of the action sequence
-            language_model_name: Name of the language model for tokenization
+            tokenize_text: Function to tokenize text data
         """
         super().__init__(
             input_data_types=input_data_types,
             output_data_types=output_data_types,
             output_prediction_horizon=output_prediction_horizon,
-            language_model_name=language_model_name,
-            language_max_token_length=language_max_token_length,
+            tokenize_text=tokenize_text,
         )
         self.num_samples = num_samples
         self.num_episodes = num_episodes
@@ -67,6 +67,9 @@ class DummyDataset(NeuracoreDataset):
             "Close the gripper",
             "Slide the object forward",
         ]
+        max_language_length = max(
+            len(instruction) for instruction in self.sample_instructions
+        )
 
         self.dataset_description = DatasetDescription()
         if DataType.RGB_IMAGE in self.data_types:
@@ -87,11 +90,9 @@ class DummyDataset(NeuracoreDataset):
             self.dataset_description.joint_target_positions = DataItemStats(
                 mean=np.zeros(7), std=np.ones(7), max_len=7
             )
-        if DataType.LANGUAGE_DATA in self.data_types:
+        if DataType.LANGUAGE in self.data_types:
             # Add language data stats to dataset description
-            self.dataset_description.language_data = DataItemStats(
-                mean=np.zeros(1), std=np.ones(1), max_len=self.language_max_token_length
-            )
+            self.dataset_description.max_language_length = max_language_length
 
         self._error_count = 0
         self._max_error_count = 1
@@ -164,20 +165,17 @@ class DummyDataset(NeuracoreDataset):
                 if DataType.JOINT_TARGET_POSITIONS in self.output_data_types:
                     sample.outputs.joint_target_positions = joint_target_positions
 
-            if DataType.LANGUAGE_DATA in self.data_types:
+            if DataType.LANGUAGE in self.data_types:
                 # Randomly select an instruction
                 instruction = np.random.choice(self.sample_instructions)
                 # Tokenize the instruction
-                input_ids, attention_mask = self._tokenize_text(instruction)
+                input_ids, attention_mask = self.tokenize_text([instruction])
 
-                language_tokens = MaskableData(
-                    input_ids.unsqueeze(0),  # Add batch dimension
-                    attention_mask.unsqueeze(0),  # Add batch dimension
-                )
+                language_tokens = MaskableData(input_ids, attention_mask)
 
-                if DataType.LANGUAGE_DATA in self.input_data_types:
+                if DataType.LANGUAGE in self.input_data_types:
                     sample.inputs.language_tokens = language_tokens
-                if DataType.LANGUAGE_DATA in self.output_data_types:
+                if DataType.LANGUAGE in self.output_data_types:
                     sample.outputs.language_tokens = language_tokens
 
             return sample

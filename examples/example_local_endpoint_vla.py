@@ -1,4 +1,4 @@
-import sys
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 from common.constants import BIMANUAL_VIPERX_URDF_PATH, EPISODE_LENGTH
@@ -6,30 +6,23 @@ from common.ee_sim_env import sample_box_pose
 from common.sim_env import BOX_POSE, make_sim_env
 
 import neuracore as nc
-from neuracore import EndpointError
 from neuracore.core.nc_types import DataType
 
-ENDPOINT_NAME = "MyExampleEndpoint"
+THIS_DIR = Path(__file__).parent
+TRAINING_JOB_NAME = "MyTrainingJobVLA"
 
 
 def main():
-
     nc.login()
     nc.connect_robot(
         robot_name="Mujoco VX300s",
         urdf_path=BIMANUAL_VIPERX_URDF_PATH,
         overwrite=False,
     )
-
-    try:
-        policy = nc.connect_endpoint(ENDPOINT_NAME)
-    except EndpointError:
-        print(f"Please ensure that the endpoint '{ENDPOINT_NAME}' is running.")
-        print(
-            "Once you have trained a model, endpoints can be satrted at https://neuracore.app/dashboard/endpoints"
-        )
-        sys.exit(1)
-
+    # If you have a train run name, you can use it to connect to a local. E.g.:
+    policy = nc.connect_local_endpoint(train_run_name=TRAINING_JOB_NAME)
+    # If you know the path to the local model.mar file, you can use it directly as:
+    # policy = nc.connect_local_endpoint(THIS_DIR / "common" / "assets" / "model.mar")
     onscreen_render = True
     render_cam_name = "angle"
     obs_camera_names = ["angle"]
@@ -51,10 +44,10 @@ def main():
 
         episode_max = 0
         horizon = 1
-
         # Run episode
         for i in range(EPISODE_LENGTH):
             nc.log_joint_positions(ts.observation["qpos"])
+            nc.log_language("Pick up the cube and pass it to the other robot")
             for key, value in ts.observation["images"].items():
                 if key in obs_camera_names:
                     nc.log_rgb(key, value)
@@ -63,7 +56,6 @@ def main():
                 prediction = policy.predict()
                 action = prediction.outputs[DataType.JOINT_TARGET_POSITIONS]
                 horizon = action.shape[0]
-
             a = action[idx_in_horizon]
             ts = env.step(a)
             episode_max = max(episode_max, ts.reward)

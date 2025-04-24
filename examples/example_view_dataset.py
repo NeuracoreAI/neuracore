@@ -81,10 +81,10 @@ first_camera_images = []
 for episode in dataset[:1]:
     print(f"Episode length is {len(episode)}")
     for step in episode:
-        joint_positions.append(step["joint_positions"])
-        if "images" in step:
-            for cam_id, img in step["images"].items():
-                first_camera_images.append(img)
+        joint_positions.append(step.joint_positions)
+        if step.rgb_images is not None:
+            for cam_id, img in step.rgb_images.items():
+                first_camera_images.append(img.frame)
                 break
 
 visualize_episode(joint_positions, first_camera_images)

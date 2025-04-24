@@ -106,7 +106,7 @@ def run_validation(
             num_samples=5,
             input_data_types=supported_input_data_types,
             output_data_types=supported_output_data_types,
-            language_model_name=model_class.get_language_model_name(),
+            tokenize_text=model_class.tokenize_text,
         )
 
         # Create a minimal dataloader
