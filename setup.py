@@ -27,19 +27,22 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
     ],
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     install_requires=[
-        "websockets>=14.0",
-        "numpy>=1.24.0",
+        "numpy",
         "requests>=2.31.0",
         "pillow>=10.0.0",
         "pyyaml>=6.0.1",
         "tqdm>=4.66.0",
         "requests-oauthlib",
+        "pydantic",
+        "av",
+        "aiortc",
+        "aiohttp-sse-client",
+        "numpy-stl",
     ],
     extras_require={
         "examples": [
@@ -51,27 +54,29 @@ setup(
         "mjcf": [
             "mujoco>3",
         ],
-        "local_endpoint": [
+        "ml": [
             "torchserve",
             "nvgpu",
             "torch",
             "torchvision",
             "torch-model-archiver",
-        ],
-        "ml": [
-            "torch",
-            "torchvision",
+            "transformers",
         ],
         "dev": [
             "pytest>=6.2.5",
             "pytest-cov>=2.12.1",
+            "pytest-asyncio>=0.15.1",
             "twine>=3.4.2",
             "requests-mock>=1.9.3",
+            "pre-commit",
         ],
     },
     entry_points={
         "console_scripts": [
-            "neuracore-generate-api-key = neuracore.generate_api_key:main",
+            (
+                "neuracore-generate-api-key = "
+                "neuracore.core.generate_api_key:generate_api_key"
+            ),
         ]
     },
     keywords="robotics machine-learning ai client-library",

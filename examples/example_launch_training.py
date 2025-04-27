@@ -56,7 +56,7 @@ def create_parser():
         help="Number of epochs to train for.",
     )
     parser.add_argument(
-        "--action_sequence_length",
+        "--output_prediction_horizon",
         type=int,
         default=50,
         help="Prediction horizon.",
@@ -80,7 +80,7 @@ if __name__ == "__main__":
     algorithm_config = {
         "batch_size": args.batch_size,
         "epochs": args.epochs,
-        "action_sequence_length": args.action_sequence_length,
+        "output_prediction_horizon": args.output_prediction_horizon,
     }
 
     job_data = nc.start_training_run(

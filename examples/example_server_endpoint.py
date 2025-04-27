@@ -1,12 +1,13 @@
 import sys
 
 import matplotlib.pyplot as plt
-from common.constants import EPISODE_LENGTH
+from common.constants import BIMANUAL_VIPERX_URDF_PATH, EPISODE_LENGTH
 from common.ee_sim_env import sample_box_pose
 from common.sim_env import BOX_POSE, make_sim_env
 
 import neuracore as nc
-from neuracore.exceptions import EndpointError
+from neuracore import EndpointError
+from neuracore.core.nc_types import DataType
 
 ENDPOINT_NAME = "MyExampleEndpoint"
 
@@ -14,6 +15,11 @@ ENDPOINT_NAME = "MyExampleEndpoint"
 def main():
 
     nc.login()
+    nc.connect_robot(
+        robot_name="Mujoco VX300s",
+        urdf_path=BIMANUAL_VIPERX_URDF_PATH,
+        overwrite=False,
+    )
 
     try:
         policy = nc.connect_endpoint(ENDPOINT_NAME)
@@ -26,6 +32,7 @@ def main():
 
     onscreen_render = True
     render_cam_name = "angle"
+    obs_camera_names = ["angle"]
 
     success = 0
     for episode_idx in range(1):
@@ -47,14 +54,14 @@ def main():
 
         # Run episode
         for i in range(EPISODE_LENGTH):
+            nc.log_joint_positions(ts.observation["qpos"])
+            for key, value in ts.observation["images"].items():
+                if key in obs_camera_names:
+                    nc.log_rgb(key, value)
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
-                joints = list(ts.observation["qpos"].values())
-                images = ts.observation["images"]
-                images_angle_only = {
-                    "angle_rgb": images["angle"],
-                }
-                action = policy.predict(joints, images_angle_only)
+                prediction = policy.predict()
+                action = prediction.outputs[DataType.JOINT_TARGET_POSITIONS]
                 horizon = action.shape[0]
 
             a = action[idx_in_horizon]

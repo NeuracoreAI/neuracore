@@ -29,6 +29,25 @@ ROBOT_ASSETS = THIS_DIR / "assets" / "robots"
 VX300S_DIR = ROBOT_ASSETS / "vx300s"
 
 BIMANUAL_VIPERX_URDF_PATH = str(VX300S_DIR / "bimanual_viperx_ee_transfer_cube.urdf")
+LEFT_ARM_JOINT_NAMES = [
+    "vx300s_left/waist",
+    "vx300s_left/shoulder",
+    "vx300s_left/elbow",
+    "vx300s_left/forearm_roll",
+    "vx300s_left/wrist_angle",
+    "vx300s_left/wrist_rotate",
+]
+LEFT_GRIPPER_JOINT_NAMES = ["vx300s_left/left_finger", "vx300s_left/right_finger"]
+RIGHT_ARM_JOINT_NAMES = [
+    "vx300s_right/waist",
+    "vx300s_right/shoulder",
+    "vx300s_right/elbow",
+    "vx300s_right/forearm_roll",
+    "vx300s_right/wrist_angle",
+    "vx300s_right/wrist_rotate",
+]
+RIGHT_GRIPPER_JOINT_NAMES = ["vx300s_right/left_finger", "vx300s_right/right_finger"]
+CAMERA_NAMES = ["top", "angle", "vis"]
 
 
 # Left finger position limits (qpos[7]), right_finger = -1 * left_finger

@@ -1,15 +1,17 @@
 """A simple CNN for each camera using a pretrained resnet18 followed by MLP."""
 
+import time
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
 
-from neuracore import (
-    BatchedInferenceOutputs,
+from neuracore.core.nc_types import DataType, ModelInitDescription, ModelPrediction
+from neuracore.ml import (
     BatchedInferenceSamples,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
-    DatasetDescription,
     NeuracoreModel,
 )
 
@@ -21,7 +23,7 @@ class CNNMLP(NeuracoreModel):
 
     def __init__(
         self,
-        dataset_description: DatasetDescription,
+        model_init_description: ModelInitDescription,
         hidden_dim: int = 512,
         cnn_output_dim: int = 64,
         num_layers: int = 3,
@@ -29,7 +31,7 @@ class CNNMLP(NeuracoreModel):
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
     ):
-        super().__init__(dataset_description)
+        super().__init__(model_init_description)
         self.hidden_dim = hidden_dim
         self.cnn_output_dim = cnn_output_dim
         self.num_layers = num_layers
@@ -39,26 +41,39 @@ class CNNMLP(NeuracoreModel):
 
         self.image_encoders = nn.ModuleList([
             ImageEncoder(output_dim=self.cnn_output_dim)
-            for _ in range(self.dataset_description.max_num_cameras)
+            for _ in range(self.dataset_description.max_num_rgb_images)
         ])
 
-        self.state_embed = nn.Linear(
-            self.dataset_description.max_state_size, hidden_dim
+        state_input_dim = (
+            self.dataset_description.joint_positions.max_len
+            + self.dataset_description.joint_velocities.max_len
+            + self.dataset_description.joint_torques.max_len
         )
+        self.state_embed = None
+        hidden_state_dim = 0
+        if state_input_dim > 0:
+            hidden_state_dim = hidden_dim
+            self.state_embed = nn.Linear(state_input_dim, hidden_dim)
 
         mlp_input_dim = (
-            self.dataset_description.max_num_cameras * cnn_output_dim + hidden_dim
+            self.dataset_description.max_num_rgb_images * cnn_output_dim
+            + hidden_state_dim
         )
 
+        self.action_data_type = self.model_init_description.output_data_types[0]
+        self.output_prediction_horizon = self.output_prediction_horizon
+        if DataType.JOINT_TARGET_POSITIONS == self.action_data_type:
+            action_data_item_stats = self.dataset_description.joint_target_positions
+        else:
+            action_data_item_stats = self.dataset_description.joint_positions
+        self.max_output_size = action_data_item_stats.max_len
+
         # Predict entire sequence at once
-        self.action_output_size = (
-            self.dataset_description.max_action_size
-            * self.dataset_description.action_prediction_horizon
-        )
+        self.output_size = self.max_output_size * self.output_prediction_horizon
         self.mlp = self._build_mlp(
             input_dim=mlp_input_dim,
             hidden_dim=hidden_dim,
-            output_dim=self.action_output_size,
+            output_dim=self.output_size,
             num_layers=num_layers,
         )
 
@@ -67,10 +82,24 @@ class CNNMLP(NeuracoreModel):
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         )
 
-        self.action_prediction_horizon = (
-            self.dataset_description.action_prediction_horizon
-        )
-        self.max_action_size = self.dataset_description.max_action_size
+        state_mean = np.concatenate([
+            self.dataset_description.joint_positions.mean,
+            self.dataset_description.joint_velocities.mean,
+            self.dataset_description.joint_torques.mean,
+        ])
+        state_std = np.concatenate([
+            self.dataset_description.joint_positions.std,
+            self.dataset_description.joint_velocities.std,
+            self.dataset_description.joint_torques.std,
+        ])
+        self.joint_state_mean = self._to_torch_float_tensor(state_mean)
+        self.joint_state_std = self._to_torch_float_tensor(state_std)
+        self.action_mean = self._to_torch_float_tensor(action_data_item_stats.mean)
+        self.action_std = self._to_torch_float_tensor(action_data_item_stats.std)
+
+    def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
+        """Convert list of floats to torch tensor."""
+        return torch.tensor(data, dtype=torch.float32, device=self.device)
 
     def _build_mlp(
         self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int
@@ -98,43 +127,25 @@ class CNNMLP(NeuracoreModel):
 
         return nn.Sequential(*layers)
 
-    def _preprocess_states(self, states: torch.FloatTensor) -> torch.FloatTensor:
+    def _preprocess_joint_state(
+        self, joint_state: torch.FloatTensor
+    ) -> torch.FloatTensor:
         """Preprocess the states."""
-        return (
-            states - self.dataset_description.state_mean
-        ) / self.dataset_description.state_std
+        return (joint_state - self.joint_state_mean) / self.joint_state_std
 
     def _preprocess_actions(self, actions: torch.FloatTensor) -> torch.FloatTensor:
         """Preprocess the actions."""
-        return (
-            actions - self.dataset_description.action_mean
-        ) / self.dataset_description.action_std
-
-    def _preprocess_camera_images(
-        self, camera_images: torch.FloatTensor
-    ) -> torch.FloatTensor:
-        for cam_id in range(self.dataset_description.max_num_cameras):
-            camera_images[:, cam_id] = self.transform(camera_images[:, cam_id])
-        return camera_images
-
-    def _inference_postprocess(
-        self, output: BatchedInferenceOutputs
-    ) -> BatchedInferenceOutputs:
-        """Postprocess the output of the inference."""
-        predictions = (
-            output.action_predicitons * self.dataset_description.action_std
-        ) + self.dataset_description.action_mean
-        return BatchedInferenceOutputs(action_predicitons=predictions)
+        return (actions - self.action_mean) / self.action_std
 
     def _predict_action(self, batch: BatchedInferenceSamples) -> torch.FloatTensor:
         """Predict action for the given batch."""
-        batch_size = batch.states.shape[0]
+        batch_size = batch.joint_positions.data.shape[0]
 
         # Process images from each camera
         image_features = []
         for cam_id, encoder in enumerate(self.image_encoders):
-            features = encoder(batch.camera_images[:, cam_id])
-            features *= batch.camera_images_mask[:, cam_id : cam_id + 1]
+            features = encoder(self.transform(batch.rgb_images.data[:, cam_id]))
+            features *= batch.rgb_images.mask[:, cam_id : cam_id + 1]
             image_features.append(features)
 
         # Combine image features
@@ -145,50 +156,68 @@ class CNNMLP(NeuracoreModel):
                 batch_size, self.cnn_output_dim, device=self.device, dtype=torch.float32
             )
 
-        state_features = self.state_embed(batch.states)
-
-        # Combine all features
-        combined_features = torch.cat([state_features, combined_image_features], dim=-1)
+        combined_features = combined_image_features
+        if self.state_embed is not None:
+            state_inputs = []
+            if batch.joint_positions:
+                state_inputs.append(
+                    batch.joint_positions.data * batch.joint_positions.mask
+                )
+            if batch.joint_velocities:
+                state_inputs.append(
+                    batch.joint_velocities.data * batch.joint_velocities.mask
+                )
+            if batch.joint_torques:
+                state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
+            joint_states = torch.cat(state_inputs, dim=-1)
+            joint_states = self._preprocess_joint_state(joint_states)
+            state_features = self.state_embed(joint_states)
+            combined_features = torch.cat(
+                [state_features, combined_image_features], dim=-1
+            )
 
         # Forward through MLP to get entire sequence
         mlp_out = self.mlp(combined_features)
 
         action_preds = mlp_out.view(
-            batch_size, self.action_prediction_horizon, self.max_action_size
+            batch_size, self.output_prediction_horizon, self.max_output_size
         )
         return action_preds
 
-    def forward(self, batch: BatchedInferenceSamples) -> BatchedInferenceOutputs:
+    def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
         """Forward pass for inference."""
-        preprocessed_batch = BatchedInferenceSamples(
-            states=self._preprocess_states(batch.states),
-            states_mask=batch.states_mask,
-            camera_images=self._preprocess_camera_images(batch.camera_images),
-            camera_images_mask=batch.camera_images_mask,
-        )
-        action_preds = self._predict_action(preprocessed_batch)
-        return self._inference_postprocess(
-            BatchedInferenceOutputs(action_predicitons=action_preds)
+        t = time.time()
+        action_preds = self._predict_action(batch)
+        prediction_time = time.time() - t
+        predictions = (action_preds * self.action_std) + self.action_mean
+        predictions = predictions.detach().cpu().numpy()
+        return ModelPrediction(
+            outputs={self.action_data_type: predictions},
+            prediction_time=prediction_time,
         )
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Training step."""
-        preprocessed_batch = BatchedInferenceSamples(
-            states=self._preprocess_states(batch.states),
-            states_mask=batch.states_mask,
-            camera_images=self._preprocess_camera_images(batch.camera_images),
-            camera_images_mask=batch.camera_images_mask,
+        inference_sample = BatchedInferenceSamples(
+            joint_positions=batch.inputs.joint_positions,
+            joint_velocities=batch.inputs.joint_velocities,
+            joint_torques=batch.inputs.joint_torques,
+            rgb_images=batch.inputs.rgb_images,
         )
-        target_actions = self._preprocess_actions(batch.actions)
-        action_predicitons = self._predict_action(preprocessed_batch)
-        losses = {}
-        metrics = {}
-        if self.training:
-            loss = nn.functional.mse_loss(action_predicitons, target_actions)
-            losses["mse_loss"] = loss
+        if self.action_data_type == DataType.JOINT_TARGET_POSITIONS:
+            action_data = batch.outputs.joint_target_positions.data
+        else:
+            action_data = batch.outputs.joint_positions.data
 
+        target_actions = self._preprocess_actions(action_data)
+        action_predicitons = self._predict_action(inference_sample)
+        losses, metrics = {}, {}
+        if self.training:
+            losses["mse_loss"] = nn.functional.mse_loss(
+                action_predicitons, target_actions
+            )
         return BatchedTrainingOutputs(
-            action_predicitons=action_predicitons,
+            output_predicitons=action_predicitons,
             losses=losses,
             metrics=metrics,
         )
@@ -209,3 +238,18 @@ class CNNMLP(NeuracoreModel):
             {"params": other_params, "lr": self.lr},
         ]
         return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+
+    @staticmethod
+    def get_supported_input_data_types() -> list[DataType]:
+        """Return the data types supported by the model."""
+        return [
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+            DataType.RGB_IMAGE,
+        ]
+
+    @staticmethod
+    def get_supported_output_data_types() -> list[DataType]:
+        """Return the data types supported by the model."""
+        return [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]

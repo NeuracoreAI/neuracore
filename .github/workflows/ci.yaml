@@ -2,9 +2,9 @@ name: CI/CD
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, staging ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, staging ]
 
 jobs:
   pre-commit:
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.9', '3.10', '3.11']
+        python-version: ['3.10', '3.11']
 
     steps:
     - uses: actions/checkout@v3
@@ -34,10 +34,11 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install ".[dev,ml]"
+        sudo apt install default-jre  # For endpoints
     
     - name: Run tests with pytest
       run: |
-        pytest tests/ --cov=neuracore
+        pytest tests/unit --cov=neuracore
 
   publish:
     needs: [pre-commit, test]
@@ -63,3 +64,28 @@ jobs:
       run: |
         python setup.py sdist bdist_wheel
         twine upload dist/*
+
+  publish-staging:
+    needs: [pre-commit, test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
+    
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v3
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install setuptools wheel twine
+    
+    - name: Build and publish
+      env:
+        TWINE_USERNAME: ${{ secrets.TEST_PYPI_USERNAME }}
+        TWINE_PASSWORD: ${{ secrets.TEST_PYPI_PASSWORD }}
+      run: |
+        python setup.py sdist bdist_wheel
+        twine upload --repository testpypi dist/*

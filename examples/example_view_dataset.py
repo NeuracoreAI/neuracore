@@ -3,13 +3,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import neuracore as nc
+from neuracore.core.nc_types import JointData
 
 
 def visualize_episode(
-    joint_positions: list[dict[float]], first_camera_images: list[np.ndarray]
+    joint_positions: list[JointData], first_camera_images: list[np.ndarray]
 ):
     """Visualize an episode with joint positions and camera images side by side."""
-    jps = np.array([list(jps.values()) for jps in joint_positions])
+    jps = np.array([list(joint_data.values.values()) for joint_data in joint_positions])
     print(jps)
     images = np.array(first_camera_images)
 
@@ -74,17 +75,17 @@ def visualize_episode(
 
 nc.login()
 # CMU Play Fusion is one of the many public/shared datasets you have access to
-dataset = nc.get_dataset("CMU Play Fusion")
+dataset = nc.get_dataset("ASU Table Top")
 print(f"Number of episodes: {len(dataset)}")
 joint_positions = []
 first_camera_images = []
 for episode in dataset[:1]:
     print(f"Episode length is {len(episode)}")
     for step in episode:
-        joint_positions.append(step["joint_positions"])
-        if "images" in step:
-            for cam_id, img in step["images"].items():
-                first_camera_images.append(img)
+        joint_positions.append(step.joint_positions)
+        if step.rgb_images is not None:
+            for cam_id, cam_data in step.rgb_images.items():
+                first_camera_images.append(cam_data.frame)
                 break
 
 visualize_episode(joint_positions, first_camera_images)
