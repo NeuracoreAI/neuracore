@@ -53,7 +53,7 @@ nc.connect_robot(
 
 ```python
 # Log joint positions
-nc.log_joints({
+nc.log_joint_positions({
     'joint1': 0.5, 
     'joint2': -0.3
 })

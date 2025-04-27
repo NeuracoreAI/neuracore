@@ -23,23 +23,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - None
 
-## [1.3.1]
+
+## [1.4.0]
 
 ### Added
 
-- None
+- Added additional logging functions
+- Example dataset upload scripts
 
 ### Changed
 
-- None
+- Improved data streaming
+- Open-sourced more example algorithms
+- `nc.log_joints` -> `nc.log_joint_positions`
+- `nc.log_actions` -> `nc.log_joint_target_positions`
 
-### Removed
 
-- None
+
+## [1.3.1]
 
 ### Fixed
 
 - API call to get algorithms.
+
 
 ## [1.3.0] 
 
@@ -52,20 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Allow python versions >= 3.9
 
-### Removed
-
-- None
-
-### Fixed
-
-- None
-
 
 ## [1.2.0] - 2025-03-12
 
 ### Added
 
-- Open source intitial neuracore algorithms
+- Open source initial neuracore algorithms
 
 
 ## [1.1.1] - 2025-03-11
@@ -90,29 +88,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rate limiting default is not DROP rather than BUFFER. Messages will be dropped if logging frequency is too high. 
 - Each camera now has its own websocket
 
-### Removed
-
-- None
-
-### Fixed
-
-- None
-
 
 ## [1.0.0] - 2025-01-07
 
 ### Added
 
 - Initial release
-
-### Changed
-
-- None
-
-### Removed
-
-- None
-
-### Fixed
-
-- None

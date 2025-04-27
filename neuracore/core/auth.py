@@ -63,12 +63,14 @@ class Auth:
             )
             if response.status_code != 200:
                 raise AuthenticationError(
-                    f"Failed to authenticate: {response.json().get('detail')}"
+                    "Could not verify API key. Please check your key and try again."
                 )
             token_data = response.json()
             self._access_token = token_data["access_token"]
-        except requests.exceptions.RequestException as e:
-            raise AuthenticationError(f"Failed to authenticate: {str(e)}")
+        except requests.exceptions.RequestException:
+            raise AuthenticationError(
+                "Could not verify API key. Please check your key and try again."
+            )
 
         # Save configuration if verification successful
         self._save_config()

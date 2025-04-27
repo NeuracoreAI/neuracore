@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import matplotlib.pyplot as plt
 from common.constants import BIMANUAL_VIPERX_URDF_PATH, EPISODE_LENGTH
 from common.ee_sim_env import sample_box_pose
@@ -8,7 +6,6 @@ from common.sim_env import BOX_POSE, make_sim_env
 import neuracore as nc
 from neuracore.core.nc_types import DataType
 
-THIS_DIR = Path(__file__).parent
 TRAINING_JOB_NAME = "MyTrainingJob"
 
 
@@ -22,7 +19,8 @@ def main():
     # If you have a train run name, you can use it to connect to a local. E.g.:
     policy = nc.connect_local_endpoint(train_run_name=TRAINING_JOB_NAME)
     # If you know the path to the local model.mar file, you can use it directly as:
-    # policy = nc.connect_local_endpoint(THIS_DIR / "common" / "assets" / "model.mar")
+    # policy = nc.connect_local_endpoint(path_to_model="PATH/TO/MODEL.mar")
+
     onscreen_render = True
     render_cam_name = "angle"
     obs_camera_names = ["angle"]

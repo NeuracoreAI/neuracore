@@ -5,14 +5,6 @@ This contains examples for using Neuracore with a simulated robot environment. Y
 - Deploy trained models locally
 - Visualize robot behavior
 
-## Table of Contents
-1. [Installation](#installation)
-2. [Examples](#examples)
-   - [Data Collection](#data-collection)
-   - [Local Model Deployment](#local-model-deployment)
-   - [Server Model Deployment](#server-model-deployment)
-   - [View Dataset](#view-dataset)
-
 ## Installation
 
 ```bash
@@ -48,11 +40,38 @@ python example_data_collection_vx300s.py --record
 3. Navigate to the [data](https://neuracore.app/dashboard/data) tab in the app to see your dataset
 
 
+### Launching Training
+Launch training example show how to:
+- Launch a training run from the UI
+- Launch a training run using python API on the server.
+
+**NOTE: Before running this example:**
+- Collect a dataset following the example: [Data Collection](#data-collection)
+
+Now that you have some data, navigate to [https://neuracore.app/dashboard/training](https://neuracore.app/dashboard/training) to launch a training run on your newly collected data.
+
+Alternatively, you can launch training runs from the python API:
+
+```
+python example_launch_training.py \
+   --name 'My Training Job' \
+   --algorithm_name 'CNNMLP' \
+   --dataset_name 'Example Dataset'
+```
+For more available arguments run `python example_launch_training.py --help`
+
+
 ### Local Model Deployment
 The local deployment example shows how to:
 - Deploy and run a model locally
 - Visualize the model's performance
 
+**NOTE: Before running this example:**
+- Collect a dataset following the example: [Data Collection](#data-collection)
+- Start a training run by:
+   - Go to your [training dashboard ](https://www.neuracore.app/dashboard/training) and start a training run
+   - Or follow [Launching Training](#launching-training) to start a training run
+- Wait for the training run to finish
 
 For local model deployment, you'll need additional packages:
 ```bash
@@ -80,20 +99,6 @@ Run the local model:
 ```bash
 python example_local_endpoint.py
 ```
-
-### Launching Training
-Launch training example show how to:
-- Launch a training run using python API on the server.
-
-**NOTE: Before running this example:**
-- Collect a dataset following the example: [Data Collection](#data-collection)
-```
-python example_launch_training.py \
-   --name 'My Training Job' \
-   --algorithm_name 'CNNMLP' \
-   --dataset_name 'Example Dataset'
-```
-For more available argumenst run `python example_launch_training.py --help`
 
 
 ### Server Model Deployment
