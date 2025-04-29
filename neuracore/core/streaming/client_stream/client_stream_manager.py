@@ -19,6 +19,7 @@ from neuracore.core.streaming.client_stream.models import (
     RecordingNotification,
     RobotStreamTrack,
 )
+from neuracore.core.streaming.client_stream.stream_enabled import StreamEnabled
 
 from ...const import API_URL
 from .connection import PierToPierConnection
@@ -59,7 +60,8 @@ class ClientStreamingManager:
         self.loop = loop
         self.client_session = client_session
         self.auth = auth if auth is not None else get_auth()
-        self.available_for_connections = True
+        self.streaming = StreamEnabled()
+        self.streaming.add_listener(StreamEnabled.STREAMING_STOPPED, self.__close)
 
         self.connections: Dict[str, PierToPierConnection] = {}
         self.video_tracks_cache: Dict[str, VideoSource] = {}
@@ -83,7 +85,9 @@ class ClientStreamingManager:
 
             mid = str(len(self.tracks))
             video_source = (
-                DepthVideoSource(mid=mid) if kind == "depth" else VideoSource(mid=mid)
+                DepthVideoSource(mid=mid, stream_enabled=self.streaming)
+                if kind == "depth"
+                else VideoSource(mid=mid, stream_enabled=self.streaming)
             )
             self.video_tracks_cache[sensor_key] = video_source
             self.tracks.append(video_source)
@@ -108,13 +112,15 @@ class ClientStreamingManager:
             self.submit_track(mid, kind, sensor_name), self.loop
         )
 
-        source = EventSource(mid=mid, loop=self.loop)
+        source = EventSource(mid=mid, stream_enabled=self.streaming, loop=self.loop)
         self.event_source_cache[sensor_key] = source
 
         return source
 
     async def submit_track(self, mid: str, kind: str, label: str):
         """Submit new track data"""
+        if not self.streaming.is_streaming():
+            return
         await self.client_session.post(
             f"{API_URL}/signalling/track",
             headers=self.auth.get_headers(),
@@ -130,6 +136,8 @@ class ClientStreamingManager:
 
     async def heartbeat_response(self):
         """Submit new track data"""
+        if not self.streaming.is_streaming():
+            return
         await self.client_session.post(
             f"{API_URL}/signalling/alive/{self.local_stream_id}",
             headers=self.auth.get_headers(),
@@ -173,7 +181,7 @@ class ClientStreamingManager:
 
     async def connect_recording_notification_stream(self):
         backoff = MINIMUM_BACKOFF_LEVEL
-        while self.available_for_connections:
+        while self.streaming.is_streaming():
             try:
                 async with sse_client.EventSource(
                     f"{API_URL}/signalling/recording_notifications/{self.local_stream_id}",
@@ -222,7 +230,7 @@ class ClientStreamingManager:
     async def connect_signalling_stream(self):
         """Connect to the signaling server and process messages"""
         backoff = MINIMUM_BACKOFF_LEVEL
-        while self.available_for_connections:
+        while self.streaming.is_streaming():
             try:
                 async with sse_client.EventSource(
                     f"{API_URL}/signalling/notifications/{self.local_stream_id}",
@@ -233,7 +241,7 @@ class ClientStreamingManager:
                     async for event in event_source:
                         try:
                             backoff = max(MINIMUM_BACKOFF_LEVEL, backoff - 1)
-                            if not self.available_for_connections:
+                            if not self.streaming.is_streaming():
                                 return
                             if event.type == "heartbeat":
                                 await self.heartbeat_response()
@@ -286,24 +294,20 @@ class ClientStreamingManager:
         await asyncio.gather(
             *(connection.close() for connection in self.connections.values())
         )
+        self.connections.clear()
 
-    def close(self):
-        """Close all connections and streams"""
-        self.available_for_connections = False
-
+    def __close(self):
         if self.signalling_stream_future.running():
             self.signalling_stream_future.cancel()
         if self.recording_stream_future.running():
             self.recording_stream_future.cancel()
 
         asyncio.run_coroutine_threadsafe(self.close_connections(), self.loop)
-
-        for track in self.video_tracks_cache.values():
-            track.stop()
-
-        self.connections.clear()
-        self.video_tracks_cache.clear()
         asyncio.run_coroutine_threadsafe(self.client_session.close(), self.loop)
+
+    def close(self):
+        """Close all connections and streams"""
+        self.streaming.stop_streaming()
 
 
 _streaming_managers: Dict[tuple[str, int], Future[ClientStreamingManager]] = {}
