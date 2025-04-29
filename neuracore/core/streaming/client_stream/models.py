@@ -27,6 +27,7 @@ class RecordingNotification(BaseModel):
     recording: bool
     robot_id: str
     recording_id: str
+    instance: int
 
 
 class RobotStreamTrack(BaseModel):

@@ -6,7 +6,7 @@ from typing import Optional
 
 from pyee.asyncio import AsyncIOEventEmitter
 
-from neuracore.core.streaming.client_stream.stream_enabled import StreamEnabled
+from neuracore.core.streaming.client_stream.stream_enabled import EnabledManager
 
 MAXIMUM_EVENT_FREQUENCY_HZ = 10
 MINIMUM_EVENT_DELTA = 1 / MAXIMUM_EVENT_FREQUENCY_HZ
@@ -14,7 +14,7 @@ MINIMUM_EVENT_DELTA = 1 / MAXIMUM_EVENT_FREQUENCY_HZ
 
 class EventSource(AsyncIOEventEmitter):
     def __init__(
-        self, mid: str, stream_enabled: StreamEnabled, loop: AbstractEventLoop = None
+        self, mid: str, stream_enabled: EnabledManager, loop: AbstractEventLoop = None
     ):
         super().__init__(loop)
         self.mid = mid
@@ -25,7 +25,7 @@ class EventSource(AsyncIOEventEmitter):
 
     def publish(self, event: dict):
         """Publish an event to all listeners"""
-        if not self.stream_enabled.is_streaming():
+        if not self.stream_enabled.is_enabled():
             return
         self._last_event = event
         if self.submit_task is None or self.submit_task.done():
@@ -42,7 +42,7 @@ class EventSource(AsyncIOEventEmitter):
             await asyncio.sleep(remaining_time)
         if self._last_event is None:
             return
-        if not self.stream_enabled.is_streaming():
+        if not self.stream_enabled.is_enabled():
             return
 
         message = json.dumps(self._last_event)

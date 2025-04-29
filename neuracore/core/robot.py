@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 import os
@@ -33,8 +34,7 @@ class Robot:
         self.mjcf_path = mjcf_path
         self.overwrite = overwrite
         self.shared = shared
-        self.id: str = None
-        self.instanced_id: str = None
+        self.id: str | None = None
         self._auth: Auth = get_auth()
         self._temp_dir = None
         if urdf_path and mjcf_path:
@@ -77,7 +77,6 @@ class Robot:
                 for robot in robots:
                     if robot["name"] == self.name:
                         self.id = robot["id"]
-                        self.instanced_id = f"{self.id}_{self.instance}"
                         logger.info(f"Found existing robot: {self.name}")
                         return
 
@@ -89,8 +88,6 @@ class Robot:
             )
             response.raise_for_status()
             self.id = response.json()
-            # Allows multiple instances of the same robot to record at once
-            self.instanced_id = f"{self.id}_{self.instance}"
 
             # Upload URDF and meshes if provided
             if self.urdf_path:
@@ -103,26 +100,32 @@ class Robot:
 
     def start_recording(self, dataset_id: str) -> str:
         """Start recording robot data."""
-        if not self.instanced_id:
+        if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
         try:
             response = requests.post(
                 f"{API_URL}/recording/start",
                 headers=self._auth.get_headers(),
-                json={"robot_id": self.instanced_id, "dataset_id": dataset_id},
+                json={
+                    "robot_id": self.id,
+                    "instance": self.instance,
+                    "dataset_id": dataset_id,
+                },
             )
             response.raise_for_status()
             # Inform the state manager immediately to skip the round trip.
-            get_recording_state_manager().recording_stopped(
-                robot_id=self.id, instance=self.instance
+
+            recording_id = response.text
+            get_recording_state_manager().recording_started_sync(
+                robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
-            return response.json()
+            return recording_id
 
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to start recording: {str(e)}")
 
-    def stop_recording(self, recording_id: str) -> None:
+    def stop_recording(self, recording_id: str, blocking: bool = False) -> None:
         """Stop a recording.
 
         Args:
@@ -138,14 +141,16 @@ class Robot:
             )
             response.raise_for_status()
             # Inform the state manager immediately to skip the round trip.
-            get_recording_state_manager().recording_started(
-                robot_id=self.id, instance=self.instance
+            get_recording_state_manager().recording_stopped(
+                robot_id=self.id, instance=self.instance, blocking=blocking
             )
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to stop recording: {str(e)}")
 
     def is_recording(self) -> bool:
-        return get_recording_state_manager().is_recording(robot_id=self.id, instance=self.instance)
+        return get_recording_state_manager().is_recording(
+            robot_id=self.id, instance=self.instance
+        )
 
     def _package_urdf(self) -> dict:
         if not os.path.exists(self.urdf_path):

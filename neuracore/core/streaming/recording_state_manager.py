@@ -1,18 +1,19 @@
 import asyncio
 from concurrent.futures import Future
+from datetime import timedelta
 import traceback
-from typing import Set
 from aiohttp import ClientSession, ClientTimeout
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.auth import Auth
-from neuracore.core.const import API_URL
+from neuracore.core.const import API_URL, REMOTE_RECORDING_TRIGGER_ENABLED
 from neuracore.core.streaming.client_stream.client_stream_manager import (
     MINIMUM_BACKOFF_LEVEL,
     get_loop,
 )
 from aiohttp_sse_client import client as sse_client
 from neuracore.core.streaming.client_stream.models import RecordingNotification
+from neuracore.core.streaming.client_stream.stream_enabled import EnabledManager
 
 
 class RecordingStateManager:
@@ -23,44 +24,84 @@ class RecordingStateManager:
         client_session: ClientSession,
         auth: Auth = None,
     ):
+
         self.loop = loop
         self.client_session = client_session
         self.auth = auth if auth is not None else get_auth()
+
+        self.remote_trigger_enabled = EnabledManager(
+            REMOTE_RECORDING_TRIGGER_ENABLED, loop=self.loop
+        )
+        self.remote_trigger_enabled.add_listener(
+            EnabledManager.DISABLED, self.__stop_remote_trigger
+        )
 
         self.recording_stream_future: Future = asyncio.run_coroutine_threadsafe(
             self.connect_recording_notification_stream(), self.loop
         )
 
-        self.recording_robot_instances: Set[tuple[str, int]] = Set()
+        self.recording_robot_instances: dict[tuple[str, int], str] = dict()
 
+    def get_current_recording_id(self, robot_id: str, instance: int) -> str | None:
+        instance_key = (robot_id, instance)
+        return self.recording_robot_instances.get(instance_key, None)
 
     def is_recording(self, robot_id: str, instance: int) -> bool:
         instance_key = (robot_id, instance)
         return instance_key in self.recording_robot_instances
 
-    async def recording_started(self, robot_id: str, instance: int):
+    async def recording_started(self, robot_id: str, instance: int, recording_id: str):
         instance_key = (robot_id, instance)
-        if instance_key in self.recording_robot_instances:
-            return
-        self.recording_robot_instances.add(instance_key)
-        for recording in GlobalSingleton().list_all_streams(instance_key).values():
-            recording.start_recording()
+        previous_recording_id = self.recording_robot_instances.get(instance_key, None)
 
-    async def recording_stopped(self, robot_id: str, instance: int):
+        if previous_recording_id == recording_id:
+            return
+        if previous_recording_id != recording_id:
+            await self.recording_stopped(robot_id, instance, blocking=True)
+
+        self.recording_robot_instances[instance_key] = recording_id
+        for recording in GlobalSingleton().list_all_streams(instance_key).values():
+            recording.start_recording(recording_id)
+
+    def recording_started_sync(self, robot_id: str, instance: int, recording_id: str):
+        asyncio.run_coroutine_threadsafe(
+            self.recording_started(robot_id, instance, recording_id), self.loop
+        ).result()
+
+    async def recording_stopped(
+        self, robot_id: str, instance: int, blocking: bool = False
+    ):
         instance_key = (robot_id, instance)
         if instance_key not in self.recording_robot_instances:
             return
-        self.recording_robot_instances.remove(instance_key)
-        for recording in GlobalSingleton().list_all_streams(instance_key).values():
+        self.recording_robot_instances.pop(instance_key, None)
+
+        stopping_threads = [
             recording.stop_recording()
+            for recording in GlobalSingleton().list_all_streams(instance_key).values()
+        ]
+
+        def join_threads():
+            for thread in stopping_threads:
+                thread.join()
+
+        if blocking:
+            await asyncio.to_thread(join_threads)
+
+    def recording_stopped_sync(self, robot_id: str, instance: int,blocking: bool = False):
+        asyncio.run_coroutine_threadsafe(
+            self.recording_stopped(robot_id, instance, blocking), self.loop
+        ).result()
 
     async def connect_recording_notification_stream(self):
         backoff = MINIMUM_BACKOFF_LEVEL
-        while self.available_for_connections:
+        while self.remote_trigger_enabled.is_enabled():
             try:
                 async with sse_client.EventSource(
                     f"{API_URL}/signalling/recording_notifications/{self.local_stream_id}",
+                    session=self.client_session,
                     headers=self.auth.get_headers(),
+                    reconnection_time=timedelta(seconds=0.1),
                 ) as event_source:
                     backoff = max(MINIMUM_BACKOFF_LEVEL, backoff - 1)
                     async for event in event_source:
@@ -71,24 +112,29 @@ class RecordingStateManager:
                         instance_key = (message.robot_id, message.instance)
 
                         is_recording = instance_key in self.recording_robot_instances
+                        previous_recording_id = self.recording_robot_instances.get(
+                            instance_key, None
+                        )
 
-                        if is_recording == message.recording:
+                        if (
+                            is_recording == message.recording
+                            and previous_recording_id == message.recording_id
+                        ):
                             # no change, nothing to do
                             continue
 
                         if message.recording:
-                            asyncio.run_coroutine_threadsafe(
-                                self.recording_started(
-                                    message.robot_id, message.instance
-                                ),
-                                self.loop,
+
+                            await self.recording_started(
+                                message.robot_id,
+                                message.instance,
+                                message.recording_id,
                             )
+
                         else:
-                            asyncio.run_coroutine_threadsafe(
-                                self.recording_stopped(
-                                    message.robot_id, message.instance
-                                ),
-                                self.loop,
+
+                            await self.recording_stopped(
+                                message.robot_id, message.instance
                             )
 
             except ConnectionError as e:
@@ -101,11 +147,13 @@ class RecordingStateManager:
                 await asyncio.sleep(2 ^ backoff)
                 backoff += 1
 
-    def close(self):
-        """Closes connection to server for updates"""
-
+    def __stop_remote_trigger(self):
         if self.recording_stream_future.running():
             self.recording_stream_future.cancel()
+
+    def disable_remote_trigger(self):
+        """Closes connection to server for updates"""
+        self.remote_trigger_enabled.disable()
 
 
 _recording_manager: Future[RecordingStateManager] | None = None
