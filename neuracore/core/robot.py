@@ -8,6 +8,8 @@ from typing import Optional
 
 import requests
 
+from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
+
 from .auth import Auth, get_auth
 from .const import API_URL
 from .exceptions import RobotError, ValidationError
@@ -64,6 +66,7 @@ class Robot:
 
         try:
             # First check if we already have a robot with the same name
+            # TODO: this should be done in one request
             if not self.overwrite:
                 response = requests.get(
                     f"{API_URL}/robots?is_shared={self.shared}",
@@ -110,6 +113,10 @@ class Robot:
                 json={"robot_id": self.instanced_id, "dataset_id": dataset_id},
             )
             response.raise_for_status()
+            # Inform the state manager immediately to skip the round trip.
+            get_recording_state_manager().recording_stopped(
+                robot_id=self.id, instance=self.instance
+            )
             return response.json()
 
         except requests.exceptions.RequestException as e:
@@ -130,9 +137,15 @@ class Robot:
                 headers=self._auth.get_headers(),
             )
             response.raise_for_status()
-
+            # Inform the state manager immediately to skip the round trip.
+            get_recording_state_manager().recording_started(
+                robot_id=self.id, instance=self.instance
+            )
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to stop recording: {str(e)}")
+
+    def is_recording(self) -> bool:
+        return get_recording_state_manager().is_recording(robot_id=self.id, instance=self.instance)
 
     def _package_urdf(self) -> dict:
         if not os.path.exists(self.urdf_path):
