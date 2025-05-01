@@ -2,7 +2,9 @@ from enum import Enum
 from typing import Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, NonNegativeInt
+
+from neuracore.core.nc_types import DataType
 
 
 class MessageType(str, Enum):
@@ -22,12 +24,27 @@ class HandshakeMessage(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex)
 
 
-# TODO: Note all of these can be defined in api, and used by the backend
-class RecordingNotification(BaseModel):
-    recording: bool
-    robot_id: str
+class BaseRecodingUpdatePayload(BaseModel):
     recording_id: str
-    instance: int
+    robot_id: str
+    instance: NonNegativeInt
+
+
+class RecordingStartPayload(BaseRecodingUpdatePayload):
+    created_by: str
+    start_time: float
+    dataset_ids: list[str] = Field(default_factory=list)
+    data_types: set[DataType] = Field(default_factory=set)
+
+class RecordingNotificationType(str, Enum):
+    START = "start"
+    STOP = "stop"
+    SAVED = "saved"
+
+
+class RecordingNotification(BaseModel):
+    type: RecordingNotificationType
+    payload: RecordingStartPayload | BaseRecodingUpdatePayload
 
 
 class RobotStreamTrack(BaseModel):

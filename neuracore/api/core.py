@@ -118,7 +118,6 @@ def start_recording(
         GlobalSingleton()._active_dataset_id
     )
 
-
 def stop_recording(
     robot_name: Optional[str] = None, instance: Optional[int] = 0, wait: bool = False
 ) -> None:
@@ -137,14 +136,8 @@ def stop_recording(
     if not robot.is_recording():
         logger.warning("No active recordings to stop.")
         return
-    threads: Thread = []
-    for sname, stream in GlobalSingleton()._data_streams.items():
-        if sname.startswith(robot.instanced_id):
-            with stream.lock:
-                if stream.is_recording():
-                    threads.append(stream.stop_recording())
-    recording_id = GlobalSingleton()._active_recording_ids.pop(robot.instanced_id)
-    robot.stop_recording(recording_id)
+    recording_id = robot.get_current_recording_id()
+    robot.stop_recording(recording_id, blocking=True)
     if wait:
         while backend_utils.get_num_active_streams(recording_id) > 0:
             time.sleep(2.0)

@@ -12,7 +12,7 @@ from neuracore.core.streaming.client_stream.client_stream_manager import (
     get_loop,
 )
 from aiohttp_sse_client import client as sse_client
-from neuracore.core.streaming.client_stream.models import RecordingNotification
+from neuracore.core.streaming.client_stream.models import RecordingNotification, RecordingNotificationType
 from neuracore.core.streaming.client_stream.stream_enabled import EnabledManager
 
 
@@ -98,8 +98,8 @@ class RecordingStateManager:
         while self.remote_trigger_enabled.is_enabled():
             try:
                 async with sse_client.EventSource(
-                    f"{API_URL}/signalling/recording_notifications/{self.local_stream_id}",
-                    session=self.client_session,
+                    f"{API_URL}/recording/notifications/{self.local_stream_id}",
+                    session=self.cliSent_session,
                     headers=self.auth.get_headers(),
                     reconnection_time=timedelta(seconds=0.1),
                 ) as event_source:
@@ -111,13 +111,17 @@ class RecordingStateManager:
                         message = RecordingNotification.model_validate_json(event.data)
                         instance_key = (message.robot_id, message.instance)
 
-                        is_recording = instance_key in self.recording_robot_instances
+                        was_recording = instance_key in self.recording_robot_instances
                         previous_recording_id = self.recording_robot_instances.get(
                             instance_key, None
                         )
+                        # TODO: make this work with the new structure
+                        if message.type is RecordingNotificationType.START:
+                            pass
+                        
 
                         if (
-                            is_recording == message.recording
+                            was_recording == message.type
                             and previous_recording_id == message.recording_id
                         ):
                             # no change, nothing to do

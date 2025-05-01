@@ -7,7 +7,7 @@ from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.nc_types import DataType
 
-
+# TODO: Receive num active stream updates from the server with the recording state rather than polling
 def get_num_active_streams(recording_id: str) -> int:
     """Get the number of active streams for a recording.
 

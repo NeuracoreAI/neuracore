@@ -7,6 +7,7 @@ from typing import Any, Optional
 import numpy as np
 
 from neuracore.api.core import _get_robot
+from neuracore.core.robot import Robot
 from neuracore.core.streaming.client_stream.client_stream_manager import (
     get_robot_streaming_manager,
 )
@@ -20,9 +21,14 @@ from ..core.nc_types import (
     PointCloudData,
     PoseData,
 )
-from ..core.streaming.data_stream import DepthDataStream, JsonDataStream, RGBDataStream
+from ..core.streaming.data_stream import (
+    DataStream,
+    DepthDataStream,
+    JsonDataStream,
+    RGBDataStream,
+)
 from ..core.utils.depth_utils import MAX_DEPTH
-from .globals import GlobalSingleton
+from .globals import  get_data_stream_store
 
 
 def _create_group_id_from_dict(joint_names: dict[str, float]) -> str:
@@ -33,6 +39,12 @@ def _create_group_id_from_dict(joint_names: dict[str, float]) -> str:
         .decode()
         .rstrip("=")
     )
+
+
+def start_stream(robot: Robot, data_stream: DataStream):
+    current_recording = robot.get_current_recording_id()
+    if current_recording is not None and not data_stream.is_recording():
+        data_stream.start_recording(current_recording)
 
 
 def _log_joint_data(
@@ -75,20 +87,15 @@ def _log_joint_data(
 
     robot = _get_robot(robot_name, instance)
     joint_group_id = _create_group_id_from_dict(joint_data)
-    joint_str_id = f"{robot.instanced_id}_{data_type}_{joint_group_id}"
-    joint_stream = GlobalSingleton()._data_streams.get(joint_str_id)
+    joint_str_id = f"{data_type}_{joint_group_id}"
+    data_stream_store = get_data_stream_store(robot)
+    joint_stream = data_stream_store.get_data_stream(robot, joint_str_id)
     if joint_stream is None:
         joint_stream = JsonDataStream(f"{data_type}/{joint_group_id}.json")
+        data_stream_store.add_data_stream(joint_str_id, joint_stream)
 
-        GlobalSingleton().add_data_stream(joint_str_id, joint_stream)
+    start_stream(robot, joint_stream)
 
-    if (
-        robot.instanced_id in GlobalSingleton()._active_recording_ids
-        and not joint_stream.is_recording()
-    ):
-        joint_stream.start_recording(
-            GlobalSingleton()._active_recording_ids[robot.instanced_id]
-        )
     data = JointData(
         timestamp=timestamp,
         values=joint_data,
@@ -147,8 +154,9 @@ def _log_camera_data(
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name, instance)
     camera_id = f"{camera_type}_{camera_id}"
-    stream_id = f"{robot.instanced_id}_{camera_type}_{camera_id}"
-    stream = GlobalSingleton()._data_streams.get(stream_id)
+
+    stream_store = get_data_stream_store(robot)
+    stream = stream_store.get_data_stream(camera_id)
     if stream is None:
         if camera_type == "rgb":
             stream = RGBDataStream(camera_id, image.shape[1], image.shape[0])
@@ -156,15 +164,9 @@ def _log_camera_data(
             stream = DepthDataStream(camera_id, image.shape[1], image.shape[0])
         else:
             raise ValueError(f"Invalid camera type: {camera_type}")
-        GlobalSingleton().add_data_stream(stream_id, stream)
+        stream_store.add_data_stream(camera_id, stream)
 
-    if (
-        robot.instanced_id in GlobalSingleton()._active_recording_ids
-        and not stream.is_recording()
-    ):
-        stream.start_recording(
-            GlobalSingleton()._active_recording_ids[robot.instanced_id]
-        )
+    start_stream(robot, stream)
 
     if stream.width != image.shape[1] or stream.height != image.shape[0]:
         raise ValueError(
@@ -175,6 +177,9 @@ def _log_camera_data(
         image,
         CameraData(timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics),
     )
+    get_robot_streaming_manager(robot.id, robot.instance).get_video_source(
+        camera_id, camera_type
+    ).add_frame(image)
 
 
 def log_synced_data(
@@ -257,19 +262,14 @@ def log_custom_data(
     """
     timestamp = timestamp or time.time()
     robot = _get_robot(robot_name, instance)
-    str_id = f"{robot.instanced_id}_{name}_custom"
-    stream = GlobalSingleton()._data_streams.get(str_id)
+    str_id = f"{name}_custom"
+    stream_store = get_data_stream_store(robot)
+    stream = stream_store.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(f"custom/{name}.json")
-        GlobalSingleton().add_data_stream(str_id, stream)
+        stream_store.add_data_stream(str_id, stream)
 
-    if (
-        robot.instanced_id in GlobalSingleton()._active_recording_ids
-        and not stream.is_recording()
-    ):
-        stream.start_recording(
-            GlobalSingleton()._active_recording_ids[robot.instanced_id]
-        )
+    start_stream(robot, stream)
 
     try:
         json.dumps(data)
@@ -394,19 +394,14 @@ def log_pose_data(
             raise ValueError(f"Poses must be lists of length 7. {key} is not length 7.")
     robot = _get_robot(robot_name, instance)
     group_id = _create_group_id_from_dict(poses)
-    str_id = f"{robot.instanced_id}_{group_id}_pose_data"
-    stream = GlobalSingleton()._data_streams.get(str_id)
+    str_id = f"{group_id}_pose_data"
+    stream_store = get_data_stream_store(robot)
+    stream = stream_store.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(f"poses/{group_id}.json")
-        GlobalSingleton().add_data_stream(str_id, stream)
+        stream_store.add_data_stream(str_id, stream)
 
-    if (
-        robot.instanced_id in GlobalSingleton()._active_recording_ids
-        and not stream.is_recording()
-    ):
-        stream.start_recording(
-            GlobalSingleton()._active_recording_ids[robot.instanced_id]
-        )
+    start_stream(robot, stream)
 
     stream.log(PoseData(timestamp=timestamp, pose=poses))
 
@@ -427,18 +422,15 @@ def log_gripper_data(
             )
     robot = _get_robot(robot_name, instance)
     group_id = _create_group_id_from_dict(open_amounts)
-    str_id = f"{robot.instanced_id}_{group_id}_gripper_data"
-    stream = GlobalSingleton()._data_streams.get(str_id)
+    str_id = f"{group_id}_gripper_data"
+    stream_store = get_data_stream_store(robot)
+    stream = stream_store.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(f"gripper_open_amounts/{group_id}.json")
-        GlobalSingleton().add_data_stream(str_id, stream)
-    if (
-        robot.instanced_id in GlobalSingleton()._active_recording_ids
-        and not stream.is_recording()
-    ):
-        stream.start_recording(
-            GlobalSingleton()._active_recording_ids[robot.instanced_id]
-        )
+        stream_store.add_data_stream(str_id, stream)
+
+    start_stream(robot, stream)
+
     stream.log(EndEffectorData(timestamp=timestamp, open_amounts=open_amounts))
 
 
@@ -464,18 +456,13 @@ def log_language(
     if not isinstance(language, str):
         raise ValueError("Language must be a string")
     robot = _get_robot(robot_name, instance)
-    str_id = f"{robot.instanced_id}_language"
-    stream = GlobalSingleton()._data_streams.get(str_id)
+    str_id = f"language"
+    stream_store = get_data_stream_store(robot)
+    stream = stream_store.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream("language_annotations.json")
-        GlobalSingleton().add_data_stream(str_id, stream)
-    if (
-        robot.instanced_id in GlobalSingleton()._active_recording_ids
-        and not stream.is_recording()
-    ):
-        stream.start_recording(
-            GlobalSingleton()._active_recording_ids[robot.instanced_id]
-        )
+        stream_store.add_data_stream(str_id, stream)
+    start_stream(robot, stream)
     stream.log(LanguageData(timestamp=timestamp, text=language))
 
 
@@ -511,10 +498,6 @@ def log_rgb(
     _log_camera_data(
         "rgb", camera_id, image, extrinsics, intrinsics, robot_name, instance, timestamp
     )
-    robot = _get_robot(robot_name, instance)
-    get_robot_streaming_manager(robot.id, robot.instance).get_video_source(
-        camera_id, "rgb"
-    ).add_frame(image)
 
 
 def log_depth(
@@ -564,10 +547,6 @@ def log_depth(
         instance,
         timestamp,
     )
-    robot = _get_robot(robot_name, instance)
-    get_robot_streaming_manager(robot.id, robot.instance).get_video_source(
-        camera_id, "depth"
-    ).add_frame(depth)
 
 
 def log_point_cloud(
@@ -604,20 +583,15 @@ def log_point_cloud(
 
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name, instance)
-    str_id = f"{robot.instanced_id}_point_cloud_{camera_id}"
-    stream = GlobalSingleton()._data_streams.get(str_id)
+    str_id = f"point_cloud_{camera_id}"
+    stream_store = get_data_stream_store(robot)
+    stream = stream_store.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(f"point_clouds/{camera_id}.json")
-        GlobalSingleton().add_data_stream(str_id, stream)
+        stream_store.add_data_stream(str_id, stream)
 
-    if (
-        robot.instanced_id in GlobalSingleton()._active_recording_ids
-        and not stream.is_recording()
-    ):
-        stream.start_recording(
-            GlobalSingleton()._active_recording_ids[robot.instanced_id]
-        )
-
+    start_stream(robot, stream)
+    
     stream.log(
         PointCloudData(
             timestamp=timestamp,

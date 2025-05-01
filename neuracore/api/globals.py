@@ -1,5 +1,6 @@
 from collections import defaultdict
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, overload
 
 from neuracore.core.const import MAX_DATA_STREAMS
 
@@ -12,23 +13,63 @@ class GlobalSingleton(object):
     _has_validated_version = False
     _active_robot: Optional[Robot] = None
     _active_dataset_id: Optional[str] = None
-    _data_streams: defaultdict[tuple[str, int], dict[str, DataStream]] = defaultdict(
-        dict
-    )
-
-    def add_data_stream(self, robot: Robot, stream_id: str, stream: DataStream):
-        robot_key = (robot.id, robot.instance)
-        if len(self._data_streams) >= MAX_DATA_STREAMS:
-            raise RuntimeError("Excessive number of data streams")
-        if robot_key in self._data_streams:
-            raise ValueError("Stream already exists")
-        self._data_streams[robot_key][stream_id] = stream
-        return stream
-
-    def list_all_streams(self, instance_key: tuple[str, int]) -> dict[str, DataStream]:
-        return self._data_streams[instance_key]
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
+
+
+@dataclass(slots=True)
+class DatastreamStore:
+    instance: int
+    robot_id: str
+    __data_streams: dict[str, DataStream] = field(default_factory=dict)
+
+    def add_data_stream(self, stream_id: str, stream: DataStream):
+        if len(self.__data_streams) >= MAX_DATA_STREAMS:
+            raise RuntimeError("Excessive number of data streams")
+        if stream_id in self.__data_streams:
+            raise ValueError("Stream already exists")
+        self.__data_streams[stream_id] = stream
+
+    def get_data_stream(self, stream_id: str) -> DataStream:
+        if stream_id not in self.__data_streams:
+            raise ValueError(
+                f"Stream {stream_id} not found for robot {self.robot_id} instance {self.instance}"
+            )
+        return self.__data_streams[stream_id]
+
+    def list_all_streams(self) -> dict[str, DataStream]:
+        """List all data streams for a given robot."""
+        return self.__data_streams
+
+
+_robot_data_stream_store: dict[tuple[str, int], DatastreamStore] = dict()
+
+
+@overload
+def get_data_stream_store(robot: Robot) -> DatastreamStore:
+    pass
+
+
+@overload
+def get_data_stream_store(robot_name: str, instance: int) -> DatastreamStore:
+    pass
+
+
+def get_data_stream_store(
+    robot: Robot | str, instance: Optional[int] = None
+) -> DatastreamStore:
+    """Get the data stream store for a given robot."""
+    if isinstance(robot, Robot):
+        robot_id = robot.id
+        instance = robot.instance
+    else:
+        robot_id = robot
+        if instance is None:
+            raise ValueError("Instance must be provided when passing a robot name")
+    key = (robot_id, instance)
+    if key not in _robot_data_stream_store:
+        _robot_data_stream_store[key] = DatastreamStore(instance, robot_id)
+    return _robot_data_stream_store[key]

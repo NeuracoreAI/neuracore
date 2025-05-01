@@ -22,7 +22,7 @@ class Robot:
     def __init__(
         self,
         robot_name: str,
-        instance: int = 0,
+        instance: int,
         urdf_path: Optional[str] = None,
         mjcf_path: Optional[str] = None,
         overwrite: bool = False,
@@ -152,6 +152,16 @@ class Robot:
             robot_id=self.id, instance=self.instance
         )
 
+    def get_current_recording_id(self) -> Optional[str]:
+        """Get the current recording ID, if the instance is recording.
+
+        Returns:
+            Optional[str]: The current recording ID, or None if not recording.
+        """
+        return get_recording_state_manager().get_current_recording_id(
+            robot_id=self.id, instance=self.instance
+        )
+
     def _package_urdf(self) -> dict:
         if not os.path.exists(self.urdf_path):
             raise ValidationError(f"URDF file not found: {self.urdf_path}")
@@ -270,7 +280,7 @@ _robots = {}
 
 def init(
     robot_name: str,
-    instance: int = 0,
+    instance: int,
     urdf_path: Optional[str] = None,
     mjcf_path: Optional[str] = None,
     overwrite: bool = False,
