@@ -64,6 +64,7 @@ class JsonDataStream(DataStream):
         if not filepath.endswith(".json"):
             filepath += ".json"
         self.filepath = filepath
+        self._streamer = None
 
     def start_recording(self, recording_id):
         super().start_recording(recording_id)

@@ -14,6 +14,7 @@ from neuracore.core.streaming.client_stream.client_stream_manager import (
     get_loop,
 )
 from neuracore.core.streaming.client_stream.models import (
+    BaseRecodingUpdatePayload,
     RecordingNotification,
     RecordingNotificationType,
 )
@@ -96,16 +97,18 @@ class RecordingStateManager(AsyncIOEventEmitter):
             self.recording_stopped(robot_id, instance, recording_id), self._loop
         ).result()
 
-    async def updated_recording_state(self, message: RecordingNotification):
-        robot_id = message.payload.robot_id
-        instance = message.payload.instance
-        recording_id = message.payload.recording_id
+    async def updated_recording_state(
+        self, is_recording: bool, details: BaseRecodingUpdatePayload
+    ):
+        robot_id = details.robot_id
+        instance = details.instance
+        recording_id = details.recording_id
 
         previous_recording_id = self.recording_robot_instances.get(
             (robot_id, instance), None
         )
         was_recording = previous_recording_id is not None
-        is_recording = message.type == RecordingNotificationType.START
+
         if was_recording == is_recording and previous_recording_id == recording_id:
             # no change
             return
@@ -147,9 +150,27 @@ class RecordingStateManager(AsyncIOEventEmitter):
                                 )
                             case (
                                 RecordingNotificationType.START
-                                | RecordingNotificationType.STOP
+                                | RecordingNotificationType.REQUESTED
                             ):
-                                await self.updated_recording_state(message)
+                                await self.updated_recording_state(
+                                    is_recording=True, details=message.payload
+                                )
+
+                            case (
+                                RecordingNotificationType.STOP
+                                | RecordingNotificationType.SAVED
+                                | RecordingNotificationType.DISCARDED
+                                | RecordingNotificationType.EXPIRED
+                            ):
+                                await self.updated_recording_state(
+                                    is_recording=False, details=message.payload
+                                )
+
+                            case RecordingNotificationType.INIT:
+                                for recording in message.payload:
+                                    await self.updated_recording_state(
+                                        is_recording=True, details=recording
+                                    )
 
             except ConnectionError as e:
                 print(f"Connection error: {e}")

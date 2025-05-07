@@ -30,22 +30,34 @@ class BaseRecodingUpdatePayload(BaseModel):
     instance: NonNegativeInt
 
 
-class RecordingStartPayload(BaseRecodingUpdatePayload):
+class RecodingRequestedPayload(BaseRecodingUpdatePayload):
     created_by: str
-    start_time: float
     dataset_ids: list[str] = Field(default_factory=list)
     data_types: set[DataType] = Field(default_factory=set)
 
 
+class RecordingStartPayload(RecodingRequestedPayload):
+    start_time: float
+
+
 class RecordingNotificationType(str, Enum):
+    INIT = "init"
+    REQUESTED = "requested"
     START = "start"
     STOP = "stop"
     SAVED = "saved"
+    DISCARDED = "discarded"
+    EXPIRED = "expired"
 
 
 class RecordingNotification(BaseModel):
     type: RecordingNotificationType
-    payload: RecordingStartPayload | BaseRecodingUpdatePayload
+    payload: (
+        RecordingStartPayload
+        | RecodingRequestedPayload
+        | list[RecordingStartPayload | RecodingRequestedPayload]
+        | BaseRecodingUpdatePayload
+    )
 
 
 class RobotStreamTrack(BaseModel):

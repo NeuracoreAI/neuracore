@@ -145,7 +145,7 @@ class Robot:
         if self.id != robot_id or self.instance != instance:
             return
 
-        for data_stream in self.__data_streams.values():
+        for stream_id, data_stream in self.__data_streams.items():
             data_stream.start_recording(recording_id=recording_id)
 
     def stop_recording(self, recording_id: str, blocking: bool = False) -> None:
@@ -182,7 +182,7 @@ class Robot:
     def _recording_stopped(self, robot_id: str, instance: int, recording_id: str):
         if self.id != robot_id or self.instance != instance:
             return
-        for data_stream in self.__data_streams.values():
+        for stream_id, data_stream in self.__data_streams.items():
             if data_stream.is_recording():
                 data_stream.stop_recording()
 
