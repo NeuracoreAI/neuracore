@@ -97,8 +97,8 @@ class RecordingStateManager(AsyncIOEventEmitter):
         ).result()
 
     async def updated_recording_state(self, message: RecordingNotification):
-        robot_id = (message.payload.recording_id,)
-        instance = (message.payload.instance,)
+        robot_id = message.payload.recording_id
+        instance = message.payload.instance
         recording_id = message.payload.recording_id
 
         previous_recording_id = self.recording_robot_instances.get(
