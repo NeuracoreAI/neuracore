@@ -1,22 +1,29 @@
 import asyncio
+import traceback
 from concurrent.futures import Future
 from datetime import timedelta
-import traceback
-from aiohttp import ClientSession, ClientTimeout
 
-from neuracore.api.globals import GlobalSingleton
-from neuracore.core.auth import Auth
+from aiohttp import ClientSession, ClientTimeout
+from aiohttp_sse_client import client as sse_client
+from pyee.asyncio import AsyncIOEventEmitter
+
+from neuracore.core.auth import Auth, get_auth
 from neuracore.core.const import API_URL, REMOTE_RECORDING_TRIGGER_ENABLED
 from neuracore.core.streaming.client_stream.client_stream_manager import (
     MINIMUM_BACKOFF_LEVEL,
     get_loop,
 )
-from aiohttp_sse_client import client as sse_client
-from neuracore.core.streaming.client_stream.models import RecordingNotification, RecordingNotificationType
+from neuracore.core.streaming.client_stream.models import (
+    RecordingNotification,
+    RecordingNotificationType,
+)
 from neuracore.core.streaming.client_stream.stream_enabled import EnabledManager
 
 
-class RecordingStateManager:
+class RecordingStateManager(AsyncIOEventEmitter):
+    RECORDING_STARTED = "RECORDING_STARTED"
+    RECORDING_STOPPED = "RECORDING_STOPPED"
+    RECORDING_SAVED = "RECORDING_SAVED"
 
     def __init__(
         self,
@@ -24,20 +31,19 @@ class RecordingStateManager:
         client_session: ClientSession,
         auth: Auth = None,
     ):
-
-        self.loop = loop
+        super().__init__(loop=loop)
         self.client_session = client_session
         self.auth = auth if auth is not None else get_auth()
 
         self.remote_trigger_enabled = EnabledManager(
-            REMOTE_RECORDING_TRIGGER_ENABLED, loop=self.loop
+            REMOTE_RECORDING_TRIGGER_ENABLED, loop=self._loop
         )
         self.remote_trigger_enabled.add_listener(
             EnabledManager.DISABLED, self.__stop_remote_trigger
         )
 
         self.recording_stream_future: Future = asyncio.run_coroutine_threadsafe(
-            self.connect_recording_notification_stream(), self.loop
+            self.connect_recording_notification_stream(), self._loop
         )
 
         self.recording_robot_instances: dict[tuple[str, int], str] = dict()
@@ -56,50 +62,74 @@ class RecordingStateManager:
 
         if previous_recording_id == recording_id:
             return
-        if previous_recording_id != recording_id:
-            await self.recording_stopped(robot_id, instance, blocking=True)
+        if previous_recording_id is not None:
+            await self.recording_stopped(robot_id, instance, previous_recording_id)
 
         self.recording_robot_instances[instance_key] = recording_id
-        for recording in GlobalSingleton().list_all_streams(instance_key).values():
-            recording.start_recording(recording_id)
+        self.emit(
+            self.RECORDING_STARTED,
+            robot_id=robot_id,
+            instance=instance,
+            recording_id=recording_id,
+        )
 
     def recording_started_sync(self, robot_id: str, instance: int, recording_id: str):
         asyncio.run_coroutine_threadsafe(
-            self.recording_started(robot_id, instance, recording_id), self.loop
+            self.recording_started(robot_id, instance, recording_id), self._loop
         ).result()
 
-    async def recording_stopped(
-        self, robot_id: str, instance: int, blocking: bool = False
-    ):
+    async def recording_stopped(self, robot_id: str, instance: int, recording_id: str):
         instance_key = (robot_id, instance)
-        if instance_key not in self.recording_robot_instances:
+        current_recording = self.recording_robot_instances.get(instance_key, None)
+        if current_recording != recording_id:
             return
         self.recording_robot_instances.pop(instance_key, None)
+        self.emit(
+            self.RECORDING_STOPPED,
+            robot_id=robot_id,
+            instance=instance,
+            recording_id=recording_id,
+        )
 
-        stopping_threads = [
-            recording.stop_recording()
-            for recording in GlobalSingleton().list_all_streams(instance_key).values()
-        ]
-
-        def join_threads():
-            for thread in stopping_threads:
-                thread.join()
-
-        if blocking:
-            await asyncio.to_thread(join_threads)
-
-    def recording_stopped_sync(self, robot_id: str, instance: int,blocking: bool = False):
+    def recording_stopped_sync(self, robot_id: str, instance: int, recording_id: str):
         asyncio.run_coroutine_threadsafe(
-            self.recording_stopped(robot_id, instance, blocking), self.loop
+            self.recording_stopped(robot_id, instance, recording_id), self._loop
         ).result()
+
+    async def updated_recording_state(self, message: RecordingNotification):
+        robot_id = (message.payload.recording_id,)
+        instance = (message.payload.instance,)
+        recording_id = message.payload.recording_id
+
+        previous_recording_id = self.recording_robot_instances.get(
+            (robot_id, instance), None
+        )
+        was_recording = previous_recording_id is not None
+        is_recording = message.type == RecordingNotificationType.START
+        if was_recording == is_recording and previous_recording_id == recording_id:
+            # no change
+            return
+
+        if is_recording:
+            await self.recording_started(
+                robot_id=robot_id,
+                instance=instance,
+                recording_id=recording_id,
+            )
+        else:
+            await self.recording_stopped(
+                robot_id=robot_id,
+                instance=instance,
+                recording_id=recording_id,
+            )
 
     async def connect_recording_notification_stream(self):
         backoff = MINIMUM_BACKOFF_LEVEL
         while self.remote_trigger_enabled.is_enabled():
             try:
                 async with sse_client.EventSource(
-                    f"{API_URL}/recording/notifications/{self.local_stream_id}",
-                    session=self.cliSent_session,
+                    f"{API_URL}/recording/notifications",
+                    session=self.client_session,
                     headers=self.auth.get_headers(),
                     reconnection_time=timedelta(seconds=0.1),
                 ) as event_source:
@@ -109,37 +139,17 @@ class RecordingStateManager:
                             continue
 
                         message = RecordingNotification.model_validate_json(event.data)
-                        instance_key = (message.robot_id, message.instance)
 
-                        was_recording = instance_key in self.recording_robot_instances
-                        previous_recording_id = self.recording_robot_instances.get(
-                            instance_key, None
-                        )
-                        # TODO: make this work with the new structure
-                        if message.type is RecordingNotificationType.START:
-                            pass
-                        
-
-                        if (
-                            was_recording == message.type
-                            and previous_recording_id == message.recording_id
-                        ):
-                            # no change, nothing to do
-                            continue
-
-                        if message.recording:
-
-                            await self.recording_started(
-                                message.robot_id,
-                                message.instance,
-                                message.recording_id,
-                            )
-
-                        else:
-
-                            await self.recording_stopped(
-                                message.robot_id, message.instance
-                            )
+                        match message.type:
+                            case RecordingNotificationType.SAVED:
+                                self.emit(
+                                    self.RECORDING_SAVED, **message.payload.model_dump()
+                                )
+                            case (
+                                RecordingNotificationType.START
+                                | RecordingNotificationType.STOP
+                            ):
+                                await self.updated_recording_state(message)
 
             except ConnectionError as e:
                 print(f"Connection error: {e}")

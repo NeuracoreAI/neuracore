@@ -1,6 +1,5 @@
 import logging
 import time
-from threading import Thread
 from typing import Optional
 
 from neuracore.core.streaming.client_stream.client_stream_manager import (
@@ -18,7 +17,7 @@ from .globals import GlobalSingleton
 logger = logging.getLogger(__name__)
 
 
-def _get_robot(robot_name: str, instance: Optional[int] = 0) -> Robot:
+def _get_robot(robot_name: str, instance: int) -> Robot:
     """Get a robot by name and instance."""
     robot: Robot = GlobalSingleton()._active_robot
     if robot_name is None:
@@ -89,9 +88,7 @@ def connect_robot(
     robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     GlobalSingleton()._active_robot = robot
     # Initialize push update managers
-    get_robot_streaming_manager(
-        robot.id, robot.instance
-    ) 
+    get_robot_streaming_manager(robot.id, robot.instance)
     get_recording_state_manager()
     return robot
 
@@ -114,9 +111,8 @@ def start_recording(
         raise RobotError("Recording already in progress. Call stop_recording() first.")
     if GlobalSingleton()._active_dataset_id is None:
         raise RobotError("No active dataset. Call create_dataset() first.")
-    robot.start_recording(
-        GlobalSingleton()._active_dataset_id
-    )
+    robot.start_recording(GlobalSingleton()._active_dataset_id)
+
 
 def stop_recording(
     robot_name: Optional[str] = None, instance: Optional[int] = 0, wait: bool = False

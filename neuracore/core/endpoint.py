@@ -14,9 +14,10 @@ import requests
 from PIL import Image
 from tqdm import tqdm
 
+from neuracore.api.core import _get_robot
+from neuracore.core.robot import Robot
 from neuracore.core.utils.depth_utils import depth_to_rgb
 
-from ..api.globals import get_data_stream_store
 from .auth import get_auth
 from .const import API_URL
 from .exceptions import EndpointError
@@ -35,13 +36,12 @@ logger = logging.getLogger(__name__)
 class EndpointPolicy:
     """Interface to a deployed model endpoint."""
 
-    def __init__(self, robot_id:str, instance:int,  predict_url: str, headers: dict[str, str] = None):
+    def __init__(self, robot: Robot, predict_url: str, headers: dict[str, str] = None):
         self._predict_url = predict_url
         self._headers = headers or {}
         self._process = None
         self._is_local = "localhost" in predict_url
-        self.robot_id = robot_id
-        self.instance = instance
+        self.robot = robot
 
     def _encode_image(self, image: np.ndarray) -> str:
         pil_image = Image.fromarray(image)
@@ -74,9 +74,8 @@ class EndpointPolicy:
         return existing
 
     def _create_sync_point(self) -> SyncPoint:
-        data_stream_store = get_data_stream_store(self.robot_id, self.instance)
         sync_point = SyncPoint(timestamp=time.time())
-        for stream_name, stream in data_stream_store.list_all_streams().items():
+        for stream_name, stream in self.robot.list_all_streams().items():
             if "rgb" in stream_name:
                 stream_data: np.ndarray = stream.get_latest_data()
                 if sync_point.rgb_images is None:
@@ -214,8 +213,10 @@ def connect_endpoint(
 
     Args:
         endpoint_name (str): the name or ID of the endpoint to connect to.
-        robot_name: (Optional[str], optional) robot ID. If not provided, uses the last initialized robot.
-        instance: (Optional[int], optional) instance number of the robot. Defaults to 0.
+        robot_name: (Optional[str], optional) robot ID. If not provided, uses
+            the last initialized robot.
+        instance: (Optional[int], optional) instance number of the robot.
+            Defaults to 0.
     Raises:
         EndpointError: Endpoint Not Found
         EndpointError: Endpoint Not Active
@@ -225,7 +226,7 @@ def connect_endpoint(
         EndpointPolicy: The policy by which actions are selected.
     """
     auth = get_auth()
-
+    robot = _get_robot(robot_name, instance)
     try:
         # If not found by ID, get all endpoints and search by name
         response = requests.get(
@@ -245,8 +246,9 @@ def connect_endpoint(
             )
 
         return EndpointPolicy(
-            f"{API_URL}/models/endpoints/{endpoint['id']}/predict",
-            auth.get_headers(),
+            robot=robot,
+            predict_url=f"{API_URL}/models/endpoints/{endpoint['id']}/predict",
+            headers=auth.get_headers(),
         )
 
     except requests.exceptions.RequestException as e:
@@ -263,8 +265,10 @@ def connect_local_endpoint(
     """Connect to a local model endpoint.
 
     Args:
-        robot_name: (Optional[str], optional) robot ID. If not provided, uses the last initialized robot.
-        instance: (Optional[int], optional) instance number of the robot. Defaults to 0.
+        robot_name: (Optional[str], optional) robot ID. If not provided, uses
+            the last initialized robot.
+        instance: (Optional[int], optional) instance number of the robot.
+            Defaults to 0.
         path_to_model:  Path to the model file
         train_run_name: Optional train run name
         port: Port to run the local endpoint on
@@ -273,6 +277,7 @@ def connect_local_endpoint(
         raise ValueError("Must provide either path_to_model or train_run_name")
     if path_to_model and train_run_name:
         raise ValueError("Cannot provide both path_to_model and train_run_name")
+    robot = _get_robot(robot_name, instance)
     auth = get_auth()
     if train_run_name:
         # Get all training runs and search for the job id
@@ -344,7 +349,9 @@ def connect_local_endpoint(
         if health_check.status_code != 200:
             raise EndpointError("TorchServe is not running")
 
-        endpoint = EndpointPolicy(f"http://localhost:{port}/predictions/robot_model")
+        endpoint = EndpointPolicy(
+            robot=robot, predict_url=f"http://localhost:{port}/predictions/robot_model"
+        )
         endpoint._process = process
         return endpoint
 

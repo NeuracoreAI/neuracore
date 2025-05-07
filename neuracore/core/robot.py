@@ -1,4 +1,3 @@
-import asyncio
 import io
 import logging
 import os
@@ -9,10 +8,14 @@ from typing import Optional
 
 import requests
 
-from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
+from neuracore.core.streaming.data_stream import DataStream
+from neuracore.core.streaming.recording_state_manager import (
+    RecordingStateManager,
+    get_recording_state_manager,
+)
 
 from .auth import Auth, get_auth
-from .const import API_URL
+from .const import API_URL, MAX_DATA_STREAMS
 from .exceptions import RobotError, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -37,6 +40,16 @@ class Robot:
         self.id: str | None = None
         self._auth: Auth = get_auth()
         self._temp_dir = None
+        self.__data_streams: dict[str, DataStream] = dict()
+        self._recording_manager = get_recording_state_manager()
+
+        self._recording_manager.add_listener(
+            RecordingStateManager.RECORDING_STARTED, self._recording_started
+        )
+        self._recording_manager.add_listener(
+            RecordingStateManager.RECORDING_STOPPED, self._recording_stopped
+        )
+
         if urdf_path and mjcf_path:
             raise ValidationError(
                 "Only one of urdf_path or mjcf_path should be provided."
@@ -65,38 +78,41 @@ class Robot:
             raise RobotError("Not authenticated. Please call nc.login() first.")
 
         try:
-            # First check if we already have a robot with the same name
-            # TODO: this should be done in one request
-            if not self.overwrite:
-                response = requests.get(
-                    f"{API_URL}/robots?is_shared={self.shared}",
-                    headers=self._auth.get_headers(),
-                )
-                response.raise_for_status()
-                robots = response.json()
-                for robot in robots:
-                    if robot["name"] == self.name:
-                        self.id = robot["id"]
-                        logger.info(f"Found existing robot: {self.name}")
-                        return
-
-            logger.info(f"Creating new robot: {self.name}")
             response = requests.post(
                 f"{API_URL}/robots?is_shared={self.shared}",
-                json={"name": self.name, "cameras": []},  # TODO: Add camera support
+                json={
+                    "name": self.name,
+                    "instance": self.instance,
+                    "overwrite": self.overwrite,
+                },  # TODO: Add camera support
                 headers=self._auth.get_headers(),
             )
             response.raise_for_status()
-            self.id = response.json()
-
+            response_body = response.json()
+            self.id = response_body["robot_id"]
+            has_urdf = response_body["has_urdf"]
             # Upload URDF and meshes if provided
-            if self.urdf_path:
+            if self.urdf_path and not has_urdf:
                 self._upload_urdf_and_meshes()
                 if self._temp_dir:
                     self._temp_dir.cleanup()
 
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to initialize robot: {str(e)}")
+
+    def add_data_stream(self, stream_id: str, stream: DataStream):
+        if len(self.__data_streams) >= MAX_DATA_STREAMS:
+            raise RuntimeError("Excessive number of data streams")
+        if stream_id in self.__data_streams:
+            raise ValueError("Stream already exists")
+        self.__data_streams[stream_id] = stream
+
+    def get_data_stream(self, stream_id: str) -> DataStream | None:
+        return self.__data_streams.get(stream_id, None)
+
+    def list_all_streams(self) -> dict[str, DataStream]:
+        """List all data streams for a given robot."""
+        return self.__data_streams
 
     def start_recording(self, dataset_id: str) -> str:
         """Start recording robot data."""
@@ -125,6 +141,13 @@ class Robot:
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to start recording: {str(e)}")
 
+    def _recording_started(self, robot_id: str, instance: int, recording_id: str):
+        if self.id != robot_id or self.instance != instance:
+            return
+
+        for data_stream in self.__data_streams.values():
+            data_stream.start_recording(recording_id=recording_id)
+
     def stop_recording(self, recording_id: str, blocking: bool = False) -> None:
         """Stop a recording.
 
@@ -140,12 +163,28 @@ class Robot:
                 headers=self._auth.get_headers(),
             )
             response.raise_for_status()
-            # Inform the state manager immediately to skip the round trip.
+
+            if blocking:
+                stopping_threads = [
+                    recording.stop_recording()
+                    for recording in self.__data_streams.values()
+                ]
+                for thread in stopping_threads:
+                    thread.join()
+
             get_recording_state_manager().recording_stopped(
-                robot_id=self.id, instance=self.instance, blocking=blocking
+                robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
+
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to stop recording: {str(e)}")
+
+    def _recording_stopped(self, robot_id: str, instance: int, recording_id: str):
+        if self.id != robot_id or self.instance != instance:
+            return
+        for data_stream in self.__data_streams.values():
+            if data_stream.is_recording():
+                data_stream.stop_recording()
 
     def is_recording(self) -> bool:
         return get_recording_state_manager().is_recording(
@@ -275,7 +314,8 @@ class Robot:
 
 
 # Global robot registry
-_robots = {}
+_robots: dict[str, Robot] = {}
+_robot_name_id_mapping: dict[str, str] = {}
 
 
 def init(
@@ -289,13 +329,15 @@ def init(
     """Initialize a robot globally."""
     robot = Robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     robot.init()
-    _robots[(robot_name, instance)] = robot
+    _robot_name_id_mapping[robot_name] = robot.id
+    _robots[(robot.id, instance)] = robot
     return robot
 
 
-def get_robot(robot_name: str, instance: int = 0) -> Robot:
-    """Get a registered robot instance."""
-    key = (robot_name, instance)
+def get_robot(robot_name: str, instance: int) -> Robot:
+    """Get a registered robot instance by name or id."""
+    robot_id = _robot_name_id_mapping.get(robot_name, robot_name)
+    key = (robot_id, instance)
     if key not in _robots:
         raise RobotError(
             f"Robot {robot_name}:{instance} not initialized. Call init() first."

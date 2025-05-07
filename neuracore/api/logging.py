@@ -28,7 +28,6 @@ from ..core.streaming.data_stream import (
     RGBDataStream,
 )
 from ..core.utils.depth_utils import MAX_DEPTH
-from .globals import  get_data_stream_store
 
 
 def _create_group_id_from_dict(joint_names: dict[str, float]) -> str:
@@ -88,11 +87,10 @@ def _log_joint_data(
     robot = _get_robot(robot_name, instance)
     joint_group_id = _create_group_id_from_dict(joint_data)
     joint_str_id = f"{data_type}_{joint_group_id}"
-    data_stream_store = get_data_stream_store(robot)
-    joint_stream = data_stream_store.get_data_stream(robot, joint_str_id)
+    joint_stream = robot.get_data_stream(joint_str_id)
     if joint_stream is None:
         joint_stream = JsonDataStream(f"{data_type}/{joint_group_id}.json")
-        data_stream_store.add_data_stream(joint_str_id, joint_stream)
+        robot.add_data_stream(joint_str_id, joint_stream)
 
     start_stream(robot, joint_stream)
 
@@ -155,8 +153,7 @@ def _log_camera_data(
     robot = _get_robot(robot_name, instance)
     camera_id = f"{camera_type}_{camera_id}"
 
-    stream_store = get_data_stream_store(robot)
-    stream = stream_store.get_data_stream(camera_id)
+    stream = robot.get_data_stream(camera_id)
     if stream is None:
         if camera_type == "rgb":
             stream = RGBDataStream(camera_id, image.shape[1], image.shape[0])
@@ -164,7 +161,7 @@ def _log_camera_data(
             stream = DepthDataStream(camera_id, image.shape[1], image.shape[0])
         else:
             raise ValueError(f"Invalid camera type: {camera_type}")
-        stream_store.add_data_stream(camera_id, stream)
+        robot.add_data_stream(camera_id, stream)
 
     start_stream(robot, stream)
 
@@ -263,11 +260,10 @@ def log_custom_data(
     timestamp = timestamp or time.time()
     robot = _get_robot(robot_name, instance)
     str_id = f"{name}_custom"
-    stream_store = get_data_stream_store(robot)
-    stream = stream_store.get_data_stream(str_id)
+    stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(f"custom/{name}.json")
-        stream_store.add_data_stream(str_id, stream)
+        robot.add_data_stream(str_id, stream)
 
     start_stream(robot, stream)
 
@@ -395,11 +391,10 @@ def log_pose_data(
     robot = _get_robot(robot_name, instance)
     group_id = _create_group_id_from_dict(poses)
     str_id = f"{group_id}_pose_data"
-    stream_store = get_data_stream_store(robot)
-    stream = stream_store.get_data_stream(str_id)
+    stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(f"poses/{group_id}.json")
-        stream_store.add_data_stream(str_id, stream)
+        robot.add_data_stream(str_id, stream)
 
     start_stream(robot, stream)
 
@@ -423,11 +418,10 @@ def log_gripper_data(
     robot = _get_robot(robot_name, instance)
     group_id = _create_group_id_from_dict(open_amounts)
     str_id = f"{group_id}_gripper_data"
-    stream_store = get_data_stream_store(robot)
-    stream = stream_store.get_data_stream(str_id)
+    stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(f"gripper_open_amounts/{group_id}.json")
-        stream_store.add_data_stream(str_id, stream)
+        robot.add_data_stream(str_id, stream)
 
     start_stream(robot, stream)
 
@@ -456,12 +450,11 @@ def log_language(
     if not isinstance(language, str):
         raise ValueError("Language must be a string")
     robot = _get_robot(robot_name, instance)
-    str_id = f"language"
-    stream_store = get_data_stream_store(robot)
-    stream = stream_store.get_data_stream(str_id)
+    str_id = "language"
+    stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream("language_annotations.json")
-        stream_store.add_data_stream(str_id, stream)
+        robot.add_data_stream(str_id, stream)
     start_stream(robot, stream)
     stream.log(LanguageData(timestamp=timestamp, text=language))
 
@@ -584,14 +577,13 @@ def log_point_cloud(
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name, instance)
     str_id = f"point_cloud_{camera_id}"
-    stream_store = get_data_stream_store(robot)
-    stream = stream_store.get_data_stream(str_id)
+    stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(f"point_clouds/{camera_id}.json")
-        stream_store.add_data_stream(str_id, stream)
+        robot.add_data_stream(str_id, stream)
 
     start_stream(robot, stream)
-    
+
     stream.log(
         PointCloudData(
             timestamp=timestamp,

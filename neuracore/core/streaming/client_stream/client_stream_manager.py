@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import threading
-import traceback
 from concurrent.futures import Future
 from datetime import timedelta
 from typing import Dict, List, Tuple
@@ -10,7 +9,6 @@ from uuid import uuid4
 from aiohttp import ClientSession, ClientTimeout
 from aiohttp_sse_client import client as sse_client
 
-from neuracore.api.globals import GlobalSingleton
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.streaming.client_stream.event_source import EventSource
 from neuracore.core.streaming.client_stream.models import (

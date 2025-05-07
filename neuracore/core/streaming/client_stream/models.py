@@ -36,6 +36,7 @@ class RecordingStartPayload(BaseRecodingUpdatePayload):
     dataset_ids: list[str] = Field(default_factory=list)
     data_types: set[DataType] = Field(default_factory=set)
 
+
 class RecordingNotificationType(str, Enum):
     START = "start"
     STOP = "stop"
@@ -49,7 +50,7 @@ class RecordingNotification(BaseModel):
 
 class RobotStreamTrack(BaseModel):
     robot_id: str
-    robot_instance: int
+    robot_instance: NonNegativeInt
     stream_id: str
     kind: str
     label: str
