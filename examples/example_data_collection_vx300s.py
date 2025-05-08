@@ -71,7 +71,7 @@ def main(args):
                 "Pick up the cube and pass it to the other robot", timestamp=t
             )
 
-            nc.log_joint_target_positions(action)
+            nc.log_joint_target_positions(action, timestamp=t)
             for cam_name in camera_names:
                 nc.log_rgb(cam_name, ts.observation["images"][cam_name], timestamp=t)
 
