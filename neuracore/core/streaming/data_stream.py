@@ -36,6 +36,8 @@ class DataStream(ABC):
 
         This must be kept lightweight and not perform any blocking operations.
         """
+        if self.is_recording():
+            self.stop_recording()
         self._recording = True
         self._recording_id = recording_id
 
@@ -93,7 +95,7 @@ class VideoDataStream(DataStream):
         self.camera_id = camera_id
         self.width = width
         self.height = height
-        self._encoder = None
+        self._encoder: VideoDataStream | None = None
 
     def start_recording(self, recording_id: str):
         """Start video recording."""

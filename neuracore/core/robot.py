@@ -44,9 +44,6 @@ class Robot:
         self._recording_manager = get_recording_state_manager()
 
         self._recording_manager.add_listener(
-            RecordingStateManager.RECORDING_STARTED, self._recording_started
-        )
-        self._recording_manager.add_listener(
             RecordingStateManager.RECORDING_STOPPED, self._recording_stopped
         )
 
@@ -132,7 +129,7 @@ class Robot:
             response.raise_for_status()
             # Inform the state manager immediately to skip the round trip.
 
-            recording_id = response.text
+            recording_id = response.json()
             get_recording_state_manager().recording_started_sync(
                 robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
@@ -140,13 +137,6 @@ class Robot:
 
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to start recording: {str(e)}")
-
-    def _recording_started(self, robot_id: str, instance: int, recording_id: str):
-        if self.id != robot_id or self.instance != instance:
-            return
-
-        for stream_id, data_stream in self.__data_streams.items():
-            data_stream.start_recording(recording_id=recording_id)
 
     def stop_recording(self, recording_id: str, blocking: bool = False) -> None:
         """Stop a recording.
@@ -162,12 +152,20 @@ class Robot:
                 f"{API_URL}/recording/stop?recording_id={recording_id}",
                 headers=self._auth.get_headers(),
             )
+
             response.raise_for_status()
+
+            if response.json() == "WrongUser":
+                raise RobotError("Cannot stop recording initiated by another user")
+
+            if response.json() == "UsageLimitExceeded":
+                raise RobotError("Storage limit exceeded. Please upgrade your plan.")
 
             if blocking:
                 stopping_threads = [
-                    recording.stop_recording()
-                    for recording in self.__data_streams.values()
+                    data_stream.stop_recording()
+                    for data_stream in self.__data_streams.values()
+                    if data_stream.is_recording()
                 ]
                 for thread in stopping_threads:
                     thread.join()

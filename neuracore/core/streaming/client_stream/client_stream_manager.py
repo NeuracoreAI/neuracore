@@ -10,7 +10,7 @@ from aiohttp import ClientSession, ClientTimeout
 from aiohttp_sse_client import client as sse_client
 
 from neuracore.core.auth import Auth, get_auth
-from neuracore.core.streaming.client_stream.event_source import EventSource
+from neuracore.core.streaming.client_stream.json_source import JSONSource
 from neuracore.core.streaming.client_stream.models import (
     HandshakeMessage,
     MessageType,
@@ -62,7 +62,7 @@ class ClientStreamingManager:
 
         self.connections: Dict[str, PierToPierConnection] = {}
         self.video_tracks_cache: Dict[str, VideoSource] = {}
-        self.event_source_cache: Dict[Tuple[str, str], EventSource] = {}
+        self.event_source_cache: Dict[Tuple[str, str], JSONSource] = {}
         self.track_lock = asyncio.Lock()
         self.tracks: List[VideoSource] = []
         self.local_stream_id = uuid4().hex
@@ -96,7 +96,7 @@ class ClientStreamingManager:
             self._create_video_source(sensor_name, kind), self.loop
         ).result()
 
-    def get_event_source(self, sensor_name: str, kind: str) -> EventSource:
+    def get_event_source(self, sensor_name: str, kind: str) -> JSONSource:
         sensor_key = (sensor_name, kind)
         if sensor_key in self.event_source_cache:
             return self.event_source_cache[sensor_key]
@@ -106,7 +106,7 @@ class ClientStreamingManager:
             self.submit_track(mid, kind, sensor_name), self.loop
         )
 
-        source = EventSource(mid=mid, stream_enabled=self.streaming, loop=self.loop)
+        source = JSONSource(mid=mid, stream_enabled=self.streaming, loop=self.loop)
         self.event_source_cache[sensor_key] = source
 
         return source
