@@ -1,5 +1,6 @@
 import argparse
 import os
+import time
 
 import numpy as np
 from common.constants import BIMANUAL_VIPERX_URDF_PATH
@@ -51,24 +52,28 @@ def main(args):
             nc.start_recording()
 
         # Log initial state
-        nc.log_joint_positions(ts.observation["qpos"])
-        nc.log_joint_velocities(ts.observation["qvel"])
-        nc.log_language("Pick up the cube and pass it to the other robot")
+        t = time.time()
+        nc.log_joint_positions(ts.observation["qpos"], timestamp=t)
+        nc.log_joint_velocities(ts.observation["qvel"], timestamp=t)
+        nc.log_language("Pick up the cube and pass it to the other robot", timestamp=t)
         for cam_name in camera_names:
-            nc.log_rgb(cam_name, ts.observation["images"][cam_name])
+            nc.log_rgb(cam_name, ts.observation["images"][cam_name], timestamp=t)
 
         # Execute action trajectory while logging
         episode_replay = [ts]
         for action in action_traj:
             ts = env.step(list(action.values()))
 
-            nc.log_joint_positions(ts.observation["qpos"])
-            nc.log_joint_velocities(ts.observation["qvel"])
-            nc.log_language("Pick up the cube and pass it to the other robot")
+            t += 0.02
+            nc.log_joint_positions(ts.observation["qpos"], timestamp=t)
+            nc.log_joint_velocities(ts.observation["qvel"], timestamp=t)
+            nc.log_language(
+                "Pick up the cube and pass it to the other robot", timestamp=t
+            )
 
             nc.log_joint_target_positions(action)
             for cam_name in camera_names:
-                nc.log_rgb(cam_name, ts.observation["images"][cam_name])
+                nc.log_rgb(cam_name, ts.observation["images"][cam_name], timestamp=t)
 
             episode_replay.append(ts)
 
