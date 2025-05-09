@@ -1,5 +1,4 @@
 import asyncio
-import traceback
 from concurrent.futures import Future
 from datetime import timedelta
 
@@ -178,7 +177,6 @@ class RecordingStateManager(AsyncIOEventEmitter):
                 backoff += 1
             except Exception as e:
                 print(f"Unexpected error: {e}")
-                print(traceback.format_exc())
                 await asyncio.sleep(2 ^ backoff)
                 backoff += 1
 
