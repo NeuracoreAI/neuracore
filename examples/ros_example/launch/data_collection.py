@@ -19,12 +19,16 @@ def generate_launch_description():
         package="ros_example",
         executable="simulation_node",
         parameters=[{"max_episodes": LaunchConfiguration("max_episodes")}],
+        output="screen",
+        emulate_tty=True,
     )
 
     # Create the data logger node
     data_logger_node = Node(
         package="ros_example",
         executable="data_logger_node",
+        output="screen",
+        emulate_tty=True,
     )
 
     return LaunchDescription([

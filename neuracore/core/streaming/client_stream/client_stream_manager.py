@@ -98,8 +98,10 @@ class ClientStreamingManager:
             self._create_video_source(sensor_name, kind), self.loop
         ).result()
 
-    def get_event_source(self, sensor_name: str, kind: str) -> EventSource:
-        sensor_key = (sensor_name, kind)
+    def get_event_source(
+        self, sensor_name: str, kind: str, sensor_key: tuple | None = None
+    ) -> EventSource:
+        sensor_key = sensor_key or (sensor_name, kind)
         if sensor_key in self.event_source_cache:
             return self.event_source_cache[sensor_key]
 
