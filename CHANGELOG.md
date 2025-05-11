@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- None
+- AsyncRuntime to manage an asyncio event loop in a background thread
 
 ### Removed
 
