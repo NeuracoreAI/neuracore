@@ -1,8 +1,6 @@
 import asyncio
-import logging
 import threading
 import traceback
-from concurrent.futures import Future
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from uuid import uuid4
@@ -24,20 +22,6 @@ from ...const import API_URL
 from .connection import PierToPierConnection
 from .video_source import DepthVideoSource, VideoSource
 
-logger = logging.getLogger(__name__)
-
-
-def get_loop():
-    try:
-        loop = asyncio.get_running_loop()
-        return loop
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        threading.Thread(target=lambda: loop.run_forever(), daemon=True).start()
-        return loop
-
-
 # must be less than zero -> a reconnection delay of more
 # than one second is considered dead
 # TODO: resubmit tracks if connection is re-established
@@ -45,58 +29,75 @@ def get_loop():
 MINIMUM_BACKOFF_LEVEL = -2
 
 
+class AsyncRuntime:
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.thread.start()
+
+    def _run_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    def run_coroutine(self, coro, timeout=None):
+        """Run coroutine safely from sync code."""
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        return future.result(timeout=timeout)
+
+    def submit_coroutine(self, coro):
+        """Fire-and-forget coroutine from sync code."""
+        asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+    def shutdown(self):
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join()
+
+
 class ClientStreamingManager:
     def __init__(
         self,
         robot_id: str,
         robot_instance: int,
-        loop: asyncio.AbstractEventLoop,
-        client_session: ClientSession,
+        runtime: AsyncRuntime,
         auth: Auth = None,
     ):
         self.robot_id = robot_id
         self.robot_instance = robot_instance
-        self.loop = loop
-        self.client_session = client_session
-        self.auth = auth if auth is not None else get_auth()
+        self.runtime = runtime
+        self.auth = auth or get_auth()
         self.available_for_connections = True
 
         self.connections: Dict[str, PierToPierConnection] = {}
         self.video_tracks_cache: Dict[str, VideoSource] = {}
         self.event_source_cache: Dict[Tuple[str, str], EventSource] = {}
-        self.track_lock = asyncio.Lock()
         self.tracks: List[VideoSource] = []
         self.local_stream_id = uuid4().hex
 
-        self.signalling_stream_future: Future = asyncio.run_coroutine_threadsafe(
-            self.connect_signalling_stream(), self.loop
-        )
-        self.recording_stream_future: Future = asyncio.run_coroutine_threadsafe(
-            self.connect_recording_notification_stream(), self.loop
-        )
+        timeout = ClientTimeout(sock_read=None, total=None)
+        self.client_session = self.runtime.run_coroutine(self._create_session(timeout))
 
-    async def _create_video_source(self, sensor_name: str, kind: str) -> VideoSource:
-        sensor_key = (sensor_name, kind)
-        async with self.track_lock:
-            if sensor_key in self.video_tracks_cache:
-                return self.video_tracks_cache[sensor_key]
+        self.runtime.submit_coroutine(self.connect_signalling_stream())
+        self.runtime.submit_coroutine(self.connect_recording_notification_stream())
 
-            mid = str(len(self.tracks))
-            video_source = (
-                DepthVideoSource(mid=mid) if kind == "depth" else VideoSource(mid=mid)
-            )
-            self.video_tracks_cache[sensor_key] = video_source
-            self.tracks.append(video_source)
-
-            await self.submit_track(mid, kind, sensor_name)
-
-            return video_source
+    async def _create_session(self, timeout):
+        return ClientSession(timeout=timeout)
 
     def get_video_source(self, sensor_name: str, kind: str) -> VideoSource:
         """Start a new recording stream"""
-        return asyncio.run_coroutine_threadsafe(
-            self._create_video_source(sensor_name, kind), self.loop
-        ).result()
+        sensor_key = (sensor_name, kind)
+        if sensor_key in self.video_tracks_cache:
+            return self.video_tracks_cache[sensor_key]
+
+        mid = str(len(self.tracks))
+        self.runtime.submit_coroutine(self.submit_track(mid, kind, sensor_name))
+
+        video_source = (
+            DepthVideoSource(mid=mid) if kind == "depth" else VideoSource(mid=mid)
+        )
+        self.video_tracks_cache[sensor_key] = video_source
+        self.tracks.append(video_source)
+
+        return video_source
 
     def get_event_source(
         self, sensor_name: str, kind: str, sensor_key: tuple | None = None
@@ -106,13 +107,9 @@ class ClientStreamingManager:
             return self.event_source_cache[sensor_key]
 
         mid = uuid4().hex
-        asyncio.run_coroutine_threadsafe(
-            self.submit_track(mid, kind, sensor_name), self.loop
-        )
-
-        source = EventSource(mid=mid, loop=self.loop)
+        self.runtime.submit_coroutine(self.submit_track(mid, kind, sensor_name))
+        source = EventSource(mid=mid, loop=self.runtime.loop)
         self.event_source_cache[sensor_key] = source
-
         return source
 
     async def submit_track(self, mid: str, kind: str, label: str):
@@ -139,10 +136,7 @@ class ClientStreamingManager:
         )
 
     async def create_new_connection(
-        self,
-        remote_stream_id: str,
-        connection_id: str,
-        connection_token: str,
+        self, remote_stream_id: str, connection_id: str, connection_token: str
     ) -> PierToPierConnection:
         """Create a new P2P connection to a remote stream"""
 
@@ -157,7 +151,7 @@ class ClientStreamingManager:
             on_close=on_close,
             client_session=self.client_session,
             auth=self.auth,
-            loop=self.loop,
+            loop=self.runtime.loop,
         )
 
         connection.setup_connection()
@@ -169,7 +163,6 @@ class ClientStreamingManager:
             connection.add_event_source(data_channel)
 
         self.connections[remote_stream_id] = connection
-
         await connection.send_offer()
         return connection
 
@@ -189,7 +182,6 @@ class ClientStreamingManager:
                             message = RecordingNotification.model_validate_json(
                                 event.data
                             )
-
                             if message.recording:
                                 GlobalSingleton()._active_recording_ids[
                                     message.robot_id
@@ -200,7 +192,6 @@ class ClientStreamingManager:
                                 )
                                 if rec_id is None:
                                     continue
-
                                 for (
                                     sname,
                                     stream,
@@ -211,14 +202,10 @@ class ClientStreamingManager:
                                             and stream.is_recording()
                                         ):
                                             stream.stop_recording()
-            except ConnectionError as e:
-                print(f"Connection error: {e}")
-                await asyncio.sleep(2 ^ backoff)
-                backoff += 1
             except Exception as e:
-                print(f"Unexpected error: {e}")
+                print(f"Recording stream error: {e}")
                 print(traceback.format_exc())
-                await asyncio.sleep(2 ^ backoff)
+                await asyncio.sleep(2**backoff)
                 backoff += 1
 
     async def connect_signalling_stream(self):
@@ -242,7 +229,6 @@ class ClientStreamingManager:
                                 continue
 
                             message = HandshakeMessage.model_validate_json(event.data)
-
                             if message.from_id == "system":
                                 continue
 
@@ -276,12 +262,12 @@ class ClientStreamingManager:
                             backoff += 1
                             continue
                         except Exception as e:
-                            print(f"Application error: {e}")
-                            await asyncio.sleep(2 ^ backoff)
+                            print(f"Signaling message error: {e}")
+                            await asyncio.sleep(2**backoff)
                             backoff += 1
             except Exception as e:
-                print(f"Connection error: {e}")
-                await asyncio.sleep(2 ^ backoff)
+                print(f"Signaling connection error: {e}")
+                await asyncio.sleep(2**backoff)
                 backoff += 1
 
     async def close_connections(self):
@@ -292,49 +278,22 @@ class ClientStreamingManager:
     def close(self):
         """Close all connections and streams"""
         self.available_for_connections = False
-
-        if self.signalling_stream_future.running():
-            self.signalling_stream_future.cancel()
-        if self.recording_stream_future.running():
-            self.recording_stream_future.cancel()
-
-        asyncio.run_coroutine_threadsafe(self.close_connections(), self.loop)
+        self.runtime.submit_coroutine(self.close_connections())
 
         for track in self.video_tracks_cache.values():
             track.stop()
 
         self.connections.clear()
         self.video_tracks_cache.clear()
-        asyncio.run_coroutine_threadsafe(self.client_session.close(), self.loop)
+        self.runtime.submit_coroutine(self.client_session.close())
 
 
-_streaming_managers: Dict[tuple[str, int], Future[ClientStreamingManager]] = {}
+_runtime = AsyncRuntime()
+_streaming_managers: Dict[Tuple[str, int], ClientStreamingManager] = {}
 
 
-async def create_client_streaming_manager(robot_id: str, instance: int):
-    # We want to keep the signalling connection alive for as long as possible
-    timeout = ClientTimeout(sock_read=None, total=None)
-    manager = ClientStreamingManager(
-        robot_id=robot_id,
-        robot_instance=instance,
-        loop=asyncio.get_event_loop(),
-        client_session=ClientSession(timeout=timeout),
-    )
-
-    return manager
-
-
-def get_robot_streaming_manager(
-    robot_id: str, instance: int
-) -> "ClientStreamingManager":
-    global _streaming_managers
+def get_robot_streaming_manager(robot_id: str, instance: int) -> ClientStreamingManager:
     key = (robot_id, instance)
-    if key in _streaming_managers:
-        return _streaming_managers[key].result()
-
-    loop = get_loop()
-    manager = asyncio.run_coroutine_threadsafe(
-        create_client_streaming_manager(robot_id, instance), loop
-    )
-    _streaming_managers[key] = manager
-    return manager.result()
+    if key not in _streaming_managers:
+        _streaming_managers[key] = ClientStreamingManager(robot_id, instance, _runtime)
+    return _streaming_managers[key]
