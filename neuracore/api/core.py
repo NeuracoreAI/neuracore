@@ -133,7 +133,7 @@ def stop_recording(
         logger.warning("No active recordings to stop.")
         return
     recording_id = robot.get_current_recording_id()
-    robot.stop_recording(recording_id, blocking=True)
+    robot.stop_recording(recording_id)
     if wait:
         while backend_utils.get_num_active_streams(recording_id) > 0:
             time.sleep(2.0)
