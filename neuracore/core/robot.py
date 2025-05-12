@@ -40,7 +40,7 @@ class Robot:
         self.id: str | None = None
         self._auth: Auth = get_auth()
         self._temp_dir = None
-        self.__data_streams: dict[str, DataStream] = dict()
+        self._data_streams: dict[str, DataStream] = dict()
         self._recording_manager = get_recording_state_manager()
 
         self._recording_manager.add_listener(
@@ -98,18 +98,18 @@ class Robot:
             raise RobotError(f"Failed to initialize robot: {str(e)}")
 
     def add_data_stream(self, stream_id: str, stream: DataStream):
-        if len(self.__data_streams) >= MAX_DATA_STREAMS:
+        if len(self._data_streams) >= MAX_DATA_STREAMS:
             raise RuntimeError("Excessive number of data streams")
-        if stream_id in self.__data_streams:
+        if stream_id in self._data_streams:
             raise ValueError("Stream already exists")
-        self.__data_streams[stream_id] = stream
+        self._data_streams[stream_id] = stream
 
     def get_data_stream(self, stream_id: str) -> DataStream | None:
-        return self.__data_streams.get(stream_id, None)
+        return self._data_streams.get(stream_id, None)
 
     def list_all_streams(self) -> dict[str, DataStream]:
         """List all data streams for a given robot."""
-        return self.__data_streams
+        return self._data_streams
 
     def start_recording(self, dataset_id: str) -> str:
         """Start recording robot data."""
@@ -138,7 +138,7 @@ class Robot:
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to start recording: {str(e)}")
 
-    def stop_recording(self, recording_id: str, blocking: bool = False) -> None:
+    def stop_recording(self, recording_id: str) -> None:
         """Stop a recording.
 
         Args:
@@ -161,15 +161,6 @@ class Robot:
             if response.json() == "UsageLimitExceeded":
                 raise RobotError("Storage limit exceeded. Please upgrade your plan.")
 
-            if blocking:
-                stopping_threads = [
-                    data_stream.stop_recording()
-                    for data_stream in self.__data_streams.values()
-                    if data_stream.is_recording()
-                ]
-                for thread in stopping_threads:
-                    thread.join()
-
             get_recording_state_manager().recording_stopped(
                 robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
@@ -180,7 +171,7 @@ class Robot:
     def _recording_stopped(self, robot_id: str, instance: int, recording_id: str):
         if self.id != robot_id or self.instance != instance:
             return
-        for stream_id, data_stream in self.__data_streams.items():
+        for stream_id, data_stream in self._data_streams.items():
             if data_stream.is_recording():
                 data_stream.stop_recording()
 
