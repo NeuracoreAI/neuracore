@@ -1,5 +1,4 @@
 import asyncio
-import threading
 import traceback
 from datetime import timedelta
 from typing import Dict, List, Tuple
@@ -10,6 +9,7 @@ from aiohttp_sse_client import client as sse_client
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.auth import Auth, get_auth
+from neuracore.core.streaming.client_stream.async_runtime import AsyncRuntime
 from neuracore.core.streaming.client_stream.event_source import EventSource
 from neuracore.core.streaming.client_stream.models import (
     HandshakeMessage,
@@ -29,41 +29,16 @@ from .video_source import DepthVideoSource, VideoSource
 MINIMUM_BACKOFF_LEVEL = -2
 
 
-class AsyncRuntime:
-    def __init__(self):
-        self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self._run_loop, daemon=True)
-        self.thread.start()
-
-    def _run_loop(self):
-        asyncio.set_event_loop(self.loop)
-        self.loop.run_forever()
-
-    def run_coroutine(self, coro, timeout=None):
-        """Run coroutine safely from sync code."""
-        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        return future.result(timeout=timeout)
-
-    def submit_coroutine(self, coro):
-        """Fire-and-forget coroutine from sync code."""
-        asyncio.run_coroutine_threadsafe(coro, self.loop)
-
-    def shutdown(self):
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        self.thread.join()
-
-
 class ClientStreamingManager:
     def __init__(
         self,
         robot_id: str,
         robot_instance: int,
-        runtime: AsyncRuntime,
         auth: Auth = None,
     ):
         self.robot_id = robot_id
         self.robot_instance = robot_instance
-        self.runtime = runtime
+        self.runtime = AsyncRuntime.get_instance()
         self.auth = auth or get_auth()
         self.available_for_connections = True
 
@@ -288,12 +263,11 @@ class ClientStreamingManager:
         self.runtime.submit_coroutine(self.client_session.close())
 
 
-_runtime = AsyncRuntime()
 _streaming_managers: Dict[Tuple[str, int], ClientStreamingManager] = {}
 
 
 def get_robot_streaming_manager(robot_id: str, instance: int) -> ClientStreamingManager:
     key = (robot_id, instance)
     if key not in _streaming_managers:
-        _streaming_managers[key] = ClientStreamingManager(robot_id, instance, _runtime)
+        _streaming_managers[key] = ClientStreamingManager(robot_id, instance)
     return _streaming_managers[key]
