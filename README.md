@@ -76,6 +76,16 @@ cd neuracore
 pip install -e .[dev]
 ```
 
+## Environment Variables
+
+A few environment variables effect how this library operates, they are generally prefixed with `NEURACORE_` and are case insensitive
+
+ | Variable                                     | Function                                                                                                            | Valid Values                               | Default Value                   |
+ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ | ------------------------------- |
+ | `NEURACORE_REMOTE_RECORDING_TRIGGER_ENABLED` | Allows you to disable other machines starting a recording when logging. this does not affect the live data          | `true`/`false`                             | `true`                          |
+ | `NEURACORE_LIVE_DATA_ENABLED`                | Allows you to disable the streaming of data for live visualizations from this node. This does not affect recording. | `true`/`false`                             | `true`                          |
+ | `NEURACORE_API_URL`                          | The base url used to contact the neuracore platform.                                                                | A url e.g. `https://api.neuracore.app/api` | `https://api.neuracore.app/api` |
+
 ## Testing
 
 ```bash
