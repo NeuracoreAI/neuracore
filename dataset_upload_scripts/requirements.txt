@@ -1,5 +1,6 @@
 robot_descriptions @ git+https://github.com/stepjam/robot_descriptions.py.git@main
 lerobot @ git+https://github.com/huggingface/lerobot.git
+huggingface_hub[hf_xet]
 pin
 pin-pink
 tensorflow-datasets

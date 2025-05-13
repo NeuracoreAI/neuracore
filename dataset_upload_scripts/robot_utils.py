@@ -50,6 +50,7 @@ class RobotType(Enum):
     XARM7 = ("UFACTORY xArm7", "xarm7_mj_description")
     PR2 = ("PR2", "pr2_description")
     SAWYER = ("Sawyer", "sawyer_mj_description")
+    UNITREE_H1 = ("Unitree H1", "h1_description")
 
 
 class StateType(Enum):
