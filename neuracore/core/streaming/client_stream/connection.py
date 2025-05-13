@@ -14,7 +14,7 @@ from aiortc import (
 from aiortc.sdp import candidate_from_sdp, candidate_to_sdp
 
 from neuracore.core.auth import Auth, get_auth
-from neuracore.core.streaming.client_stream.json_source import JSONSource
+from neuracore.core.streaming.client_stream.event_source import EventSource
 from neuracore.core.streaming.client_stream.models import HandshakeMessage, MessageType
 from neuracore.core.streaming.client_stream.video_source import VideoSource, VideoTrack
 
@@ -38,7 +38,7 @@ class PierToPierConnection:
     has_received_answer: bool = False
     has_sent_offer: bool = False
     auth: Auth = field(default_factory=get_auth)
-    event_sources: set[JSONSource] = field(default_factory=set)
+    event_sources: set[EventSource] = field(default_factory=set)
     data_channel_callback: dict[str, Callable] = field(default_factory=dict)
     connection: RTCPeerConnection = field(
         default_factory=lambda: RTCPeerConnection(
@@ -114,27 +114,19 @@ class PierToPierConnection:
         track = source.get_video_track()
         self.connection.addTrack(track)
 
-    def add_event_source(self, source: JSONSource):
+    def add_event_source(self, source: EventSource):
         data_channel = self.connection.createDataChannel(source.mid)
 
-        async def on_update(state: str):
+        @source.on("event")
+        async def on_event(event: str):
             if self._closed:
                 return
             if data_channel.readyState != "open":
                 return
-            data_channel.send(state)
-
-        def on_open():
-            last_state = source.get_last_state()
-            if last_state:
-                data_channel.send(last_state)
-            data_channel.remove_listener("open", on_open)
-
-        data_channel.add_listener("open", on_open)
+            data_channel.send(event)
 
         self.event_sources.add(source)
-        source.add_listener(source.STATE_UPDATED_EVENT, on_update)
-        self.data_channel_callback[source.mid] = on_update
+        self.data_channel_callback[source.mid] = on_event
 
     async def send_handshake_message(self, message_type: MessageType, content: str):
         """Send a message to the remote peer through the signaling server"""
@@ -241,7 +233,5 @@ class PierToPierConnection:
             self._closed = True
             await self.connection.close()
             for source in self.event_sources:
-                source.remove_listener(
-                    source.STATE_UPDATED_EVENT, self.data_channel_callback[source.mid]
-                )
+                source.remove_listener("event", self.data_channel_callback[source.mid])
             self.on_close()

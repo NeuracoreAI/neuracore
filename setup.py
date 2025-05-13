@@ -38,7 +38,7 @@ setup(
         "pyyaml>=6.0.1",
         "tqdm>=4.66.0",
         "requests-oauthlib",
-        "pydantic>=2.10",
+        "pydantic",
         "av",
         "aiortc",
         "aiohttp-sse-client",

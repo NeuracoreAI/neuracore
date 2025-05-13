@@ -27,7 +27,6 @@ class BucketUploader(ABC):
         Args:
             inc: True to increment, False to decrement
         """
-
         assert delta in (1, -1), "Value must be 1 or -1"
         response = requests.put(
             f"{API_URL}/recording/{self.recording_id}/update_num_active_streams",

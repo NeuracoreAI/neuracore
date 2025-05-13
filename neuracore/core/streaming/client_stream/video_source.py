@@ -10,7 +10,7 @@ import av
 import numpy as np
 from aiortc import MediaStreamTrack
 
-from .stream_enabled import EnabledManager
+from .stream_enabled import StreamEnabled
 
 av.logging.set_level(None)
 
@@ -22,7 +22,7 @@ TIMESTAMP_DELTA = int(VIDEO_CLOCK_RATE / STREAMING_FPS)
 
 @dataclass
 class VideoSource:
-    stream_enabled: EnabledManager
+    stream_enabled: StreamEnabled
     mid: str = field(default_factory=lambda: uuid4().hex)
     _last_frame: np.ndarray = field(
         default_factory=lambda: np.zeros((480, 640, 3), dtype=np.uint8)
@@ -35,10 +35,10 @@ class VideoSource:
         return av.VideoFrame.from_ndarray(self._last_frame, format="rgb24")
 
     def get_video_track(self):
-        if not self.stream_enabled.is_enabled():
+        if not self.stream_enabled.is_streaming():
             raise RuntimeError("Streaming is not enabled")
         consumer = VideoTrack(self)
-        self.stream_enabled.add_listener(EnabledManager.DISABLED, consumer.stop)
+        self.stream_enabled.add_listener(StreamEnabled.STREAMING_STOPPED, consumer.stop)
         return consumer
 
 

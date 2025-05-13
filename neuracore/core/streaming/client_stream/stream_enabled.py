@@ -3,26 +3,28 @@ from asyncio import AbstractEventLoop
 
 from pyee.asyncio import AsyncIOEventEmitter
 
+from neuracore.core.const import LIVE_DATA_ENABLED
 
-class EnabledManager(AsyncIOEventEmitter):
 
-    DISABLED = "DISABLED"
+class StreamEnabled(AsyncIOEventEmitter):
 
-    def __init__(self, initial_state: bool, loop: AbstractEventLoop | None = None):
+    STREAMING_STOPPED = "STREAMING_STOPPED"
+
+    def __init__(self, loop: AbstractEventLoop | None = None):
         super().__init__(loop)
-        self._is_enabled = initial_state
+        self.streaming = LIVE_DATA_ENABLED
         self.lock = threading.Lock()
 
-    def is_enabled(self) -> bool:
+    def is_streaming(self) -> bool:
         """Check if streaming is enabled"""
         with self.lock:
-            return self._is_enabled
+            return self.streaming
 
-    def disable(self) -> None:
+    def stop_streaming(self) -> None:
         """Stop streaming"""
         with self.lock:
-            if not self._is_enabled:
+            if not self.streaming:
                 return
-            self._is_enabled = False
-            self.emit(self.DISABLED)
+            self.streaming = False
+            self.emit(self.STREAMING_STOPPED)
             self.remove_all_listeners()

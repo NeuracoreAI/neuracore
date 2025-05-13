@@ -10,11 +10,7 @@ def test_connect_endpoint(temp_config_dir, mock_auth_requests, reset_neuracore):
     """Test connecting to an endpoint."""
     # Ensure login
     nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
     nc.connect_robot("test_robot")
 
     # Mock endpoint list
@@ -125,11 +121,7 @@ def test_connect_local_endpoint(
     monkeypatch.setattr("subprocess.Popen", mock_subprocess_popen)
 
     nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
     nc.connect_robot("test_robot")
 
     local_endpoint = nc.connect_local_endpoint(mock_model_mar)
@@ -229,11 +221,7 @@ def test_connect_local_endpoint_with_train_run(
     """Test connecting to a local endpoint using a training run name."""
     # Ensure login
     nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
     nc.connect_robot("test_robot")
 
     # Mock training jobs endpoint

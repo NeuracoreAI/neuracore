@@ -14,11 +14,7 @@ def test_log_joints_and_cams(
     nc.login("test_api_key")
 
     # Mock robot creation
-    mock_auth_requests.post(
-        f"{API_URL}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
 
     # Connect robot
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
@@ -45,11 +41,7 @@ def test_log_with_extrinsics_intrinsics(
     """Test logging with extrinsics and intrinsics matrices."""
     # Ensure login and robot connection
     nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Create test data
@@ -71,11 +63,7 @@ def test_log_gripper_data(
     """Test logging gripper data."""
     # Ensure login and robot connection
     nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Log gripper data
@@ -88,11 +76,7 @@ def test_log_joint_velocities_and_torques(
     """Test logging joint velocities and torques."""
     # Ensure login and robot connection
     nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Log joint velocities
@@ -106,11 +90,7 @@ def test_log_language(temp_config_dir, mock_auth_requests, reset_neuracore, mock
     """Test logging language annotations."""
     # Ensure login and robot connection
     nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Log language
@@ -123,11 +103,7 @@ def test_log_custom_data(
     """Test logging custom data."""
     # Ensure login and robot connection
     nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Log custom data
@@ -146,11 +122,7 @@ def test_log_point_cloud(
     """Test logging point cloud data."""
     # Ensure login and robot connection
     nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Create a small point cloud (1000 points x 3 dimensions)
@@ -169,11 +141,7 @@ def test_log_synced_data(
     """Test logging synchronized data from multiple sensors."""
     # Ensure login and robot connection
     nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Prepare test data
@@ -221,11 +189,7 @@ def test_log_invalid_data_format(
     """Test validation of input data formats."""
     # Ensure login and robot connection
     nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
+    mock_auth_requests.post(f"{API_URL}/robots", json="mock_robot_id", status_code=200)
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Test invalid joint positions (not float)
