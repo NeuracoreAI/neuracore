@@ -2,6 +2,7 @@
 
 import logging
 import multiprocessing
+import os
 import time
 
 import numpy as np
@@ -135,7 +136,7 @@ def upload_unitreeh1_fold_clothes():
     num_episodes = dataset.num_episodes
     logger.info(f"Number of episodes to upload: {num_episodes}")
 
-    max_workers = 2  # max(2, int(os.cpu_count() * 0.8))
+    max_workers = max(2, int(os.cpu_count() * 0.8))
     logger.info(f"Using {max_workers} workers for uploading")
     multiprocessing.set_start_method("spawn", force=True)
 

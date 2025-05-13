@@ -73,6 +73,7 @@ def run_validation(
     output_dir: Path,
     algorithm_dir: Path,
     port: int = 8080,
+    skip_endpoint_check: bool = False,
 ) -> tuple[AlgorthmCheck, str]:
     """Run the minimal validation process to check if an algorithm works."""
 
@@ -203,57 +204,60 @@ def run_validation(
                 logger.error(f"TorchScript export failed: {str(e)}")
                 raise ValueError(f"Model cannot be exported to TorchScript: {str(e)}")
 
-            policy = None
-            try:
-                # Check if the exported model can be loaded
-                policy = nc.connect_local_endpoint(
-                    path_to_model=str(artifacts_dir / "model.mar"),
-                    port=port,
-                )
-
-                # Log some data to send to the model
-                sync_point = SyncPoint(timestamp=time.time())
-                if batch.inputs.joint_positions:
-                    sync_point.joint_positions = _create_joint_data(
-                        batch.inputs.joint_positions
-                    )
-                if batch.inputs.joint_velocities:
-                    sync_point.joint_velocities = _create_joint_data(
-                        batch.inputs.joint_velocities
-                    )
-                if batch.inputs.joint_torques:
-                    sync_point.joint_torques = _create_joint_data(
-                        batch.inputs.joint_torques
-                    )
-                if batch.inputs.joint_target_positions:
-                    sync_point.joint_target_positions = _create_joint_data(
-                        batch.inputs.joint_target_positions
-                    )
-                if batch.inputs.rgb_images:
-                    rgbs = (
-                        batch.inputs.rgb_images.data[0]
-                        .cpu()
-                        .numpy()
-                        .transpose(0, 2, 3, 1)
-                        * 255
-                    ).astype(np.uint8)
-                    rgbs = {
-                        f"camera{i}": CameraData(
-                            timestamp=time.time(), frame=_encode_image(v)
-                        )
-                        for i, v in enumerate(rgbs)
-                    }
-                    sync_point.rgb_images = rgbs
-
-                action = policy.predict(sync_point)
-                logger.info(f"Exported model loaded successfully, action: {action}")
-                policy.disconnect()
+            if skip_endpoint_check:
                 algo_check.successfully_launched_endpoint = True
-            except Exception as e:
-                if policy:
+            else:
+                policy = None
+                try:
+                    # Check if the exported model can be loaded
+                    policy = nc.connect_local_endpoint(
+                        path_to_model=str(artifacts_dir / "model.mar"),
+                        port=port,
+                    )
+
+                    # Log some data to send to the model
+                    sync_point = SyncPoint(timestamp=time.time())
+                    if batch.inputs.joint_positions:
+                        sync_point.joint_positions = _create_joint_data(
+                            batch.inputs.joint_positions
+                        )
+                    if batch.inputs.joint_velocities:
+                        sync_point.joint_velocities = _create_joint_data(
+                            batch.inputs.joint_velocities
+                        )
+                    if batch.inputs.joint_torques:
+                        sync_point.joint_torques = _create_joint_data(
+                            batch.inputs.joint_torques
+                        )
+                    if batch.inputs.joint_target_positions:
+                        sync_point.joint_target_positions = _create_joint_data(
+                            batch.inputs.joint_target_positions
+                        )
+                    if batch.inputs.rgb_images:
+                        rgbs = (
+                            batch.inputs.rgb_images.data[0]
+                            .cpu()
+                            .numpy()
+                            .transpose(0, 2, 3, 1)
+                            * 255
+                        ).astype(np.uint8)
+                        rgbs = {
+                            f"camera{i}": CameraData(
+                                timestamp=time.time(), frame=_encode_image(v)
+                            )
+                            for i, v in enumerate(rgbs)
+                        }
+                        sync_point.rgb_images = rgbs
+
+                    action = policy.predict(sync_point)
+                    logger.info(f"Exported model loaded successfully, action: {action}")
                     policy.disconnect()
-                logger.error(f"Failed to load exported model: {str(e)}")
-                raise ValueError(f"Model cannot be loaded from export: {str(e)}")
+                    algo_check.successfully_launched_endpoint = True
+                except Exception as e:
+                    if policy:
+                        policy.disconnect()
+                    logger.error(f"Failed to load exported model: {str(e)}")
+                    raise ValueError(f"Model cannot be loaded from export: {str(e)}")
 
         # All checks passed!
         logger.info("All validation checks passed successfully")
