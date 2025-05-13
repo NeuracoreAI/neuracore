@@ -1,11 +1,11 @@
 import logging
 import time
-from threading import Thread
 from typing import Optional
 
 from neuracore.core.streaming.client_stream.client_stream_manager import (
     get_robot_streaming_manager,
 )
+from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils import backend_utils
 
 from ..core.auth import get_auth
@@ -17,7 +17,7 @@ from .globals import GlobalSingleton
 logger = logging.getLogger(__name__)
 
 
-def _get_robot(robot_name: str, instance: Optional[int] = 0) -> Robot:
+def _get_robot(robot_name: str, instance: int) -> Robot:
     """Get a robot by name and instance."""
     robot: Robot = GlobalSingleton()._active_robot
     if robot_name is None:
@@ -87,9 +87,9 @@ def connect_robot(
     validate_version()
     robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     GlobalSingleton()._active_robot = robot
-    get_robot_streaming_manager(
-        robot.id, robot.instance
-    )  # Initialize streaming manager
+    # Initialize push update managers
+    get_robot_streaming_manager(robot.id, robot.instance)
+    get_recording_state_manager()
     return robot
 
 
@@ -107,19 +107,11 @@ def start_recording(
         RobotError: If no robot is active and no robot_name provided
     """
     robot = _get_robot(robot_name, instance)
-    if robot.instanced_id in GlobalSingleton()._active_recording_ids:
+    if robot.is_recording():
         raise RobotError("Recording already in progress. Call stop_recording() first.")
     if GlobalSingleton()._active_dataset_id is None:
         raise RobotError("No active dataset. Call create_dataset() first.")
-    new_active_recording_id = robot.start_recording(
-        GlobalSingleton()._active_dataset_id
-    )
-    for sname, stream in GlobalSingleton()._data_streams.items():
-        if sname.startswith(robot.instanced_id):
-            stream.start_recording(new_active_recording_id)
-    GlobalSingleton()._active_recording_ids[
-        robot.instanced_id
-    ] = new_active_recording_id
+    robot.start_recording(GlobalSingleton()._active_dataset_id)
 
 
 def stop_recording(
@@ -137,16 +129,10 @@ def stop_recording(
         RobotError: If no robot is active and no robot_name provided
     """
     robot = _get_robot(robot_name, instance)
-    if robot.instanced_id not in GlobalSingleton()._active_recording_ids:
+    if not robot.is_recording():
         logger.warning("No active recordings to stop.")
         return
-    threads: Thread = []
-    for sname, stream in GlobalSingleton()._data_streams.items():
-        if sname.startswith(robot.instanced_id):
-            with stream.lock:
-                if stream.is_recording():
-                    threads.append(stream.stop_recording())
-    recording_id = GlobalSingleton()._active_recording_ids.pop(robot.instanced_id)
+    recording_id = robot.get_current_recording_id()
     robot.stop_recording(recording_id)
     if wait:
         while backend_utils.get_num_active_streams(recording_id) > 0:

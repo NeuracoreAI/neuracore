@@ -10,12 +10,17 @@ from ..core.endpoint import connect_endpoint as _connect_endpoint
 from ..core.endpoint import connect_local_endpoint as _connect_local_endpoint
 
 
-def connect_endpoint(name: str) -> EndpointPolicy:
+def connect_endpoint(
+    endpoint_name: str, robot_name: Optional[str] = None, instance: Optional[int] = 0
+) -> EndpointPolicy:
     """
     Connect to a deployed model endpoint.
 
     Args:
-        name: Name of the deployed endpoint
+        endpoint_name: Name of the deployed endpoint
+        robot_name: robot name that the data is being logged for. If not
+            provided, uses the last initialized robot.
+        instance: instance number of the robot. Defaults to 0.
 
     Returns:
         EndpointPolicy: Policy object that can be used for predictions
@@ -23,13 +28,17 @@ def connect_endpoint(name: str) -> EndpointPolicy:
     Raises:
         EndpointError: If endpoint connection fails
     """
-    return _connect_endpoint(name)
+    return _connect_endpoint(
+        endpoint_name=endpoint_name, robot_name=robot_name, instance=instance
+    )
 
 
 def connect_local_endpoint(
     path_to_model: Optional[str] = None,
     train_run_name: Optional[str] = None,
     port: int = 8080,
+    robot_name: Optional[str] = None,
+    instance: Optional[int] = 0,
 ) -> EndpointPolicy:
     """
     Connect to a local model endpoint.
@@ -40,6 +49,9 @@ def connect_local_endpoint(
         path_to_model: Path to the local .mar model
         train_run_name: Optional train run name
         port: Port to connect to the local endpoint
+        robot_name: robot name that the data is being logged for. If not
+            provided, uses the last initialized robot.
+        instance: instance number of the robot. Defaults to 0.
 
     Returns:
         EndpointPolicy: Policy object that can be used for predictions
@@ -47,7 +59,13 @@ def connect_local_endpoint(
     Raises:
         EndpointError: If endpoint connection fails
     """
-    return _connect_local_endpoint(path_to_model, train_run_name, port)
+    return _connect_local_endpoint(
+        robot_name=robot_name,
+        instance=instance,
+        path_to_model=path_to_model,
+        train_run_name=train_run_name,
+        port=port,
+    )
 
 
 def deploy_model(job_id: str, name: str) -> dict:

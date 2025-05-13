@@ -5,15 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.0-Unreleased]
 
 ### Added
 
-- None
+- `NEURACORE_REMOTE_RECORDING_TRIGGER_ENABLED` New environment variable to disable other machines from starting a recording
+- `nc.connect_endpoint()` and `nc.connect_local_endpoint()` have new arguments `robot_name` and `instance`
 
 ### Changed
 
-- None
+- `nc.connect_endpoint()` endpoint name argument has been renamed `name` -> `endpoint_name` to avoid confusion with the new `robot_name` argument
 
 ### Removed
 
@@ -21,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- None
+- Connect Endpoint (`nc.connect_endpoint()` and `nc.connect_local_endpoint()`) now supports multiple simultaneous robot instances
 
 
 ## [1.4.0]
