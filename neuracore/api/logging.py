@@ -101,8 +101,8 @@ def _log_joint_data(
     )
 
     joint_stream.log(data=data)
-    get_robot_streaming_manager(robot.id, robot.instance).get_event_source(
-        data_type, "joints"
+    get_robot_streaming_manager(robot.id, robot.instance).get_json_source(
+        data_type, "joints", sensor_key=joint_str_id
     ).publish(data.model_dump(mode="json"))
 
 
