@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from concurrent.futures import Future
 from datetime import timedelta
 
@@ -8,7 +9,6 @@ from pyee.asyncio import AsyncIOEventEmitter
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.const import API_URL, REMOTE_RECORDING_TRIGGER_ENABLED
-from neuracore.core.streaming.client_stream.async_runtime import AsyncRuntime
 from neuracore.core.streaming.client_stream.client_stream_manager import (
     MINIMUM_BACKOFF_LEVEL,
 )
@@ -192,6 +192,17 @@ class RecordingStateManager(AsyncIOEventEmitter):
 _recording_manager: Future[RecordingStateManager] | None = None
 
 
+def _get_loop():
+    try:
+        loop = asyncio.get_running_loop()
+        return loop
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        threading.Thread(target=lambda: loop.run_forever(), daemon=True).start()
+        return loop
+
+
 async def create_recording_state_manager():
     # We want to keep the signalling connection alive for as long as possible
     timeout = ClientTimeout(sock_read=None, total=None)
@@ -206,5 +217,7 @@ def get_recording_state_manager() -> "RecordingStateManager":
     global _recording_manager
     if _recording_manager is not None:
         return _recording_manager.result()
-    runtime = AsyncRuntime.get_instance()
-    return runtime.run_coroutine(create_recording_state_manager())
+    _recording_manager = asyncio.run_coroutine_threadsafe(
+        create_recording_state_manager(), _get_loop()
+    )
+    return _recording_manager.result()
