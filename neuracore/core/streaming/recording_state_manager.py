@@ -8,9 +8,9 @@ from pyee.asyncio import AsyncIOEventEmitter
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.const import API_URL, REMOTE_RECORDING_TRIGGER_ENABLED
+from neuracore.core.streaming.client_stream.async_runtime import AsyncRuntime
 from neuracore.core.streaming.client_stream.client_stream_manager import (
     MINIMUM_BACKOFF_LEVEL,
-    get_loop,
 )
 from neuracore.core.streaming.client_stream.models import (
     BaseRecodingUpdatePayload,
@@ -206,9 +206,5 @@ def get_recording_state_manager() -> "RecordingStateManager":
     global _recording_manager
     if _recording_manager is not None:
         return _recording_manager.result()
-
-    loop = get_loop()
-    _recording_manager = asyncio.run_coroutine_threadsafe(
-        create_recording_state_manager(), loop
-    )
-    return _recording_manager.result()
+    runtime = AsyncRuntime.get_instance()
+    return runtime.run_coroutine(create_recording_state_manager())

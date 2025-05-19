@@ -40,7 +40,7 @@ class ClientStreamingManager:
         timeout = ClientTimeout(sock_read=None, total=None)
         self.client_session = ClientSession(timeout=timeout, loop=self.runtime.loop)
         self.auth = auth or get_auth()
-        self.streaming = EnabledManager(LIVE_DATA_ENABLED, loop=self.loop)
+        self.streaming = EnabledManager(LIVE_DATA_ENABLED, loop=self.runtime.loop)
         self.streaming.add_listener(EnabledManager.DISABLED, self.__close)
         self.connections: Dict[str, PierToPierConnection] = {}
         self.video_tracks_cache: Dict[str, VideoSource] = {}
@@ -49,7 +49,9 @@ class ClientStreamingManager:
         self.tracks: List[VideoSource] = []
         self.local_stream_id = uuid4().hex
 
-        self.runtime.submit_coroutine(self.connect_signalling_stream())
+        self.signalling_stream_future = self.runtime.submit_coroutine(
+            self.connect_signalling_stream()
+        )
 
     def get_video_source(self, sensor_name: str, kind: str) -> VideoSource:
         """Start a new recording stream"""
@@ -61,7 +63,9 @@ class ClientStreamingManager:
         self.runtime.submit_coroutine(self.submit_track(mid, kind, sensor_name))
 
         video_source = (
-            DepthVideoSource(mid=mid) if kind == "depth" else VideoSource(mid=mid)
+            DepthVideoSource(mid=mid, stream_enabled=self.streaming)
+            if kind == "depth"
+            else VideoSource(mid=mid, stream_enabled=self.streaming)
         )
         self.video_tracks_cache[sensor_key] = video_source
         self.tracks.append(video_source)
@@ -215,8 +219,8 @@ class ClientStreamingManager:
         if self.signalling_stream_future.running():
             self.signalling_stream_future.cancel()
 
-        asyncio.run_coroutine_threadsafe(self.close_connections(), self.loop)
-        asyncio.run_coroutine_threadsafe(self.client_session.close(), self.loop)
+        self.runtime.submit_coroutine(self.close_connections())
+        self.runtime.submit_coroutine(self.client_session.close())
 
     def close(self):
         """Close all connections and streams"""
