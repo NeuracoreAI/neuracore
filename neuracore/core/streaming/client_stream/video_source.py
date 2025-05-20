@@ -2,7 +2,6 @@ import asyncio
 import fractions
 import math
 import time
-import weakref
 from dataclasses import dataclass, field
 from typing import Optional
 from uuid import uuid4
@@ -10,6 +9,8 @@ from uuid import uuid4
 import av
 import numpy as np
 from aiortc import MediaStreamTrack
+
+from .stream_enabled import EnabledManager
 
 av.logging.set_level(None)
 
@@ -21,11 +22,11 @@ TIMESTAMP_DELTA = int(VIDEO_CLOCK_RATE / STREAMING_FPS)
 
 @dataclass
 class VideoSource:
+    stream_enabled: EnabledManager
     mid: str = field(default_factory=lambda: uuid4().hex)
     _last_frame: np.ndarray = field(
         default_factory=lambda: np.zeros((480, 640, 3), dtype=np.uint8)
     )
-    _consumers: weakref.WeakSet["VideoTrack"] = field(default_factory=weakref.WeakSet)
 
     def add_frame(self, frame_data: np.ndarray):
         self._last_frame = frame_data
@@ -34,14 +35,11 @@ class VideoSource:
         return av.VideoFrame.from_ndarray(self._last_frame, format="rgb24")
 
     def get_video_track(self):
+        if not self.stream_enabled.is_enabled():
+            raise RuntimeError("Streaming is not enabled")
         consumer = VideoTrack(self)
-        self._consumers.add(consumer)
+        self.stream_enabled.add_listener(EnabledManager.DISABLED, consumer.stop)
         return consumer
-
-    def stop(self):
-        """Stop the source"""
-        for consumer in self._consumers:
-            consumer.stop()
 
 
 @dataclass
@@ -98,8 +96,6 @@ class VideoTrack(MediaStreamTrack):
     async def recv(self) -> av.VideoFrame:
         """Receive the next frame"""
         try:
-            if self._ended:
-                raise Exception("Track has ended")
             pts = await self.next_timestamp()
             frame_data = self.source.get_last_frame()
             frame_data.time_base = VIDEO_TIME_BASE
@@ -109,7 +105,3 @@ class VideoTrack(MediaStreamTrack):
         except Exception as e:
             print(f"Error in receiving frame: {self.mid=} {e}")
             raise
-
-    def stop(self):
-        """Stop the track"""
-        self._ended = True

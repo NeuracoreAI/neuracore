@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from concurrent.futures import Future
 from typing import Optional
 
 
@@ -31,9 +32,9 @@ class AsyncRuntime:
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
         return future.result(timeout=timeout)
 
-    def submit_coroutine(self, coro):
+    def submit_coroutine(self, coro) -> Future:
         """Fire-and-forget coroutine from sync code."""
-        asyncio.run_coroutine_threadsafe(coro, self.loop)
+        return asyncio.run_coroutine_threadsafe(coro, self.loop)
 
     def shutdown(self):
         """Stop the event loop and join the thread."""
