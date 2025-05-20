@@ -86,7 +86,7 @@ class RecordingStateManager(AsyncIOEventEmitter):
             recording_id=recording_id,
         )
 
-    async def updated_recording_state(
+    def updated_recording_state(
         self, is_recording: bool, details: BaseRecodingUpdatePayload
     ):
         robot_id = details.robot_id
@@ -103,13 +103,13 @@ class RecordingStateManager(AsyncIOEventEmitter):
             return
 
         if is_recording:
-            await self.recording_started(
+            self.recording_started(
                 robot_id=robot_id,
                 instance=instance,
                 recording_id=recording_id,
             )
         else:
-            await self.recording_stopped(
+            self.recording_stopped(
                 robot_id=robot_id,
                 instance=instance,
                 recording_id=recording_id,
@@ -141,7 +141,7 @@ class RecordingStateManager(AsyncIOEventEmitter):
                                 RecordingNotificationType.START
                                 | RecordingNotificationType.REQUESTED
                             ):
-                                await self.updated_recording_state(
+                                self.updated_recording_state(
                                     is_recording=True, details=message.payload
                                 )
 
@@ -151,13 +151,13 @@ class RecordingStateManager(AsyncIOEventEmitter):
                                 | RecordingNotificationType.DISCARDED
                                 | RecordingNotificationType.EXPIRED
                             ):
-                                await self.updated_recording_state(
+                                self.updated_recording_state(
                                     is_recording=False, details=message.payload
                                 )
 
                             case RecordingNotificationType.INIT:
                                 for recording in message.payload:
-                                    await self.updated_recording_state(
+                                    self.updated_recording_state(
                                         is_recording=True, details=recording
                                     )
 
