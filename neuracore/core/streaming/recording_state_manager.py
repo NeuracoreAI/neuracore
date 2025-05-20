@@ -56,14 +56,14 @@ class RecordingStateManager(AsyncIOEventEmitter):
         instance_key = (robot_id, instance)
         return instance_key in self.recording_robot_instances
 
-    async def recording_started(self, robot_id: str, instance: int, recording_id: str):
+    def recording_started(self, robot_id: str, instance: int, recording_id: str):
         instance_key = (robot_id, instance)
         previous_recording_id = self.recording_robot_instances.get(instance_key, None)
 
         if previous_recording_id == recording_id:
             return
         if previous_recording_id is not None:
-            await self.recording_stopped(robot_id, instance, previous_recording_id)
+            self.recording_stopped(robot_id, instance, previous_recording_id)
 
         self.recording_robot_instances[instance_key] = recording_id
         self.emit(
@@ -73,12 +73,7 @@ class RecordingStateManager(AsyncIOEventEmitter):
             recording_id=recording_id,
         )
 
-    def recording_started_sync(self, robot_id: str, instance: int, recording_id: str):
-        asyncio.run_coroutine_threadsafe(
-            self.recording_started(robot_id, instance, recording_id), self._loop
-        ).result()
-
-    async def recording_stopped(self, robot_id: str, instance: int, recording_id: str):
+    def recording_stopped(self, robot_id: str, instance: int, recording_id: str):
         instance_key = (robot_id, instance)
         current_recording = self.recording_robot_instances.get(instance_key, None)
         if current_recording != recording_id:
@@ -90,11 +85,6 @@ class RecordingStateManager(AsyncIOEventEmitter):
             instance=instance,
             recording_id=recording_id,
         )
-
-    def recording_stopped_sync(self, robot_id: str, instance: int, recording_id: str):
-        asyncio.run_coroutine_threadsafe(
-            self.recording_stopped(robot_id, instance, recording_id), self._loop
-        ).result()
 
     async def updated_recording_state(
         self, is_recording: bool, details: BaseRecodingUpdatePayload

@@ -130,7 +130,7 @@ class Robot:
             # Inform the state manager immediately to skip the round trip.
 
             recording_id = response.json()
-            get_recording_state_manager().recording_started_sync(
+            get_recording_state_manager().recording_started(
                 robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
             return recording_id
