@@ -1,0 +1,158 @@
+name: Manual Deploy to PyPI
+
+permissions:
+  contents: write  # Allows pushing tags
+  actions: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to deploy (branch, tag, or commit SHA)'
+        required: false
+        default: 'main'
+        type: string
+
+jobs:
+  deploy:
+    name: Deploy to PyPI 📦
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'main' }}
+          fetch-depth: 0  # Needed for tagging
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Extract version from __init__.py
+        id: version
+        run: |
+          # Read version from neuracore/__init__.py using the same logic as setup.py
+          version=$(python -c "
+          version = None
+          with open('neuracore/__init__.py', encoding='utf-8') as f:
+              for line in f:
+                  if line.startswith('__version__'):
+                      version = line.strip().split()[-1][1:-1]
+                      break
+          assert version is not None, 'Could not find version string'
+          print(version)
+          ")
+          
+          echo "VERSION=${version}" >> $GITHUB_ENV
+          echo "version=${version}" >> $GITHUB_OUTPUT
+          echo "📦 Detected version: ${version}"
+
+      - name: Check if version exists on PyPI
+        run: |
+          echo "🔍 Checking if version ${{ env.VERSION }} already exists on PyPI..."
+          
+          # Check if the version exists on PyPI
+          if pip index versions neuracore | grep -q "${{ env.VERSION }}"; then
+            echo "❌ Error: Version ${{ env.VERSION }} already exists on PyPI!"
+            echo "Please update the version in neuracore/__init__.py before deploying."
+            exit 1
+          else
+            echo "✅ Version ${{ env.VERSION }} is unique and ready for deployment"
+          fi
+
+      - name: Set deployment variables
+        run: |
+          echo "DEPLOY_TAG=v${{ env.VERSION }}" >> $GITHUB_ENV
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install setuptools wheel twine build
+
+      - name: Install package dependencies
+        run: |
+          pip install ".[dev,ml]"
+          sudo apt update && sudo apt install -y default-jre  # For endpoints
+
+      - name: Run tests
+        run: |
+          echo "🧪 Running tests..."
+          pytest tests/unit
+          echo "✅ Validation tests passed"
+
+      - name: Build package
+        run: |
+          echo "🔨 Building package..."
+          python -m build
+          echo "✅ Package built successfully"
+          
+          # Show what was built
+          echo "📦 Built files:"
+          ls -la dist/
+
+      - name: Check built package
+        run: |
+          echo "🔍 Checking built package with twine..."
+          twine check dist/*
+          echo "✅ Package check passed"
+
+      - name: Upload to PyPI
+        env:
+          TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+        run: |
+          echo "🚀 Uploading to PyPI..."
+          twine upload dist/*
+          echo "✅ Successfully uploaded to PyPI!"
+
+      - name: Verify PyPI upload
+        run: |
+          echo "🔍 Verifying upload on PyPI..."
+          # Wait a moment for PyPI to process
+          sleep 10
+          
+          # Try to install the new version
+          pip install --index-url https://pypi.org/simple/ neuracore==${{ env.VERSION }}
+          echo "✅ Package successfully installed from PyPI"
+
+      - name: Create deployment tag
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+
+          # Fetch all tags to ensure we have the latest
+          git fetch --tags
+
+          # Create new deployment tag
+          NEW_TAG="${{ env.DEPLOY_TAG }}"
+          
+          # Check if tag already exists
+          if git tag -l | grep -q "^${NEW_TAG}$"; then
+            echo "⚠️  Tag ${NEW_TAG} already exists. Skipping tag creation."
+          else
+            git tag -a "$NEW_TAG" -m "Release neuracore v${{ env.VERSION }}" \
+              -m "PyPI URL: https://pypi.org/project/neuracore/${{ env.VERSION }}/" \
+              -m "Triggered by: ${{ github.actor }}"
+
+            # Push the new tag
+            git push origin "$NEW_TAG"
+            echo "✅ Successfully created and pushed tag: $NEW_TAG"
+          fi
+
+      - name: Create deployment summary
+        run: |
+          echo "## 📦 PyPI Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Package Version**: ${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Git Ref**: ${{ inputs.ref || 'main' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag Created**: ${{ env.DEPLOY_TAG }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **PyPI URL**: https://pypi.org/project/neuracore/${{ env.VERSION }}/" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Built Files" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -la dist/ >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
