@@ -38,6 +38,8 @@ class StreamingVideoUploader(BucketUploader):
         codec: str = "libx264",
         pixel_format: str = "yuv444p10le",
         chunk_size: int = CHUNK_SIZE,
+        video_name: str = "video.mp4",
+        codec_context_options: dict[str, str] | None = None,
     ):
         """
         Initialize a streaming video encoder.
@@ -60,6 +62,8 @@ class StreamingVideoUploader(BucketUploader):
         self.codec = codec
         self.pixel_format = pixel_format
         self.chunk_size = chunk_size
+        self.video_name = video_name
+        self.codec_context_options = codec_context_options
         self._streaming_done = False
         self._upload_queue = queue.Queue()
         # Thread will continue, even if main thread exits
@@ -79,7 +83,7 @@ class StreamingVideoUploader(BucketUploader):
             )
 
         self.uploader = ResumableUpload(
-            self.recording_id, f"{self.path}/video.mp4", "video/mp4"
+            self.recording_id, f"{self.path}/{self.video_name}", "video/mp4"
         )
 
         # Create in-memory buffer
@@ -98,7 +102,8 @@ class StreamingVideoUploader(BucketUploader):
         self.stream.width = self.width
         self.stream.height = self.height
         self.stream.pix_fmt = self.pixel_format
-        self.stream.codec_context.options = {"qp": "0", "preset": "ultrafast"}
+        if self.codec_context_options is not None:
+            self.stream.codec_context.options = self.codec_context_options
 
         self.stream.time_base = Fraction(1, PTS_FRACT)
 
