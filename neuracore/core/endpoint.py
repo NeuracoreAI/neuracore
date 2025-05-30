@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import os
 import subprocess
 import sys
 import tempfile
@@ -277,7 +278,9 @@ def connect_local_endpoint(
         raise ValueError("Must provide either path_to_model or train_run_name")
     if path_to_model and train_run_name:
         raise ValueError("Cannot provide both path_to_model and train_run_name")
-    robot = _get_robot(robot_name, instance)
+    robot = None
+    if os.getenv("NEURACORE_LIVE_DATA_ENABLED", "True").lower() == "true":
+        robot = _get_robot(robot_name, instance)
     auth = get_auth()
     if train_run_name:
         # Get all training runs and search for the job id

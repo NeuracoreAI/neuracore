@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- AsyncRuntime to manage an asyncio event loop in a background thread
+- Improved validation error messages on validation of uploaded algorithms
 
 ### Removed
 
