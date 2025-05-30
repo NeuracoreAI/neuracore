@@ -354,7 +354,7 @@ class AlgorithmLoader:
                 continue
 
         raise ModelNotFoundError(
-            "No import errors, but no NeuracoreModel subclasses found. "
+            "Could not find a class that inherits from NeuracoreModel. "
             "Ensure your algorithm inherits from NeuracoreModel and "
             "is properly defined."
         )

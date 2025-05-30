@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Additional lossy upload stream for faster viewing in the dataset viewer
+- CLI validation tool for validating algorithms locally. Can be used by running `neuracore-validate /PATH/TO/MY/ALG`
 
 ### Changed
 

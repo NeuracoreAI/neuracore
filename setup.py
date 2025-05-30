@@ -77,6 +77,7 @@ setup(
                 "neuracore-generate-api-key = "
                 "neuracore.core.generate_api_key:generate_api_key"
             ),
+            ("neuracore-validate = " "neuracore.tools.validate:main"),
         ]
     },
     keywords="robotics machine-learning ai client-library",
