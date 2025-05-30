@@ -1,6 +1,7 @@
 import base64
 import io
 import logging
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -76,6 +77,18 @@ def run_validation(
     skip_endpoint_check: bool = False,
 ) -> tuple[AlgorthmCheck, str]:
     """Run the minimal validation process to check if an algorithm works."""
+    os.environ["NEURACORE_LIVE_DATA_ENABLED"] = (
+        "False"  # Disable live data for validation
+    )
+
+    # find the first folder that contains Python files
+    python_files = list(algorithm_dir.rglob("*.py"))
+    if not python_files:
+        raise ValueError(
+            f"No Python files found in the algorithm directory: {algorithm_dir}"
+        )
+    # Get parent directories and find the one with minimum number of parts
+    algorithm_dir = min([f.parent for f in python_files], key=lambda d: len(d.parts))
 
     # Setup output directory
     output_dir.mkdir(parents=True, exist_ok=True)
