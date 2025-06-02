@@ -7,6 +7,7 @@ connection management, and automatic reconnection with exponential backoff.
 
 import asyncio
 from concurrent.futures import Future
+from concurrent.futures import Future
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from uuid import uuid4
