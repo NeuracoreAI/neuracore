@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torchvision.models as models
 
 
-class ACTImageEncoder(nn.Module):
+class DiffusionPolicyImageEncoder(nn.Module):
     """Encode images using ResNet backbone.
 
     Maintaining spatial dimensions and providing position embeddings.
@@ -70,6 +70,72 @@ class ACTImageEncoder(nn.Module):
         pos = pos.repeat(x.shape[0], 1, 1, 1)  # [B, output_dim, H, W]
 
         return features, pos
+
+
+class DiffusionRgbEncoder(nn.Module):
+    """Encodes an RGB image into a 1D feature vector.
+
+    Includes the ability to normalize and crop the image first.
+    """
+
+    def __init__(self, config: DiffusionConfig):
+        super().__init__()
+        # Set up optional preprocessing.
+        if config.crop_shape is not None:
+            self.do_crop = True
+            # Always use center crop for eval
+            self.center_crop = torchvision.transforms.CenterCrop(config.crop_shape)
+            if config.crop_is_random:
+                self.maybe_random_crop = torchvision.transforms.RandomCrop(config.crop_shape)
+            else:
+                self.maybe_random_crop = self.center_crop
+        else:
+            self.do_crop = False
+
+        # Set up backbone.
+        backbone_model = getattr(torchvision.models, config.vision_backbone)(
+            weights=config.pretrained_backbone_weights
+        )
+        # Note: This assumes that the layer4 feature map is children()[-3]
+        # TODO(alexander-soare): Use a safer alternative.
+        self.backbone = nn.Sequential(*(list(backbone_model.children())[:-2]))
+
+        # Set up pooling and final layers.
+        # Use a dry run to get the feature map shape.
+        # The dummy input should take the number of image channels from `config.image_features` and it should
+        # use the height and width from `config.crop_shape` if it is provided, otherwise it should use the
+        # height and width from `config.image_features`.
+
+        # Note: we have a check in the config class to make sure all images have the same shape.
+        images_shape = next(iter(config.image_features.values())).shape
+        dummy_shape_h_w = config.crop_shape if config.crop_shape is not None else images_shape[1:]
+        dummy_shape = (1, images_shape[0], *dummy_shape_h_w)
+        feature_map_shape = get_output_shape(self.backbone, dummy_shape)[1:]
+
+        self.pool = SpatialSoftmax(feature_map_shape, num_kp=config.spatial_softmax_num_keypoints)
+        self.feature_dim = config.spatial_softmax_num_keypoints * 2
+        self.out = nn.Linear(config.spatial_softmax_num_keypoints * 2, self.feature_dim)
+        self.relu = nn.ReLU()
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Args:
+            x: (B, C, H, W) image tensor with pixel values in [0, 1].
+        Returns:
+            (B, D) image feature.
+        """
+        # Preprocess: maybe crop (if it was set up in the __init__).
+        if self.do_crop:
+            if self.training:  # noqa: SIM108
+                x = self.maybe_random_crop(x)
+            else:
+                # Always use center crop for eval.
+                x = self.center_crop(x)
+        # Extract backbone feature.
+        x = torch.flatten(self.pool(self.backbone(x)), start_dim=1)
+        # Final linear layer with non-linearity.
+        x = self.relu(self.out(x))
+        return x
 
 
 class PositionalEncoding(nn.Module):

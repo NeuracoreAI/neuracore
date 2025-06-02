@@ -20,7 +20,7 @@ from neuracore.ml import (
 )
 
 from .modules import (
-    ACTImageEncoder,
+    DiffusionPolicyImageEncoder,
     PositionalEncoding,
     TransformerDecoder,
     TransformerEncoder,
@@ -50,8 +50,17 @@ class DiffusionPolicy(NeuracoreModel):
         latent_dim: int = 512,
     ):
         super().__init__(model_init_description)
-        # Build observation encoders (depending on which observations are provided).
-        global_cond_dim = self.config.robot_state_feature.shape[0]
+        # Vision components
+        self.image_encoders = nn.ModuleList([
+            ACTImageEncoder(output_dim=hidden_dim)
+            for _ in range(self.dataset_description.max_num_rgb_images)
+        ])
+        global_cond_dim = (
+            self.dataset_description.joint_positions.max_len
+            + self.dataset_description.joint_velocities.max_len
+            + self.dataset_description.joint_torques.max_len
+            + hidden_dim * self.dataset_description.max_num_rgb_images
+        )
         if self.config.image_features:
             num_images = len(self.config.image_features)
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -61,8 +70,7 @@ class DiffusionPolicy(NeuracoreModel):
             else:
                 self.rgb_encoder = DiffusionRgbEncoder(config)
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
-        if self.config.env_state_feature:
-            global_cond_dim += self.config.env_state_feature.shape[0]
+
 
         self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
 
