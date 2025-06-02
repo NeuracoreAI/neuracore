@@ -1,5 +1,4 @@
 import asyncio
-import threading
 from concurrent.futures import Future
 from datetime import timedelta
 
@@ -18,6 +17,7 @@ from neuracore.core.streaming.client_stream.models import (
     RecordingNotificationType,
 )
 from neuracore.core.streaming.client_stream.stream_enabled import EnabledManager
+from neuracore.core.streaming.event_loop_utils import get_running_loop
 
 
 class RecordingStateManager(AsyncIOEventEmitter):
@@ -182,17 +182,6 @@ class RecordingStateManager(AsyncIOEventEmitter):
 _recording_manager: Future[RecordingStateManager] | None = None
 
 
-def _get_loop():
-    try:
-        loop = asyncio.get_running_loop()
-        return loop
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        threading.Thread(target=lambda: loop.run_forever(), daemon=True).start()
-        return loop
-
-
 async def create_recording_state_manager():
     # We want to keep the signalling connection alive for as long as possible
     timeout = ClientTimeout(sock_read=None, total=None)
@@ -208,6 +197,6 @@ def get_recording_state_manager() -> "RecordingStateManager":
     if _recording_manager is not None:
         return _recording_manager.result()
     _recording_manager = asyncio.run_coroutine_threadsafe(
-        create_recording_state_manager(), _get_loop()
+        create_recording_state_manager(), get_running_loop()
     )
     return _recording_manager.result()
