@@ -1,0 +1,393 @@
+"""Diffusion Policy: Visuomotor Policy Learning via Action Diffusion."""
+
+import logging
+import time
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.transforms as 
+
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler, DDPMScheduler
+
+from neuracore.core.nc_types import DataType, ModelInitDescription, ModelPrediction
+from neuracore.ml import (
+    BatchedInferenceSamples,
+    BatchedTrainingOutputs,
+    BatchedTrainingSamples,
+    NeuracoreModel,
+)
+
+from .modules import (
+    ACTImageEncoder,
+    PositionalEncoding,
+    TransformerDecoder,
+    TransformerEncoder,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class DiffusionPolicy(NeuracoreModel):
+    """
+    Implementation of Diffusion Policy (Visuomotor Policy Learning via Action Diffusion) model.
+    """
+
+    def __init__(
+        self,
+        model_init_description: ModelInitDescription,
+        hidden_dim: int = 512,
+        num_encoder_layers: int = 4,
+        num_decoder_layers: int = 7,
+        nheads: int = 8,
+        dim_feedforward: int = 3200,
+        dropout: float = 0.1,
+        lr: float = 1e-4,
+        lr_backbone: float = 1e-5,
+        weight_decay: float = 1e-4,
+        kl_weight: float = 10.0,
+        latent_dim: int = 512,
+    ):
+        super().__init__(model_init_description)
+        # Build observation encoders (depending on which observations are provided).
+        global_cond_dim = self.config.robot_state_feature.shape[0]
+        if self.config.image_features:
+            num_images = len(self.config.image_features)
+            if self.config.use_separate_rgb_encoder_per_camera:
+                encoders = [DiffusionRgbEncoder(config) for _ in range(num_images)]
+                self.rgb_encoder = nn.ModuleList(encoders)
+                global_cond_dim += encoders[0].feature_dim * num_images
+            else:
+                self.rgb_encoder = DiffusionRgbEncoder(config)
+                global_cond_dim += self.rgb_encoder.feature_dim * num_images
+        if self.config.env_state_feature:
+            global_cond_dim += self.config.env_state_feature.shape[0]
+
+        self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
+
+        self.noise_scheduler = _make_noise_scheduler(
+            config.noise_scheduler_type,
+            num_train_timesteps=config.num_train_timesteps,
+            beta_start=config.beta_start,
+            beta_end=config.beta_end,
+            beta_schedule=config.beta_schedule,
+            clip_sample=config.clip_sample,
+            clip_sample_range=config.clip_sample_range,
+            prediction_type=config.prediction_type,
+        )
+
+        if config.num_inference_steps is None:
+            self.num_inference_steps = self.noise_scheduler.config.num_train_timesteps
+        else:
+            self.num_inference_steps = config.num_inference_steps
+
+        state_mean = np.concatenate([
+            self.dataset_description.joint_positions.mean,
+            self.dataset_description.joint_velocities.mean,
+            self.dataset_description.joint_torques.mean,
+        ])
+        state_std = np.concatenate([
+            self.dataset_description.joint_positions.std,
+            self.dataset_description.joint_velocities.std,
+            self.dataset_description.joint_torques.std,
+        ])
+        self.joint_state_mean = self._to_torch_float_tensor(state_mean)
+        self.joint_state_std = self._to_torch_float_tensor(state_std)
+
+        self.joint_target_mean = self._to_torch_float_tensor(
+            self.dataset_description.joint_target_positions.mean
+        )
+        self.joint_target_std = self._to_torch_float_tensor(
+            self.dataset_description.joint_target_positions.std
+        )
+
+    def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
+        """Convert list of floats to torch tensor."""
+        return torch.tensor(data, dtype=torch.float32, device=self.device)
+
+    def _preprocess_joint_state(
+        self, joint_state: torch.FloatTensor
+    ) -> torch.FloatTensor:
+        """Preprocess the states."""
+        return (joint_state - self.joint_state_mean) / self.joint_state_std
+
+    def _preprocess_target_joint_pos(
+        self, target_joint_pos: torch.FloatTensor
+    ) -> torch.FloatTensor:
+        """Preprocess the actions."""
+        return (target_joint_pos - self.joint_target_mean) / self.joint_target_std
+
+    def _make_noise_scheduler(name: str, **kwargs: dict) -> DDPMScheduler | DDIMScheduler:
+    """
+        Factory for noise scheduler instances of the requested type. All kwargs are passed
+        to the scheduler.
+        """
+        if name == "DDPM":
+            return DDPMScheduler(**kwargs)
+        elif name == "DDIM":
+            return DDIMScheduler(**kwargs)
+        else:
+            raise ValueError(f"Unsupported noise scheduler type {name}")
+
+    def _encode_latent(
+        self,
+        state: torch.FloatTensor,
+        actions: torch.FloatTensor,
+        actions_mask: torch.FloatTensor,
+        actions_sequence_mask: torch.FloatTensor,
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+        """Encode actions to latent space during training."""
+        batch_size = state.shape[0]
+
+        # Project joint positions and actions
+        state_embed = self.state_embed(state)  # [B, H]
+        action_embed = self.action_embed(
+            actions * actions_mask.unsqueeze(1)
+        )  # [B, T, H]
+
+        # Reshape to sequence first
+        state_embed = state_embed.unsqueeze(0)  # [1, B, H]
+        action_embed = action_embed.transpose(0, 1)  # [T, B, H]
+
+        # Concatenate [CLS, state_emb, action_embed]
+        cls_token = self.cls_embed.expand(-1, batch_size, -1)  # [1, B, H]
+        encoder_input = torch.cat([cls_token, state_embed, action_embed], dim=0)
+
+        # Update padding mask
+        if actions_sequence_mask is not None:
+            cls_joint_pad = torch.zeros(
+                batch_size, 2, dtype=torch.bool, device=self.device
+            )
+            actions_sequence_mask = torch.cat(
+                [cls_joint_pad, actions_sequence_mask], dim=1
+            )
+
+        # Add positional encoding
+        encoder_input = self.pos_encoder(encoder_input)
+
+        # Encode sequence
+        memory = self.latent_encoder(
+            encoder_input, src_key_padding_mask=actions_sequence_mask
+        )
+
+        # Get latent parameters from CLS token
+        mu = self.latent_mu(memory[0])  # Take CLS token output
+        logvar = self.latent_logvar(memory[0])
+        return mu, logvar
+
+    def _encode_visual(
+        self,
+        states: torch.FloatTensor,
+        camera_images: torch.FloatTensor,
+        camera_images_mask: torch.FloatTensor,
+        latent: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        """Encode visual inputs with latent and proprioceptive features."""
+        batch_size = states.shape[0]
+
+        # Process images
+        image_features = []
+        image_pos = []
+        for cam_id, encoder in enumerate(self.image_encoders):
+            features, pos = encoder(
+                self.transform(camera_images[:, cam_id])
+            )  # Vision backbone provides features and pos
+            features *= camera_images_mask[:, cam_id].view(batch_size, 1, 1, 1)
+            image_features.append(features)
+            image_pos.append(pos)
+
+        # Combine image features and positions
+        combined_features = torch.cat(image_features, dim=3)  # [B, C, H, W]
+        combined_pos = torch.cat(image_pos, dim=3)  # [B, C, H, W]
+
+        # Convert to sequence [H*W, B, C]
+        src = combined_features.flatten(2).permute(2, 0, 1)
+        pos = combined_pos.flatten(2).permute(2, 0, 1)
+
+        # Process joint positions and latent
+        state_features = self.state_embed(states)  # [B, H]
+
+        # Stack latent and proprio features
+        additional_features = torch.stack([latent, state_features], dim=0)  # [2, B, H]
+
+        # Add position embeddings from additional_pos_embed
+        additional_pos = self.additional_pos_embed.expand(
+            -1, batch_size, -1
+        )  # [2, B, H]
+
+        # Concatenate everything
+        src = torch.cat([additional_features, src], dim=0)
+        pos = torch.cat([additional_pos, pos], dim=0)
+
+        # Fuse positional embeddings with source
+        src = src + pos
+
+        # Encode
+        memory = self.transformer["encoder"](src)
+
+        return memory
+
+    def _decode(
+        self,
+        latent: torch.FloatTensor,
+        memory: torch.FloatTensor,
+    ) -> torch.Tensor:
+        """Decode latent and visual features to action sequence."""
+        batch_size = latent.shape[0]
+
+        # Convert to sequence first and expand
+        query_embed = self.query_embed.expand(-1, batch_size, -1)  # [T, B, H]
+        latent = latent.unsqueeze(0).expand_as(query_embed)  # [T, B, H]
+
+        # Add latent to query embedding
+        query_embed = query_embed + latent
+
+        # Initialize target with zeros
+        tgt = torch.zeros_like(query_embed)
+
+        # Decode sequence
+        hs = self.transformer["decoder"](tgt, memory, query_pos=query_embed)
+
+        # Project to action space (keeping sequence first)
+        actions = self.action_head(hs)  # [T, B, A]
+
+        # Convert back to batch first
+        actions = actions.transpose(0, 1)  # [B, T, A]
+
+        return actions
+
+    def _predict_action(
+        self,
+        mu: torch.FloatTensor,
+        logvar: torch.FloatTensor,
+        batch: BatchedInferenceSamples,
+    ) -> torch.FloatTensor:
+        # Sample latent
+        latent_sample = self._reparametrize(mu, logvar)
+
+        # Project latent
+        latent = self.latent_out_proj(latent_sample)  # [B, H]
+
+        # Encode visual features
+        memory = self._encode_visual(
+            self._combine_joint_states(batch),
+            batch.rgb_images.data,
+            batch.rgb_images.mask,
+            latent,
+        )
+
+        # Decode actions
+        action_preds = self._decode(latent, memory)
+        return action_preds
+
+    def _combine_joint_states(
+        self, batch: BatchedInferenceSamples
+    ) -> torch.FloatTensor:
+        """Combine joint states."""
+        joint_states = None
+        if self.state_embed is not None:
+            state_inputs = []
+            if batch.joint_positions:
+                state_inputs.append(
+                    batch.joint_positions.data * batch.joint_positions.mask
+                )
+            if batch.joint_velocities:
+                state_inputs.append(
+                    batch.joint_velocities.data * batch.joint_velocities.mask
+                )
+            if batch.joint_torques:
+                state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
+            joint_states = torch.cat(state_inputs, dim=-1)
+            joint_states = self._preprocess_joint_state(joint_states)
+        return joint_states
+
+    def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
+        t = time.time()
+        batch_size = len(batch)
+        mu = torch.zeros(batch_size, self.latent_dim, device=self.device)
+        logvar = torch.zeros(batch_size, self.latent_dim, device=self.device)
+        action_preds = self._predict_action(mu, logvar, batch)
+        prediction_time = time.time() - t
+        predictions = (action_preds * self.joint_target_std) + self.joint_target_mean
+        predictions = predictions.detach().cpu().numpy()
+        return ModelPrediction(
+            outputs={DataType.JOINT_TARGET_POSITIONS: predictions},
+            prediction_time=prediction_time,
+        )
+
+    def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
+        """Training step."""
+        pred_sequence_mask = batch.outputs.joint_target_positions.mask[
+            :, :, 0
+        ]  # [batch_size, T]
+        max_action_mask = batch.outputs.joint_target_positions.mask[
+            :, 0, :
+        ]  # [batch_size, MaxActionSize]
+        inference_sample = BatchedInferenceSamples(
+            joint_positions=batch.inputs.joint_positions,
+            joint_velocities=batch.inputs.joint_velocities,
+            joint_torques=batch.inputs.joint_torques,
+            rgb_images=batch.inputs.rgb_images,
+        )
+        joint_states = self._combine_joint_states(inference_sample)
+        mu, logvar = self._encode_latent(
+            joint_states,
+            batch.outputs.joint_target_positions.data,
+            max_action_mask,
+            pred_sequence_mask,
+        )
+        action_preds = self._predict_action(mu, logvar, inference_sample)
+        target_actions = self._preprocess_target_joint_pos(
+            batch.outputs.joint_target_positions.data
+        )
+
+        l1_loss_all = F.l1_loss(action_preds, target_actions, reduction="none")
+        l1_loss = (l1_loss_all * pred_sequence_mask.unsqueeze(-1)).mean()
+        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
+        loss = l1_loss + self.kl_weight * kl_loss
+        losses = {
+            "l1_and_kl_loss": loss,
+        }
+        metrics = {
+            "l1_loss": l1_loss,
+            "kl_loss": kl_loss,
+        }
+        return BatchedTrainingOutputs(
+            output_predicitons=action_preds,
+            losses=losses,
+            metrics=metrics,
+        )
+
+    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
+        """Configure optimizer with different LRs for different components."""
+        backbone_params = []
+        other_params = []
+
+        for name, param in self.named_parameters():
+            if "image_encoders" in name:
+                backbone_params.append(param)
+            else:
+                other_params.append(param)
+
+        param_groups = [
+            {"params": backbone_params, "lr": self.lr_backbone},
+            {"params": other_params, "lr": self.lr},
+        ]
+
+        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+
+    @staticmethod
+    def get_supported_input_data_types() -> list[DataType]:
+        """Return the data types supported by the model."""
+        return [
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+            DataType.RGB_IMAGE,
+        ]
+
+    @staticmethod
+    def get_supported_output_data_types() -> list[DataType]:
+        """Return the data types supported by the model."""
+        return [DataType.JOINT_TARGET_POSITIONS]
