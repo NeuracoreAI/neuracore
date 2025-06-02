@@ -7,7 +7,10 @@ connection management, and automatic reconnection with exponential backoff.
 
 import asyncio
 from concurrent.futures import Future
+<<<<<<< HEAD
 from concurrent.futures import Future
+=======
+>>>>>>> 6a9fc5e (Revert back to creating ClientStreamingManager inside event loop)
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from uuid import uuid4
