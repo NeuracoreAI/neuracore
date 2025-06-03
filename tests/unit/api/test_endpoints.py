@@ -249,7 +249,14 @@ def test_connect_local_endpoint_with_train_run(
 
     # Mock model download
     mock_auth_requests.get(
-        f"{API_URL}/training/jobs/job_123/model",
+        f"{API_URL}/training/jobs/job_123/model_url",
+        json={
+            "url": "http://localhost:8080/model.mar",
+        },
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        "http://localhost:8080/model.mar",
         content=b"dummy model content",
         status_code=200,
     )

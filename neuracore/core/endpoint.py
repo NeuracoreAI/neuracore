@@ -386,8 +386,16 @@ def connect_local_endpoint(
 
         print(f"Downloading model '{train_run_name}' from training run...")
         response = requests.get(
-            f"{API_URL}/training/jobs/{job_id}/model",
+            f"{API_URL}/training/jobs/{job_id}/model_url",
             headers=auth.get_headers(),
+            timeout=30,
+        )
+        response.raise_for_status()
+
+        model_url_response = response.json()
+        model_url = model_url_response["url"]
+        response = requests.get(
+            model_url,
             timeout=120,
             stream=True,
         )
