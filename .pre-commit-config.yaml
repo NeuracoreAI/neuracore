@@ -22,12 +22,18 @@ repos:
         # Ignoring unused imports within __init__.py files.
         args: [--per-file-ignores, '*__init__.py:F401', --fix]
 
-# -   repo: https://github.com/pycqa/pydocstyle
-#     rev: 6.3.0
-#     hooks:
-#     -   id: pydocstyle
-#         files: app
-#         args: [
-#             "--convention=google",
-#         ]
+-   repo: https://github.com/pycqa/pydocstyle
+    rev: 6.3.0
+    hooks:
+    -   id: pydocstyle
+        files: neuracore/
+        args: [
+            "--convention=google",
+        ]
 
+# -   repo: https://github.com/pre-commit/mirrors-mypy
+#     rev: ''
+#     hooks:
+#     -   id: mypy
+#         files: neuracore/
+#         args: ["--disallow-untyped-defs", "--ignore-missing-imports"]

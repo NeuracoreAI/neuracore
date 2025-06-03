@@ -1,3 +1,5 @@
+"""Init."""
+
 from .ml_types import (
     BatchedData,
     BatchedInferenceSamples,

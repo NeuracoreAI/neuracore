@@ -1,3 +1,9 @@
+"""Training job management utilities.
+
+This module provides functions for starting and monitoring training jobs,
+including algorithm discovery, dataset resolution, and job status tracking.
+"""
+
 import concurrent
 import json
 
@@ -10,6 +16,17 @@ from ..core.nc_types import DataType
 
 
 def _get_algorithms() -> list[dict]:
+    """Retrieve all available algorithms from the API.
+
+    Fetches both organization-specific and shared algorithms concurrently.
+
+    Returns:
+        list[dict]: List of algorithm dictionaries containing algorithm metadata
+
+    Raises:
+        requests.exceptions.HTTPError: If the API request fails
+        requests.exceptions.RequestException: If there is a network problem
+    """
     auth = get_auth()
     with concurrent.futures.ThreadPoolExecutor() as executor:
         org_alg_req = executor.submit(
@@ -41,17 +58,28 @@ def start_training_run(
     input_data_types: list[DataType] = None,
     output_data_types: list[DataType] = None,
 ) -> dict:
-    """
-    Start a new training run.
+    """Start a new training run.
 
     Args:
         name: Name of the training run
         dataset_name: Name of the dataset to use for training
         algorithm_name: Name of the algorithm to use for training
-        algorithm_config: Configuration for the algorithm
-        gpu_type: Type of GPU to use for training
+        algorithm_config: Configuration parameters for the algorithm
+        gpu_type: Type of GPU to use for training (e.g., "A100", "V100")
         num_gpus: Number of GPUs to use for training
-        frequency: Frequency of to synced training data to
+        frequency: Frequency to sync training data to (in Hz)
+        input_data_types: Optional list of input data types. If not provided,
+            uses algorithm's supported input data types
+        output_data_types: Optional list of output data types. If not provided,
+            uses algorithm's supported output data types
+
+    Returns:
+        dict: Training job data including job ID and status
+
+    Raises:
+        ValueError: If dataset or algorithm is not found
+        requests.exceptions.HTTPError: If the API request fails
+        requests.exceptions.RequestException: If there is a network problem
     """
     # Get dataset id
     dataset_jsons = Dataset._get_datasets()
@@ -112,13 +140,17 @@ def start_training_run(
 
 
 def get_training_job_data(job_id: str) -> dict:
-    """
-    Check if a training job exists and return its status.
+    """Retrieve complete data for a training job.
 
     Args:
-        job_id: The ID of the training job.
+        job_id: The ID of the training job
+
+    Returns:
+        dict: Complete job data including status, configuration, and metadata
+
     Raises:
-        requests.exceptions.HTTPError: If the api request returns an error code
+        ValueError: If the job is not found or there is an error accessing the job
+        requests.exceptions.HTTPError: If the API request returns an error code
         requests.exceptions.RequestException: If there is a problem with the request
     """
     auth = get_auth()
@@ -140,13 +172,17 @@ def get_training_job_data(job_id: str) -> dict:
 
 
 def get_training_job_status(job_id: str) -> str:
-    """
-    Check if a training job exists and return its status.
+    """Get the current status of a training job.
 
     Args:
-        job_id: The ID of the training job.
+        job_id: The ID of the training job
+
+    Returns:
+        str: Current status of the training job (e.g., "running", "completed", "failed")
+
     Raises:
-        requests.exceptions.HTTPError: If the api request returns an error code
+        ValueError: If the job is not found or there is an error accessing the job
+        requests.exceptions.HTTPError: If the API request returns an error code
         requests.exceptions.RequestException: If there is a problem with the request
     """
     try:

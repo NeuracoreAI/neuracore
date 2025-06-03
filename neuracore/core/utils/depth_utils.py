@@ -1,12 +1,21 @@
+"""Depth image utility functions for encoding and decoding depth images."""
+
 import numpy as np
 
 MAX_DEPTH = 10.0
 
 
 def depth_to_rgb(depth_img: np.ndarray) -> np.ndarray:
-    """
-    Convert a depth image (in meters) to an RGB image (uint8).
+    """Convert a depth image (in meters) to an RGB image (uint8).
+
     This encodes depth values across all three channels to maximize precision.
+
+    The encoding is done as follows:
+    - Depth values are clipped to the range [0, MAX_DEPTH].
+    - Depth values are normalized to the range [0, 1].
+    - The normalized depth is scaled to a 24-bit range (0 to 2^24 - 1).
+    - Each channel (R, G, B) is filled with the corresponding part of the depth value.
+    - The resulting RGB image is uint8 with depth encoded across all channels.
 
     Args:
         depth_img: Depth image in meters as float32
@@ -35,12 +44,12 @@ def depth_to_rgb(depth_img: np.ndarray) -> np.ndarray:
 
 
 def rgb_to_depth(rgb_img: np.ndarray) -> np.ndarray:
-    """
-    Convert an RGB-encoded depth image back to a depth image in meters.
+    """Convert an RGB-encoded depth image back to a depth image in meters.
+
+    Decoding is done by reversing the encoding process used in depth_to_rgb.
 
     Args:
         rgb_img: uint8 RGB image with depth encoded across channels
-        MAX_DEPTH: Maximum depth value in meters used during encoding (default: 10.0)
 
     Returns:
         depth_img: Depth image in meters as float32

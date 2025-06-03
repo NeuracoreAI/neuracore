@@ -1,3 +1,11 @@
+"""Algorithm validation system for Neuracore model development and deployment.
+
+This module provides comprehensive validation testing for Neuracore algorithms
+including model loading, training pipeline verification, export functionality,
+and deployment readiness checks. It ensures algorithms are compatible with
+the Neuracore training and inference infrastructure.
+"""
+
 import base64
 import io
 import logging
@@ -28,6 +36,13 @@ from .mar import create_mar
 
 
 class AlgorthmCheck(BaseModel):
+    """Validation results tracking the success of each algorithm check.
+
+    This class tracks the status of various validation steps to provide
+    detailed feedback on which parts of the algorithm validation passed
+    or failed during testing.
+    """
+
     successfully_loaded_file: bool = False
     successfully_initialized_model: bool = False
     successfully_configured_optimizer: bool = False
@@ -39,7 +54,14 @@ class AlgorthmCheck(BaseModel):
 
 
 def setup_logging(output_dir: Path):
-    """Setup logging configuration."""
+    """Configure logging for validation process with file and console output.
+
+    Sets up logging to capture validation progress and errors both in the
+    console and in a log file for debugging purposes.
+
+    Args:
+        output_dir: Directory where the validation log file will be created.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -51,7 +73,17 @@ def setup_logging(output_dir: Path):
 
 
 def _encode_image(image: np.ndarray) -> str:
-    """Encode image as base64 string."""
+    """Encode a numpy image array to base64 string for testing.
+
+    Converts image data to the base64 format expected by the Neuracore
+    inference pipeline for validation testing.
+
+    Args:
+        image: Numpy array representing an image to encode.
+
+    Returns:
+        Base64-encoded string representation of the image.
+    """
     pil_image = Image.fromarray(image.astype("uint8"))
     buffer = io.BytesIO()
     pil_image.save(buffer, format="PNG")
@@ -59,7 +91,17 @@ def _encode_image(image: np.ndarray) -> str:
 
 
 def _create_joint_data(maskable_data: MaskableData) -> JointData:
-    """Convert MaskableData to JointData."""
+    """Convert MaskableData to JointData format for testing.
+
+    Transforms batch tensor data back to the individual data format
+    used in the Neuracore API for validation testing.
+
+    Args:
+        maskable_data: Batched joint data from the training pipeline.
+
+    Returns:
+        JointData object with properly formatted joint values.
+    """
     t = time.time()
     return JointData(
         timestamp=t,
@@ -76,7 +118,29 @@ def run_validation(
     port: int = 8080,
     skip_endpoint_check: bool = False,
 ) -> tuple[AlgorthmCheck, str]:
-    """Run the minimal validation process to check if an algorithm works."""
+    """Run comprehensive validation tests on a Neuracore algorithm.
+
+    Performs a series of validation checks to ensure the algorithm is
+    compatible with Neuracore's training and inference infrastructure.
+    Tests include model loading, training pipeline, export functionality,
+    and deployment readiness.
+
+    Args:
+        output_dir: Directory where validation artifacts and logs will be saved.
+        algorithm_dir: Directory containing the algorithm code to validate.
+        port: TCP port to use for local endpoint testing.
+        skip_endpoint_check: Whether to skip the endpoint deployment test.
+            Useful for faster validation when deployment testing isn't needed.
+
+    Returns:
+        A tuple containing:
+        - AlgorthmCheck object with detailed results of each validation step
+        - Error message string if validation failed, empty string if successful
+
+    Raises:
+        ValueError: If the algorithm directory contains no Python files or
+            if critical validation steps fail.
+    """
     os.environ["NEURACORE_LIVE_DATA_ENABLED"] = (
         "False"  # Disable live data for validation
     )

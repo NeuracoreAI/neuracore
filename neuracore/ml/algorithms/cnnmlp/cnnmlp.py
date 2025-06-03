@@ -1,4 +1,10 @@
-"""A simple CNN for each camera using a pretrained resnet18 followed by MLP."""
+"""CNN+MLP model for robot manipulation with sequence prediction.
+
+This module implements a simple baseline model that combines convolutional
+neural networks for visual feature extraction with multi-layer perceptrons
+for action sequence prediction. The model processes single timestep inputs
+and outputs entire action sequences.
+"""
 
 import time
 
@@ -19,7 +25,16 @@ from .modules import ImageEncoder
 
 
 class CNNMLP(NeuracoreModel):
-    """CNN+MLP model with single timestep input and sequence output."""
+    """CNN+MLP model with single timestep input and sequence output.
+
+    A baseline model architecture that uses separate CNN encoders for each
+    camera view, combines visual features with proprioceptive state, and
+    predicts entire action sequences through a multi-layer perceptron.
+
+    The model processes current observations and outputs a fixed-length
+    sequence of future actions, making it suitable for action chunking
+    approaches in robot manipulation.
+    """
 
     def __init__(
         self,
@@ -31,6 +46,17 @@ class CNNMLP(NeuracoreModel):
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
     ):
+        """Initialize the CNN+MLP model.
+
+        Args:
+            model_init_description: Model initialization parameters
+            hidden_dim: Hidden dimension for MLP layers
+            cnn_output_dim: Output dimension for CNN encoders
+            num_layers: Number of MLP layers
+            lr: Learning rate for main parameters
+            lr_backbone: Learning rate for CNN backbone
+            weight_decay: Weight decay for optimizer
+        """
         super().__init__(model_init_description)
         self.hidden_dim = hidden_dim
         self.cnn_output_dim = cnn_output_dim
@@ -98,13 +124,30 @@ class CNNMLP(NeuracoreModel):
         self.action_std = self._to_torch_float_tensor(action_data_item_stats.std)
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
-        """Convert list of floats to torch tensor."""
+        """Convert list of floats to torch tensor on the correct device.
+
+        Args:
+            data: List of float values
+
+        Returns:
+            torch.FloatTensor: Tensor on the model's device
+        """
         return torch.tensor(data, dtype=torch.float32, device=self.device)
 
     def _build_mlp(
         self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int
     ) -> nn.Sequential:
-        """Construct MLP."""
+        """Construct multi-layer perceptron with normalization and dropout.
+
+        Args:
+            input_dim: Input feature dimension
+            hidden_dim: Hidden layer dimension
+            output_dim: Output dimension
+            num_layers: Number of layers
+
+        Returns:
+            nn.Sequential: Constructed MLP module
+        """
         if num_layers == 1:
             return nn.Sequential(nn.Linear(input_dim, output_dim))
 
@@ -130,15 +173,39 @@ class CNNMLP(NeuracoreModel):
     def _preprocess_joint_state(
         self, joint_state: torch.FloatTensor
     ) -> torch.FloatTensor:
-        """Preprocess the states."""
+        """Normalize joint state using dataset statistics.
+
+        Args:
+            joint_state: Raw joint state tensor
+
+        Returns:
+            torch.FloatTensor: Normalized joint state
+        """
         return (joint_state - self.joint_state_mean) / self.joint_state_std
 
     def _preprocess_actions(self, actions: torch.FloatTensor) -> torch.FloatTensor:
-        """Preprocess the actions."""
+        """Normalize actions using dataset statistics.
+
+        Args:
+            actions: Raw action tensor
+
+        Returns:
+            torch.FloatTensor: Normalized actions
+        """
         return (actions - self.action_mean) / self.action_std
 
     def _predict_action(self, batch: BatchedInferenceSamples) -> torch.FloatTensor:
-        """Predict action for the given batch."""
+        """Predict action sequence for the given batch.
+
+        Processes visual and proprioceptive inputs through separate encoders,
+        combines features, and predicts the entire action sequence through MLP.
+
+        Args:
+            batch: Input batch with observations
+
+        Returns:
+            torch.FloatTensor: Predicted action sequence [B, T, action_dim]
+        """
         batch_size = batch.joint_positions.data.shape[0]
 
         # Process images from each camera
@@ -185,7 +252,14 @@ class CNNMLP(NeuracoreModel):
         return action_preds
 
     def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
-        """Forward pass for inference."""
+        """Perform inference to predict action sequence.
+
+        Args:
+            batch: Input batch with observations
+
+        Returns:
+            ModelPrediction: Model predictions with timing information
+        """
         t = time.time()
         action_preds = self._predict_action(batch)
         prediction_time = time.time() - t
@@ -197,7 +271,17 @@ class CNNMLP(NeuracoreModel):
         )
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
-        """Training step."""
+        """Perform a single training step.
+
+        Predicts action sequences and computes mean squared error loss
+        against target actions.
+
+        Args:
+            batch: Training batch with inputs and targets
+
+        Returns:
+            BatchedTrainingOutputs: Training outputs with losses and metrics
+        """
         inference_sample = BatchedInferenceSamples(
             joint_positions=batch.inputs.joint_positions,
             joint_velocities=batch.inputs.joint_velocities,
@@ -223,7 +307,14 @@ class CNNMLP(NeuracoreModel):
         )
 
     def configure_optimizers(self) -> list[torch.optim.Optimizer]:
-        """Configure and return optimizer for the model."""
+        """Configure optimizer with different learning rates for different components.
+
+        Uses separate learning rates for image encoder backbones (typically lower)
+        and other model parameters.
+
+        Returns:
+            list[torch.optim.Optimizer]: List containing the configured optimizer
+        """
         backbone_params = []
         other_params = []
 
@@ -241,7 +332,11 @@ class CNNMLP(NeuracoreModel):
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:
-        """Return the data types supported by the model."""
+        """Get the input data types supported by this model.
+
+        Returns:
+            list[DataType]: List of supported input data types
+        """
         return [
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
@@ -251,5 +346,9 @@ class CNNMLP(NeuracoreModel):
 
     @staticmethod
     def get_supported_output_data_types() -> list[DataType]:
-        """Return the data types supported by the model."""
+        """Get the output data types supported by this model.
+
+        Returns:
+            list[DataType]: List of supported output data types
+        """
         return [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]

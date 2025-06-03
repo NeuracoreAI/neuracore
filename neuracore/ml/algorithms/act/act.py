@@ -1,4 +1,13 @@
-"""ACT: Action Chunking with Transformers."""
+"""ACT: Action Chunking with Transformers implementation.
+
+This module implements the ACT (Action Chunking with Transformers) model
+from "Learning fine-grained bimanual manipulation with low-cost hardware"
+(Zhao et al., 2023). ACT uses a transformer architecture with latent variable
+modeling to predict action sequences for robot manipulation tasks.
+
+Reference: Zhao, Tony Z., et al. "Learning fine-grained bimanual manipulation
+with low-cost hardware." arXiv preprint arXiv:2304.13705 (2023).
+"""
 
 import logging
 import time
@@ -28,8 +37,15 @@ logger = logging.getLogger(__name__)
 
 
 class ACT(NeuracoreModel):
-    """
-    Implementation of ACT (Action Chunking Transformer) model.
+    """Implementation of ACT (Action Chunking Transformer) model.
+
+    ACT is a transformer-based architecture that learns to predict sequences
+    of robot actions by encoding visual observations and proprioceptive state
+    into a latent representation, then decoding action chunks autoregressively.
+
+    The model uses a variational autoencoder framework with separate encoders
+    for visual features and action sequences, combined with a transformer
+    decoder for action generation.
     """
 
     def __init__(
@@ -47,6 +63,22 @@ class ACT(NeuracoreModel):
         kl_weight: float = 10.0,
         latent_dim: int = 512,
     ):
+        """Initialize the ACT model.
+
+        Args:
+            model_init_description: Model initialization parameters
+            hidden_dim: Hidden dimension for transformer layers
+            num_encoder_layers: Number of transformer encoder layers
+            num_decoder_layers: Number of transformer decoder layers
+            nheads: Number of attention heads
+            dim_feedforward: Feedforward network dimension
+            dropout: Dropout probability
+            lr: Learning rate for main parameters
+            lr_backbone: Learning rate for image encoder backbone
+            weight_decay: Weight decay for optimizer
+            kl_weight: Weight for KL divergence loss
+            latent_dim: Dimension of latent variable space
+        """
         super().__init__(model_init_description)
         self.hidden_dim = hidden_dim
         self.lr = lr
@@ -151,23 +183,55 @@ class ACT(NeuracoreModel):
         )
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
-        """Convert list of floats to torch tensor."""
+        """Convert list of floats to torch tensor on the correct device.
+
+        Args:
+            data: List of float values
+
+        Returns:
+            torch.FloatTensor: Tensor on the model's device
+        """
         return torch.tensor(data, dtype=torch.float32, device=self.device)
 
     def _preprocess_joint_state(
         self, joint_state: torch.FloatTensor
     ) -> torch.FloatTensor:
-        """Preprocess the states."""
+        """Normalize joint state using dataset statistics.
+
+        Args:
+            joint_state: Raw joint state tensor
+
+        Returns:
+            torch.FloatTensor: Normalized joint state
+        """
         return (joint_state - self.joint_state_mean) / self.joint_state_std
 
     def _preprocess_target_joint_pos(
         self, target_joint_pos: torch.FloatTensor
     ) -> torch.FloatTensor:
-        """Preprocess the actions."""
+        """Normalize target joint positions using dataset statistics.
+
+        Args:
+            target_joint_pos: Raw target joint positions
+
+        Returns:
+            torch.FloatTensor: Normalized target joint positions
+        """
         return (target_joint_pos - self.joint_target_mean) / self.joint_target_std
 
     def _reparametrize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        """Sample from latent distribution using reparametrization trick."""
+        """Sample from latent distribution using reparametrization trick.
+
+        During training, samples from the distribution N(mu, exp(logvar)).
+        During inference, returns the mean mu.
+
+        Args:
+            mu: Mean of latent distribution
+            logvar: Log variance of latent distribution
+
+        Returns:
+            torch.Tensor: Sampled latent variable
+        """
         if self.training:
             std = torch.exp(0.5 * logvar)
             eps = torch.randn_like(std)
@@ -181,7 +245,20 @@ class ACT(NeuracoreModel):
         actions_mask: torch.FloatTensor,
         actions_sequence_mask: torch.FloatTensor,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
-        """Encode actions to latent space during training."""
+        """Encode actions to latent space during training.
+
+        Uses a separate transformer encoder to encode the action sequence
+        along with proprioceptive state into latent distribution parameters.
+
+        Args:
+            state: Proprioceptive state features
+            actions: Target action sequence
+            actions_mask: Mask for valid action dimensions
+            actions_sequence_mask: Mask for valid sequence positions
+
+        Returns:
+            tuple[torch.FloatTensor, torch.FloatTensor]: Latent mean and log variance
+        """
         batch_size = state.shape[0]
 
         # Project joint positions and actions
@@ -227,7 +304,20 @@ class ACT(NeuracoreModel):
         camera_images_mask: torch.FloatTensor,
         latent: torch.FloatTensor,
     ) -> torch.FloatTensor:
-        """Encode visual inputs with latent and proprioceptive features."""
+        """Encode visual inputs with latent and proprioceptive features.
+
+        Processes RGB images through vision encoders and combines them with
+        proprioceptive state and latent features using a transformer encoder.
+
+        Args:
+            states: Proprioceptive state features
+            camera_images: RGB camera images [B, num_cameras, C, H, W]
+            camera_images_mask: Mask for valid camera inputs
+            latent: Latent features from action encoding
+
+        Returns:
+            torch.FloatTensor: Encoded visual and proprioceptive memory
+        """
         batch_size = states.shape[0]
 
         # Process images
@@ -277,7 +367,18 @@ class ACT(NeuracoreModel):
         latent: torch.FloatTensor,
         memory: torch.FloatTensor,
     ) -> torch.Tensor:
-        """Decode latent and visual features to action sequence."""
+        """Decode latent and visual features to action sequence.
+
+        Uses a transformer decoder with learned query embeddings to generate
+        a sequence of action predictions conditioned on visual and latent features.
+
+        Args:
+            latent: Latent features
+            memory: Encoded visual and proprioceptive memory
+
+        Returns:
+            torch.Tensor: Predicted action sequence [B, T, action_dim]
+        """
         batch_size = latent.shape[0]
 
         # Convert to sequence first and expand
@@ -307,6 +408,16 @@ class ACT(NeuracoreModel):
         logvar: torch.FloatTensor,
         batch: BatchedInferenceSamples,
     ) -> torch.FloatTensor:
+        """Predict action sequence from latent distribution and observations.
+
+        Args:
+            mu: Mean of latent distribution
+            logvar: Log variance of latent distribution
+            batch: Input observations
+
+        Returns:
+            torch.FloatTensor: Predicted action sequence
+        """
         # Sample latent
         latent_sample = self._reparametrize(mu, logvar)
 
@@ -328,7 +439,17 @@ class ACT(NeuracoreModel):
     def _combine_joint_states(
         self, batch: BatchedInferenceSamples
     ) -> torch.FloatTensor:
-        """Combine joint states."""
+        """Combine different types of joint state data.
+
+        Concatenates joint positions, velocities, and torques into a single
+        feature vector, applying masks and normalization.
+
+        Args:
+            batch: Input batch containing joint state data
+
+        Returns:
+            torch.FloatTensor: Combined and normalized joint state features
+        """
         joint_states = None
         if self.state_embed is not None:
             state_inputs = []
@@ -347,6 +468,14 @@ class ACT(NeuracoreModel):
         return joint_states
 
     def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
+        """Perform inference to predict action sequence.
+
+        Args:
+            batch: Input batch with observations
+
+        Returns:
+            ModelPrediction: Model predictions with timing information
+        """
         t = time.time()
         batch_size = len(batch)
         mu = torch.zeros(batch_size, self.latent_dim, device=self.device)
@@ -361,7 +490,17 @@ class ACT(NeuracoreModel):
         )
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
-        """Training step."""
+        """Perform a single training step.
+
+        Encodes action sequences to latent space, predicts actions, and computes
+        L1 reconstruction loss plus KL divergence regularization.
+
+        Args:
+            batch: Training batch with inputs and targets
+
+        Returns:
+            BatchedTrainingOutputs: Training outputs with losses and metrics
+        """
         pred_sequence_mask = batch.outputs.joint_target_positions.mask[
             :, :, 0
         ]  # [batch_size, T]
@@ -404,7 +543,14 @@ class ACT(NeuracoreModel):
         )
 
     def configure_optimizers(self) -> list[torch.optim.Optimizer]:
-        """Configure optimizer with different LRs for different components."""
+        """Configure optimizer with different learning rates for different components.
+
+        Uses separate learning rates for image encoder backbone (typically lower)
+        and other model parameters to account for pre-trained vision components.
+
+        Returns:
+            list[torch.optim.Optimizer]: List containing the configured optimizer
+        """
         backbone_params = []
         other_params = []
 
@@ -423,7 +569,11 @@ class ACT(NeuracoreModel):
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:
-        """Return the data types supported by the model."""
+        """Get the input data types supported by this model.
+
+        Returns:
+            list[DataType]: List of supported input data types
+        """
         return [
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
@@ -433,5 +583,9 @@ class ACT(NeuracoreModel):
 
     @staticmethod
     def get_supported_output_data_types() -> list[DataType]:
-        """Return the data types supported by the model."""
+        """Get the output data types supported by this model.
+
+        Returns:
+            list[DataType]: List of supported output data types
+        """
         return [DataType.JOINT_TARGET_POSITIONS]

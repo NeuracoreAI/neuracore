@@ -1,3 +1,10 @@
+"""Dummy dataset for algorithm validation and testing without real data.
+
+This module provides a synthetic dataset that generates random data matching
+the structure of real Neuracore datasets. It's used for algorithm development,
+testing, and validation without requiring actual robot demonstration data.
+"""
+
 import logging
 from typing import Callable, Optional
 
@@ -14,11 +21,12 @@ TrainingSample = BatchedTrainingSamples
 
 
 class DummyDataset(NeuracoreDataset):
-    """
-    A small dummy dataset for validating algorithm plumbing.
+    """Synthetic dataset for algorithm validation and testing.
 
-    This dataset generates random data with the same structure as the real
-    EpisodicDataset, but without requiring any actual data files.
+    This dataset generates random data with the same structure and dimensions
+    as real Neuracore datasets, allowing for algorithm development and testing
+    without requiring actual robot demonstration data. It supports all standard
+    data types including images, joint data, and language instructions.
     """
 
     def __init__(
@@ -32,16 +40,16 @@ class DummyDataset(NeuracoreDataset):
             Callable[[list[str]], tuple[torch.Tensor, torch.Tensor]]
         ] = None,
     ):
-        """
-        Initialize the dummy dataset.
+        """Initialize the dummy dataset with specified data types and dimensions.
 
         Args:
-            input_data_types: List of supported input data types
-            output_data_types: List of supported output data types
-            num_samples: Number of samples in the dataset
-            num_episodes: Number of episodes in the dataset
-            output_prediction_horizon: Length of the action sequence
-            tokenize_text: Function to tokenize text data
+            input_data_types: List of data types to include as model inputs.
+            output_data_types: List of data types to include as model outputs.
+            num_samples: Total number of training samples to generate.
+            num_episodes: Number of distinct episodes in the dataset.
+            output_prediction_horizon: Length of output action sequences.
+            tokenize_text: Function to convert text strings to token tensors.
+                Should return (input_ids, attention_mask) tuple.
         """
         super().__init__(
             input_data_types=input_data_types,
@@ -100,7 +108,22 @@ class DummyDataset(NeuracoreDataset):
     def load_sample(
         self, episode_idx: int, timestep: Optional[int] = None
     ) -> TrainingSample:
-        """Generate a random sample in the format of EpisodicDataset."""
+        """Generate a random training sample with realistic data structure.
+
+        Creates synthetic data that matches the format and dimensions of real
+        robot demonstration data, including appropriate masking and tensor shapes.
+
+        Args:
+            episode_idx: Index of the episode (used for reproducible randomness).
+            timestep: Optional timestep within the episode (currently unused).
+
+        Returns:
+            A TrainingSample containing randomly generated input and output data
+            matching the specified data types and dimensions.
+
+        Raises:
+            Exception: If there's an error generating the sample data.
+        """
         try:
             sample = TrainingSample(
                 output_predicition_mask=torch.ones(
@@ -185,10 +208,27 @@ class DummyDataset(NeuracoreDataset):
             raise
 
     def __len__(self) -> int:
+        """Get the total number of samples in the dataset.
+
+        Returns:
+            The number of training samples available in this dataset.
+        """
         return self.num_samples
 
     def collate_fn(self, samples: list[TrainingSample]) -> BatchedTrainingSamples:
-        """Collate a list of samples into a single batch."""
+        """Collate individual samples into a batched training sample.
+
+        Combines multiple training samples into a single batch with proper
+        tensor stacking and masking. Handles the expansion of output data
+        across the prediction horizon for sequence generation tasks.
+
+        Args:
+            samples: List of individual TrainingSample instances to batch together.
+
+        Returns:
+            A BatchedTrainingSamples instance containing the batched inputs,
+            outputs, and prediction masks ready for model training.
+        """
         bd = self._collate_fn([s.outputs for s in samples], self.output_data_types)
         for key in bd.__dict__.keys():
             if bd.__dict__[key] is not None:

@@ -1,3 +1,11 @@
+"""Robot management and data stream coordination for Neuracore platform.
+
+This module provides the Robot class for managing robot instances, their
+kinematic models, data streams, and recording capabilities. It handles
+URDF/MJCF model uploads, data stream management, and coordinates recording
+state across multiple robot instances.
+"""
+
 import io
 import logging
 import os
@@ -22,6 +30,13 @@ logger = logging.getLogger(__name__)
 
 
 class Robot:
+    """Represents a robot instance with kinematic model and data streaming capabilities.
+
+    This class manages a robot's lifecycle including initialization, kinematic model
+    upload, data stream management, and recording coordination. It supports both
+    URDF and MJCF model formats and handles automatic conversion when needed.
+    """
+
     def __init__(
         self,
         robot_name: str,
@@ -31,6 +46,25 @@ class Robot:
         overwrite: bool = False,
         shared: bool = False,
     ):
+        """Initialize a Robot instance with configuration parameters.
+
+        Args:
+            robot_name: Unique identifier for the robot type.
+            instance: Instance number for multi-robot deployments.
+            urdf_path: Path to URDF kinematic model file.
+                Mutually exclusive with mjcf_path.
+            mjcf_path: Path to MJCF kinematic model file.
+                Mutually exclusive with urdf_path.
+            overwrite: Whether to overwrite existing robot configuration on server.
+            shared: Whether the robot is shared/open-source.
+                Note that setting shared=True is only available to specific
+                members allocated by the Neuracore team.
+
+        Raises:
+            ValidationError: If both URDF and MJCF paths are provided,
+                if files don't exist, or if file extensions are incorrect.
+            ImportError: If MJCF conversion is requested but mujoco is not available.
+        """
         self.name = robot_name
         self.instance = instance
         self.urdf_path = urdf_path
@@ -70,7 +104,15 @@ class Robot:
             convert(mjcf_path, self.urdf_path, asset_file_prefix="meshes/")
 
     def init(self) -> None:
-        """Initialize robot on the server."""
+        """Initialize the robot on the Neuracore server.
+
+        Creates the robot instance on the server and uploads the kinematic model
+        if provided. This must be called before using the robot for data streaming
+        or recording.
+
+        Raises:
+            RobotError: If not authenticated or if server communication fails.
+        """
         if not self._auth.is_authenticated:
             raise RobotError("Not authenticated. Please call nc.login() first.")
 
@@ -98,6 +140,16 @@ class Robot:
             raise RobotError(f"Failed to initialize robot: {str(e)}")
 
     def add_data_stream(self, stream_id: str, stream: DataStream):
+        """Add a data stream to the robot for sensor data collection.
+
+        Args:
+            stream_id: Unique identifier for the data stream.
+            stream: DataStream instance for handling the sensor data.
+
+        Raises:
+            RuntimeError: If the maximum number of data streams is exceeded.
+            ValueError: If a stream with the same ID already exists.
+        """
         if len(self._data_streams) >= MAX_DATA_STREAMS:
             raise RuntimeError("Excessive number of data streams")
         if stream_id in self._data_streams:
@@ -105,14 +157,40 @@ class Robot:
         self._data_streams[stream_id] = stream
 
     def get_data_stream(self, stream_id: str) -> DataStream | None:
+        """Retrieve a data stream by its identifier.
+
+        Args:
+            stream_id: Unique identifier for the data stream.
+
+        Returns:
+            The DataStream instance if found, None otherwise.
+        """
         return self._data_streams.get(stream_id, None)
 
     def list_all_streams(self) -> dict[str, DataStream]:
-        """List all data streams for a given robot."""
+        """List all data streams registered with this robot.
+
+        Returns:
+            Dictionary mapping stream IDs to DataStream instances.
+        """
         return self._data_streams
 
     def start_recording(self, dataset_id: str) -> str:
-        """Start recording robot data."""
+        """Start recording data from all active streams to a dataset.
+
+        Initiates a recording session that will capture data from all registered
+        data streams and associate it with the specified dataset.
+
+        Args:
+            dataset_id: Unique identifier of the dataset to record into.
+
+        Returns:
+            The unique recording ID for this recording session.
+
+        Raises:
+            RobotError: If the robot is not initialized or if
+                the recording fails to start.
+        """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
@@ -139,10 +217,18 @@ class Robot:
             raise RobotError(f"Failed to start recording: {str(e)}")
 
     def stop_recording(self, recording_id: str) -> None:
-        """Stop a recording.
+        """Stop an active recording session.
+
+        Ends the specified recording session and stops data collection from
+        all streams. The recorded data will be processed and stored in the
+        associated dataset.
 
         Args:
-            recording_id: Identifier of the recording to stop.
+            recording_id: Unique identifier of the recording session to stop.
+
+        Raises:
+            RobotError: If the robot is not initialized, if the recording cannot
+                be stopped, or if storage limits are exceeded.
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
@@ -169,6 +255,16 @@ class Robot:
             raise RobotError(f"Failed to stop recording: {str(e)}")
 
     def _recording_stopped(self, robot_id: str, instance: int, recording_id: str):
+        """Handle recording stopped events from the recording state manager.
+
+        Internal callback that stops data collection from all streams when
+        a recording session ends.
+
+        Args:
+            robot_id: ID of the robot whose recording stopped.
+            instance: Instance number of the robot.
+            recording_id: ID of the recording that stopped.
+        """
         if self.id != robot_id or self.instance != instance:
             return
         for stream_id, data_stream in self._data_streams.items():
@@ -176,21 +272,38 @@ class Robot:
                 data_stream.stop_recording()
 
     def is_recording(self) -> bool:
+        """Check if the robot is currently recording data.
+
+        Returns:
+            True if the robot is actively recording, False otherwise.
+        """
         return get_recording_state_manager().is_recording(
             robot_id=self.id, instance=self.instance
         )
 
     def get_current_recording_id(self) -> Optional[str]:
-        """Get the current recording ID, if the instance is recording.
+        """Get the ID of the current active recording session.
 
         Returns:
-            Optional[str]: The current recording ID, or None if not recording.
+            The current recording ID if the robot is recording, None otherwise.
         """
         return get_recording_state_manager().get_current_recording_id(
             robot_id=self.id, instance=self.instance
         )
 
     def _package_urdf(self) -> dict:
+        """Package URDF file and associated meshes into a ZIP archive.
+
+        Creates a ZIP package containing the URDF file and all referenced mesh
+        files, updating mesh paths to use a standardized directory structure.
+
+        Returns:
+            Dictionary containing the ZIP file data formatted for HTTP upload.
+
+        Raises:
+            ValidationError: If the URDF file is not found.
+            RobotError: If mesh files cannot be located or if package creation fails.
+        """
         if not os.path.exists(self.urdf_path):
             raise ValidationError(f"URDF file not found: {self.urdf_path}")
 
@@ -274,8 +387,15 @@ class Robot:
         return {"robot_package": ("robot_package.zip", zip_data, "application/zip")}
 
     def _upload_urdf_and_meshes(self) -> None:
-        """Upload URDF and associated mesh files as a ZIP package."""
+        """Upload URDF and associated mesh files as a ZIP package to the server.
 
+        Packages the robot's kinematic model and visual assets into a ZIP archive
+        and uploads it to the Neuracore platform for use in visualization and
+        simulation.
+
+        Raises:
+            RobotError: If packaging or upload fails.
+        """
         try:
             # Create the files dict with the ZIP data
             files = self._package_urdf()
@@ -315,7 +435,24 @@ def init(
     overwrite: bool = False,
     shared: bool = False,
 ) -> Robot:
-    """Initialize a robot globally."""
+    """Initialize a robot and register it globally.
+
+    Creates a new Robot instance, initializes it on the server, and registers
+    it in the global robot registry for future access.
+
+    Args:
+        robot_name: Unique identifier for the robot type.
+        instance: Instance number for multi-robot deployments.
+        urdf_path: Path to URDF kinematic model file.
+        mjcf_path: Path to MJCF kinematic model file.
+        overwrite: Whether to overwrite existing robot configuration.
+        shared: Whether the robot is shared/open-source.
+            Note that setting shared=True is only available to specific
+            members allocated by the Neuracore team.
+
+    Returns:
+        The initialized Robot instance.
+    """
     robot = Robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     robot.init()
     _robot_name_id_mapping[robot_name] = robot.id
@@ -324,7 +461,18 @@ def init(
 
 
 def get_robot(robot_name: str, instance: int) -> Robot:
-    """Get a registered robot instance by name or id."""
+    """Retrieve a registered robot instance by name and instance number.
+
+    Args:
+        robot_name: Name or ID of the robot to retrieve.
+        instance: Instance number of the robot.
+
+    Returns:
+        The Robot instance if found.
+
+    Raises:
+        RobotError: If the robot is not found in the registry.
+    """
     robot_id = _robot_name_id_mapping.get(robot_name, robot_name)
     key = (robot_id, instance)
     if key not in _robots:

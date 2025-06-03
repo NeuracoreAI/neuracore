@@ -1,3 +1,10 @@
+"""Algorithm validation script for neuracore ML algorithms.
+
+This module provides a command-line tool for validating ML algorithms in an
+isolated virtual environment. It creates a temporary venv, installs dependencies,
+and runs validation to ensure algorithms meet neuracore requirements.
+"""
+
 import logging
 import os
 import subprocess
@@ -11,7 +18,17 @@ logger = logging.getLogger(__name__)
 
 
 def run_in_venv(algorithm_folder):
-    """Run validation in a temporary virtual environment"""
+    """Run algorithm validation in a temporary virtual environment.
+
+    Creates an isolated virtual environment, installs neuracore[ml], and
+    executes validation to ensure the algorithm meets all requirements.
+
+    Args:
+        algorithm_folder: Path to the algorithm directory to validate
+
+    Returns:
+        bool: True if validation succeeded, False otherwise
+    """
     with tempfile.TemporaryDirectory(prefix="nc-validate-venv-") as temp_dir:
         venv_path = Path(temp_dir) / "venv"
 
@@ -86,6 +103,18 @@ sys.exit(0 if success else 1)
 
 
 def main():
+    """Main entry point for the neuracore-validate command-line tool.
+
+    Parses command-line arguments, validates the provided algorithm folder,
+    and exits with appropriate status code.
+
+    Usage:
+        neuracore-validate <path_to_algorithm_folder>
+
+    Exit codes:
+        0: Validation succeeded
+        1: Validation failed or invalid arguments
+    """
     if len(sys.argv) != 2:
         print("Usage: neuracore-validate <path_to_algorithm_folder>")
         sys.exit(1)

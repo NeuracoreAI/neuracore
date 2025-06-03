@@ -1,3 +1,11 @@
+"""MJCF to URDF conversion utility for robot model formats.
+
+This module provides functionality to convert MuJoCo XML format (MJCF) robot
+models to Universal Robot Description Format (URDF). It handles the conversion
+of kinematic structures, inertial properties, joint configurations, and mesh
+geometries while creating appropriate STL files for visual elements.
+"""
+
 from pathlib import Path
 from xml.dom import minidom
 from xml.etree import ElementTree as ET
@@ -9,6 +17,14 @@ from stl import mesh
 
 
 def _array2str(arr: list) -> str:
+    """Convert numeric array to space-separated string for XML attributes.
+
+    Args:
+        arr: List or array of numeric values.
+
+    Returns:
+        Space-separated string representation of the array values.
+    """
     return " ".join([str(x) for x in arr])
 
 
@@ -22,17 +38,20 @@ def _create_body(
     iyy: float,
     izz: float,
 ) -> ET.Element:
-    """Create a body with given mass and inertia.
+    """Create a URDF link element with specified mass and inertia properties.
 
     Args:
-        xml_root: XML root element
-        name: Name of the body
-        inertial_pos: Inertial position
-        inertial_rpy: Inertial roll-pitch-yaw
-        mass: Mass of the body
-        ixx: Inertia xx
-        iyy: Inertia yy
-        izz: Inertia zz
+        xml_root: Parent XML element to attach the new link to.
+        name: Name identifier for the link.
+        inertial_pos: Position offset of the center of mass [x, y, z].
+        inertial_rpy: Orientation of the inertial frame in roll-pitch-yaw [r, p, y].
+        mass: Mass of the link in kilograms.
+        ixx: Moment of inertia about the x-axis.
+        iyy: Moment of inertia about the y-axis.
+        izz: Moment of inertia about the z-axis.
+
+    Returns:
+        The created link XML element.
     """
     # create XML element for this body
     body = ET.SubElement(xml_root, "link", {"name": name})
@@ -61,11 +80,17 @@ def _create_body(
 
 
 def _create_dummy_body(xml_root: ET.Element, name: str) -> ET.Element:
-    """Create a dummy body with negligible mass and inertia.
+    """Create a lightweight dummy link with negligible mass and inertia.
+
+    Used for creating intermediate joint bodies in the URDF kinematic chain
+    where MJCF and URDF joint representations differ.
 
     Args:
-        xml_root: XML root element
-        name: Name of the body
+        xml_root: Parent XML element to attach the new link to.
+        name: Name identifier for the dummy link.
+
+    Returns:
+        The created dummy link XML element.
     """
     mass = 0.001
     mass_moi = mass * (0.001**2)  # mass moment of inertia
@@ -85,21 +110,25 @@ def _create_joint(
     jnt_range: list = None,
     jnt_type: str = "fixed",
 ) -> ET.Element:
-    """Create a joint of specified type.
-        If axis and jnt_range are None, create a fixed joint.
-        If jnt_type is 'revolute', create a revolute joint.
-        If jnt_type is 'prismatic', create a prismatic joint.
+    """Create a URDF joint element connecting two links.
+
+    Creates joints of various types including fixed, revolute, and prismatic.
+    Joint parameters are automatically configured based on the provided axis
+    and range information.
 
     Args:
-        xml_root: XML root element
-        name: Name of the joint
-        parent: Name of the parent body
-        child: Name of the child body
-        pos: Position of the joint
-        rpy: Roll-pitch-yaw of the joint
-        axis: Axis of the joint
-        jnt_range: Joint range
-        jnt_type: Type of the joint
+        xml_root: Parent XML element to attach the new joint to.
+        name: Name identifier for the joint.
+        parent: Name of the parent link.
+        child: Name of the child link.
+        pos: Position offset from parent to child [x, y, z].
+        rpy: Orientation offset in roll-pitch-yaw [r, p, y].
+        axis: Joint axis of rotation/translation [x, y, z]. None for fixed joints.
+        jnt_range: Joint limits [min, max]. None for fixed joints.
+        jnt_type: Type of joint ("fixed", "revolute", or "prismatic").
+
+    Returns:
+        The created joint XML element.
     """
     if axis is None:
         assert jnt_range is None
@@ -130,12 +159,27 @@ def _create_joint(
 
 
 def convert(mjcf_file: str, urdf_file: str, asset_file_prefix: str = "") -> None:
-    """Convert MJCF file to URDF.
+    """Convert a MuJoCo MJCF file to URDF format.
+
+    Performs a comprehensive conversion from MJCF to URDF including:
+    - Kinematic structure and joint relationships
+    - Mass and inertia properties
+    - Joint types and limits (revolute, prismatic, fixed)
+    - Visual mesh geometries converted to STL format
+    - Proper coordinate frame transformations
+
+    The conversion handles the structural differences between MJCF and URDF
+    by creating intermediate joint bodies when necessary to maintain equivalent
+    kinematic behavior.
 
     Args:
-        mjcf_file: Path to MJCF file
-        urdf_file: Path to save URDF file
-        asset_file_prefix: Prefix for asset files
+        mjcf_file: Path to the input MJCF file to convert.
+        urdf_file: Path where the output URDF file will be saved.
+        asset_file_prefix: Optional prefix for generated STL mesh files.
+            Useful for organizing assets in subdirectories.
+
+    Raises:
+        AssertionError: If a body has more than one joint, which is not supported.
     """
     urdf_file = Path(urdf_file)
     model = mujoco.MjModel.from_xml_path(mjcf_file)

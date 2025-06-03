@@ -1,3 +1,10 @@
+"""Client streaming manager for real-time robot data streaming.
+
+This module provides WebRTC-based peer-to-peer streaming capabilities for robot
+sensor data including video feeds and JSON event streams. It handles signaling,
+connection management, and automatic reconnection with exponential backoff.
+"""
+
 import asyncio
 from concurrent.futures import Future
 from datetime import timedelta
@@ -29,6 +36,12 @@ MINIMUM_BACKOFF_LEVEL = -2
 
 
 class ClientStreamingManager:
+    """Manages WebRTC streaming connections for robot sensor data.
+
+    Handles peer-to-peer connections, signaling, video tracks, and JSON data streams
+    with automatic reconnection and proper cleanup.
+    """
+
     def __init__(
         self,
         robot_id: str,
@@ -37,6 +50,15 @@ class ClientStreamingManager:
         loop: asyncio.AbstractEventLoop,
         auth: Auth = None,
     ):
+        """Initialize the client streaming manager.
+
+        Args:
+            robot_id: Unique identifier for the robot
+            robot_instance: Instance number of the robot
+            client_session: HTTP client session for API requests
+            loop: Event loop for async operations
+            auth: Authentication object. If not provided, uses default auth
+        """
         self.robot_id = robot_id
         self.robot_instance = robot_instance
         self.loop = loop
@@ -55,7 +77,15 @@ class ClientStreamingManager:
         )
 
     def get_video_source(self, sensor_name: str, kind: str) -> VideoSource:
-        """Start a new recording stream"""
+        """Get or create a video source for streaming camera data.
+
+        Args:
+            sensor_name: Name of the sensor/camera
+            kind: Type of video data ("rgb", "depth", etc.)
+
+        Returns:
+            VideoSource: Video source for streaming frames
+        """
         sensor_key = (sensor_name, kind)
         if sensor_key in self.video_tracks_cache:
             return self.video_tracks_cache[sensor_key]
@@ -78,6 +108,16 @@ class ClientStreamingManager:
     def get_json_source(
         self, sensor_name: str, kind: str, sensor_key: tuple | None = None
     ) -> JSONSource:
+        """Get or create a JSON source for streaming structured data.
+
+        Args:
+            sensor_name: Name of the sensor
+            kind: Type of data being streamed
+            sensor_key: Optional custom key for caching. Defaults to (sensor_name, kind)
+
+        Returns:
+            JSONSource: JSON source for streaming structured data
+        """
         sensor_key = sensor_key or (sensor_name, kind)
         if sensor_key in self.event_source_cache:
             return self.event_source_cache[sensor_key]
@@ -93,7 +133,13 @@ class ClientStreamingManager:
         return source
 
     async def submit_track(self, mid: str, kind: str, label: str):
-        """Submit new track data"""
+        """Submit a new track to the signaling server.
+
+        Args:
+            mid: Media ID for the track
+            kind: Type of media (e.g., "video", "audio", "application")
+            label: Human-readable label for the track
+        """
         if not self.streaming.is_enabled():
             return
         await self.client_session.post(
@@ -110,7 +156,7 @@ class ClientStreamingManager:
         )
 
     async def heartbeat_response(self):
-        """Submit new track data"""
+        """Send heartbeat response to keep the signaling connection alive."""
         if not self.streaming.is_enabled():
             return
         await self.client_session.post(
@@ -122,7 +168,16 @@ class ClientStreamingManager:
     async def create_new_connection(
         self, remote_stream_id: str, connection_id: str, connection_token: str
     ) -> PierToPierConnection:
-        """Create a new P2P connection to a remote stream"""
+        """Create a new peer-to-peer connection to a remote stream.
+
+        Args:
+            remote_stream_id: ID of the remote stream to connect to
+            connection_id: Unique identifier for this connection
+            connection_token: Authentication token for the connection
+
+        Returns:
+            PierToPierConnection: The newly created P2P connection
+        """
 
         def on_close():
             self.connections.pop(remote_stream_id, None)
@@ -151,7 +206,11 @@ class ClientStreamingManager:
         return connection
 
     async def connect_signalling_stream(self):
-        """Connect to the signaling server and process messages"""
+        """Connect to the signaling server and process incoming messages.
+
+        Maintains a persistent SSE connection with exponential backoff retry logic.
+        Handles heartbeats, connection tokens, SDP offers/answers, and ICE candidates.
+        """
         backoff = MINIMUM_BACKOFF_LEVEL
         while self.streaming.is_enabled():
             try:
@@ -213,12 +272,14 @@ class ClientStreamingManager:
                 backoff += 1
 
     async def close_connections(self):
+        """Close all active peer-to-peer connections."""
         await asyncio.gather(
             *(connection.close() for connection in self.connections.values())
         )
         self.connections.clear()
 
     def __close(self):
+        """Internal cleanup method called when streaming is disabled."""
         if self.signalling_stream_future.running():
             self.signalling_stream_future.cancel()
 
@@ -226,7 +287,11 @@ class ClientStreamingManager:
         asyncio.run_coroutine_threadsafe(self.client_session.close(), self.loop)
 
     def close(self):
-        """Close all connections and streams"""
+        """Close all connections and streams gracefully.
+
+        Disables streaming, closes all P2P connections, stops video tracks,
+        and cleans up resources.
+        """
         self.streaming.disable()
         self.available_for_connections = False
         asyncio.run_coroutine_threadsafe(self.close_connections(), self.loop)
@@ -243,6 +308,15 @@ _streaming_managers: Dict[Tuple[str, int], Future[ClientStreamingManager]] = {}
 
 
 async def _create_client_streaming_manager(robot_id: str, instance: int):
+    """Create a new client streaming manager instance.
+
+    Args:
+        robot_id: Unique identifier for the robot
+        instance: Instance number of the robot
+
+    Returns:
+        ClientStreamingManager: Configured streaming manager instance
+    """
     # We want to keep the signalling connection alive for as long as possible
     timeout = ClientTimeout(sock_read=None, total=None)
     return ClientStreamingManager(
@@ -254,6 +328,18 @@ async def _create_client_streaming_manager(robot_id: str, instance: int):
 
 
 def get_robot_streaming_manager(robot_id: str, instance: int) -> ClientStreamingManager:
+    """Get or create a streaming manager for a specific robot instance.
+
+    Uses a singleton pattern to ensure only one streaming manager exists per
+    robot instance. Thread-safe and handles event loop coordination.
+
+    Args:
+        robot_id: Unique identifier for the robot
+        instance: Instance number of the robot
+
+    Returns:
+        ClientStreamingManager: Streaming manager for the specified robot instance
+    """
     key = (robot_id, instance)
     if key not in _streaming_managers:
         # This needs to be run in the event loop thread

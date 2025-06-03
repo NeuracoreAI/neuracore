@@ -1,3 +1,10 @@
+"""Abstract base class for models in the Neuracore framework.
+
+This module provides the foundational NeuracoreModel class that all
+models must inherit from. It handles data type validation, device management,
+and defines the required interface for training and inference.
+"""
+
 import logging
 from abc import ABC, abstractmethod
 
@@ -15,12 +22,27 @@ logger = logging.getLogger(__name__)
 
 
 class NeuracoreModel(nn.Module, ABC):
-    """Abstract base class for robot learning models."""
+    """Abstract base class for all Neuracore models.
+
+    Provides the foundational structure for all robot learning models in the
+    Neuracore framework. Handles automatic device placement, data type validation,
+    and defines the required interface for training and inference operations.
+    """
 
     def __init__(
         self,
         model_init_description: ModelInitDescription,
     ):
+        """Initialize the Neuracore model.
+
+        Args:
+            model_init_description: Model initialization parameters including
+                input/output data types, dataset description, and prediction horizon
+
+        Raises:
+            ValueError: If requested data types are not supported by the model
+                or not present in the dataset
+        """
         super().__init__()
         self.model_init_description = model_init_description
         self._validate_input_output_types()
@@ -31,6 +53,15 @@ class NeuracoreModel(nn.Module, ABC):
         )
 
     def _validate_input_output_types(self):
+        """Validate that requested data types are supported and available.
+
+        Ensures that all requested input and output data types are both
+        supported by the model implementation and present in the dataset.
+
+        Raises:
+            ValueError: If any requested data type is not supported or not
+                available in the dataset
+        """
         req_input_data_types = set(self.model_init_description.input_data_types)
         types_in_dataset = set(
             self.model_init_description.dataset_description.get_data_types()
@@ -69,32 +100,68 @@ class NeuracoreModel(nn.Module, ABC):
 
     @abstractmethod
     def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
-        """Inference forward pass."""
+        """Perform inference forward pass.
+
+        Args:
+            batch: Batched input samples for inference
+
+        Returns:
+            ModelPrediction: Model predictions with appropriate structure
+        """
         pass
 
     @abstractmethod
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
-        """Inference forward pass."""
+        """Perform a single training step.
+
+        Args:
+            batch: Batched training samples including inputs and targets
+
+        Returns:
+            BatchedTrainingOutputs: Training outputs including loss and metrics
+        """
         pass
 
     @abstractmethod
     def configure_optimizers(self) -> list[torch.optim.Optimizer]:
-        """Configure and return optimizer for the model."""
+        """Configure and return optimizers for the model.
+
+        Returns:
+            list[torch.optim.Optimizer]: List of optimizers for model parameters
+        """
         pass
 
     @staticmethod
     def tokenize_text(self, text: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Tokenize text."""
+        """Tokenize text input for language processing.
+
+        Args:
+            text: List of text strings to tokenize
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: Tokenized text and attention masks
+
+        Raises:
+            NotImplementedError: Must be implemented by subclasses that use text
+        """
         raise NotImplementedError("User needs to implement this method")
 
     @staticmethod
     @abstractmethod
     def get_supported_input_data_types() -> list[DataType]:
-        """Return the input data types supported by the model."""
+        """Get the input data types supported by this model.
+
+        Returns:
+            list[DataType]: List of supported input data types
+        """
         pass
 
     @staticmethod
     @abstractmethod
     def get_supported_output_data_types() -> list[DataType]:
-        """Return the output data types supported by the model."""
+        """Get the output data types supported by this model.
+
+        Returns:
+            list[DataType]: List of supported output data types
+        """
         pass

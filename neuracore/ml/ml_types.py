@@ -1,14 +1,40 @@
+"""Machine learning data types for robot learning models.
+
+This module provides data structures for handling batched robot sensor data
+with support for masking, device placement, and multi-modal inputs including
+joint states, images, point clouds, and language tokens.
+"""
+
 import torch
 
 
 class MaskableData:
+    """Container for tensor data with associated mask for variable-length sequences.
+
+    Provides a unified interface for handling data that may have variable lengths
+    or missing values, commonly used in robot learning for handling sequences
+    of different lengths or optional sensor modalities.
+    """
 
     def __init__(self, data: torch.FloatTensor, mask: torch.FloatTensor):
+        """Initialize maskable data container.
+
+        Args:
+            data: Main data tensor
+            mask: Boolean mask tensor indicating valid data positions
+        """
         self.data = data
         self.mask = mask
 
     def to(self, device: torch.device):
-        """Move all tensors to the specified device."""
+        """Move all tensors to the specified device.
+
+        Args:
+            device: Target device for tensor placement
+
+        Returns:
+            MaskableData: New instance with tensors moved to the specified device
+        """
         return MaskableData(
             data=_to_device(self.data, device),
             mask=_to_device(self.mask, device),
@@ -16,10 +42,25 @@ class MaskableData:
 
 
 def _to_device(data, device: torch.device):
+    """Utility function to move data to device, handling None values.
+
+    Args:
+        data: Data to move (can be None)
+        device: Target device
+
+    Returns:
+        Data moved to device, or None if input was None
+    """
     return data.to(device) if data is not None else None
 
 
 class BatchedData:
+    """Container for batched multi-modal robot sensor data.
+
+    Provides a structured way to handle various types of robot sensor data
+    in batched format, including joint states, visual data, and custom
+    sensor modalities with support for device placement.
+    """
 
     def __init__(
         self,
@@ -34,6 +75,20 @@ class BatchedData:
         language_tokens: MaskableData = None,
         custom_data: dict[str, MaskableData] = None,
     ):
+        """Initialize batched data container.
+
+        Args:
+            joint_positions: Joint position data with mask
+            joint_velocities: Joint velocity data with mask
+            joint_torques: Joint torque data with mask
+            joint_target_positions: Target joint position data with mask
+            gripper_states: Gripper state data with mask
+            rgb_images: RGB image data with mask
+            depth_images: Depth image data with mask
+            point_clouds: Point cloud data with mask
+            language_tokens: Language token data with mask
+            custom_data: Dictionary of custom sensor data with masks
+        """
         self.joint_positions = joint_positions
         self.joint_velocities = joint_velocities
         self.joint_torques = joint_torques
@@ -46,7 +101,14 @@ class BatchedData:
         self.custom_data = custom_data or {}
 
     def to(self, device: torch.device):
-        """Move all tensors to the specified device."""
+        """Move all tensors to the specified device.
+
+        Args:
+            device: Target device for tensor placement
+
+        Returns:
+            BatchedData: New instance with all tensors moved to the specified device
+        """
         return BatchedData(
             joint_positions=_to_device(self.joint_positions, device),
             joint_velocities=_to_device(self.joint_velocities, device),
@@ -64,6 +126,14 @@ class BatchedData:
         )
 
     def __len__(self):
+        """Get the batch size from the first available tensor.
+
+        Returns:
+            int: Batch size (first dimension of available tensors)
+
+        Raises:
+            ValueError: If no tensors are found in the batch
+        """
         for attr_name, attr_value in self.__dict__.items():
             if isinstance(attr_value, MaskableData) and attr_value.data is not None:
                 return attr_value.data.size(0)
@@ -71,6 +141,11 @@ class BatchedData:
 
 
 class BatchedTrainingSamples:
+    """Container for batched training samples with inputs and target outputs.
+
+    Provides structured access to training data including input features,
+    target outputs, and prediction masks for supervised learning scenarios.
+    """
 
     def __init__(
         self,
@@ -78,12 +153,26 @@ class BatchedTrainingSamples:
         outputs: BatchedData = None,
         output_predicition_mask: torch.FloatTensor = None,
     ):
+        """Initialize batched training samples.
+
+        Args:
+            inputs: Input data for the model
+            outputs: Target output data for supervision
+            output_predicition_mask: Mask indicating which outputs to predict
+        """
         self.inputs = inputs or BatchedData()
         self.outputs = outputs or BatchedData()
         self.output_predicition_mask = output_predicition_mask
 
     def to(self, device: torch.device):
-        """Move all tensors to the specified device."""
+        """Move all tensors to the specified device.
+
+        Args:
+            device: Target device for tensor placement
+
+        Returns:
+            BatchedTrainingSamples: New instance with tensors moved to device
+        """
         return BatchedTrainingSamples(
             inputs=self.inputs.to(device),
             outputs=self.outputs.to(device),
@@ -95,22 +184,45 @@ class BatchedTrainingSamples:
         )
 
     def __len__(self):
+        """Get the batch size from the input data.
+
+        Returns:
+            int: Batch size
+        """
         return len(self.inputs)
 
 
 class BatchedTrainingOutputs:
+    """Container for training step outputs including predictions, losses, and metrics.
+
+    Provides structured access to the results of a training step including
+    model predictions, computed losses, and evaluation metrics.
+    """
+
     def __init__(
         self,
         output_predicitons: torch.FloatTensor,
         losses: dict[str, torch.FloatTensor],
         metrics: dict[str, torch.FloatTensor],
     ):
+        """Initialize batched training outputs.
+
+        Args:
+            output_predicitons: Model predictions for the batch
+            losses: Dictionary of named loss values
+            metrics: Dictionary of named evaluation metrics
+        """
         self.output_predictions = output_predicitons
         self.losses = losses
         self.metrics = metrics
 
 
 class BatchedInferenceSamples:
+    """Container for batched inference samples.
+
+    Provides structured access to input data for model inference,
+    supporting all robot sensor modalities with device placement.
+    """
 
     def __init__(
         self,
@@ -125,6 +237,20 @@ class BatchedInferenceSamples:
         language_tokens: MaskableData = None,
         custom_data: dict[str, MaskableData] = None,
     ):
+        """Initialize batched inference samples.
+
+        Args:
+            joint_positions: Joint position data with mask
+            joint_velocities: Joint velocity data with mask
+            joint_torques: Joint torque data with mask
+            joint_target_positions: Target joint position data with mask
+            gripper_states: Gripper state data with mask
+            rgb_images: RGB image data with mask
+            depth_images: Depth image data with mask
+            point_clouds: Point cloud data with mask
+            language_tokens: Language token data with mask
+            custom_data: Dictionary of custom sensor data with masks
+        """
         self.joint_positions = joint_positions
         self.joint_velocities = joint_velocities
         self.joint_torques = joint_torques
@@ -137,7 +263,14 @@ class BatchedInferenceSamples:
         self.custom_data = custom_data or {}
 
     def to(self, device: torch.device):
-        """Move all tensors to the specified device."""
+        """Move all tensors to the specified device.
+
+        Args:
+            device: Target device for tensor placement
+
+        Returns:
+            BatchedInferenceSamples: New instance with tensors moved to device
+        """
         return BatchedInferenceSamples(
             joint_positions=_to_device(self.joint_positions, device),
             joint_velocities=_to_device(self.joint_velocities, device),
@@ -155,6 +288,14 @@ class BatchedInferenceSamples:
         )
 
     def __len__(self):
+        """Get the batch size from the first available tensor.
+
+        Returns:
+            int: Batch size (first dimension of available tensors)
+
+        Raises:
+            ValueError: If no tensors are found in the batch
+        """
         for attr_name, attr_value in self.__dict__.items():
             if isinstance(attr_value, MaskableData) and attr_value.data is not None:
                 return attr_value.data.size(0)

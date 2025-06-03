@@ -1,5 +1,9 @@
-"""A simple world model that predicts future images
-based on current images, state, and actions."""
+"""Simple world model for predicting future images given actions.
+
+This module implements a world model that predicts future RGB images based on
+current observations, robot state, and actions. The model uses U-Net architectures
+conditioned on features to generate future visual states.
+"""
 
 import time
 
@@ -20,8 +24,17 @@ from .modules import ImageEncoder, UNet
 
 
 class SimpleWorldModel(NeuracoreModel):
-    """World model that predicts future images based on
-    current images, state, and actions."""
+    """World model that predicts future images based on multimodal inputs.
+
+    This model predicts future RGB images conditioned on current visual
+    observations, robot proprioceptive state, and planned actions. It uses
+    separate U-Net architectures for each camera view, with conditioning
+    features derived from encoded current images, state, and actions.
+
+    The model is designed for world modeling in robot manipulation tasks,
+    enabling model-based planning by predicting visual consequences of
+    action sequences.
+    """
 
     def __init__(
         self,
@@ -33,6 +46,17 @@ class SimpleWorldModel(NeuracoreModel):
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
     ):
+        """Initialize the simple world model.
+
+        Args:
+            model_init_description: Model initialization parameters
+            hidden_dim: Hidden dimension for embedding layers
+            cnn_output_dim: Output dimension for CNN encoders
+            num_layers: Number of layers (not used in current implementation)
+            lr: Learning rate for main parameters
+            lr_backbone: Learning rate for CNN backbone
+            weight_decay: Weight decay for optimizer
+        """
         super().__init__(model_init_description)
         self.hidden_dim = hidden_dim
         self.cnn_output_dim = cnn_output_dim
@@ -133,19 +157,40 @@ class SimpleWorldModel(NeuracoreModel):
             )
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
-        """Convert list of floats to torch tensor."""
+        """Convert list of floats to torch tensor on the correct device.
+
+        Args:
+            data: List of float values
+
+        Returns:
+            torch.FloatTensor: Tensor on the model's device
+        """
         return torch.tensor(data, dtype=torch.float32, device=self.device)
 
     def _preprocess_joint_state(
         self, joint_state: torch.FloatTensor
     ) -> torch.FloatTensor:
-        """Preprocess the states."""
+        """Normalize joint state using dataset statistics.
+
+        Args:
+            joint_state: Raw joint state tensor
+
+        Returns:
+            torch.FloatTensor: Normalized joint state
+        """
         if self.joint_state_mean is not None and self.joint_state_std is not None:
             return (joint_state - self.joint_state_mean) / self.joint_state_std
         return joint_state
 
     def _preprocess_actions(self, actions: torch.FloatTensor) -> torch.FloatTensor:
-        """Preprocess the actions."""
+        """Normalize actions using dataset statistics.
+
+        Args:
+            actions: Raw action tensor
+
+        Returns:
+            torch.FloatTensor: Normalized actions
+        """
         if self.actions_mean is not None and self.actions_std is not None:
             return (actions - self.actions_mean) / self.actions_std
         return actions
@@ -153,7 +198,18 @@ class SimpleWorldModel(NeuracoreModel):
     def _predict_future_images(
         self, batch: BatchedInferenceSamples
     ) -> torch.FloatTensor:
-        """Predict future images for the given batch."""
+        """Predict future images for the given batch.
+
+        Processes current images, state, and actions through their respective
+        encoders, then uses U-Net architectures to predict future image sequences
+        for each camera view.
+
+        Args:
+            batch: Input batch with current observations and actions
+
+        Returns:
+            torch.FloatTensor: Predicted future images [B, T, cameras, 3, H, W]
+        """
         batch_size = len(batch)
         num_cameras = self.dataset_description.max_num_rgb_images
 
@@ -238,7 +294,14 @@ class SimpleWorldModel(NeuracoreModel):
         return future_images.view(b, cams, t, -1, h, w).transpose(1, 2)
 
     def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
-        """Forward pass for inference."""
+        """Perform inference to predict future image sequences.
+
+        Args:
+            batch: Input batch with current observations and actions
+
+        Returns:
+            ModelPrediction: Predicted future images with timing information
+        """
         t = time.time()
         future_images = self._predict_future_images(batch)
         prediction_time = time.time() - t
@@ -259,7 +322,17 @@ class SimpleWorldModel(NeuracoreModel):
         )
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
-        """Training step."""
+        """Perform a single training step.
+
+        Predicts future images and computes reconstruction loss against target
+        future images. Also computes PSNR metric for image quality evaluation.
+
+        Args:
+            batch: Training batch with inputs and target future images
+
+        Returns:
+            BatchedTrainingOutputs: Training outputs with losses and metrics
+        """
         # Create inference sample from training input
         inference_sample = BatchedInferenceSamples(
             joint_positions=batch.inputs.joint_positions,
@@ -313,7 +386,14 @@ class SimpleWorldModel(NeuracoreModel):
         )
 
     def configure_optimizers(self) -> list[torch.optim.Optimizer]:
-        """Configure and return optimizer for the model."""
+        """Configure optimizer with different learning rates for different components.
+
+        Uses separate learning rates for image encoder backbones (typically lower)
+        and other model parameters.
+
+        Returns:
+            list[torch.optim.Optimizer]: List containing the configured optimizer
+        """
         backbone_params = []
         other_params = []
 
@@ -331,7 +411,12 @@ class SimpleWorldModel(NeuracoreModel):
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:
-        """Return the data types supported by the model."""
+        """Get the input data types supported by this model.
+
+        Returns:
+            list[DataType]: List of supported input data types including
+                joint states, actions, and RGB images
+        """
         return [
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
@@ -342,7 +427,11 @@ class SimpleWorldModel(NeuracoreModel):
 
     @staticmethod
     def get_supported_output_data_types() -> list[DataType]:
-        """Return the data types supported by the model."""
+        """Get the output data types supported by this model.
+
+        Returns:
+            list[DataType]: List of supported output data types
+        """
         return [
             DataType.RGB_IMAGE,
         ]
