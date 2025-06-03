@@ -1,3 +1,10 @@
+"""Neural network modules for the ACT (Action Chunking Transformer) model.
+
+This module provides the core building blocks for the ACT architecture including
+image encoders, positional encodings, and transformer encoder/decoder layers.
+These components are designed to work together for robot manipulation tasks.
+"""
+
 import math
 from typing import Optional
 
@@ -8,13 +15,19 @@ import torchvision.models as models
 
 
 class ACTImageEncoder(nn.Module):
-    """Encode images using ResNet backbone.
+    """Encode images using ResNet backbone with spatial position embeddings.
 
-    Maintaining spatial dimensions and providing position embeddings.
-    Similar to DETR's backbone implementation.
+    Maintains spatial dimensions and provides learnable position embeddings
+    similar to DETR's backbone implementation. Uses a pretrained ResNet18
+    backbone with projection layers for feature extraction.
     """
 
-    def __init__(self, output_dim: int = 256):  # Changed default to 256
+    def __init__(self, output_dim: int = 256):
+        """Initialize the image encoder.
+
+        Args:
+            output_dim: Output feature dimension after projection
+        """
         super().__init__()
         # Use pretrained ResNet but remove final layers
         self.backbone = self._build_backbone()
@@ -26,23 +39,29 @@ class ACTImageEncoder(nn.Module):
         self.reset_parameters()
 
     def _build_backbone(self) -> nn.Module:
-        """Build backbone CNN, removing avgpool and fc layers."""
+        """Build backbone CNN, removing avgpool and fc layers.
+
+        Returns:
+            nn.Module: ResNet18 backbone without classification layers
+        """
         resnet = getattr(models, "resnet18")(pretrained=True)
         return nn.Sequential(*list(resnet.children())[:-2])
 
     def reset_parameters(self):
-        """Initialize position embeddings."""
+        """Initialize position embeddings with uniform distribution."""
         nn.init.uniform_(self.row_embed.weight)
         nn.init.uniform_(self.col_embed.weight)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass through image encoder.
+        """Forward pass through image encoder.
+
         Args:
             x: Image tensor of shape (batch, channels, height, width)
+
         Returns:
-            features: Encoded features of shape (batch, output_dim, height, width)
-            pos: Position embeddings of shape (batch, output_dim, height, width)
+            tuple[torch.Tensor, torch.Tensor]:
+                - features: Encoded features of shape (batch, output_dim, height, width)
+                - pos: Position embeddings of shape (batch, output_dim, height, width)
         """
         # Extract features
         x = self.backbone(x)
@@ -73,9 +92,20 @@ class ACTImageEncoder(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    """Implement the PE function."""
+    """Sinusoidal positional encoding for transformer sequences.
+
+    Implements the standard sinusoidal positional encoding as described
+    in "Attention Is All You Need" (Vaswani et al., 2017).
+    """
 
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        """Initialize positional encoding.
+
+        Args:
+            d_model: Model dimension
+            dropout: Dropout probability
+            max_len: Maximum sequence length to support
+        """
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
 
@@ -90,12 +120,24 @@ class PositionalEncoding(nn.Module):
         self.register_buffer("pe", pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Add positional encoding to input tensor.
+
+        Args:
+            x: Input tensor of shape (seq_len, batch, d_model)
+
+        Returns:
+            torch.Tensor: Input with positional encoding added
+        """
         x = x + self.pe[:, : x.size(1)]
         return self.dropout(x)
 
 
 class TransformerEncoderLayer(nn.Module):
-    """Implement a single encoder layer."""
+    """Single transformer encoder layer with pre-layer normalization.
+
+    Implements a transformer encoder layer following the pre-norm architecture
+    with multi-head self-attention and position-wise feed-forward network.
+    """
 
     def __init__(
         self,
@@ -104,6 +146,14 @@ class TransformerEncoderLayer(nn.Module):
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
     ):
+        """Initialize transformer encoder layer.
+
+        Args:
+            d_model: Model dimension
+            nhead: Number of attention heads
+            dim_feedforward: Feedforward network hidden dimension
+            dropout: Dropout probability
+        """
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         self.linear1 = nn.Linear(d_model, dim_feedforward)
@@ -120,6 +170,16 @@ class TransformerEncoderLayer(nn.Module):
         src_mask: Optional[torch.Tensor] = None,
         src_key_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Forward pass through encoder layer.
+
+        Args:
+            src: Input tensor of shape (seq_len, batch, d_model)
+            src_mask: Optional attention mask
+            src_key_padding_mask: Optional key padding mask
+
+        Returns:
+            torch.Tensor: Output tensor of same shape as input
+        """
         src2 = self.norm1(src)
         src2, _ = self.self_attn(
             src2, src2, src2, attn_mask=src_mask, key_padding_mask=src_key_padding_mask
@@ -134,7 +194,12 @@ class TransformerEncoderLayer(nn.Module):
 
 
 class TransformerDecoderLayer(nn.Module):
-    """Implement a single decoder layer."""
+    """Single transformer decoder layer with cross-attention.
+
+    Implements a transformer decoder layer with masked self-attention,
+    cross-attention to encoder memory, and position-wise feed-forward network.
+    Supports query position embeddings for object detection style architectures.
+    """
 
     def __init__(
         self,
@@ -143,6 +208,14 @@ class TransformerDecoderLayer(nn.Module):
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
     ):
+        """Initialize transformer decoder layer.
+
+        Args:
+            d_model: Model dimension
+            nhead: Number of attention heads
+            dim_feedforward: Feedforward network hidden dimension
+            dropout: Dropout probability
+        """
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
@@ -166,7 +239,20 @@ class TransformerDecoderLayer(nn.Module):
         memory_key_padding_mask: Optional[torch.Tensor] = None,
         query_pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Forward pass through decoder layer.
 
+        Args:
+            tgt: Target tensor of shape (tgt_len, batch, d_model)
+            memory: Memory tensor from encoder of shape (src_len, batch, d_model)
+            tgt_mask: Optional target attention mask
+            memory_mask: Optional memory attention mask
+            tgt_key_padding_mask: Optional target key padding mask
+            memory_key_padding_mask: Optional memory key padding mask
+            query_pos: Optional query position embeddings
+
+        Returns:
+            torch.Tensor: Output tensor of same shape as target
+        """
         q = k = tgt if query_pos is None else tgt + query_pos
         tgt2 = self.norm1(tgt)
         tgt2, _ = self.self_attn(
@@ -192,7 +278,11 @@ class TransformerDecoderLayer(nn.Module):
 
 
 class TransformerEncoder(nn.Module):
-    """Stack of N encoder layers."""
+    """Stack of transformer encoder layers.
+
+    Composes multiple TransformerEncoderLayer modules with a final layer
+    normalization for encoding sequential input data.
+    """
 
     def __init__(
         self,
@@ -202,6 +292,15 @@ class TransformerEncoder(nn.Module):
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
     ):
+        """Initialize transformer encoder.
+
+        Args:
+            d_model: Model dimension
+            nhead: Number of attention heads
+            num_encoder_layers: Number of encoder layers
+            dim_feedforward: Feedforward network hidden dimension
+            dropout: Dropout probability
+        """
         super().__init__()
         self.layers = nn.ModuleList([
             TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
@@ -215,6 +314,16 @@ class TransformerEncoder(nn.Module):
         mask: Optional[torch.Tensor] = None,
         src_key_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Forward pass through all encoder layers.
+
+        Args:
+            src: Input tensor of shape (seq_len, batch, d_model)
+            mask: Optional attention mask
+            src_key_padding_mask: Optional key padding mask
+
+        Returns:
+            torch.Tensor: Encoded output tensor
+        """
         output = src
 
         for layer in self.layers:
@@ -226,7 +335,11 @@ class TransformerEncoder(nn.Module):
 
 
 class TransformerDecoder(nn.Module):
-    """Stack of N decoder layers."""
+    """Stack of transformer decoder layers.
+
+    Composes multiple TransformerDecoderLayer modules with a final layer
+    normalization for generating sequential output conditioned on memory.
+    """
 
     def __init__(
         self,
@@ -236,6 +349,15 @@ class TransformerDecoder(nn.Module):
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
     ):
+        """Initialize transformer decoder.
+
+        Args:
+            d_model: Model dimension
+            nhead: Number of attention heads
+            num_decoder_layers: Number of decoder layers
+            dim_feedforward: Feedforward network hidden dimension
+            dropout: Dropout probability
+        """
         super().__init__()
         self.layers = nn.ModuleList([
             TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout)
@@ -253,7 +375,20 @@ class TransformerDecoder(nn.Module):
         memory_key_padding_mask: Optional[torch.Tensor] = None,
         query_pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Forward pass through all decoder layers.
 
+        Args:
+            tgt: Target tensor of shape (tgt_len, batch, d_model)
+            memory: Memory tensor from encoder of shape (src_len, batch, d_model)
+            tgt_mask: Optional target attention mask
+            memory_mask: Optional memory attention mask
+            tgt_key_padding_mask: Optional target key padding mask
+            memory_key_padding_mask: Optional memory key padding mask
+            query_pos: Optional query position embeddings
+
+        Returns:
+            torch.Tensor: Decoded output tensor
+        """
         output = tgt
 
         for layer in self.layers:

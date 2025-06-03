@@ -1,3 +1,11 @@
+"""Recording state management for robot data capture sessions.
+
+This module provides centralized management of recording state across robot
+instances with real-time notifications via Server-Sent Events. Handles
+recording lifecycle events and maintains synchronization between local
+state and remote recording triggers.
+"""
+
 import asyncio
 from concurrent.futures import Future
 from datetime import timedelta
@@ -21,6 +29,13 @@ from neuracore.core.streaming.event_loop_utils import get_running_loop
 
 
 class RecordingStateManager(AsyncIOEventEmitter):
+    """Manages recording state across robot instances with real-time notifications.
+
+    Provides centralized tracking of recording sessions for multiple robot instances,
+    with automatic synchronization via Server-Sent Events and event emission for
+    state changes.
+    """
+
     RECORDING_STARTED = "RECORDING_STARTED"
     RECORDING_STOPPED = "RECORDING_STOPPED"
     RECORDING_SAVED = "RECORDING_SAVED"
@@ -31,6 +46,13 @@ class RecordingStateManager(AsyncIOEventEmitter):
         client_session: ClientSession,
         auth: Auth = None,
     ):
+        """Initialize the recording state manager.
+
+        Args:
+            loop: Event loop for async operations
+            client_session: HTTP client session for API communication
+            auth: Authentication object. If not provided, uses default auth
+        """
         super().__init__(loop=loop)
         self.client_session = client_session
         self.auth = auth if auth is not None else get_auth()
@@ -49,14 +71,42 @@ class RecordingStateManager(AsyncIOEventEmitter):
         self.recording_robot_instances: dict[tuple[str, int], str] = dict()
 
     def get_current_recording_id(self, robot_id: str, instance: int) -> str | None:
+        """Get the current recording ID for a robot instance.
+
+        Args:
+            robot_id: Unique identifier for the robot
+            instance: Instance number of the robot
+
+        Returns:
+            str | None: Recording ID if currently recording, None otherwise
+        """
         instance_key = (robot_id, instance)
         return self.recording_robot_instances.get(instance_key, None)
 
     def is_recording(self, robot_id: str, instance: int) -> bool:
+        """Check if a robot instance is currently recording.
+
+        Args:
+            robot_id: Unique identifier for the robot
+            instance: Instance number of the robot
+
+        Returns:
+            bool: True if currently recording, False otherwise
+        """
         instance_key = (robot_id, instance)
         return instance_key in self.recording_robot_instances
 
     def recording_started(self, robot_id: str, instance: int, recording_id: str):
+        """Handle recording start for a robot instance.
+
+        Updates internal state and emits RECORDING_STARTED event. If the robot
+        was already recording with a different ID, stops the previous recording first.
+
+        Args:
+            robot_id: Unique identifier for the robot
+            instance: Instance number of the robot
+            recording_id: Unique identifier for the recording session
+        """
         instance_key = (robot_id, instance)
         previous_recording_id = self.recording_robot_instances.get(instance_key, None)
 
@@ -74,6 +124,16 @@ class RecordingStateManager(AsyncIOEventEmitter):
         )
 
     def recording_stopped(self, robot_id: str, instance: int, recording_id: str):
+        """Handle recording stop for a robot instance.
+
+        Updates internal state and emits RECORDING_STOPPED event. Only processes
+        the stop if the recording ID matches the current recording.
+
+        Args:
+            robot_id: Unique identifier for the robot
+            instance: Instance number of the robot
+            recording_id: Unique identifier for the recording session
+        """
         instance_key = (robot_id, instance)
         current_recording = self.recording_robot_instances.get(instance_key, None)
         if current_recording != recording_id:
@@ -89,6 +149,15 @@ class RecordingStateManager(AsyncIOEventEmitter):
     def updated_recording_state(
         self, is_recording: bool, details: BaseRecodingUpdatePayload
     ):
+        """Update recording state based on remote notification.
+
+        Processes recording state changes from remote notifications and calls
+        appropriate start/stop methods if the state actually changed.
+
+        Args:
+            is_recording: Whether the robot should be recording
+            details: Recording details including robot ID, instance, and recording ID
+        """
         robot_id = details.robot_id
         instance = details.instance
         recording_id = details.recording_id
@@ -116,6 +185,12 @@ class RecordingStateManager(AsyncIOEventEmitter):
             )
 
     async def connect_recording_notification_stream(self):
+        """Connect to recording notification stream via Server-Sent Events.
+
+        Maintains a persistent connection to receive real-time recording state
+        updates with exponential backoff retry logic. Processes different types
+        of recording notifications and updates local state accordingly.
+        """
         backoff = MINIMUM_BACKOFF_LEVEL
         while self.remote_trigger_enabled.is_enabled():
             try:
@@ -171,11 +246,16 @@ class RecordingStateManager(AsyncIOEventEmitter):
                 backoff += 1
 
     def __stop_remote_trigger(self):
+        """Internal method to stop the remote trigger connection."""
         if self.recording_stream_future.running():
             self.recording_stream_future.cancel()
 
     def disable_remote_trigger(self):
-        """Closes connection to server for updates"""
+        """Disable remote recording triggers and close server connection.
+
+        Stops listening for remote recording notifications and closes the
+        persistent connection to the notification stream.
+        """
         self.remote_trigger_enabled.disable()
 
 
@@ -183,6 +263,12 @@ _recording_manager: Future[RecordingStateManager] | None = None
 
 
 async def create_recording_state_manager():
+    """Create a new recording state manager instance.
+
+    Returns:
+        RecordingStateManager: Configured recording state
+            manager with persistent connection
+    """
     # We want to keep the signalling connection alive for as long as possible
     timeout = ClientTimeout(sock_read=None, total=None)
     manager = RecordingStateManager(
@@ -193,6 +279,14 @@ async def create_recording_state_manager():
 
 
 def get_recording_state_manager() -> "RecordingStateManager":
+    """Get the global recording state manager instance.
+
+    Uses a singleton pattern to ensure only one recording state manager
+    exists globally. Thread-safe and handles event loop coordination.
+
+    Returns:
+        RecordingStateManager: The global recording state manager instance
+    """
     global _recording_manager
     if _recording_manager is not None:
         return _recording_manager.result()

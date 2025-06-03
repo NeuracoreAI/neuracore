@@ -1,3 +1,11 @@
+"""Model endpoint management for robot control and inference.
+
+This module provides classes and functions for connecting to and interacting
+with machine learning model endpoints, both local and remote. It handles
+model prediction requests, data synchronization from robot sensors, and
+manages TorchServe instances for local model deployment.
+"""
+
 import base64
 import json
 import logging
@@ -35,9 +43,22 @@ logger = logging.getLogger(__name__)
 
 
 class EndpointPolicy:
-    """Interface to a deployed model endpoint."""
+    """Interface to a deployed model endpoint for robot control.
+
+    This class provides methods for sending robot sensor data to a model
+    endpoint and receiving action predictions. It handles data encoding,
+    request management, and response processing for both local and remote
+    endpoints.
+    """
 
     def __init__(self, robot: Robot, predict_url: str, headers: dict[str, str] = None):
+        """Initialize the endpoint policy with connection details.
+
+        Args:
+            robot: Robot instance for accessing sensor streams.
+            predict_url: URL of the model prediction endpoint.
+            headers: Optional HTTP headers for authentication.
+        """
         self._predict_url = predict_url
         self._headers = headers or {}
         self._process = None
@@ -45,6 +66,18 @@ class EndpointPolicy:
         self.robot = robot
 
     def _encode_image(self, image: np.ndarray) -> str:
+        """Encode numpy image array to base64 string for transmission.
+
+        Converts numpy arrays to PNG format and encodes as base64. For remote
+        endpoints, automatically resizes large images to 224x224 to meet
+        payload size limits.
+
+        Args:
+            image: Numpy array representing an RGB image.
+
+        Returns:
+            Base64 encoded string of the PNG image.
+        """
         pil_image = Image.fromarray(image)
         if not self._is_local:
             if pil_image.size > (224, 224):
@@ -56,7 +89,14 @@ class EndpointPolicy:
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
     def _decode_image(self, encoded_image: str) -> np.ndarray:
-        """Decode base64 image string to numpy array."""
+        """Decode base64 image string back to numpy array.
+
+        Args:
+            encoded_image: Base64 encoded image string.
+
+        Returns:
+            Numpy array representing the decoded image.
+        """
         img_bytes = base64.b64decode(encoded_image)
         buffer = BytesIO(img_bytes)
         pil_image = Image.open(buffer)
@@ -65,6 +105,18 @@ class EndpointPolicy:
     def _maybe_add_exisiting_data(
         self, existing: JointData, to_add: JointData
     ) -> JointData:
+        """Merge joint data from multiple streams into a single data structure.
+
+        Combines joint data while preserving existing values and updating
+        timestamps. Used to aggregate data from multiple joint streams.
+
+        Args:
+            existing: Existing joint data or None.
+            to_add: New joint data to merge.
+
+        Returns:
+            Combined JointData with merged values.
+        """
         # Check if the joint data already exists
         if existing is None:
             return to_add
@@ -75,6 +127,18 @@ class EndpointPolicy:
         return existing
 
     def _create_sync_point(self) -> SyncPoint:
+        """Create a synchronized data point from current robot sensor streams.
+
+        Collects the latest data from all active robot streams including
+        cameras, joint sensors, and language inputs. Organizes the data
+        into a synchronized structure with consistent timestamps.
+
+        Returns:
+            SyncPoint containing all current sensor data.
+
+        Raises:
+            NotImplementedError: If an unsupported stream type is encountered.
+        """
         sync_point = SyncPoint(timestamp=time.time())
         for stream_name, stream in self.robot.list_all_streams().items():
             if "rgb" in stream_name:
@@ -112,18 +176,22 @@ class EndpointPolicy:
         return sync_point
 
     def predict(self, sync_point: SyncPoint | None = None) -> ModelPrediction:
-        """
-        Get action predictions from the model.
+        """Get action predictions from the model endpoint.
+
+        Sends robot sensor data to the model and receives action predictions.
+        Automatically creates a sync point from current robot data if none
+        is provided. Handles image encoding and payload size validation.
 
         Args:
-            sync_point: SyncPoint object containing the data to be sent to the model.
-                If None, a new SyncPoint will be created with the latest data.
+            sync_point: Synchronized sensor data to send to the model. If None,
+                creates a new sync point from the robot's current sensor data.
 
         Returns:
-            numpy.ndarray: Predicted action/joint velocities
+            Model predictions including actions and any generated outputs.
 
         Raises:
-            EndpointError: If prediction fails
+            EndpointError: If prediction request fails or response is invalid.
+            ValueError: If payload size exceeds limits for remote endpoints.
         """
         if sync_point is None:
             sync_point = self._create_sync_point()
@@ -197,7 +265,11 @@ class EndpointPolicy:
             raise EndpointError(f"Error processing endpoint response: {str(e)}")
 
     def disconnect(self) -> None:
-        """Disconnect from the endpoint."""
+        """Disconnect from the endpoint and clean up resources.
+
+        For local endpoints, stops the TorchServe process and releases
+        associated resources. Should be called when done using the endpoint.
+        """
         if self._process:
             subprocess.run(["torchserve", "--stop"], capture_output=True)
             self._process.terminate()
@@ -210,21 +282,24 @@ def connect_endpoint(
     robot_name: Optional[str] = None,
     instance: Optional[int] = 0,
 ) -> EndpointPolicy:
-    """Connect to a remote model endpoint.
+    """Connect to a remote model endpoint deployed on the Neuracore platform.
+
+    Locates an endpoint by name, verifies it's active, and creates a policy
+    interface for making predictions. The endpoint must be deployed and
+    running to establish a connection.
 
     Args:
-        endpoint_name (str): the name or ID of the endpoint to connect to.
-        robot_name: (Optional[str], optional) robot ID. If not provided, uses
-            the last initialized robot.
-        instance: (Optional[int], optional) instance number of the robot.
-            Defaults to 0.
-    Raises:
-        EndpointError: Endpoint Not Found
-        EndpointError: Endpoint Not Active
-        EndpointError: Failed to connect to endpoint
+        endpoint_name: Name or ID of the endpoint to connect to.
+        robot_name: Robot identifier. If not provided, uses the currently
+            active robot from global state.
+        instance: Instance number of the robot for multi-instance deployments.
 
     Returns:
-        EndpointPolicy: The policy by which actions are selected.
+        EndpointPolicy interface for making predictions with the endpoint.
+
+    Raises:
+        EndpointError: If the endpoint is not found, not active, or connection fails.
+        requests.RequestException: If API communication fails.
     """
     auth = get_auth()
     robot = _get_robot(robot_name, instance)
@@ -263,16 +338,30 @@ def connect_local_endpoint(
     train_run_name: Optional[str] = None,
     port: int = 8080,
 ) -> EndpointPolicy:
-    """Connect to a local model endpoint.
+    """Connect to a local model endpoint using TorchServe.
+
+    Sets up a local TorchServe instance with the specified model and creates
+    a policy interface. The model can be provided as a local file path or
+    downloaded from a training run. Only one of path_to_model or train_run_name
+    should be specified.
 
     Args:
-        robot_name: (Optional[str], optional) robot ID. If not provided, uses
-            the last initialized robot.
-        instance: (Optional[int], optional) instance number of the robot.
-            Defaults to 0.
-        path_to_model:  Path to the model file
-        train_run_name: Optional train run name
-        port: Port to run the local endpoint on
+        robot_name: Robot identifier. If not provided, uses the currently
+            active robot if live data is enabled.
+        instance: Instance number of the robot for multi-instance deployments.
+        path_to_model: Local file path to a .mar model archive. Mutually
+            exclusive with train_run_name.
+        train_run_name: Name of a training run to download the model from.
+            Mutually exclusive with path_to_model.
+        port: TCP port for the local TorchServe instance.
+
+    Returns:
+        EndpointPolicy interface for making predictions with the local endpoint.
+
+    Raises:
+        ValueError: If both or neither of path_to_model and train_run_name are provided.
+        EndpointError: If model download, TorchServe setup, or connection fails.
+        FileNotFoundError: If the specified model file doesn't exist.
     """
     if path_to_model is None and train_run_name is None:
         raise ValueError("Must provide either path_to_model or train_run_name")
@@ -365,7 +454,22 @@ def connect_local_endpoint(
 
 
 def _setup_torchserve(path_to_model: str, port: int = 8080) -> subprocess.Popen:
-    """Setup and start TorchServe with our model."""
+    """Setup and start a TorchServe instance with the specified model.
+
+    Creates a TorchServe configuration, starts the service with the provided
+    model, and returns the process handle for lifecycle management.
+
+    Args:
+        path_to_model: File path to the .mar model archive.
+        port: Base port for TorchServe (inference, management, and metrics
+            ports will be allocated sequentially).
+
+    Returns:
+        Subprocess.Popen object representing the TorchServe process.
+
+    Raises:
+        FileNotFoundError: If the model file doesn't exist.
+    """
     model_path = Path(path_to_model)
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")

@@ -1,3 +1,10 @@
+"""Backend utility functions for Neuracore recording and dataset management.
+
+This module provides utility functions for interacting with the Neuracore backend,
+including monitoring active streams and generating unique identifiers for
+synchronized datasets.
+"""
+
 import base64
 import hashlib
 
@@ -13,8 +20,19 @@ from neuracore.core.nc_types import DataType
 def get_num_active_streams(recording_id: str) -> int:
     """Get the number of active streams for a recording.
 
+    Queries the backend to determine how many data streams are currently
+    active for a specific recording. This is used to monitor upload progress
+    and determine when all streams have completed processing.
+
     Args:
-        recording_id: Recording ID
+        recording_id: Unique identifier for the recording to check.
+
+    Returns:
+        The number of streams currently active for the recording.
+
+    Raises:
+        requests.HTTPError: If the API request fails.
+        ValueError: If the response indicates an error or has an unexpected format.
     """
     response = requests.get(
         f"{API_URL}/recording/{recording_id}/get_num_active_streams",
@@ -27,7 +45,21 @@ def get_num_active_streams(recording_id: str) -> int:
 
 
 def synced_dataset_key(sync_freq: int, data_types: list[DataType]) -> str:
-    """Generate a unique key for a synced dataset."""
+    """Generate a unique key for a synced dataset configuration.
+
+    Creates a deterministic identifier based on synchronization frequency
+    and data types. This key is used to identify datasets that share the
+    same synchronization parameters, enabling efficient data organization
+    and retrieval.
+
+    Args:
+        sync_freq: Synchronization frequency in Hz for the dataset.
+        data_types: List of data types included in the synchronized dataset.
+
+    Returns:
+        A URL-safe base64-encoded hash that uniquely identifies the
+        synchronization configuration.
+    """
     names = [data_type.value for data_type in data_types]
     names.sort()
     long_name = "".join([str(sync_freq)] + names).encode()

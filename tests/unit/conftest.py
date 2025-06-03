@@ -125,7 +125,7 @@ def mock_model_mar(tmp_path):
 
 @pytest.fixture
 def reset_neuracore():
-    """Reset NeuraCore global state between tests."""
+    """Reset Neuracore global state between tests."""
     # Store the original authentication instance
     original_auth = neuracore.core.auth._auth
 

@@ -1,3 +1,11 @@
+"""Abstract base class for Neuracore datasets with multi-modal data support.
+
+This module provides the foundation for creating datasets that handle robot
+demonstration data including images, joint states, and language instructions.
+It includes standardized preprocessing, batching, and error handling for
+machine learning training workflows.
+"""
+
 import logging
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
@@ -16,11 +24,12 @@ TrainingSample = BatchedTrainingSamples
 
 
 class NeuracoreDataset(Dataset, ABC):
-    """
-    A small dummy dataset for validating algorithm plumbing.
+    """Abstract base class for Neuracore multi-modal robot datasets.
 
-    This dataset generates random data with the same structure as the real
-    EpisodicDataset, but without requiring any actual data files.
+    This class provides a standardized interface for datasets containing robot
+    demonstration data. It handles data type validation, preprocessing setup,
+    batch collation, and error management for training machine learning models
+    on robot data including images, joint states, and language instructions.
     """
 
     def __init__(
@@ -30,13 +39,21 @@ class NeuracoreDataset(Dataset, ABC):
         output_prediction_horizon: int = 5,
         tokenize_text: Callable[[list[str]], tuple[torch.Tensor, torch.Tensor]] = None,
     ):
-        """
-        Initialize the dummy dataset.
+        """Initialize the dataset with data type specifications and preprocessing.
 
         Args:
-            input_data_types: List of supported input data types
-            output_data_types: List of supported output data types
-            output_prediction_horizon: Length of the action sequence
+            input_data_types: List of data types to include as model inputs
+                (e.g., RGB images, joint positions).
+            output_data_types: List of data types to include as model outputs
+                (e.g., joint target positions, actions).
+            output_prediction_horizon: Number of future timesteps to predict
+                for sequential output tasks.
+            tokenize_text: Function to convert text strings to tokenized tensors.
+                Required if DataType.LANGUAGE is in the data types. Should return
+                (input_ids, attention_mask) tuple.
+
+        Raises:
+            ValueError: If language data is requested but no tokenizer is provided.
         """
         self.input_data_types = input_data_types
         self.output_data_types = output_data_types
@@ -65,14 +82,46 @@ class NeuracoreDataset(Dataset, ABC):
     def load_sample(
         self, episode_idx: int, timestep: Optional[int] = None
     ) -> TrainingSample:
+        """Load a single training sample from the dataset.
+
+        This method must be implemented by concrete subclasses to define how
+        individual samples are loaded and formatted.
+
+        Args:
+            episode_idx: Index of the episode to load data from.
+            timestep: Optional specific timestep within the episode.
+                If None, may load entire episode or use class-specific logic.
+
+        Returns:
+            A TrainingSample containing input and output data formatted
+            for model training.
+        """
         pass
 
     @abstractmethod
     def __len__(self) -> int:
+        """Get the total number of samples in the dataset.
+
+        Returns:
+            The number of training samples available.
+        """
         pass
 
     def __getitem__(self, idx: int) -> TrainingSample:
-        """Get a sample from the dataset."""
+        """Get a training sample by index with error handling.
+
+        Implements the PyTorch Dataset interface with robust error handling
+        to manage data loading failures gracefully during training.
+
+        Args:
+            idx: Index of the sample to retrieve.
+
+        Returns:
+            A TrainingSample containing the requested data.
+
+        Raises:
+            Exception: If sample loading fails after exhausting retry attempts.
+        """
         while self._error_count < self._max_error_count:
             try:
                 episode_idx = idx % self.num_episodes
@@ -86,7 +135,18 @@ class NeuracoreDataset(Dataset, ABC):
     def _collate_fn(
         self, samples: list[BatchedData], data_types: list[DataType]
     ) -> BatchedData:
-        """Collate a list of samples into a single batch."""
+        """Collate individual data samples into a batched format.
+
+        Combines multiple samples into batched tensors with appropriate stacking
+        for different data modalities. Handles masking for variable-length data.
+
+        Args:
+            samples: List of BatchedData objects to combine.
+            data_types: List of data types to include in the batch.
+
+        Returns:
+            A single BatchedData object containing the stacked samples.
+        """
         bd = BatchedData()
         if DataType.JOINT_POSITIONS in data_types:
             bd.joint_positions = MaskableData(
@@ -121,7 +181,19 @@ class NeuracoreDataset(Dataset, ABC):
         return bd
 
     def collate_fn(self, samples: list[TrainingSample]) -> BatchedTrainingSamples:
-        """Collate a list of samples into a single batch."""
+        """Collate training samples into a complete batch for model training.
+
+        Combines individual training samples into batched inputs, outputs, and
+        prediction masks suitable for model training. This function is typically
+        used with PyTorch DataLoader.
+
+        Args:
+            samples: List of TrainingSample objects to batch together.
+
+        Returns:
+            A BatchedTrainingSamples object containing batched inputs, outputs,
+            and prediction masks ready for model training.
+        """
         return BatchedTrainingSamples(
             inputs=self._collate_fn([s.inputs for s in samples], self.input_data_types),
             outputs=self._collate_fn(

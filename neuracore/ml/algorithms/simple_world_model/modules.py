@@ -1,3 +1,10 @@
+"""Neural network modules for world model architectures.
+
+This module provides building blocks for world models including image encoders
+and U-Net architectures for image prediction. The U-Net implementation supports
+conditioning on external features for generating future visual states.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,26 +12,48 @@ import torchvision.models as models
 
 
 class ImageEncoder(nn.Module):
-    """Encode images using ResNet backbone."""
+    """Encode images using ResNet backbone with projection layer.
+
+    Uses a pretrained ResNet architecture (without the final classification
+    layer) to extract visual features, followed by a linear projection to
+    map to the desired output dimension.
+    """
 
     def __init__(self, output_dim: int = 512, backbone: str = "resnet18"):
+        """Initialize the image encoder.
+
+        Args:
+            output_dim: Desired output feature dimension
+            backbone: ResNet architecture name (e.g., "resnet18", "resnet50")
+        """
         super().__init__()
         # Use pretrained ResNet but remove final layer
         self.backbone = self._build_backbone(backbone)
         self.proj = nn.Linear(512, output_dim)
 
     def _build_backbone(self, backbone_name: str) -> nn.Module:
-        """Build backbone CNN."""
+        """Build backbone CNN by removing classification layers.
+
+        Args:
+            backbone_name: Name of the ResNet architecture to use
+
+        Returns:
+            nn.Module: ResNet backbone without final classification layers
+        """
         resnet = getattr(models, backbone_name)(pretrained=True)
         return nn.Sequential(*list(resnet.children())[:-1])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass through image encoder.
+        """Forward pass through image encoder.
+
+        Processes input images through the ResNet backbone, flattens the
+        spatial dimensions, and projects to the desired output dimension.
+
         Args:
             x: Image tensor of shape (batch, channels, height, width)
+
         Returns:
-            Encoded features of shape (batch, output_dim)
+            torch.Tensor: Encoded features of shape (batch, output_dim)
         """
         batch = x.shape[0]
         x = self.backbone(x)
@@ -33,9 +62,20 @@ class ImageEncoder(nn.Module):
 
 
 class DoubleConv(nn.Module):
-    """Double convolution block used in UNet."""
+    """Double convolution block used in U-Net architecture.
+
+    Applies two consecutive convolution operations with batch normalization
+    and ReLU activation. This is the fundamental building block of U-Net.
+    """
 
     def __init__(self, in_channels, out_channels, mid_channels=None):
+        """Initialize double convolution block.
+
+        Args:
+            in_channels: Number of input channels
+            out_channels: Number of output channels
+            mid_channels: Number of intermediate channels. If None, uses out_channels
+        """
         super().__init__()
         if not mid_channels:
             mid_channels = out_channels
@@ -49,26 +89,63 @@ class DoubleConv(nn.Module):
         )
 
     def forward(self, x):
+        """Forward pass through double convolution.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            torch.Tensor: Output after double convolution
+        """
         return self.double_conv(x)
 
 
 class Down(nn.Module):
-    """Downscaling with maxpool then double conv."""
+    """Downsampling block for U-Net encoder path.
+
+    Applies max pooling for spatial downsampling followed by
+    double convolution to increase feature depth.
+    """
 
     def __init__(self, in_channels, out_channels):
+        """Initialize downsampling block.
+
+        Args:
+            in_channels: Number of input channels
+            out_channels: Number of output channels
+        """
         super().__init__()
         self.maxpool_conv = nn.Sequential(
             nn.MaxPool2d(2), DoubleConv(in_channels, out_channels)
         )
 
     def forward(self, x):
+        """Forward pass through downsampling block.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            torch.Tensor: Downsampled and processed tensor
+        """
         return self.maxpool_conv(x)
 
 
 class Up(nn.Module):
-    """Upscaling then double conv."""
+    """Upsampling block for U-Net decoder path.
+
+    Applies upsampling (either bilinear or transpose convolution) followed
+    by concatenation with skip connection and double convolution.
+    """
 
     def __init__(self, in_channels, out_channels, bilinear=True):
+        """Initialize upsampling block.
+
+        Args:
+            in_channels: Number of input channels
+            out_channels: Number of output channels
+            bilinear: If True, use bilinear upsampling; otherwise use transpose conv
+        """
         super().__init__()
 
         # if bilinear, use the normal convolutions to reduce the number of channels
@@ -82,6 +159,15 @@ class Up(nn.Module):
             self.conv = DoubleConv(in_channels, out_channels)
 
     def forward(self, x1, x2):
+        """Forward pass through upsampling block.
+
+        Args:
+            x1: Input tensor from previous layer
+            x2: Skip connection tensor from encoder path
+
+        Returns:
+            torch.Tensor: Upsampled and processed tensor
+        """
         x1 = self.up(x1)
         # input is CHW
         diffY = x2.size()[2] - x1.size()[2]
@@ -95,18 +181,45 @@ class Up(nn.Module):
 
 
 class OutConv(nn.Module):
-    """Final convolution layer."""
+    """Final convolution layer for U-Net output.
+
+    Applies a 1x1 convolution to map from feature space to the
+    desired number of output channels.
+    """
 
     def __init__(self, in_channels, out_channels):
+        """Initialize output convolution layer.
+
+        Args:
+            in_channels: Number of input channels
+            out_channels: Number of output channels
+        """
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x):
+        """Forward pass through output convolution.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            torch.Tensor: Output tensor with desired number of channels
+        """
         return self.conv(x)
 
 
 class UNet(nn.Module):
-    """UNet architecture for image prediction with conditioning."""
+    """U-Net architecture for image prediction with external conditioning.
+
+    Implements a U-Net with encoder-decoder structure and skip connections,
+    enhanced with the ability to condition on external features (e.g., robot
+    state, actions). The conditioning is injected at the bottleneck layer.
+
+    This architecture is particularly suitable for image-to-image translation
+    tasks in world modeling where future images depend on current observations
+    and planned actions.
+    """
 
     def __init__(
         self,
@@ -116,6 +229,15 @@ class UNet(nn.Module):
         condition_dim=512,
         bilinear=True,
     ):
+        """Initialize U-Net with conditioning support.
+
+        Args:
+            input_channels: Number of input image channels (e.g., 3 for RGB)
+            output_channels: Number of output image channels
+            feature_map_sizes: List of feature map sizes for each level
+            condition_dim: Dimension of conditioning features
+            bilinear: If True, use bilinear upsampling; otherwise use transpose conv
+        """
         super().__init__()
         if feature_map_sizes is None:
             feature_map_sizes = [64, 128, 256, 512]
@@ -163,15 +285,18 @@ class UNet(nn.Module):
         self.outc = OutConv(feature_map_sizes[0], output_channels)
 
     def forward(self, x, condition):
-        """
-        Forward pass of UNet.
+        """Forward pass of conditioned U-Net.
+
+        Processes input image through encoder path, injects conditioning
+        features at the bottleneck, then generates output through decoder
+        path with skip connections.
 
         Args:
             x: Input image tensor of shape (batch, channels, height, width)
             condition: Condition tensor of shape (batch, condition_dim)
 
         Returns:
-            Predicted output image
+            torch.Tensor: Predicted output image with sigmoid activation
         """
         # Process conditions
         cond_features = self.condition_processor(condition)  # [batch, 64]

@@ -1,3 +1,11 @@
+"""High-level API for Neuracore robot management and data recording.
+
+This module provides the main public interface for connecting to robots,
+managing authentication, controlling data recording sessions, and handling
+live data streaming. It maintains global state for active robots and
+recording sessions.
+"""
+
 import logging
 import time
 from typing import Optional
@@ -18,7 +26,22 @@ logger = logging.getLogger(__name__)
 
 
 def _get_robot(robot_name: str, instance: int) -> Robot:
-    """Get a robot by name and instance."""
+    """Get a robot by name and instance.
+
+    Retrieves either the active robot from global state or looks up a specific
+    robot by name and instance. Falls back to the active robot if no name
+    is provided.
+
+    Args:
+        robot_name: Name of the robot to retrieve.
+        instance: Instance number of the robot.
+
+    Returns:
+        The requested robot instance.
+
+    Raises:
+        RobotError: If no active robot exists and no robot_name is provided.
+    """
     robot: Robot = GlobalSingleton()._active_robot
     if robot_name is None:
         if GlobalSingleton()._active_robot is None:
@@ -31,11 +54,13 @@ def _get_robot(robot_name: str, instance: int) -> Robot:
 
 
 def validate_version() -> None:
-    """
-    Validate the NeuraCore version.
+    """Validate the Neuracore version compatibility.
+
+    Checks if the current Neuracore client version is compatible with the
+    server. This validation is performed once per session and cached.
 
     Raises:
-        RobotError: If the NeuraCore version is not compatible
+        RobotError: If the Neuracore version is not compatible with the server.
     """
     if not GlobalSingleton()._has_validated_version:
         get_auth().validate_version()
@@ -43,24 +68,31 @@ def validate_version() -> None:
 
 
 def login(api_key: Optional[str] = None) -> None:
-    """
-    Authenticate with NeuraCore server.
+    """Authenticate with the Neuracore server.
+
+    Establishes authentication using an API key from the parameter, environment
+    variable, or previously saved configuration. The authentication state is
+    maintained for subsequent API calls.
 
     Args:
-        api_key: Optional API key. If not provided, will look for NEURACORE_API_KEY
-                environment variable or previously saved configuration.
+        api_key: API key for authentication. If not provided, will look for
+            NEURACORE_API_KEY environment variable or previously saved configuration.
 
     Raises:
-        AuthenticationError: If authentication fails
+        AuthenticationError: If authentication fails due to invalid credentials
+            or network issues.
     """
     get_auth().login(api_key)
 
 
 def logout() -> None:
-    """Clear authentication state."""
+    """Clear authentication state and reset global session data.
+
+    Logs out from the Neuracore server and resets all global state including
+    active robots, recording IDs, dataset IDs, and version validation status.
+    """
     get_auth().logout()
     GlobalSingleton()._active_robot = None
-    GlobalSingleton()._active_recording_ids = {}
     GlobalSingleton()._active_dataset_id = None
     GlobalSingleton()._has_validated_version = False
 
@@ -73,16 +105,29 @@ def connect_robot(
     overwrite: bool = False,
     shared: bool = False,
 ) -> Robot:
-    """
-    Initialize a robot connection.
+    """Initialize a robot connection and set it as the active robot.
+
+    Creates or connects to a robot instance, validates version compatibility,
+    and initializes streaming managers for live data and recording state updates.
+    The robot becomes the active robot for subsequent operations.
+
+    Upload of a robot description file (URDF or MJCF) is not required,
+    but it is recommended for better visualization within Neuracore.
 
     Args:
-        robot_name: Unique identifier for the robot
-        instance: Instance number of the robot
-        urdf_path: Optional path to robot's URDF file
-        mjcf_path: Optional path to robot's MJCF file
-        overwrite: Whether to overwrite an existing robot with the same name
-        shared: Whether the robot is shared
+        robot_name: Unique identifier for the robot.
+        instance: Instance number of the robot for multi-instance deployments.
+        urdf_path: Path to the robot's URDF file.
+        mjcf_path: Path to the robot's MJCF file. This will be converted
+            into URDF.
+        overwrite: Whether to overwrite an existing robot configuration
+            with the same name.
+        shared: Whether you want to register the robot as shared/open-source.
+            Note that setting shared=True is only available to specific
+            members allocated by the Neuracore team.
+
+    Returns:
+        The initialized and connected robot instance.
     """
     validate_version()
     robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
@@ -96,15 +141,21 @@ def connect_robot(
 def start_recording(
     robot_name: Optional[str] = None, instance: Optional[int] = 0
 ) -> None:
-    """
-    Start recording data for a specific robot.
+    """Start recording data for a specific robot.
+
+    Begins a new recording session for the specified robot, capturing all
+    configured data streams. Requires an active dataset to be set before
+    starting the recording.
 
     Args:
-        robot_name: Optional robot ID. If not provided, uses the last initialized robot
-        instance: Optional instance number of the robot
+        robot_name: Robot identifier. If not provided, uses the currently
+            active robot from the global state.
+        instance: Instance number of the robot for multi-instance scenarios.
 
     Raises:
-        RobotError: If no robot is active and no robot_name provided
+        RobotError: If no robot is active and no robot_name is provided,
+            if a recording is already in progress, or if no active dataset
+            has been set.
     """
     robot = _get_robot(robot_name, instance)
     if robot.is_recording():
@@ -117,16 +168,20 @@ def start_recording(
 def stop_recording(
     robot_name: Optional[str] = None, instance: Optional[int] = 0, wait: bool = False
 ) -> None:
-    """
-    Stop recording data for a specific robot.
+    """Stop recording data for a specific robot.
+
+    Ends the current recording session for the specified robot. Optionally
+    waits for all data streams to finish uploading before returning.
 
     Args:
-        robot_name: Optional robot ID. If not provided, uses the last initialized robot
-        instance: Optional instance number of the robot
-        wait: Whether to wait for the recording to finish
+        robot_name: Robot identifier. If not provided, uses the currently
+            active robot from the global state.
+        instance: Instance number of the robot for multi-instance scenarios.
+        wait: Whether to block until all data streams have finished uploading
+            to the backend storage.
 
     Raises:
-        RobotError: If no robot is active and no robot_name provided
+        RobotError: If no robot is active and no robot_name is provided.
     """
     robot = _get_robot(robot_name, instance)
     if not robot.is_recording():
@@ -142,12 +197,16 @@ def stop_recording(
 def stop_live_data(
     robot_name: Optional[str] = None, instance: Optional[int] = 0
 ) -> None:
-    """
-    Stop sharing live data for active monitoring from the neuracore platform.
+    """Stop sharing live data for active monitoring from the Neuracore platform.
+
+    Terminates the live data streaming connection that allows real-time
+    monitoring and visualization of robot data through the Neuracore platform.
+    This does not affect data recording, only the live streaming capability.
 
     Args:
-        robot_name: Optional robot ID. If not provided, uses the last initialized robot
-        instance: Optional instance number of the robot
+        robot_name: Robot identifier. If not provided, uses the currently
+            active robot from the global state.
+        instance: Instance number of the robot for multi-instance scenarios.
     """
     robot = _get_robot(robot_name, instance)
     get_robot_streaming_manager(robot.id, robot.instance).close()

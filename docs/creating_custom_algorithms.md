@@ -1,17 +1,17 @@
-# Creating Custom Algorithms for NeuraCore
+# Creating Custom Algorithms for Neuracore
 
-This guide explains how to create and add your own custom machine learning algorithms to NeuraCore. You have two options:
+This guide explains how to create and add your own custom machine learning algorithms to Neuracore. You have two options:
 
-1. **Open Source Contribution**: Submit a PR to add your algorithm to the NeuraCore repository
+1. **Open Source Contribution**: Submit a PR to add your algorithm to the Neuracore repository
 2. **Private Algorithm**: Upload your algorithm directly to your account at neuracore.app
 
-## Understanding NeuraCore Models
+## Understanding Neuracore Models
 
-All NeuraCore algorithms must extend the `NeuracoreModel` class. This base class provides the foundation for creating models that can process robot data and generate actions.
+All Neuracore algorithms must extend the `NeuracoreModel` class. This base class provides the foundation for creating models that can process robot data and generate actions.
 
 ### Key Concepts
 
-- **Data Types**: NeuraCore supports various data types (joint positions, RGB images, etc.)
+- **Data Types**: Neuracore supports various data types (joint positions, RGB images, etc.)
 - **Batched Data**: Input and output data is provided in batched form
 - **Model Architecture**: You define how your model processes inputs and generates outputs
 
@@ -80,7 +80,7 @@ class MyCustomAlgorithm(NeuracoreModel):
         joint_features = self.joint_encoder(batch.joint_positions.data)
         predictions = self.output_layer(joint_features)
         
-        # Format the output according to NeuraCore expectations
+        # Format the output according to Neuracore expectations
         return ModelPrediction(
             outputs={DataType.JOINT_TARGET_POSITIONS: predictions.detach().cpu().numpy()},
             prediction_time=0.0,  # You may want to time this in a real implementation
@@ -162,11 +162,11 @@ my_algorithm/
 └── requirements.txt          # Optional: additional dependencies
 ```
 
-## Adding Your Algorithm to NeuraCore
+## Adding Your Algorithm to Neuracore
 
 ### Option 1: Open Source Contribution
 
-1. Fork the NeuraCore repository
+1. Fork the Neuracore repository
 2. Add your algorithm to `neuracore/ml/algorithms/your_algorithm/`
 3. Ensure your implementation passes all tests
 4. Submit a pull request to the main repository
@@ -201,7 +201,7 @@ If you encounter issues with your algorithm:
 
 - Verify that your model correctly handles the batch structure
 - Check that your model returns outputs in the expected format
-- Ensure all tensor dimensions match what NeuraCore expects
+- Ensure all tensor dimensions match what Neuracore expects
 - When uploading as a ZIP, make sure your module imports are correctly structured
 
 ## Example: Testing with an Existing Algorithm

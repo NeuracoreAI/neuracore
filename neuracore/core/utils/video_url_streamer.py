@@ -1,3 +1,10 @@
+"""Streaming video decoder for processing remote video files without full download.
+
+This module provides classes for streaming video files from URLs and decoding
+frames on-the-fly without downloading the entire file. It uses a custom
+buffered IO reader to provide seamless streaming capabilities with PyAV.
+"""
+
 import io
 import logging
 from typing import Iterator
@@ -12,18 +19,21 @@ CHUNK_SIZE = 256 * 1024  # Multiples of 256KB
 
 
 class StreamingReader(io.BufferedIOBase):
-    """
-    A custom IO reader that reads from a buffer and then from a streaming response.
-    This allows PyAV to read data as if it were a complete file.
+    """A custom IO reader that combines buffer and streaming response data.
+
+    This class provides a file-like interface that allows PyAV to read video
+    data as if it were a complete local file, while actually streaming from
+    a remote source. It maintains a buffer for the beginning of the file and
+    seamlessly transitions to reading from the streaming response.
     """
 
     def __init__(self, buffer: io.BytesIO, response: requests.Response):
-        """
-        Initialize the streaming reader.
+        """Initialize the streaming reader with buffer and response.
 
         Args:
-            buffer: A BytesIO buffer containing the beginning of the file
-            response: The streaming response from requests
+            buffer: BytesIO buffer containing the initial portion of the file
+                needed for format detection and metadata parsing.
+            response: Streaming HTTP response from requests for the video file.
         """
         self.buffer = buffer
         self.response = response
@@ -34,14 +44,18 @@ class StreamingReader(io.BufferedIOBase):
         self.leftover = None
 
     def read(self, size: int = -1) -> bytes:
-        """
-        Read size bytes from the stream.
+        """Read bytes from the combined buffer and streaming response.
+
+        Reads data first from the buffer, then seamlessly transitions to
+        reading from the streaming response. Handles partial reads and
+        maintains proper position tracking.
 
         Args:
-            size: Number of bytes to read, -1 means read all
+            size: Number of bytes to read. -1 means read all available data.
 
         Returns:
-            bytes: The read data
+            The requested bytes, which may be fewer than requested if
+            end of stream is reached.
         """
         if size == 0:
             return b""
@@ -95,17 +109,20 @@ class StreamingReader(io.BufferedIOBase):
         return result
 
     def _read_from_response(self, size: int) -> bytes:
-        """
-        Read data from the response iterator.
+        """Read data from the streaming HTTP response iterator.
+
+        Accumulates data from the response stream until the requested amount
+        is available or the stream ends. Handles partial chunks and stores
+        overflow data for subsequent reads.
 
         Args:
-            size: Number of bytes to read, -1 means read all available
+            size: Number of bytes to read. -1 means read all available data.
 
         Returns:
-            bytes: The read data
+            The requested bytes from the response stream.
 
         Raises:
-            StopIteration: If no more data is available
+            StopIteration: If no more data is available from the stream.
         """
         result = b""
         try:
@@ -129,37 +146,38 @@ class StreamingReader(io.BufferedIOBase):
         return result
 
     def seekable(self) -> bool:
-        """
-        Check if the stream is seekable.
+        """Check if the stream supports seeking operations.
 
         Returns:
-            bool: False, as we can't seek in a streaming response
+            Always False, as streaming responses cannot be seeked.
         """
         return False
 
     def readable(self) -> bool:
-        """
-        Check if the stream is readable.
+        """Check if the stream supports read operations.
 
         Returns:
-            bool: True, as we can read from the stream
+            Always True, as the stream supports reading.
         """
         return True
 
 
 class VideoStreamer:
-    """
-    A class that streams a video from a URL, decoding frames on the fly.
-    Yields frames as numpy arrays without downloading the entire video first.
+    """Streams and decodes video frames from a remote URL without full download.
+
+    This class provides an iterator interface for processing video frames
+    from remote sources. It uses streaming HTTP requests and progressive
+    decoding to minimize memory usage and enable processing of large video
+    files without downloading them entirely.
     """
 
     def __init__(self, video_url: str, buffer_size: int = CHUNK_SIZE):
-        """
-        Initialize the video streamer.
+        """Initialize the video streamer for a remote video URL.
 
         Args:
-            video_url: URL of the video
-            buffer_size: Size of the initial buffer to download (default: 10MB)
+            video_url: HTTP/HTTPS URL of the video file to stream.
+            buffer_size: Size of the initial buffer to download for format
+                detection and metadata parsing.
         """
         self.video_url = video_url
         self.buffer_size = buffer_size
@@ -169,11 +187,19 @@ class VideoStreamer:
         self.frame_count = 0
 
     def __iter__(self) -> Iterator[np.ndarray]:
-        """
-        Iterator that yields frames as numpy arrays.
+        """Iterate over video frames as numpy arrays.
+
+        Starts the streaming request, initializes the video decoder, and
+        yields frames as RGB numpy arrays. The iterator handles the entire
+        streaming and decoding pipeline automatically.
 
         Returns:
-            Iterator yielding numpy arrays of shape (height, width, 3) in RGB format
+            Iterator that yields numpy arrays of shape (height, width, 3)
+            in RGB format representing video frames.
+
+        Raises:
+            Exception: If the video URL is inaccessible, contains no video
+                streams, or if decoding fails.
         """
         # Start the streaming request
         # self.response = requests.get(self.video_url, stream=True)
@@ -221,7 +247,11 @@ class VideoStreamer:
             self.close()
 
     def close(self) -> None:
-        """Close the video stream and release resources."""
+        """Close the video stream and release all resources.
+
+        Properly closes the video container and HTTP response to prevent
+        resource leaks. Should be called when done processing the video.
+        """
         if self.container:
             self.container.close()
         if self.response:
@@ -229,9 +259,19 @@ class VideoStreamer:
         logger.debug(f"Stream closed. Processed {self.frame_count} frames.")
 
     def __enter__(self):
-        """Context manager entry."""
+        """Context manager entry point.
+
+        Returns:
+            Self for use in with statements.
+        """
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit, ensures streamer is closed."""
+        """Context manager exit point that ensures proper cleanup.
+
+        Args:
+            exc_type: Exception type if an exception occurred.
+            exc_val: Exception value if an exception occurred.
+            exc_tb: Exception traceback if an exception occurred.
+        """
         self.close()

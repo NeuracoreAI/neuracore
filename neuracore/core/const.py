@@ -1,3 +1,5 @@
+"""Configuration constants for Neuracore client behavior."""
+
 import os
 
 # Disabling these can help when running tests or if you just want to run a

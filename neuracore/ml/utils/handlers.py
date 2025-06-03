@@ -1,3 +1,10 @@
+"""TorchServe handler for robot control model inference and deployment.
+
+This module provides a TorchServe-compatible handler for deploying Neuracore
+robot control models. It handles model loading, data preprocessing, inference
+execution, and response formatting for robot control applications.
+"""
+
 import base64
 import io
 import json
@@ -28,25 +35,39 @@ logger = logging.getLogger(__name__)
 
 
 class RobotModelHandler(BaseHandler):
-    """Handler for robot control models in TorchServe."""
+    """TorchServe handler for robot control model inference.
+
+    This handler extends TorchServe's BaseHandler to provide specialized
+    functionality for robot control models including multi-modal data
+    preprocessing, model loading via AlgorithmLoader, and structured
+    output formatting for robot control applications.
+    """
 
     def __init__(self):
+        """Initialize the robot model handler with default configuration."""
         super().__init__()
         self.initialized = False
         self.normalization_stats = None
         self.dataset_description: DatasetDescription = None
 
     def _load_pickled_model(self, model_dir, model_file, model_pt_path):
-        """
-        Loads the pickle file from the given model path.
+        """Load a Neuracore model using the AlgorithmLoader.
+
+        Dynamically loads the model class from the algorithm directory and
+        initializes it with the appropriate configuration. Supports loading
+        pre-trained weights if available.
 
         Args:
-            model_dir (str): Points to the location of the model artifacts.
-            model_file (.py): the file which contains the model class.
-            model_pt_path (str): points to the location of the model pickle file.
+            model_dir: Directory containing the model artifacts and algorithm code.
+            model_file: Name of the Python file containing the model class.
+            model_pt_path: Path to the pre-trained model weights file, or None for
+                randomly initialized models.
 
         Returns:
-            serialized model file: Returns the pickled pytorch model file
+            The loaded and initialized model instance ready for inference.
+
+        Raises:
+            RuntimeError: If the model.py file is missing (legacy check).
         """
         model_def_path = os.path.join(model_dir, model_file)
         if not os.path.isfile(model_def_path):
@@ -63,8 +84,15 @@ class RobotModelHandler(BaseHandler):
         return model
 
     def initialize(self, context):
-        """Initialize model and preprocessing."""
+        """Initialize the model handler with TorchServe context.
 
+        Loads model configuration, initializes the model using the parent class
+        infrastructure, and prepares the handler for inference requests.
+
+        Args:
+            context: TorchServe context object containing system properties
+                and configuration information.
+        """
         # Get model configuration from dataset description
         model_init_description_path = os.path.join(
             context.system_properties.get("model_dir"), "model_init_description.json"
@@ -83,14 +111,28 @@ class RobotModelHandler(BaseHandler):
         logger.info("Model initialized!")
 
     def _decode_image(self, encoded_image: str) -> np.ndarray:
-        """Decode base64 image string to numpy array."""
+        """Decode base64-encoded image string to numpy array.
+
+        Args:
+            encoded_image: Base64-encoded image string from client requests.
+
+        Returns:
+            Numpy array representing the decoded image in RGB format.
+        """
         img_bytes = base64.b64decode(encoded_image)
         buffer = io.BytesIO(img_bytes)
         pil_image = Image.open(buffer)
         return np.array(pil_image)
 
     def _encode_image(self, image: np.ndarray) -> str:
-        """Encode image as base64 string."""
+        """Encode numpy image array to base64 string for response.
+
+        Args:
+            image: Numpy array representing an image to encode.
+
+        Returns:
+            Base64-encoded string representation of the image.
+        """
         pil_image = Image.fromarray(image.astype("uint8"))
         buffer = io.BytesIO()
         pil_image.save(buffer, format="PNG")
@@ -99,6 +141,18 @@ class RobotModelHandler(BaseHandler):
     def _process_joint_data(
         self, joint_data: list[JointData], max_len: int
     ) -> MaskableData:
+        """Process joint state data into batched tensor format.
+
+        Converts joint data from multiple samples into a batched tensor with
+        appropriate padding and masking for variable-length joint configurations.
+
+        Args:
+            joint_data: List of JointData objects from the batch.
+            max_len: Maximum joint dimension for padding.
+
+        Returns:
+            MaskableData containing batched joint values and attention masks.
+        """
         values = np.zeros((len(joint_data), max_len))
         mask = np.zeros((len(joint_data), max_len))
         for i, jd in enumerate(joint_data):
@@ -113,6 +167,18 @@ class RobotModelHandler(BaseHandler):
     def _process_image_data(
         self, image_data: list[dict[str, CameraData]], max_len: int
     ) -> MaskableData:
+        """Process camera image data into batched tensor format.
+
+        Decodes base64 images, applies standard preprocessing transforms,
+        and creates batched tensors with masking for variable numbers of cameras.
+
+        Args:
+            image_data: List of dictionaries mapping camera names to CameraData.
+            max_len: Maximum number of cameras to support with padding.
+
+        Returns:
+            MaskableData containing batched image tensors and attention masks.
+        """
         values = np.zeros((len(image_data), max_len, 3, 224, 224))
         mask = np.zeros((len(image_data), max_len))
         for i, images in enumerate(image_data):
@@ -131,7 +197,17 @@ class RobotModelHandler(BaseHandler):
         )
 
     def _process_language_data(self, language_data: list[LanguageData]) -> MaskableData:
-        """Process language data using tokenizer."""
+        """Process natural language instruction data using model tokenizer.
+
+        Tokenizes text instructions into input IDs and attention masks using
+        the model's built-in tokenization functionality.
+
+        Args:
+            language_data: List of LanguageData objects containing text instructions.
+
+        Returns:
+            MaskableData containing tokenized text and attention masks.
+        """
         # Tokenize all texts in the batch
         texts = [ld.text for ld in language_data]
         input_ids, attention_mask = self.model.tokenize_text(texts)
@@ -141,7 +217,18 @@ class RobotModelHandler(BaseHandler):
         )
 
     def preprocess(self, requests):
-        """Preprocess batch of requests."""
+        """Preprocess incoming requests into model-compatible format.
+
+        Converts raw HTTP requests containing SyncPoint data into batched
+        tensors suitable for model inference. Handles multiple data modalities
+        including joint states, images, and language instructions.
+
+        Args:
+            requests: List of HTTP requests containing JSON-encoded SyncPoint data.
+
+        Returns:
+            BatchedInferenceSamples object ready for model inference.
+        """
         batch = BatchedInferenceSamples()
         sync_points: list[SyncPoint] = []
         for req in requests:
@@ -188,13 +275,35 @@ class RobotModelHandler(BaseHandler):
         return batch.to(self.device)
 
     def inference(self, data: BatchedInferenceSamples) -> ModelPrediction:
-        """Run model inference."""
+        """Execute model inference on preprocessed data.
+
+        Runs the model forward pass with gradient computation disabled for
+        efficient inference.
+
+        Args:
+            data: Preprocessed batch of inference samples.
+
+        Returns:
+            ModelPrediction containing the model's output predictions.
+        """
         with torch.no_grad():
             batch_output: ModelPrediction = self.model(data)
             return batch_output
 
     def postprocess(self, inference_output: ModelPrediction) -> list[dict]:
-        """Postprocess model output."""
+        """Postprocess model predictions into client-compatible format.
+
+        Converts model output tensors back to JSON-serializable formats,
+        including base64 encoding for images and list conversion for
+        numerical data.
+
+        Args:
+            inference_output: Raw model predictions from the inference step.
+
+        Returns:
+            List containing a single dictionary with the formatted model
+            predictions ready for HTTP response.
+        """
         if DataType.RGB_IMAGE in inference_output.outputs:
             # Shape: [B, T, CAMS, 224, 224, 3]
             rgbs = inference_output.outputs[DataType.RGB_IMAGE]

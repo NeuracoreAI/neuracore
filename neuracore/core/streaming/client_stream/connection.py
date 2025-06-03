@@ -1,3 +1,10 @@
+"""WebRTC peer-to-peer connection management.
+
+This module provides WebRTC-based peer-to-peer connections for real-time
+streaming of video and data channels between robot clients and viewers.
+Handles SDP negotiation, ICE candidate exchange, and connection lifecycle.
+"""
+
 import asyncio
 import json
 from dataclasses import dataclass, field
@@ -28,6 +35,12 @@ ICE_SERVERS = [
 
 @dataclass
 class PierToPierConnection:
+    """WebRTC peer-to-peer connection for streaming robot sensor data.
+
+    Manages the complete lifecycle of a WebRTC connection including SDP
+    negotiation, ICE candidate exchange, video tracks, and data channels.
+    """
+
     id: str
     local_stream_id: str
     remote_stream_id: str
@@ -48,6 +61,12 @@ class PierToPierConnection:
     _closed: bool = False
 
     async def force_ice_negotiation(self):
+        """Force ICE candidate negotiation for all transceivers.
+
+        Manually sends ICE candidates for all active transceivers and SCTP
+        transport when ICE gathering is complete. This ensures proper
+        connectivity establishment.
+        """
         if self.connection.iceGatheringState != "complete":
             print("ICE gathering state is not complete")
             return
@@ -100,7 +119,11 @@ class PierToPierConnection:
                 )
 
     def setup_connection(self):
-        """Set up event handlers for the connection"""
+        """Set up event handlers for the WebRTC connection.
+
+        Configures connection state change handlers to automatically
+        close the connection when it fails or is closed remotely.
+        """
 
         @self.connection.on("connectionstatechange")
         async def on_connectionstatechange():
@@ -109,12 +132,23 @@ class PierToPierConnection:
                     await self.close()
 
     def add_video_source(self, source: VideoSource):
-        """Add a track to the connection"""
+        """Add a video source to the connection.
 
+        Args:
+            source: Video source containing the track to be streamed
+        """
         track = source.get_video_track()
         self.connection.addTrack(track)
 
     def add_event_source(self, source: JSONSource):
+        """Add a JSON event source to the connection via data channel.
+
+        Creates a data channel for the source and sets up listeners to
+        send state updates when the data channel is open.
+
+        Args:
+            source: JSON source for streaming structured data
+        """
         data_channel = self.connection.createDataChannel(source.mid)
 
         async def on_update(state: str):
@@ -137,7 +171,13 @@ class PierToPierConnection:
         self.data_channel_callback[source.mid] = on_update
 
     async def send_handshake_message(self, message_type: MessageType, content: str):
-        """Send a message to the remote peer through the signaling server"""
+        """Send a signaling message to the remote peer.
+
+        Args:
+            message_type: Type of signaling message
+                (SDP offer/answer, ICE candidate, etc.)
+            content: Message payload content
+        """
         await self.client_session.post(
             f"{API_URL}/signalling/message/submit",
             headers=self.auth.get_headers(),
@@ -151,6 +191,15 @@ class PierToPierConnection:
         )
 
     def fix_mid_ordering(self, when: str = "offer"):
+        """Fix media ID ordering for transceivers.
+
+        Ensures that transceivers have the correct track assignments
+        based on their media IDs. This is necessary for proper SDP
+        negotiation and track correlation.
+
+        Args:
+            when: Description of when this fix is being applied (for logging)
+        """
         tracks: dict[str, VideoTrack] = {}
         for transceiver in self.connection.getTransceivers():
             track = transceiver.sender.track
@@ -166,7 +215,11 @@ class PierToPierConnection:
                 transceiver.sender.replaceTrack(track)
 
     async def on_ice(self, ice_message: str):
-        """Handle received ICE candidate"""
+        """Handle received ICE candidate from remote peer.
+
+        Args:
+            ice_message: JSON string containing ICE candidate information
+        """
         if self._closed:
             return
         ice_content = json.loads(ice_message)
@@ -176,7 +229,14 @@ class PierToPierConnection:
         await self.connection.addIceCandidate(candidate)
 
     async def on_offer(self, offer: str):
-        """Handle received SDP offer"""
+        """Handle received SDP offer from remote peer.
+
+        Processes the offer, creates an answer, and sends it back through
+        the signaling server. Includes media ID ordering fixes.
+
+        Args:
+            offer: SDP offer string from the remote peer
+        """
         if self._closed:
             print("offer to closed connection")
             return
@@ -191,6 +251,14 @@ class PierToPierConnection:
         await self.send_handshake_message(MessageType.SDP_ANSWER, answer.sdp)
 
     async def on_answer(self, answer_sdp: str):
+        """Handle received SDP answer from remote peer.
+
+        Processes the answer and triggers ICE negotiation. Includes
+        proper state validation and error handling.
+
+        Args:
+            answer_sdp: SDP answer string from the remote peer
+        """
         if self.has_received_answer:
             return
         self.has_received_answer = True
@@ -213,6 +281,11 @@ class PierToPierConnection:
             self.has_received_answer = False
 
     async def send_offer(self):
+        """Send SDP offer to remote peer.
+
+        Creates and sends an SDP offer through the signaling server.
+        Includes proper state validation and error handling with retry logic.
+        """
         if self._closed:
             print("Cannot send offer from closed connection")
             return
@@ -236,7 +309,11 @@ class PierToPierConnection:
             self.has_sent_offer = False
 
     async def close(self):
-        """Close the connection"""
+        """Close the peer-to-peer connection gracefully.
+
+        Closes the WebRTC connection, removes event listeners, and
+        triggers the cleanup callback. Ensures proper resource cleanup.
+        """
         if not self._closed:
             self._closed = True
             await self.connection.close()

@@ -1,3 +1,11 @@
+"""Streaming video encoder with chunked upload support for robot recordings.
+
+This module provides a streaming video uploader that encodes video frames in
+real-time to MP4 format and uploads them to cloud storage using resumable
+uploads. It supports variable frame rates, frame transformations, and includes
+metadata handling for robot camera data.
+"""
+
 import io
 import json
 import logging
@@ -26,7 +34,14 @@ CHUNK_SIZE = 64 * MB_CHUNK
 
 
 class StreamingVideoUploader(BucketUploader):
-    """A video encoder that handles variable framerate and streams."""
+    """A video encoder that handles variable framerate streaming and chunked uploads.
+
+    This class provides real-time video encoding with configurable codecs, pixel
+    formats, and frame transformations. It encodes video frames to MP4 format
+    and uploads them in chunks while maintaining frame metadata for synchronization.
+    The encoding and upload process runs asynchronously to avoid blocking frame
+    capture.
+    """
 
     def __init__(
         self,
@@ -41,18 +56,27 @@ class StreamingVideoUploader(BucketUploader):
         video_name: str = "video.mp4",
         codec_context_options: dict[str, str] | None = None,
     ):
-        """
-        Initialize a streaming video encoder.
+        """Initialize a streaming video encoder.
+
+        Sets up the video encoding pipeline with specified parameters and starts
+        the asynchronous upload thread. The encoder supports frame transformations
+        and various codec configurations for different quality and performance
+        requirements.
 
         Args:
-            recording_id: Recording ID
-            camera_id: Camera ID
-            width: Frame width
-            height: Frame height
-            transform_frame: Frame transformation function
-            codec: Video codec
-            pixel_format: Pixel format
-            chunk_size: Size of chunks to upload
+            recording_id: Unique identifier for the recording session.
+            path: Target directory path in the cloud storage bucket.
+            width: Frame width in pixels.
+            height: Frame height in pixels.
+            transform_frame: Optional function to transform frames before encoding.
+                Should accept and return numpy arrays of shape (height, width, 3).
+            codec: Video codec to use for encoding (e.g., "libx264", "libx265").
+            pixel_format: Pixel format for encoding (e.g., "yuv444p10le", "yuv420p").
+            chunk_size: Size in bytes of each upload chunk. Will be adjusted
+                to be a multiple of 256 KiB if necessary.
+            video_name: Filename for the output video file.
+            codec_context_options: Additional codec-specific options for fine-tuning
+                encoding parameters.
         """
         super().__init__(recording_id)
         self.path = path
@@ -72,8 +96,12 @@ class StreamingVideoUploader(BucketUploader):
         self._update_num_active_streams(1)
 
     def _thread_setup(self) -> None:
-        """Setup thread for upload loop."""
+        """Setup thread-local resources for the video encoding and upload loop.
 
+        Initializes the video encoder, adjusts chunk size requirements, creates
+        the MP4 container with fragmented headers for streaming, and sets up
+        tracking variables for timestamp management and buffer handling.
+        """
         # Ensure chunk_size is a multiple of 256 KiB
         if self.chunk_size % CHUNK_MULTIPLE != 0:
             self.chunk_size = ((self.chunk_size // CHUNK_MULTIPLE) + 1) * CHUNK_MULTIPLE
@@ -121,8 +149,12 @@ class StreamingVideoUploader(BucketUploader):
         self.frame_metadatas: list[CameraData] = []
 
     def _upload_loop(self) -> None:
-        """
-        Upload chunks in a separate thread.
+        """Main video encoding and upload loop running in a separate thread.
+
+        Processes queued frame data, encodes frames to MP4, manages chunked
+        uploads, and handles encoder flushing and container finalization.
+        Also uploads frame metadata as a separate JSON file after video
+        encoding is complete.
         """
         self._thread_setup()
 
@@ -164,24 +196,31 @@ class StreamingVideoUploader(BucketUploader):
         self._update_num_active_streams(-1)
 
     def add_frame(self, frame_data: np.ndarray, metadata: CameraData) -> None:
-        """
-        Add frame to the video with timestamp and stream if buffer large enough.
+        """Add a video frame to the encoding queue.
+
+        Queues a frame and its associated metadata for asynchronous encoding
+        and upload. The frame will be processed in the order received and
+        assigned appropriate timestamps based on the metadata.
 
         Args:
-            frame_data: RGB frame data as numpy array with shape (height, width, 3)
-            json_data: JSON data to log with the frame
+            frame_data: RGB frame data as numpy array with shape (height, width, 3).
+                Should match the width and height specified during initialization.
+            metadata: Camera data containing timestamp and other frame information
+                that will be preserved for synchronization purposes.
         """
         self._upload_queue.put((frame_data, metadata))
 
     def _add_frame(self, frame_data: np.ndarray, frame_metadata: CameraData) -> None:
-        """
-        Add frame to the video with timestamp and stream if buffer large enough.
+        """Encode a video frame and upload chunks when buffer threshold is reached.
+
+        Applies frame transformations if configured, handles timestamp management
+        for variable frame rates, encodes the frame to the configured format,
+        and triggers chunk uploads when the buffer reaches the specified size.
 
         Args:
-            frame_data: RGB frame data as numpy array with shape (height, width, 3)
-            json_data: JSON data to log with the frame
+            frame_data: RGB frame data as numpy array with shape (height, width, 3).
+            frame_metadata: Camera data containing timestamp and frame information.
         """
-
         if self.transform_frame is not None:
             frame_data = self.transform_frame(frame_data)
 
@@ -224,8 +263,14 @@ class StreamingVideoUploader(BucketUploader):
         self.frame_metadatas.append(frame_metadata)
 
     def _upload_chunks(self) -> None:
-        """
-        Upload chunks of exactly chunk_size bytes if enough data is available.
+        """Upload complete chunks of the configured size.
+
+        Processes the upload buffer and uploads chunks of exactly chunk_size
+        bytes when enough data is available. Continues until insufficient
+        data remains for a complete chunk.
+
+        Raises:
+            RuntimeError: If any chunk upload fails.
         """
         # Upload complete chunks while we have enough data
         while len(self.upload_buffer) >= self.chunk_size:
@@ -242,8 +287,14 @@ class StreamingVideoUploader(BucketUploader):
                 raise RuntimeError("Failed to upload chunk")
 
     def finish(self) -> threading.Thread:
-        """
-        Finish encoding and upload any remaining data.
+        """Complete the video encoding process and initiate final upload.
+
+        Signals the encoding thread that no more frames will be added, allowing
+        it to flush the encoder, finalize the MP4 container, and upload any
+        remaining data including frame metadata.
+
+        Returns:
+            The upload thread that can be joined to wait for completion.
         """
         # Note we dont join on the (non-daemon) thread as we dont want to block
         self._upload_queue.put((None, None))
@@ -251,8 +302,14 @@ class StreamingVideoUploader(BucketUploader):
         return self._upload_thread
 
     def _upload_json_data(self) -> None:
-        """
-        Upload timestamps to the server.
+        """Upload frame metadata as a JSON file to cloud storage.
+
+        Creates a separate metadata file containing all frame information
+        including timestamps and frame indices for synchronization with
+        other data streams in the recording.
+
+        Raises:
+            requests.HTTPError: If the metadata upload fails.
         """
         params = {
             "filepath": f"{self.path}/metadata.json",

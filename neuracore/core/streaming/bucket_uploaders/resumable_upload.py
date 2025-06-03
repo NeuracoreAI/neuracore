@@ -1,3 +1,11 @@
+"""Resumable upload functionality for Google Cloud Storage integration.
+
+This module provides a ResumableUpload class that handles chunked uploads to
+Google Cloud Storage with retry logic and progress tracking. It supports
+resuming interrupted uploads and provides proper error handling with
+exponential backoff.
+"""
+
 import logging
 import time
 
@@ -10,17 +18,21 @@ logger = logging.getLogger(__name__)
 
 
 class ResumableUpload:
-    """
-    Handles resumable uploads to Google Cloud Storage.
+    """Handles resumable uploads to Google Cloud Storage.
+
+    This class manages the lifecycle of a resumable upload session, including
+    obtaining upload URLs, tracking progress, handling retries, and managing
+    chunk uploads with proper HTTP range headers. It supports resuming
+    interrupted uploads by checking server status.
     """
 
     def __init__(self, recording_id: str, filepath: str, content_type: str):
-        """
-        Initialize a resumable upload to GCS.
+        """Initialize a resumable upload to GCS.
 
         Args:
-            recording_id: Recording ID
-            camera_id: Name of the sensor
+            recording_id: Unique identifier for the recording.
+            filepath: Target file path in the storage bucket.
+            content_type: MIME type of the file being uploaded.
         """
         self.recording_id = recording_id
         self.filepath = filepath
@@ -30,11 +42,16 @@ class ResumableUpload:
         self.max_retries = 5
 
     def _get_upload_session_uri(self) -> str:
-        """
-        Get a resumable upload session URI from the backend.
+        """Get a resumable upload session URI from the backend.
+
+        Makes an API call to obtain a resumable upload session URL that will
+        be used for all subsequent chunk uploads.
 
         Returns:
-            str: Resumable upload session URI
+            The resumable upload session URI from Google Cloud Storage.
+
+        Raises:
+            requests.HTTPError: If the API request fails.
         """
         auth = get_auth()
         params = {
@@ -50,15 +67,21 @@ class ResumableUpload:
         return response.json()["url"]
 
     def upload_chunk(self, data: bytes, is_final: bool = False) -> bool:
-        """
-        Upload a chunk of data to the resumable upload session.
+        """Upload a chunk of data to the resumable upload session.
+
+        Uploads a chunk of data with proper range headers and retry logic.
+        Automatically handles upload position verification and exponential
+        backoff on failures.
 
         Args:
-            data: Chunk of data to upload
-            is_final: Whether this is the final chunk
+            data: Binary data chunk to upload.
+            is_final: Whether this is the final chunk of the upload.
 
         Returns:
-            bool: Whether the upload was successful
+            True if the upload was successful, False otherwise.
+
+        Raises:
+            Exception: If there's a mismatch between local and server upload positions.
         """
         if len(data) == 0 and not is_final:
             return True  # Nothing to upload
@@ -116,11 +139,17 @@ class ResumableUpload:
         return False
 
     def check_status(self) -> int:
-        """
-        Check the status of the resumable upload.
+        """Check the status of the resumable upload session.
+
+        Queries the upload session to determine how many bytes have been
+        successfully uploaded so far. This is used for resuming interrupted
+        uploads and verifying upload progress.
 
         Returns:
-            int: Bytes uploaded so far
+            Number of bytes that have been successfully uploaded to the server.
+
+        Raises:
+            Exception: If the server returns an unexpected status code.
         """
         headers = {"Content-Length": "0", "Content-Range": "bytes */*"}
 

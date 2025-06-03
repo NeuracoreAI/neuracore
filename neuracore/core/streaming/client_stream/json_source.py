@@ -1,3 +1,10 @@
+"""JSON data source for streaming structured data over WebRTC.
+
+This module provides a rate-limited JSON data source that can publish
+state updates to WebRTC data channels with automatic frequency throttling
+to prevent overwhelming the network connection.
+"""
+
 import asyncio
 import json
 import time
@@ -13,11 +20,25 @@ MINIMUM_EVENT_DELTA = 1 / MAXIMUM_EVENT_FREQUENCY_HZ
 
 
 class JSONSource(AsyncIOEventEmitter):
+    """Event-driven JSON data source with rate limiting for WebRTC streaming.
+
+    Provides a mechanism to publish JSON state updates with automatic
+    throttling to prevent network congestion. Extends AsyncIOEventEmitter
+    to support event-driven architecture.
+    """
+
     STATE_UPDATED_EVENT = "STATE_UPDATED_EVENT"
 
     def __init__(
         self, mid: str, stream_enabled: EnabledManager, loop: AbstractEventLoop = None
     ):
+        """Initialize the JSON source.
+
+        Args:
+            mid: Media identifier for this data source
+            stream_enabled: Manager for controlling streaming state
+            loop: Optional event loop. If not provided, uses current loop
+        """
         super().__init__(loop)
         self.mid = mid
         self._last_state: Optional[dict] = None
@@ -26,7 +47,14 @@ class JSONSource(AsyncIOEventEmitter):
         self.stream_enabled = stream_enabled
 
     def publish(self, state: dict):
-        """Publish an update to all listeners"""
+        """Publish a state update to all listeners.
+
+        Schedules the state update for emission with rate limiting.
+        If streaming is disabled, the update is ignored.
+
+        Args:
+            state: Dictionary containing the state data to publish
+        """
         if not self.stream_enabled.is_enabled():
             return
         self._last_state = state
@@ -36,13 +64,22 @@ class JSONSource(AsyncIOEventEmitter):
             )
 
     def get_last_state(self) -> str | None:
+        """Get the last published state as a JSON string.
+
+        Returns:
+            str | None: JSON-serialized last state, or None if no state exists
+        """
         if not self._last_state:
             return None
         return json.dumps(self._last_state)
 
     async def _submit_event(self):
-        """Submit an event to the server"""
+        """Submit an event with rate limiting.
 
+        Internal method that handles the actual event emission with
+        frequency throttling. Ensures updates don't exceed the maximum
+        frequency to prevent network congestion.
+        """
         remaining_time = self._last_update_time + MINIMUM_EVENT_DELTA - time.time()
 
         if remaining_time > 0:

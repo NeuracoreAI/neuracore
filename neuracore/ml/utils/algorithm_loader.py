@@ -1,3 +1,11 @@
+"""Dynamic algorithm loading and dependency management for Neuracore models.
+
+This module provides utilities for dynamically loading machine learning algorithms
+from directories, managing their dependencies, and finding NeuracoreModel subclasses.
+It handles package setup, requirements installation, and various import strategies
+to support flexible algorithm development workflows.
+"""
+
 import importlib.util
 import logging
 import os
@@ -43,29 +51,37 @@ class ModelNotFoundError(AlgorithmLoaderError):
 
 
 class AlgorithmLoader:
-    """
-    Utility for loading the first NeuracoreModel subclass found in a directory,
-    properly importing the directory as a package to support relative imports.
+    """Dynamic loader for Neuracore machine learning algorithms.
+
+    This class provides functionality to load algorithms from directories by
+    setting up proper Python package environments, installing dependencies,
+    and locating NeuracoreModel subclasses. It supports various import strategies
+    to handle different algorithm organization patterns and relative imports.
     """
 
     def __init__(self, algorithm_dir: Path):
-        """
-        Initialize the algorithm loader.
+        """Initialize the algorithm loader with a target directory.
 
         Args:
-            algorithm_dir: Directory containing the algorithm code
+            algorithm_dir: Path to the directory containing the algorithm code
+                and optional requirements.txt file.
         """
         self.algorithm_dir = algorithm_dir
 
     def install_requirements(self) -> bool:
-        """
-        Check for requirements.txt in the algorithm directory and install packages.
+        """Install Python packages from requirements.txt if present.
+
+        Searches for a requirements.txt file in the algorithm directory and
+        installs the specified packages using pip. Automatically filters out
+        Neuracore dependencies to avoid version conflicts.
 
         Returns:
-            bool: True if requirements were installed successfully, False otherwise
+            True if requirements were installed successfully or no requirements
+            file was found, False otherwise.
 
         Raises:
-            RequirementsInstallError: If requirements installation fails
+            RequirementsInstallError: If requirements installation fails due to
+                missing pip, invalid requirements file, or package installation errors.
         """
         req_file = self.algorithm_dir / "requirements.txt"
         if not req_file.exists():
@@ -109,11 +125,13 @@ class AlgorithmLoader:
             raise RequirementsInstallError(error_msg)
 
     def get_all_files(self) -> List[Path]:
-        """
-        Get all files in the algorithm directory.
+        """Get all Python files in the algorithm directory recursively.
+
+        Scans the algorithm directory and all subdirectories for Python files,
+        excluding __init__.py files which are handled separately.
 
         Returns:
-            List[Path]: List of all files in the directory
+            List of Path objects representing all Python files found.
         """
         files = []
         for root, _, filenames in os.walk(self.algorithm_dir):
@@ -123,14 +141,17 @@ class AlgorithmLoader:
         return files
 
     def _setup_package_environment(self) -> str:
-        """
-        Set up the package environment for importing.
+        """Set up the directory as a Python package for proper importing.
+
+        Creates __init__.py files as needed and modifies sys.path to enable
+        package-style imports and relative imports within the algorithm directory.
 
         Returns:
-            str: The package name
+            The package name derived from the directory name.
 
         Raises:
-            PackageSetupError: If package setup fails
+            PackageSetupError: If package setup fails due to file system errors
+                or sys.path modification issues.
         """
         try:
             # Create __init__.py if it doesn't exist
@@ -162,15 +183,18 @@ class AlgorithmLoader:
     def _find_model_in_module(
         self, module, module_name: str
     ) -> Optional[Type[NeuracoreModel]]:
-        """
-        Search for NeuracoreModel subclasses in a module.
+        """Search for NeuracoreModel subclasses within an imported module.
+
+        Inspects all attributes of a module to find classes that inherit from
+        NeuracoreModel, excluding the base NeuracoreModel class itself.
 
         Args:
-            module: The imported module
-            module_name: Name of the module for logging
+            module: The imported Python module to search.
+            module_name: Name of the module for logging purposes.
 
         Returns:
-            Optional[Type[NeuracoreModel]]: Found model class or None
+            The first NeuracoreModel subclass found, or None if no valid
+            model classes are discovered.
         """
         try:
             for attr_name in dir(module):
@@ -197,14 +221,21 @@ class AlgorithmLoader:
             return None
 
     def _try_import_package(self, package_name: str) -> Optional[Type[NeuracoreModel]]:
-        """
-        Try to import the entire package and find models.
+        """Attempt to import the entire algorithm directory as a package.
+
+        Tries to import the algorithm directory as a Python package and search
+        for NeuracoreModel subclasses within it. This is the preferred import
+        method as it properly handles relative imports.
 
         Args:
-            package_name: Name of the package to import
+            package_name: Name of the package to import.
 
         Returns:
-            Optional[Type[NeuracoreModel]]: Found model class or None
+            The first NeuracoreModel subclass found, or None if import fails
+            or no models are found.
+
+        Raises:
+            ModuleImportError: If package import fails with detailed error information.
         """
         try:
             package = importlib.import_module(package_name)
@@ -228,15 +259,19 @@ class AlgorithmLoader:
     def _try_import_module_by_path(
         self, file_path: Path, package_name: str
     ) -> Optional[Type[NeuracoreModel]]:
-        """
-        Try to import a specific module file.
+        """Import a specific Python file using multiple import strategies.
+
+        Attempts to import a Python file first as a package-relative module,
+        then falls back to spec-based import if the package approach fails.
+        This provides flexibility for different algorithm organization patterns.
 
         Args:
-            file_path: Path to the Python file
-            package_name: Base package name
+            file_path: Path to the Python file to import.
+            package_name: Base package name for module naming.
 
         Returns:
-            Optional[Type[NeuracoreModel]]: Found model class or None
+            The first NeuracoreModel subclass found in the module, or None
+            if import fails or no models are found.
         """
         # First try package-relative import
         try:
@@ -290,11 +325,14 @@ class AlgorithmLoader:
         return None
 
     def _get_python_files(self) -> List[Path]:
-        """
-        Get all Python files in the algorithm directory, excluding system files.
+        """Get all Python files in the algorithm directory for processing.
+
+        Scans the algorithm directory recursively for Python files, excluding
+        system files and __init__.py files which are handled separately.
 
         Returns:
-            List[Path]: List of Python files to process
+            List of Path objects representing Python files to process for
+            model discovery.
         """
         python_files = []
         try:
@@ -313,20 +351,20 @@ class AlgorithmLoader:
         return python_files
 
     def load_model(self) -> Type[NeuracoreModel]:
-        """
-        Find and load the first class that inherits from NeuracoreModel.
+        """Find and load the first NeuracoreModel subclass in the algorithm directory.
 
-        This method checks for requirements.txt and installs dependencies,
-        then properly sets up the directory as a package to allow
-        relative imports between files in the same directory.
+        This is the main entry point for algorithm loading. It handles the complete
+        workflow of dependency installation, package setup, and model discovery
+        using multiple import strategies to maximize compatibility.
 
         Returns:
-            Type[NeuracoreModel]: The first NeuracoreModel subclass found
+            The first NeuracoreModel subclass found in the algorithm directory.
 
         Raises:
-            RequirementsInstallError: If requirements installation fails
-            PackageSetupError: If package setup fails
-            ModelNotFoundError: If no NeuracoreModel subclass is found
+            RequirementsInstallError: If dependency installation fails.
+            PackageSetupError: If package environment setup fails.
+            ModelNotFoundError: If no NeuracoreModel subclass is found after
+                trying all import strategies.
         """
         # Install requirements if they exist
         self.install_requirements()

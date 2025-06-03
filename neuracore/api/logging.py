@@ -1,3 +1,10 @@
+"""Robot data logging utilities.
+
+This module provides functions for logging various types of robot sensor data
+including joint positions, camera images, point clouds, and custom data streams.
+All logging functions support optional robot identification and timestamping.
+"""
+
 import base64
 import hashlib
 import json
@@ -31,6 +38,14 @@ from ..core.utils.depth_utils import MAX_DEPTH
 
 
 def _create_group_id_from_dict(joint_names: dict[str, float]) -> str:
+    """Create a unique group ID from joint names dictionary.
+
+    Args:
+        joint_names: Dictionary mapping joint names to values
+
+    Returns:
+        str: Base64 encoded hash of sorted joint names
+    """
     joint_names = list(joint_names.keys())
     joint_names.sort()
     return (
@@ -41,6 +56,12 @@ def _create_group_id_from_dict(joint_names: dict[str, float]) -> str:
 
 
 def start_stream(robot: Robot, data_stream: DataStream):
+    """Start recording on a data stream if robot is currently recording.
+
+    Args:
+        robot: Robot instance
+        data_stream: Data stream to start recording on
+    """
     current_recording = robot.get_current_recording_id()
     if current_recording is not None and not data_stream.is_recording():
         data_stream.start_recording(current_recording)
@@ -54,13 +75,13 @@ def _log_joint_data(
     instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
-    """
-    Log joint positions for a robot.
+    """Log joint data for a robot.
 
     Args:
-        joint_data: Dictionary mapping joint names to joint dat
+        data_type: Type of joint data (e.g., "joint_positions", "joint_velocities")
+        joint_data: Dictionary mapping joint names to joint data values
         additional_urdf_data: Dictionary mapping joint names to
-            joint data. These wont ever be included for
+            joint data. These won't ever be included for
             training, and instead used for visualization purposes
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
@@ -68,6 +89,7 @@ def _log_joint_data(
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
+        ValueError: If joint_data is not a dictionary of floats
     """
     timestamp = timestamp or time.time()
     if not isinstance(joint_data, dict):
@@ -109,6 +131,18 @@ def _log_joint_data(
 def _validate_extrinsics_intrinsics(
     extrinsics: Optional[np.ndarray], intrinsics: Optional[np.ndarray]
 ) -> tuple[Optional[list[list[float]]], Optional[list[list[float]]]]:
+    """Validate and convert camera extrinsics and intrinsics matrices.
+
+    Args:
+        extrinsics: Optional extrinsics matrix as numpy array
+        intrinsics: Optional intrinsics matrix as numpy array
+
+    Returns:
+        tuple: Converted extrinsics and intrinsics as lists of lists
+
+    Raises:
+        ValueError: If matrices have incorrect shapes
+    """
     if extrinsics is not None:
         if not isinstance(extrinsics, np.ndarray) or extrinsics.shape != (4, 4):
             raise ValueError("Extrinsics must be a numpy array of shape (4, 4)")
@@ -131,13 +165,12 @@ def _log_camera_data(
     instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
-    """
-    Log camera data
+    """Log camera data for a robot.
 
     Args:
         camera_type: Type of camera (e.g. "rgb", "depth")
         camera_id: Unique identifier for the camera
-        image: RGB image as numpy array (HxWx3, dtype=uint8 or float32)
+        image: Image data as numpy array
         extrinsics: Optional extrinsics matrix (4x4)
         intrinsics: Optional intrinsics matrix (3x3)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
@@ -146,7 +179,7 @@ def _log_camera_data(
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
-        ValueError: If image format is invalid
+        ValueError: If image format is invalid or camera type is unsupported
     """
     timestamp = timestamp or time.time()
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
@@ -192,7 +225,23 @@ def log_synced_data(
     instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
-    """Useful for simulated data, or you are relying on ROS to sync the data"""
+    """Log synchronized data from multiple sensors.
+
+    Useful for simulated data, or when relying on ROS to sync the data.
+
+    Args:
+        joint_positions: Dictionary mapping joint names to positions
+        joint_velocities: Dictionary mapping joint names to velocities
+        joint_torques: Dictionary mapping joint names to torques
+        gripper_open_amounts: Dictionary mapping gripper names to open amounts
+        joint_target_positions: Dictionary mapping joint names to target positions
+        rgb_data: Dictionary mapping camera IDs to RGB images
+        depth_data: Dictionary mapping camera IDs to depth images
+        point_cloud_data: Dictionary mapping camera IDs to point clouds
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+    """
     timestamp = timestamp or time.time()
     log_joint_positions(
         joint_positions, robot_name=robot_name, instance=instance, timestamp=timestamp
@@ -252,10 +301,14 @@ def log_custom_data(
 
     Args:
         name: Name of the data stream
-        data: Data to log (numpy array of arbitrary shape and dtype)
+        data: Data to log (must be JSON serializable)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+        ValueError: If data is not JSON serializable
     """
     timestamp = timestamp or time.time()
     robot = _get_robot(robot_name, instance)
@@ -283,13 +336,12 @@ def log_joint_positions(
     instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
-    """
-    Log joint positions for a robot.
+    """Log joint positions for a robot.
 
     Args:
         positions: Dictionary mapping joint names to positions (in radians)
         additional_urdf_positions: Dictionary mapping joint names to
-            positions (in radians). These wont ever be included for
+            positions (in radians). These won't ever be included for
             training, and instead used for visualization purposes
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
@@ -297,6 +349,7 @@ def log_joint_positions(
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
+        ValueError: If positions is not a dictionary of floats
     """
     _log_joint_data(
         "joint_positions",
@@ -315,13 +368,13 @@ def log_joint_target_positions(
     instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
-    """
-    Log joint target positions for a robot.
+    """Log joint target positions for a robot.
 
     Args:
-        target_positions: Dictionary mapping joint names to positions (in radians)
+        target_positions: Dictionary mapping joint names to
+            target positions (in radians)
         additional_urdf_positions: Dictionary mapping joint names to
-            positions (in radians). These wont ever be included for
+            positions (in radians). These won't ever be included for
             training, and instead used for visualization purposes
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
@@ -329,6 +382,7 @@ def log_joint_target_positions(
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
+        ValueError: If target_positions is not a dictionary of floats
     """
     _log_joint_data(
         "joint_target_positions",
@@ -347,6 +401,21 @@ def log_joint_velocities(
     instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
+    """Log joint velocities for a robot.
+
+    Args:
+        velocities: Dictionary mapping joint names to velocities (in radians/second)
+        additional_urdf_velocities: Dictionary mapping joint names to
+            velocities (in radians/second). These won't ever be included for
+            training, and instead used for visualization purposes
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+        ValueError: If velocities is not a dictionary of floats
+    """
     _log_joint_data(
         "joint_velocities",
         velocities,
@@ -364,6 +433,21 @@ def log_joint_torques(
     instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
+    """Log joint torques for a robot.
+
+    Args:
+        torques: Dictionary mapping joint names to torques (in Newton-meters)
+        additional_urdf_torques: Dictionary mapping joint names to
+            torques (in Newton-meters). These won't ever be included for
+            training, and instead used for visualization purposes
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+        ValueError: If torques is not a dictionary of floats
+    """
     _log_joint_data(
         "joint_torques",
         torques,
@@ -380,6 +464,19 @@ def log_pose_data(
     instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
+    """Log pose data for a robot.
+
+    Args:
+        poses: Dictionary mapping pose names to pose data
+            (7-element lists: [x, y, z, qx, qy, qz, qw])
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+        ValueError: If poses is not a dictionary of 7-element lists
+    """
     timestamp = timestamp or time.time()
     if not isinstance(poses, dict):
         raise ValueError("Poses must be a dictionary of lists")
@@ -407,6 +504,19 @@ def log_gripper_data(
     instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
+    """Log gripper data for a robot.
+
+    Args:
+        open_amounts: Dictionary mapping gripper names to
+            open amounts (0.0 = closed, 1.0 = fully open)
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+        ValueError: If open_amounts is not a dictionary of floats
+    """
     timestamp = timestamp or time.time()
     if not isinstance(open_amounts, dict):
         raise ValueError("Gripper open amounts must be a dictionary of floats")
@@ -434,8 +544,7 @@ def log_language(
     instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
-    """
-    Log language for a robot.
+    """Log language annotation for a robot.
 
     Args:
         language: A language string associated with this timestep
@@ -445,6 +554,7 @@ def log_language(
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
+        ValueError: If language is not a string
     """
     timestamp = timestamp or time.time()
     if not isinstance(language, str):
@@ -468,12 +578,11 @@ def log_rgb(
     instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
-    """
-    Log RGB image from a camera.
+    """Log RGB image from a camera.
 
     Args:
         camera_id: Unique identifier for the camera
-        image: RGB image as numpy array (HxWx3, dtype=uint8 or float32)
+        image: RGB image as numpy array (HxWx3, dtype=uint8)
         extrinsics: Optional extrinsics matrix (4x4)
         intrinsics: Optional intrinsics matrix (3x3)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
@@ -487,7 +596,7 @@ def log_rgb(
     if not isinstance(image, np.ndarray):
         raise ValueError("Image image must be a numpy array")
     if image.dtype != np.uint8:
-        raise ValueError("Image must be uint8 wth range 0-255")
+        raise ValueError("Image must be uint8 with range 0-255")
     _log_camera_data(
         "rgb", camera_id, image, extrinsics, intrinsics, robot_name, instance, timestamp
     )
@@ -502,12 +611,11 @@ def log_depth(
     instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
-    """
-    Log depth image from a camera.
+    """Log depth image from a camera.
 
     Args:
         camera_id: Unique identifier for the camera
-        depth: Depth image as numpy array (HxW, dtype=float32, in meters)
+        depth: Depth image as numpy array (HxW, dtype=float16 or float32, in meters)
         extrinsics: Optional extrinsics matrix (4x4)
         intrinsics: Optional intrinsics matrix (3x3)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
@@ -552,6 +660,22 @@ def log_point_cloud(
     instance: Optional[int] = 0,
     timestamp: Optional[float] = None,
 ) -> None:
+    """Log point cloud data from a camera.
+
+    Args:
+        camera_id: Unique identifier for the camera
+        points: Point cloud as numpy array (Nx3, dtype=float32, in meters)
+        rgb_points: Optional RGB values for each point (Nx3, dtype=uint8)
+        extrinsics: Optional extrinsics matrix (4x4)
+        intrinsics: Optional intrinsics matrix (3x3)
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+        ValueError: If point cloud format is invalid
+    """
     timestamp = timestamp or time.time()
     if not isinstance(points, np.ndarray):
         raise ValueError("Point cloud must be a numpy array")

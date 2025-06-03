@@ -1,3 +1,10 @@
+"""Model archive (MAR) creation utility for Neuracore model deployment.
+
+This module provides functionality to package Neuracore models into TorchServe
+Model Archive (.mar) files for deployment. It handles model serialization,
+dependency management, and packaging of all required files for inference.
+"""
+
 import inspect
 import json
 from pathlib import Path
@@ -11,6 +18,17 @@ from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 
 
 def create_mar(model: NeuracoreModel, output_dir: str):
+    """Create a TorchServe Model Archive (MAR) file from a Neuracore model.
+
+    Packages a trained Neuracore model into a deployable MAR file that includes
+    the model weights, algorithm code, configuration metadata, and dependencies.
+    The resulting MAR file can be deployed to TorchServe for inference.
+
+    Args:
+        model: Trained Neuracore model instance to package for deployment.
+        output_dir: Directory path where the MAR file and temporary artifacts
+            will be created.
+    """
     algorithm_file = Path(inspect.getfile(model.__class__))
     algorithm_loader = AlgorithmLoader(algorithm_file.parent)
     algo_files = algorithm_loader.get_all_files()

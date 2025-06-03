@@ -1,3 +1,10 @@
+"""Streaming JSON data uploader with chunked upload support.
+
+This module provides a streaming JSON uploader that collects data entries,
+formats them as a JSON array, and uploads them to cloud storage using
+resumable uploads with configurable chunk sizes.
+"""
+
 import io
 import json
 import logging
@@ -16,7 +23,13 @@ CHUNK_SIZE = 64 * MB_CHUNK
 
 
 class StreamingJsonUploader(BucketUploader):
-    """A JSON data streamer that handles chunked uploads."""
+    """A JSON data streamer that handles chunked uploads to cloud storage.
+
+    This class provides asynchronous streaming of JSON data entries by collecting
+    them in a queue, formatting them as a valid JSON array, and uploading them
+    in configurable chunks using resumable uploads. The upload process runs in
+    a separate thread to avoid blocking data collection.
+    """
 
     def __init__(
         self,
@@ -24,13 +37,17 @@ class StreamingJsonUploader(BucketUploader):
         filepath: str,
         chunk_size: int = CHUNK_SIZE,
     ):
-        """
-        Initialize a streaming JSON uploader.
+        """Initialize a streaming JSON uploader.
+
+        Sets up the upload queue, starts the upload thread, and increments the
+        active stream count for the recording. The uploader will collect JSON
+        data entries and stream them as a properly formatted JSON array.
 
         Args:
-            recording_id: Recording ID
-            stream_id: Stream ID
-            chunk_size: Size of chunks to upload
+            recording_id: Unique identifier for the recording session.
+            filepath: Target file path in the cloud storage bucket.
+            chunk_size: Size in bytes of each upload chunk. Will be adjusted
+                to be a multiple of 256 KiB if necessary.
         """
         super().__init__(recording_id)
         self.filepath = filepath
@@ -43,8 +60,12 @@ class StreamingJsonUploader(BucketUploader):
         self._update_num_active_streams(1)
 
     def _thread_setup(self) -> None:
-        """Setup thread for upload loop."""
+        """Setup thread-local resources for the upload loop.
 
+        Initializes the resumable uploader, adjusts chunk size to meet requirements,
+        creates in-memory buffers, and sets up tracking variables for the JSON
+        streaming process.
+        """
         # Ensure chunk_size is a multiple of 256 KiB
         if self.chunk_size % CHUNK_MULTIPLE != 0:
             self.chunk_size = ((self.chunk_size // CHUNK_MULTIPLE) + 1) * CHUNK_MULTIPLE
@@ -74,8 +95,11 @@ class StreamingJsonUploader(BucketUploader):
         self.json_array_started = False
 
     def _upload_loop(self) -> None:
-        """
-        Upload chunks in a separate thread.
+        """Upload chunks in a separate thread.
+
+        Main upload loop that processes queued data entries, formats them as
+        a JSON array, and uploads them in chunks. Runs until streaming is
+        complete and all queued data has been processed.
         """
         self._thread_setup()
 
@@ -132,20 +156,29 @@ class StreamingJsonUploader(BucketUploader):
         self._update_num_active_streams(-1)
 
     def add_frame(self, data_entry: Dict[str, Any]) -> None:
-        """
-        Add a JSON data entry to the stream.
+        """Add a JSON data entry to the streaming queue.
+
+        Queues a data entry for asynchronous processing and upload. The entry
+        will be serialized to JSON and included in the output array in the
+        order received.
 
         Args:
-            data_entry: Dictionary containing timestamp and data
+            data_entry: Dictionary containing the data to be included in the
+                JSON stream. Typically contains timestamp and sensor data.
         """
         self._upload_queue.put(data_entry)
 
     def _add_entry(self, data_entry: Dict[str, Any]) -> None:
-        """
-        Add a JSON data entry to the stream and upload if buffer is large enough.
+        """Add a JSON data entry to the buffer and upload if threshold is reached.
+
+        Serializes the data entry to JSON, writes it to the buffer, and triggers
+        chunk uploads when the buffer reaches the configured chunk size.
 
         Args:
-            data_entry: Dictionary containing timestamp and data
+            data_entry: Dictionary containing timestamp and data to be serialized.
+
+        Raises:
+            RuntimeError: If chunk upload fails during the process.
         """
         # Serialize the entry to JSON and encode to bytes
         entry_json = json.dumps(data_entry)
@@ -182,8 +215,14 @@ class StreamingJsonUploader(BucketUploader):
         self.total_bytes_written = current_pos
 
     def _upload_chunks(self) -> None:
-        """
-        Upload chunks of exactly chunk_size bytes if enough data is available.
+        """Upload complete chunks of the configured size.
+
+        Processes the upload buffer and uploads chunks of exactly chunk_size
+        bytes when enough data is available. Continues until insufficient
+        data remains for a complete chunk.
+
+        Raises:
+            RuntimeError: If any chunk upload fails.
         """
         # Upload complete chunks while we have enough data
         while len(self.upload_buffer) >= self.chunk_size:
@@ -200,9 +239,14 @@ class StreamingJsonUploader(BucketUploader):
                 raise RuntimeError("Failed to upload chunk")
 
     def finish(self) -> threading.Thread:
-        """
-        Finish encoding and upload any remaining data.
-        Returns the upload thread which can be joined if needed.
+        """Complete the streaming process and initiate final upload.
+
+        Signals the upload thread that no more data will be added, allowing it
+        to finalize the JSON array and upload any remaining data. The thread
+        will complete the upload process including the closing JSON bracket.
+
+        Returns:
+            The upload thread that can be joined to wait for completion.
         """
         # Signal the upload thread that we're done
         self._upload_queue.put(None)

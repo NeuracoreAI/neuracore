@@ -1,3 +1,11 @@
+"""Neuracore data types and models for robot sensor data and ML operations.
+
+This module defines the core data structures used throughout Neuracore for
+representing robot sensor data, synchronized data points, dataset descriptions,
+and model predictions. All data types include automatic timestamping and
+support for serialization via Pydantic.
+"""
+
 import time
 from enum import Enum
 from typing import Any, Optional
@@ -6,15 +14,35 @@ from pydantic import BaseModel, Field
 
 
 class NCData(BaseModel):
+    """Base class for all Neuracore data with automatic timestamping.
+
+    Provides a common base for all data types in the system with automatic
+    timestamp generation for temporal synchronization and data ordering.
+    """
+
     timestamp: float = Field(default_factory=lambda: time.time())
 
 
 class JointData(NCData):
+    """Robot joint state data including positions, velocities, or torques.
+
+    Represents joint-space data for robotic systems with support for named
+    joints and additional auxiliary values. Used for positions, velocities,
+    torques, and target positions.
+    """
+
     values: dict[str, float]
     additional_values: Optional[dict[str, float]] = None
 
 
 class CameraData(NCData):
+    """Camera sensor data including images and calibration information.
+
+    Contains image data along with camera intrinsic and extrinsic parameters
+    for 3D reconstruction and computer vision applications. The frame field
+    is populated during dataset iteration for efficiency.
+    """
+
     frame_idx: int = 0  # Needed so we can index video after sync
     extrinsics: Optional[list[list[float]]] = None
     intrinsics: Optional[list[list[float]]] = None
@@ -22,14 +50,33 @@ class CameraData(NCData):
 
 
 class PoseData(NCData):
+    """6DOF pose data for objects, end-effectors, or coordinate frames.
+
+    Represents position and orientation information for tracking objects
+    or robot components in 3D space. Poses are stored as dictionaries
+    mapping pose names to [x, y, z, rx, ry, rz] values.
+    """
+
     pose: dict[str, list[float]]
 
 
 class EndEffectorData(NCData):
+    """End-effector state data including gripper and tool configurations.
+
+    Contains the state of robot end-effectors such as gripper opening amounts,
+    tool activations, or other end-effector specific parameters.
+    """
+
     open_amounts: dict[str, float]
 
 
 class PointCloudData(NCData):
+    """3D point cloud data with optional RGB coloring and camera parameters.
+
+    Represents 3D spatial data from depth sensors or LiDAR systems with
+    optional color information and camera calibration for registration.
+    """
+
     points: list[list[float]]
     rgb_points: Optional[list[list[int]]] = None
     extrinsics: Optional[list[list[float]]] = None
@@ -37,15 +84,32 @@ class PointCloudData(NCData):
 
 
 class LanguageData(NCData):
+    """Natural language instruction or description data.
+
+    Contains text-based information such as task descriptions, voice commands,
+    or other linguistic data associated with robot demonstrations.
+    """
+
     text: str
 
 
 class CustomData(NCData):
+    """Generic container for application-specific data types.
+
+    Provides a flexible way to include custom sensor data or application-specific
+    information that doesn't fit into the standard data categories.
+    """
+
     data: Any
 
 
 class SyncPoint(BaseModel):
-    """Synchronized data point."""
+    """Synchronized collection of all sensor data at a single time point.
+
+    Represents a complete snapshot of robot state and sensor information
+    at a specific timestamp. Used for creating temporally aligned datasets
+    and ensuring consistent data relationships across different sensors.
+    """
 
     timestamp: float = Field(default_factory=lambda: time.time())
     joint_positions: Optional[JointData] = None
@@ -62,12 +126,24 @@ class SyncPoint(BaseModel):
 
 
 class SyncedData(BaseModel):
+    """Complete synchronized dataset containing a sequence of data points.
+
+    Represents an entire recording or demonstration as a time-ordered sequence
+    of synchronized data points with start and end timestamps for temporal
+    reference.
+    """
+
     frames: list[SyncPoint]
     start_time: float
     end_time: float
 
 
 class DataType(str, Enum):
+    """Enumeration of supported data types in the Neuracore system.
+
+    Defines the standard data categories used for dataset organization,
+    model training, and data processing pipelines.
+    """
 
     # Robot state
     JOINT_POSITIONS = "joint_positions"
@@ -88,6 +164,13 @@ class DataType(str, Enum):
 
 
 class DataItemStats(BaseModel):
+    """Statistical summary of data dimensions and distributions.
+
+    Contains statistical information about data arrays including means,
+    standard deviations, counts, and maximum lengths for normalization
+    and model configuration purposes.
+    """
+
     mean: list[float] = Field(default_factory=list)
     std: list[float] = Field(default_factory=list)
     count: list[int] = Field(default_factory=list)
@@ -95,6 +178,13 @@ class DataItemStats(BaseModel):
 
 
 class DatasetDescription(BaseModel):
+    """Comprehensive description of dataset contents and statistics.
+
+    Provides metadata about a complete dataset including statistical summaries
+    for all data types, maximum counts for variable-length data, and methods
+    for determining which data types are present.
+    """
+
     joint_positions: DataItemStats = Field(default_factory=lambda: DataItemStats())
     joint_velocities: DataItemStats = Field(default_factory=lambda: DataItemStats())
     joint_torques: DataItemStats = Field(default_factory=lambda: DataItemStats())
@@ -109,6 +199,15 @@ class DatasetDescription(BaseModel):
     max_language_length: int = 0
 
     def get_data_types(self) -> list[DataType]:
+        """Determine which data types are present in the dataset.
+
+        Analyzes the dataset statistics to identify which data modalities
+        contain actual data (non-zero lengths/counts).
+
+        Returns:
+            List of DataType enums representing the data modalities
+            present in this dataset.
+        """
         data_types = []
         if self.joint_positions.max_len > 0:
             data_types.append(DataType.JOINT_POSITIONS)
@@ -130,6 +229,12 @@ class DatasetDescription(BaseModel):
 
 
 class RecordingDescription(BaseModel):
+    """Description of a single recording episode with statistics and counts.
+
+    Provides metadata about an individual recording including data statistics,
+    sensor counts, and episode length for analysis and processing.
+    """
+
     joint_positions: DataItemStats = Field(default_factory=lambda: DataItemStats())
     joint_velocities: DataItemStats = Field(default_factory=lambda: DataItemStats())
     joint_torques: DataItemStats = Field(default_factory=lambda: DataItemStats())
@@ -145,6 +250,15 @@ class RecordingDescription(BaseModel):
     episode_length: int = 0
 
     def get_data_types(self) -> list[DataType]:
+        """Determine which data types are present in the recording.
+
+        Analyzes the recording statistics to identify which data modalities
+        contain actual data (non-zero lengths/counts).
+
+        Returns:
+            List of DataType enums representing the data modalities
+            present in this recording.
+        """
         data_types = []
         if self.joint_positions.max_len > 0:
             data_types.append(DataType.JOINT_POSITIONS)
@@ -166,7 +280,12 @@ class RecordingDescription(BaseModel):
 
 
 class ModelInitDescription(BaseModel):
-    """Description of a Neuracore model."""
+    """Configuration specification for initializing Neuracore models.
+
+    Defines the model architecture requirements including dataset characteristics,
+    input/output data types, and prediction horizons for model initialization
+    and training configuration.
+    """
 
     dataset_description: DatasetDescription
     input_data_types: list[DataType]
@@ -175,7 +294,12 @@ class ModelInitDescription(BaseModel):
 
 
 class ModelPrediction(BaseModel):
-    """Synchronized data point."""
+    """Model inference output containing predictions and timing information.
+
+    Represents the results of model inference including predicted outputs
+    for each configured data type and optional timing information for
+    performance monitoring.
+    """
 
     outputs: dict[DataType, Any] = Field(default_factory=dict)
     prediction_time: Optional[float] = None

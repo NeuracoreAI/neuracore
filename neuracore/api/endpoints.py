@@ -1,3 +1,10 @@
+"""Model endpoint management and connection API for Neuracore.
+
+This module provides functionality for connecting to deployed model endpoints,
+managing local model endpoints, and handling the lifecycle of model deployments
+including deployment, status monitoring, and deletion operations.
+"""
+
 import json
 from typing import Optional
 
@@ -13,20 +20,25 @@ from ..core.endpoint import connect_local_endpoint as _connect_local_endpoint
 def connect_endpoint(
     endpoint_name: str, robot_name: Optional[str] = None, instance: Optional[int] = 0
 ) -> EndpointPolicy:
-    """
-    Connect to a deployed model endpoint.
+    """Connect to a deployed model endpoint for inference.
+
+    Establishes a connection to a model endpoint that has been deployed on the
+    Neuracore platform. The endpoint can be used to make predictions with the
+    deployed model, and data logging is associated with the specified robot.
 
     Args:
-        endpoint_name: Name of the deployed endpoint
-        robot_name: robot name that the data is being logged for. If not
-            provided, uses the last initialized robot.
-        instance: instance number of the robot. Defaults to 0.
+        endpoint_name: Name of the deployed endpoint to connect to.
+        robot_name: Robot name that predictions and data will be associated with.
+            If not provided, uses the last initialized robot from global state.
+        instance: Instance number of the robot for multi-instance deployments.
 
     Returns:
-        EndpointPolicy: Policy object that can be used for predictions
+        Policy object that provides an interface for making predictions
+        with the deployed model.
 
     Raises:
-        EndpointError: If endpoint connection fails
+        EndpointError: If the endpoint connection fails due to invalid endpoint
+            name, authentication issues, or network problems.
     """
     return _connect_endpoint(
         endpoint_name=endpoint_name, robot_name=robot_name, instance=instance
@@ -40,24 +52,32 @@ def connect_local_endpoint(
     robot_name: Optional[str] = None,
     instance: Optional[int] = 0,
 ) -> EndpointPolicy:
-    """
-    Connect to a local model endpoint.
+    """Connect to a local model endpoint (run locally on your hardware).
 
-    Can supply either path_to_model or train_run_name, but not both.
+    Establishes a connection to a locally hosted model endpoint. The model can
+    be specified either by providing a direct path to a .mar model file or by
+    referencing a training run name. Only one of these options should be provided.
 
     Args:
-        path_to_model: Path to the local .mar model
-        train_run_name: Optional train run name
-        port: Port to connect to the local endpoint
-        robot_name: robot name that the data is being logged for. If not
-            provided, uses the last initialized robot.
-        instance: instance number of the robot. Defaults to 0.
+        path_to_model: Direct file path to a local .mar (Model ARchive) model file.
+            Mutually exclusive with train_run_name.
+        train_run_name: Name of a training run to load the model from. The system
+            will locate and load the model from the specified training run.
+            Mutually exclusive with path_to_model.
+        port: TCP port number where the local endpoint is running.
+        robot_name: Robot name that predictions and data will be associated with.
+            If not provided, uses the last initialized robot from global state.
+        instance: Instance number of the robot for multi-instance deployments.
 
     Returns:
-        EndpointPolicy: Policy object that can be used for predictions
+        Policy object that provides an interface for making predictions
+        with the local model.
 
     Raises:
-        EndpointError: If endpoint connection fails
+        EndpointError: If the endpoint connection fails due to invalid model path,
+            inaccessible port, or conflicting parameters.
+        ValueError: If both path_to_model and train_run_name are provided, or if
+            neither is provided.
     """
     return _connect_local_endpoint(
         robot_name=robot_name,
@@ -69,15 +89,27 @@ def connect_local_endpoint(
 
 
 def deploy_model(job_id: str, name: str) -> dict:
-    """
-    Deploy a trained model to an endpoint.
+    """Deploy a trained model to a managed endpoint.
+
+    Takes a completed training job and deploys the resulting model to a managed
+    endpoint on the Neuracore platform. The endpoint will be accessible for
+    inference once deployment is complete.
 
     Args:
-        job_id: The ID of the training job.
-        name: The name of the endpoint.
+        job_id: Unique identifier of the completed training job containing
+            the model to deploy.
+        name: Human-readable name for the endpoint that will be created.
+
+    Returns:
+        Deployment response containing endpoint details and deployment status.
+
     Raises:
-        requests.exceptions.HTTPError: If the api request returns an error code
-        requests.exceptions.RequestException: If there is a problem with the request
+        requests.exceptions.HTTPError: If the API request returns an error code
+            due to invalid job_id, name conflicts, or server issues.
+        requests.exceptions.RequestException: If there are network connectivity
+            or request formatting problems.
+        ValueError: If the deployment fails due to invalid parameters or
+            server-side errors.
     """
     auth = get_auth()
     try:
@@ -92,14 +124,25 @@ def deploy_model(job_id: str, name: str) -> dict:
         raise ValueError(f"Error deploying model: {e}")
 
 
-def get_endpoint_status(endpoint_id: str) -> dict:
-    """
-    Get the status of an endpoint.
+def get_endpoint_status(endpoint_id: str) -> str:
+    """Get the current status of a deployed endpoint.
+
+    Retrieves the operational status of an endpoint, including deployment state,
+    health information, and availability for inference requests.
+
     Args:
-        endpoint_id: The ID of the endpoint.
+        endpoint_id: Unique identifier of the endpoint to check.
+
+    Returns:
+        Status information dictionary containing the current state and
+        health details of the endpoint.
+
     Raises:
-        requests.exceptions.HTTPError: If the api request returns an error code
-        requests.exceptions.RequestException: If there is a problem with the request
+        requests.exceptions.HTTPError: If the API request returns an error code
+            due to invalid endpoint_id or access permissions.
+        requests.exceptions.RequestException: If there are network connectivity
+            or request formatting problems.
+        ValueError: If the status check fails due to server-side errors.
     """
     auth = get_auth()
     try:
@@ -113,14 +156,23 @@ def get_endpoint_status(endpoint_id: str) -> dict:
 
 
 def delete_endpoint(endpoint_id: str) -> None:
-    """
-    Delete an endpoint.
+    """Delete a deployed endpoint and free its resources.
+
+    Permanently removes an endpoint from the Neuracore platform, stopping
+    all inference capabilities and releasing associated computing resources.
+    This operation cannot be undone.
+
     Args:
-        endpoint_id: The ID of the endpoint.
+        endpoint_id: Unique identifier of the endpoint to delete.
 
     Raises:
-        requests.exceptions.HTTPError: If the api request returns an error code
-        requests.exceptions.RequestException: If there is a problem with the request
+        requests.exceptions.HTTPError: If the API request returns an error code
+            due to invalid endpoint_id, insufficient permissions, or if the
+            endpoint is currently in use.
+        requests.exceptions.RequestException: If there are network connectivity
+            or request formatting problems.
+        ValueError: If the deletion fails due to server-side errors or
+            endpoint dependencies.
     """
     auth = get_auth()
     try:
