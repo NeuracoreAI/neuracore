@@ -7,7 +7,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.transforms as 
 
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler, DDPMScheduler
 
@@ -128,6 +127,12 @@ class DiffusionPolicy(NeuracoreModel):
         """Preprocess the actions."""
         return (target_joint_pos - self.joint_target_mean) / self.joint_target_std
 
+    def _unnormalize_actions(
+        self, predicted_actions: torch.FloatTensor
+    ) -> torch.FloatTensor:
+        """Unnormalize the actions."""
+        return (predicted_actions * self.joint_target_std) + self.joint_target_mean
+
     def _combine_joint_states(
         self, batch: BatchedInferenceSamples
     ) -> torch.FloatTensor:
@@ -229,7 +234,7 @@ class DiffusionPolicy(NeuracoreModel):
         action_preds = self._predict_action(batch, prediction_horizon)
         prediction_time = time.time() - t
         # unnormalize the actions
-        predictions = (action_preds * self.joint_target_std) + self.joint_target_mean
+        predictions = self._unnormalize_actions(action_preds)
         predictions = predictions.detach().cpu().numpy() 
         return ModelPrediction(
             outputs={DataType.JOINT_TARGET_POSITIONS: predictions},
@@ -238,12 +243,12 @@ class DiffusionPolicy(NeuracoreModel):
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Training step."""
-        pred_sequence_mask = batch.outputs.joint_target_positions.mask[
-            :, :, 0
-        ]  # [batch_size, T]
-        max_action_mask = batch.outputs.joint_target_positions.mask[
-            :, 0, :
-        ]  # [batch_size, MaxActionSize]
+        # pred_sequence_mask = batch.outputs.joint_target_positions.mask[
+        #     :, :, 0
+        # ]  # [batch_size, T]
+        # max_action_mask = batch.outputs.joint_target_positions.mask[
+        #     :, 0, :
+        # ]  # [batch_size, MaxActionSize]
         prediction_horizon = batch.outputs.joint_target_positions.data.shape[1]
         inference_sample = BatchedInferenceSamples(
             joint_positions=batch.inputs.joint_positions,
