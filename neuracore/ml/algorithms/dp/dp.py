@@ -21,9 +21,7 @@ from neuracore.ml import (
 
 from .modules import (
     DiffusionPolicyImageEncoder,
-    PositionalEncoding,
-    TransformerDecoder,
-    TransformerEncoder,
+    DiffusionConditionalUnet1d
 )
 
 logger = logging.getLogger(__name__)
@@ -37,58 +35,62 @@ class DiffusionPolicy(NeuracoreModel):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
-        hidden_dim: int = 512,
-        num_encoder_layers: int = 4,
-        num_decoder_layers: int = 7,
-        nheads: int = 8,
-        dim_feedforward: int = 3200,
-        dropout: float = 0.1,
+        hidden_dim: int = 256,
+        unet_down_dims: list[int] = [512, 1024, 2048],
+        unet_kernel_size: int = 5,
+        unet_n_groups: int = 8,
+        unet_diffusion_step_embed_dim: int = 128,
+        unet_use_film_scale_modulation: bool = True,
+        noise_scheduler_type: str = "DDPM",
+        num_train_timesteps: int = 100,
+        num_inference_steps: int = 100,
+        beta_start: float = 0.0001,
+        beta_end: float = 0.02,
+        beta_schedule: str = "squaredcos_cap_v2",
+        clip_sample: bool = True,   
+        clip_sample_range: float = 1.0,
         lr: float = 1e-4,
         lr_backbone: float = 1e-5,
-        weight_decay: float = 1e-4,
-        kl_weight: float = 10.0,
-        latent_dim: int = 512,
+        prediction_type: str = "epsilon",
     ):
         super().__init__(model_init_description)
+        self.lr = lr
+        self.lr_backbone = lr_backbone
         # Vision components
         self.image_encoders = nn.ModuleList([
-            ACTImageEncoder(output_dim=hidden_dim)
+            DiffusionPolicyImageEncoder(feature_dim=hidden_dim)
             for _ in range(self.dataset_description.max_num_rgb_images)
         ])
+        # what if there is no joint velocities or torques?
         global_cond_dim = (
             self.dataset_description.joint_positions.max_len
             + self.dataset_description.joint_velocities.max_len
             + self.dataset_description.joint_torques.max_len
-            + hidden_dim * self.dataset_description.max_num_rgb_images
+            + self.image_encoders[0].feature_dim * self.dataset_description.max_num_rgb_images
         )
-        if self.config.image_features:
-            num_images = len(self.config.image_features)
-            if self.config.use_separate_rgb_encoder_per_camera:
-                encoders = [DiffusionRgbEncoder(config) for _ in range(num_images)]
-                self.rgb_encoder = nn.ModuleList(encoders)
-                global_cond_dim += encoders[0].feature_dim * num_images
-            else:
-                self.rgb_encoder = DiffusionRgbEncoder(config)
-                global_cond_dim += self.rgb_encoder.feature_dim * num_images
 
-
-        self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
+        self.unet = DiffusionConditionalUnet1d(
+            action_dim=self.dataset_description.joint_target_positions.max_len,
+            global_cond_dim=global_cond_dim,
+            down_dims=unet_down_dims,
+            kernel_size=unet_kernel_size,
+            n_groups=unet_n_groups,
+            diffusion_step_embed_dim=unet_diffusion_step_embed_dim,
+            use_film_scale_modulation=unet_use_film_scale_modulation,
+        )
 
         self.noise_scheduler = _make_noise_scheduler(
-            config.noise_scheduler_type,
-            num_train_timesteps=config.num_train_timesteps,
-            beta_start=config.beta_start,
-            beta_end=config.beta_end,
-            beta_schedule=config.beta_schedule,
-            clip_sample=config.clip_sample,
-            clip_sample_range=config.clip_sample_range,
-            prediction_type=config.prediction_type,
+            noise_scheduler_type,
+            num_train_timesteps=num_train_timesteps,
+            beta_start=beta_start,
+            beta_end=beta_end,
+            beta_schedule=beta_schedule,
+            clip_sample=clip_sample,
+            clip_sample_range=clip_sample_range,
+            prediction_type=prediction_type,
         )
-
-        if config.num_inference_steps is None:
-            self.num_inference_steps = self.noise_scheduler.config.num_train_timesteps
-        else:
-            self.num_inference_steps = config.num_inference_steps
+        self.prediction_type = prediction_type
+        self.num_inference_steps = num_inference_steps
 
         state_mean = np.concatenate([
             self.dataset_description.joint_positions.mean,
@@ -126,169 +128,6 @@ class DiffusionPolicy(NeuracoreModel):
         """Preprocess the actions."""
         return (target_joint_pos - self.joint_target_mean) / self.joint_target_std
 
-    def _make_noise_scheduler(name: str, **kwargs: dict) -> DDPMScheduler | DDIMScheduler:
-    """
-        Factory for noise scheduler instances of the requested type. All kwargs are passed
-        to the scheduler.
-        """
-        if name == "DDPM":
-            return DDPMScheduler(**kwargs)
-        elif name == "DDIM":
-            return DDIMScheduler(**kwargs)
-        else:
-            raise ValueError(f"Unsupported noise scheduler type {name}")
-
-    def _encode_latent(
-        self,
-        state: torch.FloatTensor,
-        actions: torch.FloatTensor,
-        actions_mask: torch.FloatTensor,
-        actions_sequence_mask: torch.FloatTensor,
-    ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
-        """Encode actions to latent space during training."""
-        batch_size = state.shape[0]
-
-        # Project joint positions and actions
-        state_embed = self.state_embed(state)  # [B, H]
-        action_embed = self.action_embed(
-            actions * actions_mask.unsqueeze(1)
-        )  # [B, T, H]
-
-        # Reshape to sequence first
-        state_embed = state_embed.unsqueeze(0)  # [1, B, H]
-        action_embed = action_embed.transpose(0, 1)  # [T, B, H]
-
-        # Concatenate [CLS, state_emb, action_embed]
-        cls_token = self.cls_embed.expand(-1, batch_size, -1)  # [1, B, H]
-        encoder_input = torch.cat([cls_token, state_embed, action_embed], dim=0)
-
-        # Update padding mask
-        if actions_sequence_mask is not None:
-            cls_joint_pad = torch.zeros(
-                batch_size, 2, dtype=torch.bool, device=self.device
-            )
-            actions_sequence_mask = torch.cat(
-                [cls_joint_pad, actions_sequence_mask], dim=1
-            )
-
-        # Add positional encoding
-        encoder_input = self.pos_encoder(encoder_input)
-
-        # Encode sequence
-        memory = self.latent_encoder(
-            encoder_input, src_key_padding_mask=actions_sequence_mask
-        )
-
-        # Get latent parameters from CLS token
-        mu = self.latent_mu(memory[0])  # Take CLS token output
-        logvar = self.latent_logvar(memory[0])
-        return mu, logvar
-
-    def _encode_visual(
-        self,
-        states: torch.FloatTensor,
-        camera_images: torch.FloatTensor,
-        camera_images_mask: torch.FloatTensor,
-        latent: torch.FloatTensor,
-    ) -> torch.FloatTensor:
-        """Encode visual inputs with latent and proprioceptive features."""
-        batch_size = states.shape[0]
-
-        # Process images
-        image_features = []
-        image_pos = []
-        for cam_id, encoder in enumerate(self.image_encoders):
-            features, pos = encoder(
-                self.transform(camera_images[:, cam_id])
-            )  # Vision backbone provides features and pos
-            features *= camera_images_mask[:, cam_id].view(batch_size, 1, 1, 1)
-            image_features.append(features)
-            image_pos.append(pos)
-
-        # Combine image features and positions
-        combined_features = torch.cat(image_features, dim=3)  # [B, C, H, W]
-        combined_pos = torch.cat(image_pos, dim=3)  # [B, C, H, W]
-
-        # Convert to sequence [H*W, B, C]
-        src = combined_features.flatten(2).permute(2, 0, 1)
-        pos = combined_pos.flatten(2).permute(2, 0, 1)
-
-        # Process joint positions and latent
-        state_features = self.state_embed(states)  # [B, H]
-
-        # Stack latent and proprio features
-        additional_features = torch.stack([latent, state_features], dim=0)  # [2, B, H]
-
-        # Add position embeddings from additional_pos_embed
-        additional_pos = self.additional_pos_embed.expand(
-            -1, batch_size, -1
-        )  # [2, B, H]
-
-        # Concatenate everything
-        src = torch.cat([additional_features, src], dim=0)
-        pos = torch.cat([additional_pos, pos], dim=0)
-
-        # Fuse positional embeddings with source
-        src = src + pos
-
-        # Encode
-        memory = self.transformer["encoder"](src)
-
-        return memory
-
-    def _decode(
-        self,
-        latent: torch.FloatTensor,
-        memory: torch.FloatTensor,
-    ) -> torch.Tensor:
-        """Decode latent and visual features to action sequence."""
-        batch_size = latent.shape[0]
-
-        # Convert to sequence first and expand
-        query_embed = self.query_embed.expand(-1, batch_size, -1)  # [T, B, H]
-        latent = latent.unsqueeze(0).expand_as(query_embed)  # [T, B, H]
-
-        # Add latent to query embedding
-        query_embed = query_embed + latent
-
-        # Initialize target with zeros
-        tgt = torch.zeros_like(query_embed)
-
-        # Decode sequence
-        hs = self.transformer["decoder"](tgt, memory, query_pos=query_embed)
-
-        # Project to action space (keeping sequence first)
-        actions = self.action_head(hs)  # [T, B, A]
-
-        # Convert back to batch first
-        actions = actions.transpose(0, 1)  # [B, T, A]
-
-        return actions
-
-    def _predict_action(
-        self,
-        mu: torch.FloatTensor,
-        logvar: torch.FloatTensor,
-        batch: BatchedInferenceSamples,
-    ) -> torch.FloatTensor:
-        # Sample latent
-        latent_sample = self._reparametrize(mu, logvar)
-
-        # Project latent
-        latent = self.latent_out_proj(latent_sample)  # [B, H]
-
-        # Encode visual features
-        memory = self._encode_visual(
-            self._combine_joint_states(batch),
-            batch.rgb_images.data,
-            batch.rgb_images.mask,
-            latent,
-        )
-
-        # Decode actions
-        action_preds = self._decode(latent, memory)
-        return action_preds
-
     def _combine_joint_states(
         self, batch: BatchedInferenceSamples
     ) -> torch.FloatTensor:
@@ -310,15 +149,88 @@ class DiffusionPolicy(NeuracoreModel):
             joint_states = self._preprocess_joint_state(joint_states)
         return joint_states
 
+    # ========= inference  ============
+    def _conditional_sample(
+        self, batch_size: int, prediction_horizon: int, global_cond: torch.Tensor | None = None, generator: torch.Generator | None = None
+    ) -> torch.Tensor:
+
+        # Sample prior.
+        sample = torch.randn(
+            size=(batch_size, prediction_horizon, self.dataset_description.joint_target_positions.max_len),
+            dtype=torch.float32,
+            device=self.device,
+            generator=generator,
+        )
+
+        self.noise_scheduler.set_timesteps(self.num_inference_steps)
+
+        for t in self.noise_scheduler.timesteps:
+            # Predict model output.
+            model_output = self.unet(
+                sample,
+                torch.full(sample.shape[:1], t, dtype=torch.long, device=sample.device),
+                global_cond=global_cond,
+            )
+            # Compute previous image: x_t -> x_t-1
+            sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
+
+        return sample
+
+    def _prepare_global_conditioning(
+        self,
+        states: torch.FloatTensor,
+        camera_images: torch.FloatTensor,
+        camera_images_mask: torch.FloatTensor,) -> torch.FloatTensor:
+        """Encode image features and concatenate them all together along with the state vector."""
+        global_cond_feats = self._combine_joint_states(batch)
+        if camera_images:
+        # Extract image features.
+            for cam_id, encoder in enumerate(self.image_encoders):
+                features = encoder(camera_images[:, cam_id])
+                features *= camera_images_mask[:, cam_id].view(batch_size, 1, 1, 1)
+                global_cond_feats.append(features)
+
+        # Concatenate features then flatten to (B, global_cond_dim).
+        return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
+
+    def _make_noise_scheduler(name: str, **kwargs: dict) -> DDPMScheduler | DDIMScheduler:
+    """
+        Factory for noise scheduler instances of the requested type. All kwargs are passed
+        to the scheduler.
+        """
+        if name == "DDPM":
+            return DDPMScheduler(**kwargs)
+        elif name == "DDIM":
+            return DDIMScheduler(**kwargs)
+        else:
+            raise ValueError(f"Unsupported noise scheduler type {name}")
+
+    def _predict_action(
+        self,
+        batch: BatchedInferenceSamples,
+        prediction_horizon: int,
+    ) -> torch.FloatTensor:
+
+        batch_size = len(batch)
+        # Normalize and combine joint states
+        joint_states = self._combine_joint_states(batch)
+
+        # Encode image features and concatenate them all together along with the state vector.
+        global_cond = self._prepare_global_conditioning(joint_states, batch.rgb_images.data, batch.rgb_images.mask)  # (B, global_cond_dim)
+
+        # run sampling
+        actions = self._conditional_sample(batch_size, prediction_horizon, global_cond=global_cond)
+
+        return actions
+
     def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
         t = time.time()
-        batch_size = len(batch)
-        mu = torch.zeros(batch_size, self.latent_dim, device=self.device)
-        logvar = torch.zeros(batch_size, self.latent_dim, device=self.device)
-        action_preds = self._predict_action(mu, logvar, batch)
+        prediction_horizon = batch.outputs.joint_target_positions.data.shape[1]
+        action_preds = self._predict_action(batch, prediction_horizon)
         prediction_time = time.time() - t
+        # unnormalize the actions
         predictions = (action_preds * self.joint_target_std) + self.joint_target_mean
-        predictions = predictions.detach().cpu().numpy()
+        predictions = predictions.detach().cpu().numpy() 
         return ModelPrediction(
             outputs={DataType.JOINT_TARGET_POSITIONS: predictions},
             prediction_time=prediction_time,
@@ -332,37 +244,52 @@ class DiffusionPolicy(NeuracoreModel):
         max_action_mask = batch.outputs.joint_target_positions.mask[
             :, 0, :
         ]  # [batch_size, MaxActionSize]
+        prediction_horizon = batch.outputs.joint_target_positions.data.shape[1]
         inference_sample = BatchedInferenceSamples(
             joint_positions=batch.inputs.joint_positions,
             joint_velocities=batch.inputs.joint_velocities,
             joint_torques=batch.inputs.joint_torques,
             rgb_images=batch.inputs.rgb_images,
+            joint_target_positions=batch.outputs.joint_target_positions,
         )
         joint_states = self._combine_joint_states(inference_sample)
-        mu, logvar = self._encode_latent(
-            joint_states,
-            batch.outputs.joint_target_positions.data,
-            max_action_mask,
-            pred_sequence_mask,
-        )
-        action_preds = self._predict_action(mu, logvar, inference_sample)
+        global_cond = self._prepare_global_conditioning(joint_states, batch.rgb_images.data, batch.rgb_images.mask)
         target_actions = self._preprocess_target_joint_pos(
             batch.outputs.joint_target_positions.data
         )
+        # Sample noise to add to the trajectory.
+        eps = torch.randn(target_actions.shape, device=target_actions.device)
+        # Sample a random noising timestep for each item in the batch.
+        timesteps = torch.randint(
+            low=0,
+            high=self.noise_scheduler.config.num_train_timesteps,
+            size=(target_actions.shape[0],),
+            device=target_actions.device,
+        ).long()
+        # Add noise to the clean trajectories according to the noise magnitude at each timestep.
+        noisy_trajectory = self.noise_scheduler.add_noise(target_actions, eps, timesteps)
+        # Run the denoising network (that might denoise the trajectory, or attempt to predict the noise).
+        pred = self.unet(noisy_trajectory, timesteps, global_cond=global_cond)
 
-        l1_loss_all = F.l1_loss(action_preds, target_actions, reduction="none")
-        l1_loss = (l1_loss_all * pred_sequence_mask.unsqueeze(-1)).mean()
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
-        loss = l1_loss + self.kl_weight * kl_loss
+        # Compute the loss.
+        # The target is either the original trajectory, or the noise.
+        if self.prediction_type == "epsilon":
+            target = eps
+        elif self.prediction_type == "sample":
+            target = target_actions
+        else:
+            raise ValueError(f"Unsupported prediction type {self.config.prediction_type}")
+
+        loss = F.mse_loss(pred, target, reduction="none")
+
         losses = {
-            "l1_and_kl_loss": loss,
+            "mse_loss": loss,
         }
         metrics = {
-            "l1_loss": l1_loss,
-            "kl_loss": kl_loss,
+            "mse_loss": loss,
         }
         return BatchedTrainingOutputs(
-            output_predicitons=action_preds,
+            output_predicitons=pred,
             losses=losses,
             metrics=metrics,
         )
