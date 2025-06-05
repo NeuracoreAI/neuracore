@@ -6,7 +6,7 @@ from common.sim_env import BOX_POSE, make_sim_env
 import neuracore as nc
 from neuracore.core.nc_types import DataType
 
-TRAINING_JOB_NAME = "MyTrainingJob"
+TRAINING_JOB_NAME = "Training_test_exampleData"
 
 
 def main():
@@ -17,9 +17,9 @@ def main():
         overwrite=False,
     )
     # If you have a train run name, you can use it to connect to a local. E.g.:
-    policy = nc.connect_local_endpoint(train_run_name=TRAINING_JOB_NAME)
+    # policy = nc.connect_local_endpoint(train_run_name=TRAINING_JOB_NAME)
     # If you know the path to the local model.mar file, you can use it directly as:
-    # policy = nc.connect_local_endpoint(path_to_model="PATH/TO/MODEL.mar")
+    policy = nc.connect_local_endpoint(path_to_model="model_mlp.mar")
 
     onscreen_render = True
     render_cam_name = "angle"
@@ -45,6 +45,7 @@ def main():
         # Run episode
         for i in range(EPISODE_LENGTH):
             nc.log_joint_positions(ts.observation["qpos"])
+            nc.log_joint_velocities(ts.observation["qvel"])
             for key, value in ts.observation["images"].items():
                 if key in obs_camera_names:
                     nc.log_rgb(key, value)
