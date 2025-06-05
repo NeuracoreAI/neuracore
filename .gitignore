@@ -106,6 +106,3 @@ Thumbs.db
 ehthumbs.db
 
 MUJOCO_LOG.TXT
-
-# Local model
-*.mar

@@ -61,6 +61,8 @@ setup(
             "torchvision",
             "torch-model-archiver",
             "transformers",
+            "diffusers>=0.27.2",
+            "einops",
         ],
         "dev": [
             "pytest>=6.2.5",
