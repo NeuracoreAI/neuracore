@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.transforms as T
 
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler, DDPMScheduler
 
@@ -90,6 +91,11 @@ class DiffusionPolicy(NeuracoreModel):
         )
         self.prediction_type = prediction_type
         self.num_inference_steps = num_inference_steps
+        # Normalize the images with imagenet mean and std
+        self.image_normalizer = torch.nn.Sequential(
+            T.Resize((224, 224)),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        )
 
         state_mean = np.concatenate([
             self.dataset_description.joint_positions.mean,
@@ -116,16 +122,13 @@ class DiffusionPolicy(NeuracoreModel):
         return torch.tensor(data, dtype=torch.float32, device=self.device)
 
     def _preprocess_joint_state(
-        self, joint_state: torch.FloatTensor
+        self, 
+        joint_state: torch.FloatTensor,
+        joint_state_mean: torch.FloatTensor,
+        joint_state_std: torch.FloatTensor,
     ) -> torch.FloatTensor:
         """Preprocess the states."""
-        return (joint_state - self.joint_state_mean) / self.joint_state_std
-
-    def _preprocess_target_joint_pos(
-        self, target_joint_pos: torch.FloatTensor
-    ) -> torch.FloatTensor:
-        """Preprocess the actions."""
-        return (target_joint_pos - self.joint_target_mean) / self.joint_target_std
+        return (joint_state - joint_state_mean) / joint_state_std
 
     def _unnormalize_actions(
         self, predicted_actions: torch.FloatTensor
@@ -151,7 +154,7 @@ class DiffusionPolicy(NeuracoreModel):
             if batch.joint_torques:
                 state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
             joint_states = torch.cat(state_inputs, dim=-1)
-            joint_states = self._preprocess_joint_state(joint_states)
+            joint_states = self._preprocess_joint_state(joint_states, self.joint_state_mean, self.joint_state_std)
         return joint_states
 
     # ========= inference  ============
@@ -191,7 +194,7 @@ class DiffusionPolicy(NeuracoreModel):
         if camera_images:
         # Extract image features.
             for cam_id, encoder in enumerate(self.image_encoders):
-                features = encoder(camera_images[:, cam_id])
+                features = encoder(self.image_normalizer(camera_images[:, cam_id]))
                 features *= camera_images_mask[:, cam_id].view(batch_size, 1, 1, 1)
                 global_cond_feats.append(features)
 
@@ -243,12 +246,6 @@ class DiffusionPolicy(NeuracoreModel):
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Training step."""
-        # pred_sequence_mask = batch.outputs.joint_target_positions.mask[
-        #     :, :, 0
-        # ]  # [batch_size, T]
-        # max_action_mask = batch.outputs.joint_target_positions.mask[
-        #     :, 0, :
-        # ]  # [batch_size, MaxActionSize]
         prediction_horizon = batch.outputs.joint_target_positions.data.shape[1]
         inference_sample = BatchedInferenceSamples(
             joint_positions=batch.inputs.joint_positions,
@@ -259,9 +256,12 @@ class DiffusionPolicy(NeuracoreModel):
         )
         joint_states = self._combine_joint_states(inference_sample)
         global_cond = self._prepare_global_conditioning(joint_states, batch.rgb_images.data, batch.rgb_images.mask)
-        target_actions = self._preprocess_target_joint_pos(
-            batch.outputs.joint_target_positions.data
+        target_actions = self._preprocess_joint_state(
+            batch.outputs.joint_target_positions.data,
+            self.joint_target_mean,
+            self.joint_target_std,
         )
+        target_actions = target_actions * batch.outputs.joint_target_positions.mask
         # Sample noise to add to the trajectory.
         eps = torch.randn(target_actions.shape, device=target_actions.device)
         # Sample a random noising timestep for each item in the batch.

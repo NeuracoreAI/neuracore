@@ -18,9 +18,9 @@ class DiffusionPolicyImageEncoder(nn.Module):
         self,
         spatial_softmax_num_keypoints: int = 32,
         feature_dim: int = 256,
-        do_crop: bool = False,
+        do_crop: bool = True,
         crop_shape: tuple[int, int] = (224, 224),
-        crop_is_random: bool = False,
+        crop_is_random: bool = True,
     ):
         super().__init__()
         # Set up optional preprocessing.
