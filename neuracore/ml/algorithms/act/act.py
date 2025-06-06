@@ -172,14 +172,26 @@ class ACT(NeuracoreModel):
             self.dataset_description.joint_velocities.std,
             self.dataset_description.joint_torques.std,
         ])
-        self.joint_state_mean = self._to_torch_float_tensor(state_mean)
-        self.joint_state_std = self._to_torch_float_tensor(state_std)
-
-        self.joint_target_mean = self._to_torch_float_tensor(
-            self.dataset_description.joint_target_positions.mean
+        # Register as buffers so they move with the model
+        self.register_buffer(
+            'joint_state_mean', self._to_torch_float_tensor(state_mean)
         )
-        self.joint_target_std = self._to_torch_float_tensor(
-            self.dataset_description.joint_target_positions.std
+        self.register_buffer(
+            'joint_state_std', self._to_torch_float_tensor(state_std)
+        )
+
+        # Register as buffers so they move with the model
+        self.register_buffer(
+            'joint_target_mean', 
+            self._to_torch_float_tensor(
+                self.dataset_description.joint_target_positions.mean
+            )
+        )
+        self.register_buffer(
+            'joint_target_std',
+            self._to_torch_float_tensor(
+                self.dataset_description.joint_target_positions.std
+            )
         )
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:

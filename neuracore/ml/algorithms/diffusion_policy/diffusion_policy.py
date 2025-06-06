@@ -9,7 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
 
-from diffusers.schedulers.scheduling_ddim import DDIMScheduler, DDPMScheduler
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
 from neuracore.core.nc_types import DataType, ModelInitDescription, ModelPrediction
 from neuracore.ml import (
@@ -36,7 +37,7 @@ class DiffusionPolicy(NeuracoreModel):
         self,
         model_init_description: ModelInitDescription,
         hidden_dim: int = 256,
-        unet_down_dims: list[int] = [512, 1024, 2048],
+        unet_down_dims: list[int] = [512, 1024, 2048], # sth wrong with unet down_dims
         unet_kernel_size: int = 5,
         unet_n_groups: int = 8,
         unet_diffusion_step_embed_dim: int = 128,
@@ -51,11 +52,13 @@ class DiffusionPolicy(NeuracoreModel):
         clip_sample_range: float = 1.0,
         lr: float = 1e-4,
         lr_backbone: float = 1e-5,
+        weight_decay: float = 1e-4,
         prediction_type: str = "epsilon",
     ):
         super().__init__(model_init_description)
         self.lr = lr
         self.lr_backbone = lr_backbone
+        self.weight_decay = weight_decay
         # Vision components
         self.image_encoders = nn.ModuleList([
             DiffusionPolicyImageEncoder(feature_dim=hidden_dim)
@@ -79,7 +82,7 @@ class DiffusionPolicy(NeuracoreModel):
             use_film_scale_modulation=unet_use_film_scale_modulation,
         )
 
-        self.noise_scheduler = _make_noise_scheduler(
+        self.noise_scheduler = self._make_noise_scheduler(
             noise_scheduler_type,
             num_train_timesteps=num_train_timesteps,
             beta_start=beta_start,
@@ -107,14 +110,26 @@ class DiffusionPolicy(NeuracoreModel):
             self.dataset_description.joint_velocities.std,
             self.dataset_description.joint_torques.std,
         ])
-        self.joint_state_mean = self._to_torch_float_tensor(state_mean)
-        self.joint_state_std = self._to_torch_float_tensor(state_std)
-
-        self.joint_target_mean = self._to_torch_float_tensor(
-            self.dataset_description.joint_target_positions.mean
+        # Register as buffers so they move with the model
+        self.register_buffer(
+            'joint_state_mean', self._to_torch_float_tensor(state_mean)
         )
-        self.joint_target_std = self._to_torch_float_tensor(
-            self.dataset_description.joint_target_positions.std
+        self.register_buffer(
+            'joint_state_std', self._to_torch_float_tensor(state_std)
+        )
+
+        # Register as buffers so they move with the model
+        self.register_buffer(
+            'joint_target_mean', 
+            self._to_torch_float_tensor(
+                self.dataset_description.joint_target_positions.mean
+            )
+        )
+        self.register_buffer(
+            'joint_target_std',
+            self._to_torch_float_tensor(
+                self.dataset_description.joint_target_positions.std
+            )
         )
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
@@ -140,22 +155,25 @@ class DiffusionPolicy(NeuracoreModel):
         self, batch: BatchedInferenceSamples
     ) -> torch.FloatTensor:
         """Combine joint states."""
-        joint_states = None
-        if self.state_embed is not None:
-            state_inputs = []
-            if batch.joint_positions:
-                state_inputs.append(
-                    batch.joint_positions.data * batch.joint_positions.mask
-                )
-            if batch.joint_velocities:
-                state_inputs.append(
-                    batch.joint_velocities.data * batch.joint_velocities.mask
-                )
-            if batch.joint_torques:
-                state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
+        state_inputs = []
+        if batch.joint_positions:
+            state_inputs.append(
+                batch.joint_positions.data * batch.joint_positions.mask
+            )
+        if batch.joint_velocities:
+            state_inputs.append(
+                batch.joint_velocities.data * batch.joint_velocities.mask
+            )
+        if batch.joint_torques:
+            state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
+        
+        if state_inputs:
             joint_states = torch.cat(state_inputs, dim=-1)
             joint_states = self._preprocess_joint_state(joint_states, self.joint_state_mean, self.joint_state_std)
-        return joint_states
+            return joint_states
+        else:
+            # Return zero tensor if no joint states available
+            raise ValueError("No joint states available")
 
     # ========= inference  ============
     def _conditional_sample(
@@ -186,25 +204,26 @@ class DiffusionPolicy(NeuracoreModel):
 
     def _prepare_global_conditioning(
         self,
-        states: torch.FloatTensor,
+        joint_states: torch.FloatTensor,
         camera_images: torch.FloatTensor,
         camera_images_mask: torch.FloatTensor,) -> torch.FloatTensor:
         """Encode image features and concatenate them all together along with the state vector."""
-        global_cond_feats = self._combine_joint_states(batch)
-        if camera_images:
-        # Extract image features.
+        global_cond_feats = [joint_states]
+        batch_size = joint_states.shape[0]
+        if camera_images is not None:
+            # Extract image features.
             for cam_id, encoder in enumerate(self.image_encoders):
                 features = encoder(self.image_normalizer(camera_images[:, cam_id]))
-                features *= camera_images_mask[:, cam_id].view(batch_size, 1, 1, 1)
+                features = features * camera_images_mask[:, cam_id].view(batch_size, 1)
                 global_cond_feats.append(features)
 
         # Concatenate features then flatten to (B, global_cond_dim).
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
 
+    @staticmethod
     def _make_noise_scheduler(name: str, **kwargs: dict) -> DDPMScheduler | DDIMScheduler:
-    """
-        Factory for noise scheduler instances of the requested type. All kwargs are passed
-        to the scheduler.
+        """
+        Factory for noise scheduler instances of the requested type. All kwargs are passed to the scheduler.
         """
         if name == "DDPM":
             return DDPMScheduler(**kwargs)
@@ -233,7 +252,7 @@ class DiffusionPolicy(NeuracoreModel):
 
     def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
         t = time.time()
-        prediction_horizon = batch.outputs.joint_target_positions.data.shape[1]
+        prediction_horizon = self.output_prediction_horizon
         action_preds = self._predict_action(batch, prediction_horizon)
         prediction_time = time.time() - t
         # unnormalize the actions
@@ -255,7 +274,7 @@ class DiffusionPolicy(NeuracoreModel):
             joint_target_positions=batch.outputs.joint_target_positions,
         )
         joint_states = self._combine_joint_states(inference_sample)
-        global_cond = self._prepare_global_conditioning(joint_states, batch.rgb_images.data, batch.rgb_images.mask)
+        global_cond = self._prepare_global_conditioning(joint_states, batch.inputs.rgb_images.data, batch.inputs.rgb_images.mask)
         target_actions = self._preprocess_joint_state(
             batch.outputs.joint_target_positions.data,
             self.joint_target_mean,
@@ -283,9 +302,12 @@ class DiffusionPolicy(NeuracoreModel):
         elif self.prediction_type == "sample":
             target = target_actions
         else:
-            raise ValueError(f"Unsupported prediction type {self.config.prediction_type}")
+            raise ValueError(f"Unsupported prediction type {self.prediction_type}")
 
         loss = F.mse_loss(pred, target, reduction="none")
+        # Apply mask and reduce
+        mask = batch.outputs.joint_target_positions.mask
+        loss = (loss * mask).mean()
 
         losses = {
             "mse_loss": loss,

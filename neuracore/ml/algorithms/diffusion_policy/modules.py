@@ -19,15 +19,13 @@ class DiffusionPolicyImageEncoder(nn.Module):
         self,
         spatial_softmax_num_keypoints: int = 32,
         feature_dim: int = 256,
-        do_crop: bool = True,
-        crop_shape: tuple[int, int] = (224, 224),
-        crop_is_random: bool = True,
     ):
         super().__init__()
 
         # Use pretrained ResNet but remove final layers
         self.backbone = self._build_backbone()
-        self.pool = SpatialSoftmax(512, num_kp=spatial_softmax_num_keypoints)
+        # ResNet18 without avgpool and fc layers outputs (512, 7, 7) for 224x224 input
+        self.pool = SpatialSoftmax((512, 7, 7), num_kp=spatial_softmax_num_keypoints)
         self.feature_dim = feature_dim
         self.out = nn.Linear(spatial_softmax_num_keypoints * 2, self.feature_dim)
         self.relu = nn.ReLU()
@@ -210,7 +208,7 @@ class DiffusionConditionalUnet1d(nn.Module):
 
         self.final_conv = nn.Sequential(
             DiffusionConv1dBlock(down_dims[0], down_dims[0], kernel_size=kernel_size),
-            nn.Conv1d(down_dims[0], action_feature.shape[0], 1),
+            nn.Conv1d(down_dims[0], action_dim, 1),
         )
 
     def forward(self, x: torch.Tensor, timestep: torch.Tensor | int, global_cond=None) -> torch.Tensor:
@@ -333,22 +331,20 @@ class DiffusionConv1dBlock(nn.Module):
 
 
 class DiffusionSinusoidalPosEmb(nn.Module):
-    """1D sinusoidal positional embeddings used for time embedding."""
+    """1D sinusoidal positional embeddings as in Attention is All You Need."""
 
-    def __init__(self, d_model: int, max_len: int = 5000):
+    def __init__(self, dim: int):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer("pe", pe)
+        self.dim = dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.pe[:, : x.size(1)]
+        device = x.device
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = x.unsqueeze(-1) * emb.unsqueeze(0)
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
 
 
 
