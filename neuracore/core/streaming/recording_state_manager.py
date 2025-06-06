@@ -9,6 +9,7 @@ state and remote recording triggers.
 import asyncio
 from concurrent.futures import Future
 from datetime import timedelta
+from typing import Optional
 
 from aiohttp import ClientSession, ClientTimeout
 from aiohttp_sse_client import client as sse_client
@@ -44,7 +45,7 @@ class RecordingStateManager(AsyncIOEventEmitter):
         self,
         loop: asyncio.AbstractEventLoop,
         client_session: ClientSession,
-        auth: Auth = None,
+        auth: Optional[Auth] = None,
     ):
         """Initialize the recording state manager.
 

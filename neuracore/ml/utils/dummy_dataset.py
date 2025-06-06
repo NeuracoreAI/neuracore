@@ -192,14 +192,15 @@ class DummyDataset(NeuracoreDataset):
                 # Randomly select an instruction
                 instruction = np.random.choice(self.sample_instructions)
                 # Tokenize the instruction
-                input_ids, attention_mask = self.tokenize_text([instruction])
+                if self.tokenize_text is not None:
+                    input_ids, attention_mask = self.tokenize_text([instruction])
 
-                language_tokens = MaskableData(input_ids, attention_mask)
+                    language_tokens = MaskableData(input_ids, attention_mask)
 
-                if DataType.LANGUAGE in self.input_data_types:
-                    sample.inputs.language_tokens = language_tokens
-                if DataType.LANGUAGE in self.output_data_types:
-                    sample.outputs.language_tokens = language_tokens
+                    if DataType.LANGUAGE in self.input_data_types:
+                        sample.inputs.language_tokens = language_tokens
+                    if DataType.LANGUAGE in self.output_data_types:
+                        sample.outputs.language_tokens = language_tokens
 
             return sample
 

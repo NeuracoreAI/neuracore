@@ -6,6 +6,7 @@ to prevent overwhelming the network connection.
 """
 
 import asyncio
+import concurrent.futures
 import json
 import time
 from asyncio import AbstractEventLoop
@@ -30,7 +31,10 @@ class JSONSource(AsyncIOEventEmitter):
     STATE_UPDATED_EVENT = "STATE_UPDATED_EVENT"
 
     def __init__(
-        self, mid: str, stream_enabled: EnabledManager, loop: AbstractEventLoop = None
+        self,
+        mid: str,
+        stream_enabled: EnabledManager,
+        loop: Optional[AbstractEventLoop] = None,
     ):
         """Initialize the JSON source.
 
@@ -42,11 +46,11 @@ class JSONSource(AsyncIOEventEmitter):
         super().__init__(loop)
         self.mid = mid
         self._last_state: Optional[dict] = None
-        self._last_update_time = 0
-        self.submit_task = None
+        self._last_update_time: float = 0
+        self.submit_task: Optional[concurrent.futures.Future[None]] = None
         self.stream_enabled = stream_enabled
 
-    def publish(self, state: dict):
+    def publish(self, state: dict) -> None:
         """Publish a state update to all listeners.
 
         Schedules the state update for emission with rate limiting.
@@ -73,7 +77,7 @@ class JSONSource(AsyncIOEventEmitter):
             return None
         return json.dumps(self._last_state)
 
-    async def _submit_event(self):
+    async def _submit_event(self) -> None:
         """Submit an event with rate limiting.
 
         Internal method that handles the actual event emission with
@@ -90,5 +94,5 @@ class JSONSource(AsyncIOEventEmitter):
             return
 
         message = json.dumps(self._last_state)
-        self._last_update_time = time.time()
+        self._last_update_time = float(time.time())
         self.emit(self.STATE_UPDATED_EVENT, message)

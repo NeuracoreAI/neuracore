@@ -216,9 +216,12 @@ class SimpleWorldModel(NeuracoreModel):
         # Process current images from each camera
         image_features = []
         for cam_id, encoder in enumerate(self.image_encoders):
-            features = encoder(self.transform(batch.rgb_images.data[:, cam_id]))
-            masked_features = features * batch.rgb_images.mask[:, cam_id : cam_id + 1]
-            image_features.append(masked_features)
+            if batch.rgb_images is not None:
+                features = encoder(self.transform(batch.rgb_images.data[:, cam_id]))
+                masked_features = (
+                    features * batch.rgb_images.mask[:, cam_id : cam_id + 1]
+                )
+                image_features.append(masked_features)
 
         # Combine state inputs if available
         state_features = None
@@ -246,7 +249,7 @@ class SimpleWorldModel(NeuracoreModel):
 
         # Process action inputs if available
         action_features = None
-        if self.action_embed is not None:
+        if self.action_embed is not None and batch.joint_target_positions is not None:
             action_data = (
                 batch.joint_target_positions.data * batch.joint_target_positions.mask
             )
@@ -276,17 +279,18 @@ class SimpleWorldModel(NeuracoreModel):
             combined_features = torch.cat(conditioning_features, dim=-1)
 
             # Use UNet to predict future image
-            current_image = batch.rgb_images.data[:, cam_id]
-            image_prediction = self.image_predictors[cam_id](
-                current_image, combined_features
-            )
+            if batch.rgb_images is not None:
+                current_image = batch.rgb_images.data[:, cam_id]
+                image_prediction = self.image_predictors[cam_id](
+                    current_image, combined_features
+                )
 
-            # Apply mask if available
-            future_image = image_prediction * batch.rgb_images.mask[:, cam_id].view(
-                batch_size, 1, 1, 1
-            )
+                # Apply mask if available
+                future_image = image_prediction * batch.rgb_images.mask[:, cam_id].view(
+                    batch_size, 1, 1, 1
+                )
 
-            future_images[:, cam_id] = future_image
+                future_images[:, cam_id] = future_image
 
         # [B, CAMS, 3 * T, H, W] -> [B, T, CAMS, 3, H, W]
         b, cams, c, h, w = future_images.shape
@@ -343,7 +347,9 @@ class SimpleWorldModel(NeuracoreModel):
         )
 
         # Preprocess images
-        target_future_images = batch.outputs.rgb_images.data
+        target_future_images = None
+        if batch.outputs.rgb_images is not None:
+            target_future_images = batch.outputs.rgb_images.data
 
         # Predict future images
         predicted_future_images = self._predict_future_images(inference_sample)
@@ -351,16 +357,18 @@ class SimpleWorldModel(NeuracoreModel):
         losses = {}
         metrics = {}
 
-        if self.training:
+        if self.training and target_future_images is not None:
             # [B, T, CAMS, 3, H, W] -> [B * T * CAMS, 3, H, W]
             _, _, _, c, h, w = target_future_images.shape
             target_future_image = self.transform(
                 target_future_images.reshape(-1, c, h, w)
             )
-            masked_target_future_image = (
-                target_future_image
-                * batch.outputs.rgb_images.mask.flatten().reshape(-1, 1, 1, 1)
-            )
+            masked_target_future_image = None
+            if batch.outputs.rgb_images is not None:
+                masked_target_future_image = (
+                    target_future_image
+                    * batch.outputs.rgb_images.mask.flatten().reshape(-1, 1, 1, 1)
+                )
             reconstruction_loss = nn.functional.mse_loss(
                 predicted_future_images.reshape(-1, c, h, w), masked_target_future_image
             )

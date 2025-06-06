@@ -6,7 +6,7 @@ state information to predict action sequences for robot manipulation tasks.
 """
 
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -230,6 +230,7 @@ class SimpleVLA(NeuracoreModel):
 
     def _process_language_tokens(
         self,
+        batch_size: int,
         language_tokens: Optional[torch.FloatTensor],
         language_mask: Optional[torch.FloatTensor] = None,
     ) -> torch.FloatTensor:
@@ -244,9 +245,7 @@ class SimpleVLA(NeuracoreModel):
         """
         if language_tokens is None:
             # Return zero tensor with appropriate dimensions if no language input
-            return torch.zeros(
-                language_tokens.shape[0], self.language_output_dim, device=self.device
-            )
+            return torch.zeros(batch_size, self.language_output_dim, device=self.device)
 
         # Forward through language encoder
         return self.language_encoder(
@@ -296,7 +295,9 @@ class SimpleVLA(NeuracoreModel):
         language_features = None
         if batch.language_tokens is not None:
             language_features = self._process_language_tokens(
-                batch.language_tokens.data, batch.language_tokens.mask
+                batch_size,
+                batch.language_tokens.data,
+                batch.language_tokens.mask,
             )
         else:
             language_features = torch.zeros(
@@ -385,15 +386,19 @@ class SimpleVLA(NeuracoreModel):
         )
 
         # Preprocess target actions
-        target_actions = self._preprocess_target_joint_pos(
-            batch.outputs.joint_target_positions.data
-        )
+        target_actions = None
+        if batch.outputs.joint_target_positions is not None:
+            target_actions = self._preprocess_target_joint_pos(
+                batch.outputs.joint_target_positions.data
+            )
 
         # Get model predictions
         action_predictions = self._predict_action(inference_sample)
 
-        losses, metrics = {}, {}
-        if self.training:
+        losses: Dict[str, Any] = {}
+        metrics: Dict[str, Any] = {}
+
+        if self.training and target_actions is not None:
             # Calculate MSE loss
             losses["mse_loss"] = nn.functional.mse_loss(
                 action_predictions, target_actions

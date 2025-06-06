@@ -9,7 +9,7 @@ import asyncio
 import threading
 
 
-def get_running_loop():
+def get_running_loop() -> asyncio.AbstractEventLoop:
     """Get the running event loop or create a new one if none exists.
 
     Attempts to get the currently running event loop. If no loop is running,

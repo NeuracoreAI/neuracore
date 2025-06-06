@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from importlib import import_module
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 
 import numpy as np
 import pink
@@ -80,16 +80,16 @@ class Robot:
         desc = import_module(f"robot_descriptions.{description_module}")
         urdf_path = None
         if hasattr(desc, "URDF_PATH"):
-            urdf_path = str(Path(desc.URDF_PATH))
+            urdf_path = Path(desc.URDF_PATH)
         else:
             mjcf_path = str(Path(desc.MJCF_PATH))
-            urdf_path = str(Path(TEMP_DIR.name) / f"{description_module}_model.urdf")
+            urdf_path = Path(TEMP_DIR.name) / f"{description_module}_model.urdf"
             mjcf_to_urdf(mjcf_path, urdf_path, asset_file_prefix="meshes/")
 
         # Define robot information
         return RobotInfo(
             name=robot_name,
-            urdf_path=urdf_path,
+            urdf_path=str(urdf_path),
         )
 
     @property
@@ -180,7 +180,9 @@ class Robot:
                 # Treat as absolute width (usually in meters)
                 # For typical grippers, divide by 2 (half width on each finger)
                 # But ensure result is within limits
-                joint_pos = np.clip(gripper_open_width / 2.0, min_pos, max_pos)
+                joint_pos = np.clip(
+                    cast(float, gripper_open_width) / 2.0, min_pos, max_pos
+                )
             joint_positions[joint_name] = float(joint_pos)
         return joint_positions
 
