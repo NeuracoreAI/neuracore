@@ -37,7 +37,7 @@ class DiffusionPolicy(NeuracoreModel):
         self,
         model_init_description: ModelInitDescription,
         hidden_dim: int = 256,
-        unet_down_dims: list[int] = [512, 1024, 2048], # sth wrong with unet down_dims
+        unet_down_dims: list[int] = [512, 1024, 2048],  # the prediction horizon has to be 2^down_dims
         unet_kernel_size: int = 5,
         unet_n_groups: int = 8,
         unet_diffusion_step_embed_dim: int = 128,
@@ -265,7 +265,6 @@ class DiffusionPolicy(NeuracoreModel):
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Training step."""
-        prediction_horizon = batch.outputs.joint_target_positions.data.shape[1]
         inference_sample = BatchedInferenceSamples(
             joint_positions=batch.inputs.joint_positions,
             joint_velocities=batch.inputs.joint_velocities,
