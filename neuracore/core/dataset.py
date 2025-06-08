@@ -319,7 +319,8 @@ class EpisodeIterator:
         """
         auth = get_auth()
         response = requests.post(
-            f"{API_URL}/visualization/demonstrations/{self.recording['id']}/sync",
+            f"{API_URL}/synchronize/synchronize-recording",
+            data={"recording_id": self.recording["id"]},
             headers=auth.get_headers(),
         )
         response.raise_for_status()
