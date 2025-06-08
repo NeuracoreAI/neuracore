@@ -170,7 +170,7 @@ def mock_dataset_api(mock_auth_requests, dataset_dict, recordings_list, synced_d
 
     # Mock sync endpoint
     mock_auth_requests.post(
-        re.compile(f"{API_URL}/visualization/demonstrations/.*/sync"),
+        re.compile(f"{API_URL}/synchronize/synchronize-recording"),
         json=synced_data.model_dump(),
         status_code=200,
     )
