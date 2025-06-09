@@ -89,7 +89,7 @@ class StreamingVideoUploader(BucketUploader):
         self.video_name = video_name
         self.codec_context_options = codec_context_options
         self._streaming_done = False
-        self._upload_queue = queue.Queue()
+        self._upload_queue: queue.Queue = queue.Queue()
         # Thread will continue, even if main thread exits
         self._upload_thread = threading.Thread(target=self._upload_loop, daemon=False)
         self._upload_thread.start()
@@ -136,8 +136,8 @@ class StreamingVideoUploader(BucketUploader):
         self.stream.time_base = Fraction(1, PTS_FRACT)
 
         # Keep track of timestamps
-        self.first_timestamp = None
-        self.last_pts = None
+        self.first_timestamp: float | None = None
+        self.last_pts: int | None = None
 
         # Track bytes and buffer positions
         self.total_bytes_written = 0

@@ -76,7 +76,9 @@ class ClientStreamingManager:
             self.connect_signalling_stream(), self.loop
         )
 
-    def get_video_source(self, sensor_name: str, kind: str) -> VideoSource:
+    def get_video_source(
+        self, sensor_name: str, kind: str, sensor_key: str
+    ) -> VideoSource:
         """Get or create a video source for streaming camera data.
 
         Args:
@@ -86,7 +88,6 @@ class ClientStreamingManager:
         Returns:
             VideoSource: Video source for streaming frames
         """
-        sensor_key = (sensor_name, kind)
         if sensor_key in self.video_tracks_cache:
             return self.video_tracks_cache[sensor_key]
 
@@ -106,7 +107,7 @@ class ClientStreamingManager:
         return video_source
 
     def get_json_source(
-        self, sensor_name: str, kind: str, sensor_key: tuple | None = None
+        self, sensor_name: str, kind: str, sensor_key: str
     ) -> JSONSource:
         """Get or create a JSON source for streaming structured data.
 
@@ -118,7 +119,6 @@ class ClientStreamingManager:
         Returns:
             JSONSource: JSON source for streaming structured data
         """
-        sensor_key = sensor_key or (sensor_name, kind)
         if sensor_key in self.event_source_cache:
             return self.event_source_cache[sensor_key]
 
@@ -307,7 +307,9 @@ class ClientStreamingManager:
 _streaming_managers: Dict[Tuple[str, int], Future[ClientStreamingManager]] = {}
 
 
-async def _create_client_streaming_manager(robot_id: str, instance: int):
+async def _create_client_streaming_manager(
+    robot_id: str, instance: int
+) -> ClientStreamingManager:
     """Create a new client streaming manager instance.
 
     Args:

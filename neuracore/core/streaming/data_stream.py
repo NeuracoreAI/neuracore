@@ -9,7 +9,7 @@ cloud upload functionality.
 import logging
 import threading
 from abc import ABC
-from typing import Any, List
+from typing import Any, List, Optional
 
 import numpy as np
 
@@ -33,17 +33,17 @@ class DataStream(ABC):
     storage across different types of sensor data streams.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the data stream.
 
         This must be kept lightweight and not perform any blocking operations.
         """
         self._recording = False
-        self._recording_id = None
-        self._latest_data = None
+        self._recording_id: Optional[str] = None
+        self._latest_data: Optional[NCData] = None
         self.lock = threading.Lock()
 
-    def start_recording(self, recording_id: str):
+    def start_recording(self, recording_id: str) -> None:
         """Start recording data.
 
         Args:
@@ -107,9 +107,9 @@ class JsonDataStream(DataStream):
         if not filepath.endswith(".json"):
             filepath += ".json"
         self.filepath = filepath
-        self._streamer = None
+        self._streamer: Optional[StreamingJsonUploader] = None
 
-    def start_recording(self, recording_id):
+    def start_recording(self, recording_id: str) -> None:
         """Start JSON data recording.
 
         Args:
@@ -125,11 +125,13 @@ class JsonDataStream(DataStream):
             List[threading.Thread]: Upload thread for cleanup
         """
         super().stop_recording()
+        if self._streamer is None:
+            raise TypeError("Streamer is None")
         upload_thread = self._streamer.finish()
         self._streamer = None
         return [upload_thread]
 
-    def log(self, data: NCData):
+    def log(self, data: NCData) -> None:
         """Log structured data as JSON.
 
         Args:
@@ -160,10 +162,10 @@ class VideoDataStream(DataStream):
         self.camera_id = camera_id
         self.width = width
         self.height = height
-        self._lossless_encoder: VideoDataStream | None = None
-        self._lossy_encoder: VideoDataStream | None = None
+        self._lossless_encoder: Optional[StreamingVideoUploader] = None
+        self._lossy_encoder: Optional[StreamingVideoUploader] = None
 
-    def start_recording(self, recording_id: str):
+    def start_recording(self, recording_id: str) -> None:
         """Start video recording.
 
         Args:
@@ -178,13 +180,17 @@ class VideoDataStream(DataStream):
             List[threading.Thread]: Upload threads for both lossless and lossy encoders
         """
         super().stop_recording()
+        if self._lossless_encoder is None:
+            raise TypeError("_lossless_encoder is None")
         lossless_upload_thread = self._lossless_encoder.finish()
+        if self._lossy_encoder is None:
+            raise TypeError("_lossy_encoder is None")
         lossy_upload_thread = self._lossy_encoder.finish()
         self._lossless_encoder = None
         self._lossy_encoder = None
         return [lossless_upload_thread, lossy_upload_thread]
 
-    def log(self, data: np.ndarray, metadata: CameraData):
+    def log(self, data: np.ndarray, metadata: CameraData) -> None:
         """Log video frame data.
 
         Args:
@@ -209,7 +215,7 @@ class DepthDataStream(VideoDataStream):
     maintaining both lossless and lossy variants for different use cases.
     """
 
-    def start_recording(self, recording_id: str):
+    def start_recording(self, recording_id: str) -> None:
         """Start depth video recording.
 
         Initializes both lossless (for accuracy) and lossy (for bandwidth)
@@ -246,7 +252,7 @@ class RGBDataStream(VideoDataStream):
     (lossless) and streaming efficiency (lossy) use cases.
     """
 
-    def start_recording(self, recording_id: str):
+    def start_recording(self, recording_id: str) -> None:
         """Start RGB video recording.
 
         Initializes both lossless and lossy encoders with appropriate

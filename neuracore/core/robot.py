@@ -12,6 +12,7 @@ import os
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -71,7 +72,7 @@ class Robot:
         self.mjcf_path = mjcf_path
         self.overwrite = overwrite
         self.shared = shared
-        self.id: str | None = None
+        self.id: Optional[str] = None
         self._auth: Auth = get_auth()
         self._temp_dir = None
         self._data_streams: dict[str, DataStream] = dict()
@@ -101,7 +102,7 @@ class Robot:
                 raise ImportError("MJCF to URDF conversion requires mujoco")
             self._temp_dir = tempfile.TemporaryDirectory(prefix="neuracore")
             self.urdf_path = os.path.join(self._temp_dir.name, "model.urdf")
-            convert(mjcf_path, self.urdf_path, asset_file_prefix="meshes/")
+            convert(mjcf_path, Path(self.urdf_path), asset_file_prefix="meshes/")
 
     def init(self) -> None:
         """Initialize the robot on the Neuracore server.
@@ -139,7 +140,7 @@ class Robot:
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to initialize robot: {str(e)}")
 
-    def add_data_stream(self, stream_id: str, stream: DataStream):
+    def add_data_stream(self, stream_id: str, stream: DataStream) -> None:
         """Add a data stream to the robot for sensor data collection.
 
         Args:
@@ -254,7 +255,9 @@ class Robot:
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to stop recording: {str(e)}")
 
-    def _recording_stopped(self, robot_id: str, instance: int, recording_id: str):
+    def _recording_stopped(
+        self, robot_id: str, instance: int, recording_id: str
+    ) -> None:
         """Handle recording stopped events from the recording state manager.
 
         Internal callback that stops data collection from all streams when
@@ -277,6 +280,8 @@ class Robot:
         Returns:
             True if the robot is actively recording, False otherwise.
         """
+        if not self.id:
+            raise RobotError("Robot not initialized. Call init() first.")
         return get_recording_state_manager().is_recording(
             robot_id=self.id, instance=self.instance
         )
@@ -287,6 +292,8 @@ class Robot:
         Returns:
             The current recording ID if the robot is recording, None otherwise.
         """
+        if not self.id:
+            raise RobotError("Robot not initialized. Call init() first.")
         return get_recording_state_manager().get_current_recording_id(
             robot_id=self.id, instance=self.instance
         )
@@ -304,6 +311,8 @@ class Robot:
             ValidationError: If the URDF file is not found.
             RobotError: If mesh files cannot be located or if package creation fails.
         """
+        if not self.urdf_path:
+            raise ValueError("urdf path nis None")
         if not os.path.exists(self.urdf_path):
             raise ValidationError(f"URDF file not found: {self.urdf_path}")
 
@@ -423,7 +432,7 @@ class Robot:
 
 
 # Global robot registry
-_robots: dict[str, Robot] = {}
+_robots: dict[tuple[str, int], Robot] = {}
 _robot_name_id_mapping: dict[str, str] = {}
 
 
@@ -455,6 +464,8 @@ def init(
     """
     robot = Robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     robot.init()
+    if not robot.id:
+        raise RobotError("Robot not initialized. Call init() first.")
     _robot_name_id_mapping[robot_name] = robot.id
     _robots[(robot.id, instance)] = robot
     return robot

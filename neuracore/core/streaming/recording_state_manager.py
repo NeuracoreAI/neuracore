@@ -96,7 +96,9 @@ class RecordingStateManager(AsyncIOEventEmitter):
         instance_key = (robot_id, instance)
         return instance_key in self.recording_robot_instances
 
-    def recording_started(self, robot_id: str, instance: int, recording_id: str):
+    def recording_started(
+        self, robot_id: str, instance: int, recording_id: str
+    ) -> None:
         """Handle recording start for a robot instance.
 
         Updates internal state and emits RECORDING_STARTED event. If the robot
@@ -123,7 +125,9 @@ class RecordingStateManager(AsyncIOEventEmitter):
             recording_id=recording_id,
         )
 
-    def recording_stopped(self, robot_id: str, instance: int, recording_id: str):
+    def recording_stopped(
+        self, robot_id: str, instance: int, recording_id: str
+    ) -> None:
         """Handle recording stop for a robot instance.
 
         Updates internal state and emits RECORDING_STOPPED event. Only processes
@@ -148,7 +152,7 @@ class RecordingStateManager(AsyncIOEventEmitter):
 
     def updated_recording_state(
         self, is_recording: bool, details: BaseRecodingUpdatePayload
-    ):
+    ) -> None:
         """Update recording state based on remote notification.
 
         Processes recording state changes from remote notifications and calls
@@ -184,7 +188,7 @@ class RecordingStateManager(AsyncIOEventEmitter):
                 recording_id=recording_id,
             )
 
-    async def connect_recording_notification_stream(self):
+    async def connect_recording_notification_stream(self) -> None:
         """Connect to recording notification stream via Server-Sent Events.
 
         Maintains a persistent connection to receive real-time recording state
@@ -245,12 +249,12 @@ class RecordingStateManager(AsyncIOEventEmitter):
                 await asyncio.sleep(2 ^ backoff)
                 backoff += 1
 
-    def __stop_remote_trigger(self):
+    def __stop_remote_trigger(self) -> None:
         """Internal method to stop the remote trigger connection."""
         if self.recording_stream_future.running():
             self.recording_stream_future.cancel()
 
-    def disable_remote_trigger(self):
+    def disable_remote_trigger(self) -> None:
         """Disable remote recording triggers and close server connection.
 
         Stops listening for remote recording notifications and closes the
@@ -262,7 +266,7 @@ class RecordingStateManager(AsyncIOEventEmitter):
 _recording_manager: Future[RecordingStateManager] | None = None
 
 
-async def create_recording_state_manager():
+async def create_recording_state_manager() -> RecordingStateManager:
     """Create a new recording state manager instance.
 
     Returns:
