@@ -246,7 +246,10 @@ def run_validation(
             )
 
         # Sum all losses
-        loss = torch.tensor(sum(outputs.losses.values())).mean()
+        # loss = torch.tensor(sum(outputs.losses.values())).mean()
+        loss = sum(outputs.losses.values())
+        if isinstance(loss, (int, float)):
+            loss = torch.tensor(loss, requires_grad=True)
         logger.info(f"Forward pass successful, loss: {loss.item():.4f}")
         algo_check.successfully_forward_pass = True
 

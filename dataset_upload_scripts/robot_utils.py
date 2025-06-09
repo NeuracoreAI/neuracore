@@ -177,6 +177,9 @@ class Robot:
                 # Treat as percentage open
                 joint_pos = min_pos + (max_pos - min_pos) * gripper_open_amount
             else:
+                assert isinstance(
+                    gripper_open_width, float
+                ), "Expected gripper_open_width to be float instance"
                 # Treat as absolute width (usually in meters)
                 # For typical grippers, divide by 2 (half width on each finger)
                 # But ensure result is within limits

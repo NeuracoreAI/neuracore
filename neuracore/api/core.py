@@ -134,7 +134,7 @@ def connect_robot(
     GlobalSingleton()._active_robot = robot
     # Initialize push update managers
     if robot.id is None:
-        raise RobotError("Robot.id is None, failed to initialize robot instance")
+        raise RobotError("Robot not initialized. Call init() first.")
     get_robot_streaming_manager(robot.id, robot.instance)
     get_recording_state_manager()
     return robot
@@ -208,8 +208,11 @@ def stop_live_data(robot_name: Optional[str] = None, instance: int = 0) -> None:
         robot_name: Robot identifier. If not provided, uses the currently
             active robot from the global state.
         instance: Instance number of the robot for multi-instance scenarios.
+
+    Raises:
+        RobotError: If no robot is active and no robot_name is provided.
     """
     robot = _get_robot(robot_name, instance)
     if not robot.id:
-        raise RobotError("Recording_id is None, no current recording")
+        raise RobotError("Robot not initialized. Call init() first.")
     get_robot_streaming_manager(robot.id, robot.instance).close()

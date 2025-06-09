@@ -206,14 +206,18 @@ class CNNMLP(NeuracoreModel):
         Returns:
             torch.FloatTensor: Predicted action sequence [B, T, action_dim]
         """
-        batch_size = batch.joint_positions.data.shape[0]
+        if batch.joint_positions:
+            batch_size = batch.joint_positions.data.shape[0]
+        else:
+            raise ValueError("Batch size not discernable")
 
         # Process images from each camera
         image_features = []
-        for cam_id, encoder in enumerate(self.image_encoders):
-            features = encoder(self.transform(batch.rgb_images.data[:, cam_id]))
-            features *= batch.rgb_images.mask[:, cam_id : cam_id + 1]
-            image_features.append(features)
+        if batch.rgb_images is not None:
+            for cam_id, encoder in enumerate(self.image_encoders):
+                features = encoder(self.transform(batch.rgb_images.data[:, cam_id]))
+                features *= batch.rgb_images.mask[:, cam_id : cam_id + 1]
+                image_features.append(features)
 
         # Combine image features
         if image_features:

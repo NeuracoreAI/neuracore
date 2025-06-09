@@ -259,8 +259,14 @@ class ACT(NeuracoreModel):
         Returns:
             tuple[torch.FloatTensor, torch.FloatTensor]: Latent mean and log variance
         """
+        if self.state_embed is None:
+            raise ValueError(
+                "ACT model requires state information "
+                "(joint positions, velocities, or torques) "
+                "but state_embed is None. Check your dataset"
+                " configuration."
+            )
         batch_size = state.shape[0]
-
         # Project joint positions and actions
         state_embed = self.state_embed(state)  # [B, H]
         action_embed = self.action_embed(
@@ -318,8 +324,12 @@ class ACT(NeuracoreModel):
         Returns:
             torch.FloatTensor: Encoded visual and proprioceptive memory
         """
+        if self.state_embed is None:
+            raise ValueError(
+                "ACT model requires state information for visual encoding "
+                "but state_embed is None. Check your dataset configuration."
+            )
         batch_size = states.shape[0]
-
         # Process images
         image_features = []
         image_pos = []
@@ -340,7 +350,8 @@ class ACT(NeuracoreModel):
         pos = combined_pos.flatten(2).permute(2, 0, 1)
 
         # Process joint positions and latent
-        state_features = self.state_embed(states)  # [B, H]
+        state_features = self.state_embed(states)
+        # [B, H]
 
         # Stack latent and proprio features
         additional_features = torch.stack([latent, state_features], dim=0)  # [2, B, H]
@@ -424,13 +435,17 @@ class ACT(NeuracoreModel):
         # Project latent
         latent = self.latent_out_proj(latent_sample)  # [B, H]
 
-        # Encode visual features
-        memory = self._encode_visual(
-            self._combine_joint_states(batch),
-            batch.rgb_images.data,
-            batch.rgb_images.mask,
-            latent,
-        )
+        if batch.rgb_images is not None:
+            joint_states = self._combine_joint_states(batch)
+            if joint_states is None:
+                raise ValueError("No joint state data available")
+            # Encode visual features
+            memory = self._encode_visual(
+                joint_states,
+                batch.rgb_images.data,
+                batch.rgb_images.mask,
+                latent,
+            )
 
         # Decode actions
         action_preds = self._decode(latent, memory)
@@ -451,20 +466,19 @@ class ACT(NeuracoreModel):
             torch.FloatTensor: Combined and normalized joint state features
         """
         joint_states = None
-        if self.state_embed is not None:
-            state_inputs = []
-            if batch.joint_positions:
-                state_inputs.append(
-                    batch.joint_positions.data * batch.joint_positions.mask
-                )
-            if batch.joint_velocities:
-                state_inputs.append(
-                    batch.joint_velocities.data * batch.joint_velocities.mask
-                )
-            if batch.joint_torques:
-                state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
-            joint_states = torch.cat(state_inputs, dim=-1)
-            joint_states = self._preprocess_joint_state(joint_states)
+        if self.state_embed is None:
+            raise ValueError("State embed is None")
+        state_inputs = []
+        if batch.joint_positions:
+            state_inputs.append(batch.joint_positions.data * batch.joint_positions.mask)
+        if batch.joint_velocities:
+            state_inputs.append(
+                batch.joint_velocities.data * batch.joint_velocities.mask
+            )
+        if batch.joint_torques:
+            state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
+        joint_states = torch.cat(state_inputs, dim=-1)
+        joint_states = self._preprocess_joint_state(joint_states)
         return joint_states
 
     def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:

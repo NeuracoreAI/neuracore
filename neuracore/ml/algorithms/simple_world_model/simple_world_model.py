@@ -215,10 +215,13 @@ class SimpleWorldModel(NeuracoreModel):
 
         # Process current images from each camera
         image_features = []
-        for cam_id, encoder in enumerate(self.image_encoders):
-            features = encoder(self.transform(batch.rgb_images.data[:, cam_id]))
-            masked_features = features * batch.rgb_images.mask[:, cam_id : cam_id + 1]
-            image_features.append(masked_features)
+        if batch.rgb_images is not None:
+            for cam_id, encoder in enumerate(self.image_encoders):
+                features = encoder(self.transform(batch.rgb_images.data[:, cam_id]))
+                masked_features = (
+                    features * batch.rgb_images.mask[:, cam_id : cam_id + 1]
+                )
+                image_features.append(masked_features)
 
         # Combine state inputs if available
         state_features = None
@@ -351,7 +354,11 @@ class SimpleWorldModel(NeuracoreModel):
         losses = {}
         metrics = {}
 
-        if self.training:
+        if (
+            self.training
+            and target_future_images is not None
+            and batch.outputs.rgb_images is not None
+        ):
             # [B, T, CAMS, 3, H, W] -> [B * T * CAMS, 3, H, W]
             _, _, _, c, h, w = target_future_images.shape
             target_future_image = self.transform(

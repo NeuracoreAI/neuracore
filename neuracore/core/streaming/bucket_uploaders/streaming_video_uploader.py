@@ -12,7 +12,7 @@ import logging
 import queue
 import threading
 from fractions import Fraction
-from typing import Callable
+from typing import Callable, Optional
 
 import av
 import numpy as np
@@ -136,8 +136,8 @@ class StreamingVideoUploader(BucketUploader):
         self.stream.time_base = Fraction(1, PTS_FRACT)
 
         # Keep track of timestamps
-        self.first_timestamp: float | None = None
-        self.last_pts: int | None = None
+        self.first_timestamp: Optional[float] = None
+        self.last_pts: Optional[int] = None
 
         # Track bytes and buffer positions
         self.total_bytes_written = 0

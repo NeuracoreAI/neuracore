@@ -130,14 +130,17 @@ def _log_joint_data(
     ), "Expected stream to be instance of JSONDataStream"
     joint_stream.log(data=data)
     if robot.id is None:
-        raise RobotError("Robot not initialised, robot ID is none")
+        raise RobotError("Robot not initialized. Call init() first.")
     get_robot_streaming_manager(robot.id, robot.instance).get_json_source(
         data_type, "joints", sensor_key=joint_str_id
     ).publish(data.model_dump(mode="json"))
 
 
 def _validate_extrinsics_intrinsics(
-    extrinsics: Optional[np.ndarray], intrinsics: Optional[np.ndarray]
+    # Extrinsics and intrinsics types
+    # need updating following numpy array type config
+    extrinsics: Optional[Any],
+    intrinsics: Optional[Any],
 ) -> tuple[Optional[list[list[float]]], Optional[list[list[float]]]]:
     """Validate and convert camera extrinsics and intrinsics matrices.
 
@@ -167,8 +170,8 @@ def _log_camera_data(
     camera_type: str,
     camera_id: str,
     image: np.ndarray,
-    extrinsics: Optional[np.ndarray] = None,
-    intrinsics: Optional[np.ndarray] = None,
+    extrinsics: Optional[Any] = None,
+    intrinsics: Optional[Any] = None,
     robot_name: Optional[str] = None,
     instance: int = 0,
     timestamp: Optional[float] = None,
@@ -208,7 +211,7 @@ def _log_camera_data(
 
     assert isinstance(
         stream, VideoDataStream
-    ), "Expted stream as instance of VideoDataStream"
+    ), "Expected stream as instance of VideoDataStream"
 
     if stream.width != image.shape[1] or stream.height != image.shape[0]:
         raise ValueError(
@@ -220,7 +223,7 @@ def _log_camera_data(
         CameraData(timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics),
     )
     if robot.id is None:
-        raise RobotError("Robot not initialised, robot ID is none")
+        raise RobotError("Robot not initialized. Call init() first.")
     get_robot_streaming_manager(robot.id, robot.instance).get_video_source(
         camera_id, camera_type, f"{camera_id}_{camera_type}"
     ).add_frame(image)
@@ -555,7 +558,7 @@ def log_gripper_data(
     start_stream(robot, stream)
 
     assert isinstance(
-        stream, EndEffectorData
+        stream, JsonDataStream
     ), "Expected stream to be instance of EndEffectorData"
     stream.log(EndEffectorData(timestamp=timestamp, open_amounts=open_amounts))
 
@@ -678,9 +681,9 @@ def log_depth(
 def log_point_cloud(
     camera_id: str,
     points: np.ndarray,
-    rgb_points: Optional[np.ndarray] = None,
-    extrinsics: Optional[np.ndarray] = None,
-    intrinsics: Optional[np.ndarray] = None,
+    rgb_points: Optional[Any] = None,
+    extrinsics: Optional[Any] = None,
+    intrinsics: Optional[Any] = None,
     robot_name: Optional[str] = None,
     instance: int = 0,
     timestamp: Optional[float] = None,
@@ -738,7 +741,7 @@ def log_point_cloud(
     stream.log(
         PointCloudData(
             timestamp=timestamp,
-            points=points.tolist(),
+            points=points.tolist(),  # type: ignore
             rgb_points=rgb_points,
             extrinsics=extrinsics,
             intrinsics=intrinsics,

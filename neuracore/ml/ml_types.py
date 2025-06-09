@@ -298,5 +298,5 @@ class BatchedInferenceSamples:
         """
         for attr_name, attr_value in self.__dict__.items():
             if isinstance(attr_value, MaskableData) and attr_value.data is not None:
-                return attr_value.data.size(0)
+                return attr_value.data.shape[0]
         raise ValueError("No tensor found in the batch input")

@@ -8,7 +8,7 @@ support for serialization via Pydantic.
 
 import time
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -43,10 +43,14 @@ class CameraData(NCData):
     is populated during dataset iteration for efficiency.
     """
 
+    # Extrinsics and intrinsics types
+    # need updating following numpy array type config
     frame_idx: int = 0  # Needed so we can index video after sync
-    extrinsics: Optional[list[list[float]]] = None
-    intrinsics: Optional[list[list[float]]] = None
-    frame: Optional[Any] = None  # Only filled in when using dataset iter
+    extrinsics: Optional[Any] = None
+    intrinsics: Optional[Any] = None
+    # extrinsics: Optional[list[list[float]]] = None
+    # intrinsics: Optional[list[list[float]]] = None
+    frame: Optional[Union[Any, str]] = None  # Only filled in when using dataset iter
 
 
 class PoseData(NCData):

@@ -192,6 +192,9 @@ class RobotModelHandler(BaseHandler):
         mask = np.zeros((len(image_data), max_len))
         for i, images in enumerate(image_data):
             for j, (camera_name, camera_data) in enumerate(images.items()):
+                assert isinstance(
+                    camera_data.frame, str
+                ), f"Expected string fram data, got {type(camera_data.frame)}"
                 image = self._decode_image(camera_data.frame)
                 image = Image.fromarray(image)
                 transform = T.Compose([

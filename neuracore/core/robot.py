@@ -312,7 +312,7 @@ class Robot:
             RobotError: If mesh files cannot be located or if package creation fails.
         """
         if not self.urdf_path:
-            raise ValueError("urdf path nis None")
+            raise ValueError("urdf path is None")
         if not os.path.exists(self.urdf_path):
             raise ValidationError(f"URDF file not found: {self.urdf_path}")
 

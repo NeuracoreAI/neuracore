@@ -399,6 +399,7 @@ class EpisodeIterator:
                     frame, frame_idx = self._msg_queues[camera_id].get(timeout=10.0)
                 except queue.Empty:
                     frame = None
+                    frame_idx = None
                 if frame is None:
                     break
                 if frame_idx == cam_data.frame_idx:

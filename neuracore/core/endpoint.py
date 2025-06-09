@@ -367,6 +367,7 @@ def connect_local_endpoint(
     if os.getenv("NEURACORE_LIVE_DATA_ENABLED", "True").lower() == "true":
         robot = _get_robot(robot_name, instance)
     auth = get_auth()
+
     if train_run_name:
         # Get all training runs and search for the job id
         response = requests.get(f"{API_URL}/training/jobs", headers=auth.get_headers())
@@ -427,9 +428,13 @@ def connect_local_endpoint(
         # Close the progress bar
         progress_bar.close()
         print(f"Model download complete. Saved to {model_path_object}")
+    else:
+        # path_to_model cannot be none here
+        assert path_to_model is not None, "Path to model not found"
+        model_path_object = Path(path_to_model)
 
     try:
-        process = _setup_torchserve(str(path_to_model), port=port)
+        process = _setup_torchserve(str(model_path_object), port=port)
         attemps = 5
         health_check = None
         status_code = 500
