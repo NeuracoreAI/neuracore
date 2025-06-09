@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
-
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
@@ -20,24 +19,27 @@ from neuracore.ml import (
     NeuracoreModel,
 )
 
-from .modules import (
-    DiffusionPolicyImageEncoder,
-    DiffusionConditionalUnet1d
-)
+from .modules import DiffusionConditionalUnet1d, DiffusionPolicyImageEncoder
 
 logger = logging.getLogger(__name__)
 
 
 class DiffusionPolicy(NeuracoreModel):
-    """
-    Implementation of Diffusion Policy (Visuomotor Policy Learning via Action Diffusion) model.
+    """Implementation of Diffusion Policy for visuomotor policy learning.
+
+    This implements the Diffusion Policy model for Visuomotor Policy Learning
+    via Action Diffusion as described in the original paper.
     """
 
     def __init__(
         self,
         model_init_description: ModelInitDescription,
         hidden_dim: int = 256,
-        unet_down_dims: list[int] = [512, 1024, 2048],  # the prediction horizon has to be 2^down_dims
+        unet_down_dims: list[int] = [
+            512,
+            1024,
+            2048,
+        ],  # the prediction horizon has to be 2^down_dims
         unet_kernel_size: int = 5,
         unet_n_groups: int = 8,
         unet_diffusion_step_embed_dim: int = 128,
@@ -48,13 +50,36 @@ class DiffusionPolicy(NeuracoreModel):
         beta_start: float = 0.0001,
         beta_end: float = 0.02,
         beta_schedule: str = "squaredcos_cap_v2",
-        clip_sample: bool = True,   
+        clip_sample: bool = True,
         clip_sample_range: float = 1.0,
         lr: float = 1e-4,
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
         prediction_type: str = "epsilon",
     ):
+        """Initialize the Diffusion Policy model.
+
+        Args:
+            model_init_description: Model initialization configuration.
+            hidden_dim: Hidden dimension for image encoders.
+            unet_down_dims: Downsampling dimensions for UNet.
+            unet_kernel_size: Kernel size for UNet convolutions.
+            unet_n_groups: Number of groups for group normalization.
+            unet_diffusion_step_embed_dim: Dimension of diffusion step embeddings.
+            unet_use_film_scale_modulation: Whether to use FiLM scale modulation.
+            noise_scheduler_type: Type of noise scheduler ("DDPM" or "DDIM").
+            num_train_timesteps: Number of timesteps for training.
+            num_inference_steps: Number of timesteps for inference.
+            beta_start: Starting beta value for noise schedule.
+            beta_end: Ending beta value for noise schedule.
+            beta_schedule: Beta schedule type.
+            clip_sample: Whether to clip samples.
+            clip_sample_range: Range for clipping samples.
+            lr: Learning rate for main parameters.
+            lr_backbone: Learning rate for backbone parameters.
+            weight_decay: Weight decay for optimization.
+            prediction_type: Type of prediction ("epsilon" or "sample").
+        """
         super().__init__(model_init_description)
         self.lr = lr
         self.lr_backbone = lr_backbone
@@ -69,7 +94,8 @@ class DiffusionPolicy(NeuracoreModel):
             self.dataset_description.joint_positions.max_len
             + self.dataset_description.joint_velocities.max_len
             + self.dataset_description.joint_torques.max_len
-            + self.image_encoders[0].feature_dim * self.dataset_description.max_num_rgb_images
+            + self.image_encoders[0].feature_dim
+            * self.dataset_description.max_num_rgb_images
         )
 
         self.unet = DiffusionConditionalUnet1d(
@@ -112,24 +138,22 @@ class DiffusionPolicy(NeuracoreModel):
         ])
         # Register as buffers so they move with the model
         self.register_buffer(
-            'joint_state_mean', self._to_torch_float_tensor(state_mean)
+            "joint_state_mean", self._to_torch_float_tensor(state_mean)
         )
-        self.register_buffer(
-            'joint_state_std', self._to_torch_float_tensor(state_std)
-        )
+        self.register_buffer("joint_state_std", self._to_torch_float_tensor(state_std))
 
         # Register as buffers so they move with the model
         self.register_buffer(
-            'joint_target_mean', 
+            "joint_target_mean",
             self._to_torch_float_tensor(
                 self.dataset_description.joint_target_positions.mean
-            )
+            ),
         )
         self.register_buffer(
-            'joint_target_std',
+            "joint_target_std",
             self._to_torch_float_tensor(
                 self.dataset_description.joint_target_positions.std
-            )
+            ),
         )
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
@@ -137,7 +161,7 @@ class DiffusionPolicy(NeuracoreModel):
         return torch.tensor(data, dtype=torch.float32, device=self.device)
 
     def _preprocess_joint_state(
-        self, 
+        self,
         joint_state: torch.FloatTensor,
         joint_state_mean: torch.FloatTensor,
         joint_state_std: torch.FloatTensor,
@@ -157,19 +181,19 @@ class DiffusionPolicy(NeuracoreModel):
         """Combine joint states."""
         state_inputs = []
         if batch.joint_positions:
-            state_inputs.append(
-                batch.joint_positions.data * batch.joint_positions.mask
-            )
+            state_inputs.append(batch.joint_positions.data * batch.joint_positions.mask)
         if batch.joint_velocities:
             state_inputs.append(
                 batch.joint_velocities.data * batch.joint_velocities.mask
             )
         if batch.joint_torques:
             state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
-        
+
         if state_inputs:
             joint_states = torch.cat(state_inputs, dim=-1)
-            joint_states = self._preprocess_joint_state(joint_states, self.joint_state_mean, self.joint_state_std)
+            joint_states = self._preprocess_joint_state(
+                joint_states, self.joint_state_mean, self.joint_state_std
+            )
             return joint_states
         else:
             # Return zero tensor if no joint states available
@@ -177,12 +201,20 @@ class DiffusionPolicy(NeuracoreModel):
 
     # ========= inference  ============
     def _conditional_sample(
-        self, batch_size: int, prediction_horizon: int, global_cond: torch.Tensor | None = None, generator: torch.Generator | None = None
+        self,
+        batch_size: int,
+        prediction_horizon: int,
+        global_cond: torch.Tensor | None = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
 
         # Sample prior.
         sample = torch.randn(
-            size=(batch_size, prediction_horizon, self.dataset_description.joint_target_positions.max_len),
+            size=(
+                batch_size,
+                prediction_horizon,
+                self.dataset_description.joint_target_positions.max_len,
+            ),
             dtype=torch.float32,
             device=self.device,
             generator=generator,
@@ -198,7 +230,9 @@ class DiffusionPolicy(NeuracoreModel):
                 global_cond=global_cond,
             )
             # Compute previous image: x_t -> x_t-1
-            sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
+            sample = self.noise_scheduler.step(
+                model_output, t, sample, generator=generator
+            ).prev_sample
 
         return sample
 
@@ -206,8 +240,18 @@ class DiffusionPolicy(NeuracoreModel):
         self,
         joint_states: torch.FloatTensor,
         camera_images: torch.FloatTensor,
-        camera_images_mask: torch.FloatTensor,) -> torch.FloatTensor:
-        """Encode image features and concatenate them all together along with the state vector."""
+        camera_images_mask: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        """Encode image features and concatenate with the state vector.
+
+        Args:
+            joint_states: Joint state tensor.
+            camera_images: Camera image tensor.
+            camera_images_mask: Camera image mask tensor.
+
+        Returns:
+            Global conditioning tensor.
+        """
         global_cond_feats = [joint_states]
         batch_size = joint_states.shape[0]
         if camera_images is not None:
@@ -221,9 +265,19 @@ class DiffusionPolicy(NeuracoreModel):
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
 
     @staticmethod
-    def _make_noise_scheduler(name: str, **kwargs: dict) -> DDPMScheduler | DDIMScheduler:
-        """
-        Factory for noise scheduler instances of the requested type. All kwargs are passed to the scheduler.
+    def _make_noise_scheduler(
+        name: str, **kwargs: dict
+    ) -> DDPMScheduler | DDIMScheduler:
+        """Factory for noise scheduler instances.
+
+        All kwargs are passed to the scheduler.
+
+        Args:
+            name: Type of scheduler to create.
+            **kwargs: Additional arguments for scheduler.
+
+        Returns:
+            Noise scheduler instance.
         """
         if name == "DDPM":
             return DDPMScheduler(**kwargs)
@@ -242,22 +296,35 @@ class DiffusionPolicy(NeuracoreModel):
         # Normalize and combine joint states
         joint_states = self._combine_joint_states(batch)
 
-        # Encode image features and concatenate them all together along with the state vector.
-        global_cond = self._prepare_global_conditioning(joint_states, batch.rgb_images.data, batch.rgb_images.mask)  # (B, global_cond_dim)
+        # Encode image features and concatenate them all together along
+        # with the state vector.
+        global_cond = self._prepare_global_conditioning(
+            joint_states, batch.rgb_images.data, batch.rgb_images.mask
+        )  # (B, global_cond_dim)
 
         # run sampling
-        actions = self._conditional_sample(batch_size, prediction_horizon, global_cond=global_cond)
+        actions = self._conditional_sample(
+            batch_size, prediction_horizon, global_cond=global_cond
+        )
 
         return actions
 
     def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
+        """Forward pass for inference.
+
+        Args:
+            batch: Batch of inference samples.
+
+        Returns:
+            Model prediction with outputs and timing information.
+        """
         t = time.time()
         prediction_horizon = self.output_prediction_horizon
         action_preds = self._predict_action(batch, prediction_horizon)
         prediction_time = time.time() - t
         # unnormalize the actions
         predictions = self._unnormalize_actions(action_preds)
-        predictions = predictions.detach().cpu().numpy() 
+        predictions = predictions.detach().cpu().numpy()
         return ModelPrediction(
             outputs={DataType.JOINT_TARGET_POSITIONS: predictions},
             prediction_time=prediction_time,
@@ -273,7 +340,9 @@ class DiffusionPolicy(NeuracoreModel):
             joint_target_positions=batch.outputs.joint_target_positions,
         )
         joint_states = self._combine_joint_states(inference_sample)
-        global_cond = self._prepare_global_conditioning(joint_states, batch.inputs.rgb_images.data, batch.inputs.rgb_images.mask)
+        global_cond = self._prepare_global_conditioning(
+            joint_states, batch.inputs.rgb_images.data, batch.inputs.rgb_images.mask
+        )
         target_actions = self._preprocess_joint_state(
             batch.outputs.joint_target_positions.data,
             self.joint_target_mean,
@@ -289,9 +358,13 @@ class DiffusionPolicy(NeuracoreModel):
             size=(target_actions.shape[0],),
             device=target_actions.device,
         ).long()
-        # Add noise to the clean trajectories according to the noise magnitude at each timestep.
-        noisy_trajectory = self.noise_scheduler.add_noise(target_actions, eps, timesteps)
-        # Run the denoising network (that might denoise the trajectory, or attempt to predict the noise).
+        # Add noise to the clean trajectories according to the noise magnitude
+        # at each timestep.
+        noisy_trajectory = self.noise_scheduler.add_noise(
+            target_actions, eps, timesteps
+        )
+        # Run the denoising network (that might denoise the trajectory, or
+        # attempt to predict the noise).
         pred = self.unet(noisy_trajectory, timesteps, global_cond=global_cond)
 
         # Compute the loss.
