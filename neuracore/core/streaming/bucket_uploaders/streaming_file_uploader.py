@@ -10,7 +10,7 @@ import json
 import logging
 import queue
 import threading
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from .bucket_uploader import BucketUploader
 from .resumable_upload import ResumableUpload
@@ -53,7 +53,7 @@ class StreamingJsonUploader(BucketUploader):
         self.filepath = filepath
         self.chunk_size = chunk_size
         self._streaming_done = False
-        self._upload_queue = queue.Queue()
+        self._upload_queue: queue.Queue = queue.Queue()
         # Thread will continue, even if main thread exits
         self._upload_thread = threading.Thread(target=self._upload_loop, daemon=False)
         self._upload_thread.start()
@@ -89,7 +89,7 @@ class StreamingJsonUploader(BucketUploader):
         self.last_write_position = 0
 
         # Store all data entries
-        self.data_entries = []
+        self.data_entries: List[Dict[str, Any]] = []
 
         # Track if we've already started the JSON array
         self.json_array_started = False

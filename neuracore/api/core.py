@@ -25,7 +25,7 @@ from .globals import GlobalSingleton
 logger = logging.getLogger(__name__)
 
 
-def _get_robot(robot_name: str, instance: int) -> Robot:
+def _get_robot(robot_name: Optional[str], instance: int) -> Robot:
     """Get a robot by name and instance.
 
     Retrieves either the active robot from global state or looks up a specific
@@ -42,9 +42,9 @@ def _get_robot(robot_name: str, instance: int) -> Robot:
     Raises:
         RobotError: If no active robot exists and no robot_name is provided.
     """
-    robot: Robot = GlobalSingleton()._active_robot
     if robot_name is None:
-        if GlobalSingleton()._active_robot is None:
+        robot = GlobalSingleton()._active_robot
+        if robot is None:
             raise RobotError(
                 "No active robot. Call init() first or provide robot_name."
             )
@@ -133,14 +133,14 @@ def connect_robot(
     robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     GlobalSingleton()._active_robot = robot
     # Initialize push update managers
+    if robot.id is None:
+        raise RobotError("Robot.id is None, failed to initialize robot instance")
     get_robot_streaming_manager(robot.id, robot.instance)
     get_recording_state_manager()
     return robot
 
 
-def start_recording(
-    robot_name: Optional[str] = None, instance: Optional[int] = 0
-) -> None:
+def start_recording(robot_name: Optional[str] = None, instance: int = 0) -> None:
     """Start recording data for a specific robot.
 
     Begins a new recording session for the specified robot, capturing all
@@ -160,13 +160,14 @@ def start_recording(
     robot = _get_robot(robot_name, instance)
     if robot.is_recording():
         raise RobotError("Recording already in progress. Call stop_recording() first.")
-    if GlobalSingleton()._active_dataset_id is None:
+    active_dataset_id = GlobalSingleton()._active_dataset_id
+    if active_dataset_id is None:
         raise RobotError("No active dataset. Call create_dataset() first.")
-    robot.start_recording(GlobalSingleton()._active_dataset_id)
+    robot.start_recording(active_dataset_id)
 
 
 def stop_recording(
-    robot_name: Optional[str] = None, instance: Optional[int] = 0, wait: bool = False
+    robot_name: Optional[str] = None, instance: int = 0, wait: bool = False
 ) -> None:
     """Stop recording data for a specific robot.
 
@@ -188,15 +189,15 @@ def stop_recording(
         logger.warning("No active recordings to stop.")
         return
     recording_id = robot.get_current_recording_id()
+    if not recording_id:
+        raise ValueError("Recording_id is None, no current recording")
     robot.stop_recording(recording_id)
     if wait:
         while backend_utils.get_num_active_streams(recording_id) > 0:
             time.sleep(2.0)
 
 
-def stop_live_data(
-    robot_name: Optional[str] = None, instance: Optional[int] = 0
-) -> None:
+def stop_live_data(robot_name: Optional[str] = None, instance: int = 0) -> None:
     """Stop sharing live data for active monitoring from the Neuracore platform.
 
     Terminates the live data streaming connection that allows real-time
@@ -209,4 +210,6 @@ def stop_live_data(
         instance: Instance number of the robot for multi-instance scenarios.
     """
     robot = _get_robot(robot_name, instance)
+    if not robot.id:
+        raise RobotError("Recording_id is None, no current recording")
     get_robot_streaming_manager(robot.id, robot.instance).close()
