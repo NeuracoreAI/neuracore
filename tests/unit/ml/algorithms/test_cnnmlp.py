@@ -145,6 +145,9 @@ def test_model_construction(
     model_init_description: ModelInitDescription, model_config: dict
 ):
     model = CNNMLP(model_init_description, **model_config)
+    # Use CUDA if available, otherwise CPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
     assert isinstance(model, nn.Module)
 
 
@@ -154,6 +157,10 @@ def test_model_forward(
     sample_inference_batch: BatchedInferenceSamples,
 ):
     model = CNNMLP(model_init_description, **model_config)
+    # Use CUDA if available, otherwise CPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    sample_inference_batch = sample_inference_batch.to(device)
     output = model(sample_inference_batch)
     assert isinstance(output, ModelPrediction)
     assert DataType.JOINT_TARGET_POSITIONS in output.outputs
@@ -170,6 +177,10 @@ def test_model_backward(
     sample_batch: BatchedTrainingSamples,
 ):
     model = CNNMLP(model_init_description, **model_config)
+    # Use CUDA if available, otherwise CPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    sample_batch = sample_batch.to(device)
     output: BatchedTrainingOutputs = model.training_step(sample_batch)
 
     # Compute loss
