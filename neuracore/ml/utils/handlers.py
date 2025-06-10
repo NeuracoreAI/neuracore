@@ -61,7 +61,7 @@ class RobotModelHandler(BaseHandler):
             model_dir: Directory containing the model artifacts and algorithm code.
             model_file: Name of the Python file containing the model class.
             model_pt_path: Path to the pre-trained model weights file, or None for
-                randomly initialized models.
+            randomly initialized models.
 
         Returns:
             The loaded and initialized model instance ready for inference.
@@ -75,7 +75,7 @@ class RobotModelHandler(BaseHandler):
 
         algorithm_loader = AlgorithmLoader(Path(model_dir))
         model_class = algorithm_loader.load_model()
-        model = model_class(self.model_init_description)
+        model = model_class(self.model_init_description, **self.algorithm_config)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if model_pt_path:
             model.load_state_dict(
@@ -99,6 +99,15 @@ class RobotModelHandler(BaseHandler):
         )
         with open(model_init_description_path) as f:
             data = json.load(f)
+        # Get custom algorithm configuration if available
+        algorithm_config_path = os.path.join(
+            context.system_properties.get("model_dir"), "algorithm_config.json"
+        )
+        if os.path.isfile(algorithm_config_path):
+            with open(algorithm_config_path) as f:
+                self.algorithm_config = json.load(f)
+        else:
+            self.algorithm_config = {}
         self.model_init_description = ModelInitDescription.model_validate(data)
         self.dataset_description = self.model_init_description.dataset_description
 

@@ -17,7 +17,7 @@ from neuracore.ml.neuracore_model import NeuracoreModel
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 
 
-def create_mar(model: NeuracoreModel, output_dir: str):
+def create_mar(model: NeuracoreModel, output_dir: str, algorithm_config: dict = {}):
     """Create a TorchServe Model Archive (MAR) file from a Neuracore model.
 
     Packages a trained Neuracore model into a deployable MAR file that includes
@@ -28,6 +28,7 @@ def create_mar(model: NeuracoreModel, output_dir: str):
         model: Trained Neuracore model instance to package for deployment.
         output_dir: Directory path where the MAR file and temporary artifacts
             will be created.
+        algorithm_config: Custom configuration for the algorithm.
     """
     algorithm_file = Path(inspect.getfile(model.__class__))
     algorithm_loader = AlgorithmLoader(algorithm_file.parent)
@@ -36,7 +37,9 @@ def create_mar(model: NeuracoreModel, output_dir: str):
     torch.save(model.state_dict(), output_dir / "model.pt")
     with open(output_dir / "model_init_description.json", "w") as f:
         json.dump(model.model_init_description.model_dump(), f, indent=2)
-
+    if algorithm_config is not None:
+        with open(output_dir / "algorithm_config.json", "w") as f:
+            json.dump(algorithm_config, f, indent=2)
     with open(output_dir / "requirements.txt", "w") as f:
         # TODO: Remove test PyPI for main branch
         f.write("--index-url https://test.pypi.org/simple\n")
@@ -44,6 +47,7 @@ def create_mar(model: NeuracoreModel, output_dir: str):
 
     extra_files = [str(f) for f in algo_files] + [
         str(output_dir / "model_init_description.json"),
+        str(output_dir / "algorithm_config.json"),
         str(output_dir / "requirements.txt"),
     ]
 
