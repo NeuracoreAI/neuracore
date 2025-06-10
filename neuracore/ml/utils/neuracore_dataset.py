@@ -8,7 +8,7 @@ machine learning training workflows.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Callable, Optional, cast
 
 import torch
 import torchvision.transforms as T

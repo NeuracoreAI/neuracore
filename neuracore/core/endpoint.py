@@ -446,9 +446,10 @@ def connect_local_endpoint(
                 if status_code == 200:
                     logging.info("TorchServe is running...")
                     break
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as e:
                 health_check = None
                 status_code = 500
+                logger.info(f"Error: {e}")
                 pass
             attemps -= 1
             time.sleep(5)

@@ -1,0 +1,39 @@
+//  For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/anaconda
+{
+  "name": "Anaconda (Python 3)",
+  "build": {
+    "context": "..",
+    "dockerfile": "Dockerfile"
+  },
+  "features": {
+    "ghcr.io/devcontainers-extra/features/pre-commit:2": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.black-formatter",
+        "streetsidesoftware.code-spell-checker",
+        "ms-python.isort",
+        "ms-python.python",
+        "njpwerner.autodocstring"
+      ]
+    }
+  },
+  "runArgs": [
+    "--network=host","--memory=8g", "--cpus=4"
+    // "--gpus=all"
+    // "--mount","type=bind,src=/run/media/cougaroo,dst=/mnt/usb",
+    // "--env", "TFDS_DATA_DIR=/mnt/usb/CrucialTB4/data/tensorflow_datasets"
+  ]
+  // Features to add to the dev container. More info: https://containers.dev/features.
+  // "features": {},
+  // Use 'forwardPorts' to make a list of ports inside the container available locally.
+  // "forwardPorts": [],
+  // Use 'postCreateCommand' to run commands after the container is created.
+  // "postCreateCommand": "python --version",
+  // Configure tool-specific properties.
+  // "customizations": {},
+  // Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+  // "remoteUser": "root"
+}
