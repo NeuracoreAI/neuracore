@@ -20,7 +20,7 @@ from neuracore.ml import (
     BatchedTrainingSamples,
     MaskableData,
 )
-from neuracore.ml.algorithms.act.act import ACT
+from neuracore.ml.algorithms.diffusion_policy.diffusion_policy import DiffusionPolicy
 from neuracore.ml.ml_types import BatchedData
 from neuracore.ml.utils.validate import run_validation
 
@@ -144,7 +144,7 @@ def mock_dataloader(sample_batch):
 def test_model_construction(
     model_init_description: ModelInitDescription, model_config: dict
 ):
-    model = ACT(model_init_description, **model_config)
+    model = DiffusionPolicy(model_init_description, **model_config)
     # Use CUDA if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
@@ -156,7 +156,7 @@ def test_model_forward(
     model_config: dict,
     sample_inference_batch: BatchedInferenceSamples,
 ):
-    model = ACT(model_init_description, **model_config)
+    model = DiffusionPolicy(model_init_description, **model_config)
     # Use CUDA if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
@@ -176,7 +176,7 @@ def test_model_backward(
     model_config: dict,
     sample_batch: BatchedTrainingSamples,
 ):
-    model = ACT(model_init_description, **model_config)
+    model = DiffusionPolicy(model_init_description, **model_config)
     # Use CUDA if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
@@ -184,7 +184,7 @@ def test_model_backward(
     output: BatchedTrainingOutputs = model.training_step(sample_batch)
 
     # Compute loss
-    loss = output.losses["l1_and_kl_loss"]
+    loss = output.losses["mse_loss"]
 
     # Perform backward pass
     loss.backward()
@@ -197,16 +197,17 @@ def test_model_backward(
 
 
 def test_run_validation(tmp_path: Path):
-    algorithm_dir = Path(inspect.getfile(ACT)).parent
+    algorithm_dir = Path(inspect.getfile(DiffusionPolicy)).parent
     _, error_msg = run_validation(
         output_dir=tmp_path,
         algorithm_dir=algorithm_dir,
         port=random.randint(10000, 20000),
         algorithm_config={
+            "num_train_timesteps": 1,
+            "num_inference_steps": 1,
             "hidden_dim": 64,
-            "num_encoder_layers": 2,
-            "num_decoder_layers": 4,
-            "nheads": 4,
+            "unet_n_groups": 4,
+            "unet_down_dims": [128, 256],
         },
     )
     assert len(error_msg) == 0

@@ -117,6 +117,7 @@ def run_validation(
     algorithm_dir: Path,
     port: int = 8080,
     skip_endpoint_check: bool = False,
+    algorithm_config: dict = {},
 ) -> tuple[AlgorthmCheck, str]:
     """Run comprehensive validation tests on a Neuracore algorithm.
 
@@ -131,6 +132,7 @@ def run_validation(
         port: TCP port to use for local endpoint testing.
         skip_endpoint_check: Whether to skip the endpoint deployment test.
             Useful for faster validation when deployment testing isn't needed.
+        algorithm_config: Custom configuration arguments for the algorithm.
 
     Returns:
         A tuple containing:
@@ -206,7 +208,6 @@ def run_validation(
 
         # Check 1: Can initialize the model
         logger.info("Initializing model")
-        algorithm_config = {}  # Use the dafault configuration
         model = model_class(
             model_init_description=model_init_description, **algorithm_config
         ).to(device)
@@ -272,7 +273,7 @@ def run_validation(
         with tempfile.TemporaryDirectory():
             try:
                 artifacts_dir = output_dir
-                create_mar(model, artifacts_dir)
+                create_mar(model, artifacts_dir, algorithm_config)
 
                 algo_check.successfully_exported_model = True
                 logger.info("TorchScript export successful")
