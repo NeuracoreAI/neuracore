@@ -5,6 +5,8 @@ with support for masking, device placement, and multi-modal inputs including
 joint states, images, point clouds, and language tokens.
 """
 
+from typing import Optional
+
 import torch
 
 
@@ -26,7 +28,7 @@ class MaskableData:
         self.data = data
         self.mask = mask
 
-    def to(self, device: torch.device):
+    def to(self, device: torch.device) -> "MaskableData":
         """Move all tensors to the specified device.
 
         Args:
@@ -41,7 +43,7 @@ class MaskableData:
         )
 
 
-def _to_device(data, device: torch.device):
+def _to_device(data: Optional[MaskableData], device: torch.device) -> "MaskableData":
     """Utility function to move data to device, handling None values.
 
     Args:
@@ -64,16 +66,16 @@ class BatchedData:
 
     def __init__(
         self,
-        joint_positions: MaskableData = None,
-        joint_velocities: MaskableData = None,
-        joint_torques: MaskableData = None,
-        joint_target_positions: MaskableData = None,
-        gripper_states: MaskableData = None,
-        rgb_images: MaskableData = None,
-        depth_images: MaskableData = None,
-        point_clouds: MaskableData = None,
-        language_tokens: MaskableData = None,
-        custom_data: dict[str, MaskableData] = None,
+        joint_positions: Optional[MaskableData] = None,
+        joint_velocities: Optional[MaskableData] = None,
+        joint_torques: Optional[MaskableData] = None,
+        joint_target_positions: Optional[MaskableData] = None,
+        gripper_states: Optional[MaskableData] = None,
+        rgb_images: Optional[MaskableData] = None,
+        depth_images: Optional[MaskableData] = None,
+        point_clouds: Optional[MaskableData] = None,
+        language_tokens: Optional[MaskableData] = None,
+        custom_data: Optional[dict[str, MaskableData]] = None,
     ):
         """Initialize batched data container.
 
