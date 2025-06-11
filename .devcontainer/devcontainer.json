@@ -21,7 +21,9 @@
     }
   },
   "runArgs": [
-    "--network=host","--memory=8g", "--cpus=4"
+    "--network=host",
+    "--memory=8g",
+    "--cpus=4"
     // "--gpus=all"
     // "--mount","type=bind,src=/run/media/cougaroo,dst=/mnt/usb",
     // "--env", "TFDS_DATA_DIR=/mnt/usb/CrucialTB4/data/tensorflow_datasets"
