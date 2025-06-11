@@ -43,7 +43,9 @@ class MaskableData:
         )
 
 
-def _to_device(data: Optional[MaskableData], device: torch.device) -> "MaskableData":
+def _to_device(
+    data: Optional[MaskableData], device: torch.device
+) -> Optional["MaskableData"]:
     """Utility function to move data to device, handling None values.
 
     Args:
@@ -102,7 +104,7 @@ class BatchedData:
         self.language_tokens = language_tokens
         self.custom_data = custom_data or {}
 
-    def to(self, device: torch.device):
+    def to(self, device: torch.device) -> "BatchedData":
         """Move all tensors to the specified device.
 
         Args:
