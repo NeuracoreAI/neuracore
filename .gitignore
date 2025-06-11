@@ -112,4 +112,3 @@ MUJOCO_LOG.TXT
 
 logs/
 examples/logs/
-Dockerfile

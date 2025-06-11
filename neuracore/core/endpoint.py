@@ -16,7 +16,6 @@ import tempfile
 import time
 from io import BytesIO
 from pathlib import Path
-from subprocess import Popen
 from typing import Optional
 
 import numpy as np
@@ -31,7 +30,14 @@ from neuracore.core.utils.depth_utils import depth_to_rgb
 from .auth import get_auth
 from .const import API_URL
 from .exceptions import EndpointError
-from .nc_types import CameraData, DataType, JointData, ModelPrediction, SyncPoint
+from .nc_types import (
+    CameraData,
+    DataType,
+    JointData,
+    LanguageData,
+    ModelPrediction,
+    SyncPoint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +51,7 @@ class EndpointPolicy:
     endpoints.
     """
 
-    def __init__(
-        self, robot: Robot, predict_url: str, headers: Optional[dict[str, str]] = None
-    ):
+    def __init__(self, robot: Robot, predict_url: str, headers: dict[str, str] = None):
         """Initialize the endpoint policy with connection details.
 
         Args:
@@ -57,7 +61,7 @@ class EndpointPolicy:
         """
         self._predict_url = predict_url
         self._headers = headers or {}
-        self._process: Optional[Popen] = None
+        self._process = None
         self._is_local = "localhost" in predict_url
         self.robot = robot
 
@@ -99,7 +103,7 @@ class EndpointPolicy:
         return np.array(pil_image)
 
     def _maybe_add_exisiting_data(
-        self, existing: Optional[JointData], to_add: JointData
+        self, existing: JointData, to_add: JointData
     ) -> JointData:
         """Merge joint data from multiple streams into a single data structure.
 
@@ -118,7 +122,7 @@ class EndpointPolicy:
             return to_add
         existing.timestamp = to_add.timestamp
         existing.values.update(to_add.values)
-        if existing.additional_values and to_add.additional_values:
+        if existing.additional_values:
             existing.additional_values.update(to_add.additional_values)
         return existing
 
@@ -138,14 +142,14 @@ class EndpointPolicy:
         sync_point = SyncPoint(timestamp=time.time())
         for stream_name, stream in self.robot.list_all_streams().items():
             if "rgb" in stream_name:
-                stream_data = stream.get_latest_data()
+                stream_data: np.ndarray = stream.get_latest_data()
                 if sync_point.rgb_images is None:
                     sync_point.rgb_images = {}
                 sync_point.rgb_images[stream_name] = CameraData(
                     timestamp=time.time(), frame=self._encode_image(stream_data)
                 )
             elif "depth" in stream_name:
-                stream_data = stream.get_latest_data()
+                stream_data: np.ndarray = stream.get_latest_data()
                 if sync_point.depth_images is None:
                     sync_point.depth_images = {}
                 sync_point.depth_images[stream_name] = CameraData(
@@ -153,17 +157,17 @@ class EndpointPolicy:
                     frame=self._encode_image(depth_to_rgb(stream_data)),
                 )
             elif "joint_positions" in stream_name:
-                stream_data = stream.get_latest_data()
+                stream_data: JointData = stream.get_latest_data()
                 sync_point.joint_positions = self._maybe_add_exisiting_data(
                     sync_point.joint_positions, stream_data
                 )
             elif "joint_velocities" in stream_name:
-                stream_data = stream.get_latest_data()
+                stream_data: JointData = stream.get_latest_data()
                 sync_point.joint_velocities = self._maybe_add_exisiting_data(
                     sync_point.joint_velocities, stream_data
                 )
             elif "language" in stream_name:
-                stream_data = stream.get_latest_data()
+                stream_data: LanguageData = stream.get_latest_data()
                 sync_point.language_data = stream_data
             else:
                 raise NotImplementedError(
@@ -276,7 +280,7 @@ class EndpointPolicy:
 def connect_endpoint(
     endpoint_name: str,
     robot_name: Optional[str] = None,
-    instance: int = 0,
+    instance: Optional[int] = 0,
 ) -> EndpointPolicy:
     """Connect to a remote model endpoint deployed on the Neuracore platform.
 
@@ -329,7 +333,7 @@ def connect_endpoint(
 
 def connect_local_endpoint(
     robot_name: Optional[str] = None,
-    instance: int = 0,
+    instance: Optional[int] = 0,
     path_to_model: Optional[str] = None,
     train_run_name: Optional[str] = None,
     port: int = 8080,
@@ -367,7 +371,6 @@ def connect_local_endpoint(
     if os.getenv("NEURACORE_LIVE_DATA_ENABLED", "True").lower() == "true":
         robot = _get_robot(robot_name, instance)
     auth = get_auth()
-
     if train_run_name:
         # Get all training runs and search for the job id
         response = requests.get(f"{API_URL}/training/jobs", headers=auth.get_headers())
@@ -403,7 +406,7 @@ def connect_local_endpoint(
 
         # Create a temporary directory and file path
         tempdir = tempfile.mkdtemp()
-        model_path_object: Path = Path(tempdir) / "model.mar"
+        path_to_model = Path(tempdir) / "model.mar"
 
         # Create progress bar based on file size
         progress_bar = tqdm(
@@ -419,7 +422,7 @@ def connect_local_endpoint(
         )
 
         # Write the file with progress updates
-        with open(model_path_object, "wb") as f:
+        with open(path_to_model, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
@@ -427,36 +430,25 @@ def connect_local_endpoint(
 
         # Close the progress bar
         progress_bar.close()
-        print(f"Model download complete. Saved to {model_path_object}")
-    else:
-        # path_to_model cannot be none here
-        assert path_to_model is not None, "Path to model not found"
-        model_path_object = Path(path_to_model)
+        print(f"Model download complete. Saved to {path_to_model}")
 
     try:
-        process = _setup_torchserve(str(model_path_object), port=port)
+        process = _setup_torchserve(path_to_model, port=port)
         attemps = 5
-        health_check = None
-        status_code = 500
         while attemps > 0:
             try:
                 # Check if the server is running
                 health_check = requests.get(f"http://localhost:{port}/ping", timeout=10)
-                status_code = health_check.status_code
-                if status_code == 200:
+                if health_check.status_code == 200:
                     logging.info("TorchServe is running...")
                     break
-            except requests.exceptions.RequestException as e:
-                health_check = None
-                status_code = 500
-                logger.info(f"Error: {e}")
+            except requests.exceptions.RequestException:
                 pass
             attemps -= 1
             time.sleep(5)
-        if status_code != 200:
+        if health_check.status_code != 200:
             raise EndpointError("TorchServe is not running")
-        if robot is None:
-            raise EndpointError("Failed to create endpoint policy with no robot")
+
         endpoint = EndpointPolicy(
             robot=robot, predict_url=f"http://localhost:{port}/predictions/robot_model"
         )

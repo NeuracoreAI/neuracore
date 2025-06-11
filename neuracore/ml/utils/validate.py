@@ -13,7 +13,6 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict
 
 import numpy as np
 import torch
@@ -54,7 +53,7 @@ class AlgorthmCheck(BaseModel):
     successfully_launched_endpoint: bool = False
 
 
-def setup_logging(output_dir: Path) -> None:
+def setup_logging(output_dir: Path):
     """Configure logging for validation process with file and console output.
 
     Sets up logging to capture validation progress and errors both in the
@@ -209,7 +208,6 @@ def run_validation(
 
         # Check 1: Can initialize the model
         logger.info("Initializing model")
-        algorithm_config: Dict[str, Any] = {}  # Use the dafault configuration
         model = model_class(
             model_init_description=model_init_description, **algorithm_config
         ).to(device)
@@ -246,10 +244,7 @@ def run_validation(
             )
 
         # Sum all losses
-        # loss = torch.tensor(sum(outputs.losses.values())).mean()
-        loss = sum(outputs.losses.values())
-        if isinstance(loss, (int, float)):
-            loss = torch.tensor(loss, requires_grad=True)
+        loss = sum(outputs.losses.values()).mean()
         logger.info(f"Forward pass successful, loss: {loss.item():.4f}")
         algo_check.successfully_forward_pass = True
 
