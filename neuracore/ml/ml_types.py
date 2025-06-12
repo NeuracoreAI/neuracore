@@ -5,6 +5,8 @@ with support for masking, device placement, and multi-modal inputs including
 joint states, images, point clouds, and language tokens.
 """
 
+from typing import Optional
+
 import torch
 
 
@@ -26,7 +28,7 @@ class MaskableData:
         self.data = data
         self.mask = mask
 
-    def to(self, device: torch.device):
+    def to(self, device: torch.device) -> "MaskableData":
         """Move all tensors to the specified device.
 
         Args:
@@ -41,7 +43,9 @@ class MaskableData:
         )
 
 
-def _to_device(data, device: torch.device):
+def _to_device(
+    data: Optional[MaskableData], device: torch.device
+) -> Optional[MaskableData]:
     """Utility function to move data to device, handling None values.
 
     Args:
@@ -64,16 +68,16 @@ class BatchedData:
 
     def __init__(
         self,
-        joint_positions: MaskableData = None,
-        joint_velocities: MaskableData = None,
-        joint_torques: MaskableData = None,
-        joint_target_positions: MaskableData = None,
-        gripper_states: MaskableData = None,
-        rgb_images: MaskableData = None,
-        depth_images: MaskableData = None,
-        point_clouds: MaskableData = None,
-        language_tokens: MaskableData = None,
-        custom_data: dict[str, MaskableData] = None,
+        joint_positions: Optional[MaskableData] = None,
+        joint_velocities: Optional[MaskableData] = None,
+        joint_torques: Optional[MaskableData] = None,
+        joint_target_positions: Optional[MaskableData] = None,
+        gripper_states: Optional[MaskableData] = None,
+        rgb_images: Optional[MaskableData] = None,
+        depth_images: Optional[MaskableData] = None,
+        point_clouds: Optional[MaskableData] = None,
+        language_tokens: Optional[MaskableData] = None,
+        custom_data: Optional[dict[str, MaskableData]] = None,
     ):
         """Initialize batched data container.
 
@@ -100,7 +104,7 @@ class BatchedData:
         self.language_tokens = language_tokens
         self.custom_data = custom_data or {}
 
-    def to(self, device: torch.device):
+    def to(self, device: torch.device) -> "BatchedData":
         """Move all tensors to the specified device.
 
         Args:
@@ -120,12 +124,13 @@ class BatchedData:
             point_clouds=_to_device(self.point_clouds, device),
             language_tokens=_to_device(self.language_tokens, device),
             custom_data={
-                key: _to_device(value, device)
+                key: moved_value
                 for key, value in self.custom_data.items()
+                if (moved_value := _to_device(value, device)) is not None
             },
         )
 
-    def __len__(self):
+    def __len__(self) -> int:
         """Get the batch size from the first available tensor.
 
         Returns:
@@ -149,9 +154,9 @@ class BatchedTrainingSamples:
 
     def __init__(
         self,
-        inputs: BatchedData = None,
-        outputs: BatchedData = None,
-        output_predicition_mask: torch.FloatTensor = None,
+        output_predicition_mask: Optional[torch.FloatTensor] = None,
+        inputs: Optional[BatchedData] = None,
+        outputs: Optional[BatchedData] = None,
     ):
         """Initialize batched training samples.
 
@@ -164,7 +169,7 @@ class BatchedTrainingSamples:
         self.outputs = outputs or BatchedData()
         self.output_predicition_mask = output_predicition_mask
 
-    def to(self, device: torch.device):
+    def to(self, device: torch.device) -> "BatchedTrainingSamples":
         """Move all tensors to the specified device.
 
         Args:
@@ -183,7 +188,7 @@ class BatchedTrainingSamples:
             ),
         )
 
-    def __len__(self):
+    def __len__(self) -> int:
         """Get the batch size from the input data.
 
         Returns:
@@ -226,16 +231,16 @@ class BatchedInferenceSamples:
 
     def __init__(
         self,
-        joint_positions: MaskableData = None,
-        joint_velocities: MaskableData = None,
-        joint_torques: MaskableData = None,
-        joint_target_positions: MaskableData = None,
-        gripper_states: MaskableData = None,
-        rgb_images: MaskableData = None,
-        depth_images: MaskableData = None,
-        point_clouds: MaskableData = None,
-        language_tokens: MaskableData = None,
-        custom_data: dict[str, MaskableData] = None,
+        joint_positions: Optional[MaskableData] = None,
+        joint_velocities: Optional[MaskableData] = None,
+        joint_torques: Optional[MaskableData] = None,
+        joint_target_positions: Optional[MaskableData] = None,
+        gripper_states: Optional[MaskableData] = None,
+        rgb_images: Optional[MaskableData] = None,
+        depth_images: Optional[MaskableData] = None,
+        point_clouds: Optional[MaskableData] = None,
+        language_tokens: Optional[MaskableData] = None,
+        custom_data: Optional[dict[str, MaskableData]] = None,
     ):
         """Initialize batched inference samples.
 
@@ -262,7 +267,7 @@ class BatchedInferenceSamples:
         self.language_tokens = language_tokens
         self.custom_data = custom_data or {}
 
-    def to(self, device: torch.device):
+    def to(self, device: torch.device) -> "BatchedInferenceSamples":
         """Move all tensors to the specified device.
 
         Args:
@@ -282,12 +287,13 @@ class BatchedInferenceSamples:
             point_clouds=_to_device(self.point_clouds, device),
             language_tokens=_to_device(self.language_tokens, device),
             custom_data={
-                key: _to_device(value, device)
+                key: moved_value
                 for key, value in self.custom_data.items()
+                if (moved_value := _to_device(value, device)) is not None
             },
         )
 
-    def __len__(self):
+    def __len__(self) -> int:
         """Get the batch size from the first available tensor.
 
         Returns:

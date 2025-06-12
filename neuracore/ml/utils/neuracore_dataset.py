@@ -8,7 +8,7 @@ machine learning training workflows.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Callable, Optional, cast
 
 import torch
 import torchvision.transforms as T
@@ -37,7 +37,9 @@ class NeuracoreDataset(Dataset, ABC):
         input_data_types: list[DataType],
         output_data_types: list[DataType],
         output_prediction_horizon: int = 5,
-        tokenize_text: Callable[[list[str]], tuple[torch.Tensor, torch.Tensor]] = None,
+        tokenize_text: Optional[
+            Callable[[list[str]], tuple[torch.Tensor, torch.Tensor]]
+        ] = None,
     ):
         """Initialize the dataset with data type specifications and preprocessing.
 
@@ -131,6 +133,9 @@ class NeuracoreDataset(Dataset, ABC):
                 logger.error(f"Error loading item {idx}: {str(e)}")
                 if self._error_count >= self._max_error_count:
                     raise e
+        raise Exception(
+            f"Maximum error count ({self._max_error_count}) already reached"
+        )
 
     def _collate_fn(
         self, samples: list[BatchedData], data_types: list[DataType]
@@ -149,34 +154,88 @@ class NeuracoreDataset(Dataset, ABC):
         """
         bd = BatchedData()
         if DataType.JOINT_POSITIONS in data_types:
+            if any(s.joint_positions is None for s in samples):
+                raise ValueError(
+                    "All samples must have joint_positions when "
+                    "JOINT_POSITIONS data type is requested"
+                )
             bd.joint_positions = MaskableData(
-                torch.stack([s.joint_positions.data for s in samples]),
-                torch.stack([s.joint_positions.mask for s in samples]),
+                torch.stack(
+                    [cast(MaskableData, s.joint_positions).data for s in samples]
+                ),
+                torch.stack(
+                    [cast(MaskableData, s.joint_positions).mask for s in samples]
+                ),
             )
+
         if DataType.JOINT_VELOCITIES in data_types:
+            if any(s.joint_velocities is None for s in samples):
+                raise ValueError(
+                    "All samples must have joint_velocities when "
+                    "JOINT_VELOCITIES data type is requested"
+                )
             bd.joint_velocities = MaskableData(
-                torch.stack([s.joint_velocities.data for s in samples]),
-                torch.stack([s.joint_velocities.mask for s in samples]),
+                torch.stack(
+                    [cast(MaskableData, s.joint_velocities).data for s in samples]
+                ),
+                torch.stack(
+                    [cast(MaskableData, s.joint_velocities).mask for s in samples]
+                ),
             )
+
         if DataType.JOINT_TORQUES in data_types:
+            if any(s.joint_torques is None for s in samples):
+                raise ValueError(
+                    "All samples must have joint_torques when "
+                    "JOINT_TORQUES data type is requested"
+                )
             bd.joint_torques = MaskableData(
-                torch.stack([s.joint_torques.data for s in samples]),
-                torch.stack([s.joint_torques.mask for s in samples]),
+                torch.stack(
+                    [cast(MaskableData, s.joint_torques).data for s in samples]
+                ),
+                torch.stack(
+                    [cast(MaskableData, s.joint_torques).mask for s in samples]
+                ),
             )
+
         if DataType.JOINT_TARGET_POSITIONS in data_types:
+            if any(s.joint_target_positions is None for s in samples):
+                raise ValueError(
+                    "All samples must have joint_target_positions when "
+                    "JOINT_TARGET_POSITIONS data type is requested"
+                )
             bd.joint_target_positions = MaskableData(
-                torch.stack([s.joint_target_positions.data for s in samples]),
-                torch.stack([s.joint_target_positions.mask for s in samples]),
+                torch.stack(
+                    [cast(MaskableData, s.joint_target_positions).data for s in samples]
+                ),
+                torch.stack(
+                    [cast(MaskableData, s.joint_target_positions).mask for s in samples]
+                ),
             )
+
         if DataType.RGB_IMAGE in data_types:
+            if any(s.rgb_images is None for s in samples):
+                raise ValueError(
+                    "All samples must have rgb_images when "
+                    "RGB_IMAGE data type is requested"
+                )
             bd.rgb_images = MaskableData(
-                torch.stack([s.rgb_images.data for s in samples]),
-                torch.stack([s.rgb_images.mask for s in samples]),
+                torch.stack([cast(MaskableData, s.rgb_images).data for s in samples]),
+                torch.stack([cast(MaskableData, s.rgb_images).mask for s in samples]),
             )
         if DataType.LANGUAGE in data_types:
+            if any(s.language_tokens is None for s in samples):
+                raise ValueError(
+                    "All samples must have language_tokens when "
+                    "LANGUAGE data type is requested"
+                )
             bd.language_tokens = MaskableData(
-                torch.cat([s.language_tokens.data for s in samples]),
-                torch.cat([s.language_tokens.mask for s in samples]),
+                torch.cat(
+                    [cast(MaskableData, s.language_tokens).data for s in samples]
+                ),
+                torch.cat(
+                    [cast(MaskableData, s.language_tokens).mask for s in samples]
+                ),
             )
         return bd
 

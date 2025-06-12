@@ -47,7 +47,7 @@ class ACTImageEncoder(nn.Module):
         resnet = getattr(models, "resnet18")(pretrained=True)
         return nn.Sequential(*list(resnet.children())[:-2])
 
-    def reset_parameters(self):
+    def reset_parameters(self) -> None:
         """Initialize position embeddings with uniform distribution."""
         nn.init.uniform_(self.row_embed.weight)
         nn.init.uniform_(self.col_embed.weight)

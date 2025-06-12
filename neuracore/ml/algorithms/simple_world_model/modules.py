@@ -5,6 +5,8 @@ and U-Net architectures for image prediction. The U-Net implementation supports
 conditioning on external features for generating future visual states.
 """
 
+from typing import List, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -68,7 +70,9 @@ class DoubleConv(nn.Module):
     and ReLU activation. This is the fundamental building block of U-Net.
     """
 
-    def __init__(self, in_channels, out_channels, mid_channels=None):
+    def __init__(
+        self, in_channels: int, out_channels: int, mid_channels: Optional[int] = None
+    ):
         """Initialize double convolution block.
 
         Args:
@@ -88,7 +92,7 @@ class DoubleConv(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through double convolution.
 
         Args:
@@ -107,7 +111,7 @@ class Down(nn.Module):
     double convolution to increase feature depth.
     """
 
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels: int, out_channels: int):
         """Initialize downsampling block.
 
         Args:
@@ -119,7 +123,7 @@ class Down(nn.Module):
             nn.MaxPool2d(2), DoubleConv(in_channels, out_channels)
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through downsampling block.
 
         Args:
@@ -138,7 +142,7 @@ class Up(nn.Module):
     by concatenation with skip connection and double convolution.
     """
 
-    def __init__(self, in_channels, out_channels, bilinear=True):
+    def __init__(self, in_channels: int, out_channels: int, bilinear: bool = True):
         """Initialize upsampling block.
 
         Args:
@@ -158,7 +162,7 @@ class Up(nn.Module):
             )
             self.conv = DoubleConv(in_channels, out_channels)
 
-    def forward(self, x1, x2):
+    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
         """Forward pass through upsampling block.
 
         Args:
@@ -187,7 +191,7 @@ class OutConv(nn.Module):
     desired number of output channels.
     """
 
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels: int, out_channels: int):
         """Initialize output convolution layer.
 
         Args:
@@ -197,7 +201,7 @@ class OutConv(nn.Module):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through output convolution.
 
         Args:
@@ -223,11 +227,11 @@ class UNet(nn.Module):
 
     def __init__(
         self,
-        input_channels=3,
-        output_channels=3,
-        feature_map_sizes=None,
-        condition_dim=512,
-        bilinear=True,
+        input_channels: int = 3,
+        output_channels: int = 3,
+        feature_map_sizes: Optional[List] = None,
+        condition_dim: int = 512,
+        bilinear: bool = True,
     ):
         """Initialize U-Net with conditioning support.
 
@@ -284,7 +288,7 @@ class UNet(nn.Module):
         # Final convolution for output
         self.outc = OutConv(feature_map_sizes[0], output_channels)
 
-    def forward(self, x, condition):
+    def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
         """Forward pass of conditioned U-Net.
 
         Processes input image through encoder path, injects conditioning

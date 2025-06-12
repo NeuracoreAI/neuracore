@@ -18,7 +18,7 @@ from ..core.endpoint import connect_local_endpoint as _connect_local_endpoint
 
 
 def connect_endpoint(
-    endpoint_name: str, robot_name: Optional[str] = None, instance: Optional[int] = 0
+    endpoint_name: str, robot_name: Optional[str] = None, instance: int = 0
 ) -> EndpointPolicy:
     """Connect to a deployed model endpoint for inference.
 
@@ -50,7 +50,7 @@ def connect_local_endpoint(
     train_run_name: Optional[str] = None,
     port: int = 8080,
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
 ) -> EndpointPolicy:
     """Connect to a local model endpoint (run locally on your hardware).
 

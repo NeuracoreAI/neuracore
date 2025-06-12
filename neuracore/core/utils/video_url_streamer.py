@@ -7,7 +7,7 @@ buffered IO reader to provide seamless streaming capabilities with PyAV.
 
 import io
 import logging
-from typing import Iterator
+from typing import Any, Iterator, Optional
 
 import av
 import numpy as np
@@ -43,7 +43,7 @@ class StreamingReader(io.BufferedIOBase):
         self.eof = False
         self.leftover = None
 
-    def read(self, size: int = -1) -> bytes:
+    def read(self, size: Optional[int] = -1) -> bytes:
         """Read bytes from the combined buffer and streaming response.
 
         Reads data first from the buffer, then seamlessly transitions to
@@ -57,6 +57,9 @@ class StreamingReader(io.BufferedIOBase):
             The requested bytes, which may be fewer than requested if
             end of stream is reached.
         """
+        if size is None:
+            size = -1
+
         if size == 0:
             return b""
 
@@ -181,7 +184,7 @@ class VideoStreamer:
         """
         self.video_url = video_url
         self.buffer_size = buffer_size
-        self.response = None
+        self.response: Optional[requests.Response] = None
         self.container = None
         self.video_stream = None
         self.frame_count = 0
@@ -202,14 +205,13 @@ class VideoStreamer:
                 streams, or if decoding fails.
         """
         # Start the streaming request
-        # self.response = requests.get(self.video_url, stream=True)
         self.response = requests.get(self.video_url, stream=True)
 
         # Check if request was successful
         if self.response.status_code != 200:
-            raise Exception(
-                f"Failed to access video. Status code: {self.response.status_code}"
-            )
+            status = self.response.status_code or "unknown"
+            msg = f"Failed to access video. Status code: {status}"
+            raise Exception(msg)
 
         # Create a growing buffer for the initial part of the file
         buffer = io.BytesIO()
@@ -219,7 +221,7 @@ class VideoStreamer:
         self.container = av.open(buffer_reader)
 
         # Find the video stream
-        if self.container.streams.video:
+        if self.container and self.container.streams.video:
             self.video_stream = self.container.streams.video[0]
             # Only decode video frames
             self.video_stream.thread_type = "AUTO"  # Enable multithreading
@@ -258,7 +260,7 @@ class VideoStreamer:
             self.response.close()
         logger.debug(f"Stream closed. Processed {self.frame_count} frames.")
 
-    def __enter__(self):
+    def __enter__(self: "VideoStreamer") -> "VideoStreamer":
         """Context manager entry point.
 
         Returns:
@@ -266,7 +268,9 @@ class VideoStreamer:
         """
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self: "VideoStreamer", exc_type: Any, exc_val: Any, exc_tb: Any
+    ) -> None:
         """Context manager exit point that ensures proper cleanup.
 
         Args:

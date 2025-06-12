@@ -17,7 +17,9 @@ from neuracore.ml.neuracore_model import NeuracoreModel
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 
 
-def create_mar(model: NeuracoreModel, output_dir: str, algorithm_config: dict = {}):
+def create_mar(
+    model: NeuracoreModel, output_dir: Path, algorithm_config: dict = {}
+) -> None:
     """Create a TorchServe Model Archive (MAR) file from a Neuracore model.
 
     Packages a trained Neuracore model into a deployable MAR file that includes

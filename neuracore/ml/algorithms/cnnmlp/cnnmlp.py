@@ -7,6 +7,7 @@ and outputs entire action sequences.
 """
 
 import time
+from typing import Any, Dict
 
 import numpy as np
 import torch
@@ -206,14 +207,15 @@ class CNNMLP(NeuracoreModel):
         Returns:
             torch.FloatTensor: Predicted action sequence [B, T, action_dim]
         """
-        batch_size = batch.joint_positions.data.shape[0]
+        batch_size = len(batch)
 
         # Process images from each camera
         image_features = []
-        for cam_id, encoder in enumerate(self.image_encoders):
-            features = encoder(self.transform(batch.rgb_images.data[:, cam_id]))
-            features *= batch.rgb_images.mask[:, cam_id : cam_id + 1]
-            image_features.append(features)
+        if batch.rgb_images is not None:
+            for cam_id, encoder in enumerate(self.image_encoders):
+                features = encoder(self.transform(batch.rgb_images.data[:, cam_id]))
+                features *= batch.rgb_images.mask[:, cam_id : cam_id + 1]
+                image_features.append(features)
 
         # Combine image features
         if image_features:
@@ -288,14 +290,20 @@ class CNNMLP(NeuracoreModel):
             joint_torques=batch.inputs.joint_torques,
             rgb_images=batch.inputs.rgb_images,
         )
+
         if self.action_data_type == DataType.JOINT_TARGET_POSITIONS:
+            assert (
+                batch.outputs.joint_target_positions is not None
+            ), "joint_target_positions required"
             action_data = batch.outputs.joint_target_positions.data
         else:
+            assert batch.outputs.joint_positions is not None, "joint_positions required"
             action_data = batch.outputs.joint_positions.data
 
         target_actions = self._preprocess_actions(action_data)
         action_predicitons = self._predict_action(inference_sample)
-        losses, metrics = {}, {}
+        losses: Dict[str, Any] = {}
+        metrics: Dict[str, Any] = {}
         if self.training:
             losses["mse_loss"] = nn.functional.mse_loss(
                 action_predicitons, target_actions

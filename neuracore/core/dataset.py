@@ -7,10 +7,11 @@ with efficient streaming capabilities.
 """
 
 import concurrent
+import concurrent.futures
 import logging
 import queue
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 import numpy as np
 import requests
@@ -36,7 +37,7 @@ class Dataset:
     over episodes and synchronized data access.
     """
 
-    def __init__(self, dataset_dict: dict, recordings: list[dict] = None):
+    def __init__(self, dataset_dict: dict, recordings: Optional[list[dict]] = None):
         """Initialize a dataset from server response data.
 
         Args:
@@ -51,7 +52,7 @@ class Dataset:
         self.tags = dataset_dict["tags"]
         self.is_shared = dataset_dict["is_shared"]
         self._recording_idx = 0
-        self._previous_iterator = None
+        self._previous_iterator: Optional[EpisodeIterator] = None
         if recordings is None:
             self.num_episodes = dataset_dict["num_demonstrations"]
             auth = get_auth()
@@ -66,7 +67,7 @@ class Dataset:
             self._recordings = recordings
 
     @staticmethod
-    def get(name: str, non_exist_ok: bool = False) -> "Dataset":
+    def get(name: str, non_exist_ok: bool = False) -> Optional["Dataset"]:
         """Retrieve an existing dataset by name.
 
         Searches through both organizational and shared datasets to find
@@ -188,7 +189,7 @@ class Dataset:
         shared_data.raise_for_status()
         return org_data.json() + shared_data.json()
 
-    def as_pytorch_dataset(self, **kwargs):
+    def as_pytorch_dataset(self, **kwargs: Any) -> "Dataset":
         """Convert to PyTorch dataset format.
 
         Returns:
@@ -215,7 +216,7 @@ class Dataset:
         """
         return self.num_episodes
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Union["Dataset", "EpisodeIterator"]:
         """Support for indexing and slicing dataset episodes.
 
         Args:
@@ -246,7 +247,7 @@ class Dataset:
                 f"Dataset indices must be integers or slices, not {type(idx)}"
             )
 
-    def __next__(self):
+    def __next__(self) -> "EpisodeIterator":
         """Get the next episode in the dataset iteration.
 
         Returns:
@@ -266,7 +267,7 @@ class Dataset:
         self._previous_iterator = EpisodeIterator(self, recording)
         return self._previous_iterator
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Clean up resources when exiting context manager.
 
         Args:
@@ -287,7 +288,7 @@ class EpisodeIterator:
     according to the episode's timestamp information.
     """
 
-    def __init__(self, dataset, recording):
+    def __init__(self, dataset: "Dataset", recording: Dict[str, Any]) -> None:
         """Initialize episode iterator for a specific recording.
 
         Args:
@@ -348,7 +349,7 @@ class EpisodeIterator:
         response.raise_for_status()
         return response.json()["url"]
 
-    def _stream_data_loop(self, camera_type: str, camera_id: str):
+    def _stream_data_loop(self, camera_type: str, camera_id: str) -> None:
         """Stream video frames from a camera in a background thread.
 
         Downloads and queues video frames for synchronized access. Runs
@@ -366,7 +367,7 @@ class EpisodeIterator:
         # Signal end of data stream
         self._msg_queues[camera_id].put((None, None))
 
-    def close(self):
+    def close(self) -> None:
         """Explicitly close the iterator and clean up streaming threads.
 
         Stops all background streaming threads and releases resources.
@@ -381,8 +382,8 @@ class EpisodeIterator:
     def _populate_video_frames(
         self,
         camera_data: dict[str, CameraData],
-        transform_fn: Callable[[np.ndarray], np.ndarray] = None,
-    ):
+        transform_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    ) -> None:
         """Populate camera data with frames from streaming queues.
 
         Retrieves frames from the appropriate streaming thread queues and
@@ -399,6 +400,7 @@ class EpisodeIterator:
                     frame, frame_idx = self._msg_queues[camera_id].get(timeout=10.0)
                 except queue.Empty:
                     frame = None
+                    frame_idx = None
                 if frame is None:
                     break
                 if frame_idx == cam_data.frame_idx:
@@ -431,7 +433,7 @@ class EpisodeIterator:
         self._iter_idx += 1
         return sync_point
 
-    def __iter__(self):
+    def __iter__(self) -> "EpisodeIterator":
         """Initialize iteration over the episode with background streaming.
 
         Sets up streaming threads for all cameras and initializes queues
@@ -455,7 +457,7 @@ class EpisodeIterator:
                 self._threads.append(thread)
         return self
 
-    def __enter__(self):
+    def __enter__(self) -> "EpisodeIterator":
         """Context manager entry point.
 
         Returns:
@@ -463,7 +465,7 @@ class EpisodeIterator:
         """
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Context manager exit point that ensures proper cleanup.
 
         Args:
@@ -473,7 +475,7 @@ class EpisodeIterator:
         """
         self.close()
 
-    def __del__(self):
+    def __del__(self) -> None:
         """Cleanup when object is destroyed to prevent resource leaks."""
         self.close()
 
@@ -485,7 +487,7 @@ class EpisodeIterator:
         """
         return self._episode_length
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> None:
         """Support for indexing and slicing episode data.
 
         Args:

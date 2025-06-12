@@ -80,16 +80,16 @@ class Robot:
         desc = import_module(f"robot_descriptions.{description_module}")
         urdf_path = None
         if hasattr(desc, "URDF_PATH"):
-            urdf_path = str(Path(desc.URDF_PATH))
+            urdf_path = Path(desc.URDF_PATH)
         else:
             mjcf_path = str(Path(desc.MJCF_PATH))
-            urdf_path = str(Path(TEMP_DIR.name) / f"{description_module}_model.urdf")
+            urdf_path = Path(TEMP_DIR.name) / f"{description_module}_model.urdf"
             mjcf_to_urdf(mjcf_path, urdf_path, asset_file_prefix="meshes/")
 
         # Define robot information
         return RobotInfo(
             name=robot_name,
-            urdf_path=urdf_path,
+            urdf_path=str(urdf_path),
         )
 
     @property
@@ -177,6 +177,9 @@ class Robot:
                 # Treat as percentage open
                 joint_pos = min_pos + (max_pos - min_pos) * gripper_open_amount
             else:
+                assert isinstance(
+                    gripper_open_width, float
+                ), "Expected gripper_open_width to be float instance"
                 # Treat as absolute width (usually in meters)
                 # For typical grippers, divide by 2 (half width on each finger)
                 # But ensure result is within limits
