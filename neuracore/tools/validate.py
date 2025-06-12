@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def run_in_venv(algorithm_folder):
+def run_in_venv(algorithm_folder: Path) -> bool:
     """Run algorithm validation in a temporary virtual environment.
 
     Creates an isolated virtual environment, installs neuracore[ml], and
@@ -102,7 +102,7 @@ sys.exit(0 if success else 1)
     return True
 
 
-def main():
+def main() -> None:
     """Main entry point for the neuracore-validate command-line tool.
 
     Parses command-line arguments, validates the provided algorithm folder,

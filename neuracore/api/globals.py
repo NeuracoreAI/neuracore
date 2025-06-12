@@ -33,7 +33,7 @@ class GlobalSingleton(object):
     _active_robot: Optional[Robot] = None
     _active_dataset_id: Optional[str] = None
 
-    def __new__(cls):
+    def __new__(cls) -> "GlobalSingleton":
         """Create or return the singleton instance.
 
         Ensures only one instance of GlobalSingleton exists throughout the

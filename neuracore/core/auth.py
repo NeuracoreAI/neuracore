@@ -33,7 +33,7 @@ class Auth:
     _instance = None
     _api_key: Optional[str] = None
 
-    def __new__(cls):
+    def __new__(cls) -> "Auth":
         """Create or return the singleton Auth instance.
 
         Returns:
@@ -43,7 +43,7 @@ class Auth:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the Auth instance and load saved configuration."""
         self._load_config()
         self._access_token = None

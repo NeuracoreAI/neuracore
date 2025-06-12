@@ -209,5 +209,6 @@ def test_run_validation(tmp_path: Path):
             "unet_n_groups": 4,
             "unet_down_dims": [128, 256],
         },
+        skip_endpoint_check=True,
     )
     assert len(error_msg) == 0

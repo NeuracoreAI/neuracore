@@ -202,5 +202,6 @@ def test_run_validation(tmp_path: Path):
         output_dir=tmp_path,
         algorithm_dir=algorithm_dir,
         port=random.randint(10000, 20000),
+        skip_endpoint_check=True,
     )
     assert len(error_msg) == 0

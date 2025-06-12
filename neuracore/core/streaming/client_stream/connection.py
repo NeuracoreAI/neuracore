@@ -60,7 +60,7 @@ class PierToPierConnection:
     )
     _closed: bool = False
 
-    async def force_ice_negotiation(self):
+    async def force_ice_negotiation(self) -> None:
         """Force ICE candidate negotiation for all transceivers.
 
         Manually sends ICE candidates for all active transceivers and SCTP
@@ -118,7 +118,7 @@ class PierToPierConnection:
                     }),
                 )
 
-    def setup_connection(self):
+    def setup_connection(self) -> None:
         """Set up event handlers for the WebRTC connection.
 
         Configures connection state change handlers to automatically
@@ -126,12 +126,12 @@ class PierToPierConnection:
         """
 
         @self.connection.on("connectionstatechange")
-        async def on_connectionstatechange():
+        async def on_connectionstatechange() -> None:
             match self.connection.connectionState:
                 case "closed" | "failed":
                     await self.close()
 
-    def add_video_source(self, source: VideoSource):
+    def add_video_source(self, source: VideoSource) -> None:
         """Add a video source to the connection.
 
         Args:
@@ -140,7 +140,7 @@ class PierToPierConnection:
         track = source.get_video_track()
         self.connection.addTrack(track)
 
-    def add_event_source(self, source: JSONSource):
+    def add_event_source(self, source: JSONSource) -> None:
         """Add a JSON event source to the connection via data channel.
 
         Creates a data channel for the source and sets up listeners to
@@ -151,14 +151,14 @@ class PierToPierConnection:
         """
         data_channel = self.connection.createDataChannel(source.mid)
 
-        async def on_update(state: str):
+        async def on_update(state: str) -> None:
             if self._closed:
                 return
             if data_channel.readyState != "open":
                 return
             data_channel.send(state)
 
-        def on_open():
+        def on_open() -> None:
             last_state = source.get_last_state()
             if last_state:
                 data_channel.send(last_state)
@@ -170,7 +170,9 @@ class PierToPierConnection:
         source.add_listener(source.STATE_UPDATED_EVENT, on_update)
         self.data_channel_callback[source.mid] = on_update
 
-    async def send_handshake_message(self, message_type: MessageType, content: str):
+    async def send_handshake_message(
+        self, message_type: MessageType, content: str
+    ) -> None:
         """Send a signaling message to the remote peer.
 
         Args:
@@ -190,7 +192,7 @@ class PierToPierConnection:
             ).model_dump(mode="json"),
         )
 
-    def fix_mid_ordering(self, when: str = "offer"):
+    def fix_mid_ordering(self, when: str = "offer") -> None:
         """Fix media ID ordering for transceivers.
 
         Ensures that transceivers have the correct track assignments
@@ -214,7 +216,7 @@ class PierToPierConnection:
                 print(f"updating track ordering {when}")
                 transceiver.sender.replaceTrack(track)
 
-    async def on_ice(self, ice_message: str):
+    async def on_ice(self, ice_message: str) -> None:
         """Handle received ICE candidate from remote peer.
 
         Args:
@@ -228,7 +230,7 @@ class PierToPierConnection:
         candidate.sdpMLineIndex = ice_content["sdpMLineIndex"]
         await self.connection.addIceCandidate(candidate)
 
-    async def on_offer(self, offer: str):
+    async def on_offer(self, offer: str) -> None:
         """Handle received SDP offer from remote peer.
 
         Processes the offer, creates an answer, and sends it back through
@@ -250,7 +252,7 @@ class PierToPierConnection:
         await self.connection.setLocalDescription(answer)
         await self.send_handshake_message(MessageType.SDP_ANSWER, answer.sdp)
 
-    async def on_answer(self, answer_sdp: str):
+    async def on_answer(self, answer_sdp: str) -> None:
         """Handle received SDP answer from remote peer.
 
         Processes the answer and triggers ICE negotiation. Includes
@@ -280,7 +282,7 @@ class PierToPierConnection:
         except Exception:
             self.has_received_answer = False
 
-    async def send_offer(self):
+    async def send_offer(self) -> None:
         """Send SDP offer to remote peer.
 
         Creates and sends an SDP offer through the signaling server.
@@ -308,7 +310,7 @@ class PierToPierConnection:
         except Exception:
             self.has_sent_offer = False
 
-    async def close(self):
+    async def close(self) -> None:
         """Close the peer-to-peer connection gracefully.
 
         Closes the WebRTC connection, removes event listeners, and

@@ -262,13 +262,17 @@ class ACT(NeuracoreModel):
         batch_size = state.shape[0]
 
         # Project joint positions and actions
-        state_embed = self.state_embed(state)  # [B, H]
+        state_embed = (
+            self.state_embed(state) if self.state_embed is not None else None
+        )  # [B, H]
         action_embed = self.action_embed(
             actions * actions_mask.unsqueeze(1)
         )  # [B, T, H]
 
         # Reshape to sequence first
-        state_embed = state_embed.unsqueeze(0)  # [1, B, H]
+        state_embed = (
+            state_embed.unsqueeze(0) if state_embed is not None else None
+        )  # [1, B, H]
         action_embed = action_embed.transpose(0, 1)  # [T, B, H]
 
         # Concatenate [CLS, state_emb, action_embed]
@@ -340,7 +344,9 @@ class ACT(NeuracoreModel):
         pos = combined_pos.flatten(2).permute(2, 0, 1)
 
         # Process joint positions and latent
-        state_features = self.state_embed(states)  # [B, H]
+        state_features = (
+            self.state_embed(states) if self.state_embed is not None else None
+        )  # [B, H]
 
         # Stack latent and proprio features
         additional_features = torch.stack([latent, state_features], dim=0)  # [2, B, H]
@@ -424,17 +430,19 @@ class ACT(NeuracoreModel):
         # Project latent
         latent = self.latent_out_proj(latent_sample)  # [B, H]
 
-        # Encode visual features
-        memory = self._encode_visual(
-            self._combine_joint_states(batch),
-            batch.rgb_images.data,
-            batch.rgb_images.mask,
-            latent,
-        )
+        if batch.rgb_images is not None:
+            # Encode visual features
+            memory = self._encode_visual(
+                self._combine_joint_states(batch),
+                batch.rgb_images.data,
+                batch.rgb_images.mask,
+                latent,
+            )
 
-        # Decode actions
-        action_preds = self._decode(latent, memory)
-        return action_preds
+            # Decode actions
+            action_preds = self._decode(latent, memory)
+            return action_preds
+        raise ValueError("No batch rbg_images")
 
     def _combine_joint_states(
         self, batch: BatchedInferenceSamples
@@ -501,6 +509,9 @@ class ACT(NeuracoreModel):
         Returns:
             BatchedTrainingOutputs: Training outputs with losses and metrics
         """
+        if batch.outputs.joint_target_positions is None:
+            raise ValueError("Batch output joint target positions is None")
+
         pred_sequence_mask = batch.outputs.joint_target_positions.mask[
             :, :, 0
         ]  # [batch_size, T]

@@ -7,6 +7,7 @@ geometries while creating appropriate STL files for visual elements.
 """
 
 from pathlib import Path
+from typing import List, Optional
 from xml.dom import minidom
 from xml.etree import ElementTree as ET
 
@@ -106,8 +107,8 @@ def _create_joint(
     child: str,
     pos: list,
     rpy: list,
-    axis: list = None,
-    jnt_range: list = None,
+    axis: Optional[List] = None,
+    jnt_range: Optional[List] = None,
     jnt_type: str = "fixed",
 ) -> ET.Element:
     """Create a URDF joint element connecting two links.
@@ -145,20 +146,21 @@ def _create_joint(
     )
     if axis is not None:
         ET.SubElement(jnt_element, "axis", {"xyz": _array2str(axis)})
-        ET.SubElement(
-            jnt_element,
-            "limit",
-            {
-                "lower": str(jnt_range[0]),
-                "upper": str(jnt_range[1]),
-                "effort": "100",
-                "velocity": "100",
-            },
-        )
+        if jnt_range is not None:
+            ET.SubElement(
+                jnt_element,
+                "limit",
+                {
+                    "lower": str(jnt_range[0]),
+                    "upper": str(jnt_range[1]),
+                    "effort": "100",
+                    "velocity": "100",
+                },
+            )
     return jnt_element
 
 
-def convert(mjcf_file: str, urdf_file: str, asset_file_prefix: str = "") -> None:
+def convert(mjcf_file: str, urdf_file: Path, asset_file_prefix: str = "") -> None:
     """Convert a MuJoCo MJCF file to URDF format.
 
     Performs a comprehensive conversion from MJCF to URDF including:
@@ -181,7 +183,6 @@ def convert(mjcf_file: str, urdf_file: str, asset_file_prefix: str = "") -> None
     Raises:
         AssertionError: If a body has more than one joint, which is not supported.
     """
-    urdf_file = Path(urdf_file)
     model = mujoco.MjModel.from_xml_path(mjcf_file)
     root = ET.Element("robot", {"name": "converted_robot"})
 

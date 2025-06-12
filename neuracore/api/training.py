@@ -6,6 +6,7 @@ including algorithm discovery, dataset resolution, and job status tracking.
 
 import concurrent
 import json
+from typing import Any, Optional
 
 import requests
 
@@ -51,12 +52,12 @@ def start_training_run(
     name: str,
     dataset_name: str,
     algorithm_name: str,
-    algorithm_config: dict[str, any],
+    algorithm_config: dict[str, Any],
     gpu_type: str,
     num_gpus: int,
     frequency: int,
-    input_data_types: list[DataType] = None,
-    output_data_types: list[DataType] = None,
+    input_data_types: Optional[list[DataType]] = None,
+    output_data_types: Optional[list[DataType]] = None,
 ) -> dict:
     """Start a new training run.
 

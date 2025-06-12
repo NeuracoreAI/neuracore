@@ -9,11 +9,12 @@ import base64
 import hashlib
 import json
 import time
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
 from neuracore.api.core import _get_robot
+from neuracore.core.exceptions import RobotError
 from neuracore.core.robot import Robot
 from neuracore.core.streaming.client_stream.client_stream_manager import (
     get_robot_streaming_manager,
@@ -33,11 +34,12 @@ from ..core.streaming.data_stream import (
     DepthDataStream,
     JsonDataStream,
     RGBDataStream,
+    VideoDataStream,
 )
 from ..core.utils.depth_utils import MAX_DEPTH
 
 
-def _create_group_id_from_dict(joint_names: dict[str, float]) -> str:
+def _create_group_id_from_dict(joint_names: Dict[str, Any]) -> str:
     """Create a unique group ID from joint names dictionary.
 
     Args:
@@ -46,16 +48,18 @@ def _create_group_id_from_dict(joint_names: dict[str, float]) -> str:
     Returns:
         str: Base64 encoded hash of sorted joint names
     """
-    joint_names = list(joint_names.keys())
-    joint_names.sort()
+    joint_names_list: List[str] = list(joint_names.keys())
+    joint_names_list.sort()
     return (
-        base64.urlsafe_b64encode(hashlib.md5("".join(joint_names).encode()).digest())
+        base64.urlsafe_b64encode(
+            hashlib.md5("".join(joint_names_list).encode()).digest()
+        )
         .decode()
         .rstrip("=")
     )
 
 
-def start_stream(robot: Robot, data_stream: DataStream):
+def start_stream(robot: Robot, data_stream: DataStream) -> None:
     """Start recording on a data stream if robot is currently recording.
 
     Args:
@@ -72,7 +76,7 @@ def _log_joint_data(
     joint_data: dict[str, float],
     additional_urdf_data: Optional[dict[str, float]] = None,
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log joint data for a robot.
@@ -121,8 +125,12 @@ def _log_joint_data(
         values=joint_data,
         additional_values=additional_urdf_data,
     )
-
+    assert isinstance(
+        joint_stream, JsonDataStream
+    ), "Expected stream to be instance of JSONDataStream"
     joint_stream.log(data=data)
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
     get_robot_streaming_manager(robot.id, robot.instance).get_json_source(
         data_type, "joints", sensor_key=joint_str_id
     ).publish(data.model_dump(mode="json"))
@@ -162,7 +170,7 @@ def _log_camera_data(
     extrinsics: Optional[np.ndarray] = None,
     intrinsics: Optional[np.ndarray] = None,
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log camera data for a robot.
@@ -198,6 +206,10 @@ def _log_camera_data(
 
     start_stream(robot, stream)
 
+    assert isinstance(
+        stream, VideoDataStream
+    ), "Expected stream as instance of VideoDataStream"
+
     if stream.width != image.shape[1] or stream.height != image.shape[0]:
         raise ValueError(
             f"Camera image dimensions {image.shape[1]}x{image.shape[0]} do not match "
@@ -207,8 +219,10 @@ def _log_camera_data(
         image,
         CameraData(timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics),
     )
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
     get_robot_streaming_manager(robot.id, robot.instance).get_video_source(
-        camera_id, camera_type
+        camera_id, camera_type, f"{camera_id}_{camera_type}"
     ).add_frame(image)
 
 
@@ -222,7 +236,7 @@ def log_synced_data(
     depth_data: dict[str, np.ndarray],
     point_cloud_data: dict[str, np.ndarray],
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log synchronized data from multiple sensors.
@@ -294,7 +308,7 @@ def log_custom_data(
     name: str,
     data: Any,
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log arbitrary data for a robot.
@@ -326,6 +340,9 @@ def log_custom_data(
         raise ValueError(
             "Data is not serializable. Please ensure that all data is serializable."
         )
+    assert isinstance(
+        stream, JsonDataStream
+    ), "Expected stream to be instance of JSONDataStream"
     stream.log(CustomData(timestamp=timestamp, data=data))
 
 
@@ -333,7 +350,7 @@ def log_joint_positions(
     positions: dict[str, float],
     additional_urdf_positions: Optional[dict[str, float]] = None,
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log joint positions for a robot.
@@ -365,7 +382,7 @@ def log_joint_target_positions(
     target_positions: dict[str, float],
     additional_urdf_positions: Optional[dict[str, float]] = None,
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log joint target positions for a robot.
@@ -398,7 +415,7 @@ def log_joint_velocities(
     velocities: dict[str, float],
     additional_urdf_velocities: Optional[dict[str, float]] = None,
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log joint velocities for a robot.
@@ -430,7 +447,7 @@ def log_joint_torques(
     torques: dict[str, float],
     additional_urdf_torques: Optional[dict[str, float]] = None,
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log joint torques for a robot.
@@ -461,7 +478,7 @@ def log_joint_torques(
 def log_pose_data(
     poses: dict[str, list[float]],
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log pose data for a robot.
@@ -494,14 +511,16 @@ def log_pose_data(
         robot.add_data_stream(str_id, stream)
 
     start_stream(robot, stream)
-
+    assert isinstance(
+        stream, JsonDataStream
+    ), "Expected stream to be instance of JSONDataStream"
     stream.log(PoseData(timestamp=timestamp, pose=poses))
 
 
 def log_gripper_data(
     open_amounts: dict[str, float],
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log gripper data for a robot.
@@ -535,13 +554,16 @@ def log_gripper_data(
 
     start_stream(robot, stream)
 
+    assert isinstance(
+        stream, JsonDataStream
+    ), "Expected stream to be instance of EndEffectorData"
     stream.log(EndEffectorData(timestamp=timestamp, open_amounts=open_amounts))
 
 
 def log_language(
     language: str,
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log language annotation for a robot.
@@ -566,6 +588,9 @@ def log_language(
         stream = JsonDataStream("language_annotations.json")
         robot.add_data_stream(str_id, stream)
     start_stream(robot, stream)
+    assert isinstance(
+        stream, JsonDataStream
+    ), "Expected stream to be instance of JSONDataStream"
     stream.log(LanguageData(timestamp=timestamp, text=language))
 
 
@@ -575,7 +600,7 @@ def log_rgb(
     extrinsics: Optional[np.ndarray] = None,
     intrinsics: Optional[np.ndarray] = None,
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log RGB image from a camera.
@@ -608,7 +633,7 @@ def log_depth(
     extrinsics: Optional[np.ndarray] = None,
     intrinsics: Optional[np.ndarray] = None,
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log depth image from a camera.
@@ -657,7 +682,7 @@ def log_point_cloud(
     extrinsics: Optional[np.ndarray] = None,
     intrinsics: Optional[np.ndarray] = None,
     robot_name: Optional[str] = None,
-    instance: Optional[int] = 0,
+    instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
     """Log point cloud data from a camera.
@@ -705,7 +730,9 @@ def log_point_cloud(
     if stream is None:
         stream = JsonDataStream(f"point_clouds/{camera_id}.json")
         robot.add_data_stream(str_id, stream)
-
+    assert isinstance(
+        stream, JsonDataStream
+    ), "Expected stream to be instance of JSONDataStream"
     start_stream(robot, stream)
 
     stream.log(

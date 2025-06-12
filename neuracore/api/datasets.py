@@ -20,6 +20,8 @@ def get_dataset(name: str) -> Dataset:
         Dataset: The requested dataset instance
     """
     _active_dataset = Dataset.get(name)
+    if _active_dataset is None:
+        raise ValueError("No active dataset: _active_dataset is None")
     GlobalSingleton()._active_dataset_id = _active_dataset.id
     return _active_dataset
 

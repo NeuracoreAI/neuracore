@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import traceback
+import types
 from pathlib import Path
 from typing import List, Optional, Type
 
@@ -181,7 +182,7 @@ class AlgorithmLoader:
         return package_name
 
     def _find_model_in_module(
-        self, module, module_name: str
+        self, module: types.ModuleType, module_name: str
     ) -> Optional[Type[NeuracoreModel]]:
         """Search for NeuracoreModel subclasses within an imported module.
 

@@ -8,7 +8,7 @@ connection management, and automatic reconnection with exponential backoff.
 import asyncio
 from concurrent.futures import Future
 from datetime import timedelta
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from aiohttp import ClientSession, ClientTimeout
@@ -48,7 +48,7 @@ class ClientStreamingManager:
         robot_instance: int,
         client_session: ClientSession,
         loop: asyncio.AbstractEventLoop,
-        auth: Auth = None,
+        auth: Optional[Auth] = None,
     ):
         """Initialize the client streaming manager.
 
@@ -67,8 +67,8 @@ class ClientStreamingManager:
         self.streaming = EnabledManager(LIVE_DATA_ENABLED, loop=self.loop)
         self.streaming.add_listener(EnabledManager.DISABLED, self.__close)
         self.connections: Dict[str, PierToPierConnection] = {}
-        self.video_tracks_cache: Dict[str, VideoSource] = {}
-        self.event_source_cache: Dict[Tuple[str, str], JSONSource] = {}
+        self.video_tracks_cache: dict[str, VideoSource] = {}
+        self.event_source_cache: Dict[str, JSONSource] = {}
         self.track_lock = asyncio.Lock()
         self.tracks: List[VideoSource] = []
         self.local_stream_id = uuid4().hex
@@ -76,7 +76,9 @@ class ClientStreamingManager:
             self.connect_signalling_stream(), self.loop
         )
 
-    def get_video_source(self, sensor_name: str, kind: str) -> VideoSource:
+    def get_video_source(
+        self, sensor_name: str, kind: str, sensor_key: str
+    ) -> VideoSource:
         """Get or create a video source for streaming camera data.
 
         Args:
@@ -86,7 +88,6 @@ class ClientStreamingManager:
         Returns:
             VideoSource: Video source for streaming frames
         """
-        sensor_key = (sensor_name, kind)
         if sensor_key in self.video_tracks_cache:
             return self.video_tracks_cache[sensor_key]
 
@@ -106,7 +107,7 @@ class ClientStreamingManager:
         return video_source
 
     def get_json_source(
-        self, sensor_name: str, kind: str, sensor_key: tuple | None = None
+        self, sensor_name: str, kind: str, sensor_key: str
     ) -> JSONSource:
         """Get or create a JSON source for streaming structured data.
 
@@ -118,7 +119,6 @@ class ClientStreamingManager:
         Returns:
             JSONSource: JSON source for streaming structured data
         """
-        sensor_key = sensor_key or (sensor_name, kind)
         if sensor_key in self.event_source_cache:
             return self.event_source_cache[sensor_key]
 
@@ -132,7 +132,7 @@ class ClientStreamingManager:
         self.event_source_cache[sensor_key] = source
         return source
 
-    async def submit_track(self, mid: str, kind: str, label: str):
+    async def submit_track(self, mid: str, kind: str, label: str) -> None:
         """Submit a new track to the signaling server.
 
         Args:
@@ -155,7 +155,7 @@ class ClientStreamingManager:
             ).model_dump(mode="json"),
         )
 
-    async def heartbeat_response(self):
+    async def heartbeat_response(self) -> None:
         """Send heartbeat response to keep the signaling connection alive."""
         if not self.streaming.is_enabled():
             return
@@ -179,7 +179,7 @@ class ClientStreamingManager:
             PierToPierConnection: The newly created P2P connection
         """
 
-        def on_close():
+        def on_close() -> None:
             self.connections.pop(remote_stream_id, None)
 
         connection = PierToPierConnection(
@@ -205,7 +205,7 @@ class ClientStreamingManager:
         await connection.send_offer()
         return connection
 
-    async def connect_signalling_stream(self):
+    async def connect_signalling_stream(self) -> None:
         """Connect to the signaling server and process incoming messages.
 
         Maintains a persistent SSE connection with exponential backoff retry logic.
@@ -271,14 +271,14 @@ class ClientStreamingManager:
                 await asyncio.sleep(2**backoff)
                 backoff += 1
 
-    async def close_connections(self):
+    async def close_connections(self) -> None:
         """Close all active peer-to-peer connections."""
         await asyncio.gather(
             *(connection.close() for connection in self.connections.values())
         )
         self.connections.clear()
 
-    def __close(self):
+    def __close(self) -> None:
         """Internal cleanup method called when streaming is disabled."""
         if self.signalling_stream_future.running():
             self.signalling_stream_future.cancel()
@@ -286,7 +286,7 @@ class ClientStreamingManager:
         asyncio.run_coroutine_threadsafe(self.close_connections(), self.loop)
         asyncio.run_coroutine_threadsafe(self.client_session.close(), self.loop)
 
-    def close(self):
+    def close(self) -> None:
         """Close all connections and streams gracefully.
 
         Disables streaming, closes all P2P connections, stops video tracks,
@@ -297,7 +297,9 @@ class ClientStreamingManager:
         asyncio.run_coroutine_threadsafe(self.close_connections(), self.loop)
 
         for track in self.video_tracks_cache.values():
-            track.stop()
+            if track is not None and hasattr(track, "stop"):
+                assert hasattr(track, "stop")
+                track.stop()  # type: ignore
 
         self.connections.clear()
         self.video_tracks_cache.clear()
@@ -307,7 +309,9 @@ class ClientStreamingManager:
 _streaming_managers: Dict[Tuple[str, int], Future[ClientStreamingManager]] = {}
 
 
-async def _create_client_streaming_manager(robot_id: str, instance: int):
+async def _create_client_streaming_manager(
+    robot_id: str, instance: int
+) -> ClientStreamingManager:
     """Create a new client streaming manager instance.
 
     Args:

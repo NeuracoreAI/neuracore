@@ -1,6 +1,7 @@
 """Diffusion Policy model components including UNet, encoders, and utilities."""
 
 import math
+from typing import Any, Dict, Optional, Tuple, Union
 
 import einops
 import numpy as np
@@ -43,7 +44,7 @@ class DiffusionPolicyImageEncoder(nn.Module):
         resnet = getattr(models, "resnet18")(pretrained=True)
         return nn.Sequential(*list(resnet.children())[:-2])
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through image encoder.
 
         Args:
@@ -87,7 +88,9 @@ class SpatialSoftmax(nn.Module):
     (in_channels, H, W) -> (num_kp, H, W).
     """
 
-    def __init__(self, input_shape, num_kp=None):
+    def __init__(
+        self, input_shape: Tuple[int, int, int], num_kp: Optional[int] = None
+    ) -> None:
         """Initialize SpatialSoftmax layer.
 
         Args:
@@ -191,7 +194,7 @@ class DiffusionConditionalUnet1d(nn.Module):
         )
 
         # Unet encoder.
-        common_res_block_kwargs = {
+        common_res_block_kwargs: Dict[str, Any] = {
             "cond_dim": cond_dim,
             "kernel_size": kernel_size,
             "n_groups": n_groups,
@@ -256,7 +259,10 @@ class DiffusionConditionalUnet1d(nn.Module):
         )
 
     def forward(
-        self, x: torch.Tensor, timestep: torch.Tensor | int, global_cond=None
+        self,
+        x: torch.Tensor,
+        timestep: Union[torch.Tensor, int],
+        global_cond: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass through the UNet.
 
@@ -411,7 +417,9 @@ class DiffusionConditionalResidualBlock1d(nn.Module):
 class DiffusionConv1dBlock(nn.Module):
     """Conv1d --> GroupNorm --> Mish."""
 
-    def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8):
+    def __init__(
+        self, inp_channels: int, out_channels: int, kernel_size: int, n_groups: int = 8
+    ):
         """Initialize the conv1d block.
 
         Args:

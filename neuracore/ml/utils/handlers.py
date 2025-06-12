@@ -11,24 +11,25 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any, List, Optional
 
 import numpy as np
 import torch
 import torchvision.transforms as T
 from PIL import Image
+from ts.context import Context
 from ts.torch_handler.base_handler import BaseHandler
 
 from neuracore.core.nc_types import LanguageData  # Import LanguageData
 from neuracore.core.nc_types import (
     CameraData,
-    DatasetDescription,
     DataType,
     JointData,
     ModelInitDescription,
     ModelPrediction,
     SyncPoint,
 )
-from neuracore.ml import BatchedInferenceSamples, MaskableData
+from neuracore.ml import BatchedInferenceSamples, MaskableData, NeuracoreModel
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 
 logger = logging.getLogger(__name__)
@@ -43,14 +44,15 @@ class RobotModelHandler(BaseHandler):
     output formatting for robot control applications.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the robot model handler with default configuration."""
         super().__init__()
         self.initialized = False
         self.normalization_stats = None
-        self.dataset_description: DatasetDescription = None
 
-    def _load_pickled_model(self, model_dir, model_file, model_pt_path):
+    def _load_pickled_model(
+        self, model_dir: str, model_file: str, model_pt_path: Optional[str]
+    ) -> NeuracoreModel:
         """Load a Neuracore model using the AlgorithmLoader.
 
         Dynamically loads the model class from the algorithm directory and
@@ -83,7 +85,7 @@ class RobotModelHandler(BaseHandler):
             )
         return model
 
-    def initialize(self, context):
+    def initialize(self, context: Context) -> None:
         """Initialize the model handler with TorchServe context.
 
         Loads model configuration, initializes the model using the parent class
@@ -192,6 +194,9 @@ class RobotModelHandler(BaseHandler):
         mask = np.zeros((len(image_data), max_len))
         for i, images in enumerate(image_data):
             for j, (camera_name, camera_data) in enumerate(images.items()):
+                assert isinstance(
+                    camera_data.frame, str
+                ), f"Expected string fram data, got {type(camera_data.frame)}"
                 image = self._decode_image(camera_data.frame)
                 image = Image.fromarray(image)
                 transform = T.Compose([
@@ -225,7 +230,7 @@ class RobotModelHandler(BaseHandler):
             torch.tensor(attention_mask, dtype=torch.float32),
         )
 
-    def preprocess(self, requests):
+    def preprocess(self, requests: list[dict]) -> BatchedInferenceSamples:
         """Preprocess incoming requests into model-compatible format.
 
         Converts raw HTTP requests containing SyncPoint data into batched
@@ -250,35 +255,55 @@ class RobotModelHandler(BaseHandler):
 
         if sync_points[0].joint_positions:
             batch.joint_positions = self._process_joint_data(
-                [sp.joint_positions for sp in sync_points],
+                [
+                    sp.joint_positions
+                    for sp in sync_points
+                    if sp.joint_positions is not None
+                ],
                 self.dataset_description.joint_positions.max_len,
             )
         if sync_points[0].joint_torques:
             batch.joint_torques = self._process_joint_data(
-                [sp.joint_torques for sp in sync_points],
+                [
+                    sp.joint_torques
+                    for sp in sync_points
+                    if sp.joint_torques is not None
+                ],
                 self.dataset_description.joint_torques.max_len,
             )
         if sync_points[0].joint_velocities:
             batch.joint_velocities = self._process_joint_data(
-                [sp.joint_velocities for sp in sync_points],
+                [
+                    sp.joint_velocities
+                    for sp in sync_points
+                    if sp.joint_velocities is not None
+                ],
                 self.dataset_description.joint_velocities.max_len,
             )
         if sync_points[0].joint_target_positions:
             batch.joint_target_positions = self._process_joint_data(
-                [sp.joint_target_positions for sp in sync_points],
+                [
+                    sp.joint_target_positions
+                    for sp in sync_points
+                    if sp.joint_target_positions is not None
+                ],
                 self.dataset_description.joint_target_positions.max_len,
             )
 
         if sync_points[0].rgb_images:
             batch.rgb_images = self._process_image_data(
-                [sp.rgb_images for sp in sync_points],
+                [sp.rgb_images for sp in sync_points if sp.rgb_images is not None],
                 self.dataset_description.max_num_rgb_images,
             )
 
         # Process language data if available
         if sync_points[0].language_data:
             batch.language_tokens = self._process_language_data(
-                [sp.language_data for sp in sync_points],
+                [
+                    sp.language_data
+                    for sp in sync_points
+                    if sp.language_data is not None
+                ],
             )
 
         return batch.to(self.device)
@@ -316,7 +341,7 @@ class RobotModelHandler(BaseHandler):
         if DataType.RGB_IMAGE in inference_output.outputs:
             # Shape: [B, T, CAMS, 224, 224, 3]
             rgbs = inference_output.outputs[DataType.RGB_IMAGE]
-            str_rets = [
+            str_rets: List[List[Any]] = [
                 [[] for _ in range(rgbs.shape[1])] for _ in range(rgbs.shape[0])
             ]
             for b_idx in range(rgbs.shape[0]):
