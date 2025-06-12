@@ -53,7 +53,7 @@ class AlgorthmCheck(BaseModel):
     successfully_launched_endpoint: bool = False
 
 
-def setup_logging(output_dir: Path):
+def setup_logging(output_dir: Path) -> None:
     """Configure logging for validation process with file and console output.
 
     Sets up logging to capture validation progress and errors both in the
@@ -244,7 +244,7 @@ def run_validation(
             )
 
         # Sum all losses
-        loss = sum(outputs.losses.values()).mean()
+        loss = torch.stack(list(outputs.losses.values())).sum(0).mean()
         logger.info(f"Forward pass successful, loss: {loss.item():.4f}")
         algo_check.successfully_forward_pass = True
 

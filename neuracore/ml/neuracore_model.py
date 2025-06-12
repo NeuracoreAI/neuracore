@@ -7,6 +7,7 @@ and defines the required interface for training and inference.
 
 import logging
 from abc import ABC, abstractmethod
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
@@ -52,7 +53,7 @@ class NeuracoreModel(nn.Module, ABC):
             model_init_description.output_prediction_horizon
         )
 
-    def _validate_input_output_types(self):
+    def _validate_input_output_types(self) -> None:
         """Validate that requested data types are supported and available.
 
         Ensures that all requested input and output data types are both
@@ -132,7 +133,7 @@ class NeuracoreModel(nn.Module, ABC):
         pass
 
     @staticmethod
-    def tokenize_text(self, text: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
+    def tokenize_text(text: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Tokenize text input for language processing.
 
         Args:

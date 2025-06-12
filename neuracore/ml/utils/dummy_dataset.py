@@ -189,11 +189,15 @@ class DummyDataset(NeuracoreDataset):
                     sample.outputs.joint_target_positions = joint_target_positions
 
             if DataType.LANGUAGE in self.data_types:
+                if self.tokenize_text is None:
+                    raise ValueError(
+                        "Failed to initialize tokenize_text for DataType.LANGUAGE"
+                    )
+
                 # Randomly select an instruction
                 instruction = np.random.choice(self.sample_instructions)
                 # Tokenize the instruction
                 input_ids, attention_mask = self.tokenize_text([instruction])
-
                 language_tokens = MaskableData(input_ids, attention_mask)
 
                 if DataType.LANGUAGE in self.input_data_types:

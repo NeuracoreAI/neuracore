@@ -2,6 +2,7 @@
 
 import logging
 import time
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import torch
@@ -35,11 +36,11 @@ class DiffusionPolicy(NeuracoreModel):
         self,
         model_init_description: ModelInitDescription,
         hidden_dim: int = 256,
-        unet_down_dims: list[int] = [
+        unet_down_dims: Tuple[int, ...] = (
             512,
             1024,
             2048,
-        ],
+        ),
         unet_kernel_size: int = 5,
         unet_n_groups: int = 8,
         unet_diffusion_step_embed_dim: int = 128,
@@ -110,15 +111,18 @@ class DiffusionPolicy(NeuracoreModel):
             use_film_scale_modulation=unet_use_film_scale_modulation,
         )
 
+        kwargs: Dict[str, Any] = {
+            "num_train_timesteps": num_train_timesteps,
+            "beta_start": beta_start,
+            "beta_end": beta_end,
+            "beta_schedule": beta_schedule,
+            "clip_sample": clip_sample,
+            "clip_sample_range": clip_sample_range,
+            "prediction_type": prediction_type,
+        }
+
         self.noise_scheduler = self._make_noise_scheduler(
-            noise_scheduler_type,
-            num_train_timesteps=num_train_timesteps,
-            beta_start=beta_start,
-            beta_end=beta_end,
-            beta_schedule=beta_schedule,
-            clip_sample=clip_sample,
-            clip_sample_range=clip_sample_range,
-            prediction_type=prediction_type,
+            noise_scheduler_type, **kwargs
         )
         self.prediction_type = prediction_type
         self.num_inference_steps = num_inference_steps
@@ -277,7 +281,7 @@ class DiffusionPolicy(NeuracoreModel):
 
     @staticmethod
     def _make_noise_scheduler(
-        name: str, **kwargs: dict
+        noise_scheduler_type: str, **kwargs: Dict[str, Any]
     ) -> DDPMScheduler | DDIMScheduler:
         """Factory for noise scheduler instances.
 
@@ -290,18 +294,18 @@ class DiffusionPolicy(NeuracoreModel):
         Returns:
             Noise scheduler instance.
         """
-        if name == "DDPM":
+        if noise_scheduler_type == "DDPM":
             return DDPMScheduler(**kwargs)
-        elif name == "DDIM":
+        elif noise_scheduler_type == "DDIM":
             return DDIMScheduler(**kwargs)
         else:
-            raise ValueError(f"Unsupported noise scheduler type {name}")
+            raise ValueError(f"Unsupported noise scheduler type {noise_scheduler_type}")
 
     def _predict_action(
         self,
         batch: BatchedInferenceSamples,
         prediction_horizon: int,
-    ) -> torch.FloatTensor:
+    ) -> torch.Tensor:
         """Predict action sequence from observations.
 
         Args:
@@ -318,6 +322,8 @@ class DiffusionPolicy(NeuracoreModel):
 
         # Encode image features and concatenate them all together along
         # with the state vector.
+        if batch.rgb_images is None:
+            raise ValueError("Failed to find rgb_images")
         global_cond = self._prepare_global_conditioning(
             joint_states, batch.rgb_images.data, batch.rgb_images.mask
         )  # (B, global_cond_dim)
@@ -369,10 +375,14 @@ class DiffusionPolicy(NeuracoreModel):
             rgb_images=batch.inputs.rgb_images,
             joint_target_positions=batch.outputs.joint_target_positions,
         )
+        if batch.inputs.rgb_images is None:
+            raise ValueError("Failed to find rgb_images")
         joint_states = self._combine_joint_states(inference_sample)
         global_cond = self._prepare_global_conditioning(
             joint_states, batch.inputs.rgb_images.data, batch.inputs.rgb_images.mask
         )
+        if batch.outputs.joint_target_positions is None:
+            raise ValueError("Failed to find joint_target_positions")
         target_actions = self._preprocess_joint_state(
             batch.outputs.joint_target_positions.data,
             self.joint_target_mean,

@@ -6,13 +6,14 @@ an access token, and creates a new API key for CLI usage.
 """
 
 from getpass import getpass  # For hidden password input
+from typing import Optional
 
 import requests
 
 from .const import API_URL
 
 
-def generate_api_key():
+def generate_api_key() -> Optional[str]:
     """Generate a new API key through interactive user authentication.
 
     Prompts the user for their registered email and password, authenticates
@@ -38,7 +39,7 @@ def generate_api_key():
         access_token = token_data.get("access_token")
     except requests.exceptions.RequestException as e:
         print(f"Authentication failed: {e}")
-        return
+        return None
 
     # Use the access token to request an API key
     try:
@@ -54,6 +55,7 @@ def generate_api_key():
         return api_key
     except requests.exceptions.RequestException as e:
         print(f"Failed to create API key: {e}")
+        return None
 
 
 if __name__ == "__main__":
