@@ -1,0 +1,44 @@
+defaults:
+  - _self_
+  - algorithm: null
+  - override hydra/launcher: basic
+
+# Core training parameters
+seed: 42
+epochs: 100
+output_prediction_horizon: 10
+validation_split: 0.2
+
+# Batch size (can be "auto" for automatic tuning or an integer)
+batch_size: "auto"
+
+# Dataset synchronization
+dataset_name: null
+dataset_id: null
+frequency: 10
+input_data_types:
+  - "joint_positions"
+  - "rgb_image"
+output_data_types:
+  - "joint_positions"
+
+
+# Paths and IDs (for cloud vs local training)
+algorithm_id: null    # For cloud training
+training_id: null     # For cloud training
+local_output_dir: ${oc.env:HOME}/neuracore_logs
+
+# Custom algorithm parameters (used when algorithm_id is provided)
+# These will be passed directly to the algorithm constructor
+algorithm_params: null
+
+# Resume training
+resume: null  # Path to checkpoint to resume from
+
+# Hydra configuration
+hydra:
+  run:
+    dir: ${local_output_dir}/hydra_outputs/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${local_output_dir}/hydra_sweeps/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra:job.num}

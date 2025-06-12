@@ -1,5 +1,7 @@
 # Neuracore Examples
 
+**NOTE:** You will need Git LFS to run examples.
+
 This contains examples for using Neuracore with a simulated robot environment. You'll learn how to:
 - Collect and record robot demonstrations
 - Deploy trained models locally

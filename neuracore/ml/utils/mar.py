@@ -13,7 +13,7 @@ import torch
 from model_archiver.model_archiver import ModelArchiver
 from model_archiver.model_archiver_config import ModelArchiverConfig
 
-from neuracore.ml.neuracore_model import NeuracoreModel
+from neuracore.ml.core.neuracore_model import NeuracoreModel
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 
 
@@ -43,8 +43,6 @@ def create_mar(
         with open(output_dir / "algorithm_config.json", "w") as f:
             json.dump(algorithm_config, f, indent=2)
     with open(output_dir / "requirements.txt", "w") as f:
-        # TODO: Remove test PyPI for main branch
-        f.write("--index-url https://test.pypi.org/simple\n")
         f.write("neuracore\n")
 
     extra_files = [str(f) for f in algo_files] + [

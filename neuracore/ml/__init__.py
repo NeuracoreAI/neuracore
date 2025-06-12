@@ -1,13 +1,13 @@
 """Init."""
 
-from .ml_types import (
+from .core.ml_types import (
     BatchedData,
     BatchedInferenceSamples,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     MaskableData,
 )
-from .neuracore_model import NeuracoreModel
+from .core.neuracore_model import NeuracoreModel
 
 __all__ = [
     "NeuracoreModel",

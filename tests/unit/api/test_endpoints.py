@@ -123,6 +123,7 @@ def test_connect_local_endpoint(
     )
 
     monkeypatch.setattr("subprocess.Popen", mock_subprocess_popen)
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: None)
 
     nc.login("test_api_key")
     mock_auth_requests.post(
@@ -293,6 +294,7 @@ def test_connect_local_endpoint_with_train_run(
 
     # Apply mocks
     monkeypatch.setattr("subprocess.Popen", mock_subprocess_popen)
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: None)
 
     # Connect using train run name
     local_endpoint = nc.connect_local_endpoint(train_run_name="test_run")

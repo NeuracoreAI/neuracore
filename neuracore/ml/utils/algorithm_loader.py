@@ -16,7 +16,7 @@ import types
 from pathlib import Path
 from typing import List, Optional, Type
 
-from ..neuracore_model import NeuracoreModel
+from ..core.neuracore_model import NeuracoreModel
 
 logger = logging.getLogger(__name__)
 

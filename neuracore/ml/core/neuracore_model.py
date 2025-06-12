@@ -12,7 +12,7 @@ from typing import List, Tuple
 import torch
 import torch.nn as nn
 
-from ..core.nc_types import DataType, ModelInitDescription, ModelPrediction
+from ...core.nc_types import DataType, ModelInitDescription, ModelPrediction
 from .ml_types import (
     BatchedInferenceSamples,
     BatchedTrainingOutputs,
