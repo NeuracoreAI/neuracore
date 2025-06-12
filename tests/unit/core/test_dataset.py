@@ -10,7 +10,7 @@ import pytest
 
 import neuracore as nc
 from neuracore.core.const import API_URL
-from neuracore.core.dataset import Dataset, EpisodeIterator
+from neuracore.core.data.dataset import Dataset
 from neuracore.core.exceptions import DatasetError
 from neuracore.core.nc_types import CameraData, JointData, SyncedData, SyncPoint
 from neuracore.core.utils.video_url_streamer import VideoStreamer
@@ -81,6 +81,33 @@ def create_test_video():
 
 
 @pytest.fixture
+def mock_wget_download(monkeypatch, create_test_video):
+    """Mock wget.download calls to return fake video file."""
+    import wget
+
+    def mock_download(url, out=None, bar=None):
+        """Mock wget.download to create a fake video file."""
+        # Create fake video data
+        video_data = create_test_video(num_frames=10)
+
+        # Determine output filename
+        if out:
+            filename = out
+        else:
+            # Extract filename from URL or use default
+            filename = url.split("/")[-1] if "/" in url else "downloaded_video.mp4"
+
+        # Write fake video data to file
+        with open(filename, "wb") as f:
+            f.write(video_data)
+
+        return filename
+
+    monkeypatch.setattr(wget, "download", mock_download)
+    yield
+
+
+@pytest.fixture
 def dataset_dict():
     return {
         "id": "dataset123",
@@ -88,7 +115,6 @@ def dataset_dict():
         "size_bytes": 1024,
         "tags": ["test", "robotics"],
         "is_shared": False,
-        "num_demonstrations": 2,
     }
 
 
@@ -130,22 +156,22 @@ def synced_data():
 
     # Create sync points
     frame1 = SyncPoint(
-        timestamp=1000.0,
-        joint_positions=JointData(timestamp=1000.0, values={"joint1": 0.5}),
-        joint_target_positions=JointData(timestamp=2000.0, values={"joint1": 1.0}),
+        timestamp=0.0,
+        joint_positions=JointData(timestamp=0.0, values={"joint1": 0.5}),
+        joint_target_positions=JointData(timestamp=1000.0, values={"joint1": 1.0}),
         rgb_images={"cam1": camera1},
         depth_images={"cam2": camera2},
     )
 
     frame2 = SyncPoint(
-        timestamp=2000.0,
-        joint_positions=JointData(timestamp=2000.0, values={"joint1": 0.7}),
-        joint_target_positions=JointData(timestamp=2000.0, values={"joint1": 1.2}),
-        rgb_images={"cam1": CameraData(timestamp=2000.0, frame_idx=1)},
-        depth_images={"cam2": CameraData(timestamp=2000.0, frame_idx=1)},
+        timestamp=1.0,
+        joint_positions=JointData(timestamp=1.0, values={"joint1": 0.7}),
+        joint_target_positions=JointData(timestamp=1.0, values={"joint1": 1.2}),
+        rgb_images={"cam1": CameraData(timestamp=1.0, frame_idx=1)},
+        depth_images={"cam2": CameraData(timestamp=1.0, frame_idx=1)},
     )
 
-    return SyncedData(frames=[frame1, frame2], start_time=1000.0, end_time=2000.0)
+    return SyncedData(frames=[frame1, frame2], start_time=0.0, end_time=1.0)
 
 
 @pytest.fixture
@@ -157,6 +183,15 @@ def mock_dataset_api(mock_auth_requests, dataset_dict, recordings_list, synced_d
 
     # Mock shared datasets endpoint
     mock_auth_requests.get(f"{API_URL}/datasets/shared", json=[], status_code=200)
+
+    mock_auth_requests.get(
+        f"{API_URL}/datasets/by-name/{dataset_dict['name']}",
+        json=dataset_dict,
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/datasets/by-name/nonexistent", json={}, status_code=404
+    )
 
     # Mock dataset creation endpoint
     mock_auth_requests.post(f"{API_URL}/datasets", json=dataset_dict, status_code=200)
@@ -226,29 +261,29 @@ class TestDataset:
 
     def test_init_with_dict(self, mock_auth_requests, mock_dataset_api, dataset_dict):
         """Test initializing a Dataset with a dictionary."""
-        dataset = Dataset(dataset_dict)
+        dataset = Dataset(**dataset_dict)
 
         assert dataset.id == "dataset123"
         assert dataset.name == "test_dataset"
         assert dataset.size_bytes == 1024
         assert dataset.tags == ["test", "robotics"]
         assert dataset.is_shared is False
-        assert dataset.num_episodes == 2
+        assert len(dataset) == 2
 
     def test_init_with_recordings(self, dataset_dict, recordings_list):
         """Test initializing a Dataset with provided recordings."""
-        dataset = Dataset(dataset_dict, recordings=recordings_list)
+        dataset = Dataset(**dataset_dict, recordings=recordings_list)
 
         assert dataset.id == "dataset123"
         assert dataset.name == "test_dataset"
-        assert dataset.num_episodes == 2
-        assert len(dataset._recordings) == 2
-        assert dataset._recordings[0]["id"] == "rec1"
-        assert dataset._recordings[1]["id"] == "rec2"
+        assert len(dataset) == 2
+        assert len(dataset.recordings) == 2
+        assert dataset.recordings[0]["id"] == "rec1"
+        assert dataset.recordings[1]["id"] == "rec2"
 
     def test_get_existing_dataset(self, mock_auth_requests, mock_dataset_api):
         """Test getting an existing dataset by name."""
-        dataset = Dataset.get("test_dataset")
+        dataset = Dataset.get_by_name("test_dataset")
 
         assert dataset.id == "dataset123"
         assert dataset.name == "test_dataset"
@@ -256,7 +291,7 @@ class TestDataset:
     def test_get_nonexistent_dataset(self, mock_auth_requests, mock_dataset_api):
         """Test getting a non-existent dataset raises an error."""
         with pytest.raises(DatasetError, match="Dataset 'nonexistent' not found"):
-            Dataset.get("nonexistent")
+            Dataset.get_by_name("nonexistent")
 
     def test_create_dataset(self, mock_auth_requests, mock_dataset_api):
         """Test creating a new dataset."""
@@ -269,54 +304,18 @@ class TestDataset:
 
     def test_len(self, dataset_dict, recordings_list):
         """Test the __len__ method."""
-        dataset = Dataset(dataset_dict, recordings=recordings_list)
+        dataset = Dataset(**dataset_dict, recordings=recordings_list)
         assert len(dataset) == 2
 
     def test_getitem_slice(self, dataset_dict, recordings_list):
         """Test getting a slice of the dataset."""
-        dataset = Dataset(dataset_dict, recordings=recordings_list)
+        dataset = Dataset(**dataset_dict, recordings=recordings_list)
 
         result = dataset[0:1]
 
         assert isinstance(result, Dataset)
         assert len(result) == 1
-        assert result._recordings[0]["id"] == "rec1"
-
-
-class TestEpisodeIterator:
-
-    def test_episodeiterator_with_video(
-        self,
-        mock_auth_requests,
-        mock_dataset_api,
-        mock_video_api,
-        dataset_dict,
-        recordings_list,
-    ):
-        """Test EpisodeIterator with video streaming."""
-        # Create a dataset and get an episode
-        dataset = Dataset(dataset_dict, recordings=recordings_list)
-
-        # Create and use the iterator
-        with EpisodeIterator(dataset, recordings_list[0]) as iterator:
-            # Check the iterator basic properties
-            assert iterator.id == "rec1"
-            assert iterator.size_bytes == 512
-
-            # Check the iterator length
-            assert len(iterator) == 2
-
-            # Get the camera IDs
-            assert len(iterator._camera_ids) == 2
-
-            # Iterate through frames - just check we can iterate
-            frame_count = 0
-            for frame in iterator:
-                frame_count += 1
-                assert isinstance(frame, SyncPoint)
-                assert frame.timestamp in [1000.0, 2000.0]
-
-            assert frame_count == 2
+        assert result.recordings[0]["id"] == "rec1"
 
     def test_dataset_iteration(
         self,
@@ -325,10 +324,11 @@ class TestEpisodeIterator:
         mock_video_api,
         dataset_dict,
         recordings_list,
+        mock_wget_download,
     ):
         """Test iterating through a dataset of episodes."""
         # Create a dataset
-        dataset = Dataset(dataset_dict)
+        dataset = Dataset(**dataset_dict)
 
         # Make sure we can iterate through the dataset
         episode_count = 0
@@ -337,7 +337,7 @@ class TestEpisodeIterator:
         for episode in dataset:
             episode_count += 1
             # Count frames in this episode
-            frames = list(episode)
+            frames = list(episode.synchronize(frequency=30))
             frame_counts.append(len(frames))
 
         # Should have processed both episodes
@@ -355,17 +355,17 @@ class TestEpisodeIterator:
     ):
         """Test accessing dataset episodes by index."""
         # Create a dataset
-        dataset = Dataset(dataset_dict)
+        dataset = Dataset(**dataset_dict)
 
         # Access first episode
-        with dataset[0] as episode:
-            frames = list(episode)
-            assert len(frames) == 2
+        episode = dataset[0]
+        frames = list(episode.synchronize(frequency=100))
+        assert len(frames) == 2
 
         # Access second episode
-        with dataset[1] as episode:
-            frames = list(episode)
-            assert len(frames) == 2
+        episode = dataset[1]
+        frames = list(episode.synchronize(frequency=100))
+        assert len(frames) == 2
 
     def test_nested_iteration(
         self,
@@ -377,7 +377,7 @@ class TestEpisodeIterator:
     ):
         """Test nested iteration through dataset and episodes."""
         # Create a dataset
-        dataset = Dataset(dataset_dict)
+        dataset = Dataset(**dataset_dict)
 
         # Test double nested iteration
         episode_count = 0
@@ -385,7 +385,8 @@ class TestEpisodeIterator:
 
         for episode in dataset:
             episode_count += 1
-            for frame in episode:
+            synced_ep = episode.synchronize(frequency=100)
+            for frame in synced_ep:
                 total_frames += 1
                 # Check frame has expected properties
                 assert hasattr(frame, "timestamp")

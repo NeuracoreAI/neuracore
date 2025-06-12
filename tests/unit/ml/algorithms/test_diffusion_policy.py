@@ -21,7 +21,7 @@ from neuracore.ml import (
     MaskableData,
 )
 from neuracore.ml.algorithms.diffusion_policy.diffusion_policy import DiffusionPolicy
-from neuracore.ml.ml_types import BatchedData
+from neuracore.ml.core.ml_types import BatchedData
 from neuracore.ml.utils.validate import run_validation
 
 BS = 2

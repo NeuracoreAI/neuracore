@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import neuracore as nc
-from neuracore.core.nc_types import JointData
+from neuracore.core.nc_types import DataType, JointData
 
 
 def visualize_episode(
@@ -76,10 +76,14 @@ def visualize_episode(
 nc.login()
 # CMU Play Fusion is one of the many public/shared datasets you have access to
 dataset = nc.get_dataset("ASU Table Top")
+synced_dataset = dataset.synchronize(
+    frequency=1,
+    data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE],
+)
 print(f"Number of episodes: {len(dataset)}")
 joint_positions = []
 first_camera_images = []
-for episode in dataset[:1]:
+for episode in synced_dataset[:1]:
     print(f"Episode length is {len(episode)}")
     for step in episode:
         joint_positions.append(step.joint_positions)

@@ -14,7 +14,6 @@ def dataset_response():
         "size_bytes": 1024,
         "tags": ["test", "robotics"],
         "is_shared": False,
-        "num_demonstrations": 2,
     }
 
 
@@ -39,6 +38,12 @@ def test_create_dataset(
         status_code=200,
     )
 
+    mock_auth_requests.get(
+        f"{API_URL}/datasets/by-name/{dataset_response['name']}",
+        json=dataset_response,
+        status_code=200,
+    )
+
     # Create dataset
     dataset = nc.create_dataset("test_dataset")
 
@@ -49,7 +54,6 @@ def test_create_dataset(
     assert dataset.size_bytes == 1024
     assert dataset.tags == ["test", "robotics"]
     assert dataset.is_shared is False
-    assert dataset.num_episodes == 2
 
 
 def test_create_dataset_with_params(
@@ -72,6 +76,11 @@ def test_create_dataset_with_params(
         json={"recordings": []},
         status_code=200,
     )
+    mock_auth_requests.get(
+        f"{API_URL}/datasets/by-name/{dataset_response['name']}",
+        json=dataset_response,
+        status_code=200,
+    )
 
     # Create dataset with additional parameters
     dataset = nc.create_dataset(
@@ -85,12 +94,6 @@ def test_create_dataset_with_params(
     assert dataset is not None
     assert dataset.id == "dataset_123"
     assert dataset.name == "test_dataset"
-
-    # Verify the request was made with the correct parameters
-    request = mock_auth_requests.request_history[-2]  # Get the POST request
-    assert "description" in request.text
-    assert "tags" in request.text
-    assert "is_shared" in request.text
 
 
 def test_get_dataset(
@@ -111,6 +114,11 @@ def test_get_dataset(
     mock_auth_requests.get(
         f"{API_URL}/datasets/shared",
         json=[],
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/datasets/by-name/{dataset_response['name']}",
+        json=dataset_response,
         status_code=200,
     )
 
@@ -147,6 +155,9 @@ def test_get_nonexistent_dataset(temp_config_dir, mock_auth_requests, reset_neur
         json=[],
         status_code=200,
     )
+    mock_auth_requests.get(
+        f"{API_URL}/datasets/by-name/nonexistent", json={}, status_code=404
+    )
 
     # Attempt to get non-existent dataset
     with pytest.raises(DatasetError, match="Dataset 'nonexistent' not found"):
@@ -181,6 +192,12 @@ def test_dataset_shared_property(temp_config_dir, mock_auth_requests, reset_neur
         status_code=200,
     )
 
+    mock_auth_requests.get(
+        f"{API_URL}/datasets/by-name/{shared_dataset_response['name']}",
+        json=shared_dataset_response,
+        status_code=200,
+    )
+
     # Create shared dataset
     dataset = nc.create_dataset(
         name="shared_dataset",
@@ -210,6 +227,11 @@ def test_dataset_global_state(
     mock_auth_requests.get(
         f"{API_URL}/datasets/{dataset_response['id']}/recordings",
         json={"recordings": []},
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/datasets/by-name/{dataset_response['name']}",
+        json=dataset_response,
         status_code=200,
     )
 

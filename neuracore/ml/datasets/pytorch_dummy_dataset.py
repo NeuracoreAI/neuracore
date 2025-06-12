@@ -13,14 +13,14 @@ import torch
 
 from neuracore.core.nc_types import DataItemStats, DatasetDescription, DataType
 from neuracore.ml import BatchedTrainingSamples, MaskableData
-from neuracore.ml.utils.neuracore_dataset import NeuracoreDataset
+from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
 
 logger = logging.getLogger(__name__)
 
 TrainingSample = BatchedTrainingSamples
 
 
-class DummyDataset(NeuracoreDataset):
+class PytorchDummyDataset(PytorchNeuracoreDataset):
     """Synthetic dataset for algorithm validation and testing.
 
     This dataset generates random data with the same structure and dimensions
@@ -52,13 +52,13 @@ class DummyDataset(NeuracoreDataset):
                 Should return (input_ids, attention_mask) tuple.
         """
         super().__init__(
+            num_recordings=num_episodes,
             input_data_types=input_data_types,
             output_data_types=output_data_types,
             output_prediction_horizon=output_prediction_horizon,
             tokenize_text=tokenize_text,
         )
         self.num_samples = num_samples
-        self.num_episodes = num_episodes
 
         self.image_size = (224, 224)
 

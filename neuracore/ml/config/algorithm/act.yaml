@@ -1,0 +1,14 @@
+# @package _global_
+algorithm:
+  _target_: neuracore.ml.algorithms.act.act.ACT
+  hidden_dim: 512
+  num_encoder_layers: 4
+  num_decoder_layers: 7
+  nheads: 8
+  dim_feedforward: 3200
+  dropout: 0.1
+  lr: 1e-4
+  lr_backbone: 1e-5
+  weight_decay: 1e-4
+  kl_weight: 10.0
+  latent_dim: 512

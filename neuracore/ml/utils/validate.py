@@ -12,6 +12,7 @@ import logging
 import os
 import tempfile
 import time
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -29,13 +30,13 @@ from ...core.nc_types import (
     ModelInitDescription,
     SyncPoint,
 )
-from ..ml_types import BatchedTrainingOutputs, BatchedTrainingSamples, MaskableData
+from ..core.ml_types import BatchedTrainingOutputs, BatchedTrainingSamples, MaskableData
+from ..datasets.pytorch_dummy_dataset import PytorchDummyDataset
 from .algorithm_loader import AlgorithmLoader
-from .dummy_dataset import DummyDataset
 from .mar import create_mar
 
 
-class AlgorthmCheck(BaseModel):
+class AlgorithmCheck(BaseModel):
     """Validation results tracking the success of each algorithm check.
 
     This class tracks the status of various validation steps to provide
@@ -118,7 +119,7 @@ def run_validation(
     port: int = 8080,
     skip_endpoint_check: bool = False,
     algorithm_config: dict = {},
-) -> tuple[AlgorthmCheck, str]:
+) -> tuple[AlgorithmCheck, str]:
     """Run comprehensive validation tests on a Neuracore algorithm.
 
     Performs a series of validation checks to ensure the algorithm is
@@ -136,7 +137,7 @@ def run_validation(
 
     Returns:
         A tuple containing:
-        - AlgorthmCheck object with detailed results of each validation step
+        - AlgorithmCheck object with detailed results of each validation step
         - Error message string if validation failed, empty string if successful
 
     Raises:
@@ -162,7 +163,7 @@ def run_validation(
     setup_logging(output_dir)
     logger = logging.getLogger(__name__)
 
-    algo_check = AlgorthmCheck()
+    algo_check = AlgorithmCheck()
     error_msg = ""
     try:
         logger.info("Starting algorithm validation")
@@ -182,7 +183,7 @@ def run_validation(
             model_class.get_supported_output_data_types()
         )
 
-        dataset = DummyDataset(
+        dataset = PytorchDummyDataset(
             num_samples=5,
             input_data_types=supported_input_data_types,
             output_data_types=supported_output_data_types,
@@ -341,10 +342,8 @@ def run_validation(
         logger.info("All validation checks passed successfully")
 
     except Exception as e:
-        logger.error(f"Validation failed: {str(e)}")
-        try:
-            error_msg = str(e)
-        except Exception as inner_e:
-            logger.error(f"Failed to save error details: {str(inner_e)}")
+        error_msg = f"Validation failed: {str(e)}\n"
+        error_msg += traceback.format_exc()
+        logger.error(f"Validation failed: {str(error_msg)}")
 
     return algo_check, error_msg

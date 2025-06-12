@@ -59,17 +59,31 @@ def test_start_training_run(
     # Ensure login
     nc.login("test_api_key")
 
+    dataset_response = {
+        "id": "dataset_123",
+        "name": "test_dataset",
+        "size_bytes": 1024,
+        "tags": ["test"],
+        "is_shared": False,
+        "num_demonstrations": 10,
+    }
+
     # Mock datasets endpoint to return a dataset
     mock_auth_requests.get(
         f"{API_URL}/datasets",
-        json=[{
-            "id": "dataset_123",
-            "name": "test_dataset",
-            "size_bytes": 1024,
-            "tags": ["test"],
-            "is_shared": False,
-            "num_demonstrations": 10,
-        }],
+        json=[dataset_response],
+        status_code=200,
+    )
+
+    mock_auth_requests.get(
+        f"{API_URL}/datasets/by-name/{dataset_response['name']}",
+        json=dataset_response,
+        status_code=200,
+    )
+
+    mock_auth_requests.get(
+        f"{API_URL}/datasets/{dataset_response['id']}/recordings",
+        json={"recordings": []},
         status_code=200,
     )
 
