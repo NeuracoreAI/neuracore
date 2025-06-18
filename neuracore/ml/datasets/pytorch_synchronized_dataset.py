@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Callable, Optional, cast
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Single training sample is identical type, but with no batch dimension
 TrainingSample = BatchedTrainingSamples
 
-CHECK_MEMORY_INTERVAL = 10
+CHECK_MEMORY_INTERVAL = 100
 
 
 class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
@@ -70,6 +71,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         if cache_dir is None:
             cache_dir = os.path.join(tempfile.gettempdir(), "episodic_dataset_cache")
         self.cache_dir = Path(cache_dir)
+        shutil.rmtree(self.cache_dir)  # clear cache directory if it exists
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_manager = CacheManager(
             self.cache_dir,
         )
