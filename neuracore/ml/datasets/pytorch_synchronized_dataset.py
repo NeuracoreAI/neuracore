@@ -71,7 +71,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         if cache_dir is None:
             cache_dir = os.path.join(tempfile.gettempdir(), "episodic_dataset_cache")
         self.cache_dir = Path(cache_dir)
-        shutil.rmtree(self.cache_dir)  # clear cache directory if it exists
+        if self.cache_dir.exists():
+            shutil.rmtree(self.cache_dir)  # clear cache directory if it exists
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_manager = CacheManager(
             self.cache_dir,
