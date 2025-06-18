@@ -212,9 +212,6 @@ def run_training(
             dataset, [train_size, val_size], generator=generator
         )
 
-        num_train_workers = min((os.cpu_count() or 1) // 2, 4)
-        #  Use half the number of workers for validation
-        num_val_workers = min(num_train_workers // 2, 1)
         if world_size > 1:
             train_sampler = DistributedSampler(
                 train_dataset,
@@ -235,7 +232,7 @@ def run_training(
                 train_dataset,
                 batch_size=batch_size,
                 sampler=train_sampler,
-                num_workers=num_train_workers,
+                num_workers=cfg.num_train_workers,
                 pin_memory=True,
                 persistent_workers=True,
                 collate_fn=dataset.collate_fn,
@@ -245,7 +242,7 @@ def run_training(
                 val_dataset,
                 batch_size=batch_size,
                 sampler=val_sampler,
-                num_workers=num_val_workers,
+                num_workers=cfg.num_val_workers,
                 pin_memory=True,
                 persistent_workers=True,
                 collate_fn=dataset.collate_fn,
@@ -256,7 +253,7 @@ def run_training(
                 train_dataset,
                 batch_size=batch_size,
                 shuffle=True,
-                num_workers=num_train_workers,
+                num_workers=cfg.num_train_workers,
                 pin_memory=True,
                 persistent_workers=True,
                 collate_fn=dataset.collate_fn,
@@ -266,7 +263,7 @@ def run_training(
                 val_dataset,
                 batch_size=batch_size,
                 shuffle=False,
-                num_workers=num_val_workers,
+                num_workers=cfg.num_val_workers,
                 pin_memory=True,
                 persistent_workers=True,
                 collate_fn=dataset.collate_fn,
