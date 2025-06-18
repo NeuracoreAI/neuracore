@@ -59,7 +59,7 @@ class TrainingStorageHandler:
             "content_type": content_type,
         }
         response = requests.get(
-            f"{API_URL}/recording/{self.training_job_id}/upload-url",
+            f"{API_URL}/training/jobs/{self.training_job_id}/upload-url",
             params=params,
             headers=auth.get_headers(),
         )
@@ -160,7 +160,7 @@ class TrainingStorageHandler:
         if self.log_to_cloud:
             for file_path in artifacts_dir.glob("*"):
                 upload_url = self._get_upload_url(
-                    filepath=str(file_path.relative_to(self.local_dir)),
+                    filepath=str(file_path.name),
                     content_type="application/octet-stream",
                 )
                 with open(file_path, "rb") as f:

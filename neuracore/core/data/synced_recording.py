@@ -176,8 +176,6 @@ class SynchronizedRecording:
                         logger.error(f"Failed to download {cam_type}/{camera_id}: {e}")
                         raise
 
-            logger.info(f"All {cam_type} videos downloaded successfully")
-
     def _get_video_frames(
         self,
         camera_type: str,

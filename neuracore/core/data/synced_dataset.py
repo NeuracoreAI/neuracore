@@ -37,6 +37,7 @@ class SynchronizedDataset:
         self.data_types = data_types or []
         self.dataset_description = dataset_description
         self._recording_idx = 0
+        self._synced_recording_cache: dict[int, SynchronizedRecording] = {}
 
     @property
     def num_transitions(self) -> int:
@@ -94,12 +95,15 @@ class SynchronizedDataset:
                     idx += len(self.dataset.recordings)
                 if not 0 <= idx < len(self.dataset.recordings):
                     raise IndexError("Dataset index out of range")
-                return SynchronizedRecording(
-                    recording_id=self.dataset.recordings[idx]["id"],
-                    dataset=self.dataset,
-                    frequency=self.frequency,
-                    data_types=self.data_types,
-                )
+                if idx not in self._synced_recording_cache:
+                    synced_recording = SynchronizedRecording(
+                        recording_id=self.dataset.recordings[idx]["id"],
+                        dataset=self.dataset,
+                        frequency=self.frequency,
+                        data_types=self.data_types,
+                    )
+                    self._synced_recording_cache[idx] = synced_recording
+                return self._synced_recording_cache[idx]
             raise TypeError(
                 f"Dataset indices must be integers or slices, not {type(idx)}"
             )
@@ -115,6 +119,9 @@ class SynchronizedDataset:
         """
         if self._recording_idx >= len(self.dataset.recordings):
             raise StopIteration
+
+        if self._recording_idx in self._synced_recording_cache:
+            return self._synced_recording_cache[self._recording_idx]
 
         recording = self.dataset.recordings[self._recording_idx]
         self._recording_idx += 1  # Increment counter

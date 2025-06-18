@@ -1,7 +1,6 @@
 """Monitor CPU RAM and GPU VRAM usage to prevent out of memory errors."""
 
 import logging
-import os
 
 import psutil
 import torch
@@ -42,7 +41,6 @@ class MemoryMonitor:
         self.max_ram_utilization = max_ram_utilization
         self.max_gpu_utilization = max_gpu_utilization
         self.gpu_id = gpu_id
-        self.process = psutil.Process(os.getpid())
 
     def check_memory(self, log: bool = False) -> None:
         """Raise OutOfMemoryError if memory is close to system limits.
