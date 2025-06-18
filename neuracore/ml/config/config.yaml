@@ -12,6 +12,9 @@ validation_split: 0.2
 # Batch size (can be "auto" for automatic tuning or an integer)
 batch_size: "auto"
 
+num_train_workers: 2
+num_val_workers: 1
+
 # Dataset synchronization
 dataset_name: null
 dataset_id: null

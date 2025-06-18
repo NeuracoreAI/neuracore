@@ -1,6 +1,7 @@
 """Synchronized recording iterator."""
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional, Union, cast
@@ -159,22 +160,30 @@ class SynchronizedRecording:
             if not camera_ids:
                 continue
 
-            # Download videos in parallel
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                future_to_task = {
-                    executor.submit(
-                        self._download_video, cam_type, camera_id, video_cache_path
-                    ): camera_id
-                    for camera_id in camera_ids
-                }
+            num_parallel_downloads = int(
+                os.environ.get("NEURACORE_NUM_PARALLEL_VIDEO_DOWNLOADS", "4")
+            )
+            if num_parallel_downloads <= 1:
+                for camera_id in camera_ids:
+                    self._download_video(cam_type, camera_id, video_cache_path)
+            else:
+                with ThreadPoolExecutor(max_workers=num_parallel_downloads) as executor:
+                    future_to_task = {
+                        executor.submit(
+                            self._download_video, cam_type, camera_id, video_cache_path
+                        ): camera_id
+                        for camera_id in camera_ids
+                    }
 
-                for future in as_completed(future_to_task):
-                    camera_id = future_to_task[future]
-                    try:
-                        future.result()
-                    except Exception as e:
-                        logger.error(f"Failed to download {cam_type}/{camera_id}: {e}")
-                        raise
+                    for future in as_completed(future_to_task):
+                        camera_id = future_to_task[future]
+                        try:
+                            future.result()
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to download {cam_type}/{camera_id}: {e}"
+                            )
+                            raise
 
     def _get_video_frames(
         self,

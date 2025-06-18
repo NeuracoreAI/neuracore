@@ -100,6 +100,9 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             # Ensure we only log in once per dataset instance
             nc.login()
             self._logged_in = True
+            # Dataloaders already run in parallel, so set to 0
+            os.environ["NEURACORE_NUM_PARALLEL_VIDEO_DOWNLOADS"] = "0"
+
         if self._mem_check_counter % CHECK_MEMORY_INTERVAL == 0:
             self._memory_monitor.check_memory()
             self._mem_check_counter = 0
