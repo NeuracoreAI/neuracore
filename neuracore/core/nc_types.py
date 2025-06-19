@@ -303,3 +303,87 @@ class ModelPrediction(BaseModel):
 
     outputs: dict[DataType, Any] = Field(default_factory=dict)
     prediction_time: Optional[float] = None
+
+
+class SyncedDataset(BaseModel):
+    """Represents a dataset of robot demonstrations.
+
+    A Synchronized dataset groups related robot demonstrations together
+    and maintains metadata about the collection as a whole.
+
+    Attributes:
+        id: Unique identifier for the synced dataset.
+        parent_id: Unique identifier of the corresponding dataset.
+        freq: Frequency at which dataset was proccessed.
+        name: Human-readable name for the dataset.
+        created_at: Unix timestamp of dataset creation.
+        modified_at: Unix timestamp of last modification.
+        description: Optional description of the dataset.
+        recording_ids: List of recording IDs in this dataset
+        num_demonstrations: Total number of demonstrations.
+        total_duration_seconds: Total duration of all demonstrations.
+        is_shared: Whether the dataset is shared with other users.
+        metadata: Additional arbitrary metadata.
+    """
+
+    id: str
+    parent_id: str
+    freq: int
+    name: str
+    created_at: float
+    modified_at: float
+    description: str | None = None
+    recording_ids: list[str] = Field(default_factory=list)
+    num_demonstrations: int = 0
+    num_processed_demonstrations: int = 0
+    total_duration_seconds: float = 0.0
+    is_shared: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    dataset_description: DatasetDescription = Field(
+        default_factory=DatasetDescription()
+    )
+    all_data_types: dict[DataType, int] = Field(default_factory=dict)
+    common_data_types: dict[DataType, int] = Field(default_factory=dict)
+
+
+class Dataset(BaseModel):
+    """Represents a dataset of robot demonstrations.
+
+    A dataset groups related robot demonstrations together and maintains metadata
+    about the collection as a whole.
+
+    Attributes:
+        id: Unique identifier for the dataset.
+        name: Human-readable name for the dataset.
+        created_at: Unix timestamp of dataset creation.
+        modified_at: Unix timestamp of last modification.
+        description: Optional description of the dataset.
+        tags: List of tags for categorizing the dataset.
+        recording_ids: List of recording IDs in this dataset
+        demonstration_ids: List of demonstration IDs in this dataset.
+        num_demonstrations: Total number of demonstrations.
+        total_duration_seconds: Total duration of all demonstrations.
+        size_bytes: Total size of all demonstrations.
+        is_shared: Whether the dataset is shared with other users.
+        metadata: Additional arbitrary metadata.
+        synced_dataset_ids: List of synced dataset IDs in this dataset.
+                            They point to synced datasets that synchronized
+                            this dataset at a particular frequency.
+    """
+
+    id: str
+    name: str
+    created_at: float
+    modified_at: float
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    recording_ids: list[str] = Field(default_factory=list)
+    num_demonstrations: int = 0
+    total_duration_seconds: float = 0.0
+    size_bytes: int = 0
+    is_shared: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    synced_dataset_ids: dict[str, Any] = Field(default_factory=dict)
+    all_data_types: dict[DataType, int] = Field(default_factory=dict)
+    common_data_types: dict[DataType, int] = Field(default_factory=dict)
+    recording_ids_in_bucket: bool = False

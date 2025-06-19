@@ -23,7 +23,7 @@ from neuracore.ml import (
 from neuracore.ml.algorithms.simple_world_model.simple_world_model import (
     SimpleWorldModel,
 )
-from neuracore.ml.ml_types import BatchedData
+from neuracore.ml.core.ml_types import BatchedData
 from neuracore.ml.utils.validate import run_validation
 
 BS = 2

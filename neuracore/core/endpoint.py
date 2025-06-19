@@ -503,6 +503,10 @@ def _setup_torchserve(path_to_model: str, port: int = 8080) -> subprocess.Popen:
     with config_path.open("w") as f:
         for key, value in config.items():
             f.write(f"{key}={value}\n")
+
+    # Ensure torchserve is not already running
+    subprocess.run(["torchserve", "--stop"], capture_output=True)
+
     # Start TorchServe
     cmd = [
         "torchserve",

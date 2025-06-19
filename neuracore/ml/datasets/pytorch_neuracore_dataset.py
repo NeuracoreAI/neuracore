@@ -16,14 +16,14 @@ from torch.utils.data import Dataset
 
 from neuracore.core.nc_types import DataType
 from neuracore.ml import BatchedTrainingSamples, MaskableData
-from neuracore.ml.ml_types import BatchedData
+from neuracore.ml.core.ml_types import BatchedData
 
 logger = logging.getLogger(__name__)
 
 TrainingSample = BatchedTrainingSamples
 
 
-class NeuracoreDataset(Dataset, ABC):
+class PytorchNeuracoreDataset(Dataset, ABC):
     """Abstract base class for Neuracore multi-modal robot datasets.
 
     This class provides a standardized interface for datasets containing robot
@@ -34,6 +34,7 @@ class NeuracoreDataset(Dataset, ABC):
 
     def __init__(
         self,
+        num_recordings: int,
         input_data_types: list[DataType],
         output_data_types: list[DataType],
         output_prediction_horizon: int = 5,
@@ -57,6 +58,7 @@ class NeuracoreDataset(Dataset, ABC):
         Raises:
             ValueError: If language data is requested but no tokenizer is provided.
         """
+        self.num_recordings = num_recordings
         self.input_data_types = input_data_types
         self.output_data_types = output_data_types
         self.output_prediction_horizon = output_prediction_horizon
@@ -71,12 +73,6 @@ class NeuracoreDataset(Dataset, ABC):
 
         # Create tokenizer if language data is used
         self.tokenize_text = tokenize_text
-        if DataType.LANGUAGE in self.data_types and tokenize_text is None:
-            raise ValueError(
-                "Tokenizer not provided but language data requested. "
-                "Please provide a tokenizer function."
-            )
-
         self._error_count = 0
         self._max_error_count = 1
 
@@ -126,7 +122,7 @@ class NeuracoreDataset(Dataset, ABC):
         """
         while self._error_count < self._max_error_count:
             try:
-                episode_idx = idx % self.num_episodes
+                episode_idx = idx % self.num_recordings
                 return self.load_sample(episode_idx)
             except Exception as e:
                 self._error_count += 1

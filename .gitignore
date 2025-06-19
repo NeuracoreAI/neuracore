@@ -112,3 +112,6 @@ MUJOCO_LOG.TXT
 
 logs/
 examples/logs/
+*.log
+*.log.gz
+neuracore_training_output/
