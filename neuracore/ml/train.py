@@ -173,6 +173,7 @@ def run_training(
     """Run the training process for a single GPU."""
     # Setup for distributed training
     if world_size > 1:
+        nc.login()  # Ensure Neuracore is logged in on this process
         setup_distributed(rank, world_size)
 
     # Setup logging (different file per process)
@@ -234,7 +235,7 @@ def run_training(
                 sampler=train_sampler,
                 num_workers=cfg.num_train_workers,
                 pin_memory=True,
-                persistent_workers=True,
+                persistent_workers=cfg.num_train_workers > 0,
                 collate_fn=dataset.collate_fn,
             )
 
@@ -244,7 +245,7 @@ def run_training(
                 sampler=val_sampler,
                 num_workers=cfg.num_val_workers,
                 pin_memory=True,
-                persistent_workers=True,
+                persistent_workers=cfg.num_val_workers > 0,
                 collate_fn=dataset.collate_fn,
             )
         else:
@@ -255,7 +256,7 @@ def run_training(
                 shuffle=True,
                 num_workers=cfg.num_train_workers,
                 pin_memory=True,
-                persistent_workers=True,
+                persistent_workers=cfg.num_train_workers > 0,
                 collate_fn=dataset.collate_fn,
             )
 
@@ -265,7 +266,7 @@ def run_training(
                 shuffle=False,
                 num_workers=cfg.num_val_workers,
                 pin_memory=True,
-                persistent_workers=True,
+                persistent_workers=cfg.num_val_workers > 0,
                 collate_fn=dataset.collate_fn,
             )
 
