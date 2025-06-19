@@ -7,7 +7,12 @@ from neuracore.core.exceptions import RobotError
 
 
 def test_log_joints_and_cams(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, monkeypatch
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mock_urdf,
+    monkeypatch,
+    mocked_org_id,
 ):
     """Test logging actions and sensor data."""
     # Ensure login and robot connection
@@ -15,7 +20,7 @@ def test_log_joints_and_cams(
 
     # Mock robot creation
     mock_auth_requests.post(
-        f"{API_URL}/robots",
+        f"{API_URL}/org/{mocked_org_id}/robots",
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
@@ -40,13 +45,13 @@ def test_log_joints_and_cams(
 
 
 def test_log_with_extrinsics_intrinsics(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
 ):
     """Test logging with extrinsics and intrinsics matrices."""
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(
-        f"{API_URL}/robots",
+        f"{API_URL}/org/{mocked_org_id}/robots",
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
@@ -66,13 +71,13 @@ def test_log_with_extrinsics_intrinsics(
 
 
 def test_log_gripper_data(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
 ):
     """Test logging gripper data."""
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(
-        f"{API_URL}/robots",
+        f"{API_URL}/org/{mocked_org_id}/robots",
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
@@ -83,13 +88,13 @@ def test_log_gripper_data(
 
 
 def test_log_joint_velocities_and_torques(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
 ):
     """Test logging joint velocities and torques."""
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(
-        f"{API_URL}/robots",
+        f"{API_URL}/org/{mocked_org_id}/robots",
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
@@ -102,12 +107,14 @@ def test_log_joint_velocities_and_torques(
     nc.log_joint_torques({"joint1": 1.5, "joint2": 2.3})
 
 
-def test_log_language(temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf):
+def test_log_language(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
     """Test logging language annotations."""
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(
-        f"{API_URL}/robots",
+        f"{API_URL}/org/{mocked_org_id}/robots",
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
@@ -118,13 +125,13 @@ def test_log_language(temp_config_dir, mock_auth_requests, reset_neuracore, mock
 
 
 def test_log_custom_data(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
 ):
     """Test logging custom data."""
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(
-        f"{API_URL}/robots",
+        f"{API_URL}/org/{mocked_org_id}/robots",
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
@@ -141,13 +148,13 @@ def test_log_custom_data(
 
 
 def test_log_point_cloud(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
 ):
     """Test logging point cloud data."""
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(
-        f"{API_URL}/robots",
+        f"{API_URL}/org/{mocked_org_id}/robots",
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
@@ -164,13 +171,13 @@ def test_log_point_cloud(
 
 
 def test_log_synced_data(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
 ):
     """Test logging synchronized data from multiple sensors."""
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(
-        f"{API_URL}/robots",
+        f"{API_URL}/org/{mocked_org_id}/robots",
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
@@ -216,13 +223,13 @@ def test_log_with_no_robot(temp_config_dir, mock_auth_requests, reset_neuracore)
 
 
 def test_log_invalid_data_format(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
 ):
     """Test validation of input data formats."""
     # Ensure login and robot connection
     nc.login("test_api_key")
     mock_auth_requests.post(
-        f"{API_URL}/robots",
+        f"{API_URL}/org/{mocked_org_id}/robots",
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )

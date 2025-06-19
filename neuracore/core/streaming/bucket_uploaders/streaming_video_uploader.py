@@ -19,6 +19,7 @@ import numpy as np
 import requests
 
 from neuracore.core.auth import get_auth
+from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.nc_types import CameraData
 
@@ -315,8 +316,9 @@ class StreamingVideoUploader(BucketUploader):
             "filepath": f"{self.path}/metadata.json",
             "content_type": "application/json",
         }
+        org_id = get_current_org()
         upload_url_response = requests.get(
-            f"{API_URL}/recording/{self.uploader.recording_id}/resumable_upload_url",
+            f"{API_URL}/org/{org_id}/recording/{self.uploader.recording_id}/resumable_upload_url",
             params=params,
             headers=get_auth().get_headers(),
         )

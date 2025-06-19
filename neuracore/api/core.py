@@ -10,6 +10,8 @@ import logging
 import time
 from typing import Optional
 
+from neuracore.core.cli.select_current_org import list_my_orgs
+from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.streaming.client_stream.client_stream_manager import (
     get_robot_streaming_manager,
 )
@@ -81,6 +83,8 @@ def login(api_key: Optional[str] = None) -> None:
     Raises:
         AuthenticationError: If authentication fails due to invalid credentials
             or network issues.
+        InputError: If there is an issue with the user's input.
+
     """
     get_auth().login(api_key)
 
@@ -95,6 +99,30 @@ def logout() -> None:
     GlobalSingleton()._active_robot = None
     GlobalSingleton()._active_dataset_id = None
     GlobalSingleton()._has_validated_version = False
+
+
+def set_organization(id_or_name: str) -> None:
+    """Set the current organization based upon it's name or or id.
+
+    Args:
+        id_or_name: the uuid of the organization or its exact name
+
+    Raises:
+        AuthenticationError: If the user is not logged in
+        OrganizationError: If there is an issue contacting the backend
+        ValueError: If the id or name does not exist
+    """
+    orgs = list_my_orgs()
+
+    org = next(
+        (org for org in orgs if org.id == id_or_name or org.name == id_or_name), None
+    )
+    if not org:
+        raise ValueError(f"No org found with id or name '{id_or_name}'")
+
+    config_manager = get_config_manager()
+    config_manager.config.current_org_id = org.id
+    config_manager.save_config()
 
 
 def connect_robot(

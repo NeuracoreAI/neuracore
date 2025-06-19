@@ -6,12 +6,14 @@ from neuracore.core.const import API_URL
 from neuracore.core.nc_types import DataType, ModelPrediction
 
 
-def test_connect_endpoint(temp_config_dir, mock_auth_requests, reset_neuracore):
+def test_connect_endpoint(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
     """Test connecting to an endpoint."""
     # Ensure login
     nc.login("test_api_key")
     mock_auth_requests.post(
-        f"{API_URL}/robots",
+        f"{API_URL}/org/{mocked_org_id}/robots",
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
@@ -19,14 +21,14 @@ def test_connect_endpoint(temp_config_dir, mock_auth_requests, reset_neuracore):
 
     # Mock endpoint list
     mock_auth_requests.get(
-        f"{API_URL}/models/endpoints",
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints",
         json=[{"id": "test_endpoint_id", "name": "test_endpoint", "status": "active"}],
         status_code=200,
     )
 
     # Mock endpoint prediction
     mock_auth_requests.post(
-        f"{API_URL}/models/endpoints/test_endpoint_id/predict",
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints/test_endpoint_id/predict",
         json={
             "predictions": ModelPrediction(
                 outputs={DataType.JOINT_TARGET_POSITIONS: [[0.1, 0.2, 0.3]]}
@@ -48,7 +50,7 @@ def test_connect_endpoint(temp_config_dir, mock_auth_requests, reset_neuracore):
 
 
 def test_connect_nonexistent_endpoint(
-    temp_config_dir, mock_auth_requests, reset_neuracore
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Test connecting to a non-existent endpoint."""
     # Ensure login
@@ -56,7 +58,7 @@ def test_connect_nonexistent_endpoint(
 
     # Mock empty endpoint list
     mock_auth_requests.get(
-        f"{API_URL}/models/endpoints",
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints",
         json=[],
         status_code=200,
     )
@@ -67,7 +69,7 @@ def test_connect_nonexistent_endpoint(
 
 
 def test_connect_inactive_endpoint(
-    temp_config_dir, mock_auth_requests, reset_neuracore
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Test connecting to an inactive endpoint."""
     # Ensure login
@@ -75,7 +77,7 @@ def test_connect_inactive_endpoint(
 
     # Mock endpoint list with inactive endpoint
     mock_auth_requests.get(
-        f"{API_URL}/models/endpoints",
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints",
         json=[
             {"id": "test_endpoint_id", "name": "test_endpoint", "status": "deploying"}
         ],
@@ -88,7 +90,12 @@ def test_connect_inactive_endpoint(
 
 
 def test_connect_local_endpoint(
-    temp_config_dir, mock_model_mar, reset_neuracore, monkeypatch, mock_auth_requests
+    temp_config_dir,
+    mock_model_mar,
+    reset_neuracore,
+    monkeypatch,
+    mock_auth_requests,
+    mocked_org_id,
 ):
     """Test connecting to a local endpoint."""
 
@@ -127,7 +134,7 @@ def test_connect_local_endpoint(
 
     nc.login("test_api_key")
     mock_auth_requests.post(
-        f"{API_URL}/robots",
+        f"{API_URL}/org/{mocked_org_id}/robots",
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
@@ -143,14 +150,16 @@ def test_connect_local_endpoint(
     assert isinstance(pred, ModelPrediction)
 
 
-def test_deploy_model(temp_config_dir, mock_auth_requests, reset_neuracore):
+def test_deploy_model(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
     """Test model deployment."""
     # Ensure login
     nc.login("test_api_key")
 
     # Mock deployment endpoint
     mock_auth_requests.post(
-        f"{API_URL}/models/deploy",
+        f"{API_URL}/org/{mocked_org_id}/models/deploy",
         json={"id": "endpoint_123", "name": "test_endpoint", "status": "deploying"},
         status_code=200,
     )
@@ -165,14 +174,16 @@ def test_deploy_model(temp_config_dir, mock_auth_requests, reset_neuracore):
     assert result["status"] == "deploying"
 
 
-def test_get_endpoint_status(temp_config_dir, mock_auth_requests, reset_neuracore):
+def test_get_endpoint_status(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
     """Test getting endpoint status."""
     # Ensure login
     nc.login("test_api_key")
 
     # Mock endpoint status
     mock_auth_requests.get(
-        f"{API_URL}/models/endpoints/endpoint_123",
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints/endpoint_123",
         json={"id": "endpoint_123", "name": "test_endpoint", "status": "active"},
         status_code=200,
     )
@@ -184,14 +195,16 @@ def test_get_endpoint_status(temp_config_dir, mock_auth_requests, reset_neuracor
     assert status == "active"
 
 
-def test_delete_endpoint(temp_config_dir, mock_auth_requests, reset_neuracore):
+def test_delete_endpoint(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
     """Test deleting an endpoint."""
     # Ensure login
     nc.login("test_api_key")
 
     # Mock delete endpoint
     mock_auth_requests.delete(
-        f"{API_URL}/models/endpoints/endpoint_123",
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints/endpoint_123",
         status_code=200,
     )
 
@@ -203,18 +216,20 @@ def test_delete_endpoint(temp_config_dir, mock_auth_requests, reset_neuracore):
     assert mock_auth_requests.request_history[-1].method == "DELETE"
     assert (
         mock_auth_requests.request_history[-1].url
-        == f"{API_URL}/models/endpoints/endpoint_123"
+        == f"{API_URL}/org/{mocked_org_id}/models/endpoints/endpoint_123"
     )
 
 
-def test_deploy_model_failure(temp_config_dir, mock_auth_requests, reset_neuracore):
+def test_deploy_model_failure(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
     """Test handling of deployment failures."""
     # Ensure login
     nc.login("test_api_key")
 
     # Mock deployment endpoint to return an error
     mock_auth_requests.post(
-        f"{API_URL}/models/deploy",
+        f"{API_URL}/org/{mocked_org_id}/models/deploy",
         status_code=500,
         text="Internal Server Error",
     )
@@ -225,13 +240,13 @@ def test_deploy_model_failure(temp_config_dir, mock_auth_requests, reset_neuraco
 
 
 def test_connect_local_endpoint_with_train_run(
-    temp_config_dir, mock_auth_requests, reset_neuracore, monkeypatch
+    temp_config_dir, mock_auth_requests, reset_neuracore, monkeypatch, mocked_org_id
 ):
     """Test connecting to a local endpoint using a training run name."""
     # Ensure login
     nc.login("test_api_key")
     mock_auth_requests.post(
-        f"{API_URL}/robots",
+        f"{API_URL}/org/{mocked_org_id}/robots",
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
@@ -239,7 +254,7 @@ def test_connect_local_endpoint_with_train_run(
 
     # Mock training jobs endpoint
     mock_auth_requests.get(
-        f"{API_URL}/training/jobs",
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
         json=[{
             "id": "job_123",
             "name": "test_run",
@@ -250,7 +265,7 @@ def test_connect_local_endpoint_with_train_run(
 
     # Mock model download
     mock_auth_requests.get(
-        f"{API_URL}/training/jobs/job_123/model_url",
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/job_123/model_url",
         json={
             "url": "http://localhost:8080/model.mar",
         },

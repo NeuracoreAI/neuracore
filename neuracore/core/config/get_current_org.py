@@ -1,0 +1,32 @@
+"""This module provides a method to get the currently select organization id."""
+
+from neuracore.core.cli.input_lock import user_input_lock
+from neuracore.core.cli.select_current_org import select_current_org
+from neuracore.core.config.config_manager import get_config
+from neuracore.core.exceptions import (
+    AuthenticationError,
+    ConfigError,
+    InputError,
+    OrganizationError,
+)
+
+
+def get_current_org() -> str:
+    """Get the current organization from storage or interactively select it.
+
+    If the organization is selected interactively it is persisted to the config.
+
+    Returns:
+        The selected organization's id
+
+    Raises:
+        ConfigError: If there is an error trying to get the config
+    """
+    with user_input_lock:
+        org_id = get_config().current_org_id
+        if org_id:
+            return org_id
+        try:
+            return select_current_org().id
+        except (AuthenticationError, OrganizationError, InputError) as e:
+            raise ConfigError(f"Failed to select organization: {e}")
