@@ -9,6 +9,7 @@ from typing import Optional, Union
 import requests
 from tqdm import tqdm
 
+from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 
@@ -29,6 +30,7 @@ class Dataset:
     def __init__(
         self,
         id: str,
+        org_id: str,
         name: str,
         size_bytes: int,
         tags: list[str],
@@ -39,6 +41,7 @@ class Dataset:
 
         Args:
             id: Unique identifier for the dataset.
+            org_id: The id of the organization this dataset belongs to.
             name: Name of the dataset.
             size_bytes: Size of the dataset in bytes.
             tags: List of tags associated with the dataset.
@@ -47,6 +50,7 @@ class Dataset:
                 If not provided, recordings will be fetched from the server.
         """
         self.id = id
+        self.org_id = org_id
         self.name = name
         self.size_bytes = size_bytes
         self.tags = tags
@@ -67,7 +71,8 @@ class Dataset:
         """
         auth = get_auth()
         response = requests.get(
-            f"{API_URL}/datasets/{self.id}/recordings", headers=auth.get_headers()
+            f"{API_URL}/org/{self.org_id}/datasets/{self.id}/recordings",
+            headers=auth.get_headers(),
         )
         response.raise_for_status()
         data = response.json()
@@ -90,8 +95,9 @@ class Dataset:
             DatasetError: If the dataset is not found and non_exist_ok is False.
         """
         auth: Auth = get_auth()
+        org_id = get_current_org()
         req = requests.get(
-            f"{API_URL}/datasets/{id}",
+            f"{API_URL}/org/{org_id}/datasets/{id}",
             headers=auth.get_headers(),
         )
         if req.status_code != 200:
@@ -101,6 +107,7 @@ class Dataset:
         dataset_json = req.json()
         return Dataset(
             id=dataset_json["id"],
+            org_id=org_id,
             name=dataset_json["name"],
             size_bytes=dataset_json["size_bytes"],
             tags=dataset_json["tags"],
@@ -124,8 +131,9 @@ class Dataset:
             DatasetError: If the dataset is not found and non_exist_ok is False.
         """
         auth: Auth = get_auth()
+        org_id = get_current_org()
         req = requests.get(
-            f"{API_URL}/datasets/by-name/{name}",
+            f"{API_URL}/org/{org_id}/datasets/by-name/{name}",
             headers=auth.get_headers(),
         )
         if req.status_code != 200:
@@ -135,6 +143,7 @@ class Dataset:
         dataset_json = req.json()
         return Dataset(
             id=dataset_json["id"],
+            org_id=org_id,
             name=dataset_json["name"],
             size_bytes=dataset_json["size_bytes"],
             tags=dataset_json["tags"],
@@ -197,8 +206,9 @@ class Dataset:
             requests.HTTPError: If the API request fails.
         """
         auth: Auth = get_auth()
+        org_id = get_current_org()
         response = requests.post(
-            f"{API_URL}/datasets",
+            f"{API_URL}/org/{org_id}/datasets",
             headers=auth.get_headers(),
             json={
                 "name": name,
@@ -211,6 +221,7 @@ class Dataset:
         dataset_json = response.json()
         return Dataset(
             id=dataset_json["id"],
+            org_id=org_id,
             name=dataset_json["name"],
             size_bytes=dataset_json["size_bytes"],
             tags=dataset_json["tags"],
@@ -236,7 +247,7 @@ class Dataset:
             DatasetError: If frequency is not greater than 0.
         """
         response = requests.post(
-            f"{API_URL}/synchronize/synchronize-dataset",
+            f"{API_URL}/org/{self.org_id}/synchronize/synchronize-dataset",
             headers=get_auth().get_headers(),
             json={
                 "dataset_id": self.id,
@@ -327,6 +338,7 @@ class Dataset:
             recordings = self.recordings[idx.start : idx.stop : idx.step]
             ds = Dataset(
                 id=self.id,
+                org_id=self.org_id,
                 name=self.name,
                 size_bytes=self.size_bytes,
                 tags=self.tags,

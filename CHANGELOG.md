@@ -10,11 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- None
+- `nc.set_organization(id_or_name)` method to simplify changing organizations
+- `nc-select-org` to interactively change organization
+- `nc.list_my_orgs()` method to find the details of your organizations
 
 ### Changed
 
-- None
+- The current organization is now stored locally at `~/.neuracore/config.json` rather than being set globally
 
 ### Removed
 
@@ -22,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- None
+- Error message when the wong credentials are provided to `nc-login` 
 
 
 ## [1.6.0]

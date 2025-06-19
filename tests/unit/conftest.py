@@ -6,7 +6,7 @@ import pytest
 import requests_mock
 
 import neuracore
-from neuracore.core import auth
+from neuracore.core.config import config_manager
 from neuracore.core.const import API_URL
 
 
@@ -16,8 +16,16 @@ def temp_config_dir(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         # Mock home directory for testing
         monkeypatch.setattr("pathlib.Path.home", lambda: pathlib.Path(tmpdir))
-        auth.CONFIG_DIR = pathlib.Path(tmpdir) / ".neuracore"
+        config_manager.CONFIG_DIR = pathlib.Path(tmpdir) / ".neuracore"
         yield tmpdir
+
+
+MOCKED_ORG_ID = "test-org-id"
+
+
+@pytest.fixture
+def mocked_org_id():
+    return MOCKED_ORG_ID
 
 
 @pytest.fixture
@@ -42,23 +50,33 @@ def mock_auth_requests():
             f"{API_URL}/auth/verify-version",
             status_code=200,
         )
-
         # Mock robots endpoint
-        m.get(f"{API_URL}/robots", json=[], status_code=200)
+        m.get(f"{API_URL}/org/{MOCKED_ORG_ID}/robots", json=[], status_code=200)
 
         # Mock robots upload endpoint
         m.put(
-            re.compile(f"{API_URL}/robots/.*/package"),
+            re.compile(f"{API_URL}/org/{MOCKED_ORG_ID}/robots/.*/package"),
             json={"status": "success"},
             status_code=200,
         )
 
         # Mock dataset endpoint
-        m.get(f"{API_URL}/datasets", json=[], status_code=200)
-        m.get(f"{API_URL}/datasets/shared", json=[], status_code=200)
+        m.get(f"{API_URL}/org/{MOCKED_ORG_ID}/datasets", json=[], status_code=200)
+        m.get(
+            f"{API_URL}/org/{MOCKED_ORG_ID}/datasets/shared", json=[], status_code=200
+        )
 
         # Mock models/endpoints endpoint
-        m.get(f"{API_URL}/models/endpoints", json=[], status_code=200)
+        m.get(
+            f"{API_URL}/org/{MOCKED_ORG_ID}/models/endpoints", json=[], status_code=200
+        )
+
+        # Mock List Organizations
+
+        m.get(
+            f"{API_URL}/org-management/my-orgs",
+            json=[{"org": {"id": MOCKED_ORG_ID, "name": "test organization"}}],
+        )
 
         yield m
 

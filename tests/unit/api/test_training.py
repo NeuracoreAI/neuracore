@@ -54,6 +54,7 @@ def test_start_training_run(
     reset_neuracore,
     training_job_response,
     algorithm_list_response,
+    mocked_org_id,
 ):
     """Test starting a training run."""
     # Ensure login
@@ -70,47 +71,47 @@ def test_start_training_run(
 
     # Mock datasets endpoint to return a dataset
     mock_auth_requests.get(
-        f"{API_URL}/datasets",
+        f"{API_URL}/org/{mocked_org_id}/datasets",
         json=[dataset_response],
         status_code=200,
     )
 
     mock_auth_requests.get(
-        f"{API_URL}/datasets/by-name/{dataset_response['name']}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{dataset_response['name']}",
         json=dataset_response,
         status_code=200,
     )
 
     mock_auth_requests.get(
-        f"{API_URL}/datasets/{dataset_response['id']}/recordings",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response['id']}/recordings",
         json={"recordings": []},
         status_code=200,
     )
 
     # Mock shared datasets endpoint
     mock_auth_requests.get(
-        f"{API_URL}/datasets/shared",
+        f"{API_URL}/org/{mocked_org_id}/datasets/shared",
         json=[],
         status_code=200,
     )
 
     # Mock algorithms endpoint
     mock_auth_requests.get(
-        f"{API_URL}/algorithms",
+        f"{API_URL}/org/{mocked_org_id}/algorithms",
         json=algorithm_list_response,
         status_code=200,
     )
 
     # Mock shared algorithms endpoint
     mock_auth_requests.get(
-        f"{API_URL}/algorithms?shared=true",
+        f"{API_URL}/org/{mocked_org_id}/algorithms?shared=true",
         json=[],
         status_code=200,
     )
 
     # Mock training job creation endpoint
     mock_auth_requests.post(
-        f"{API_URL}/training/jobs",
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
         json=training_job_response,
         status_code=200,
     )
@@ -142,7 +143,11 @@ def test_start_training_run(
 
 
 def test_get_training_job_data(
-    temp_config_dir, mock_auth_requests, reset_neuracore, training_job_response
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    training_job_response,
+    mocked_org_id,
 ):
     """Test getting training job data."""
     # Ensure login
@@ -150,7 +155,7 @@ def test_get_training_job_data(
 
     # Mock training jobs endpoint
     mock_auth_requests.get(
-        f"{API_URL}/training/jobs",
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
         json=[training_job_response],
         status_code=200,
     )
@@ -166,7 +171,11 @@ def test_get_training_job_data(
 
 
 def test_get_training_job_status(
-    temp_config_dir, mock_auth_requests, reset_neuracore, training_job_response
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    training_job_response,
+    mocked_org_id,
 ):
     """Test getting training job status."""
     # Ensure login
@@ -174,7 +183,7 @@ def test_get_training_job_status(
 
     # Mock training jobs endpoint
     mock_auth_requests.get(
-        f"{API_URL}/training/jobs",
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
         json=[training_job_response],
         status_code=200,
     )
@@ -187,7 +196,7 @@ def test_get_training_job_status(
 
 
 def test_get_nonexistent_training_job(
-    temp_config_dir, mock_auth_requests, reset_neuracore
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Test getting a non-existent training job raises an error."""
     # Ensure login
@@ -195,7 +204,7 @@ def test_get_nonexistent_training_job(
 
     # Mock training jobs endpoint with empty list
     mock_auth_requests.get(
-        f"{API_URL}/training/jobs",
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
         json=[],
         status_code=200,
     )
@@ -206,7 +215,7 @@ def test_get_nonexistent_training_job(
 
 
 def test_failed_training_job_request(
-    temp_config_dir, mock_auth_requests, reset_neuracore
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Test handling of failed API requests."""
     # Ensure login
@@ -214,7 +223,7 @@ def test_failed_training_job_request(
 
     # Mock training jobs endpoint to return an error
     mock_auth_requests.get(
-        f"{API_URL}/training/jobs",
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
         status_code=500,
         text="Internal Server Error",
     )

@@ -18,28 +18,31 @@ def dataset_response():
 
 
 def test_create_dataset(
-    temp_config_dir, mock_auth_requests, reset_neuracore, dataset_response
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    dataset_response,
+    mocked_org_id,
 ):
     """Test dataset creation."""
     # Ensure login
     nc.login("test_api_key")
-
     # Mock dataset creation endpoint
     mock_auth_requests.post(
-        f"{API_URL}/datasets",
+        f"{API_URL}/org/{mocked_org_id}/datasets",
         json=dataset_response,
         status_code=200,
     )
 
     # Mock recordings endpoint
     mock_auth_requests.get(
-        f"{API_URL}/datasets/{dataset_response['id']}/recordings",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response['id']}/recordings",
         json={"recordings": []},
         status_code=200,
     )
 
     mock_auth_requests.get(
-        f"{API_URL}/datasets/by-name/{dataset_response['name']}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{dataset_response['name']}",
         json=dataset_response,
         status_code=200,
     )
@@ -57,7 +60,11 @@ def test_create_dataset(
 
 
 def test_create_dataset_with_params(
-    temp_config_dir, mock_auth_requests, reset_neuracore, dataset_response
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    dataset_response,
+    mocked_org_id,
 ):
     """Test dataset creation with additional parameters."""
     # Ensure login
@@ -65,19 +72,19 @@ def test_create_dataset_with_params(
 
     # Mock dataset creation endpoint
     mock_auth_requests.post(
-        f"{API_URL}/datasets",
+        f"{API_URL}/org/{mocked_org_id}/datasets",
         json=dataset_response,
         status_code=200,
     )
 
     # Mock recordings endpoint
     mock_auth_requests.get(
-        f"{API_URL}/datasets/{dataset_response['id']}/recordings",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response['id']}/recordings",
         json={"recordings": []},
         status_code=200,
     )
     mock_auth_requests.get(
-        f"{API_URL}/datasets/by-name/{dataset_response['name']}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{dataset_response['name']}",
         json=dataset_response,
         status_code=200,
     )
@@ -97,7 +104,11 @@ def test_create_dataset_with_params(
 
 
 def test_get_dataset(
-    temp_config_dir, mock_auth_requests, reset_neuracore, dataset_response
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    dataset_response,
+    mocked_org_id,
 ):
     """Test getting an existing dataset."""
     # Ensure login
@@ -105,26 +116,26 @@ def test_get_dataset(
 
     # Mock datasets endpoint
     mock_auth_requests.get(
-        f"{API_URL}/datasets",
+        f"{API_URL}/org/{mocked_org_id}/datasets",
         json=[dataset_response],
         status_code=200,
     )
 
     # Mock shared datasets endpoint
     mock_auth_requests.get(
-        f"{API_URL}/datasets/shared",
+        f"{API_URL}/org/{mocked_org_id}/datasets/shared",
         json=[],
         status_code=200,
     )
     mock_auth_requests.get(
-        f"{API_URL}/datasets/by-name/{dataset_response['name']}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{dataset_response['name']}",
         json=dataset_response,
         status_code=200,
     )
 
     # Mock recordings endpoint
     mock_auth_requests.get(
-        f"{API_URL}/datasets/{dataset_response['id']}/recordings",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response['id']}/recordings",
         json={"recordings": []},
         status_code=200,
     )
@@ -138,25 +149,29 @@ def test_get_dataset(
     assert dataset.name == "test_dataset"
 
 
-def test_get_nonexistent_dataset(temp_config_dir, mock_auth_requests, reset_neuracore):
+def test_get_nonexistent_dataset(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
     """Test getting a non-existent dataset raises an error."""
     # Ensure login
     nc.login("test_api_key")
 
     # Mock empty datasets endpoints
     mock_auth_requests.get(
-        f"{API_URL}/datasets",
+        f"{API_URL}/org/{mocked_org_id}/datasets",
         json=[],
         status_code=200,
     )
 
     mock_auth_requests.get(
-        f"{API_URL}/datasets/shared",
+        f"{API_URL}/org/{mocked_org_id}/datasets/shared",
         json=[],
         status_code=200,
     )
     mock_auth_requests.get(
-        f"{API_URL}/datasets/by-name/nonexistent", json={}, status_code=404
+        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/nonexistent",
+        json={},
+        status_code=404,
     )
 
     # Attempt to get non-existent dataset
@@ -164,7 +179,9 @@ def test_get_nonexistent_dataset(temp_config_dir, mock_auth_requests, reset_neur
         nc.get_dataset("nonexistent")
 
 
-def test_dataset_shared_property(temp_config_dir, mock_auth_requests, reset_neuracore):
+def test_dataset_shared_property(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
     """Test dataset shared property."""
     # Ensure login
     nc.login("test_api_key")
@@ -180,20 +197,20 @@ def test_dataset_shared_property(temp_config_dir, mock_auth_requests, reset_neur
     }
 
     mock_auth_requests.post(
-        f"{API_URL}/datasets",
+        f"{API_URL}/org/{mocked_org_id}/datasets",
         json=shared_dataset_response,
         status_code=200,
     )
 
     # Mock recordings endpoint
     mock_auth_requests.get(
-        f"{API_URL}/datasets/{shared_dataset_response['id']}/recordings",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{shared_dataset_response['id']}/recordings",
         json={"recordings": []},
         status_code=200,
     )
 
     mock_auth_requests.get(
-        f"{API_URL}/datasets/by-name/{shared_dataset_response['name']}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{shared_dataset_response['name']}",
         json=shared_dataset_response,
         status_code=200,
     )
@@ -210,7 +227,11 @@ def test_dataset_shared_property(temp_config_dir, mock_auth_requests, reset_neur
 
 
 def test_dataset_global_state(
-    temp_config_dir, mock_auth_requests, reset_neuracore, dataset_response
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    dataset_response,
+    mocked_org_id,
 ):
     """Test that dataset ID is stored in global state."""
     # Ensure login
@@ -218,19 +239,19 @@ def test_dataset_global_state(
 
     # Mock dataset creation endpoint
     mock_auth_requests.post(
-        f"{API_URL}/datasets",
+        f"{API_URL}/org/{mocked_org_id}/datasets",
         json=dataset_response,
         status_code=200,
     )
 
     # Mock recordings endpoint
     mock_auth_requests.get(
-        f"{API_URL}/datasets/{dataset_response['id']}/recordings",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response['id']}/recordings",
         json={"recordings": []},
         status_code=200,
     )
     mock_auth_requests.get(
-        f"{API_URL}/datasets/by-name/{dataset_response['name']}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{dataset_response['name']}",
         json=dataset_response,
         status_code=200,
     )
