@@ -17,6 +17,7 @@ from typing import Optional
 
 import requests
 
+from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import (
     RecordingStateManager,
@@ -113,13 +114,14 @@ class Robot:
 
         Raises:
             RobotError: If not authenticated or if server communication fails.
+            ConfigError: If there is an error trying to get the current org
         """
         if not self._auth.is_authenticated:
             raise RobotError("Not authenticated. Please call nc.login() first.")
-
+        org_id = get_current_org()
         try:
             response = requests.post(
-                f"{API_URL}/robots?is_shared={self.shared}",
+                f"{API_URL}/org/{org_id}/robots?is_shared={self.shared}",
                 json={
                     "name": self.name,
                     "instance": self.instance,
@@ -191,13 +193,15 @@ class Robot:
         Raises:
             RobotError: If the robot is not initialized or if
                 the recording fails to start.
+            ConfigError: If there is an error trying to get the current org
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
         try:
+            org_id = get_current_org()
             response = requests.post(
-                f"{API_URL}/recording/start",
+                f"{API_URL}/org/{org_id}/recording/start",
                 headers=self._auth.get_headers(),
                 json={
                     "robot_id": self.id,
@@ -230,13 +234,15 @@ class Robot:
         Raises:
             RobotError: If the robot is not initialized, if the recording cannot
                 be stopped, or if storage limits are exceeded.
+            ConfigError: If there is an error trying to get the current org
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
+        org_id = get_current_org()
         try:
             response = requests.post(
-                f"{API_URL}/recording/stop?recording_id={recording_id}",
+                f"{API_URL}/org/{org_id}/recording/stop?recording_id={recording_id}",
                 headers=self._auth.get_headers(),
             )
 
@@ -404,14 +410,16 @@ class Robot:
 
         Raises:
             RobotError: If packaging or upload fails.
+            ConfigError: If there is an error trying to get the current org
         """
+        org_id = get_current_org()
         try:
             # Create the files dict with the ZIP data
             files = self._package_urdf()
 
             # Upload the package
             response = requests.put(
-                f"{API_URL}/robots/{self.id}/package?is_shared={self.shared}",
+                f"{API_URL}/org/{org_id}/robots/{self.id}/package?is_shared={self.shared}",
                 headers=self._auth.get_headers(),
                 files=files,
             )

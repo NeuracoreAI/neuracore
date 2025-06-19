@@ -9,6 +9,7 @@ import requests
 import wget
 
 from neuracore.core.auth import get_auth
+from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.ml.utils.validate import AlgorithmCheck
 
@@ -29,9 +30,10 @@ class AlgorithmStorageHandler:
         """
         self.algorithm_id = algorithm_id
         self.log_to_cloud = self.algorithm_id is not None
+        self.org_id = get_current_org()
         if self.log_to_cloud:
             response = requests.get(
-                f"{API_URL}/algorithms/{self.algorithm_id}",
+                f"{API_URL}/org/{self.org_id}/algorithms/{self.algorithm_id}",
                 headers=get_auth().get_headers(),
             )
             if response.status_code != 200:
@@ -47,7 +49,7 @@ class AlgorithmStorageHandler:
         """
         if self.log_to_cloud:
             response = requests.post(
-                f"{API_URL}/algorithms/{self.algorithm_id}/validation-error",
+                f"{API_URL}/org/{self.org_id}/algorithms/{self.algorithm_id}/validation-error",
                 headers=get_auth().get_headers(),
                 json={"error_message": error_message},
             )
@@ -63,7 +65,7 @@ class AlgorithmStorageHandler:
             extract_dir: Directory to extract algorithm code to.
         """
         response = requests.get(
-            f"{API_URL}/algorithms/download_url/{self.algorithm_id}",
+            f"{API_URL}/org/{self.org_id}/algorithms/download_url/{self.algorithm_id}",
             headers=get_auth().get_headers(),
         )
         if response.status_code != 200:
@@ -105,7 +107,7 @@ class AlgorithmStorageHandler:
             dict_to_save["validation_status"] = "validation_failed"
             dict_to_save["validation_message"] = error_message
         response = requests.put(
-            f"{API_URL}/algorithms/{self.algorithm_id}/update-algorithm-validation",
+            f"{API_URL}/org/{self.org_id}/algorithms/{self.algorithm_id}/update-algorithm-validation",
             headers=get_auth().get_headers(),
             json=dict_to_save,
         )

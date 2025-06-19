@@ -6,19 +6,16 @@ It implements a singleton pattern to maintain authentication state across
 the application.
 """
 
-import json
 import os
-from pathlib import Path
 from typing import Optional
 
 import requests
 
+from neuracore.core.config.config_manager import get_config_manager
+from neuracore.core.config.get_api_key import get_api_key
+
 from .const import API_URL
 from .exceptions import AuthenticationError
-from .generate_api_key import generate_api_key
-
-CONFIG_DIR = Path.home() / ".neuracore"
-CONFIG_FILE = "config.json"
 
 
 class Auth:
@@ -31,7 +28,6 @@ class Auth:
     """
 
     _instance = None
-    _api_key: Optional[str] = None
 
     def __new__(cls) -> "Auth":
         """Create or return the singleton Auth instance.
@@ -45,33 +41,7 @@ class Auth:
 
     def __init__(self) -> None:
         """Initialize the Auth instance and load saved configuration."""
-        self._load_config()
         self._access_token = None
-
-    def _load_config(self) -> None:
-        """Load authentication configuration from persistent storage.
-
-        Attempts to load previously saved API key from the user's home
-        directory configuration file. Does nothing if no configuration
-        file exists.
-        """
-        config_file = CONFIG_DIR / CONFIG_FILE
-        if config_file.exists():
-            with open(config_file) as f:
-                config = json.load(f)
-                self._api_key = config.get("api_key")
-
-    def _save_config(self) -> None:
-        """Save current authentication configuration to persistent storage.
-
-        Creates the configuration directory if it doesn't exist and saves
-        the current API key to a JSON configuration file in the user's
-        home directory.
-        """
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        config_file = CONFIG_DIR / CONFIG_FILE
-        with open(config_file, "w") as f:
-            json.dump({"api_key": self._api_key}, f)
 
     def login(self, api_key: Optional[str] = None) -> None:
         """Authenticate with the Neuracore server using an API key.
@@ -90,18 +60,16 @@ class Auth:
         Raises:
             AuthenticationError: If API key verification fails due to invalid
                 credentials, network issues, or server errors.
+            InputError: If there is an issue with the user's input when gathering
+                credentials
         """
-        self._api_key = api_key or os.environ.get("NEURACORE_API_KEY") or self._api_key
-
-        if not self._api_key:
-            print("No API key provided. Attempting to log you in...")
-            self._api_key = generate_api_key()
+        api_key = api_key or os.environ.get("NEURACORE_API_KEY") or get_api_key()
 
         # Verify API key with server and get access token
         try:
             response = requests.post(
                 f"{API_URL}/auth/verify-api-key",
-                json={"api_key": self._api_key},
+                json={"api_key": api_key},
             )
             if response.status_code != 200:
                 raise AuthenticationError(
@@ -114,20 +82,25 @@ class Auth:
                 "Could not verify API key. Please check your key and try again."
             )
 
-        # Save configuration if verification successful
-        self._save_config()
+        config_manager = get_config_manager()
+        if config_manager.config.api_key != api_key:
+            config_manager.config.api_key = api_key
+            config_manager.save_config()
 
     def logout(self) -> None:
         """Clear authentication state and remove saved configuration.
 
         Resets all authentication data including API key and access token,
-        and removes the saved configuration file from disk.
+        and removes the saved current org.
+
+        Raises:
+            ConfigError: If saving the config fails.
         """
-        self._api_key = None
         self._access_token = None
-        config_file = CONFIG_DIR / CONFIG_FILE
-        if config_file.exists():
-            config_file.unlink()
+        config_manager = get_config_manager()
+        config_manager.config.api_key = None
+        config_manager.config.current_org_id = None
+        config_manager.save_config()
 
     def validate_version(self) -> None:
         """Validate client version compatibility with the Neuracore server.
@@ -153,15 +126,6 @@ class Auth:
             )
 
     @property
-    def api_key(self) -> Optional[str]:
-        """Get the current API key.
-
-        Returns:
-            The currently configured API key, or None if not set.
-        """
-        return self._api_key
-
-    @property
     def access_token(self) -> Optional[str]:
         """Get the current access token.
 
@@ -176,10 +140,10 @@ class Auth:
         """Check if currently authenticated with valid credentials.
 
         Returns:
-            True if both API key and access token are available, indicating
+            True if an access token is available, indicating
             successful authentication.
         """
-        return self._api_key is not None and self._access_token is not None
+        return self._access_token is not None
 
     def get_headers(self) -> dict:
         """Get HTTP headers for authenticated API requests.
@@ -214,7 +178,11 @@ def login(api_key: Optional[str] = None) -> None:
 
 
 def logout() -> None:
-    """Global convenience function for clearing authentication state."""
+    """Global convenience function for clearing authentication state.
+
+    Raises:
+        ConfigError: If saving the updated config fails
+    """
     _auth.logout()
 
 

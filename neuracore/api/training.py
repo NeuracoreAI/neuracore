@@ -10,6 +10,8 @@ from typing import Any, Optional, cast
 
 import requests
 
+from neuracore.core.config.get_current_org import get_current_org
+
 from ..core.auth import get_auth
 from ..core.const import API_URL
 from ..core.data.dataset import Dataset
@@ -27,18 +29,20 @@ def _get_algorithms() -> list[dict]:
     Raises:
         requests.exceptions.HTTPError: If the API request fails
         requests.exceptions.RequestException: If there is a network problem
+        ConfigError: If there is an error trying to get the current org
     """
     auth = get_auth()
+    org_id = get_current_org()
     with concurrent.futures.ThreadPoolExecutor() as executor:
         org_alg_req = executor.submit(
             requests.get,
-            f"{API_URL}/algorithms",
+            f"{API_URL}/org/{org_id}/algorithms",
             headers=auth.get_headers(),
             params={"shared": False},
         )
         shared_alg_req = executor.submit(
             requests.get,
-            f"{API_URL}/algorithms",
+            f"{API_URL}/org/{org_id}/algorithms",
             headers=auth.get_headers(),
             params={"shared": True},
         )
@@ -81,6 +85,7 @@ def start_training_run(
         ValueError: If dataset or algorithm is not found
         requests.exceptions.HTTPError: If the API request fails
         requests.exceptions.RequestException: If there is a network problem
+                ConfigError: If there is an error trying to get the current org
     """
     dataset = cast(Dataset, Dataset.get_by_name(dataset_name))
     dataset_id = dataset.id
@@ -123,8 +128,11 @@ def start_training_run(
     }
 
     auth = get_auth()
+    org_id = get_current_org()
     response = requests.post(
-        f"{API_URL}/training/jobs", headers=auth.get_headers(), data=json.dumps(data)
+        f"{API_URL}/org/{org_id}/training/jobs",
+        headers=auth.get_headers(),
+        data=json.dumps(data),
     )
     response.raise_for_status()
 
@@ -145,10 +153,14 @@ def get_training_job_data(job_id: str) -> dict:
         ValueError: If the job is not found or there is an error accessing the job
         requests.exceptions.HTTPError: If the API request returns an error code
         requests.exceptions.RequestException: If there is a problem with the request
+        ConfigError: If there is an error trying to get the current org
     """
     auth = get_auth()
+    org_id = get_current_org()
     try:
-        response = requests.get(f"{API_URL}/training/jobs", headers=auth.get_headers())
+        response = requests.get(
+            f"{API_URL}/org/{org_id}/training/jobs", headers=auth.get_headers()
+        )
         response.raise_for_status()
 
         job = response.json()
