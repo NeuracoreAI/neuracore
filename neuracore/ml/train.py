@@ -67,12 +67,8 @@ def get_algorithm_config_and_class(
     assert (
         cfg.algorithm_id is not None
     ), "Algorithm ID must be provided in the configuration"
-    # Cloud training: download algorithm and use algorithm_params
-    logger.info(f"Loading algorithm from cloud with ID: {cfg.algorithm_id}")
-    storage_handler = AlgorithmStorageHandler(algorithm_id=cfg.algorithm_id)
+    #  Assume algorithm already downloaded
     extract_dir = Path(cfg.local_output_dir) / "algorithm"
-    storage_handler.download_algorithm(extract_dir=extract_dir)
-    logger.info(f"Algorithm extracted to {extract_dir}")
     algorithm_loader = AlgorithmLoader(extract_dir)
     model_class = algorithm_loader.load_model()
 
@@ -411,6 +407,14 @@ def main(cfg: DictConfig) -> None:
         batch_size = optimal_batch_size
     else:
         batch_size = int(batch_size)
+
+    if cfg.algorithm_id is not None:
+        # Download the algorithm so that it can be processed later
+        logger.info(f"Downloading algorithm from cloud with ID: {cfg.algorithm_id}")
+        storage_handler = AlgorithmStorageHandler(algorithm_id=cfg.algorithm_id)
+        extract_dir = Path(cfg.local_output_dir) / "algorithm"
+        storage_handler.download_algorithm(extract_dir=extract_dir)
+        logger.info(f"Algorithm extracted to {extract_dir}")
 
     if world_size > 1:
         # Use multiprocessing to launch multiple processes
