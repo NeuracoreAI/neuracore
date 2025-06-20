@@ -29,6 +29,7 @@ output_data_types:
 # Paths and IDs (for cloud vs local training)
 algorithm_id: null    # For cloud training
 training_id: null     # For cloud training
+org_id: null         # For cloud training
 local_output_dir: ${oc.env:HOME}/neuracore_logs
 
 # Custom algorithm parameters (used when algorithm_id is provided)

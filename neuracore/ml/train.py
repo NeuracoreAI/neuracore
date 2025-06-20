@@ -387,6 +387,8 @@ def main(cfg: DictConfig) -> None:
 
     # Login and get dataset
     nc.login()
+    if cfg.org_id is not None:
+        nc.set_organization(cfg.org_id)
     if cfg.dataset_id is not None:
         dataset = nc.get_dataset(id=cfg.dataset_id)
     elif cfg.dataset_name is not None:
