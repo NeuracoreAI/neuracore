@@ -241,6 +241,11 @@ def main() -> None:
         type=str,
         help="Algorithm ID to pass to validation",
     )
+    parser.add_argument(
+        "--org_id",
+        type=str,
+        help="Organization ID to use for validation",
+    )
 
     args = parser.parse_args()
 
@@ -254,6 +259,7 @@ def main() -> None:
         algorithm_folder = Path(args.path)
     elif args.algorithm_id:
         nc.login()
+        nc.set_organization(args.org_id)
         tempfile_dir = Path(tempfile.gettempdir())
         storage_handler = AlgorithmStorageHandler(algorithm_id=args.algorithm_id)
         algorithm_folder = Path(tempfile_dir) / "algorithm"
