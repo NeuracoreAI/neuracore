@@ -15,7 +15,6 @@ from aiohttp import ClientSession, ClientTimeout
 from aiohttp_sse_client import client as sse_client
 
 from neuracore.core.auth import Auth, get_auth
-from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.client_stream.json_source import JSONSource
 from neuracore.core.streaming.client_stream.models import (
     HandshakeMessage,
@@ -60,7 +59,6 @@ class ClientStreamingManager:
             loop: Event loop for async operations
             auth: Authentication object. If not provided, uses default auth
         """
-        self.org_id = get_current_org()
         self.robot_id = robot_id
         self.robot_instance = robot_instance
         self.loop = loop
@@ -141,15 +139,11 @@ class ClientStreamingManager:
             mid: Media ID for the track
             kind: Type of media (e.g., "video", "audio", "application")
             label: Human-readable label for the track
-
-        Raises:
-            ConfigError: If there is an error trying to get the current org
         """
         if not self.streaming.is_enabled():
             return
-
         await self.client_session.post(
-            f"{API_URL}/org/{self.org_id}/signalling/track",
+            f"{API_URL}/signalling/track",
             headers=self.auth.get_headers(),
             json=RobotStreamTrack(
                 robot_id=self.robot_id,
@@ -165,9 +159,8 @@ class ClientStreamingManager:
         """Send heartbeat response to keep the signaling connection alive."""
         if not self.streaming.is_enabled():
             return
-
         await self.client_session.post(
-            f"{API_URL}/org/{self.org_id}/signalling/alive/{self.local_stream_id}",
+            f"{API_URL}/signalling/alive/{self.local_stream_id}",
             headers=self.auth.get_headers(),
             data="pong",
         )
@@ -194,7 +187,6 @@ class ClientStreamingManager:
             remote_stream_id=remote_stream_id,
             id=connection_id,
             connection_token=connection_token,
-            org_id=self.org_id,
             on_close=on_close,
             client_session=self.client_session,
             auth=self.auth,
@@ -223,7 +215,7 @@ class ClientStreamingManager:
         while self.streaming.is_enabled():
             try:
                 async with sse_client.EventSource(
-                    f"{API_URL}/org/{self.org_id}/signalling/notifications/{self.local_stream_id}",
+                    f"{API_URL}/signalling/notifications/{self.local_stream_id}",
                     session=self.client_session,
                     headers=self.auth.get_headers(),
                     reconnection_time=timedelta(seconds=0.1),

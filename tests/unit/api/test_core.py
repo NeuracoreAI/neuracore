@@ -34,7 +34,7 @@ def test_login_with_api_key(temp_config_dir, monkeypatch):
     # Verify authentication state
     auth = get_auth()
     assert auth.is_authenticated
-    assert auth.access_token == "test_token"
+    assert auth.api_key == "test_api_key"
 
 
 def test_logout(temp_config_dir, monkeypatch):
@@ -46,16 +46,13 @@ def test_logout(temp_config_dir, monkeypatch):
 
     # Write initial config
     with open(config_file, "w") as f:
-        json.dump({"api_key": "test_key", "current_org_id": "test-org-id"}, f)
+        json.dump({"api_key": "test_key"}, f)
 
     # Perform logout
     nc.logout()
 
-    # Verify config contents
-    with open(config_file) as f:
-        config = json.load(f)
-        assert config["api_key"] is None
-        assert config["current_org_id"] is None
+    # Check config file is deleted
+    assert not config_file.exists()
 
 
 def test_auth_instance_singleton():
@@ -66,7 +63,7 @@ def test_auth_instance_singleton():
     assert auth1 is auth2, "Auth should be a singleton"
 
 
-def test_auth_headers(temp_config_dir, monkeypatch):
+def test_auth_headers(monkeypatch):
     """Test generation of authentication headers."""
     # Create mock authentication
     with requests_mock.Mocker() as m:
@@ -98,22 +95,21 @@ def test_login_logout(temp_config_dir, mock_auth_requests, reset_neuracore):
     # Check authentication state
     auth = get_auth()
     assert auth.is_authenticated
+    assert auth.api_key == "test_api_key"
 
     # Logout
     nc.logout()
     assert not auth.is_authenticated
 
 
-def test_connect_robot(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
-):
+def test_connect_robot(temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf):
     """Test robot connection."""
     # Ensure login first
     nc.login("test_api_key")
 
     # Mock robot creation endpoint with a full response
     mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/robots",
+        f"{API_URL}/robots",
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )

@@ -10,8 +10,6 @@ from typing import Optional
 
 import requests
 
-from neuracore.core.config.get_current_org import get_current_org
-
 from ..core.auth import get_auth
 from ..core.const import API_URL
 from ..core.endpoint import EndpointPolicy
@@ -41,7 +39,6 @@ def connect_endpoint(
     Raises:
         EndpointError: If the endpoint connection fails due to invalid endpoint
             name, authentication issues, or network problems.
-        ConfigError: If there is an error trying to get the current org
     """
     return _connect_endpoint(
         endpoint_name=endpoint_name, robot_name=robot_name, instance=instance
@@ -81,8 +78,6 @@ def connect_local_endpoint(
             inaccessible port, or conflicting parameters.
         ValueError: If both path_to_model and train_run_name are provided, or if
             neither is provided.
-        FileNotFoundError: If the specified model file doesn't exist.
-        ConfigError: If there is an error trying to get the current org
     """
     return _connect_local_endpoint(
         robot_name=robot_name,
@@ -115,13 +110,11 @@ def deploy_model(job_id: str, name: str) -> dict:
             or request formatting problems.
         ValueError: If the deployment fails due to invalid parameters or
             server-side errors.
-        ConfigError: If there is an error trying to get the current org
     """
     auth = get_auth()
-    org_id = get_current_org()
     try:
         response = requests.post(
-            f"{API_URL}/org/{org_id}/models/deploy",
+            f"{API_URL}/models/deploy",
             headers=auth.get_headers(),
             data=json.dumps({"training_id": job_id, "name": name}),
         )
@@ -150,14 +143,11 @@ def get_endpoint_status(endpoint_id: str) -> str:
         requests.exceptions.RequestException: If there are network connectivity
             or request formatting problems.
         ValueError: If the status check fails due to server-side errors.
-        ConfigError: If there is an error trying to get the current org
     """
     auth = get_auth()
-    org_id = get_current_org()
     try:
         response = requests.get(
-            f"{API_URL}/org/{org_id}/models/endpoints/{endpoint_id}",
-            headers=auth.get_headers(),
+            f"{API_URL}/models/endpoints/{endpoint_id}", headers=auth.get_headers()
         )
         response.raise_for_status()
         return response.json()["status"]
@@ -183,14 +173,11 @@ def delete_endpoint(endpoint_id: str) -> None:
             or request formatting problems.
         ValueError: If the deletion fails due to server-side errors or
             endpoint dependencies.
-        ConfigError: If there is an error trying to get the current org
     """
     auth = get_auth()
-    org_id = get_current_org()
     try:
         response = requests.delete(
-            f"{API_URL}/org/{org_id}/models/endpoints/{endpoint_id}",
-            headers=auth.get_headers(),
+            f"{API_URL}/models/endpoints/{endpoint_id}", headers=auth.get_headers()
         )
         response.raise_for_status()
     except Exception as e:

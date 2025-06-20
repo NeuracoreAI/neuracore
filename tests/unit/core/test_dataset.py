@@ -108,10 +108,9 @@ def mock_wget_download(monkeypatch, create_test_video):
 
 
 @pytest.fixture
-def dataset_dict(mocked_org_id):
+def dataset_dict():
     return {
         "id": "dataset123",
-        "org_id": mocked_org_id,
         "name": "test_dataset",
         "size_bytes": 1024,
         "tags": ["test", "robotics"],
@@ -176,53 +175,37 @@ def synced_data():
 
 
 @pytest.fixture
-def mock_dataset_api(
-    temp_config_dir,
-    mock_auth_requests,
-    dataset_dict,
-    recordings_list,
-    synced_data,
-    mocked_org_id,
-):
+def mock_dataset_api(mock_auth_requests, dataset_dict, recordings_list, synced_data):
     """Set up mocks for Dataset API endpoints."""
-    nc.login("test_api_key")
-
+    nc.login()
     # Mock datasets endpoint
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets", json=[dataset_dict], status_code=200
-    )
+    mock_auth_requests.get(f"{API_URL}/datasets", json=[dataset_dict], status_code=200)
 
     # Mock shared datasets endpoint
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/shared", json=[], status_code=200
-    )
+    mock_auth_requests.get(f"{API_URL}/datasets/shared", json=[], status_code=200)
 
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{dataset_dict['name']}",
+        f"{API_URL}/datasets/by-name/{dataset_dict['name']}",
         json=dataset_dict,
         status_code=200,
     )
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/nonexistent",
-        json={},
-        status_code=404,
+        f"{API_URL}/datasets/by-name/nonexistent", json={}, status_code=404
     )
 
     # Mock dataset creation endpoint
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/datasets", json=dataset_dict, status_code=200
-    )
+    mock_auth_requests.post(f"{API_URL}/datasets", json=dataset_dict, status_code=200)
 
     # Mock recordings endpoint
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_dict['id']}/recordings",
+        f"{API_URL}/datasets/{dataset_dict['id']}/recordings",
         json={"recordings": recordings_list},
         status_code=200,
     )
 
     # Mock sync endpoint
     mock_auth_requests.post(
-        re.compile(f"{API_URL}/org/{mocked_org_id}/synchronize/synchronize-recording"),
+        re.compile(f"{API_URL}/synchronize/synchronize-recording"),
         json=synced_data.model_dump(),
         status_code=200,
     )
@@ -231,14 +214,14 @@ def mock_dataset_api(
 
 
 @pytest.fixture
-def mock_video_api(mock_auth_requests, create_test_video, mocked_org_id):
+def mock_video_api(mock_auth_requests, create_test_video):
     """Set up mocks for video streaming API endpoints."""
     # Create test video data
     video_data = create_test_video(num_frames=10)
 
     # Mock video URL endpoint
     mock_auth_requests.get(
-        re.compile(f"{API_URL}/org/{mocked_org_id}/recording/.*/download_url"),
+        re.compile(f"{API_URL}/recording/.*/download_url"),
         json={"url": "https://example.com/test-video.mp4"},
         status_code=200,
     )

@@ -12,7 +12,6 @@ import time
 import requests
 
 from neuracore.core.auth import get_auth
-from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 
 logger = logging.getLogger(__name__)
@@ -59,9 +58,8 @@ class ResumableUpload:
             "filepath": self.filepath,
             "content_type": self.content_type,
         }
-        org_id = get_current_org()
         response = requests.get(
-            f"{API_URL}/org/{org_id}/recording/{self.recording_id}/resumable_upload_url",
+            f"{API_URL}/recording/{self.recording_id}/resumable_upload_url",
             params=params,
             headers=auth.get_headers(),
         )

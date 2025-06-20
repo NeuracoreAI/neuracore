@@ -19,15 +19,3 @@ class RobotError(Exception):
 
 class DatasetError(Exception):
     """Exception raised for errors in the dataset module."""
-
-
-class OrganizationError(Exception):
-    """Exception raised for errors gathering organization information."""
-
-
-class InputError(Exception):
-    """Exception raised when the user does not provide valid input."""
-
-
-class ConfigError(Exception):
-    """Exception raised when there is an error attempting to read or write config."""

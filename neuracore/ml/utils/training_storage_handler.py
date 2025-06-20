@@ -9,7 +9,6 @@ import torch
 from torch import nn
 
 from neuracore.core.auth import get_auth
-from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.ml.utils.mar import create_mar
 
@@ -31,10 +30,9 @@ class TrainingStorageHandler:
         self.local_dir = Path(local_dir or "./output")
         self.training_job_id = training_job_id
         self.log_to_cloud = self.training_job_id is not None
-        self.org_id = get_current_org()
         if self.log_to_cloud:
             response = requests.get(
-                f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}",
+                f"{API_URL}/training/jobs/{self.training_job_id}",
                 headers=get_auth().get_headers(),
             )
             if response.status_code != 200:
@@ -60,9 +58,8 @@ class TrainingStorageHandler:
             "filepath": filepath,
             "content_type": content_type,
         }
-
         response = requests.get(
-            f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/upload-url",
+            f"{API_URL}/training/jobs/{self.training_job_id}/upload-url",
             params=params,
             headers=auth.get_headers(),
         )
@@ -85,9 +82,8 @@ class TrainingStorageHandler:
             ValueError: If the request to get the download URL fails.
         """
         auth = get_auth()
-        get_current_org()
         response = requests.get(
-            f"{API_URL}/org/{self.org_id}/recording/{self.training_job_id}/download-url",
+            f"{API_URL}/recording/{self.training_job_id}/download-url",
             params={"filepath": filepath},
             headers=auth.get_headers(),
         )
@@ -190,7 +186,7 @@ class TrainingStorageHandler:
         """
         if self.log_to_cloud:
             response = requests.put(
-                f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/update",
+                f"{API_URL}/training/jobs/{self.training_job_id}/update",
                 headers=get_auth().get_headers(),
                 json={"epoch": epoch, "step": step, "error": error},
             )

@@ -76,7 +76,7 @@ class SynchronizedRecording:
         """
         auth = get_auth()
         response = requests.post(
-            f"{API_URL}/org/{self.dataset.org_id}/synchronize/synchronize-recording",
+            f"{API_URL}/synchronize/synchronize-recording",
             json={
                 "recording_id": self.id,
                 "frequency": self.frequency,
@@ -102,7 +102,7 @@ class SynchronizedRecording:
         """
         auth = get_auth()
         response = requests.get(
-            f"{API_URL}/org/{self.dataset.org_id}/recording/{self.id}/download_url",
+            f"{API_URL}/recording/{self.id}/download_url",
             params={"filepath": f"{camera_type}/{camera_id}/video.mp4"},
             headers=auth.get_headers(),
         )

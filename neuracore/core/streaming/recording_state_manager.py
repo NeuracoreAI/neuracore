@@ -16,7 +16,6 @@ from aiohttp_sse_client import client as sse_client
 from pyee.asyncio import AsyncIOEventEmitter
 
 from neuracore.core.auth import Auth, get_auth
-from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL, REMOTE_RECORDING_TRIGGER_ENABLED
 from neuracore.core.streaming.client_stream.client_stream_manager import (
     MINIMUM_BACKOFF_LEVEL,
@@ -200,9 +199,8 @@ class RecordingStateManager(AsyncIOEventEmitter):
         backoff = MINIMUM_BACKOFF_LEVEL
         while self.remote_trigger_enabled.is_enabled():
             try:
-                org_id = get_current_org()
                 async with sse_client.EventSource(
-                    f"{API_URL}/org/{org_id}/recording/notifications",
+                    f"{API_URL}/recording/notifications",
                     session=self.client_session,
                     headers=self.auth.get_headers(),
                     reconnection_time=timedelta(seconds=0.1),

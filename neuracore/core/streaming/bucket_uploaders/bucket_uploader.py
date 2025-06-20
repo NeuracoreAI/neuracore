@@ -10,7 +10,6 @@ from abc import ABC, abstractmethod
 import requests
 
 from neuracore.core.auth import get_auth
-from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 
 
@@ -50,9 +49,8 @@ class BucketUploader(ABC):
             ValueError: If the response status code is not 200.
         """
         assert delta in (1, -1), "Value must be 1 or -1"
-        org_id = get_current_org()
         response = requests.put(
-            f"{API_URL}/org/{org_id}/recording/{self.recording_id}/update_num_active_streams",
+            f"{API_URL}/recording/{self.recording_id}/update_num_active_streams",
             params={
                 "delta": delta,
             },

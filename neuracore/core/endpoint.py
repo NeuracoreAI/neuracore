@@ -25,7 +25,6 @@ from PIL import Image
 from tqdm import tqdm
 
 from neuracore.api.core import _get_robot
-from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.robot import Robot
 from neuracore.core.utils.depth_utils import depth_to_rgb
 
@@ -301,15 +300,14 @@ def connect_endpoint(
 
     Raises:
         EndpointError: If the endpoint is not found, not active, or connection fails.
-        ConfigError: If there is an error trying to get the current org
+        requests.RequestException: If API communication fails.
     """
     auth = get_auth()
-    org_id = get_current_org()
     robot = _get_robot(robot_name, instance)
     try:
         # If not found by ID, get all endpoints and search by name
         response = requests.get(
-            f"{API_URL}/org/{org_id}/models/endpoints", headers=auth.get_headers()
+            f"{API_URL}/models/endpoints", headers=auth.get_headers()
         )
         response.raise_for_status()
 
@@ -326,7 +324,7 @@ def connect_endpoint(
 
         return EndpointPolicy(
             robot=robot,
-            predict_url=f"{API_URL}/org/{org_id}/models/endpoints/{endpoint['id']}/predict",
+            predict_url=f"{API_URL}/models/endpoints/{endpoint['id']}/predict",
             headers=auth.get_headers(),
         )
 
@@ -365,7 +363,6 @@ def connect_local_endpoint(
         ValueError: If both or neither of path_to_model and train_run_name are provided.
         EndpointError: If model download, TorchServe setup, or connection fails.
         FileNotFoundError: If the specified model file doesn't exist.
-        ConfigError: If there is an error trying to get the current org
     """
     if path_to_model is None and train_run_name is None:
         raise ValueError("Must provide either path_to_model or train_run_name")
@@ -374,14 +371,11 @@ def connect_local_endpoint(
     robot = None
     if os.getenv("NEURACORE_LIVE_DATA_ENABLED", "True").lower() == "true":
         robot = _get_robot(robot_name, instance)
+    auth = get_auth()
 
     if train_run_name:
-        auth = get_auth()
-        org_id = get_current_org()
         # Get all training runs and search for the job id
-        response = requests.get(
-            f"{API_URL}/org/{org_id}/training/jobs", headers=auth.get_headers()
-        )
+        response = requests.get(f"{API_URL}/training/jobs", headers=auth.get_headers())
         response.raise_for_status()
         jobs = response.json()
         job_id = None
@@ -394,7 +388,7 @@ def connect_local_endpoint(
 
         print(f"Downloading model '{train_run_name}' from training run...")
         response = requests.get(
-            f"{API_URL}/org/{org_id}/training/jobs/{job_id}/model_url",
+            f"{API_URL}/training/jobs/{job_id}/model_url",
             headers=auth.get_headers(),
             timeout=30,
         )

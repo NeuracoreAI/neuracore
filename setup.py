@@ -78,8 +78,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "nc-login = neuracore.core.cli.generate_api_key:generate_api_key",
-            "nc-select-org = neuracore.core.cli.select_current_org:select_current_org",
+            "nc-login = neuracore.core.generate_api_key:generate_api_key",
             # "nc-validate = neuracore.ml.cli.validate:main",
             # "nc-train = neuracore.ml.cli.train:main"
             # "nc-upload-algorithm = neuracore.ml.cli.upload_algorithm:main",

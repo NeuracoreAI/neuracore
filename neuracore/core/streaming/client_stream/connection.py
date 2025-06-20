@@ -45,7 +45,6 @@ class PierToPierConnection:
     local_stream_id: str
     remote_stream_id: str
     connection_token: str  # not used yet
-    org_id: str
     on_close: Callable
     client_session: ClientSession
     loop: asyncio.AbstractEventLoop
@@ -180,12 +179,9 @@ class PierToPierConnection:
             message_type: Type of signaling message
                 (SDP offer/answer, ICE candidate, etc.)
             content: Message payload content
-
-        Raises:
-            ConfigError: If there is an error trying to get the current org
         """
         await self.client_session.post(
-            f"{API_URL}/org/{self.org_id}/signalling/message/submit",
+            f"{API_URL}/signalling/message/submit",
             headers=self.auth.get_headers(),
             json=HandshakeMessage(
                 connection_id=self.id,

@@ -11,7 +11,6 @@ import hashlib
 import requests
 
 from neuracore.core.auth import get_auth
-from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.nc_types import DataType
 
@@ -34,11 +33,9 @@ def get_num_active_streams(recording_id: str) -> int:
     Raises:
         requests.HTTPError: If the API request fails.
         ValueError: If the response indicates an error or has an unexpected format.
-        ConfigError: If there is an error trying to get the current org
     """
-    org_id = get_current_org()
     response = requests.get(
-        f"{API_URL}/org/{org_id}/recording/{recording_id}/get_num_active_streams",
+        f"{API_URL}/recording/{recording_id}/get_num_active_streams",
         headers=get_auth().get_headers(),
     )
     response.raise_for_status()

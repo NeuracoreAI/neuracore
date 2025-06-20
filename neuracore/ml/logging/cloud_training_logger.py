@@ -10,7 +10,6 @@ import requests
 import torch
 
 from neuracore.core.auth import get_auth
-from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.ml.logging.training_logger import TrainingLogger
 
@@ -173,9 +172,8 @@ class CloudTrainingLogger(TrainingLogger):
         """Sync TensorBoard logs to cloud storage."""
         if len(self._store) == 0:
             return
-        org_id = get_current_org()
         response = requests.put(
-            f"{API_URL}/org/{org_id}/training/jobs/{self.training_id}/metrics",
+            f"{API_URL}/training/jobs/{self.training_id}/metrics",
             headers=get_auth().get_headers(),
             json={"metrics": self._store},
         )
