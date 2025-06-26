@@ -196,17 +196,19 @@ def run_validation(
             dataset, batch_size=batch_size, shuffle=True, collate_fn=dataset.collate_fn
         )
 
-        # Set device
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"Using device: {device}")
-
         model_init_description = ModelInitDescription(
             dataset_description=dataset.dataset_description,
             input_data_types=supported_input_data_types,
             output_data_types=supported_output_data_types,
             output_prediction_horizon=dataset.output_prediction_horizon,
         )
-
+        # Set device
+        device_str = os.environ.get("NEURACORE_TRAINING_DEVICE")
+        if device_str is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            device = torch.device(device_str)
+        logger.info(f"Using device: {device}")
         # Check 1: Can initialize the model
         logger.info("Initializing model")
         model = model_class(
@@ -293,7 +295,6 @@ def run_validation(
                         path_to_model=str(artifacts_dir / "model.mar"),
                         port=port,
                     )
-
                     # Log some data to send to the model
                     sync_point = SyncPoint(timestamp=time.time())
                     if batch.inputs.joint_positions:

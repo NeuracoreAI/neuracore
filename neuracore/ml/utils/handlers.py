@@ -78,7 +78,11 @@ class RobotModelHandler(BaseHandler):
         algorithm_loader = AlgorithmLoader(Path(model_dir))
         model_class = algorithm_loader.load_model()
         model = model_class(self.model_init_description, **self.algorithm_config)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device_str = os.environ.get("NEURACORE_INFERENCE_DEVICE")
+        if device_str is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(device_str)
         if model_pt_path:
             model.load_state_dict(
                 torch.load(model_pt_path, map_location=self.device, weights_only=True),
@@ -112,9 +116,12 @@ class RobotModelHandler(BaseHandler):
             self.algorithm_config = {}
         self.model_init_description = ModelInitDescription.model_validate(data)
         self.dataset_description = self.model_init_description.dataset_description
-
         super().initialize(context)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device_str = os.environ.get("NEURACORE_INFERENCE_DEVICE")
+        if device_str is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(device_str)
         self.model.to(self.device)
         self.model.eval()
 
