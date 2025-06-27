@@ -42,7 +42,7 @@ def test_create_dataset(
     )
 
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{dataset_response['name']}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
         json=dataset_response,
         status_code=200,
     )
@@ -84,7 +84,7 @@ def test_create_dataset_with_params(
         status_code=200,
     )
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{dataset_response['name']}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
         json=dataset_response,
         status_code=200,
     )
@@ -128,7 +128,7 @@ def test_get_dataset(
         status_code=200,
     )
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{dataset_response['name']}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
         json=dataset_response,
         status_code=200,
     )
@@ -169,7 +169,7 @@ def test_get_nonexistent_dataset(
         status_code=200,
     )
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/nonexistent",
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
         json={},
         status_code=404,
     )
@@ -210,7 +210,7 @@ def test_dataset_shared_property(
     )
 
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{shared_dataset_response['name']}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
         json=shared_dataset_response,
         status_code=200,
     )
@@ -251,7 +251,7 @@ def test_dataset_global_state(
         status_code=200,
     )
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{dataset_response['name']}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
         json=dataset_response,
         status_code=200,
     )

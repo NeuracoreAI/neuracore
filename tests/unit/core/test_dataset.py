@@ -198,14 +198,9 @@ def mock_dataset_api(
     )
 
     mock_auth_requests.get(
-        re.compile(f"{API_URL}/org/{mocked_org_id}/datasets/by-name/.*"),
+        re.compile(f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name"),
         json=dataset_dict,
         status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/nonexistent",
-        json={},
-        status_code=404,
     )
 
     # Mock dataset creation endpoint
@@ -305,8 +300,15 @@ class TestDataset:
         assert dataset.id == "dataset123"
         assert dataset.name == "test_dataset"
 
-    def test_get_nonexistent_dataset(self, mock_auth_requests, mock_dataset_api):
+    def test_get_nonexistent_dataset(
+        self, mock_auth_requests, mock_dataset_api, mocked_org_id
+    ):
         """Test getting a non-existent dataset raises an error."""
+        mock_auth_requests.get(
+            f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+            json={},
+            status_code=404,
+        )
         with pytest.raises(DatasetError, match="Dataset 'nonexistent' not found"):
             Dataset.get_by_name("nonexistent")
 

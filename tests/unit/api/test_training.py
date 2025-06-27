@@ -77,7 +77,7 @@ def test_start_training_run(
     )
 
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{dataset_response['name']}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
         json=dataset_response,
         status_code=200,
     )
