@@ -3,6 +3,7 @@
 import logging
 import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Optional, Union
 
@@ -132,8 +133,9 @@ class Dataset:
         """
         auth: Auth = get_auth()
         org_id = get_current_org()
+        encoded_param_name = urllib.parse.quote(name, safe="")
         req = requests.get(
-            f"{API_URL}/org/{org_id}/datasets/by-name/{name}",
+            f"{API_URL}/org/{org_id}/datasets/by-name/{encoded_param_name}",
             headers=auth.get_headers(),
         )
         if req.status_code != 200:
