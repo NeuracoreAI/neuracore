@@ -198,7 +198,7 @@ def mock_dataset_api(
     )
 
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/by-name/{dataset_dict['name']}",
+        re.compile(f"{API_URL}/org/{mocked_org_id}/datasets/by-name/.*"),
         json=dataset_dict,
         status_code=200,
     )
@@ -417,3 +417,13 @@ class TestDataset:
         # Should have processed 2 episodes with 2 frames each
         assert episode_count == 2
         assert total_frames == 4
+
+    def test_get_dataset_by_name(self, mock_dataset_api, mocked_org_id):
+        """Test getting a dataset by name."""
+        dataset_name = "ghjdidnia-dd/X0551-Ker-Pieb87-846483-CNNMLPP"
+
+        Dataset.create(
+            dataset_name, description="Test description", tags=["test"], shared=False
+        )
+        dataset = Dataset.get_by_name(dataset_name)
+        assert dataset is not None

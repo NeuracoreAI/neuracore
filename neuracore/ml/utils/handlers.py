@@ -5,6 +5,19 @@ robot control models. It handles model loading, data preprocessing, inference
 execution, and response formatting for robot control applications.
 """
 
+import subprocess
+import sys
+
+# Ensure neuracore is installed when running on cloud
+# ruff: noqa: E402
+subprocess.check_call([
+    sys.executable,
+    "-m",
+    "pip",
+    "install",
+    "neuracore",
+])
+
 import base64
 import io
 import json
