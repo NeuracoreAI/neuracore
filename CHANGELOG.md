@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The current organization is now stored locally at `~/.neuracore/config.json` rather than being set globally
+- Training now supports all data types. See CNNMLP for an example.
 
 ### Removed
 

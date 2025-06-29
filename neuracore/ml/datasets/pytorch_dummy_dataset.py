@@ -26,7 +26,8 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
     This dataset generates random data with the same structure and dimensions
     as real Neuracore datasets, allowing for algorithm development and testing
     without requiring actual robot demonstration data. It supports all standard
-    data types including images, joint data, and language instructions.
+    data types including images, joint data, depth images, point clouds,
+    poses, end-effectors, and language instructions.
     """
 
     def __init__(
@@ -80,8 +81,8 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         )
 
         self.dataset_description = DatasetDescription()
-        if DataType.RGB_IMAGE in self.data_types:
-            self.dataset_description.max_num_rgb_images = 2
+
+        # Joint data
         if DataType.JOINT_POSITIONS in self.data_types:
             self.dataset_description.joint_positions = DataItemStats(
                 mean=np.zeros(6), std=np.ones(6), max_len=6
@@ -98,9 +99,41 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             self.dataset_description.joint_target_positions = DataItemStats(
                 mean=np.zeros(7), std=np.ones(7), max_len=7
             )
+
+        # End-effector data
+        if DataType.END_EFFECTORS in self.data_types:
+            self.dataset_description.end_effector_states = DataItemStats(
+                mean=np.zeros(2),
+                std=np.ones(2),
+                max_len=2,  # e.g., gripper open amounts
+            )
+
+        # Pose data
+        if DataType.POSES in self.data_types:
+            self.dataset_description.poses = DataItemStats(
+                mean=np.zeros(12), std=np.ones(12), max_len=12  # 2 poses x 6DOF each
+            )
+
+        # Visual data
+        if DataType.RGB_IMAGE in self.data_types:
+            self.dataset_description.max_num_rgb_images = 2
+        if DataType.DEPTH_IMAGE in self.data_types:
+            self.dataset_description.max_num_depth_images = 2
+        if DataType.POINT_CLOUD in self.data_types:
+            self.dataset_description.max_num_point_clouds = 1
+
+        # Language data
         if DataType.LANGUAGE in self.data_types:
-            # Add language data stats to dataset description
             self.dataset_description.max_language_length = max_language_length
+
+        # Custom data
+        if DataType.CUSTOM in self.data_types:
+            self.dataset_description.custom_data_stats = {
+                "sensor_1": DataItemStats(
+                    mean=np.zeros(10), std=np.ones(10), max_len=10
+                ),
+                "sensor_2": DataItemStats(mean=np.zeros(5), std=np.ones(5), max_len=5),
+            }
 
         self._error_count = 0
         self._max_error_count = 1
@@ -131,6 +164,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 ),
             )
 
+            # Visual data
             if DataType.RGB_IMAGE in self.data_types:
                 max_rgb_len = self.dataset_description.max_num_rgb_images
                 rgb_images = MaskableData(
@@ -144,6 +178,33 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 if DataType.RGB_IMAGE in self.output_data_types:
                     sample.outputs.rgb_images = rgb_images
 
+            if DataType.DEPTH_IMAGE in self.data_types:
+                max_depth_len = self.dataset_description.max_num_depth_images
+                depth_images = MaskableData(
+                    torch.zeros(
+                        (max_depth_len, 1, *self.image_size), dtype=torch.float32
+                    ),
+                    torch.ones((max_depth_len,), dtype=torch.float32),
+                )
+                if DataType.DEPTH_IMAGE in self.input_data_types:
+                    sample.inputs.depth_images = depth_images
+                if DataType.DEPTH_IMAGE in self.output_data_types:
+                    sample.outputs.depth_images = depth_images
+
+            if DataType.POINT_CLOUD in self.data_types:
+                max_pc_len = self.dataset_description.max_num_point_clouds
+                # Point clouds: [num_clouds, num_points, 3 (x,y,z)]
+                num_points = 1024  # Standard point cloud size
+                point_clouds = MaskableData(
+                    torch.randn((max_pc_len, num_points, 3), dtype=torch.float32),
+                    torch.ones((max_pc_len,), dtype=torch.float32),
+                )
+                if DataType.POINT_CLOUD in self.input_data_types:
+                    sample.inputs.point_clouds = point_clouds
+                if DataType.POINT_CLOUD in self.output_data_types:
+                    sample.outputs.point_clouds = point_clouds
+
+            # Joint data
             if DataType.JOINT_POSITIONS in self.data_types:
                 max_jp_len = self.dataset_description.joint_positions.max_len
                 joint_positions = MaskableData(
@@ -188,6 +249,31 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 if DataType.JOINT_TARGET_POSITIONS in self.output_data_types:
                     sample.outputs.joint_target_positions = joint_target_positions
 
+            # End-effector data
+            if DataType.END_EFFECTORS in self.data_types:
+                max_ee_len = self.dataset_description.end_effector_states.max_len
+                end_effectors = MaskableData(
+                    torch.zeros((max_ee_len,), dtype=torch.float32),
+                    torch.ones((max_ee_len,), dtype=torch.float32),
+                )
+                if DataType.END_EFFECTORS in self.input_data_types:
+                    sample.inputs.end_effectors = end_effectors
+                if DataType.END_EFFECTORS in self.output_data_types:
+                    sample.outputs.end_effectors = end_effectors
+
+            # Pose data
+            if DataType.POSES in self.data_types:
+                max_pose_len = self.dataset_description.poses.max_len
+                poses = MaskableData(
+                    torch.zeros((max_pose_len,), dtype=torch.float32),
+                    torch.ones((max_pose_len,), dtype=torch.float32),
+                )
+                if DataType.POSES in self.input_data_types:
+                    sample.inputs.poses = poses
+                if DataType.POSES in self.output_data_types:
+                    sample.outputs.poses = poses
+
+            # Language data
             if DataType.LANGUAGE in self.data_types:
                 if self.tokenize_text is None:
                     raise ValueError(
@@ -204,6 +290,24 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                     sample.inputs.language_tokens = language_tokens
                 if DataType.LANGUAGE in self.output_data_types:
                     sample.outputs.language_tokens = language_tokens
+
+            # Custom data
+            if DataType.CUSTOM in self.data_types:
+                # Generate some example custom data
+                custom_data = {
+                    "sensor_1": MaskableData(
+                        torch.randn((10,), dtype=torch.float32),
+                        torch.ones((10,), dtype=torch.float32),
+                    ),
+                    "sensor_2": MaskableData(
+                        torch.randn((5,), dtype=torch.float32),
+                        torch.ones((5,), dtype=torch.float32),
+                    ),
+                }
+                if DataType.CUSTOM in self.input_data_types:
+                    sample.inputs.custom_data = custom_data
+                if DataType.CUSTOM in self.output_data_types:
+                    sample.outputs.custom_data = custom_data
 
             return sample
 
@@ -250,6 +354,19 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                     )
                     bd.__dict__[key].data = data
                     bd.__dict__[key].mask = mask
+                elif isinstance(bd.__dict__[key], dict):
+                    # Handle custom_data dictionary
+                    for custom_key, custom_value in bd.__dict__[key].items():
+                        if isinstance(custom_value, MaskableData):
+                            data = custom_value.data.unsqueeze(1)
+                            data = data.expand(
+                                -1, self.output_prediction_horizon, *data.shape[2:]
+                            )
+                            mask = custom_value.mask.unsqueeze(1)
+                            mask = mask.expand(
+                                -1, self.output_prediction_horizon, *mask.shape[2:]
+                            )
+                            bd.__dict__[key][custom_key] = MaskableData(data, mask)
         return BatchedTrainingSamples(
             inputs=self._collate_fn([s.inputs for s in samples], self.input_data_types),
             outputs=bd,
