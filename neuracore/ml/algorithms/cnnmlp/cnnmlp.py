@@ -9,7 +9,6 @@ and outputs entire action sequences.
 import time
 from typing import Any, Dict
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
@@ -20,6 +19,14 @@ from neuracore.ml import (
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     NeuracoreModel,
+)
+from neuracore.ml.algorithm_utils.modules import (
+    CustomDataEncoder,
+    DepthImageEncoder,
+    EndEffectorEncoder,
+    MultimodalFusionEncoder,
+    PointCloudEncoder,
+    PoseEncoder,
 )
 
 from .modules import ImageEncoder
@@ -66,29 +73,91 @@ class CNNMLP(NeuracoreModel):
         self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
 
-        self.image_encoders = nn.ModuleList([
-            ImageEncoder(output_dim=self.cnn_output_dim)
-            for _ in range(self.dataset_description.max_num_rgb_images)
-        ])
+        # Initialize encoders for each supported modality
+        self.encoders = nn.ModuleDict()
+        self.feature_dims = {}
 
-        state_input_dim = (
-            self.dataset_description.joint_positions.max_len
-            + self.dataset_description.joint_velocities.max_len
-            + self.dataset_description.joint_torques.max_len
-        )
-        self.state_embed = None
-        hidden_state_dim = 0
+        # Vision encoders
+        if DataType.RGB_IMAGE in self.model_init_description.input_data_types:
+            self.encoders["rgb"] = nn.ModuleList([
+                ImageEncoder(output_dim=cnn_output_dim)
+                for _ in range(self.dataset_description.max_num_rgb_images)
+            ])
+            self.feature_dims["rgb"] = (
+                self.dataset_description.max_num_rgb_images * cnn_output_dim
+            )
+
+        if DataType.DEPTH_IMAGE in self.model_init_description.input_data_types:
+            self.encoders["depth"] = nn.ModuleList([
+                DepthImageEncoder(output_dim=cnn_output_dim)
+                for _ in range(self.dataset_description.max_num_depth_images)
+            ])
+            self.feature_dims["depth"] = (
+                self.dataset_description.max_num_depth_images * cnn_output_dim
+            )
+
+        if DataType.POINT_CLOUD in self.model_init_description.input_data_types:
+            self.encoders["point_cloud"] = nn.ModuleList([
+                PointCloudEncoder(output_dim=cnn_output_dim)
+                for _ in range(self.dataset_description.max_num_point_clouds)
+            ])
+            self.feature_dims["point_cloud"] = (
+                self.dataset_description.max_num_point_clouds * cnn_output_dim
+            )
+
+        # State encoders
+        state_input_dim = 0
+        if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
+            state_input_dim += self.dataset_description.joint_positions.max_len
+        if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
+            state_input_dim += self.dataset_description.joint_velocities.max_len
+        if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
+            state_input_dim += self.dataset_description.joint_torques.max_len
+
         if state_input_dim > 0:
-            hidden_state_dim = hidden_dim
-            self.state_embed = nn.Linear(state_input_dim, hidden_dim)
+            self.encoders["joints"] = nn.Linear(state_input_dim, cnn_output_dim)
+            self.feature_dims["joints"] = cnn_output_dim
 
-        mlp_input_dim = (
-            self.dataset_description.max_num_rgb_images * cnn_output_dim
-            + hidden_state_dim
+        # End-effector encoder
+        if DataType.END_EFFECTORS in self.model_init_description.input_data_types:
+            self.encoders["end_effectors"] = EndEffectorEncoder(
+                output_dim=cnn_output_dim,
+                max_effectors=self.dataset_description.end_effector_states.max_len,
+            )
+            self.feature_dims["end_effectors"] = cnn_output_dim
+
+        # Pose encoder
+        if DataType.POSES in self.model_init_description.input_data_types:
+            self.encoders["poses"] = PoseEncoder(
+                output_dim=cnn_output_dim,
+                max_poses=self.dataset_description.poses.max_len // 6,  # 6DOF per pose
+            )
+            self.feature_dims["poses"] = cnn_output_dim
+
+        # Language encoder (simplified - just use embedding)
+        if DataType.LANGUAGE in self.model_init_description.input_data_types:
+            self.encoders["language"] = nn.Sequential(
+                nn.Embedding(1000, 128),  # Simple embedding
+                nn.Linear(128, cnn_output_dim),
+            )
+            self.feature_dims["language"] = cnn_output_dim
+
+        # Custom data encoders
+        self.custom_encoders = nn.ModuleDict()
+        for key, data_items_stats in self.dataset_description.custom_data_stats.items():
+            self.custom_encoders[key] = CustomDataEncoder(
+                input_dim=data_items_stats.max_len, output_dim=cnn_output_dim
+            )
+            self.feature_dims[key] = cnn_output_dim
+
+        # Use multimodal fusion if multiple modalities
+        self.fusion = MultimodalFusionEncoder(
+            feature_dims=self.feature_dims, output_dim=hidden_dim
         )
+        mlp_input_dim = hidden_dim
 
+        # Determine output configuration
         self.action_data_type = self.model_init_description.output_data_types[0]
-        self.output_prediction_horizon = self.output_prediction_horizon
         if DataType.JOINT_TARGET_POSITIONS == self.action_data_type:
             action_data_item_stats = self.dataset_description.joint_target_positions
         else:
@@ -104,23 +173,49 @@ class CNNMLP(NeuracoreModel):
             num_layers=num_layers,
         )
 
-        self.transform = torch.nn.Sequential(
+        # Image transformations
+        self.rgb_transform = torch.nn.Sequential(
             T.Resize((224, 224)),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         )
 
-        state_mean = np.concatenate([
-            self.dataset_description.joint_positions.mean,
-            self.dataset_description.joint_velocities.mean,
-            self.dataset_description.joint_torques.mean,
-        ])
-        state_std = np.concatenate([
-            self.dataset_description.joint_positions.std,
-            self.dataset_description.joint_velocities.std,
-            self.dataset_description.joint_torques.std,
-        ])
-        self.joint_state_mean = self._to_torch_float_tensor(state_mean)
-        self.joint_state_std = self._to_torch_float_tensor(state_std)
+        self.depth_transform = torch.nn.Sequential(
+            T.Resize((224, 224)),
+            T.Normalize(mean=[0.5], std=[0.5]),  # Simple normalization for depth
+        )
+
+        # Normalization statistics
+        self._setup_normalization_stats()
+
+    def _setup_normalization_stats(self) -> None:
+        """Setup normalization statistics for different data types."""
+        # Joint state normalization
+        state_means = []
+        state_stds = []
+
+        if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_positions.mean)
+            state_stds.extend(self.dataset_description.joint_positions.std)
+        if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_velocities.mean)
+            state_stds.extend(self.dataset_description.joint_velocities.std)
+        if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_torques.mean)
+            state_stds.extend(self.dataset_description.joint_torques.std)
+
+        if state_means:
+            self.joint_state_mean = self._to_torch_float_tensor(state_means)
+            self.joint_state_std = self._to_torch_float_tensor(state_stds)
+        else:
+            self.joint_state_mean = None
+            self.joint_state_std = None
+
+        # Action normalization
+        action_data_item_stats = (
+            self.dataset_description.joint_target_positions
+            if self.action_data_type == DataType.JOINT_TARGET_POSITIONS
+            else self.dataset_description.joint_positions
+        )
         self.action_mean = self._to_torch_float_tensor(action_data_item_stats.mean)
         self.action_std = self._to_torch_float_tensor(action_data_item_stats.std)
 
@@ -155,8 +250,8 @@ class CNNMLP(NeuracoreModel):
         layers = [
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.LayerNorm(hidden_dim),  # Added normalization
-            nn.Dropout(0.1),  # Added dropout
+            nn.LayerNorm(hidden_dim),
+            nn.Dropout(0.1),
         ]
 
         for _ in range(num_layers - 2):
@@ -168,7 +263,6 @@ class CNNMLP(NeuracoreModel):
             ])
 
         layers.append(nn.Linear(hidden_dim, output_dim))
-
         return nn.Sequential(*layers)
 
     def _preprocess_joint_state(
@@ -182,7 +276,9 @@ class CNNMLP(NeuracoreModel):
         Returns:
             torch.FloatTensor: Normalized joint state
         """
-        return (joint_state - self.joint_state_mean) / self.joint_state_std
+        if self.joint_state_mean is not None and self.joint_state_std is not None:
+            return (joint_state - self.joint_state_mean) / self.joint_state_std
+        return joint_state
 
     def _preprocess_actions(self, actions: torch.FloatTensor) -> torch.FloatTensor:
         """Normalize actions using dataset statistics.
@@ -194,6 +290,121 @@ class CNNMLP(NeuracoreModel):
             torch.FloatTensor: Normalized actions
         """
         return (actions - self.action_mean) / self.action_std
+
+    def _process_visual_features(
+        self, batch: BatchedInferenceSamples
+    ) -> Dict[str, torch.Tensor]:
+        """Process all visual modalities and return features."""
+        features = {}
+
+        # RGB images
+        if "rgb" in self.encoders and batch.rgb_images is not None:
+            image_features = []
+            for cam_id, encoder in enumerate(self.encoders["rgb"]):
+                features_cam = encoder(
+                    self.rgb_transform(batch.rgb_images.data[:, cam_id])
+                )
+                # Apply mask
+                features_cam *= batch.rgb_images.mask[:, cam_id : cam_id + 1]
+                image_features.append(features_cam)
+            features["rgb"] = torch.cat(image_features, dim=-1)
+
+        # Depth images
+        if "depth" in self.encoders and batch.depth_images is not None:
+            depth_features = []
+            for cam_id, encoder in enumerate(self.encoders["depth"]):
+                features_cam = encoder(
+                    self.depth_transform(batch.depth_images.data[:, cam_id])
+                )
+                # Apply mask
+                features_cam *= batch.depth_images.mask[:, cam_id : cam_id + 1]
+                depth_features.append(features_cam)
+            features["depth"] = torch.cat(depth_features, dim=-1)
+
+        # Point clouds
+        if "point_cloud" in self.encoders and batch.point_clouds is not None:
+            pc_features = []
+            for pc_id, encoder in enumerate(self.encoders["point_cloud"]):
+                features_pc = encoder(batch.point_clouds.data[:, pc_id])
+                # Apply mask
+                features_pc *= batch.point_clouds.mask[:, pc_id : pc_id + 1]
+                pc_features.append(features_pc)
+            features["point_cloud"] = torch.cat(pc_features, dim=-1)
+
+        return features
+
+    def _process_state_features(
+        self, batch: BatchedInferenceSamples
+    ) -> Dict[str, torch.Tensor]:
+        """Process all state modalities and return features."""
+        features = {}
+
+        # Joint states
+        if "joints" in self.encoders:
+            state_inputs = []
+            if batch.joint_positions is not None:
+                state_inputs.append(
+                    batch.joint_positions.data * batch.joint_positions.mask
+                )
+            if batch.joint_velocities is not None:
+                state_inputs.append(
+                    batch.joint_velocities.data * batch.joint_velocities.mask
+                )
+            if batch.joint_torques is not None:
+                state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
+
+            if state_inputs:
+                joint_states = torch.cat(state_inputs, dim=-1)
+                joint_states = self._preprocess_joint_state(joint_states)
+                features["joints"] = self.encoders["joints"](joint_states)
+
+        # End-effectors
+        if "end_effectors" in self.encoders and batch.end_effectors is not None:
+            ee_data = batch.end_effectors.data * batch.end_effectors.mask
+            features["end_effectors"] = self.encoders["end_effectors"](ee_data)
+
+        # Poses
+        if "poses" in self.encoders and batch.poses is not None:
+            pose_data = batch.poses.data * batch.poses.mask
+            features["poses"] = self.encoders["poses"](pose_data)
+
+        return features
+
+    def _process_language_features(
+        self, batch: BatchedInferenceSamples
+    ) -> Dict[str, torch.Tensor]:
+        """Process language features."""
+        features = {}
+
+        if "language" in self.encoders and batch.language_tokens is not None:
+            # Simple approach: use mean of token embeddings
+            token_embeddings = self.encoders["language"][0](
+                batch.language_tokens.data.long()
+            )
+            # Apply attention mask and take mean
+            masked_embeddings = token_embeddings * batch.language_tokens.mask.unsqueeze(
+                -1
+            )
+            mean_embeddings = masked_embeddings.sum(
+                dim=1
+            ) / batch.language_tokens.mask.sum(dim=1, keepdim=True)
+            features["language"] = self.encoders["language"][1](mean_embeddings)
+
+        return features
+
+    def _process_custom_features(
+        self, batch: BatchedInferenceSamples
+    ) -> Dict[str, torch.Tensor]:
+        """Process custom data features."""
+        features = {}
+
+        if batch.custom_data is not None:
+            for key, custom_data in batch.custom_data.items():
+                if key in self.custom_encoders:
+                    custom_input = custom_data.data * custom_data.mask
+                    features[key] = self.custom_encoders[key](custom_input)
+
+        return features
 
     def _predict_action(self, batch: BatchedInferenceSamples) -> torch.FloatTensor:
         """Predict action sequence for the given batch.
@@ -208,46 +419,18 @@ class CNNMLP(NeuracoreModel):
             torch.FloatTensor: Predicted action sequence [B, T, action_dim]
         """
         batch_size = len(batch)
+        all_features = {}
 
-        # Process images from each camera
-        image_features = []
-        if batch.rgb_images is not None:
-            for cam_id, encoder in enumerate(self.image_encoders):
-                features = encoder(self.transform(batch.rgb_images.data[:, cam_id]))
-                features *= batch.rgb_images.mask[:, cam_id : cam_id + 1]
-                image_features.append(features)
+        # Process each modality
+        all_features.update(self._process_visual_features(batch))
+        all_features.update(self._process_state_features(batch))
+        all_features.update(self._process_language_features(batch))
+        all_features.update(self._process_custom_features(batch))
 
-        # Combine image features
-        if image_features:
-            combined_image_features = torch.cat(image_features, dim=-1)
-        else:
-            combined_image_features = torch.zeros(
-                batch_size, self.cnn_output_dim, device=self.device, dtype=torch.float32
-            )
-
-        combined_features = combined_image_features
-        if self.state_embed is not None:
-            state_inputs = []
-            if batch.joint_positions:
-                state_inputs.append(
-                    batch.joint_positions.data * batch.joint_positions.mask
-                )
-            if batch.joint_velocities:
-                state_inputs.append(
-                    batch.joint_velocities.data * batch.joint_velocities.mask
-                )
-            if batch.joint_torques:
-                state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
-            joint_states = torch.cat(state_inputs, dim=-1)
-            joint_states = self._preprocess_joint_state(joint_states)
-            state_features = self.state_embed(joint_states)
-            combined_features = torch.cat(
-                [state_features, combined_image_features], dim=-1
-            )
+        combined_features = self.fusion(all_features)
 
         # Forward through MLP to get entire sequence
         mlp_out = self.mlp(combined_features)
-
         action_preds = mlp_out.view(
             batch_size, self.output_prediction_horizon, self.max_output_size
         )
@@ -288,7 +471,13 @@ class CNNMLP(NeuracoreModel):
             joint_positions=batch.inputs.joint_positions,
             joint_velocities=batch.inputs.joint_velocities,
             joint_torques=batch.inputs.joint_torques,
+            end_effectors=batch.inputs.end_effectors,
+            poses=batch.inputs.poses,
             rgb_images=batch.inputs.rgb_images,
+            depth_images=batch.inputs.depth_images,
+            point_clouds=batch.inputs.point_clouds,
+            language_tokens=batch.inputs.language_tokens,
+            custom_data=batch.inputs.custom_data,
         )
 
         if self.action_data_type == DataType.JOINT_TARGET_POSITIONS:
@@ -301,15 +490,18 @@ class CNNMLP(NeuracoreModel):
             action_data = batch.outputs.joint_positions.data
 
         target_actions = self._preprocess_actions(action_data)
-        action_predicitons = self._predict_action(inference_sample)
+        action_predictions = self._predict_action(inference_sample)
+
         losses: Dict[str, Any] = {}
         metrics: Dict[str, Any] = {}
+
         if self.training:
             losses["mse_loss"] = nn.functional.mse_loss(
-                action_predicitons, target_actions
+                action_predictions, target_actions
             )
+
         return BatchedTrainingOutputs(
-            output_predicitons=action_predicitons,
+            output_predicitons=action_predictions,
             losses=losses,
             metrics=metrics,
         )
@@ -327,7 +519,7 @@ class CNNMLP(NeuracoreModel):
         other_params = []
 
         for name, param in self.named_parameters():
-            if "image_encoders" in name:
+            if any(backbone in name for backbone in ["rgb", "depth"]):
                 backbone_params.append(param)
             else:
                 other_params.append(param)
@@ -349,7 +541,13 @@ class CNNMLP(NeuracoreModel):
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
+            DataType.END_EFFECTORS,
+            DataType.POSES,
             DataType.RGB_IMAGE,
+            DataType.DEPTH_IMAGE,
+            DataType.POINT_CLOUD,
+            DataType.LANGUAGE,
+            DataType.CUSTOM,
         ]
 
     @staticmethod
@@ -360,3 +558,30 @@ class CNNMLP(NeuracoreModel):
             list[DataType]: List of supported output data types
         """
         return [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]
+
+    @staticmethod
+    def tokenize_text(text: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Tokenize text using simple word-level tokenization.
+
+        Args:
+            text: List of text strings to tokenize
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: Input IDs and attention masks
+        """
+        # Simple tokenization - convert to word indices
+        max_length = 50
+        vocab_size = 1000
+
+        batch_size = len(text)
+        input_ids = torch.zeros(batch_size, max_length, dtype=torch.long)
+        attention_mask = torch.zeros(batch_size, max_length, dtype=torch.float)
+
+        for i, txt in enumerate(text):
+            words = txt.lower().split()[:max_length]
+            for j, word in enumerate(words):
+                # Simple hash-based vocab mapping
+                input_ids[i, j] = hash(word) % vocab_size
+                attention_mask[i, j] = 1.0
+
+        return input_ids, attention_mask

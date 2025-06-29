@@ -2,12 +2,13 @@
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import requests
 import torch
 from torch import nn
 
+import neuracore as nc
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
@@ -33,9 +34,8 @@ class TrainingStorageHandler:
         self.log_to_cloud = self.training_job_id is not None
         self.org_id = get_current_org()
         if self.log_to_cloud:
-            response = requests.get(
-                f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}",
-                headers=get_auth().get_headers(),
+            response = self._get_request(
+                f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}"
             )
             if response.status_code != 200:
                 raise ValueError(
@@ -55,16 +55,14 @@ class TrainingStorageHandler:
         Raises:
             ValueError: If the request to get the upload URL fails.
         """
-        auth = get_auth()
         params = {
             "filepath": filepath,
             "content_type": content_type,
         }
 
-        response = requests.get(
+        response = self._get_request(
             f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/upload-url",
             params=params,
-            headers=auth.get_headers(),
         )
         if response.status_code != 200:
             raise ValueError(
@@ -84,12 +82,10 @@ class TrainingStorageHandler:
         Raises:
             ValueError: If the request to get the download URL fails.
         """
-        auth = get_auth()
         get_current_org()
-        response = requests.get(
-            f"{API_URL}/org/{self.org_id}/recording/{self.training_job_id}/download-url",
+        response = self._get_request(
+            f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/download-url",
             params={"filepath": filepath},
-            headers=auth.get_headers(),
         )
         if response.status_code != 200:
             raise ValueError(
@@ -113,7 +109,7 @@ class TrainingStorageHandler:
                 content_type="application/octet-stream",
             )
             with open(save_path, "rb") as f:
-                response = requests.put(
+                response = self._put_request(
                     upload_url,
                     data=f,
                     headers={"Content-Type": "application/octet-stream"},
@@ -168,7 +164,7 @@ class TrainingStorageHandler:
                     content_type="application/octet-stream",
                 )
                 with open(file_path, "rb") as f:
-                    response = requests.put(
+                    response = self._put_request(
                         upload_url,
                         data=f,
                         headers={"Content-Type": "application/octet-stream"},
@@ -189,10 +185,50 @@ class TrainingStorageHandler:
             error: Optional error message if training failed.
         """
         if self.log_to_cloud:
-            response = requests.put(
+            response = self._put_request(
                 f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/update",
-                headers=get_auth().get_headers(),
                 json={"epoch": epoch, "step": step, "error": error},
             )
             if response.status_code != 200:
                 logger.error(f"Failed to save epoch {epoch} to cloud: {response.text}")
+
+    def _put_request(
+        self,
+        url: str,
+        json: Optional[dict] = None,
+        data: Optional[Any] = None,
+        headers: Optional[dict] = None,
+    ) -> requests.Response:
+        """Helper method to send a PUT request.
+
+        Args:
+            url: The URL to send the request to.
+            json: The JSON payload to include in the request.
+            data: Optional data to include in the request body.
+            headers: Optional headers to include in the request.
+        """
+        headers = headers or get_auth().get_headers()
+        response = requests.put(url, headers=headers, json=json, data=data)
+        if response.status_code == 401:
+            logger.warning("Unauthorized request. Token may have expired.")
+            nc.login()
+            response = requests.put(url, headers=headers, json=json, data=data)
+        return response
+
+    def _get_request(
+        self, url: str, params: Optional[dict] = None
+    ) -> requests.Response:
+        """Helper method to send a GET request.
+
+        Args:
+            url: The URL to send the request to.
+            params: Optional parameters to include in the request.
+        """
+        response = requests.get(url, headers=get_auth().get_headers(), params=params)
+        if response.status_code == 401:
+            logger.warning("Unauthorized request. Token may have expired.")
+            nc.login()
+            response = requests.get(
+                url, headers=get_auth().get_headers(), params=params
+            )
+        return response

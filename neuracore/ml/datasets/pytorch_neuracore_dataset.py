@@ -1,14 +1,13 @@
 """Abstract base class for Neuracore datasets with multi-modal data support.
 
 This module provides the foundation for creating datasets that handle robot
-demonstration data including images, joint states, and language instructions.
-It includes standardized preprocessing, batching, and error handling for
-machine learning training workflows.
+demonstration data including images, joint states, depth images, point clouds,
+poses, end-effectors, and language instructions.
 """
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Callable, Optional, cast
+from typing import Callable, Optional, Set, cast
 
 import torch
 import torchvision.transforms as T
@@ -29,7 +28,8 @@ class PytorchNeuracoreDataset(Dataset, ABC):
     This class provides a standardized interface for datasets containing robot
     demonstration data. It handles data type validation, preprocessing setup,
     batch collation, and error management for training machine learning models
-    on robot data including images, joint states, and language instructions.
+    on robot data including images, joint states, depth images, point clouds,
+    poses, end-effectors, and language instructions.
     """
 
     def __init__(
@@ -58,6 +58,10 @@ class PytorchNeuracoreDataset(Dataset, ABC):
         Raises:
             ValueError: If language data is requested but no tokenizer is provided.
         """
+        if len(input_data_types) == 0 and len(output_data_types) == 0:
+            raise ValueError(
+                "Must supply both input and output data types for the dataset"
+            )
         self.num_recordings = num_recordings
         self.input_data_types = input_data_types
         self.output_data_types = output_data_types
@@ -120,6 +124,13 @@ class PytorchNeuracoreDataset(Dataset, ABC):
         Raises:
             Exception: If sample loading fails after exhausting retry attempts.
         """
+        if idx < 0:
+            # Handle negative indices by wrapping around
+            idx += len(self)
+        if idx < 0 or idx >= len(self):
+            raise IndexError(
+                f"Index {idx} out of bounds for dataset of size {len(self)}"
+            )
         while self._error_count < self._max_error_count:
             try:
                 episode_idx = idx % self.num_recordings
@@ -149,6 +160,8 @@ class PytorchNeuracoreDataset(Dataset, ABC):
             A single BatchedData object containing the stacked samples.
         """
         bd = BatchedData()
+
+        # Joint state data
         if DataType.JOINT_POSITIONS in data_types:
             if any(s.joint_positions is None for s in samples):
                 raise ValueError(
@@ -209,6 +222,34 @@ class PytorchNeuracoreDataset(Dataset, ABC):
                 ),
             )
 
+        # End-effector data
+        if DataType.END_EFFECTORS in data_types:
+            if any(s.end_effectors is None for s in samples):
+                raise ValueError(
+                    "All samples must have end_effectors when "
+                    "END_EFFECTORS data type is requested"
+                )
+            bd.end_effectors = MaskableData(
+                torch.stack(
+                    [cast(MaskableData, s.end_effectors).data for s in samples]
+                ),
+                torch.stack(
+                    [cast(MaskableData, s.end_effectors).mask for s in samples]
+                ),
+            )
+
+        # Pose data
+        if DataType.POSES in data_types:
+            if any(s.poses is None for s in samples):
+                raise ValueError(
+                    "All samples must have poses when " "POSES data type is requested"
+                )
+            bd.poses = MaskableData(
+                torch.stack([cast(MaskableData, s.poses).data for s in samples]),
+                torch.stack([cast(MaskableData, s.poses).mask for s in samples]),
+            )
+
+        # Visual data
         if DataType.RGB_IMAGE in data_types:
             if any(s.rgb_images is None for s in samples):
                 raise ValueError(
@@ -219,6 +260,30 @@ class PytorchNeuracoreDataset(Dataset, ABC):
                 torch.stack([cast(MaskableData, s.rgb_images).data for s in samples]),
                 torch.stack([cast(MaskableData, s.rgb_images).mask for s in samples]),
             )
+
+        if DataType.DEPTH_IMAGE in data_types:
+            if any(s.depth_images is None for s in samples):
+                raise ValueError(
+                    "All samples must have depth_images when "
+                    "DEPTH_IMAGE data type is requested"
+                )
+            bd.depth_images = MaskableData(
+                torch.stack([cast(MaskableData, s.depth_images).data for s in samples]),
+                torch.stack([cast(MaskableData, s.depth_images).mask for s in samples]),
+            )
+
+        if DataType.POINT_CLOUD in data_types:
+            if any(s.point_clouds is None for s in samples):
+                raise ValueError(
+                    "All samples must have point_clouds when "
+                    "POINT_CLOUD data type is requested"
+                )
+            bd.point_clouds = MaskableData(
+                torch.stack([cast(MaskableData, s.point_clouds).data for s in samples]),
+                torch.stack([cast(MaskableData, s.point_clouds).mask for s in samples]),
+            )
+
+        # Language data
         if DataType.LANGUAGE in data_types:
             if any(s.language_tokens is None for s in samples):
                 raise ValueError(
@@ -233,6 +298,42 @@ class PytorchNeuracoreDataset(Dataset, ABC):
                     [cast(MaskableData, s.language_tokens).mask for s in samples]
                 ),
             )
+
+        # Custom data
+        if DataType.CUSTOM in data_types:
+            # Collect all custom data keys from all samples
+            all_custom_keys: Set[str] = set()
+            for sample in samples:
+                if sample.custom_data:
+                    all_custom_keys.update(sample.custom_data.keys())
+
+            bd.custom_data = {}
+            for key in all_custom_keys:
+                # Check if all samples have this custom data key
+                custom_data_list = []
+                custom_mask_list = []
+                for sample in samples:
+                    if sample.custom_data and key in sample.custom_data:
+                        custom_data_list.append(sample.custom_data[key].data)
+                        custom_mask_list.append(sample.custom_data[key].mask)
+                    else:
+                        # Create zero tensors for missing data
+                        if custom_data_list:
+                            # Use the shape of the first sample for consistency
+                            zero_data = torch.zeros_like(custom_data_list[0])
+                            zero_mask = torch.zeros_like(custom_mask_list[0])
+                        else:
+                            # If this is the first sample and it's missing, skip
+                            continue
+                        custom_data_list.append(zero_data)
+                        custom_mask_list.append(zero_mask)
+
+                if custom_data_list:
+                    bd.custom_data[key] = MaskableData(
+                        torch.stack(custom_data_list),
+                        torch.stack(custom_mask_list),
+                    )
+
         return bd
 
     def collate_fn(self, samples: list[TrainingSample]) -> BatchedTrainingSamples:

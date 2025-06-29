@@ -185,18 +185,28 @@ class DatasetDescription(BaseModel):
     for determining which data types are present.
     """
 
-    joint_positions: DataItemStats = Field(default_factory=lambda: DataItemStats())
-    joint_velocities: DataItemStats = Field(default_factory=lambda: DataItemStats())
-    joint_torques: DataItemStats = Field(default_factory=lambda: DataItemStats())
-    joint_target_positions: DataItemStats = Field(
-        default_factory=lambda: DataItemStats()
-    )
-    end_effector_states: DataItemStats = Field(default_factory=lambda: DataItemStats())
-    poses: DataItemStats = Field(default_factory=lambda: DataItemStats())
+    # Joint data statistics
+    joint_positions: DataItemStats = Field(default_factory=DataItemStats)
+    joint_velocities: DataItemStats = Field(default_factory=DataItemStats)
+    joint_torques: DataItemStats = Field(default_factory=DataItemStats)
+    joint_target_positions: DataItemStats = Field(default_factory=DataItemStats)
+
+    # End-effector statistics
+    end_effector_states: DataItemStats = Field(default_factory=DataItemStats)
+
+    # Pose statistics
+    poses: DataItemStats = Field(default_factory=DataItemStats)
+
+    # Visual data counts
     max_num_rgb_images: int = 0
     max_num_depth_images: int = 0
     max_num_point_clouds: int = 0
+
+    # Language data
     max_language_length: int = 0
+
+    # Custom data statistics
+    custom_data_stats: dict[str, DataItemStats] = Field(default_factory=dict)
 
     def get_data_types(self) -> list[DataType]:
         """Determine which data types are present in the dataset.
@@ -209,6 +219,8 @@ class DatasetDescription(BaseModel):
             present in this dataset.
         """
         data_types = []
+
+        # Joint data
         if self.joint_positions.max_len > 0:
             data_types.append(DataType.JOINT_POSITIONS)
         if self.joint_velocities.max_len > 0:
@@ -217,15 +229,44 @@ class DatasetDescription(BaseModel):
             data_types.append(DataType.JOINT_TORQUES)
         if self.joint_target_positions.max_len > 0:
             data_types.append(DataType.JOINT_TARGET_POSITIONS)
+
+        # End-effector data
+        if self.end_effector_states.max_len > 0:
+            data_types.append(DataType.END_EFFECTORS)
+
+        # Pose data
+        if self.poses.max_len > 0:
+            data_types.append(DataType.POSES)
+
+        # Visual data
         if self.max_num_rgb_images > 0:
             data_types.append(DataType.RGB_IMAGE)
         if self.max_num_depth_images > 0:
             data_types.append(DataType.DEPTH_IMAGE)
         if self.max_num_point_clouds > 0:
             data_types.append(DataType.POINT_CLOUD)
+
+        # Language data
         if self.max_language_length > 0:
             data_types.append(DataType.LANGUAGE)
+
+        # Custom data
+        if self.custom_data_stats:
+            data_types.append(DataType.CUSTOM)
+
         return data_types
+
+    def add_custom_data_stats(
+        self, key: str, stats: DataItemStats, max_length: int = 0
+    ) -> None:
+        """Add statistics for a custom data type.
+
+        Args:
+            key: Name of the custom data type
+            stats: Statistical information for the custom data
+            max_length: Maximum length of the custom data arrays
+        """
+        self.custom_data_stats[key] = stats
 
 
 class RecordingDescription(BaseModel):
@@ -235,19 +276,31 @@ class RecordingDescription(BaseModel):
     sensor counts, and episode length for analysis and processing.
     """
 
-    joint_positions: DataItemStats = Field(default_factory=lambda: DataItemStats())
-    joint_velocities: DataItemStats = Field(default_factory=lambda: DataItemStats())
-    joint_torques: DataItemStats = Field(default_factory=lambda: DataItemStats())
-    joint_target_positions: DataItemStats = Field(
-        default_factory=lambda: DataItemStats()
-    )
-    end_effector_states: DataItemStats = Field(default_factory=lambda: DataItemStats())
-    poses: DataItemStats = Field(default_factory=lambda: DataItemStats())
+    # Joint data statistics
+    joint_positions: DataItemStats = Field(default_factory=DataItemStats)
+    joint_velocities: DataItemStats = Field(default_factory=DataItemStats)
+    joint_torques: DataItemStats = Field(default_factory=DataItemStats)
+    joint_target_positions: DataItemStats = Field(default_factory=DataItemStats)
+
+    # End-effector statistics
+    end_effector_states: DataItemStats = Field(default_factory=DataItemStats)
+
+    # Pose statistics
+    poses: DataItemStats = Field(default_factory=DataItemStats)
+
+    # Visual data counts
     num_rgb_images: int = 0
     num_depth_images: int = 0
     num_point_clouds: int = 0
+
+    # Language data
     max_language_length: int = 0
+
+    # Episode metadata
     episode_length: int = 0
+
+    # Custom data statistics
+    custom_data_stats: dict[str, DataItemStats] = Field(default_factory=dict)
 
     def get_data_types(self) -> list[DataType]:
         """Determine which data types are present in the recording.
@@ -260,6 +313,8 @@ class RecordingDescription(BaseModel):
             present in this recording.
         """
         data_types = []
+
+        # Joint data
         if self.joint_positions.max_len > 0:
             data_types.append(DataType.JOINT_POSITIONS)
         if self.joint_velocities.max_len > 0:
@@ -268,14 +323,31 @@ class RecordingDescription(BaseModel):
             data_types.append(DataType.JOINT_TORQUES)
         if self.joint_target_positions.max_len > 0:
             data_types.append(DataType.JOINT_TARGET_POSITIONS)
+
+        # End-effector data
+        if self.end_effector_states.max_len > 0:
+            data_types.append(DataType.END_EFFECTORS)
+
+        # Pose data
+        if self.poses.max_len > 0:
+            data_types.append(DataType.POSES)
+
+        # Visual data
         if self.num_rgb_images > 0:
             data_types.append(DataType.RGB_IMAGE)
         if self.num_depth_images > 0:
             data_types.append(DataType.DEPTH_IMAGE)
         if self.num_point_clouds > 0:
             data_types.append(DataType.POINT_CLOUD)
+
+        # Language data
         if self.max_language_length > 0:
             data_types.append(DataType.LANGUAGE)
+
+        # Custom data
+        if self.custom_data_stats:
+            data_types.append(DataType.CUSTOM)
+
         return data_types
 
 
@@ -339,9 +411,7 @@ class SyncedDataset(BaseModel):
     total_duration_seconds: float = 0.0
     is_shared: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
-    dataset_description: DatasetDescription = Field(
-        default_factory=DatasetDescription()
-    )
+    dataset_description: DatasetDescription = Field(default_factory=DatasetDescription)
     all_data_types: dict[DataType, int] = Field(default_factory=dict)
     common_data_types: dict[DataType, int] = Field(default_factory=dict)
 

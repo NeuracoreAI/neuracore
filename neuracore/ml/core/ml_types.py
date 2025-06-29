@@ -2,7 +2,7 @@
 
 This module provides data structures for handling batched robot sensor data
 with support for masking, device placement, and multi-modal inputs including
-joint states, images, point clouds, and language tokens.
+joint states, images, point clouds, poses, end-effectors, and language tokens.
 """
 
 from typing import Optional
@@ -62,8 +62,8 @@ class BatchedData:
     """Container for batched multi-modal robot sensor data.
 
     Provides a structured way to handle various types of robot sensor data
-    in batched format, including joint states, visual data, and custom
-    sensor modalities with support for device placement.
+    in batched format, including joint states, visual data, poses, end-effectors,
+    and custom sensor modalities with support for device placement.
     """
 
     def __init__(
@@ -72,7 +72,8 @@ class BatchedData:
         joint_velocities: Optional[MaskableData] = None,
         joint_torques: Optional[MaskableData] = None,
         joint_target_positions: Optional[MaskableData] = None,
-        gripper_states: Optional[MaskableData] = None,
+        end_effectors: Optional[MaskableData] = None,
+        poses: Optional[MaskableData] = None,
         rgb_images: Optional[MaskableData] = None,
         depth_images: Optional[MaskableData] = None,
         point_clouds: Optional[MaskableData] = None,
@@ -86,7 +87,8 @@ class BatchedData:
             joint_velocities: Joint velocity data with mask
             joint_torques: Joint torque data with mask
             joint_target_positions: Target joint position data with mask
-            gripper_states: Gripper state data with mask
+            end_effectors: End-effector state data with mask
+            poses: 6DOF pose data with mask
             rgb_images: RGB image data with mask
             depth_images: Depth image data with mask
             point_clouds: Point cloud data with mask
@@ -97,7 +99,8 @@ class BatchedData:
         self.joint_velocities = joint_velocities
         self.joint_torques = joint_torques
         self.joint_target_positions = joint_target_positions
-        self.gripper_states = gripper_states
+        self.end_effectors = end_effectors
+        self.poses = poses
         self.rgb_images = rgb_images
         self.depth_images = depth_images
         self.point_clouds = point_clouds
@@ -118,7 +121,8 @@ class BatchedData:
             joint_velocities=_to_device(self.joint_velocities, device),
             joint_torques=_to_device(self.joint_torques, device),
             joint_target_positions=_to_device(self.joint_target_positions, device),
-            gripper_states=_to_device(self.gripper_states, device),
+            end_effectors=_to_device(self.end_effectors, device),
+            poses=_to_device(self.poses, device),
             rgb_images=_to_device(self.rgb_images, device),
             depth_images=_to_device(self.depth_images, device),
             point_clouds=_to_device(self.point_clouds, device),
@@ -142,6 +146,10 @@ class BatchedData:
         for attr_name, attr_value in self.__dict__.items():
             if isinstance(attr_value, MaskableData) and attr_value.data is not None:
                 return attr_value.data.size(0)
+            if isinstance(attr_value, dict):
+                for key, value in attr_value.items():
+                    if isinstance(value, MaskableData) and value.data is not None:
+                        return value.data.size(0)
         raise ValueError("No tensor found in the batch input")
 
 
@@ -235,7 +243,8 @@ class BatchedInferenceSamples:
         joint_velocities: Optional[MaskableData] = None,
         joint_torques: Optional[MaskableData] = None,
         joint_target_positions: Optional[MaskableData] = None,
-        gripper_states: Optional[MaskableData] = None,
+        end_effectors: Optional[MaskableData] = None,
+        poses: Optional[MaskableData] = None,
         rgb_images: Optional[MaskableData] = None,
         depth_images: Optional[MaskableData] = None,
         point_clouds: Optional[MaskableData] = None,
@@ -249,7 +258,8 @@ class BatchedInferenceSamples:
             joint_velocities: Joint velocity data with mask
             joint_torques: Joint torque data with mask
             joint_target_positions: Target joint position data with mask
-            gripper_states: Gripper state data with mask
+            end_effectors: End-effector state data with mask
+            poses: 6DOF pose data with mask
             rgb_images: RGB image data with mask
             depth_images: Depth image data with mask
             point_clouds: Point cloud data with mask
@@ -260,7 +270,8 @@ class BatchedInferenceSamples:
         self.joint_velocities = joint_velocities
         self.joint_torques = joint_torques
         self.joint_target_positions = joint_target_positions
-        self.gripper_states = gripper_states
+        self.end_effectors = end_effectors
+        self.poses = poses
         self.rgb_images = rgb_images
         self.depth_images = depth_images
         self.point_clouds = point_clouds
@@ -281,7 +292,8 @@ class BatchedInferenceSamples:
             joint_velocities=_to_device(self.joint_velocities, device),
             joint_torques=_to_device(self.joint_torques, device),
             joint_target_positions=_to_device(self.joint_target_positions, device),
-            gripper_states=_to_device(self.gripper_states, device),
+            end_effectors=_to_device(self.end_effectors, device),
+            poses=_to_device(self.poses, device),
             rgb_images=_to_device(self.rgb_images, device),
             depth_images=_to_device(self.depth_images, device),
             point_clouds=_to_device(self.point_clouds, device),
