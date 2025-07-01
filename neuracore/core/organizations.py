@@ -49,7 +49,8 @@ def list_my_orgs() -> list[Organization]:
     except requests.exceptions.RequestException as e:
         raise OrganizationError(f"Failed to get organizations: {e}")
     except AuthenticationError as e:
-        print("Your not logged in, please log in to see current organizations")
+        if not auth.is_authenticated:
+            print("Your not logged in, please log in to see current organizations")
         raise e
     except ValidationError:
         raise OrganizationError(
