@@ -10,8 +10,8 @@ import logging
 import time
 from typing import Optional
 
-from neuracore.core.cli.select_current_org import list_my_orgs
 from neuracore.core.config.config_manager import get_config_manager
+from neuracore.core.organizations import list_my_orgs
 from neuracore.core.streaming.client_stream.client_stream_manager import (
     get_robot_streaming_manager,
 )

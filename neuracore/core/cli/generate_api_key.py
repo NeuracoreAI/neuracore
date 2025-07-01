@@ -71,6 +71,8 @@ def generate_api_key() -> str:
             token_data = Token.model_validate(auth_response.json())
             access_token = token_data.access_token
             break
+        except KeyboardInterrupt:
+            raise InputError("User cancelled the operation.")
         except ValidationError:
             raise AuthenticationError("Invalid token from server")
         except requests.exceptions.RequestException as e:
@@ -96,9 +98,20 @@ def generate_api_key() -> str:
         return api_key
     except ValidationError:
         raise AuthenticationError("Invalid api-key from server")
+
     except requests.exceptions.RequestException as e:
         raise AuthenticationError(f"Failed to create API key: {e}")
 
 
+def main() -> None:
+    """Main function to run the API key generation process."""
+    try:
+        generate_api_key()
+    except AuthenticationError:
+        print("Failed to generate API key, please try again later")
+    except InputError:
+        print("Failed to generate API key due to incorrect input")
+
+
 if __name__ == "__main__":
-    generate_api_key()
+    main()
