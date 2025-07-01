@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Error message when the wong credentials are provided to `nc-login` 
+- Streaming will resume correctly after network disruptions
 
 
 ## [1.6.0]

@@ -7,6 +7,7 @@ Handles SDP negotiation, ICE candidate exchange, and connection lifecycle.
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -32,6 +33,8 @@ ICE_SERVERS = [
     RTCIceServer(urls="stun:stun1.l.google.com:19302"),
 ]
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class PierToPierConnection:
@@ -49,7 +52,10 @@ class PierToPierConnection:
     on_close: Callable
     client_session: ClientSession
     loop: asyncio.AbstractEventLoop
-    has_received_answer: bool = False
+    received_answer_event: asyncio.Event = field(default_factory=asyncio.Event)
+    handle_answer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    handle_ice_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    send_offer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     has_sent_offer: bool = False
     auth: Auth = field(default_factory=get_auth)
     event_sources: set[JSONSource] = field(default_factory=set)
@@ -69,7 +75,7 @@ class PierToPierConnection:
         connectivity establishment.
         """
         if self.connection.iceGatheringState != "complete":
-            print("ICE gathering state is not complete")
+            logger.warning("ICE gathering state is not complete")
             return
 
         for transceiver in self.connection.getTransceivers():
@@ -225,35 +231,19 @@ class PierToPierConnection:
         Args:
             ice_message: JSON string containing ICE candidate information
         """
-        if self._closed:
-            return
-        ice_content = json.loads(ice_message)
-        candidate = candidate_from_sdp(ice_content["candidate"])
-        candidate.sdpMid = ice_content["sdpMid"]
-        candidate.sdpMLineIndex = ice_content["sdpMLineIndex"]
-        await self.connection.addIceCandidate(candidate)
+        async with self.handle_ice_lock:
+            await self.received_answer_event.wait()
 
-    async def on_offer(self, offer: str) -> None:
-        """Handle received SDP offer from remote peer.
-
-        Processes the offer, creates an answer, and sends it back through
-        the signaling server. Includes media ID ordering fixes.
-
-        Args:
-            offer: SDP offer string from the remote peer
-        """
-        if self._closed:
-            print("offer to closed connection")
-            return
-
-        offer = RTCSessionDescription(offer, type="offer")
-        self.fix_mid_ordering("before offer")
-        await self.connection.setRemoteDescription(offer)
-        self.fix_mid_ordering("after offer")
-        answer = await self.connection.createAnswer()
-        self.fix_mid_ordering("after answer")
-        await self.connection.setLocalDescription(answer)
-        await self.send_handshake_message(MessageType.SDP_ANSWER, answer.sdp)
+            if self._closed:
+                return
+            try:
+                ice_content = json.loads(ice_message)
+                candidate = candidate_from_sdp(ice_content["candidate"])
+                candidate.sdpMid = ice_content["sdpMid"]
+                candidate.sdpMLineIndex = ice_content["sdpMLineIndex"]
+                await self.connection.addIceCandidate(candidate)
+            except Exception:
+                logging.warning("Signalling Error: failed to add ice candidate")
 
     async def on_answer(self, answer_sdp: str) -> None:
         """Handle received SDP answer from remote peer.
@@ -264,26 +254,26 @@ class PierToPierConnection:
         Args:
             answer_sdp: SDP answer string from the remote peer
         """
-        if self.has_received_answer:
-            return
-        self.has_received_answer = True
-
         if self._closed:
-            print("answer to closed connection")
+            logger.info("answer to closed connection")
             return
 
-        if self.connection.signalingState != "have-local-offer":
-            print("Not Ready for answer")
-            return
+        async with self.handle_answer_lock:
+            if self.received_answer_event.is_set():
+                return
 
-        answer = RTCSessionDescription(answer_sdp, type="answer")
+            if self.connection.signalingState != "have-local-offer":
+                logger.info("Received answer before offer.")
+                return
+            try:
+                answer = RTCSessionDescription(answer_sdp, type="answer")
+                self.fix_mid_ordering("before answer")
+                await self.connection.setRemoteDescription(answer)
+                await self.force_ice_negotiation()
+                self.received_answer_event.set()
 
-        self.fix_mid_ordering("before answer")
-        try:
-            await self.connection.setRemoteDescription(answer)
-            await self.force_ice_negotiation()
-        except Exception:
-            self.has_received_answer = False
+            except Exception:
+                logger.warning("Signalling Error: failed to set remote description")
 
     async def send_offer(self) -> None:
         """Send SDP offer to remote peer.
@@ -294,24 +284,31 @@ class PierToPierConnection:
         if self._closed:
             print("Cannot send offer from closed connection")
             return
-        if self.has_sent_offer:
-            return
-        self.has_sent_offer = True
 
-        if self.connection.signalingState != "stable":
-            print("Not ready to send offer")
-            return
+        async with self.send_offer_lock:
+            if self.has_sent_offer:
+                return
 
-        self.fix_mid_ordering("before offer")
-        try:
-            await self.connection.setLocalDescription(
-                await self.connection.createOffer()
-            )
-            await self.send_handshake_message(
-                MessageType.SDP_OFFER, self.connection.localDescription.sdp
-            )
-        except Exception:
-            self.has_sent_offer = False
+            if self.connection.signalingState != "stable":
+                logger.warning("Not ready to send offer")
+                return
+
+            self.fix_mid_ordering("before offer")
+            try:
+                await self.connection.setLocalDescription(
+                    await self.connection.createOffer()
+                )
+                await self.send_handshake_message(
+                    MessageType.SDP_OFFER, self.connection.localDescription.sdp
+                )
+
+                await asyncio.wait_for(self.received_answer_event.wait(), timeout=30)
+                self.has_sent_offer = True
+            except asyncio.TimeoutError:
+                # waiting 30 seconds for answer -> assuming peer is gone
+                await self.close()
+            except Exception:
+                logger.info("Signalling Error: Failed to send offer")
 
     async def close(self) -> None:
         """Close the peer-to-peer connection gracefully.
