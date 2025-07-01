@@ -457,3 +457,9 @@ class Dataset(BaseModel):
     all_data_types: dict[DataType, int] = Field(default_factory=dict)
     common_data_types: dict[DataType, int] = Field(default_factory=dict)
     recording_ids_in_bucket: bool = False
+
+
+class StreamAliveResponse(BaseModel):
+    """Represents the response from asserting a stream is alive."""
+
+    resurrected: bool

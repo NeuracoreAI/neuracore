@@ -16,6 +16,7 @@ from aiohttp_sse_client import client as sse_client
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.nc_types import StreamAliveResponse
 from neuracore.core.streaming.client_stream.json_source import JSONSource
 from neuracore.core.streaming.client_stream.models import (
     HandshakeMessage,
@@ -29,11 +30,11 @@ from ...const import API_URL, LIVE_DATA_ENABLED
 from .connection import PierToPierConnection
 from .video_source import DepthVideoSource, VideoSource
 
-# must be less than zero -> a reconnection delay of more
+# must start less than zero -> a reconnection delay of more
 # than one second is considered dead
-# TODO: resubmit tracks if connection is re-established
-# after more than one second
-MINIMUM_BACKOFF_LEVEL = -2
+
+MINIMUM_BACKOFF_TIME_S = 0.05
+MAXIMUM_BACKOFF_TIME_S = 5
 
 
 class ClientStreamingManager:
@@ -69,14 +70,14 @@ class ClientStreamingManager:
         self.streaming = EnabledManager(LIVE_DATA_ENABLED, loop=self.loop)
         self.streaming.add_listener(EnabledManager.DISABLED, self.__close)
         self.connections: Dict[str, PierToPierConnection] = {}
-        self.video_tracks_cache: dict[str, VideoSource] = {}
+        self.video_tracks_cache: Dict[str, VideoSource] = {}
         self.event_source_cache: Dict[str, JSONSource] = {}
-        self.track_lock = asyncio.Lock()
         self.tracks: List[VideoSource] = []
         self.local_stream_id = uuid4().hex
         self.signalling_stream_future = asyncio.run_coroutine_threadsafe(
             self.connect_signalling_stream(), self.loop
         )
+        self.track_metadata: dict[str, RobotStreamTrack] = {}
 
     def get_video_source(
         self, sensor_name: str, kind: str, sensor_key: str
@@ -147,18 +148,20 @@ class ClientStreamingManager:
         """
         if not self.streaming.is_enabled():
             return
+        track = RobotStreamTrack(
+            robot_id=self.robot_id,
+            robot_instance=self.robot_instance,
+            stream_id=self.local_stream_id,
+            mid=mid,
+            kind=kind,
+            label=label,
+        )
+        self.track_metadata[track.id] = track
 
         await self.client_session.post(
             f"{API_URL}/org/{self.org_id}/signalling/track",
             headers=self.auth.get_headers(),
-            json=RobotStreamTrack(
-                robot_id=self.robot_id,
-                robot_instance=self.robot_instance,
-                stream_id=self.local_stream_id,
-                mid=mid,
-                kind=kind,
-                label=label,
-            ).model_dump(mode="json"),
+            json=track.model_dump(mode="json"),
         )
 
     async def heartbeat_response(self) -> None:
@@ -166,11 +169,25 @@ class ClientStreamingManager:
         if not self.streaming.is_enabled():
             return
 
-        await self.client_session.post(
+        response = await self.client_session.post(
             f"{API_URL}/org/{self.org_id}/signalling/alive/{self.local_stream_id}",
             headers=self.auth.get_headers(),
             data="pong",
         )
+        response = await response.json()
+        response = StreamAliveResponse.model_validate(response)
+
+        if response.resurrected:
+            await asyncio.gather(
+                *(
+                    self.client_session.post(
+                        f"{API_URL}/org/{self.org_id}/signalling/track",
+                        headers=self.auth.get_headers(),
+                        json=track.model_dump(mode="json"),
+                    )
+                    for track in self.track_metadata.values()
+                )
+            )
 
     async def create_new_connection(
         self, remote_stream_id: str, connection_id: str, connection_token: str
@@ -219,9 +236,17 @@ class ClientStreamingManager:
         Maintains a persistent SSE connection with exponential backoff retry logic.
         Handles heartbeats, connection tokens, SDP offers/answers, and ICE candidates.
         """
-        backoff = MINIMUM_BACKOFF_LEVEL
+        backoff = 0
+
         while self.streaming.is_enabled():
             try:
+                backoff_time = MINIMUM_BACKOFF_TIME_S * (2**backoff)
+                if backoff_time > MAXIMUM_BACKOFF_TIME_S:
+                    await asyncio.sleep(MAXIMUM_BACKOFF_TIME_S)
+                    return
+                await asyncio.sleep(backoff_time)
+                backoff += 1
+
                 async with sse_client.EventSource(
                     f"{API_URL}/org/{self.org_id}/signalling/notifications/{self.local_stream_id}",
                     session=self.client_session,
@@ -229,54 +254,40 @@ class ClientStreamingManager:
                     reconnection_time=timedelta(seconds=0.1),
                 ) as event_source:
                     async for event in event_source:
-                        try:
-                            backoff = max(MINIMUM_BACKOFF_LEVEL, backoff - 1)
-                            if not self.streaming.is_enabled():
-                                return
-                            if event.type == "heartbeat":
-                                await self.heartbeat_response()
-                                continue
-
-                            message = HandshakeMessage.model_validate_json(event.data)
-                            if message.from_id == "system":
-                                continue
-
-                            connection = self.connections.get(message.from_id)
-
-                            if message.type == MessageType.CONNECTION_TOKEN:
-                                await self.create_new_connection(
-                                    remote_stream_id=message.from_id,
-                                    connection_id=message.connection_id,
-                                    connection_token=message.data,
-                                )
-                                continue
-
-                            if (
-                                connection is None
-                                or connection.id != message.connection_id
-                            ):
-                                continue
-
-                            if message.type == MessageType.SDP_OFFER:
-                                await connection.on_offer(message.data)
-                            elif message.type == MessageType.ICE_CANDIDATE:
-                                await connection.on_ice(message.data)
-                            elif message.type == MessageType.SDP_ANSWER:
-                                await connection.on_answer(message.data)
-                            else:
-                                pass
-                        except asyncio.TimeoutError:
-                            await asyncio.sleep(2 ^ backoff)
-                            backoff += 1
+                        backoff = max(0, backoff - 1)
+                        if not self.streaming.is_enabled():
+                            return
+                        if event.type == "heartbeat":
+                            await self.heartbeat_response()
                             continue
-                        except Exception as e:
-                            print(f"Signaling message error: {e}")
-                            await asyncio.sleep(2**backoff)
-                            backoff += 1
+
+                        message = HandshakeMessage.model_validate_json(event.data)
+                        if message.from_id == "system":
+                            continue
+
+                        connection = self.connections.get(message.from_id)
+
+                        if message.type == MessageType.CONNECTION_TOKEN:
+                            await self.create_new_connection(
+                                remote_stream_id=message.from_id,
+                                connection_id=message.connection_id,
+                                connection_token=message.data,
+                            )
+                            continue
+
+                        if connection is None or connection.id != message.connection_id:
+                            continue
+
+                        if message.type == MessageType.SDP_OFFER:
+                            await connection.on_offer(message.data)
+                        elif message.type == MessageType.ICE_CANDIDATE:
+                            await connection.on_ice(message.data)
+                        elif message.type == MessageType.SDP_ANSWER:
+                            await connection.on_answer(message.data)
+                        else:
+                            pass
             except Exception as e:
-                print(f"Signaling connection error: {e}")
-                await asyncio.sleep(2**backoff)
-                backoff += 1
+                print(f"Streaming signalling error: {e}")
 
     async def close_connections(self) -> None:
         """Close all active peer-to-peer connections."""

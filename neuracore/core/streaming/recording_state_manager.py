@@ -19,7 +19,8 @@ from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL, REMOTE_RECORDING_TRIGGER_ENABLED
 from neuracore.core.streaming.client_stream.client_stream_manager import (
-    MINIMUM_BACKOFF_LEVEL,
+    MAXIMUM_BACKOFF_TIME_S,
+    MINIMUM_BACKOFF_TIME_S,
 )
 from neuracore.core.streaming.client_stream.models import (
     BaseRecodingUpdatePayload,
@@ -197,9 +198,17 @@ class RecordingStateManager(AsyncIOEventEmitter):
         updates with exponential backoff retry logic. Processes different types
         of recording notifications and updates local state accordingly.
         """
-        backoff = MINIMUM_BACKOFF_LEVEL
+        backoff = 0
+
         while self.remote_trigger_enabled.is_enabled():
             try:
+                backoff_time = MINIMUM_BACKOFF_TIME_S * (2**backoff)
+                if backoff_time > MAXIMUM_BACKOFF_TIME_S:
+                    await asyncio.sleep(MAXIMUM_BACKOFF_TIME_S)
+                    return
+                await asyncio.sleep(backoff_time)
+                backoff += 1
+
                 org_id = get_current_org()
                 async with sse_client.EventSource(
                     f"{API_URL}/org/{org_id}/recording/notifications",
@@ -207,7 +216,7 @@ class RecordingStateManager(AsyncIOEventEmitter):
                     headers=self.auth.get_headers(),
                     reconnection_time=timedelta(seconds=0.1),
                 ) as event_source:
-                    backoff = max(MINIMUM_BACKOFF_LEVEL, backoff - 1)
+                    backoff = max(0, backoff - 1)
                     async for event in event_source:
                         if event.type != "data":
                             continue
@@ -240,14 +249,8 @@ class RecordingStateManager(AsyncIOEventEmitter):
                                     is_recording=True, details=recording
                                 )
 
-            except ConnectionError as e:
-                print(f"Connection error: {e}")
-                await asyncio.sleep(2 ^ backoff)
-                backoff += 1
             except Exception as e:
-                print(f"Unexpected error: {e}")
-                await asyncio.sleep(2 ^ backoff)
-                backoff += 1
+                print(f"Recording signalling error: {e}")
 
     def __stop_remote_trigger(self) -> None:
         """Internal method to stop the remote trigger connection."""
