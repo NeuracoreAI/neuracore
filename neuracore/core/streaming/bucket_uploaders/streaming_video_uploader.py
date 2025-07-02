@@ -50,12 +50,12 @@ class StreamingVideoUploader(BucketUploader):
         path: str,
         width: int,
         height: int,
-        transform_frame: Callable[[np.ndarray], np.ndarray] | None = None,
+        transform_frame: Optional[Callable[[np.ndarray], np.ndarray]] = None,
         codec: str = "libx264",
         pixel_format: str = "yuv444p10le",
         chunk_size: int = CHUNK_SIZE,
         video_name: str = "video.mp4",
-        codec_context_options: dict[str, str] | None = None,
+        codec_context_options: Optional[dict[str, str]] = None,
     ):
         """Initialize a streaming video encoder.
 

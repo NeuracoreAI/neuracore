@@ -404,7 +404,7 @@ class SyncedDataset(BaseModel):
     name: str
     created_at: float
     modified_at: float
-    description: str | None = None
+    description: Optional[str] = None
     recording_ids: list[str] = Field(default_factory=list)
     num_demonstrations: int = 0
     num_processed_demonstrations: int = 0
@@ -445,7 +445,7 @@ class Dataset(BaseModel):
     name: str
     created_at: float
     modified_at: float
-    description: str | None = None
+    description: Optional[str] = None
     tags: list[str] = Field(default_factory=list)
     recording_ids: list[str] = Field(default_factory=list)
     num_demonstrations: int = 0

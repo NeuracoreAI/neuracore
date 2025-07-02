@@ -7,6 +7,7 @@ across multiple components and threads.
 
 import threading
 from asyncio import AbstractEventLoop
+from typing import Optional
 
 from pyee.asyncio import AsyncIOEventEmitter
 
@@ -21,7 +22,7 @@ class EnabledManager(AsyncIOEventEmitter):
 
     DISABLED = "DISABLED"
 
-    def __init__(self, initial_state: bool, loop: AbstractEventLoop | None = None):
+    def __init__(self, initial_state: bool, loop: Optional[AbstractEventLoop] = None):
         """Initialize the enabled manager.
 
         Args:

@@ -177,7 +177,7 @@ class EndpointPolicy:
                 )
         return sync_point
 
-    def predict(self, sync_point: SyncPoint | None = None) -> ModelPrediction:
+    def predict(self, sync_point: Optional[SyncPoint] = None) -> ModelPrediction:
         """Get action predictions from the model endpoint.
 
         Sends robot sensor data to the model and receives action predictions.

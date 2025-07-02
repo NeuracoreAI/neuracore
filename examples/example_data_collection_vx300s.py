@@ -30,7 +30,7 @@ def main(args):
 
     if record:
         nc.create_dataset(
-            name="My Example Dataset",
+            name="My Example Datase with custom data",
             description="This is an example dataset",
         )
         print("Created Dataset...")
@@ -53,6 +53,8 @@ def main(args):
 
         # Log initial state
         t = time.time()
+        CUSTOM_DATA = [1, 2, 3, 4, 5]
+        nc.log_custom_data("my_custom_data", CUSTOM_DATA, timestamp=t)
         nc.log_joint_positions(ts.observation["qpos"], timestamp=t)
         nc.log_joint_velocities(ts.observation["qvel"], timestamp=t)
         nc.log_language("Pick up the cube and pass it to the other robot", timestamp=t)
@@ -65,6 +67,7 @@ def main(args):
             ts = env.step(list(action.values()))
 
             t += 0.02
+            nc.log_custom_data("my_custom_data", CUSTOM_DATA, timestamp=t)
             nc.log_joint_positions(ts.observation["qpos"], timestamp=t)
             nc.log_joint_velocities(ts.observation["qvel"], timestamp=t)
             nc.log_language(

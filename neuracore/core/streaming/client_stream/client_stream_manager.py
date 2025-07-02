@@ -257,15 +257,14 @@ class ClientStreamingManager:
                             ):
                                 continue
 
-                            match message.type:
-                                case MessageType.SDP_OFFER:
-                                    await connection.on_offer(message.data)
-                                case MessageType.ICE_CANDIDATE:
-                                    await connection.on_ice(message.data)
-                                case MessageType.SDP_ANSWER:
-                                    await connection.on_answer(message.data)
-                                case _:
-                                    pass
+                            if message.type == MessageType.SDP_OFFER:
+                                await connection.on_offer(message.data)
+                            elif message.type == MessageType.ICE_CANDIDATE:
+                                await connection.on_ice(message.data)
+                            elif message.type == MessageType.SDP_ANSWER:
+                                await connection.on_answer(message.data)
+                            else:
+                                pass
                         except asyncio.TimeoutError:
                             await asyncio.sleep(2 ^ backoff)
                             backoff += 1
