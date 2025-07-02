@@ -159,7 +159,7 @@ class Robot:
             raise ValueError("Stream already exists")
         self._data_streams[stream_id] = stream
 
-    def get_data_stream(self, stream_id: str) -> DataStream | None:
+    def get_data_stream(self, stream_id: str) -> Optional[DataStream]:
         """Retrieve a data stream by its identifier.
 
         Args:

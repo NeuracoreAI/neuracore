@@ -189,9 +189,7 @@ class DiffusionConditionalUnet1d(nn.Module):
 
         # In channels / out channels for each downsampling block in the Unet's
         # encoder. For the decoder, we just reverse these.
-        in_out = [(action_dim, down_dims[0])] + list(
-            zip(down_dims[:-1], down_dims[1:], strict=True)
-        )
+        in_out = [(action_dim, down_dims[0])] + list(zip(down_dims[:-1], down_dims[1:]))
 
         # Unet encoder.
         common_res_block_kwargs: Dict[str, Any] = {

@@ -6,7 +6,7 @@ for validation and serialization.
 """
 
 from enum import Enum
-from typing import Optional
+from typing import Optional, Union
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, NonNegativeInt
@@ -93,12 +93,12 @@ class RecordingNotification(BaseModel):
     """
 
     type: RecordingNotificationType
-    payload: (
-        RecordingStartPayload
-        | RecodingRequestedPayload
-        | list[RecordingStartPayload | RecodingRequestedPayload]
-        | BaseRecodingUpdatePayload
-    )
+    payload: Union[
+        RecordingStartPayload,
+        RecodingRequestedPayload,
+        list[Union[RecordingStartPayload, RecodingRequestedPayload]],
+        BaseRecodingUpdatePayload,
+    ]
 
 
 class RobotStreamTrack(BaseModel):

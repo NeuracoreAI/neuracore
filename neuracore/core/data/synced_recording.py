@@ -47,7 +47,7 @@ class SynchronizedRecording:
         self.id = recording_id
         self.frequency = frequency
         self.data_types = data_types or []
-        self.cache_dir: Path | None = dataset.cache_dir
+        self.cache_dir: Optional[Path] = dataset.cache_dir
 
         self._recording_synced = self._get_synced_data()
         _rgb = self._recording_synced.frames[0].rgb_images
@@ -330,7 +330,7 @@ class SynchronizedRecording:
         """
         return self._episode_length
 
-    def __getitem__(self, idx: Union[int, slice]) -> Union[SyncPoint | list[SyncPoint]]:
+    def __getitem__(self, idx: Union[int, slice]) -> Union[SyncPoint, list[SyncPoint]]:
         """Support for indexing episode data.
 
         Args:

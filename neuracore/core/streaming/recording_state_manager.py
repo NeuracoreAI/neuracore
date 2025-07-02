@@ -72,7 +72,7 @@ class RecordingStateManager(AsyncIOEventEmitter):
 
         self.recording_robot_instances: dict[tuple[str, int], str] = dict()
 
-    def get_current_recording_id(self, robot_id: str, instance: int) -> str | None:
+    def get_current_recording_id(self, robot_id: str, instance: int) -> Optional[str]:
         """Get the current recording ID for a robot instance.
 
         Args:
@@ -80,7 +80,7 @@ class RecordingStateManager(AsyncIOEventEmitter):
             instance: Instance number of the robot
 
         Returns:
-            str | None: Recording ID if currently recording, None otherwise
+            str: Recording ID if currently recording, None otherwise
         """
         instance_key = (robot_id, instance)
         return self.recording_robot_instances.get(instance_key, None)
@@ -213,35 +213,32 @@ class RecordingStateManager(AsyncIOEventEmitter):
                             continue
 
                         message = RecordingNotification.model_validate_json(event.data)
-
-                        match message.type:
-                            case RecordingNotificationType.SAVED:
-                                self.emit(
-                                    self.RECORDING_SAVED, **message.payload.model_dump()
-                                )
-                            case (
-                                RecordingNotificationType.START
-                                | RecordingNotificationType.REQUESTED
-                            ):
+                        # Python 3.9 compatibility: replace match/case with if/elif
+                        if message.type == RecordingNotificationType.SAVED:
+                            self.emit(
+                                self.RECORDING_SAVED, **message.payload.model_dump()
+                            )
+                        elif message.type in (
+                            RecordingNotificationType.START,
+                            RecordingNotificationType.REQUESTED,
+                        ):
+                            self.updated_recording_state(
+                                is_recording=True, details=message.payload
+                            )
+                        elif message.type in (
+                            RecordingNotificationType.STOP,
+                            RecordingNotificationType.SAVED,
+                            RecordingNotificationType.DISCARDED,
+                            RecordingNotificationType.EXPIRED,
+                        ):
+                            self.updated_recording_state(
+                                is_recording=False, details=message.payload
+                            )
+                        elif message.type == RecordingNotificationType.INIT:
+                            for recording in message.payload:
                                 self.updated_recording_state(
-                                    is_recording=True, details=message.payload
+                                    is_recording=True, details=recording
                                 )
-
-                            case (
-                                RecordingNotificationType.STOP
-                                | RecordingNotificationType.SAVED
-                                | RecordingNotificationType.DISCARDED
-                                | RecordingNotificationType.EXPIRED
-                            ):
-                                self.updated_recording_state(
-                                    is_recording=False, details=message.payload
-                                )
-
-                            case RecordingNotificationType.INIT:
-                                for recording in message.payload:
-                                    self.updated_recording_state(
-                                        is_recording=True, details=recording
-                                    )
 
             except ConnectionError as e:
                 print(f"Connection error: {e}")
@@ -266,7 +263,7 @@ class RecordingStateManager(AsyncIOEventEmitter):
         self.remote_trigger_enabled.disable()
 
 
-_recording_manager: Future[RecordingStateManager] | None = None
+_recording_manager: Optional[Future[RecordingStateManager]] = None
 
 
 async def create_recording_state_manager() -> RecordingStateManager:

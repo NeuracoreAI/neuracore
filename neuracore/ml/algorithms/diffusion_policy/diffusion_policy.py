@@ -2,7 +2,7 @@
 
 import logging
 import time
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -209,8 +209,8 @@ class DiffusionPolicy(NeuracoreModel):
         self,
         batch_size: int,
         prediction_horizon: int,
-        global_cond: torch.Tensor | None = None,
-        generator: torch.Generator | None = None,
+        global_cond: Optional[torch.Tensor] = None,
+        generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         """Sample action sequence conditioned on the observations.
 
@@ -282,7 +282,7 @@ class DiffusionPolicy(NeuracoreModel):
     @staticmethod
     def _make_noise_scheduler(
         noise_scheduler_type: str, **kwargs: Dict[str, Any]
-    ) -> DDPMScheduler | DDIMScheduler:
+    ) -> Union[DDPMScheduler, DDIMScheduler]:
         """Factory for noise scheduler instances.
 
         All kwargs are passed to the scheduler.

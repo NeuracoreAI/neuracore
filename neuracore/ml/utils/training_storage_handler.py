@@ -175,7 +175,7 @@ class TrainingStorageHandler:
                     )
 
     def update_training_metadata(
-        self, epoch: int, step: int, error: str | None = None
+        self, epoch: int, step: int, error: Optional[str] = None
     ) -> None:
         """Update training metadata in cloud storage.
 

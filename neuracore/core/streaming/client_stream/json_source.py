@@ -67,11 +67,11 @@ class JSONSource(AsyncIOEventEmitter):
                 self._submit_event(), self._loop
             )
 
-    def get_last_state(self) -> str | None:
+    def get_last_state(self) -> Optional[str]:
         """Get the last published state as a JSON string.
 
         Returns:
-            str | None: JSON-serialized last state, or None if no state exists
+            str: JSON-serialized last state, or None if no state exists
         """
         if not self._last_state:
             return None

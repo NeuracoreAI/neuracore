@@ -128,9 +128,8 @@ class PierToPierConnection:
 
         @self.connection.on("connectionstatechange")
         async def on_connectionstatechange() -> None:
-            match self.connection.connectionState:
-                case "closed" | "failed":
-                    await self.close()
+            if self.connection.connectionState in ("closed", "failed"):
+                await self.close()
 
     def add_video_source(self, source: VideoSource) -> None:
         """Add a video source to the connection.

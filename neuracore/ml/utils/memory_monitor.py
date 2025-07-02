@@ -1,6 +1,7 @@
 """Monitor CPU RAM and GPU VRAM usage to prevent out of memory errors."""
 
 import logging
+from typing import Optional
 
 import psutil
 import torch
@@ -29,7 +30,7 @@ class MemoryMonitor:
         self,
         max_ram_utilization: float = 0.9,
         max_gpu_utilization: float = 0.9,
-        gpu_id: int | None = 0,
+        gpu_id: Optional[int] = 0,
     ):
         """Init.
 
