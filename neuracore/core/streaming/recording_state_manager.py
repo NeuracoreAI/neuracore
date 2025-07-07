@@ -7,6 +7,7 @@ state and remote recording triggers.
 """
 
 import asyncio
+import logging
 from concurrent.futures import Future
 from datetime import timedelta
 from typing import Optional
@@ -29,6 +30,8 @@ from neuracore.core.streaming.client_stream.models import (
 )
 from neuracore.core.streaming.client_stream.stream_enabled import EnabledManager
 from neuracore.core.streaming.event_loop_utils import get_running_loop
+
+logger = logging.getLogger(__name__)
 
 
 class RecordingStateManager(AsyncIOEventEmitter):
@@ -246,7 +249,7 @@ class RecordingStateManager(AsyncIOEventEmitter):
                                 )
 
             except Exception as e:
-                print(f"Recording signalling error: {e}")
+                logger.warning(f"Recording signalling error: {e}")
 
     def __stop_remote_trigger(self) -> None:
         """Internal method to stop the remote trigger connection."""
