@@ -50,6 +50,7 @@ class EndpointPolicy:
         self,
         robot: Optional[Robot],
         predict_url: str,
+        log_dir: str,
         headers: Optional[dict[str, str]] = None,
     ):
         """Initialize the endpoint policy with connection details.
@@ -57,6 +58,7 @@ class EndpointPolicy:
         Args:
             robot: Robot instance for accessing sensor streams.
             predict_url: URL of the model prediction endpoint.
+            log_dir: Directory for TorchServe logs.
             headers: Optional HTTP headers for authentication.
         """
         self._predict_url = predict_url
@@ -64,6 +66,7 @@ class EndpointPolicy:
         self._process: Optional[Popen] = None
         self._is_local = "localhost" in predict_url
         self.robot = robot
+        self._log_path = Path(log_dir)
 
     def _encode_image(self, image: np.ndarray) -> str:
         """Encode numpy image array to base64 string for transmission.
@@ -228,14 +231,9 @@ class EndpointPolicy:
                 self._predict_url,
                 headers=self._headers,
                 json=request_data,
-                timeout=10,
+                timeout=int(os.getenv("NEURACORE_ENDPOINT_TIMEOUT", 10)),
             )
             response.raise_for_status()
-
-            if response.status_code != 200:
-                raise EndpointError(
-                    f"Failed to get prediction from endpoint: {response.text}"
-                )
 
             # Parse response
             result = response.json()
@@ -261,8 +259,20 @@ class EndpointPolicy:
                 model_pred.outputs[key] = model_pred.outputs[key][0]
             return model_pred
 
-        except requests.exceptions.RequestException as e:
-            raise EndpointError(f"Failed to get prediction from endpoint: {str(e)}")
+        except requests.exceptions.RequestException:
+            # Read the logs
+            log_file = self._log_path / "model_log.log"
+            logs = []
+            if log_file.exists():
+                # Get the last 50 lines of the log file
+                with log_file.open("r") as f:
+                    logs = f.readlines()[-50:]
+            # Include logs in the error message
+            raise EndpointError(
+                f"Failed to get prediction from endpoint.\n"
+                f"Full logs located at: {log_file}\n"
+                f"Here are the last 50 lines:\n{''.join(logs)}"
+            )
         except Exception as e:
             raise EndpointError(f"Error processing endpoint response: {str(e)}")
 
@@ -328,6 +338,7 @@ def connect_endpoint(
             robot=robot,
             predict_url=f"{API_URL}/org/{org_id}/models/endpoints/{endpoint['id']}/predict",
             headers=auth.get_headers(),
+            log_dir="",
         )
 
     except requests.exceptions.RequestException as e:
@@ -340,6 +351,7 @@ def connect_local_endpoint(
     path_to_model: Optional[str] = None,
     train_run_name: Optional[str] = None,
     port: int = 8080,
+    log_dir: Optional[str] = None,
 ) -> EndpointPolicy:
     """Connect to a local model endpoint using TorchServe.
 
@@ -357,6 +369,7 @@ def connect_local_endpoint(
         train_run_name: Name of a training run to download the model from.
             Mutually exclusive with path_to_model.
         port: TCP port for the local TorchServe instance.
+        log_dir: Optional directory for TorchServe logs.
 
     Returns:
         EndpointPolicy interface for making predictions with the local endpoint.
@@ -401,9 +414,8 @@ def connect_local_endpoint(
         response.raise_for_status()
 
         model_url_response = response.json()
-        model_url = model_url_response["url"]
         response = requests.get(
-            model_url,
+            model_url_response["url"],
             timeout=120,
             stream=True,
         )
@@ -445,11 +457,12 @@ def connect_local_endpoint(
         model_path_object = Path(path_to_model)
 
     try:
-        process = _setup_torchserve(str(model_path_object), port=port)
-        attemps = 5
+        log_dir = log_dir or (tempfile.mkdtemp() + "/torchserve_logs")
+        process = _setup_torchserve(str(model_path_object), port=port, log_dir=log_dir)
+        attempts = 10
         health_check = None
         status_code = 500
-        while attemps > 0:
+        while attempts > 0:
             try:
                 # Check if the server is running
                 health_check = requests.get(f"http://localhost:{port}/ping", timeout=10)
@@ -460,13 +473,16 @@ def connect_local_endpoint(
             except requests.exceptions.RequestException:
                 health_check = None
                 status_code = 500
+                logging.info("TorchServe is not running yet, retrying...")
                 pass
-            attemps -= 1
+            attempts -= 1
             time.sleep(5)
         if status_code != 200:
             raise EndpointError("TorchServe is not running")
         endpoint = EndpointPolicy(
-            robot=robot, predict_url=f"http://localhost:{port}/predictions/robot_model"
+            robot=robot,
+            predict_url=f"http://localhost:{port}/predictions/robot_model",
+            log_dir=log_dir,
         )
         endpoint._process = process
         return endpoint
@@ -477,7 +493,9 @@ def connect_local_endpoint(
         raise EndpointError(f"Error processing local endpoint response: {str(e)}")
 
 
-def _setup_torchserve(path_to_model: str, port: int = 8080) -> subprocess.Popen:
+def _setup_torchserve(
+    path_to_model: str, log_dir: str, port: int = 8080
+) -> subprocess.Popen:
     """Setup and start a TorchServe instance with the specified model.
 
     Creates a TorchServe configuration, starts the service with the provided
@@ -485,6 +503,7 @@ def _setup_torchserve(path_to_model: str, port: int = 8080) -> subprocess.Popen:
 
     Args:
         path_to_model: File path to the .mar model archive.
+        log_dir: Optional directory for TorchServe logs.
         port: Base port for TorchServe (inference, management, and metrics
             ports will be allocated sequentially).
 
@@ -512,6 +531,8 @@ def _setup_torchserve(path_to_model: str, port: int = 8080) -> subprocess.Popen:
 
     # Ensure torchserve is not already running
     subprocess.run(["torchserve", "--stop"], capture_output=True)
+
+    os.environ["LOG_LOCATION"] = log_dir
 
     # Start TorchServe
     cmd = [

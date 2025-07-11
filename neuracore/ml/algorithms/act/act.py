@@ -53,7 +53,7 @@ class ACT(NeuracoreModel):
         model_init_description: ModelInitDescription,
         hidden_dim: int = 512,
         num_encoder_layers: int = 4,
-        num_decoder_layers: int = 7,
+        num_decoder_layers: int = 1,
         nheads: int = 8,
         dim_feedforward: int = 3200,
         dropout: float = 0.1,

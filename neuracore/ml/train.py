@@ -181,10 +181,6 @@ def run_training(
 
     try:
         logger.info(f"Using batch size: {batch_size}")
-        training_storage_handler = TrainingStorageHandler(
-            local_dir=cfg.local_output_dir,
-            training_job_id=cfg.training_id,
-        )
 
         input_data_types = convert_data_types(cfg.input_data_types)
         output_data_types = convert_data_types(cfg.output_data_types)
@@ -279,6 +275,7 @@ def run_training(
             output_prediction_horizon=cfg.output_prediction_horizon,
         )
 
+        algorithm_config: dict[str, Any] = {}
         if "algorithm" in cfg:
             model = hydra.utils.instantiate(
                 cfg.algorithm,
@@ -295,6 +292,12 @@ def run_training(
                 "Either 'algorithm' or 'algorithm_id' "
                 "must be provided in the configuration"
             )
+
+        training_storage_handler = TrainingStorageHandler(
+            local_dir=cfg.local_output_dir,
+            training_job_id=cfg.training_id,
+            algorithm_config=algorithm_config,
+        )
 
         # TODO: Find a better way to handle text tokenization
         dataset.tokenize_text = model.tokenize_text

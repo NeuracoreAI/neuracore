@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `nc-select-org` to interactively change organization
 - `nc.list_my_orgs()` method to find the details of your organizations
 - Support for Python 3.9
+- Added Pi0
 
 ### Changed
 

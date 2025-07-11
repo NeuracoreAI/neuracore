@@ -30,6 +30,7 @@ from ...core.nc_types import (
     EndEffectorData,
     JointData,
     LanguageData,
+    ModelDevice,
     ModelInitDescription,
     PointCloudData,
     PoseData,
@@ -306,22 +307,20 @@ def run_validation(
             dataset, batch_size=batch_size, shuffle=True, collate_fn=dataset.collate_fn
         )
 
-        # Set device
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"Using device: {device}")
-
         model_init_description = ModelInitDescription(
             dataset_description=dataset.dataset_description,
             input_data_types=supported_input_data_types,
             output_data_types=supported_output_data_types,
             output_prediction_horizon=dataset.output_prediction_horizon,
+            device=ModelDevice.AUTO,
         )
 
         # Check 1: Can initialize the model
         logger.info("Initializing model")
         model = model_class(
             model_init_description=model_init_description, **algorithm_config
-        ).to(device)
+        )
+        model = model.to(model.device)
         logger.info(
             "Model initialized with "
             f"{sum(p.numel() for p in model.parameters()):,} parameters"
@@ -340,7 +339,7 @@ def run_validation(
 
         # Get a batch from the dataloader
         batch: BatchedTrainingSamples = next(iter(dataloader))
-        batch = batch.to(device)
+        batch = batch.to(model.device)
 
         # Forward pass
         for optimizer in optimizers:

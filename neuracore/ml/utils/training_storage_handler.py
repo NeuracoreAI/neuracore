@@ -22,15 +22,22 @@ logger = logging.getLogger(__name__)
 class TrainingStorageHandler:
     """Handles storage operations for both local and GCS."""
 
-    def __init__(self, local_dir: Optional[str], training_job_id: Optional[str] = None):
+    def __init__(
+        self,
+        local_dir: Optional[str],
+        training_job_id: Optional[str] = None,
+        algorithm_config: dict = {},
+    ) -> None:
         """Initialize the storage handler.
 
         Args:
             local_dir: Local directory to save artifacts and checkpoints.
             training_job_id: Optional ID of the training job for cloud logging.
+            algorithm_config: Optional configuration for the algorithm.
         """
         self.local_dir = Path(local_dir or "./output")
         self.training_job_id = training_job_id
+        self.algorithm_config = algorithm_config
         self.log_to_cloud = self.training_job_id is not None
         self.org_id = get_current_org()
         if self.log_to_cloud:
@@ -156,7 +163,11 @@ class TrainingStorageHandler:
         """
         artifacts_dir = self.local_dir / output_dir / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
-        create_mar(model=model, output_dir=artifacts_dir)
+        create_mar(
+            model=model,
+            output_dir=artifacts_dir,
+            algorithm_config=self.algorithm_config,
+        )
         if self.log_to_cloud:
             for file_path in artifacts_dir.glob("*"):
                 upload_url = self._get_upload_url(
