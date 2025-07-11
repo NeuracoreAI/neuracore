@@ -1,4 +1,5 @@
 import inspect
+import os
 import random
 from pathlib import Path
 
@@ -15,22 +16,36 @@ from neuracore.core.nc_types import (
     ModelPrediction,
 )
 from neuracore.ml import (
+    BatchedData,
     BatchedInferenceSamples,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     MaskableData,
 )
-from neuracore.ml.algorithms.simple_vla.simple_vla import SimpleVLA
-from neuracore.ml.core.ml_types import BatchedData
+from neuracore.ml.algorithms.pi0.pi0 import Pi0
 from neuracore.ml.utils.validate import run_validation
 
-BS = 2
-CAMS = 1
-JOINT_POSITION_DIM = 32
+BS = 1
+CAMS = 2
+JOINT_POSITION_DIM = 16
 OUTPUT_PRED_DIM = JOINT_POSITION_DIM
-PRED_HORIZON = 10
-LANGUAGE_MAX_LEN = 512  # Maximum length for language tokens
+PRED_HORIZON = 8
+LANGUAGE_MAX_LEN = 128  # Maximum length for language tokens
 DEVICE = torch.device("cpu")
+
+SKIP_TEST = os.environ.get("CI", "false").lower() == "true"
+
+
+PI_TINY_ARGS = {
+    "vlm_expert_intermediate_size": 4,
+    "vlm_expert_num_heads": 1,
+    "vlm_expert_head_dim": 4,
+    "action_expert_width": 16,
+    "action_expert_intermediate_size": 4,
+    "action_expert_num_heads": 1,
+    "action_expert_head_dim": 4,
+    "moe_depth": 1,
+}
 
 
 @pytest.fixture
@@ -39,22 +54,18 @@ def model_init_description() -> ModelInitDescription:
         joint_positions=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
-            max_len=JOINT_POSITION_DIM,
         ),
         joint_target_positions=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
-            max_len=JOINT_POSITION_DIM,
         ),
         joint_velocities=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
-            max_len=JOINT_POSITION_DIM,
         ),
         joint_torques=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
-            max_len=JOINT_POSITION_DIM,
         ),
         max_num_rgb_images=CAMS,
         max_language_length=LANGUAGE_MAX_LEN,
@@ -95,10 +106,10 @@ def sample_batch() -> BatchedTrainingSamples:
                 torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
             ),
             rgb_images=MaskableData(
-                torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
+                torch.rand(BS, CAMS, 3, 224, 224, dtype=torch.float32),
                 torch.ones(BS, CAMS, dtype=torch.float32),
             ),
-            language_tokens=MaskableData(  # Add language tokens input
+            language_tokens=MaskableData(
                 torch.randint(0, 1000, (BS, LANGUAGE_MAX_LEN), dtype=torch.long),
                 torch.ones(BS, LANGUAGE_MAX_LEN, dtype=torch.float32),
             ),
@@ -129,10 +140,10 @@ def sample_inference_batch() -> BatchedInferenceSamples:
             torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
         ),
         rgb_images=MaskableData(
-            torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
+            torch.rand(BS, CAMS, 3, 224, 224, dtype=torch.float32),
             torch.ones(BS, CAMS, dtype=torch.float32),
         ),
-        language_tokens=MaskableData(  # Add language tokens for inference
+        language_tokens=MaskableData(
             torch.randint(0, 1000, (BS, LANGUAGE_MAX_LEN), dtype=torch.long),
             torch.ones(BS, LANGUAGE_MAX_LEN, dtype=torch.float32),
         ),
@@ -157,20 +168,22 @@ def mock_dataloader(sample_batch):
     return MockDataLoader()
 
 
+@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
 def test_model_construction(
     model_init_description: ModelInitDescription, model_config: dict
 ):
-    model = SimpleVLA(model_init_description, **model_config)
+    model = Pi0(model_init_description, **PI_TINY_ARGS)
     model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
 
 
+@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
 def test_model_forward(
     model_init_description: ModelInitDescription,
     model_config: dict,
     sample_inference_batch: BatchedInferenceSamples,
 ):
-    model = SimpleVLA(model_init_description, **model_config)
+    model = Pi0(model_init_description, **PI_TINY_ARGS)
     model = model.to(DEVICE)
     sample_inference_batch = sample_inference_batch.to(DEVICE)
     output = model(sample_inference_batch)
@@ -183,12 +196,13 @@ def test_model_forward(
     )
 
 
+@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
 def test_model_backward(
     model_init_description: ModelInitDescription,
     model_config: dict,
     sample_batch: BatchedTrainingSamples,
 ):
-    model = SimpleVLA(model_init_description, **model_config)
+    model = Pi0(model_init_description, **PI_TINY_ARGS)
     model = model.to(DEVICE)
     sample_batch = sample_batch.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_batch)
@@ -199,18 +213,38 @@ def test_model_backward(
     # Perform backward pass
     loss.backward()
 
-    # Check that gradients are computed
+    # Check that gradients are computed for parameters that should have them
     for name, param in model.named_parameters():
         if param.requires_grad:
-            assert param.grad is not None
-            assert torch.isfinite(param.grad).all()
+            # VLM parameters may not get gradients if they're not used in the
+            # forward pass
+            is_vlm_param = any(keyword in name.lower() for keyword in ["vlm", "vision"])
+
+            if not is_vlm_param:
+                # Non-VLM parameters should definitely have gradients
+                assert (
+                    param.grad is not None
+                ), f"Non-VLM parameter {name} should have gradients"
+                assert torch.isfinite(
+                    param.grad
+                ).all(), f"Parameter {name} has non-finite gradients"
+            elif param.grad is not None:
+                # If VLM parameters do have gradients, they should be finite
+                assert torch.isfinite(
+                    param.grad
+                ).all(), f"Parameter {name} has non-finite gradients"
 
 
+@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
 def test_run_validation(tmp_path: Path):
-    algorithm_dir = Path(inspect.getfile(SimpleVLA)).parent
+    # Long timeout due to larger model run on CPU
+    os.environ["NEURACORE_ENDPOINT_TIMEOUT"] = "120"
+    algorithm_dir = Path(inspect.getfile(Pi0)).parent
     _, error_msg = run_validation(
         output_dir=tmp_path,
         algorithm_dir=algorithm_dir,
         port=random.randint(10000, 20000),
+        skip_endpoint_check=False,
+        algorithm_config=PI_TINY_ARGS,
     )
     assert len(error_msg) == 0

@@ -12,7 +12,12 @@ from typing import List, Tuple
 import torch
 import torch.nn as nn
 
-from ...core.nc_types import DataType, ModelInitDescription, ModelPrediction
+from ...core.nc_types import (
+    DataType,
+    ModelDevice,
+    ModelInitDescription,
+    ModelPrediction,
+)
 from .ml_types import (
     BatchedInferenceSamples,
     BatchedTrainingOutputs,
@@ -47,7 +52,10 @@ class NeuracoreModel(nn.Module, ABC):
         super().__init__()
         self.model_init_description = model_init_description
         self._validate_input_output_types()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if model_init_description.device == ModelDevice.AUTO:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(model_init_description.device.value)
         self.dataset_description = model_init_description.dataset_description
         self.output_prediction_horizon = (
             model_init_description.output_prediction_horizon

@@ -78,6 +78,8 @@ jobs:
           sudo apt update && sudo apt install -y default-jre  # For endpoints
 
       - name: Run tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           echo "🧪 Running tests..."
           pytest tests/unit

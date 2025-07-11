@@ -94,10 +94,10 @@ class RobotModelHandler(BaseHandler):
         algorithm_loader = AlgorithmLoader(Path(model_dir))
         model_class = algorithm_loader.load_model()
         model = model_class(self.model_init_description, **self.algorithm_config)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = model.device
         if model_pt_path:
             model.load_state_dict(
-                torch.load(model_pt_path, map_location=self.device, weights_only=True),
+                torch.load(model_pt_path, map_location=model.device, weights_only=True),
             )
         return model
 
@@ -125,15 +125,19 @@ class RobotModelHandler(BaseHandler):
         if os.path.isfile(algorithm_config_path):
             with open(algorithm_config_path) as f:
                 self.algorithm_config = json.load(f)
+            logger.info(f"Loaded algorithm configuration from {algorithm_config_path}")
+            logger.info(f"Algorithm configuration: {self.algorithm_config}")
         else:
+            logger.info(
+                "No algorithm_config.json found, using default empty configuration."
+            )
             self.algorithm_config = {}
 
         self.model_init_description = ModelInitDescription.model_validate(data)
         self.dataset_description = self.model_init_description.dataset_description
 
         super().initialize(context)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.to(self.device)
+        self.model.to(self.model.device)
         self.model.eval()
 
         self.initialized = True

@@ -45,6 +45,8 @@ jobs:
         pip install ".[dev,ml]"
     
     - name: Run tests with pytest
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
         pytest tests/unit
     
