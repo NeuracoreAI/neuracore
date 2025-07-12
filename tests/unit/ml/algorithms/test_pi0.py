@@ -236,7 +236,7 @@ def test_model_backward(
 
 
 @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
-def test_run_validation(tmp_path: Path):
+def test_run_validation(tmp_path: Path, mock_login):
     # Long timeout due to larger model run on CPU
     os.environ["NEURACORE_ENDPOINT_TIMEOUT"] = "120"
     algorithm_dir = Path(inspect.getfile(Pi0)).parent

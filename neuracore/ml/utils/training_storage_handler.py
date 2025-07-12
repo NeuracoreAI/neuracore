@@ -12,9 +12,7 @@ import neuracore as nc
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
-from neuracore.ml.utils.mar import create_mar
-
-FILE_PATH = Path(__file__).parent / "handlers.py"
+from neuracore.ml.utils.nc_archive import create_nc_archive
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +161,7 @@ class TrainingStorageHandler:
         """
         artifacts_dir = self.local_dir / output_dir / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
-        create_mar(
+        create_nc_archive(
             model=model,
             output_dir=artifacts_dir,
             algorithm_config=self.algorithm_config,

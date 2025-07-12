@@ -29,15 +29,13 @@ def test_connect_endpoint(
     # Mock endpoint prediction
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/models/endpoints/test_endpoint_id/predict",
-        json={
-            "predictions": ModelPrediction(
-                outputs={DataType.JOINT_TARGET_POSITIONS: [[0.1, 0.2, 0.3]]}
-            ).model_dump()
-        },
+        json=ModelPrediction(
+            outputs={DataType.JOINT_TARGET_POSITIONS: [[0.1, 0.2, 0.3]]}
+        ).model_dump(),
         status_code=200,
     )
 
-    endpoint = nc.connect_endpoint("test_endpoint")
+    endpoint = nc.policy_remote_server("test_endpoint")
 
     nc.log_joint_positions({"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
     nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
@@ -64,8 +62,10 @@ def test_connect_nonexistent_endpoint(
     )
 
     # Attempt to connect to non-existent endpoint should raise an error
-    with pytest.raises(Exception, match="No endpoint found with name or ID"):
-        nc.connect_endpoint("non_existent_endpoint")
+    with pytest.raises(
+        Exception, match="No endpoint found with name: non_existent_endpoint"
+    ):
+        nc.policy_remote_server("non_existent_endpoint")
 
 
 def test_connect_inactive_endpoint(
@@ -86,7 +86,7 @@ def test_connect_inactive_endpoint(
 
     # Attempt to connect to inactive endpoint should raise an error
     with pytest.raises(Exception, match="Endpoint test_endpoint is not active"):
-        nc.connect_endpoint("test_endpoint")
+        nc.policy_remote_server("test_endpoint")
 
 
 def test_connect_local_endpoint(
@@ -99,12 +99,16 @@ def test_connect_local_endpoint(
 ):
     """Test connecting to a local endpoint."""
 
+    port = np.random.randint(8000, 9000)
+    localhost = f"http://127.0.0.1:{port}"
+
     # Mock torchserve subprocess
     def mock_subprocess_popen(*args, **kwargs):
         class MockProcess:
             def __init__(self):
                 self.stdout = None
                 self.stderr = None
+                self.pid = -1
 
             def terminate(self):
                 pass
@@ -115,17 +119,15 @@ def test_connect_local_endpoint(
         return MockProcess()
 
     mock_auth_requests.get(
-        "http://localhost:8080/ping",
+        f"{localhost}/ping",
         status_code=200,
     )
 
     mock_auth_requests.post(
-        "http://localhost:8080/predictions/robot_model",
-        json={
-            "predictions": ModelPrediction(
-                outputs={DataType.JOINT_TARGET_POSITIONS: [0.1, 0.2, 0.3]}
-            ).model_dump()
-        },
+        f"{localhost}/predict",
+        json=ModelPrediction(
+            outputs={DataType.JOINT_TARGET_POSITIONS: [0.1, 0.2, 0.3]}
+        ).model_dump(),
         status_code=200,
     )
 
@@ -140,7 +142,7 @@ def test_connect_local_endpoint(
     )
     nc.connect_robot("test_robot")
 
-    local_endpoint = nc.connect_local_endpoint(mock_model_mar)
+    local_endpoint = nc.policy_local_server(model_file=mock_model_mar, port=port)
 
     nc.log_joint_positions({"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
     nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
@@ -148,6 +150,7 @@ def test_connect_local_endpoint(
     # Test prediction
     pred = local_endpoint.predict()
     assert isinstance(pred, ModelPrediction)
+    local_endpoint.disconnect()
 
 
 def test_deploy_model(
@@ -251,6 +254,7 @@ def test_connect_local_endpoint_with_train_run(
         status_code=200,
     )
     nc.connect_robot("test_robot")
+    port = np.random.randint(8000, 9000)
 
     # Mock training jobs endpoint
     mock_auth_requests.get(
@@ -263,32 +267,32 @@ def test_connect_local_endpoint_with_train_run(
         status_code=200,
     )
 
+    localhost = f"http://127.0.0.1:{port}"
+
     # Mock model download
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/training/jobs/job_123/model_url",
         json={
-            "url": "http://localhost:8080/model.mar",
+            "url": f"{localhost}/model.nc.zip",
         },
         status_code=200,
     )
     mock_auth_requests.get(
-        "http://localhost:8080/model.mar",
+        f"{localhost}/model.nc.zip",
         content=b"dummy model content",
         status_code=200,
     )
 
     mock_auth_requests.get(
-        "http://localhost:8080/ping",
+        f"{localhost}/ping",
         status_code=200,
     )
 
     mock_auth_requests.post(
-        "http://localhost:8080/predictions/robot_model",
-        json={
-            "predictions": ModelPrediction(
-                outputs={DataType.JOINT_TARGET_POSITIONS: [0.1, 0.2, 0.3]}
-            ).model_dump()
-        },
+        f"{localhost}/predict",
+        json=ModelPrediction(
+            outputs={DataType.JOINT_TARGET_POSITIONS: [0.1, 0.2, 0.3]}
+        ).model_dump(),
         status_code=200,
     )
 
@@ -298,6 +302,7 @@ def test_connect_local_endpoint_with_train_run(
             def __init__(self):
                 self.stdout = None
                 self.stderr = None
+                self.pid = -1
 
             def terminate(self):
                 pass
@@ -312,13 +317,14 @@ def test_connect_local_endpoint_with_train_run(
     monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: None)
 
     # Connect using train run name
-    local_endpoint = nc.connect_local_endpoint(train_run_name="test_run")
+    local_endpoint = nc.policy_local_server(train_run_name="test_run", port=port)
     nc.log_joint_positions({"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
     nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
 
     # Test prediction
     pred = local_endpoint.predict()
     assert isinstance(pred, ModelPrediction)
+    local_endpoint.disconnect()
 
 
 def test_connect_local_endpoint_invalid_args(
@@ -330,12 +336,12 @@ def test_connect_local_endpoint_invalid_args(
 
     # Both arguments provided should raise an error
     with pytest.raises(
-        ValueError, match="Cannot provide both path_to_model and train_run_name"
+        ValueError, match="Cannot specify both train_run_name and model_file"
     ):
-        nc.connect_local_endpoint(path_to_model="model.mar", train_run_name="test_run")
+        nc.policy_local_server(model_file="model.nc.zip", train_run_name="test_run")
 
     # Neither argument provided should raise an error
     with pytest.raises(
-        ValueError, match="Must provide either path_to_model or train_run_name"
+        ValueError, match="Must specify either train_run_name or model_file"
     ):
-        nc.connect_local_endpoint()
+        nc.policy_local_server()

@@ -31,7 +31,7 @@ def mocked_org_id():
 @pytest.fixture
 def mock_auth_requests():
     """Fixture to mock authentication and API requests."""
-    with requests_mock.Mocker() as m:
+    with requests_mock.Mocker(real_http=True) as m:
         # Mock API Key Verification
         m.post(
             f"{API_URL}/auth/verify-api-key",
@@ -72,13 +72,19 @@ def mock_auth_requests():
         )
 
         # Mock List Organizations
-
         m.get(
             f"{API_URL}/org-management/my-orgs",
             json=[{"org": {"id": MOCKED_ORG_ID, "name": "test organization"}}],
         )
 
         yield m
+
+
+@pytest.fixture
+def mock_login(mock_auth_requests):
+    """Fixture to mock login."""
+    neuracore.login("test_api_key")
+    yield
 
 
 @pytest.fixture
@@ -135,8 +141,8 @@ def mock_urdf(tmp_path):
 
 @pytest.fixture
 def mock_model_mar(tmp_path):
-    """Create a mock model.mar file for testing."""
-    model_path = tmp_path / "model.mar"
+    """Create a mock model.nc.zip file for testing."""
+    model_path = tmp_path / "model.nc.zip"
     model_path.write_bytes(b"dummy model content")
     return str(model_path)
 

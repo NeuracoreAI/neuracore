@@ -196,7 +196,7 @@ def test_model_backward(
             assert torch.isfinite(param.grad).all()
 
 
-def test_run_validation(tmp_path: Path):
+def test_run_validation(tmp_path: Path, mock_login):
     algorithm_dir = Path(inspect.getfile(DiffusionPolicy)).parent
     _, error_msg = run_validation(
         output_dir=tmp_path,

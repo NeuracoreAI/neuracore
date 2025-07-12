@@ -22,7 +22,7 @@ def main():
     )
 
     try:
-        policy = nc.connect_endpoint(ENDPOINT_NAME)
+        policy = nc.policy_remote_server(ENDPOINT_NAME)
     except EndpointError:
         print(f"Please ensure that the endpoint '{ENDPOINT_NAME}' is running.")
         print(

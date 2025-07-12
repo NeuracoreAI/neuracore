@@ -108,7 +108,7 @@ ehthumbs.db
 MUJOCO_LOG.TXT
 
 # Local model
-*.mar
+*.nc.zip
 
 logs/
 examples/logs/

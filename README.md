@@ -68,6 +68,37 @@ nc.log_joint_positions({
 nc.log_rgb("top_camera", image_array)
 ```
 
+## Command Line Commands
+
+Neuracore provides several command-line tools for authentication, organization management, and server operations:
+
+### Authentication
+```bash
+# Generate and save API key (interactive login)
+nc-login
+```
+
+### Organization Management
+```bash
+# Select current organization (interactive selection)
+nc-select-org
+```
+
+### Server Operations
+```bash
+# Launch local policy server
+nc-launch-server --job_id <job_id> --org_id <org_id> [--host <host>] [--port <port>]
+
+# Example:
+nc-launch-server --job_id my_job_123 --org_id my_org_456 --host 0.0.0.0 --port 8080
+```
+
+**Parameters:**
+- `--job_id`: Required. The job ID to run
+- `--org_id`: Required. Your organization ID
+- `--host`: Optional. Host address (default: 0.0.0.0)
+- `--port`: Optional. Port number (default: 8080)
+
 ## Open Source Training
 
 Neuracore includes a powerful open-source training infrastructure built with Hydra for configuration management. Train your own robot learning algorithms locally rather than using our cloud training service.

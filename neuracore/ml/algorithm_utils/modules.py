@@ -264,8 +264,6 @@ class CustomDataEncoder(nn.Module):
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
                 nn.ReLU(),
-                nn.BatchNorm1d(hidden_dim),
-                nn.Dropout(0.1),
             ])
             prev_dim = hidden_dim
 

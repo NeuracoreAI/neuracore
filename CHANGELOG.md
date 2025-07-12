@@ -15,11 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `nc.list_my_orgs()` method to find the details of your organizations
 - Support for Python 3.9
 - Added Pi0
+- Ability to launch a policy outside of a server using `nc.policy()`
 
 ### Changed
 
 - The current organization is now stored locally at `~/.neuracore/config.json` rather than being set globally
 - Training now supports all data types. See CNNMLP for an example.
+- Endpoints now use our own custom server, rather than torchserve
+- `nc.connect_local_endpoint()` -> `nc.policy_local_server()`
+- `nc.connect_endpoint()` -> `nc.policy_remote_server()`
+- Moved from .mar format to .nc.zip format for model archives
 
 ### Removed
 

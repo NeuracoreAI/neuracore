@@ -6,8 +6,6 @@ and deployment readiness checks. It ensures algorithms are compatible with
 the Neuracore training and inference infrastructure.
 """
 
-import base64
-import io
 import logging
 import os
 import tempfile
@@ -17,7 +15,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image
 from pydantic import BaseModel
 from torch.utils.data import DataLoader
 
@@ -39,7 +36,7 @@ from ...core.nc_types import (
 from ..core.ml_types import BatchedTrainingOutputs, BatchedTrainingSamples, MaskableData
 from ..datasets.pytorch_dummy_dataset import PytorchDummyDataset
 from .algorithm_loader import AlgorithmLoader
-from .mar import create_mar
+from .nc_archive import create_nc_archive
 
 
 class AlgorithmCheck(BaseModel):
@@ -77,24 +74,6 @@ def setup_logging(output_dir: Path) -> None:
             logging.FileHandler(output_dir / "validate.log"),
         ],
     )
-
-
-def _encode_image(image: np.ndarray) -> str:
-    """Encode a numpy image array to base64 string for testing.
-
-    Converts image data to the base64 format expected by the Neuracore
-    inference pipeline for validation testing.
-
-    Args:
-        image: Numpy array representing an image to encode.
-
-    Returns:
-        Base64-encoded string representation of the image.
-    """
-    pil_image = Image.fromarray(image.astype("uint8"))
-    buffer = io.BytesIO()
-    pil_image.save(buffer, format="PNG")
-    return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
 def _create_joint_data(maskable_data: MaskableData) -> JointData:
@@ -383,7 +362,7 @@ def run_validation(
         with tempfile.TemporaryDirectory():
             try:
                 artifacts_dir = output_dir
-                create_mar(model, artifacts_dir, algorithm_config)
+                create_nc_archive(model, artifacts_dir, algorithm_config)
 
                 algo_check.successfully_exported_model = True
                 logger.info("TorchScript export successful")
@@ -398,8 +377,8 @@ def run_validation(
                 policy = None
                 try:
                     # Check if the exported model can be loaded
-                    policy = nc.connect_local_endpoint(
-                        path_to_model=str(artifacts_dir / "model.mar"),
+                    policy = nc.policy_local_server(
+                        model_file=str(artifacts_dir / "model.nc.zip"),
                         port=port,
                     )
 
@@ -444,9 +423,7 @@ def run_validation(
                             * 255
                         ).astype(np.uint8)
                         rgbs = {
-                            f"camera{i}": CameraData(
-                                timestamp=time.time(), frame=_encode_image(v)
-                            )
+                            f"camera{i}": CameraData(timestamp=time.time(), frame=v)
                             for i, v in enumerate(rgbs)
                         }
                         sync_point.rgb_images = rgbs
@@ -474,7 +451,7 @@ def run_validation(
 
                         depth_cameras = {
                             f"depth_camera{i}": CameraData(
-                                timestamp=time.time(), frame=_encode_image(v)
+                                timestamp=time.time(), frame=v
                             )
                             for i, v in enumerate(depths_normalized)
                         }
