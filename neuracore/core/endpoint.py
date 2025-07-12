@@ -3,13 +3,15 @@
 This module provides classes and functions for connecting to and interacting
 with machine learning model endpoints, both local and remote. It handles
 model prediction requests, data synchronization from robot sensors, and
-manages TorchServe instances for local model deployment.
+manages FastAPI instance for local model deployment.
 """
 
+import atexit
 import base64
-import json
 import logging
 import os
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -22,12 +24,18 @@ from typing import Optional
 import numpy as np
 import requests
 from PIL import Image
-from tqdm import tqdm
 
 from neuracore.api.core import _get_robot
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.robot import Robot
 from neuracore.core.utils.depth_utils import depth_to_rgb
+from neuracore.core.utils.download import download_with_progress
+from neuracore.core.utils.server import (
+    PING_ENDPOINT,
+    PREDICT_ENDPOINT,
+    SET_CHECKPOINT_ENDPOINT,
+)
+from neuracore.ml.utils.policy_inference import PolicyInference
 
 from .auth import get_auth
 from .const import API_URL
@@ -37,73 +45,12 @@ from .nc_types import CameraData, DataType, JointData, ModelPrediction, SyncPoin
 logger = logging.getLogger(__name__)
 
 
-class EndpointPolicy:
-    """Interface to a deployed model endpoint for robot control.
+class Policy:
+    """Base class for all policies."""
 
-    This class provides methods for sending robot sensor data to a model
-    endpoint and receiving action predictions. It handles data encoding,
-    request management, and response processing for both local and remote
-    endpoints.
-    """
-
-    def __init__(
-        self,
-        robot: Optional[Robot],
-        predict_url: str,
-        log_dir: str,
-        headers: Optional[dict[str, str]] = None,
-    ):
-        """Initialize the endpoint policy with connection details.
-
-        Args:
-            robot: Robot instance for accessing sensor streams.
-            predict_url: URL of the model prediction endpoint.
-            log_dir: Directory for TorchServe logs.
-            headers: Optional HTTP headers for authentication.
-        """
-        self._predict_url = predict_url
-        self._headers = headers or {}
-        self._process: Optional[Popen] = None
-        self._is_local = "localhost" in predict_url
+    def __init__(self, robot: Optional[Robot]):
+        """Initialize the policy with an optional robot instance."""
         self.robot = robot
-        self._log_path = Path(log_dir)
-
-    def _encode_image(self, image: np.ndarray) -> str:
-        """Encode numpy image array to base64 string for transmission.
-
-        Converts numpy arrays to PNG format and encodes as base64. For remote
-        endpoints, automatically resizes large images to 224x224 to meet
-        payload size limits.
-
-        Args:
-            image: Numpy array representing an RGB image.
-
-        Returns:
-            Base64 encoded string of the PNG image.
-        """
-        pil_image = Image.fromarray(image)
-        if not self._is_local:
-            if pil_image.size > (224, 224):
-                # There is a limit on the image size for non-local endpoints
-                # This is OK as almost all algorithms scale to 224x224
-                pil_image = pil_image.resize((224, 224))
-        buffer = BytesIO()
-        pil_image.save(buffer, format="PNG")
-        return base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-    def _decode_image(self, encoded_image: str) -> np.ndarray:
-        """Decode base64 image string back to numpy array.
-
-        Args:
-            encoded_image: Base64 encoded image string.
-
-        Returns:
-            Numpy array representing the decoded image.
-        """
-        img_bytes = base64.b64decode(encoded_image)
-        buffer = BytesIO(img_bytes)
-        pil_image = Image.open(buffer)
-        return np.array(pil_image)
 
     def _maybe_add_exisiting_data(
         self, existing: Optional[JointData], to_add: JointData
@@ -151,7 +98,7 @@ class EndpointPolicy:
                 if sync_point.rgb_images is None:
                     sync_point.rgb_images = {}
                 sync_point.rgb_images[stream_name] = CameraData(
-                    timestamp=time.time(), frame=self._encode_image(stream_data)
+                    timestamp=time.time(), frame=stream_data
                 )
             elif "depth" in stream_name:
                 stream_data = stream.get_latest_data()
@@ -159,7 +106,7 @@ class EndpointPolicy:
                     sync_point.depth_images = {}
                 sync_point.depth_images[stream_name] = CameraData(
                     timestamp=time.time(),
-                    frame=self._encode_image(depth_to_rgb(stream_data)),
+                    frame=depth_to_rgb(stream_data),
                 )
             elif "joint_positions" in stream_name:
                 stream_data = stream.get_latest_data()
@@ -179,6 +126,179 @@ class EndpointPolicy:
                     f"Support for stream {stream_name} is not implemented yet"
                 )
         return sync_point
+
+    def set_checkpoint(
+        self, epoch: Optional[int] = None, checkpoint_file: Optional[str] = None
+    ) -> None:
+        """Set the model checkpoint to use for inference.
+
+        Args:
+            epoch: The epoch number of the checkpoint to load.
+            checkpoint_file: Optional path to a specific checkpoint file.
+                If provided, overrides the epoch setting.
+        """
+        if epoch is not None and checkpoint_file is not None:
+            raise ValueError("Specify either epoch or checkpoint_file, not both.")
+        if epoch is None and checkpoint_file is None:
+            raise ValueError("Must specify either epoch or checkpoint_file.")
+
+    def predict(self, sync_point: Optional[SyncPoint] = None) -> ModelPrediction:
+        """Make a prediction using the policy."""
+        raise NotImplementedError("Subclasses must implement this method.")
+
+    def disconnect(self) -> None:
+        """Disconnect from the policy and clean up resources."""
+        pass
+
+
+class DirectPolicy(Policy):
+    """Direct model inference without any server infrastructure.
+
+    This policy loads the model directly in the current process and runs
+    inference without any network overhead. Ideal for low-latency applications.
+    """
+
+    def __init__(
+        self,
+        robot: Optional[Robot],
+        model_path: Path,
+        org_id: str,
+        job_id: Optional[str] = None,
+    ):
+        """Initialize the direct policy with a robot instance."""
+        super().__init__(robot)
+        self._policy = PolicyInference(
+            org_id=org_id, job_id=job_id, model_file=model_path
+        )
+
+    def set_checkpoint(
+        self, epoch: Optional[int] = None, checkpoint_file: Optional[str] = None
+    ) -> None:
+        """Set the model checkpoint to use for inference.
+
+        Args:
+            epoch: The epoch number of the checkpoint to load.
+            checkpoint_file: Optional path to a specific checkpoint file.
+                If provided, overrides the epoch setting.
+        """
+        super().set_checkpoint(epoch, checkpoint_file)
+        self._policy.set_checkpoint(epoch, checkpoint_file)
+
+    def predict(self, sync_point: Optional[SyncPoint] = None) -> ModelPrediction:
+        """Run direct model inference.
+
+        Args:
+            sync_point: Optional sync point. If None, creates from robot sensors.
+
+        Returns:
+            Model predictions.
+        """
+        if sync_point is None:
+            sync_point = self._create_sync_point()
+        model_prediction = self._policy(sync_point)
+        model_prediction.outputs = {
+            key: value[0] if isinstance(value, np.ndarray) and value.ndim > 0 else value
+            for key, value in model_prediction.outputs.items()
+        }
+        return model_prediction
+
+
+class ServerPolicy(Policy):
+    """Base class for server-based policies that communicate via HTTP.
+
+    This class provides common functionality for policies that send requests
+    to HTTP endpoints, whether local or remote.
+    """
+
+    def __init__(
+        self,
+        robot: Optional[Robot],
+        base_url: str,
+        headers: Optional[dict[str, str]] = None,
+    ):
+        """Initialize the server policy with connection details.
+
+        Args:
+            robot: Robot instance for accessing sensor streams.
+            base_url: Base URL of the server.
+            headers: Optional HTTP headers for authentication.
+        """
+        super().__init__(robot)
+        self._base_url = base_url
+        self._headers = headers or {}
+        self._is_local = "localhost" in base_url or "127.0.0.1" in base_url
+        self.robot = robot
+
+    def _encode_image(self, image: np.ndarray) -> str:
+        """Encode numpy image array to base64 string for transmission.
+
+        Converts numpy arrays to PNG format and encodes as base64. For remote
+        endpoints, automatically resizes large images to 224x224 to meet
+        payload size limits.
+
+        Args:
+            image: Numpy array representing an RGB image.
+
+        Returns:
+            Base64 encoded string of the PNG image.
+        """
+        pil_image = Image.fromarray(image)
+        if not self._is_local:
+            if pil_image.size > (224, 224):
+                # There is a limit on the image size for non-local endpoints
+                # This is OK as almost all algorithms scale to 224x224
+                pil_image = pil_image.resize((224, 224))
+        buffer = BytesIO()
+        pil_image.save(buffer, format="PNG")
+        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+    def _decode_image(self, encoded_image: str) -> np.ndarray:
+        """Decode base64 image string back to numpy array.
+
+        Args:
+            encoded_image: Base64 encoded image string.
+
+        Returns:
+            Numpy array representing the decoded image.
+        """
+        img_bytes = base64.b64decode(encoded_image)
+        buffer = BytesIO(img_bytes)
+        pil_image = Image.open(buffer)
+        return np.array(pil_image)
+
+    def set_checkpoint(
+        self, epoch: Optional[int] = None, checkpoint_file: Optional[str] = None
+    ) -> None:
+        """Set the model checkpoint via HTTP request.
+
+        Args:
+            epoch: The epoch number of the checkpoint to load.
+            checkpoint_file: Optional path to a specific checkpoint file.
+                If provided, overrides the epoch setting.
+        """
+        if checkpoint_file is not None:
+            raise ValueError(
+                "Setting checkpoint by file is not supported in server policies."
+            )
+        if epoch is None:
+            raise ValueError("Must specify epoch to set checkpoint.")
+        if epoch < -1:
+            raise ValueError("Epoch must be -1 (last) or a non-negative integer.")
+        try:
+            response = requests.post(
+                f"{self._base_url}{SET_CHECKPOINT_ENDPOINT}",
+                headers=self._headers,
+                json={"epoch": epoch},
+                timeout=30,
+            )
+            if response.status_code != 200:
+                raise EndpointError(
+                    "Failed to set checkpoint: "
+                    f"{response.status_code} - {response.text}"
+                )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise EndpointError(f"Failed to set checkpoint: {str(e)}")
 
     def predict(self, sync_point: Optional[SyncPoint] = None) -> ModelPrediction:
         """Get action predictions from the model endpoint.
@@ -200,47 +320,32 @@ class EndpointPolicy:
         """
         if sync_point is None:
             sync_point = self._create_sync_point()
-        else:
-            if sync_point.rgb_images:
-                for key in sync_point.rgb_images:
-                    if isinstance(sync_point.rgb_images[key].frame, np.ndarray):
-                        sync_point.rgb_images[key].frame = self._encode_image(
-                            sync_point.rgb_images[key].frame
-                        )
-            if sync_point.depth_images:
-                for key in sync_point.depth_images:
-                    if isinstance(sync_point.depth_images[key].frame, np.ndarray):
-                        sync_point.depth_images[key].frame = self._encode_image(
-                            sync_point.depth_images[key].frame
-                        )
-        request_data = sync_point.model_dump()
-        if not self._is_local:
-            payload_size = sys.getsizeof(json.dumps(request_data)) / (
-                1024 * 1024
-            )  # Size in MB
-            if payload_size > 1.5:
-                raise ValueError(
-                    f"Payload size ({payload_size:.2f}MB) "
-                    "exceeds server endpoint limit (1.5MB). "
-                    "Please use a local endpoint."
-                )
 
+        # Encode images if they are numpy arrays
+        if sync_point.rgb_images:
+            for key in sync_point.rgb_images:
+                if isinstance(sync_point.rgb_images[key].frame, np.ndarray):
+                    sync_point.rgb_images[key].frame = self._encode_image(
+                        sync_point.rgb_images[key].frame
+                    )
+        if sync_point.depth_images:
+            for key in sync_point.depth_images:
+                if isinstance(sync_point.depth_images[key].frame, np.ndarray):
+                    sync_point.depth_images[key].frame = self._encode_image(
+                        sync_point.depth_images[key].frame
+                    )
         try:
             # Make prediction request
             response = requests.post(
-                self._predict_url,
+                f"{self._base_url}{PREDICT_ENDPOINT}",
                 headers=self._headers,
-                json=request_data,
+                json=sync_point.model_dump(),
                 timeout=int(os.getenv("NEURACORE_ENDPOINT_TIMEOUT", 10)),
             )
             response.raise_for_status()
 
             # Parse response
             result = response.json()
-
-            if isinstance(result, dict) and "predictions" in result:
-                result = result["predictions"]
-
             model_pred = ModelPrediction.model_validate(result)
             if DataType.RGB_IMAGE in model_pred.outputs:
                 rgb_batch = model_pred.outputs[DataType.RGB_IMAGE]
@@ -259,65 +364,284 @@ class EndpointPolicy:
                 model_pred.outputs[key] = model_pred.outputs[key][0]
             return model_pred
 
-        except requests.exceptions.RequestException:
-            # Read the logs
-            log_file = self._log_path / "model_log.log"
-            logs = []
-            if log_file.exists():
-                # Get the last 50 lines of the log file
-                with log_file.open("r") as f:
-                    logs = f.readlines()[-50:]
-            # Include logs in the error message
-            raise EndpointError(
-                f"Failed to get prediction from endpoint.\n"
-                f"Full logs located at: {log_file}\n"
-                f"Here are the last 50 lines:\n{''.join(logs)}"
-            )
+        except requests.exceptions.RequestException as e:
+            raise EndpointError(f"Failed to get prediction from endpoint: {str(e)}")
         except Exception as e:
             raise EndpointError(f"Error processing endpoint response: {str(e)}")
 
-    def disconnect(self) -> None:
-        """Disconnect from the endpoint and clean up resources.
 
-        For local endpoints, stops the TorchServe process and releases
-        associated resources. Should be called when done using the endpoint.
+class LocalServerPolicy(ServerPolicy):
+    """Policy that manages a local FastAPI server instance.
+
+    This policy starts and manages a local FastAPI server for model inference,
+    providing the flexibility of a server architecture with local control.
+    """
+
+    def __init__(
+        self,
+        robot: Optional[Robot],
+        org_id: str,
+        model_path: Path,
+        job_id: Optional[str] = None,
+        port: int = 8080,
+        host: str = "127.0.0.1",
+    ):
+        """Initialize the local server policy.
+
+        Args:
+            robot: Robot instance for accessing sensor streams.
+            org_id: Organization ID
+            model_path: Path to the .nc.zip model file
+            job_id: Optional job ID to associate with the server
+            port: Port to run the server on
+            host: Host to bind to
         """
-        if self._process:
-            subprocess.run(["torchserve", "--stop"], capture_output=True)
-            self._process.terminate()
-            self._process.wait()
-            self._process = None
+        super().__init__(robot, f"http://{host}:{port}")
+        self.org_id = org_id
+        self.job_id = job_id
+        self.model_path = model_path
+        self.port = port
+        self.host = host
+        self.server_process: Optional[Popen] = None
+        atexit.register(self.disconnect)
+        self._start_server()
+
+    def _start_server(self) -> None:
+        """Start the FastAPI server in a subprocess using module execution."""
+        # Start the server process using module execution
+        cmd = [
+            sys.executable,
+            "-m",
+            "neuracore.core.utils.server",
+            "--model_file",
+            str(self.model_path),
+            "--org-id",
+            self.org_id,
+            "--host",
+            self.host,
+            "--port",
+            str(self.port),
+            "--log-level",
+            "info",
+        ]
+        if self.job_id:
+            cmd.extend(["--job-id", self.job_id])
+
+        if self._is_port_in_use(self.host, self.port):
+            raise EndpointError(
+                f"Port {self.port} is already in use. "
+                "Kill the process using it or choose a different port."
+            )
+
+        logger.info(f"Starting FastAPI server with command: {' '.join(cmd)}")
+
+        self.server_process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            # Ensure clean process termination
+            preexec_fn=os.setsid if hasattr(os, "setsid") else None,
+        )
+
+        # Wait for server to start
+        self._wait_for_server()
+
+    def _is_port_in_use(self, host: str, port: int) -> bool:
+        """Check if a port is in use on the specified host."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            return sock.connect_ex((host, port)) == 0
+
+    def _wait_for_server(self, max_attempts: int = 60) -> None:
+        """Wait for the server to become available."""
+        for attempt in range(max_attempts):
+            try:
+                response = requests.get(
+                    f"http://{self.host}:{self.port}{PING_ENDPOINT}", timeout=1
+                )
+                if response.status_code == 200:
+                    logger.info(
+                        f"Local server started successfully on {self.host}:{self.port}"
+                    )
+                    return
+            except requests.exceptions.RequestException:
+                pass
+            time.sleep(1)
+
+        raise EndpointError(
+            f"Local server failed to start after {max_attempts} attempts"
+        )
+
+    def set_checkpoint(
+        self, epoch: Optional[int] = None, checkpoint_file: Optional[str] = None
+    ) -> None:
+        """Set the model checkpoint via HTTP request to the local server.
+
+        Args:
+            epoch: The epoch number of the checkpoint to load.
+            checkpoint_file: Optional path to a specific checkpoint file.
+                If provided, overrides the epoch setting.
+        """
+        if self.job_id is None:
+            raise ValueError("Cannot set a checkpoint when loading from .nc.zip file")
+        return super().set_checkpoint(epoch, checkpoint_file)
+
+    def disconnect(self) -> None:
+        """Stop the local server and clean up resources."""
+        if not self.server_process:
+            return
+        try:
+            # Try graceful termination first
+            if hasattr(os, "killpg"):
+                # Unix-like systems: kill the process group
+                os.killpg(os.getpgid(self.server_process.pid), signal.SIGTERM)
+            else:
+                # Windows: terminate the process
+                self.server_process.terminate()
+
+            # Wait for graceful shutdown
+            try:
+                self.server_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Force kill if graceful shutdown fails
+                if hasattr(os, "killpg"):
+                    os.killpg(os.getpgid(self.server_process.pid), signal.SIGKILL)
+                else:
+                    self.server_process.kill()
+                self.server_process.wait()
+
+        except (ProcessLookupError, OSError):
+            # Process already terminated
+            pass
+        finally:
+            self.server_process = None
+            logger.info("Local server stopped")
 
 
-def connect_endpoint(
+class RemoteServerPolicy(ServerPolicy):
+    """Policy for connecting to remote endpoints on the Neuracore platform."""
+
+    def __init__(self, robot: Optional[Robot], base_url: str, headers: dict[str, str]):
+        """Initialize the remote server policy.
+
+        Args:
+            robot: Robot instance for accessing sensor streams.
+            base_url: Base URL of the remote server.
+            headers: HTTP headers for authentication.
+        """
+        super().__init__(robot, base_url, headers)
+
+
+# Main connection functions
+def policy(
+    train_run_name: Optional[str] = None,
+    model_file: Optional[str] = None,
+    robot_name: Optional[str] = None,
+    instance: int = 0,
+) -> DirectPolicy:
+    """Launch a direct policy that runs the model in-process.
+
+    Args:
+        train_run_name: Name of the training run to load the model from.
+        robot_name: Robot identifier.
+        instance: Instance number of the robot.
+
+    Returns:
+        DirectPolicy instance for direct model inference.
+    """
+    robot = None
+    if os.getenv("NEURACORE_LIVE_DATA_ENABLED", "True").lower() == "true":
+        robot = _get_robot(robot_name, instance)
+
+    org_id = get_current_org()
+    job_id = None
+    if train_run_name is not None:
+        job_id = _get_job_id(train_run_name, org_id)
+        model_path = _download_model(job_id, org_id)
+    elif model_file is not None:
+        model_path = Path(model_file)
+    else:
+        raise ValueError("Must specify either train_run_name or model_file")
+
+    return DirectPolicy(
+        robot=robot, org_id=org_id, job_id=job_id, model_path=model_path
+    )
+
+
+def policy_local_server(
+    train_run_name: Optional[str] = None,
+    model_file: Optional[str] = None,
+    port: int = 8080,
+    robot_name: Optional[str] = None,
+    instance: int = 0,
+    host: str = "127.0.0.1",
+    job_id: Optional[str] = None,
+) -> LocalServerPolicy:
+    """Launch a local server policy with a FastAPI server.
+
+    Args:
+        train_run_name: Name of the training run to load the model from.
+        port: Port to run the server on.
+        robot_name: Robot identifier.
+        instance: Instance number of the robot.
+        host: Host to bind to.
+        job_id: Optional job ID to associate with the server.
+
+    Returns:
+        LocalServerPolicy instance managing a local FastAPI server.
+    """
+    if train_run_name is None and model_file is None:
+        raise ValueError("Must specify either train_run_name or model_file")
+    if train_run_name and model_file:
+        raise ValueError("Cannot specify both train_run_name and model_file")
+
+    robot = None
+    if os.getenv("NEURACORE_LIVE_DATA_ENABLED", "True").lower() == "true":
+        robot = _get_robot(robot_name, instance)
+
+    org_id = get_current_org()
+
+    # Download model
+    if train_run_name is not None:
+        if job_id is None:
+            job_id = _get_job_id(train_run_name, org_id)
+        model_path = _download_model(job_id, org_id)
+    elif model_file is not None:
+        model_path = Path(model_file)
+    else:
+        raise ValueError("Must specify either train_run_name or model_file")
+
+    return LocalServerPolicy(
+        robot=robot,
+        org_id=org_id,
+        model_path=model_path,
+        job_id=job_id,
+        port=port,
+        host=host,
+    )
+
+
+def policy_remote_server(
     endpoint_name: str,
     robot_name: Optional[str] = None,
     instance: int = 0,
-) -> EndpointPolicy:
-    """Connect to a remote model endpoint deployed on the Neuracore platform.
-
-    Locates an endpoint by name, verifies it's active, and creates a policy
-    interface for making predictions. The endpoint must be deployed and
-    running to establish a connection.
+) -> RemoteServerPolicy:
+    """Launch a remote server policy connected to a deployed endpoint.
 
     Args:
-        endpoint_name: Name or ID of the endpoint to connect to.
-        robot_name: Robot identifier. If not provided, uses the currently
-            active robot from global state.
-        instance: Instance number of the robot for multi-instance deployments.
+        endpoint_name: Name of the deployed endpoint.
+        robot_name: Robot identifier.
+        instance: Instance number of the robot.
 
     Returns:
-        EndpointPolicy interface for making predictions with the endpoint.
-
-    Raises:
-        EndpointError: If the endpoint is not found, not active, or connection fails.
-        ConfigError: If there is an error trying to get the current org
+        RemoteServerPolicy instance for remote inference.
     """
     auth = get_auth()
     org_id = get_current_org()
     robot = _get_robot(robot_name, instance)
+
     try:
-        # If not found by ID, get all endpoints and search by name
+        # Find endpoint by name
         response = requests.get(
             f"{API_URL}/org/{org_id}/models/endpoints", headers=auth.get_headers()
         )
@@ -326,7 +650,7 @@ def connect_endpoint(
         endpoints = response.json()
         endpoint = next((e for e in endpoints if e["name"] == endpoint_name), None)
         if not endpoint:
-            raise EndpointError(f"No endpoint found with name or ID: {endpoint_name}")
+            raise EndpointError(f"No endpoint found with name: {endpoint_name}")
 
         # Verify endpoint is active
         if endpoint["status"] != "active":
@@ -334,221 +658,55 @@ def connect_endpoint(
                 f"Endpoint {endpoint_name} is not active (status: {endpoint['status']})"
             )
 
-        return EndpointPolicy(
+        return RemoteServerPolicy(
             robot=robot,
-            predict_url=f"{API_URL}/org/{org_id}/models/endpoints/{endpoint['id']}/predict",
+            base_url=f"{API_URL}/org/{org_id}/models/endpoints/{endpoint['id']}",
             headers=auth.get_headers(),
-            log_dir="",
         )
 
     except requests.exceptions.RequestException as e:
         raise EndpointError(f"Failed to connect to endpoint: {str(e)}")
 
 
-def connect_local_endpoint(
-    robot_name: Optional[str] = None,
-    instance: int = 0,
-    path_to_model: Optional[str] = None,
-    train_run_name: Optional[str] = None,
-    port: int = 8080,
-    log_dir: Optional[str] = None,
-) -> EndpointPolicy:
-    """Connect to a local model endpoint using TorchServe.
+# Helper functions
+def _download_model(job_id: str, org_id: str) -> Path:
+    """Download model from training run."""
+    auth = get_auth()
+    destination = Path(tempfile.gettempdir()) / job_id / "model.nc.zip"
+    if destination.exists():
+        print(f"Model already downloaded at {destination}. Skipping download.")
+        return destination
+    destination.parent.mkdir(parents=True, exist_ok=True)
 
-    Sets up a local TorchServe instance with the specified model and creates
-    a policy interface. The model can be provided as a local file path or
-    downloaded from a training run. Only one of path_to_model or train_run_name
-    should be specified.
+    print("Downloading model from training run...")
+    response = requests.get(
+        f"{API_URL}/org/{org_id}/training/jobs/{job_id}/model_url",
+        headers=auth.get_headers(),
+        timeout=30,
+    )
+    response.raise_for_status()
 
-    Args:
-        robot_name: Robot identifier. If not provided, uses the currently
-            active robot if live data is enabled.
-        instance: Instance number of the robot for multi-instance deployments.
-        path_to_model: Local file path to a .mar model archive. Mutually
-            exclusive with train_run_name.
-        train_run_name: Name of a training run to download the model from.
-            Mutually exclusive with path_to_model.
-        port: TCP port for the local TorchServe instance.
-        log_dir: Optional directory for TorchServe logs.
-
-    Returns:
-        EndpointPolicy interface for making predictions with the local endpoint.
-
-    Raises:
-        ValueError: If both or neither of path_to_model and train_run_name are provided.
-        EndpointError: If model download, TorchServe setup, or connection fails.
-        FileNotFoundError: If the specified model file doesn't exist.
-        ConfigError: If there is an error trying to get the current org
-    """
-    if path_to_model is None and train_run_name is None:
-        raise ValueError("Must provide either path_to_model or train_run_name")
-    if path_to_model and train_run_name:
-        raise ValueError("Cannot provide both path_to_model and train_run_name")
-    robot = None
-    if os.getenv("NEURACORE_LIVE_DATA_ENABLED", "True").lower() == "true":
-        robot = _get_robot(robot_name, instance)
-
-    if train_run_name:
-        auth = get_auth()
-        org_id = get_current_org()
-        # Get all training runs and search for the job id
-        response = requests.get(
-            f"{API_URL}/org/{org_id}/training/jobs", headers=auth.get_headers()
-        )
-        response.raise_for_status()
-        jobs = response.json()
-        job_id = None
-        for job in jobs:
-            if job["name"] == train_run_name:
-                job_id = job["id"]
-                break
-        if job_id is None:
-            raise EndpointError(f"Training run not found: {train_run_name}")
-
-        print(f"Downloading model '{train_run_name}' from training run...")
-        response = requests.get(
-            f"{API_URL}/org/{org_id}/training/jobs/{job_id}/model_url",
-            headers=auth.get_headers(),
-            timeout=30,
-        )
-        response.raise_for_status()
-
-        model_url_response = response.json()
-        response = requests.get(
-            model_url_response["url"],
-            timeout=120,
-            stream=True,
-        )
-        response.raise_for_status()
-
-        # Get total file size
-        total_size = int(response.headers.get("Content-Length", 0))
-
-        # Create a temporary directory and file path
-        tempdir = tempfile.mkdtemp()
-        model_path_object: Path = Path(tempdir) / "model.mar"
-
-        # Create progress bar based on file size
-        progress_bar = tqdm(
-            total=total_size,
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            desc=f"Downloading model {train_run_name}",
-            bar_format=(
-                "{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} "
-                "[{elapsed}<{remaining}, {rate_fmt}]"
-            ),
-        )
-
-        # Write the file with progress updates
-        with open(model_path_object, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    progress_bar.update(len(chunk))
-
-        # Close the progress bar
-        progress_bar.close()
-        print(f"Model download complete. Saved to {model_path_object}")
-    else:
-        # path_to_model cannot be none here
-        assert path_to_model is not None, "Path to model not found"
-        model_path_object = Path(path_to_model)
-
-    try:
-        log_dir = log_dir or (tempfile.mkdtemp() + "/torchserve_logs")
-        process = _setup_torchserve(str(model_path_object), port=port, log_dir=log_dir)
-        attempts = 10
-        health_check = None
-        status_code = 500
-        while attempts > 0:
-            try:
-                # Check if the server is running
-                health_check = requests.get(f"http://localhost:{port}/ping", timeout=10)
-                status_code = health_check.status_code
-                if status_code == 200:
-                    logging.info("TorchServe is running...")
-                    break
-            except requests.exceptions.RequestException:
-                health_check = None
-                status_code = 500
-                logging.info("TorchServe is not running yet, retrying...")
-                pass
-            attempts -= 1
-            time.sleep(5)
-        if status_code != 200:
-            raise EndpointError("TorchServe is not running")
-        endpoint = EndpointPolicy(
-            robot=robot,
-            predict_url=f"http://localhost:{port}/predictions/robot_model",
-            log_dir=log_dir,
-        )
-        endpoint._process = process
-        return endpoint
-
-    except requests.exceptions.RequestException as e:
-        raise EndpointError(f"Failed to connect to local endpoint: {str(e)}")
-    except Exception as e:
-        raise EndpointError(f"Error processing local endpoint response: {str(e)}")
+    model_url_response = response.json()
+    model_path = download_with_progress(
+        model_url_response["url"],
+        "Downloading model...",
+        destination=destination,
+    )
+    print(f"Model download complete. Saved to {model_path}")
+    return model_path
 
 
-def _setup_torchserve(
-    path_to_model: str, log_dir: str, port: int = 8080
-) -> subprocess.Popen:
-    """Setup and start a TorchServe instance with the specified model.
+def _get_job_id(train_run_name: str, org_id: str) -> str:
+    """Get job ID from training run name."""
+    auth = get_auth()
+    response = requests.get(
+        f"{API_URL}/org/{org_id}/training/jobs", headers=auth.get_headers()
+    )
+    response.raise_for_status()
+    jobs = response.json()
 
-    Creates a TorchServe configuration, starts the service with the provided
-    model, and returns the process handle for lifecycle management.
+    for job in jobs:
+        if job["name"] == train_run_name:
+            return job["id"]
 
-    Args:
-        path_to_model: File path to the .mar model archive.
-        log_dir: Optional directory for TorchServe logs.
-        port: Base port for TorchServe (inference, management, and metrics
-            ports will be allocated sequentially).
-
-    Returns:
-        Subprocess.Popen object representing the TorchServe process.
-
-    Raises:
-        FileNotFoundError: If the model file doesn't exist.
-    """
-    model_path = Path(path_to_model)
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model file not found: {model_path}")
-    # Create config file
-    config = {
-        "default_workers_per_model": 1,
-        "default_response_timeout": 120,
-        "inference_address": f"http://localhost:{port}",
-        "management_address": f"http://localhost:{port+1}",
-        "metrics_address": f"http://localhost:{port+2}",
-    }
-    config_path = Path(tempfile.gettempdir()) / "config.properties"
-    with config_path.open("w") as f:
-        for key, value in config.items():
-            f.write(f"{key}={value}\n")
-
-    # Ensure torchserve is not already running
-    subprocess.run(["torchserve", "--stop"], capture_output=True)
-
-    os.environ["LOG_LOCATION"] = log_dir
-
-    # Start TorchServe
-    cmd = [
-        "torchserve",
-        "--start",
-        "--model-store",
-        str(model_path.resolve().parent),
-        "--models",
-        f"robot_model={str(model_path.name)}",
-        "--ts-config",
-        str(config_path.resolve()),
-        "--ncs",  # Disable cleanup
-        "--disable-token-auth",  # Disable authentication
-    ]
-
-    logger.info(f"Starting TorchServe with command:{' '.join(cmd)}")
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    time.sleep(5)  # Give time for server to start
-    return process
+    raise EndpointError(f"Training run not found: {train_run_name}")

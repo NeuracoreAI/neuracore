@@ -14,19 +14,81 @@ from neuracore.core.config.get_current_org import get_current_org
 
 from ..core.auth import get_auth
 from ..core.const import API_URL
-from ..core.endpoint import EndpointPolicy
-from ..core.endpoint import connect_endpoint as _connect_endpoint
-from ..core.endpoint import connect_local_endpoint as _connect_local_endpoint
+from ..core.endpoint import DirectPolicy, LocalServerPolicy, RemoteServerPolicy
+from ..core.endpoint import policy as _policy
+from ..core.endpoint import policy_local_server as _policy_local_server
+from ..core.endpoint import policy_remote_server as _policy_remote_server
 
 
-def connect_endpoint(
-    endpoint_name: str, robot_name: Optional[str] = None, instance: int = 0
-) -> EndpointPolicy:
-    """Connect to a deployed model endpoint for inference.
+def policy(
+    train_run_name: Optional[str] = None,
+    model_file: Optional[str] = None,
+    robot_name: Optional[str] = None,
+    instance: int = 0,
+) -> DirectPolicy:
+    """Launch a direct policy that runs the model in-process without any server.
 
-    Establishes a connection to a model endpoint that has been deployed on the
-    Neuracore platform. The endpoint can be used to make predictions with the
-    deployed model, and data logging is associated with the specified robot.
+    This is the fastest option with lowest latency since there's no network overhead.
+    The model runs directly in your Python process.
+
+    Args:
+        train_run_name: Name of the training run to load the model from.
+        robot_name: Robot name that predictions and data will be associated with.
+            If not provided, uses the last initialized robot from global state.
+        instance: Instance number of the robot for multi-instance deployments.
+
+    Returns:
+        DirectPolicy object that provides direct in-process model inference.
+
+    Raises:
+        EndpointError: If the model download or initialization fails.
+        ConfigError: If there is an error trying to get the current org.
+    """
+    return _policy(train_run_name, model_file, robot_name, instance)
+
+
+def policy_local_server(
+    train_run_name: Optional[str] = None,
+    model_file: Optional[str] = None,
+    port: int = 8080,
+    robot_name: Optional[str] = None,
+    instance: int = 0,
+    host: str = "127.0.0.1",
+) -> LocalServerPolicy:
+    """Launch and connect to a local server policy.
+
+    This option provides server-like architecture while maintaining local control.
+
+    Args:
+        train_run_name: Name of the training run to load the model from.
+        model_file: Path to the model file to load.
+        port: TCP port number where the local server will run.
+        robot_name: Robot name that predictions and data will be associated with.
+            If not provided, uses the last initialized robot from global state.
+        instance: Instance number of the robot for multi-instance deployments.
+        host: Host address to bind the server to. Defaults to localhost.
+
+    Returns:
+        LocalServerPolicy object that manages a local FastAPI server.
+
+    Raises:
+        EndpointError: If the server startup or model initialization fails.
+        ConfigError: If there is an error trying to get the current org.
+    """
+    return _policy_local_server(
+        train_run_name, model_file, port, robot_name, instance, host
+    )
+
+
+def policy_remote_server(
+    endpoint_name: str,
+    robot_name: Optional[str] = None,
+    instance: int = 0,
+) -> RemoteServerPolicy:
+    """Connects to a policy that is remotely running on neuracore.
+
+    Connects to a model endpoint deployed on the Neuracore cloud platform.
+    The endpoint must be active and accessible.
 
     Args:
         endpoint_name: Name of the deployed endpoint to connect to.
@@ -35,64 +97,17 @@ def connect_endpoint(
         instance: Instance number of the robot for multi-instance deployments.
 
     Returns:
-        Policy object that provides an interface for making predictions
-        with the deployed model.
+        RemoteServerPolicy object for making predictions with the remote endpoint.
 
     Raises:
         EndpointError: If the endpoint connection fails due to invalid endpoint
             name, authentication issues, or network problems.
-        ConfigError: If there is an error trying to get the current org
+        ConfigError: If there is an error trying to get the current org.
     """
-    return _connect_endpoint(
-        endpoint_name=endpoint_name, robot_name=robot_name, instance=instance
-    )
+    return _policy_remote_server(endpoint_name, robot_name, instance)
 
 
-def connect_local_endpoint(
-    path_to_model: Optional[str] = None,
-    train_run_name: Optional[str] = None,
-    port: int = 8080,
-    robot_name: Optional[str] = None,
-    instance: int = 0,
-) -> EndpointPolicy:
-    """Connect to a local model endpoint (run locally on your hardware).
-
-    Establishes a connection to a locally hosted model endpoint. The model can
-    be specified either by providing a direct path to a .mar model file or by
-    referencing a training run name. Only one of these options should be provided.
-
-    Args:
-        path_to_model: Direct file path to a local .mar (Model ARchive) model file.
-            Mutually exclusive with train_run_name.
-        train_run_name: Name of a training run to load the model from. The system
-            will locate and load the model from the specified training run.
-            Mutually exclusive with path_to_model.
-        port: TCP port number where the local endpoint is running.
-        robot_name: Robot name that predictions and data will be associated with.
-            If not provided, uses the last initialized robot from global state.
-        instance: Instance number of the robot for multi-instance deployments.
-
-    Returns:
-        Policy object that provides an interface for making predictions
-        with the local model.
-
-    Raises:
-        EndpointError: If the endpoint connection fails due to invalid model path,
-            inaccessible port, or conflicting parameters.
-        ValueError: If both path_to_model and train_run_name are provided, or if
-            neither is provided.
-        FileNotFoundError: If the specified model file doesn't exist.
-        ConfigError: If there is an error trying to get the current org
-    """
-    return _connect_local_endpoint(
-        robot_name=robot_name,
-        instance=instance,
-        path_to_model=path_to_model,
-        train_run_name=train_run_name,
-        port=port,
-    )
-
-
+# Deployment management functions
 def deploy_model(job_id: str, name: str) -> dict:
     """Deploy a trained model to a managed endpoint.
 

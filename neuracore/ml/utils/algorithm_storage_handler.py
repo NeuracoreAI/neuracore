@@ -13,8 +13,6 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.ml.utils.validate import AlgorithmCheck
 
-FILE_PATH = Path(__file__).parent / "handlers.py"
-
 logger = logging.getLogger(__name__)
 
 

@@ -45,6 +45,9 @@ setup(
         "aiohttp-sse-client",
         "numpy-stl",
         "wget",
+        "uvicorn[standard]",
+        "fastapi",
+        "psutil",
     ],
     extras_require={
         "examples": [
@@ -57,11 +60,8 @@ setup(
             "mujoco>3",
         ],
         "ml": [
-            "torchserve",
-            "nvgpu",
             "torch",
             "torchvision",
-            "torch-model-archiver",
             "transformers",
             "diffusers>=0.27.2",
             "einops",
@@ -81,9 +81,7 @@ setup(
         "console_scripts": [
             "nc-login = neuracore.core.cli.generate_api_key:main",
             "nc-select-org = neuracore.core.cli.select_current_org:main",
-            # "nc-validate = neuracore.ml.cli.validate:main",
-            # "nc-train = neuracore.ml.cli.train:main"
-            # "nc-upload-algorithm = neuracore.ml.cli.upload_algorithm:main",
+            "nc-launch-server = neuracore.core.cli.launch_server:main",
         ]
     },
     keywords="robotics machine-learning ai client-library",

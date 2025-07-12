@@ -80,22 +80,6 @@ For local model deployment, you'll need additional packages:
 pip install "neuracore[ml]"
 ```
 
-Local model deployment also requires a Java JRE.
-
-<details>
-<summary>Install Java JRE</summary>
-
-Mac:
-```bash
-brew install temurin java
-```
-
-Linux:
-```bash
-sudo apt install default-jre
-```
-</details>
-
 
 Run the local model:
 ```bash

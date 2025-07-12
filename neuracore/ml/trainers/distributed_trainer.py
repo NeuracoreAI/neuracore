@@ -349,6 +349,7 @@ class DistributedTrainer:
 
         # Save regular checkpoint
         self.storage_handler.save_checkpoint(checkpoint, "checkpoint_latest.pt")
+        self.storage_handler.save_checkpoint(checkpoint, f"checkpoint_{epoch}.pt")
 
         # Save best model if needed
         if is_best:

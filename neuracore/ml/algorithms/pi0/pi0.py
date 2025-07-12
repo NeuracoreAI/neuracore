@@ -499,7 +499,7 @@ class Pi0(NeuracoreModel):
         pad_masks = []
 
         # iterate over num_cam images
-        for img, img_mask in zip(images, image_masks, strict=False):
+        for img, img_mask in zip(images, image_masks):
             img_emb = self.vlm.model.get_image_features(img)
             img_emb = img_emb.to(dtype=self.dtype, device=self.device)
 
