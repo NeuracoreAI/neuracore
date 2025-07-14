@@ -55,9 +55,6 @@ def select_current_org() -> Organization:
                 raise ValueError()
 
             organization = orgs[input_selection - 1]
-            config_manager = get_config_manager()
-            config_manager.config.current_org_id = organization.id
-            config_manager.save_config()
             print(f"You have selected the organization: {organization.name}")
             return organization
         except ValueError:
@@ -81,7 +78,11 @@ def main() -> None:
     try:
         if not auth.is_authenticated:
             auth.login()
-        select_current_org()
+        organization = select_current_org()
+        config_manager = get_config_manager()
+        config_manager.config.current_org_id = organization.id
+        config_manager.save_config()
+
     except AuthenticationError:
         print("Failed to Authenticate, please try again")
     except (OrganizationError, InputError):
