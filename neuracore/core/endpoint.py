@@ -7,7 +7,6 @@ manages FastAPI instance for local model deployment.
 """
 
 import atexit
-import base64
 import logging
 import os
 import signal
@@ -16,20 +15,19 @@ import subprocess
 import sys
 import tempfile
 import time
-from io import BytesIO
 from pathlib import Path
 from subprocess import Popen
 from typing import Optional
 
 import numpy as np
 import requests
-from PIL import Image
 
 from neuracore.api.core import _get_robot
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.get_latest_sync_point import get_latest_sync_point
 from neuracore.core.robot import Robot
-from neuracore.core.utils.depth_utils import depth_to_rgb
 from neuracore.core.utils.download import download_with_progress
+from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 from neuracore.core.utils.server import (
     PING_ENDPOINT,
     PREDICT_ENDPOINT,
@@ -39,7 +37,7 @@ from neuracore.core.utils.server import (
 from .auth import get_auth
 from .const import API_URL
 from .exceptions import EndpointError
-from .nc_types import CameraData, DataType, JointData, ModelPrediction, SyncPoint
+from .nc_types import DataType, ModelPrediction, SyncPoint
 
 logger = logging.getLogger(__name__)
 
@@ -47,84 +45,9 @@ logger = logging.getLogger(__name__)
 class Policy:
     """Base class for all policies."""
 
-    def __init__(self, robot: Optional[Robot]):
+    def __init__(self, robot: Robot):
         """Initialize the policy with an optional robot instance."""
         self.robot = robot
-
-    def _maybe_add_exisiting_data(
-        self, existing: Optional[JointData], to_add: JointData
-    ) -> JointData:
-        """Merge joint data from multiple streams into a single data structure.
-
-        Combines joint data while preserving existing values and updating
-        timestamps. Used to aggregate data from multiple joint streams.
-
-        Args:
-            existing: Existing joint data or None.
-            to_add: New joint data to merge.
-
-        Returns:
-            Combined JointData with merged values.
-        """
-        # Check if the joint data already exists
-        if existing is None:
-            return to_add
-        existing.timestamp = to_add.timestamp
-        existing.values.update(to_add.values)
-        if existing.additional_values and to_add.additional_values:
-            existing.additional_values.update(to_add.additional_values)
-        return existing
-
-    def _create_sync_point(self) -> SyncPoint:
-        """Create a synchronized data point from current robot sensor streams.
-
-        Collects the latest data from all active robot streams including
-        cameras, joint sensors, and language inputs. Organizes the data
-        into a synchronized structure with consistent timestamps.
-
-        Returns:
-            SyncPoint containing all current sensor data.
-
-        Raises:
-            NotImplementedError: If an unsupported stream type is encountered.
-        """
-        if self.robot is None:
-            raise AttributeError("No robot instance")
-        sync_point = SyncPoint(timestamp=time.time())
-        for stream_name, stream in self.robot.list_all_streams().items():
-            if "rgb" in stream_name:
-                stream_data = stream.get_latest_data()
-                if sync_point.rgb_images is None:
-                    sync_point.rgb_images = {}
-                sync_point.rgb_images[stream_name] = CameraData(
-                    timestamp=time.time(), frame=stream_data
-                )
-            elif "depth" in stream_name:
-                stream_data = stream.get_latest_data()
-                if sync_point.depth_images is None:
-                    sync_point.depth_images = {}
-                sync_point.depth_images[stream_name] = CameraData(
-                    timestamp=time.time(),
-                    frame=depth_to_rgb(stream_data),
-                )
-            elif "joint_positions" in stream_name:
-                stream_data = stream.get_latest_data()
-                sync_point.joint_positions = self._maybe_add_exisiting_data(
-                    sync_point.joint_positions, stream_data
-                )
-            elif "joint_velocities" in stream_name:
-                stream_data = stream.get_latest_data()
-                sync_point.joint_velocities = self._maybe_add_exisiting_data(
-                    sync_point.joint_velocities, stream_data
-                )
-            elif "language" in stream_name:
-                stream_data = stream.get_latest_data()
-                sync_point.language_data = stream_data
-            else:
-                raise NotImplementedError(
-                    f"Support for stream {stream_name} is not implemented yet"
-                )
-        return sync_point
 
     def set_checkpoint(
         self, epoch: Optional[int] = None, checkpoint_file: Optional[str] = None
@@ -159,7 +82,7 @@ class DirectPolicy(Policy):
 
     def __init__(
         self,
-        robot: Optional[Robot],
+        robot: Robot,
         model_path: Path,
         org_id: str,
         job_id: Optional[str] = None,
@@ -196,7 +119,7 @@ class DirectPolicy(Policy):
             Model predictions.
         """
         if sync_point is None:
-            sync_point = self._create_sync_point()
+            sync_point = get_latest_sync_point(robot=self.robot)
         model_prediction = self._policy(sync_point)
         model_prediction.outputs = {
             key: value[0] if isinstance(value, np.ndarray) and value.ndim > 0 else value
@@ -214,7 +137,7 @@ class ServerPolicy(Policy):
 
     def __init__(
         self,
-        robot: Optional[Robot],
+        robot: Robot,
         base_url: str,
         headers: Optional[dict[str, str]] = None,
     ):
@@ -229,44 +152,6 @@ class ServerPolicy(Policy):
         self._base_url = base_url
         self._headers = headers or {}
         self._is_local = "localhost" in base_url or "127.0.0.1" in base_url
-        self.robot = robot
-
-    def _encode_image(self, image: np.ndarray) -> str:
-        """Encode numpy image array to base64 string for transmission.
-
-        Converts numpy arrays to PNG format and encodes as base64. For remote
-        endpoints, automatically resizes large images to 224x224 to meet
-        payload size limits.
-
-        Args:
-            image: Numpy array representing an RGB image.
-
-        Returns:
-            Base64 encoded string of the PNG image.
-        """
-        pil_image = Image.fromarray(image)
-        if not self._is_local:
-            if pil_image.size > (224, 224):
-                # There is a limit on the image size for non-local endpoints
-                # This is OK as almost all algorithms scale to 224x224
-                pil_image = pil_image.resize((224, 224))
-        buffer = BytesIO()
-        pil_image.save(buffer, format="PNG")
-        return base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-    def _decode_image(self, encoded_image: str) -> np.ndarray:
-        """Decode base64 image string back to numpy array.
-
-        Args:
-            encoded_image: Base64 encoded image string.
-
-        Returns:
-            Numpy array representing the decoded image.
-        """
-        img_bytes = base64.b64decode(encoded_image)
-        buffer = BytesIO(img_bytes)
-        pil_image = Image.open(buffer)
-        return np.array(pil_image)
 
     def set_checkpoint(
         self, epoch: Optional[int] = None, checkpoint_file: Optional[str] = None
@@ -321,27 +206,29 @@ class ServerPolicy(Policy):
             ValueError: If payload size exceeds limits for remote endpoints.
         """
         if sync_point is None:
-            sync_point = self._create_sync_point()
+            sync_point = get_latest_sync_point(robot=self.robot)
 
         # Encode images if they are numpy arrays
         if sync_point.rgb_images:
             for key in sync_point.rgb_images:
                 if isinstance(sync_point.rgb_images[key].frame, np.ndarray):
-                    sync_point.rgb_images[key].frame = self._encode_image(
+                    sync_point.rgb_images[key].frame = ImageStringEncoder.encode_image(
                         sync_point.rgb_images[key].frame
                     )
         if sync_point.depth_images:
             for key in sync_point.depth_images:
                 if isinstance(sync_point.depth_images[key].frame, np.ndarray):
-                    sync_point.depth_images[key].frame = self._encode_image(
-                        sync_point.depth_images[key].frame
+                    sync_point.depth_images[key].frame = (
+                        ImageStringEncoder.encode_image(
+                            sync_point.depth_images[key].frame
+                        )
                     )
         try:
             # Make prediction request
             response = requests.post(
                 f"{self._base_url}{PREDICT_ENDPOINT}",
                 headers=self._headers,
-                json=sync_point.model_dump(),
+                json=sync_point.model_dump(mode="json"),
                 timeout=int(os.getenv("NEURACORE_ENDPOINT_TIMEOUT", 10)),
             )
             response.raise_for_status()
@@ -355,8 +242,10 @@ class ServerPolicy(Policy):
                 for b_idx in range(len(rgb_batch)):
                     for t_idx in range(len(rgb_batch[b_idx])):
                         for cam_idx in range(len(rgb_batch[b_idx][t_idx])):
-                            rgb_batch[b_idx][t_idx][cam_idx] = self._decode_image(
-                                rgb_batch[b_idx][t_idx][cam_idx]
+                            rgb_batch[b_idx][t_idx][cam_idx] = (
+                                ImageStringEncoder.decode_image(
+                                    rgb_batch[b_idx][t_idx][cam_idx]
+                                )
                             )
                 model_pred.outputs[DataType.RGB_IMAGE] = np.array(rgb_batch)
             for key, value in model_pred.outputs.items():
@@ -381,7 +270,7 @@ class LocalServerPolicy(ServerPolicy):
 
     def __init__(
         self,
-        robot: Optional[Robot],
+        robot: Robot,
         org_id: str,
         model_path: Path,
         job_id: Optional[str] = None,
@@ -523,7 +412,7 @@ class LocalServerPolicy(ServerPolicy):
 class RemoteServerPolicy(ServerPolicy):
     """Policy for connecting to remote endpoints on the Neuracore platform."""
 
-    def __init__(self, robot: Optional[Robot], base_url: str, headers: dict[str, str]):
+    def __init__(self, robot: Robot, base_url: str, headers: dict[str, str]):
         """Initialize the remote server policy.
 
         Args:
@@ -551,9 +440,7 @@ def policy(
     Returns:
         DirectPolicy instance for direct model inference.
     """
-    robot = None
-    if os.getenv("NEURACORE_LIVE_DATA_ENABLED", "True").lower() == "true":
-        robot = _get_robot(robot_name, instance)
+    robot = _get_robot(robot_name, instance)
 
     org_id = get_current_org()
     job_id = None
@@ -597,9 +484,7 @@ def policy_local_server(
     if train_run_name and model_file:
         raise ValueError("Cannot specify both train_run_name and model_file")
 
-    robot = None
-    if os.getenv("NEURACORE_LIVE_DATA_ENABLED", "True").lower() == "true":
-        robot = _get_robot(robot_name, instance)
+    robot = _get_robot(robot_name, instance)
 
     org_id = get_current_org()
 

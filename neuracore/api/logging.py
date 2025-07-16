@@ -15,12 +15,7 @@ import numpy as np
 
 from neuracore.api.core import _get_robot
 from neuracore.core.exceptions import RobotError
-from neuracore.core.robot import Robot
-from neuracore.core.streaming.client_stream.client_stream_manager import (
-    get_robot_streaming_manager,
-)
-
-from ..core.nc_types import (
+from neuracore.core.nc_types import (
     CameraData,
     CustomData,
     EndEffectorData,
@@ -28,15 +23,20 @@ from ..core.nc_types import (
     LanguageData,
     PointCloudData,
     PoseData,
+    TrackKind,
 )
-from ..core.streaming.data_stream import (
+from neuracore.core.robot import Robot
+from neuracore.core.streaming.data_stream import (
     DataStream,
     DepthDataStream,
     JsonDataStream,
     RGBDataStream,
     VideoDataStream,
 )
-from ..core.utils.depth_utils import MAX_DEPTH
+from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
+    StreamManagerOrchestrator,
+)
+from neuracore.core.utils.depth_utils import MAX_DEPTH
 
 
 def _create_group_id_from_dict(joint_names: Dict[str, Any]) -> str:
@@ -131,9 +131,11 @@ def _log_joint_data(
     joint_stream.log(data=data)
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
-    get_robot_streaming_manager(robot.id, robot.instance).get_json_source(
-        data_type, "joints", sensor_key=joint_str_id
-    ).publish(data.model_dump(mode="json"))
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(data_type, TrackKind.JOINTS, sensor_key=joint_str_id).publish(
+        data.model_dump(mode="json")
+    )
 
 
 def _validate_extrinsics_intrinsics(
@@ -164,7 +166,7 @@ def _validate_extrinsics_intrinsics(
 
 
 def _log_camera_data(
-    camera_type: str,
+    camera_type: TrackKind,
     camera_id: str,
     image: np.ndarray,
     extrinsics: Optional[np.ndarray] = None,
@@ -176,7 +178,7 @@ def _log_camera_data(
     """Log camera data for a robot.
 
     Args:
-        camera_type: Type of camera (e.g. "rgb", "depth")
+        camera_type: Type of camera (e.g. TrackKind.RGB or TrackKind.DEPTH)
         camera_id: Unique identifier for the camera
         image: Image data as numpy array
         extrinsics: Optional extrinsics matrix (4x4)
@@ -189,20 +191,22 @@ def _log_camera_data(
         RobotError: If no robot is active and no robot_name provided
         ValueError: If image format is invalid or camera type is unsupported
     """
+    assert camera_type in (TrackKind.RGB, TrackKind.DEPTH), "Unsupported camera type"
+
     timestamp = timestamp or time.time()
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name, instance)
-    camera_id = f"{camera_type}_{camera_id}"
+    full_cam_id = f"{camera_type.value}_{camera_id}"
 
-    stream = robot.get_data_stream(camera_id)
+    stream = robot.get_data_stream(full_cam_id)
     if stream is None:
-        if camera_type == "rgb":
-            stream = RGBDataStream(camera_id, image.shape[1], image.shape[0])
-        elif camera_type == "depth":
-            stream = DepthDataStream(camera_id, image.shape[1], image.shape[0])
+        if camera_type == TrackKind.RGB:
+            stream = RGBDataStream(full_cam_id, image.shape[1], image.shape[0])
+        elif camera_type == TrackKind.DEPTH:
+            stream = DepthDataStream(full_cam_id, image.shape[1], image.shape[0])
         else:
             raise ValueError(f"Invalid camera type: {camera_type}")
-        robot.add_data_stream(camera_id, stream)
+        robot.add_data_stream(full_cam_id, stream)
 
     start_stream(robot, stream)
 
@@ -215,15 +219,21 @@ def _log_camera_data(
             f"Camera image dimensions {image.shape[1]}x{image.shape[0]} do not match "
             f"stream dimensions {stream.width}x{stream.height}"
         )
+
+    camera_data = CameraData(
+        timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics
+    )
     stream.log(
         image,
-        CameraData(timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics),
+        camera_data,
     )
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
-    get_robot_streaming_manager(robot.id, robot.instance).get_video_source(
-        camera_id, camera_type, f"{camera_id}_{camera_type}"
-    ).add_frame(image)
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_video_source(camera_id, camera_type, f"{camera_id}_{camera_type}").add_frame(
+        image, camera_data
+    )
 
 
 def log_synced_data(
@@ -343,7 +353,18 @@ def log_custom_data(
     assert isinstance(
         stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
-    stream.log(CustomData(timestamp=timestamp, data=data))
+
+    custom_data = CustomData(timestamp=timestamp, data=data)
+    stream.log(custom_data)
+
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(name, TrackKind.CUSTOM, sensor_key=str_id).publish(
+        custom_data.model_dump(mode="json")
+    )
 
 
 def log_joint_positions(
@@ -514,7 +535,18 @@ def log_pose_data(
     assert isinstance(
         stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
-    stream.log(PoseData(timestamp=timestamp, pose=poses))
+
+    pose_data = PoseData(timestamp=timestamp, pose=poses)
+    stream.log(pose_data)
+
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(str_id, TrackKind.POSE, sensor_key=str_id).publish(
+        pose_data.model_dump(mode="json")
+    )
 
 
 def log_gripper_data(
@@ -557,7 +589,17 @@ def log_gripper_data(
     assert isinstance(
         stream, JsonDataStream
     ), "Expected stream to be instance of EndEffectorData"
-    stream.log(EndEffectorData(timestamp=timestamp, open_amounts=open_amounts))
+    end_effector_data = EndEffectorData(timestamp=timestamp, open_amounts=open_amounts)
+    stream.log(end_effector_data)
+
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(str_id, TrackKind.GRIPPER, str_id).publish(
+        end_effector_data.model_dump(mode="json")
+    )
 
 
 def log_language(
@@ -591,7 +633,18 @@ def log_language(
     assert isinstance(
         stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
-    stream.log(LanguageData(timestamp=timestamp, text=language))
+
+    data = LanguageData(timestamp=timestamp, text=language)
+    stream.log(data)
+
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(str_id, TrackKind.LANGUAGE, sensor_key=str_id).publish(
+        data.model_dump(mode="json")
+    )
 
 
 def log_rgb(
@@ -623,7 +676,14 @@ def log_rgb(
     if image.dtype != np.uint8:
         raise ValueError("Image must be uint8 with range 0-255")
     _log_camera_data(
-        "rgb", camera_id, image, extrinsics, intrinsics, robot_name, instance, timestamp
+        TrackKind.RGB,
+        camera_id,
+        image,
+        extrinsics,
+        intrinsics,
+        robot_name,
+        instance,
+        timestamp,
     )
 
 
@@ -664,7 +724,7 @@ def log_depth(
             "The values you are passing in are likely in millimeters."
         )
     _log_camera_data(
-        "depth",
+        TrackKind.DEPTH,
         camera_id,
         depth,
         extrinsics,
@@ -735,12 +795,21 @@ def log_point_cloud(
     ), "Expected stream to be instance of JSONDataStream"
     start_stream(robot, stream)
 
-    stream.log(
-        PointCloudData(
-            timestamp=timestamp,
-            points=points.tolist(),
-            rgb_points=rgb_points,
-            extrinsics=extrinsics,
-            intrinsics=intrinsics,
-        )
+    point_data = PointCloudData(
+        timestamp=timestamp,
+        points=points.tolist(),
+        rgb_points=rgb_points,
+        extrinsics=extrinsics,
+        intrinsics=intrinsics,
+    )
+
+    stream.log(point_data)
+
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(camera_id, TrackKind.POINT_CLOUD, sensor_key=str_id).publish(
+        point_data.model_dump(mode="json")
     )

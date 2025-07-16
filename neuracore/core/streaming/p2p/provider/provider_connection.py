@@ -8,8 +8,7 @@ Handles SDP negotiation, ICE candidate exchange, and connection lifecycle.
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Optional
 
 from aiohttp import ClientSession
 from aiortc import (
@@ -22,11 +21,13 @@ from aiortc import (
 from aiortc.sdp import candidate_from_sdp, candidate_to_sdp
 
 from neuracore.core.auth import Auth, get_auth
-from neuracore.core.streaming.client_stream.json_source import JSONSource
-from neuracore.core.streaming.client_stream.models import HandshakeMessage, MessageType
-from neuracore.core.streaming.client_stream.video_source import VideoSource, VideoTrack
-
-from ...const import API_URL
+from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.const import API_URL
+from neuracore.core.nc_types import HandshakeMessage, MessageType, OpenConnectionDetails
+from neuracore.core.streaming.event_loop_utils import get_running_loop
+from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
+from neuracore.core.streaming.p2p.provider.json_source import JSONSource
+from neuracore.core.streaming.p2p.provider.video_source import VideoSource, VideoTrack
 
 ICE_SERVERS = [
     RTCIceServer(urls="stun:stun.l.google.com:19302"),
@@ -36,36 +37,71 @@ ICE_SERVERS = [
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class PierToPierConnection:
+class PierToPierProviderConnection:
     """WebRTC peer-to-peer connection for streaming robot sensor data.
 
     Manages the complete lifecycle of a WebRTC connection including SDP
     negotiation, ICE candidate exchange, video tracks, and data channels.
     """
 
-    id: str
-    local_stream_id: str
-    remote_stream_id: str
-    connection_token: str  # not used yet
-    org_id: str
-    on_close: Callable
-    client_session: ClientSession
-    loop: asyncio.AbstractEventLoop
-    received_answer_event: asyncio.Event = field(default_factory=asyncio.Event)
-    handle_answer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    handle_ice_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    send_offer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    has_sent_offer: bool = False
-    auth: Auth = field(default_factory=get_auth)
-    event_sources: set[JSONSource] = field(default_factory=set)
-    data_channel_callback: dict[str, Callable] = field(default_factory=dict)
-    connection: RTCPeerConnection = field(
-        default_factory=lambda: RTCPeerConnection(
+    def __init__(
+        self,
+        connection_id: str,
+        local_stream_id: str,
+        remote_stream_id: str,
+        connection_details: OpenConnectionDetails,
+        client_session: ClientSession = None,
+        org_id: Optional[str] = None,
+        enabled_manager: Optional[EnabledManager] = None,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        auth: Optional[Auth] = None,
+    ) -> None:
+        """Initialize the connection.
+
+        Args:
+            connection_id: the unique identifier for this connection
+            local_stream_id: the unique identifier for this node.
+            remote_stream_id: the unique identifier for the remote node.
+            connection_details: the configuration of the connection established.
+            client_session: The http session to use.
+            auth: The auth instance used to connect to the signalling server or
+                defaults to the global auth provider if not provided.
+            org_id: the organization to receive signalling from. If not provided
+                defaults to the current org.
+            loop: the event loop to run on. Defaults to the running loop if not
+                provided.
+            enabled_manager: The enabled manager for whether this should be
+                consuming. Defaults to a new enabled manger if not provided.
+
+        """
+        self.id = connection_id
+        self.local_stream_id = local_stream_id
+        self.remote_stream_id = remote_stream_id
+        self.connection_details = connection_details
+        self.client_session = client_session
+
+        self.connection = RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=ICE_SERVERS)
         )
-    )
-    _closed: bool = False
+        self.received_answer_event = asyncio.Event()
+        self.handle_answer_lock = asyncio.Lock()
+        self.handle_ice_lock = asyncio.Lock()
+        self.send_offer_lock = asyncio.Lock()
+        self.has_sent_offer: bool = False
+
+        self.org_id = org_id or get_current_org()
+        self.auth = auth or get_auth()
+        self.loop = loop or get_running_loop()
+        self.enabled_manager = enabled_manager or EnabledManager(True, loop=self.loop)
+        self.enabled_manager.add_listener(EnabledManager.DISABLED, self._on_close)
+
+        self.event_sources: set[JSONSource] = set()
+        self.data_channel_callback: dict[str, Callable] = dict()
+
+        @self.connection.on("connectionstatechange")
+        def on_connectionstatechange() -> None:
+            if self.connection.connectionState in ("closed", "failed"):
+                self.close()
 
     async def force_ice_negotiation(self) -> None:
         """Force ICE candidate negotiation for all transceivers.
@@ -90,7 +126,7 @@ class PierToPierConnection:
                 )
 
                 if candidate.sdpMid is None or candidate.sdpMLineIndex is None:
-                    print(
+                    logger.warning(
                         "Warning: Candidate missing sdpMid or sdpMLineIndex, "
                         f"{candidate=}, {transceiver=}"
                     )
@@ -125,18 +161,6 @@ class PierToPierConnection:
                     }),
                 )
 
-    def setup_connection(self) -> None:
-        """Set up event handlers for the WebRTC connection.
-
-        Configures connection state change handlers to automatically
-        close the connection when it fails or is closed remotely.
-        """
-
-        @self.connection.on("connectionstatechange")
-        async def on_connectionstatechange() -> None:
-            if self.connection.connectionState in ("closed", "failed"):
-                await self.close()
-
     def add_video_source(self, source: VideoSource) -> None:
         """Add a video source to the connection.
 
@@ -158,7 +182,7 @@ class PierToPierConnection:
         data_channel = self.connection.createDataChannel(source.mid)
 
         async def on_update(state: str) -> None:
-            if self._closed:
+            if self.enabled_manager.is_disabled():
                 return
             if data_channel.readyState != "open":
                 return
@@ -222,7 +246,7 @@ class PierToPierConnection:
             if track is None:
                 continue
             if transceiver.sender.track.id != track.id:
-                print(f"updating track ordering {when}")
+                logger.info(f"updating track ordering {when}")
                 transceiver.sender.replaceTrack(track)
 
     async def on_ice(self, ice_message: str) -> None:
@@ -234,7 +258,7 @@ class PierToPierConnection:
         async with self.handle_ice_lock:
             await self.received_answer_event.wait()
 
-            if self._closed:
+            if self.enabled_manager.is_disabled():
                 return
             try:
                 ice_content = json.loads(ice_message)
@@ -254,7 +278,7 @@ class PierToPierConnection:
         Args:
             answer_sdp: SDP answer string from the remote peer
         """
-        if self._closed:
+        if self.enabled_manager.is_disabled():
             logger.info("answer to closed connection")
             return
 
@@ -281,8 +305,8 @@ class PierToPierConnection:
         Creates and sends an SDP offer through the signaling server.
         Includes proper state validation and error handling with retry logic.
         """
-        if self._closed:
-            print("Cannot send offer from closed connection")
+        if self.enabled_manager.is_disabled():
+            logger.warning("Cannot send offer from closed connection")
             return
 
         async with self.send_offer_lock:
@@ -306,21 +330,22 @@ class PierToPierConnection:
                 self.has_sent_offer = True
             except asyncio.TimeoutError:
                 # waiting 30 seconds for answer -> assuming peer is gone
-                await self.close()
+                self.close()
             except Exception:
                 logger.info("Signalling Error: Failed to send offer")
 
-    async def close(self) -> None:
+    async def _on_close(self) -> None:
+        """Handles the connection close event."""
+        await self.connection.close()
+        for source in self.event_sources:
+            source.remove_listener(
+                source.STATE_UPDATED_EVENT, self.data_channel_callback[source.mid]
+            )
+
+    def close(self) -> None:
         """Close the peer-to-peer connection gracefully.
 
         Closes the WebRTC connection, removes event listeners, and
         triggers the cleanup callback. Ensures proper resource cleanup.
         """
-        if not self._closed:
-            self._closed = True
-            await self.connection.close()
-            for source in self.event_sources:
-                source.remove_listener(
-                    source.STATE_UPDATED_EVENT, self.data_channel_callback[source.mid]
-                )
-            self.on_close()
+        self.enabled_manager.disable()

@@ -23,7 +23,11 @@ import av
 import numpy as np
 from aiortc import MediaStreamTrack
 
-from .stream_enabled import EnabledManager
+from neuracore.core.nc_types import CameraData
+from neuracore.core.streaming.p2p.provider.json_source import JSONSource
+from neuracore.core.utils.image_string_encoder import ImageStringEncoder
+
+from ..enabled_manager import EnabledManager
 
 av.logging.set_level(None)
 
@@ -52,15 +56,24 @@ class VideoSource:
     _last_frame: np.ndarray = field(
         default_factory=lambda: np.zeros((480, 640, 3), dtype=np.uint8)
     )
+    _last_camera_data: Optional[CameraData] = None
+    custom_data_source: Optional[JSONSource] = None
 
-    def add_frame(self, frame_data: np.ndarray) -> None:
+    def add_frame(self, frame_data: np.ndarray, camera_data: CameraData) -> None:
         """Add a new video frame to the source.
 
         Args:
             frame_data: RGB video frame data as a numpy array.
                 Should be in HWC format (Height, Width, Channels).
+            camera_data: Extra metadata about the frame.
         """
         self._last_frame = frame_data
+        self._last_camera_data = camera_data
+        if self.custom_data_source:
+            self.custom_data_source.publish({
+                **camera_data.model_dump(mode="json"),
+                "frame": ImageStringEncoder.encode_image(frame_data, cap_size=True),
+            })
 
     def get_last_frame(self) -> av.VideoFrame:
         """Get the most recent video frame.
@@ -80,11 +93,39 @@ class VideoSource:
         Raises:
             RuntimeError: If streaming is not currently enabled.
         """
-        if not self.stream_enabled.is_enabled():
+        if self.stream_enabled.is_disabled():
             raise RuntimeError("Streaming is not enabled")
         consumer = VideoTrack(self)
         self.stream_enabled.add_listener(EnabledManager.DISABLED, consumer.stop)
         return consumer
+
+    def get_neuracore_custom_track(
+        self,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ) -> JSONSource:
+        """Gets a data source for the video frames encoded as dataUri's.
+
+        Args:
+            loop: the event loop to run on. Defaults to the running loop if not
+                    provided.
+
+
+        Returns:
+            JSONSource: the source for the video frames.
+        """
+        if not self.custom_data_source:
+            self.custom_data_source = JSONSource(
+                mid=self.mid, stream_enabled=self.stream_enabled, loop=loop
+            )
+            if self._last_frame is not None and self._last_camera_data is not None:
+                self.custom_data_source.publish({
+                    **self._last_camera_data.model_dump(mode="json"),
+                    "frame": ImageStringEncoder.encode_image(
+                        self._last_frame, cap_size=True
+                    ),
+                })
+
+        return self.custom_data_source
 
 
 @dataclass

@@ -240,8 +240,10 @@ A few environment variables effect how this library operates, they are generally
  | Variable                                     | Function                                                                                                            | Valid Values                               | Default Value                   |
  | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ | ------------------------------- |
  | `NEURACORE_REMOTE_RECORDING_TRIGGER_ENABLED` | Allows you to disable other machines starting a recording when logging. this does not affect the live data          | `true`/`false`                             | `true`                          |
- | `NEURACORE_LIVE_DATA_ENABLED`                | Allows you to disable the streaming of data for live visualizations from this node. This does not affect recording. | `true`/`false`                             | `true`                          |
+ | `NEURACORE_PROVIDE_LIVE_DATA`                | Allows you to disable the streaming of data for live visualizations from this node. This does not affect recording. | `true`/`false`                             | `true`                          |
+ | `NEURACORE_CONSUME_LIVE_DATA`                | Allows you to disable the streaming of data to this node used for inference. | `true`/`false`                             | `true`                          |
  | `NEURACORE_API_URL`                          | The base url used to contact the neuracore platform.                                                                | A url e.g. `https://api.neuracore.app/api` | `https://api.neuracore.app/api` |
+
 
 ## Testing
 

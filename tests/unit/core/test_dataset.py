@@ -218,7 +218,7 @@ def mock_dataset_api(
     # Mock sync endpoint
     mock_auth_requests.post(
         re.compile(f"{API_URL}/org/{mocked_org_id}/synchronize/synchronize-recording"),
-        json=synced_data.model_dump(),
+        json=synced_data.model_dump(mode="json"),
         status_code=200,
     )
 

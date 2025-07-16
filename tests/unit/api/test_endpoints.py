@@ -31,7 +31,7 @@ def test_connect_endpoint(
         f"{API_URL}/org/{mocked_org_id}/models/endpoints/test_endpoint_id/predict",
         json=ModelPrediction(
             outputs={DataType.JOINT_TARGET_POSITIONS: [[0.1, 0.2, 0.3]]}
-        ).model_dump(),
+        ).model_dump(mode="json"),
         status_code=200,
     )
 
@@ -127,7 +127,7 @@ def test_connect_local_endpoint(
         f"{localhost}/predict",
         json=ModelPrediction(
             outputs={DataType.JOINT_TARGET_POSITIONS: [0.1, 0.2, 0.3]}
-        ).model_dump(),
+        ).model_dump(mode="json"),
         status_code=200,
     )
 
@@ -292,7 +292,7 @@ def test_connect_local_endpoint_with_train_run(
         f"{localhost}/predict",
         json=ModelPrediction(
             outputs={DataType.JOINT_TARGET_POSITIONS: [0.1, 0.2, 0.3]}
-        ).model_dump(),
+        ).model_dump(mode="json"),
         status_code=200,
     )
 

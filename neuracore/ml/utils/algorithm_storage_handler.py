@@ -95,9 +95,9 @@ class AlgorithmStorageHandler:
         """
         assert self.algorithm_id is not None, "Algorithm ID not provided"
         # check if all values in model (checklist) are true
-        success = all(list(checklist.model_dump().values()))
+        success = all(list(checklist.model_dump(mode="json").values()))
         dict_to_save = {
-            "validation_checklist": checklist.model_dump(),
+            "validation_checklist": checklist.model_dump(mode="json"),
         }
         if success:
             dict_to_save["validation_status"] = "available"
