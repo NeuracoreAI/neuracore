@@ -19,7 +19,6 @@ from PIL import Image
 from pydantic import BaseModel
 
 from neuracore.core.nc_types import DataType, ModelPrediction, SyncPoint
-from neuracore.ml.utils.policy_inference import PolicyInference
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +44,9 @@ class ModelServer:
             org_id: Organization ID for the model
             job_id: Job ID for the model
         """
+        # Import here to avoid the need for pytorch unless the user uses this policy
+        from neuracore.ml.utils.policy_inference import PolicyInference
+
         self.policy_inference = PolicyInference(
             org_id=org_id, job_id=job_id, model_file=model_file
         )
