@@ -10,14 +10,21 @@ from typing import Optional
 
 import requests
 
+from neuracore.api.core import _get_robot
+from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
-
-from ..core.auth import get_auth
-from ..core.const import API_URL
-from ..core.endpoint import DirectPolicy, LocalServerPolicy, RemoteServerPolicy
-from ..core.endpoint import policy as _policy
-from ..core.endpoint import policy_local_server as _policy_local_server
-from ..core.endpoint import policy_remote_server as _policy_remote_server
+from neuracore.core.const import API_URL
+from neuracore.core.endpoint import DirectPolicy, LocalServerPolicy, RemoteServerPolicy
+from neuracore.core.endpoint import policy as _policy
+from neuracore.core.endpoint import policy_local_server as _policy_local_server
+from neuracore.core.endpoint import policy_remote_server as _policy_remote_server
+from neuracore.core.get_latest_sync_point import (
+    check_remote_nodes_connected as _check_remote_nodes_connected,
+)
+from neuracore.core.get_latest_sync_point import (
+    get_latest_sync_point as _get_latest_sync_point,
+)
+from neuracore.core.nc_types import SyncPoint
 
 
 def policy(
@@ -210,3 +217,51 @@ def delete_endpoint(endpoint_id: str) -> None:
         response.raise_for_status()
     except Exception as e:
         raise ValueError(f"Error deleting endpoint: {e}")
+
+
+def get_latest_sync_point(
+    robot_name: Optional[str] = None, instance: int = 0, include_remote: bool = True
+) -> SyncPoint:
+    """Creates a sync point from gathering data logged by a robot.
+
+    Note after instantiation it can take time before data is available from
+    all remote nodes as it sets up all the necessary connections. to get this
+    started sooner and to check the progress call `check_remote_nodes_connected`
+
+    Args:
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        include_remote: wether to connect to remote nodes to gather their
+            data. This is ignored if NEURACORE_CONSUME_LIVE_DATA is disabled.
+
+    Returns:
+        The SyncPoint consisting of the latest data recorded for each of the
+            sensors
+
+    Raises:
+        RobotError: If the robot is not initialized.
+    """
+    return _get_latest_sync_point(
+        robot=_get_robot(robot_name, instance), include_remote=include_remote
+    )
+
+
+def check_remote_nodes_connected(
+    num_remote_nodes: int = 0, robot_name: Optional[str] = None, instance: int = 0
+) -> bool:
+    """Checks if the required remote nodes are connected to the robot.
+
+    Args:
+        num_remote_nodes: The number of remote nodes that are expected to connect
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+
+    Returns:
+        True if all remote nodes are connected, False otherwise
+
+    Raises:
+        RobotError: If the robot is not initialized.
+    """
+    return _check_remote_nodes_connected(
+        robot=_get_robot(robot_name, instance), num_remote_nodes=num_remote_nodes
+    )

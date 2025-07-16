@@ -4,8 +4,6 @@ This replaces TorchServe with a more flexible, custom solution that gives us
 full control over the inference pipeline while maintaining .nc.zip compatibility.
 """
 
-import base64
-import io
 import logging
 import time
 from pathlib import Path
@@ -15,10 +13,10 @@ import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
 from pydantic import BaseModel
 
 from neuracore.core.nc_types import DataType, ModelPrediction, SyncPoint
+from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -105,34 +103,6 @@ class ModelServer:
 
         return app
 
-    def _decode_image(self, encoded_image: str) -> np.ndarray:
-        """Decode base64-encoded image string to numpy array.
-
-        Args:
-            encoded_image: Base64-encoded image string from client requests.
-
-        Returns:
-            Numpy array representing the decoded image in RGB format.
-        """
-        img_bytes = base64.b64decode(encoded_image)
-        buffer = io.BytesIO(img_bytes)
-        pil_image = Image.open(buffer)
-        return np.array(pil_image)
-
-    def _encode_image(self, image: np.ndarray) -> str:
-        """Encode numpy image array to base64 string for response.
-
-        Args:
-            image: Numpy array representing an image to encode.
-
-        Returns:
-            Base64-encoded string representation of the image.
-        """
-        pil_image = Image.fromarray(image.astype("uint8"))
-        buffer = io.BytesIO()
-        pil_image.save(buffer, format="PNG")
-        return base64.b64encode(buffer.getvalue()).decode("utf-8")
-
     def _decode_images(self, sync_point: SyncPoint) -> SyncPoint:
         """Decode base64 images in sync point to numpy arrays.
 
@@ -147,14 +117,18 @@ class ModelServer:
             for camera_name, camera_data in sync_point.rgb_images.items():
                 if isinstance(camera_data.frame, str):
                     # It's a base64 string, decode it
-                    camera_data.frame = self._decode_image(camera_data.frame)
+                    camera_data.frame = ImageStringEncoder.decode_image(
+                        camera_data.frame
+                    )
 
         # Decode depth images
         if sync_point.depth_images:
             for camera_name, camera_data in sync_point.depth_images.items():
                 if isinstance(camera_data.frame, str):
                     # It's a base64 string, decode it
-                    camera_data.frame = self._decode_image(camera_data.frame)
+                    camera_data.frame = ImageStringEncoder.decode_image(
+                        camera_data.frame
+                    )
 
         return sync_point
 
@@ -184,7 +158,7 @@ class ModelServer:
                             image = np.transpose(image, (1, 2, 0))  # Convert to HWC
                         if image.dtype != np.uint8:
                             image = np.clip(image, 0, 255).astype(np.uint8)
-                        time_images.append(self._encode_image(image))
+                        time_images.append(ImageStringEncoder.encode_image(image))
                     batch_images.append(time_images)
                 str_rets.append(batch_images)
             prediction.outputs[DataType.RGB_IMAGE] = str_rets
@@ -210,7 +184,7 @@ class ModelServer:
                             * 255
                         )
                         depth_norm = depth_norm.astype(np.uint8)
-                        time_images.append(self._encode_image(depth_norm))
+                        time_images.append(ImageStringEncoder.encode_image(depth_norm))
                     batch_images.append(time_images)
                 str_rets.append(batch_images)
                 prediction.outputs[DataType.DEPTH_IMAGE] = str_rets

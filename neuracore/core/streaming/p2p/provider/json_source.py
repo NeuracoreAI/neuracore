@@ -14,7 +14,8 @@ from typing import Optional
 
 from pyee.asyncio import AsyncIOEventEmitter
 
-from neuracore.core.streaming.client_stream.stream_enabled import EnabledManager
+from neuracore.core.streaming.event_loop_utils import get_running_loop
+from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 
 MAXIMUM_EVENT_FREQUENCY_HZ = 10
 MINIMUM_EVENT_DELTA = 1 / MAXIMUM_EVENT_FREQUENCY_HZ
@@ -43,7 +44,8 @@ class JSONSource(AsyncIOEventEmitter):
             stream_enabled: Manager for controlling streaming state
             loop: Optional event loop. If not provided, uses current loop
         """
-        super().__init__(loop)
+        self.loop = loop or get_running_loop()
+        super().__init__(self.loop)
         self.mid = mid
         self._last_state: Optional[dict] = None
         self._last_update_time: float = 0
@@ -59,12 +61,12 @@ class JSONSource(AsyncIOEventEmitter):
         Args:
             state: Dictionary containing the state data to publish
         """
-        if not self.stream_enabled.is_enabled():
+        if self.stream_enabled.is_disabled():
             return
         self._last_state = state
         if self.submit_task is None or self.submit_task.done():
             self.submit_task = asyncio.run_coroutine_threadsafe(
-                self._submit_event(), self._loop
+                self._submit_event(), self.loop
             )
 
     def get_last_state(self) -> Optional[str]:
@@ -90,7 +92,7 @@ class JSONSource(AsyncIOEventEmitter):
             await asyncio.sleep(remaining_time)
         if self._last_state is None:
             return
-        if not self.stream_enabled.is_enabled():
+        if self.stream_enabled.is_disabled():
             return
 
         message = json.dumps(self._last_state)

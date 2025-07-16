@@ -326,7 +326,7 @@ class StreamingVideoUploader(BucketUploader):
         upload_url = upload_url_response.json()["url"]
         for i in range(0, len(self.frame_metadatas)):
             self.frame_metadatas[i].frame_idx = i
-        data = json.dumps([fm.model_dump() for fm in self.frame_metadatas])
+        data = json.dumps([fm.model_dump(mode="json") for fm in self.frame_metadatas])
         response = requests.put(
             upload_url, headers={"Content-Length": str(len(data))}, data=data
         )

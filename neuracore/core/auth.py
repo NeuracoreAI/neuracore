@@ -13,12 +13,13 @@ import requests
 
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.config.get_api_key import get_api_key
+from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
 
 from .const import API_URL
 from .exceptions import AuthenticationError
 
 
-class Auth:
+class Auth(metaclass=SingletonMetaclass):
     """Singleton class for managing Neuracore authentication state.
 
     This class handles API key management, access token retrieval, configuration
@@ -26,18 +27,6 @@ class Auth:
     authentication state throughout the application lifecycle and automatically
     loads saved configuration on initialization.
     """
-
-    _instance = None
-
-    def __new__(cls) -> "Auth":
-        """Create or return the singleton Auth instance.
-
-        Returns:
-            The singleton Auth instance.
-        """
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
 
     def __init__(self) -> None:
         """Initialize the Auth instance and load saved configuration."""

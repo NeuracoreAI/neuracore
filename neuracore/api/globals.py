@@ -7,10 +7,11 @@ and validation status.
 
 from typing import Optional
 
-from ..core.robot import Robot
+from neuracore.core.robot import Robot
+from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
 
 
-class GlobalSingleton(object):
+class GlobalSingleton(metaclass=SingletonMetaclass):
     """Singleton class for managing global Neuracore session state.
 
     This class ensures that only one instance exists throughout the application
@@ -19,7 +20,6 @@ class GlobalSingleton(object):
     ensures consistent state management across all Neuracore modules.
 
     Attributes:
-        _instance: Class-level singleton instance reference.
         _has_validated_version: Whether version compatibility has been verified
             with the Neuracore server.
         _active_robot: Currently active robot instance, used as the default
@@ -28,21 +28,6 @@ class GlobalSingleton(object):
             recordings will be associated with.
     """
 
-    _instance = None
     _has_validated_version = False
     _active_robot: Optional[Robot] = None
     _active_dataset_id: Optional[str] = None
-
-    def __new__(cls) -> "GlobalSingleton":
-        """Create or return the singleton instance.
-
-        Ensures only one instance of GlobalSingleton exists throughout the
-        application lifecycle. Subsequent calls to the constructor will
-        return the same instance.
-
-        Returns:
-            The singleton instance of GlobalSingleton.
-        """
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance

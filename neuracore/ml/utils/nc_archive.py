@@ -55,7 +55,7 @@ def create_nc_archive(
 
         # Save model initialization description
         with open(temp_path / "model_init_description.json", "w") as f:
-            json.dump(model.model_init_description.model_dump(), f, indent=2)
+            json.dump(model.model_init_description.model_dump(mode="json"), f, indent=2)
 
         # Save algorithm config (always create file, even if empty)
         with open(temp_path / "algorithm_config.json", "w") as f:

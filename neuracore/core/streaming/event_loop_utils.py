@@ -7,6 +7,10 @@ performed even when no event loop is currently running.
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
+
+_neuracore_async_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def get_running_loop() -> asyncio.AbstractEventLoop:
@@ -24,10 +28,22 @@ def get_running_loop() -> asyncio.AbstractEventLoop:
         be automatically terminated when the main program exits.
     """
     try:
-        loop = asyncio.get_running_loop()
-        return loop
+        return asyncio.get_running_loop()
     except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        threading.Thread(target=lambda: loop.run_forever(), daemon=True).start()
-        return loop
+        global _neuracore_async_loop
+        if _neuracore_async_loop is None:
+            _neuracore_async_loop = asyncio.new_event_loop()
+            # Limit the number of threads to a reasonable number
+            executor = ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="nc-async-executor"
+            )
+            _neuracore_async_loop.set_default_executor(executor)
+            threading.Thread(
+                target=lambda: _neuracore_async_loop.run_forever(),
+                name="nc-async-loop",
+                daemon=True,
+            ).start()
+
+        asyncio.set_event_loop(_neuracore_async_loop)
+
+        return _neuracore_async_loop

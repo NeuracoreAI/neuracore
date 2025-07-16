@@ -9,32 +9,32 @@ state and remote recording triggers.
 import asyncio
 import logging
 from concurrent.futures import Future
-from datetime import timedelta
 from typing import Optional
 
-from aiohttp import ClientSession, ClientTimeout
-from aiohttp_sse_client import client as sse_client
+from aiohttp import ClientSession
 from pyee.asyncio import AsyncIOEventEmitter
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import API_URL, REMOTE_RECORDING_TRIGGER_ENABLED
-from neuracore.core.streaming.client_stream.client_stream_manager import (
-    MAXIMUM_BACKOFF_TIME_S,
-    MINIMUM_BACKOFF_TIME_S,
-)
-from neuracore.core.streaming.client_stream.models import (
+from neuracore.core.const import API_URL
+from neuracore.core.nc_types import (
     BaseRecodingUpdatePayload,
     RecordingNotification,
     RecordingNotificationType,
+    RobotInstanceIdentifier,
 )
-from neuracore.core.streaming.client_stream.stream_enabled import EnabledManager
+from neuracore.core.streaming.base_sse_consumer import (
+    BaseSSEConsumer,
+    EventSourceConfig,
+)
 from neuracore.core.streaming.event_loop_utils import get_running_loop
+from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
+from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
 
 logger = logging.getLogger(__name__)
 
 
-class RecordingStateManager(AsyncIOEventEmitter):
+class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
     """Manages recording state across robot instances with real-time notifications.
 
     Provides centralized tracking of recording sessions for multiple robot instances,
@@ -48,33 +48,40 @@ class RecordingStateManager(AsyncIOEventEmitter):
 
     def __init__(
         self,
-        loop: asyncio.AbstractEventLoop,
-        client_session: ClientSession,
+        org_id: Optional[str] = None,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        enabled_manager: Optional[EnabledManager] = None,
+        background_coroutine_tracker: Optional[BackgroundCoroutineTracker] = None,
+        client_session: Optional[ClientSession] = None,
         auth: Optional[Auth] = None,
     ):
         """Initialize the recording state manager.
 
         Args:
-            loop: Event loop for async operations
-            client_session: HTTP client session for API communication
-            auth: Authentication object. If not provided, uses default auth
+            org_id: the organization to receive signalling from. If not provided
+                defaults to the current org.
+            loop: the event loop to run on. Defaults to the running loop if not
+                provided.
+            enabled_manager: The enabled manager for whether this should be
+                consuming. Defaults to a new enabled manger if not provided.
+            background_coroutine_tracker: The storage for background tasks
+                scheduled on receiving events. Defaults to a new tracker if not
+                provided.
+            client_session: The http session to use. Defaults to a new session
+                if not provided.
+            auth: The auth instance used to connect to the signalling server or
+                defaults to the global auth provider if not provided.
         """
-        super().__init__(loop=loop)
-        self.client_session = client_session
+        super().__init__(
+            loop=loop,
+            enabled_manager=enabled_manager,
+            background_coroutine_tracker=background_coroutine_tracker,
+            client_session=client_session,
+        )
+        self.org_id = org_id or get_current_org()
         self.auth = auth if auth is not None else get_auth()
 
-        self.remote_trigger_enabled = EnabledManager(
-            REMOTE_RECORDING_TRIGGER_ENABLED, loop=self._loop
-        )
-        self.remote_trigger_enabled.add_listener(
-            EnabledManager.DISABLED, self.__stop_remote_trigger
-        )
-
-        self.recording_stream_future: Future = asyncio.run_coroutine_threadsafe(
-            self.connect_recording_notification_stream(), self._loop
-        )
-
-        self.recording_robot_instances: dict[tuple[str, int], str] = dict()
+        self.recording_robot_instances: dict[RobotInstanceIdentifier, str] = dict()
 
     def get_current_recording_id(self, robot_id: str, instance: int) -> Optional[str]:
         """Get the current recording ID for a robot instance.
@@ -86,7 +93,9 @@ class RecordingStateManager(AsyncIOEventEmitter):
         Returns:
             str: Recording ID if currently recording, None otherwise
         """
-        instance_key = (robot_id, instance)
+        instance_key = RobotInstanceIdentifier(
+            robot_id=robot_id, robot_instance=instance
+        )
         return self.recording_robot_instances.get(instance_key, None)
 
     def is_recording(self, robot_id: str, instance: int) -> bool:
@@ -99,7 +108,9 @@ class RecordingStateManager(AsyncIOEventEmitter):
         Returns:
             bool: True if currently recording, False otherwise
         """
-        instance_key = (robot_id, instance)
+        instance_key = RobotInstanceIdentifier(
+            robot_id=robot_id, robot_instance=instance
+        )
         return instance_key in self.recording_robot_instances
 
     def recording_started(
@@ -115,7 +126,9 @@ class RecordingStateManager(AsyncIOEventEmitter):
             instance: Instance number of the robot
             recording_id: Unique identifier for the recording session
         """
-        instance_key = (robot_id, instance)
+        instance_key = RobotInstanceIdentifier(
+            robot_id=robot_id, robot_instance=instance
+        )
         previous_recording_id = self.recording_robot_instances.get(instance_key, None)
 
         if previous_recording_id == recording_id:
@@ -144,7 +157,9 @@ class RecordingStateManager(AsyncIOEventEmitter):
             instance: Instance number of the robot
             recording_id: Unique identifier for the recording session
         """
-        instance_key = (robot_id, instance)
+        instance_key = RobotInstanceIdentifier(
+            robot_id=robot_id, robot_instance=instance
+        )
         current_recording = self.recording_robot_instances.get(instance_key, None)
         if current_recording != recording_id:
             return
@@ -173,7 +188,7 @@ class RecordingStateManager(AsyncIOEventEmitter):
         recording_id = details.recording_id
 
         previous_recording_id = self.recording_robot_instances.get(
-            (robot_id, instance), None
+            RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance), None
         )
         was_recording = previous_recording_id is not None
 
@@ -194,75 +209,45 @@ class RecordingStateManager(AsyncIOEventEmitter):
                 recording_id=recording_id,
             )
 
-    async def connect_recording_notification_stream(self) -> None:
-        """Connect to recording notification stream via Server-Sent Events.
+    def get_sse_client_config(self) -> EventSourceConfig:
+        """Used to configure the event client to consume events from the server.
 
-        Maintains a persistent connection to receive real-time recording state
-        updates with exponential backoff retry logic. Processes different types
-        of recording notifications and updates local state accordingly.
+        Returns:
+            the configuration to be used to connect to the client
         """
-        backoff_time = MINIMUM_BACKOFF_TIME_S
+        return EventSourceConfig(
+            url=f"{API_URL}/org/{self.org_id}/recording/notifications",
+            request_options={
+                "headers": self.auth.get_headers(),
+            },
+        )
 
-        while self.remote_trigger_enabled.is_enabled():
-            try:
-                await asyncio.sleep(backoff_time)
-                backoff_time = min(MAXIMUM_BACKOFF_TIME_S, backoff_time * 2)
+    async def on_message(self, message_data: str) -> None:
+        """The main handler for when the stream receives a message.
 
-                org_id = get_current_org()
-                async with sse_client.EventSource(
-                    f"{API_URL}/org/{org_id}/recording/notifications",
-                    session=self.client_session,
-                    headers=self.auth.get_headers(),
-                    reconnection_time=timedelta(seconds=0.1),
-                ) as event_source:
-                    backoff_time = max(MINIMUM_BACKOFF_TIME_S, backoff_time / 2)
-                    async for event in event_source:
-                        if event.type != "data":
-                            continue
+        Args:
+            message_data: The raw string data of the message
 
-                        message = RecordingNotification.model_validate_json(event.data)
-                        # Python 3.9 compatibility: replace match/case with if/elif
-                        if message.type == RecordingNotificationType.SAVED:
-                            self.emit(
-                                self.RECORDING_SAVED, **message.payload.model_dump()
-                            )
-                        elif message.type in (
-                            RecordingNotificationType.START,
-                            RecordingNotificationType.REQUESTED,
-                        ):
-                            self.updated_recording_state(
-                                is_recording=True, details=message.payload
-                            )
-                        elif message.type in (
-                            RecordingNotificationType.STOP,
-                            RecordingNotificationType.SAVED,
-                            RecordingNotificationType.DISCARDED,
-                            RecordingNotificationType.EXPIRED,
-                        ):
-                            self.updated_recording_state(
-                                is_recording=False, details=message.payload
-                            )
-                        elif message.type == RecordingNotificationType.INIT:
-                            for recording in message.payload:
-                                self.updated_recording_state(
-                                    is_recording=True, details=recording
-                                )
-
-            except Exception as e:
-                logger.warning(f"Recording signalling error: {e}")
-
-    def __stop_remote_trigger(self) -> None:
-        """Internal method to stop the remote trigger connection."""
-        if self.recording_stream_future.running():
-            self.recording_stream_future.cancel()
-
-    def disable_remote_trigger(self) -> None:
-        """Disable remote recording triggers and close server connection.
-
-        Stops listening for remote recording notifications and closes the
-        persistent connection to the notification stream.
         """
-        self.remote_trigger_enabled.disable()
+        message = RecordingNotification.model_validate_json(message_data)
+        # Python 3.9 compatibility: replace match/case with if/elif
+        if message.type == RecordingNotificationType.SAVED:
+            self.emit(self.RECORDING_SAVED, **message.payload.model_dump())
+        elif message.type in (
+            RecordingNotificationType.START,
+            RecordingNotificationType.REQUESTED,
+        ):
+            self.updated_recording_state(is_recording=True, details=message.payload)
+        elif message.type in (
+            RecordingNotificationType.STOP,
+            RecordingNotificationType.SAVED,
+            RecordingNotificationType.DISCARDED,
+            RecordingNotificationType.EXPIRED,
+        ):
+            self.updated_recording_state(is_recording=False, details=message.payload)
+        elif message.type == RecordingNotificationType.INIT:
+            for recording in message.payload:
+                self.updated_recording_state(is_recording=True, details=recording)
 
 
 _recording_manager: Optional[Future[RecordingStateManager]] = None
@@ -275,13 +260,7 @@ async def create_recording_state_manager() -> RecordingStateManager:
         RecordingStateManager: Configured recording state
             manager with persistent connection
     """
-    # We want to keep the signalling connection alive for as long as possible
-    timeout = ClientTimeout(sock_read=None, total=None)
-    manager = RecordingStateManager(
-        loop=asyncio.get_event_loop(),
-        client_session=ClientSession(timeout=timeout),
-    )
-    return manager
+    return RecordingStateManager(loop=asyncio.get_event_loop())
 
 
 def get_recording_state_manager() -> "RecordingStateManager":

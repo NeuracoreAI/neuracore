@@ -8,6 +8,10 @@ import requests_mock
 import neuracore
 from neuracore.core.config import config_manager
 from neuracore.core.const import API_URL
+from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
+    global_consume_live_data_manager,
+    global_provide_live_data_manager,
+)
 
 
 @pytest.fixture
@@ -31,6 +35,9 @@ def mocked_org_id():
 @pytest.fixture
 def mock_auth_requests():
     """Fixture to mock authentication and API requests."""
+    global_provide_live_data_manager.disable()
+    global_consume_live_data_manager.disable()
+
     with requests_mock.Mocker(real_http=True) as m:
         # Mock API Key Verification
         m.post(

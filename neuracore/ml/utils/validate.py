@@ -7,7 +7,6 @@ the Neuracore training and inference infrastructure.
 """
 
 import logging
-import os
 import tempfile
 import time
 import traceback
@@ -231,9 +230,7 @@ def run_validation(
         ValueError: If the algorithm directory contains no Python files or
             if critical validation steps fail.
     """
-    os.environ["NEURACORE_LIVE_DATA_ENABLED"] = (
-        "False"  # Disable live data for validation
-    )
+    nc.stop_live_data()
 
     # find the first folder that contains Python files
     python_files = list(algorithm_dir.rglob("*.py"))

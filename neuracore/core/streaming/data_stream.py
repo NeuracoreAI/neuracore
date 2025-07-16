@@ -140,7 +140,7 @@ class JsonDataStream(DataStream):
         self._latest_data = data
         if not self.is_recording() or self._streamer is None:
             return
-        self._streamer.add_frame(data.model_dump())
+        self._streamer.add_frame(data.model_dump(mode="json"))
 
 
 class VideoDataStream(DataStream):

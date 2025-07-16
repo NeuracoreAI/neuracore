@@ -18,6 +18,7 @@ from typing import Optional
 import requests
 
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.nc_types import RobotInstanceIdentifier
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import (
     RecordingStateManager,
@@ -47,6 +48,7 @@ class Robot:
         mjcf_path: Optional[str] = None,
         overwrite: bool = False,
         shared: bool = False,
+        org_id: Optional[str] = None,
     ):
         """Initialize a Robot instance with configuration parameters.
 
@@ -61,6 +63,8 @@ class Robot:
             shared: Whether the robot is shared/open-source.
                 Note that setting shared=True is only available to specific
                 members allocated by the Neuracore team.
+            org_id: the organization to receive streaming information from. If n
+                ot provided defaults to the current org.
 
         Raises:
             ValidationError: If both URDF and MJCF paths are provided,
@@ -82,6 +86,7 @@ class Robot:
         self._recording_manager.add_listener(
             RecordingStateManager.RECORDING_STOPPED, self._recording_stopped
         )
+        self.org_id = org_id or get_current_org()
 
         if urdf_path and mjcf_path:
             raise ValidationError(
@@ -118,10 +123,10 @@ class Robot:
         """
         if not self._auth.is_authenticated:
             raise RobotError("Not authenticated. Please call nc.login() first.")
-        org_id = get_current_org()
+
         try:
             response = requests.post(
-                f"{API_URL}/org/{org_id}/robots?is_shared={self.shared}",
+                f"{API_URL}/org/{self.org_id}/robots?is_shared={self.shared}",
                 json={
                     "name": self.name,
                     "instance": self.instance,
@@ -199,9 +204,9 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         try:
-            org_id = get_current_org()
+
             response = requests.post(
-                f"{API_URL}/org/{org_id}/recording/start",
+                f"{API_URL}/org/{self.org_id}/recording/start",
                 headers=self._auth.get_headers(),
                 json={
                     "robot_id": self.id,
@@ -239,10 +244,9 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        org_id = get_current_org()
         try:
             response = requests.post(
-                f"{API_URL}/org/{org_id}/recording/stop?recording_id={recording_id}",
+                f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}",
                 headers=self._auth.get_headers(),
             )
 
@@ -412,14 +416,13 @@ class Robot:
             RobotError: If packaging or upload fails.
             ConfigError: If there is an error trying to get the current org
         """
-        org_id = get_current_org()
         try:
             # Create the files dict with the ZIP data
             files = self._package_urdf()
 
             # Upload the package
             response = requests.put(
-                f"{API_URL}/org/{org_id}/robots/{self.id}/package?is_shared={self.shared}",
+                f"{API_URL}/org/{self.org_id}/robots/{self.id}/package?is_shared={self.shared}",
                 headers=self._auth.get_headers(),
                 files=files,
             )
@@ -440,7 +443,7 @@ class Robot:
 
 
 # Global robot registry
-_robots: dict[tuple[str, int], Robot] = {}
+_robots: dict[RobotInstanceIdentifier, Robot] = {}
 _robot_name_id_mapping: dict[str, str] = {}
 
 
@@ -475,7 +478,7 @@ def init(
     if not robot.id:
         raise RobotError("Robot not initialized. Call init() first.")
     _robot_name_id_mapping[robot_name] = robot.id
-    _robots[(robot.id, instance)] = robot
+    _robots[RobotInstanceIdentifier(robot_id=robot.id, robot_instance=instance)] = robot
     return robot
 
 
@@ -493,7 +496,7 @@ def get_robot(robot_name: str, instance: int) -> Robot:
         RobotError: If the robot is not found in the registry.
     """
     robot_id = _robot_name_id_mapping.get(robot_name, robot_name)
-    key = (robot_id, instance)
+    key = RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance)
     if key not in _robots:
         raise RobotError(
             f"Robot {robot_name}:{instance} not initialized. Call init() first."
