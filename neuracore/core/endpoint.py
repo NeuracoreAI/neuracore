@@ -35,7 +35,6 @@ from neuracore.core.utils.server import (
     PREDICT_ENDPOINT,
     SET_CHECKPOINT_ENDPOINT,
 )
-from neuracore.ml.utils.policy_inference import PolicyInference
 
 from .auth import get_auth
 from .const import API_URL
@@ -167,6 +166,9 @@ class DirectPolicy(Policy):
     ):
         """Initialize the direct policy with a robot instance."""
         super().__init__(robot)
+        # Import here to avoid the need for pytorch unless the user uses this policy
+        from neuracore.ml.utils.policy_inference import PolicyInference
+
         self._policy = PolicyInference(
             org_id=org_id, job_id=job_id, model_file=model_path
         )
