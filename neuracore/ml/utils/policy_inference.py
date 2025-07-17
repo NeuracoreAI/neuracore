@@ -3,7 +3,7 @@
 import logging
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import numpy as np
 import requests
@@ -11,11 +11,14 @@ import torch
 import torchvision.transforms as T
 from PIL import Image
 
+from neuracore.api.globals import GlobalSingleton
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.nc_types import (
     CameraData,
     CustomData,
+    DataItemStats,
+    DataType,
     EndEffectorData,
     JointData,
     LanguageData,
@@ -45,6 +48,7 @@ class PolicyInference:
         org_id: str,
         job_id: Optional[str] = None,
         device: Optional[str] = None,
+        output_mapping: Optional[dict[DataType, list[str]]] = None,
     ) -> None:
         """Initialize the policy inference."""
         self.org_id = org_id
@@ -60,6 +64,110 @@ class PolicyInference:
                 else torch.device("cpu")
             )
         )
+        self.output_mapping = output_mapping
+        self.robot_ids_to_output_mapping: dict[str, dict[DataType, list[str]]] = {}
+
+    def _validate_robot_to_ncdata_keys(
+        self, robot_id: str, data_item_stats: DataItemStats, data_name: str
+    ) -> list[str]:
+        keys = data_item_stats.robot_to_ncdata_keys.get(robot_id, [])
+        if not keys:
+            raise ValueError(
+                f"No {data_name} found for robot {robot_id} in dataset description."
+            )
+        return keys
+
+    def _get_output_mapping(self, robot_id: Optional[str]) -> dict[DataType, list[str]]:
+        if self.output_mapping is not None:
+            return self.output_mapping
+        if robot_id is None:
+            raise ValueError(
+                "You must either set an active robot or provide an output mapping."
+            )
+        if robot_id in self.robot_ids_to_output_mapping:
+            return self.robot_ids_to_output_mapping[robot_id]
+
+        output_data_types = self.model.model_init_description.output_data_types
+        output_mapping: dict[DataType, list[str]] = {}
+        if DataType.JOINT_TARGET_POSITIONS in output_data_types:
+            keys = self._validate_robot_to_ncdata_keys(
+                robot_id,
+                self.dataset_description.joint_target_positions,
+                "joint target positions",
+            )
+            output_mapping[DataType.JOINT_TARGET_POSITIONS] = keys
+        if DataType.JOINT_POSITIONS in output_data_types:
+            keys = self._validate_robot_to_ncdata_keys(
+                robot_id,
+                self.dataset_description.joint_positions,
+                "joint positions",
+            )
+            output_mapping[DataType.JOINT_POSITIONS] = keys
+        if DataType.JOINT_VELOCITIES in output_data_types:
+            keys = self._validate_robot_to_ncdata_keys(
+                robot_id,
+                self.dataset_description.joint_velocities,
+                "joint velocities",
+            )
+            output_mapping[DataType.JOINT_VELOCITIES] = keys
+        if DataType.JOINT_TORQUES in output_data_types:
+            keys = self._validate_robot_to_ncdata_keys(
+                robot_id,
+                self.dataset_description.joint_torques,
+                "joint torques",
+            )
+            output_mapping[DataType.JOINT_TORQUES] = keys
+        if DataType.END_EFFECTORS in output_data_types:
+            keys = self._validate_robot_to_ncdata_keys(
+                robot_id,
+                self.dataset_description.end_effector_states,
+                "end effector states",
+            )
+            output_mapping[DataType.END_EFFECTORS] = keys
+        if DataType.POSES in output_data_types:
+            keys = self._validate_robot_to_ncdata_keys(
+                robot_id,
+                self.dataset_description.poses,
+                "poses",
+            )
+            output_mapping[DataType.POSES] = keys
+        if DataType.RGB_IMAGE in output_data_types:
+            keys = self._validate_robot_to_ncdata_keys(
+                robot_id,
+                self.dataset_description.rgb_images,
+                "RGB images",
+            )
+            output_mapping[DataType.RGB_IMAGE] = keys
+        if DataType.DEPTH_IMAGE in output_data_types:
+            keys = self._validate_robot_to_ncdata_keys(
+                robot_id,
+                self.dataset_description.depth_images,
+                "depth images",
+            )
+            output_mapping[DataType.DEPTH_IMAGE] = keys
+        if DataType.POINT_CLOUD in output_data_types:
+            keys = self._validate_robot_to_ncdata_keys(
+                robot_id,
+                self.dataset_description.point_clouds,
+                "point clouds",
+            )
+            output_mapping[DataType.POINT_CLOUD] = keys
+        if DataType.LANGUAGE in output_data_types:
+            pass  # Language data typically does not require robot-specific keys
+        if DataType.CUSTOM in output_data_types:
+            all_custom_keys = []
+            for (
+                custom_data_name,
+                data_item_stats,
+            ) in self.dataset_description.custom_data.items():
+                keys = self._validate_robot_to_ncdata_keys(
+                    robot_id, data_item_stats, "custom data"
+                )
+                all_custom_keys.extend(keys)
+            output_mapping[DataType.CUSTOM] = all_custom_keys
+
+        self.robot_ids_to_output_mapping[robot_id] = output_mapping
+        return output_mapping
 
     def _process_joint_data(self, joint_data: JointData, max_len: int) -> MaskableData:
         """Process joint state data into batched tensor format.
@@ -155,16 +263,14 @@ class PolicyInference:
             torch.tensor(mask, dtype=torch.float32),
         )
 
-    def _process_pose_data(
-        self, pose_data: dict[str, PoseData], max_len: int
-    ) -> MaskableData:
+    def _process_pose_data(self, pose_data: PoseData, max_len: int) -> MaskableData:
         """Process pose data into batched tensor format."""
         values = np.zeros((1, max_len))
         mask = np.zeros((1, max_len))
 
         all_poses = []
-        for pose_name, pose_data_item in pose_data.items():
-            all_poses.extend(pose_data_item.pose[pose_name])  # 6DOF pose
+        for pose_name, pose_data_item in pose_data.pose.items():
+            all_poses.extend(pose_data_item)  # 6DOF pose
 
         values[0, : len(all_poses)] = all_poses
         mask[0, : len(all_poses)] = 1.0
@@ -295,13 +401,13 @@ class PolicyInference:
         if sync_point.rgb_images:
             batch.rgb_images = self._process_image_data(
                 sync_point.rgb_images,
-                self.dataset_description.max_num_rgb_images,
+                self.dataset_description.rgb_images.max_len,
                 is_depth=False,
             )
         if sync_point.depth_images:
             batch.depth_images = self._process_image_data(
                 sync_point.depth_images,
-                self.dataset_description.max_num_depth_images,
+                self.dataset_description.depth_images.max_len,
                 is_depth=True,
             )
 
@@ -323,7 +429,7 @@ class PolicyInference:
         if sync_point.point_clouds:
             batch.point_clouds = self._process_point_cloud_data(
                 sync_point.point_clouds,
-                self.dataset_description.max_num_point_clouds,
+                self.dataset_description.point_clouds.max_len,
             )
 
         # Process language data
@@ -386,16 +492,139 @@ class PolicyInference:
             strict=False,
         )
 
-    def __call__(self, sync_point: SyncPoint) -> ModelPrediction:
+    def _model_prediction_to_sync_points(
+        self,
+        batch_output: ModelPrediction,
+        output_mapping: dict[DataType, list[str]],
+        robot_id: Optional[str] = None,
+    ) -> list[SyncPoint]:
+        """Convert model prediction output to SyncPoint format.
+
+        Args:
+            batch_output: ModelPrediction containing the model's outputs.
+
+        Returns:
+            SyncPoint with processed outputs.
+        """
+        horizon = list(batch_output.outputs.values())[0].shape[1]
+        sync_points: list[SyncPoint] = [
+            SyncPoint(robot_id=robot_id) for _ in range(horizon)
+        ]
+
+        # Map outputs to SyncPoint fields based on output_mapping
+        for data_type, output in batch_output.outputs.items():
+            # Remove batch dimension if present
+            if isinstance(output, np.ndarray) and output.ndim > 0:
+                output = output[0]
+            output = cast(np.ndarray, output)
+            keys = output_mapping[data_type]
+
+            if data_type == DataType.JOINT_POSITIONS:
+                for t in range(horizon):
+                    sync_points[t].joint_positions = JointData(
+                        values=dict(zip(keys, output[t].tolist()))
+                    )
+            elif data_type == DataType.JOINT_VELOCITIES:
+                for t in range(horizon):
+                    sync_points[t].joint_velocities = JointData(
+                        values=dict(zip(keys, output[t].tolist()))
+                    )
+            elif data_type == DataType.JOINT_TORQUES:
+                for t in range(horizon):
+                    sync_points[t].joint_torques = JointData(
+                        values=dict(zip(keys, output[t].tolist()))
+                    )
+            elif data_type == DataType.JOINT_TARGET_POSITIONS:
+                for t in range(horizon):
+                    sync_points[t].joint_target_positions = JointData(
+                        values=dict(zip(keys, output[t].tolist()))
+                    )
+            elif data_type == DataType.END_EFFECTORS:
+                for t in range(horizon):
+                    sync_points[t].end_effectors = EndEffectorData(
+                        open_amounts=dict(zip(keys, output[t].tolist())),
+                    )
+            elif data_type == DataType.POSES:
+                for t in range(horizon):
+                    # Assuming output is a flat array of pose values
+                    sync_points[t].poses = PoseData(
+                        pose={
+                            key: output[t, i * 7 : (i + 1) * 7].tolist()
+                            for i, key in enumerate(keys)
+                        }
+                    )
+            elif data_type == DataType.POINT_CLOUD:
+                # [T, CLOUDs, N, 3]
+                for i in range(horizon):
+                    sync_points[i].point_clouds = {
+                        cloud_name: PointCloudData(points=output[i, j])
+                        for j, cloud_name in enumerate(keys)
+                    }
+            elif data_type == DataType.RGB_IMAGE:
+                # [T, CAMs, H, W, C]
+                camera_names = keys
+                for t in range(horizon):
+                    sync_points[t].rgb_images = {
+                        cam_name: CameraData(frame=output[t, i])
+                        for i, cam_name in enumerate(camera_names)
+                    }
+            elif data_type == DataType.DEPTH_IMAGE:
+                # [T, CAMs, H, W]
+                camera_names = keys
+                for t in range(horizon):
+                    sync_points[t].depth_images = {
+                        cam_name: CameraData(frame=output[t, i])
+                        for i, cam_name in enumerate(camera_names)
+                    }
+            elif data_type == DataType.LANGUAGE:
+                raise NotImplementedError(
+                    "Language data processing is not implemented yet."
+                )
+            elif data_type == DataType.CUSTOM:
+                # Assuming output is a dictionary with custom data
+                for t in range(horizon):
+                    if len(output[t]) != len(keys):
+                        raise ValueError(
+                            f"Output length {len(output[t])} does not match expected "
+                            f"keys length {len(keys)} for custom data."
+                        )
+                    sync_points[t].custom_data = {
+                        key: CustomData(
+                            data=(
+                                value.tolist()
+                                if isinstance(value, np.ndarray)
+                                else value
+                            )
+                        )
+                        for key, value in zip(keys, output)
+                    }
+                    if len(output[t]) != len(keys):
+                        raise ValueError(
+                            f"Output length {len(output[t])} does not match expected "
+                            f"keys length {len(keys)} for custom data."
+                        )
+
+        return sync_points
+
+    def __call__(self, sync_point: SyncPoint) -> list[SyncPoint]:
         """Process a single sync point and run inference.
 
         Args:
             sync_point: SyncPoint containing data from a single time step.
 
         Returns:
-            ModelPrediction containing the model's output predictions.
+            SyncPoint with model predictions filled in.
         """
+        sync_point = sync_point.order()
+        if sync_point.robot_id is None:
+            active_robot = GlobalSingleton()._active_robot
+            if active_robot is None:
+                raise ValueError("No active robot set. Please set an active robot.")
+            sync_point.robot_id = active_robot.id
         batch = self._preprocess(sync_point)
         with torch.no_grad():
             batch_output: ModelPrediction = self.model(batch)
-            return batch_output
+            output_mapping = self._get_output_mapping(sync_point.robot_id)
+            return self._model_prediction_to_sync_points(
+                batch_output, output_mapping, robot_id=sync_point.robot_id
+            )

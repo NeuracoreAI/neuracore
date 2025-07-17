@@ -81,28 +81,28 @@ class CNNMLP(NeuracoreModel):
         if DataType.RGB_IMAGE in self.model_init_description.input_data_types:
             self.encoders["rgb"] = nn.ModuleList([
                 ImageEncoder(output_dim=cnn_output_dim)
-                for _ in range(self.dataset_description.max_num_rgb_images)
+                for _ in range(self.dataset_description.rgb_images.max_len)
             ])
             self.feature_dims["rgb"] = (
-                self.dataset_description.max_num_rgb_images * cnn_output_dim
+                self.dataset_description.rgb_images.max_len * cnn_output_dim
             )
 
         if DataType.DEPTH_IMAGE in self.model_init_description.input_data_types:
             self.encoders["depth"] = nn.ModuleList([
                 DepthImageEncoder(output_dim=cnn_output_dim)
-                for _ in range(self.dataset_description.max_num_depth_images)
+                for _ in range(self.dataset_description.depth_images.max_len)
             ])
             self.feature_dims["depth"] = (
-                self.dataset_description.max_num_depth_images * cnn_output_dim
+                self.dataset_description.depth_images.max_len * cnn_output_dim
             )
 
         if DataType.POINT_CLOUD in self.model_init_description.input_data_types:
             self.encoders["point_cloud"] = nn.ModuleList([
                 PointCloudEncoder(output_dim=cnn_output_dim)
-                for _ in range(self.dataset_description.max_num_point_clouds)
+                for _ in range(self.dataset_description.point_clouds.max_len)
             ])
             self.feature_dims["point_cloud"] = (
-                self.dataset_description.max_num_point_clouds * cnn_output_dim
+                self.dataset_description.point_clouds.max_len * cnn_output_dim
             )
 
         # State encoders
@@ -144,7 +144,7 @@ class CNNMLP(NeuracoreModel):
 
         # Custom data encoders
         self.custom_encoders = nn.ModuleDict()
-        for key, data_items_stats in self.dataset_description.custom_data_stats.items():
+        for key, data_items_stats in self.dataset_description.custom_data.items():
             self.custom_encoders[key] = CustomDataEncoder(
                 input_dim=data_items_stats.max_len, output_dim=cnn_output_dim
             )

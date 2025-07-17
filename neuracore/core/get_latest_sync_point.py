@@ -11,6 +11,7 @@ from typing import Optional
 
 import numpy as np
 
+from neuracore.api.globals import GlobalSingleton
 from neuracore.core.exceptions import RobotError
 from neuracore.core.nc_types import CameraData, JointData, LanguageData, SyncPoint
 from neuracore.core.robot import Robot
@@ -83,7 +84,9 @@ def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
     return consumer_manager.all_remote_nodes_connected()
 
 
-def get_latest_sync_point(robot: Robot, include_remote: bool = True) -> SyncPoint:
+def get_latest_sync_point(
+    robot: Optional[Robot] = None, include_remote: bool = True
+) -> SyncPoint:
     """Create a synchronized data point from current robot sensor streams.
 
     Collects the latest data from all active robot streams including
@@ -96,6 +99,9 @@ def get_latest_sync_point(robot: Robot, include_remote: bool = True) -> SyncPoin
     Raises:
         NotImplementedError: If an unsupported stream type is encountered.
     """
+    robot = GlobalSingleton()._active_robot
+    if robot is None:
+        raise ValueError("No active robot found. Please initialize a robot instance.")
     sync_point = SyncPoint(timestamp=time.time())
     for stream_name, stream in robot.list_all_streams().items():
         if "rgb" in stream_name:

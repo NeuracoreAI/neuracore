@@ -50,7 +50,9 @@ def model_init_description_partial() -> ModelInitDescription:
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
         ),
-        max_num_rgb_images=CAMS,
+        rgb_images=DataItemStats(
+            max_len=CAMS,
+        ),
     )
     return ModelInitDescription(
         dataset_description=dataset_description,
@@ -92,16 +94,24 @@ def model_init_description_full() -> ModelInitDescription:
             mean=np.zeros(7, dtype=float),
             std=np.ones(7, dtype=float),
         ),
-        custom_data_stats={
+        custom_data={
             "sensor_data": DataItemStats(
                 mean=np.zeros(1, dtype=float),
                 std=np.ones(1, dtype=float),
             )
         },
-        max_num_point_clouds=1,
-        max_num_rgb_images=CAMS,
-        max_num_depth_images=CAMS,
-        max_language_length=512,  # Maximum length for language tokens
+        rgb_images=DataItemStats(
+            max_len=CAMS,
+        ),
+        depth_images=DataItemStats(
+            max_len=CAMS,
+        ),
+        point_clouds=DataItemStats(
+            max_len=1,
+        ),
+        language=DataItemStats(
+            max_len=512,
+        ),
     )
     return ModelInitDescription(
         dataset_description=dataset_description,
@@ -331,4 +341,5 @@ def test_run_validation(tmp_path: Path, mock_login):
         algorithm_dir=algorithm_dir,
         port=random.randint(10000, 20000),
     )
-    assert len(error_msg) == 0
+    if len(error_msg) > 0:
+        raise RuntimeError(error_msg)

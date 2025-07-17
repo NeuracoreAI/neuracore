@@ -22,10 +22,9 @@ from typing import Optional
 import numpy as np
 import requests
 
-from neuracore.api.core import _get_robot
+from neuracore.api.globals import GlobalSingleton
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.get_latest_sync_point import get_latest_sync_point
-from neuracore.core.robot import Robot
 from neuracore.core.utils.download import download_with_progress
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 from neuracore.core.utils.server import (
@@ -37,17 +36,13 @@ from neuracore.core.utils.server import (
 from .auth import get_auth
 from .const import API_URL
 from .exceptions import EndpointError
-from .nc_types import DataType, ModelPrediction, SyncPoint
+from .nc_types import DataType, SyncPoint
 
 logger = logging.getLogger(__name__)
 
 
 class Policy:
     """Base class for all policies."""
-
-    def __init__(self, robot: Robot):
-        """Initialize the policy with an optional robot instance."""
-        self.robot = robot
 
     def set_checkpoint(
         self, epoch: Optional[int] = None, checkpoint_file: Optional[str] = None
@@ -64,7 +59,7 @@ class Policy:
         if epoch is None and checkpoint_file is None:
             raise ValueError("Must specify either epoch or checkpoint_file.")
 
-    def predict(self, sync_point: Optional[SyncPoint] = None) -> ModelPrediction:
+    def predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
         """Make a prediction using the policy."""
         raise NotImplementedError("Subclasses must implement this method.")
 
@@ -82,18 +77,21 @@ class DirectPolicy(Policy):
 
     def __init__(
         self,
-        robot: Robot,
         model_path: Path,
         org_id: str,
         job_id: Optional[str] = None,
+        output_mapping: Optional[dict[DataType, list[str]]] = None,
     ):
         """Initialize the direct policy with a robot instance."""
-        super().__init__(robot)
+        super().__init__()
         # Import here to avoid the need for pytorch unless the user uses this policy
         from neuracore.ml.utils.policy_inference import PolicyInference
 
         self._policy = PolicyInference(
-            org_id=org_id, job_id=job_id, model_file=model_path
+            org_id=org_id,
+            job_id=job_id,
+            model_file=model_path,
+            output_mapping=output_mapping,
         )
 
     def set_checkpoint(
@@ -109,7 +107,7 @@ class DirectPolicy(Policy):
         super().set_checkpoint(epoch, checkpoint_file)
         self._policy.set_checkpoint(epoch, checkpoint_file)
 
-    def predict(self, sync_point: Optional[SyncPoint] = None) -> ModelPrediction:
+    def predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
         """Run direct model inference.
 
         Args:
@@ -119,13 +117,8 @@ class DirectPolicy(Policy):
             Model predictions.
         """
         if sync_point is None:
-            sync_point = get_latest_sync_point(robot=self.robot)
-        model_prediction = self._policy(sync_point)
-        model_prediction.outputs = {
-            key: value[0] if isinstance(value, np.ndarray) and value.ndim > 0 else value
-            for key, value in model_prediction.outputs.items()
-        }
-        return model_prediction
+            sync_point = get_latest_sync_point()
+        return self._policy(sync_point)
 
 
 class ServerPolicy(Policy):
@@ -137,7 +130,6 @@ class ServerPolicy(Policy):
 
     def __init__(
         self,
-        robot: Robot,
         base_url: str,
         headers: Optional[dict[str, str]] = None,
     ):
@@ -148,7 +140,7 @@ class ServerPolicy(Policy):
             base_url: Base URL of the server.
             headers: Optional HTTP headers for authentication.
         """
-        super().__init__(robot)
+        super().__init__()
         self._base_url = base_url
         self._headers = headers or {}
         self._is_local = "localhost" in base_url or "127.0.0.1" in base_url
@@ -187,7 +179,7 @@ class ServerPolicy(Policy):
         except requests.exceptions.RequestException as e:
             raise EndpointError(f"Failed to set checkpoint: {str(e)}")
 
-    def predict(self, sync_point: Optional[SyncPoint] = None) -> ModelPrediction:
+    def predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
         """Get action predictions from the model endpoint.
 
         Sends robot sensor data to the model and receives action predictions.
@@ -206,7 +198,15 @@ class ServerPolicy(Policy):
             ValueError: If payload size exceeds limits for remote endpoints.
         """
         if sync_point is None:
-            sync_point = get_latest_sync_point(robot=self.robot)
+            sync_point = get_latest_sync_point()
+
+        if sync_point.robot_id is None:
+            robot = GlobalSingleton()._active_robot
+            if robot is None:
+                raise ValueError(
+                    "No active robot found. Please connect a robot before predicting."
+                )
+            sync_point.robot_id = robot.id
 
         # Encode images if they are numpy arrays
         if sync_point.rgb_images:
@@ -223,6 +223,7 @@ class ServerPolicy(Policy):
                             sync_point.depth_images[key].frame
                         )
                     )
+        response = None
         try:
             # Make prediction request
             response = requests.post(
@@ -235,27 +236,32 @@ class ServerPolicy(Policy):
 
             # Parse response
             result = response.json()
-            model_pred = ModelPrediction.model_validate(result)
-            if DataType.RGB_IMAGE in model_pred.outputs:
-                rgb_batch = model_pred.outputs[DataType.RGB_IMAGE]
-                # Will be [B, T, CAMs, H, W, C]
-                for b_idx in range(len(rgb_batch)):
-                    for t_idx in range(len(rgb_batch[b_idx])):
-                        for cam_idx in range(len(rgb_batch[b_idx][t_idx])):
-                            rgb_batch[b_idx][t_idx][cam_idx] = (
-                                ImageStringEncoder.decode_image(
-                                    rgb_batch[b_idx][t_idx][cam_idx]
-                                )
+            sync_point_preds = [SyncPoint.model_validate(res) for res in result]
+            for sync_point_pred in sync_point_preds:
+                if sync_point_pred.rgb_images:
+                    # Decode images back to numpy arrays
+                    rgb = sync_point_pred.rgb_images
+                    for cam_name, cam_data in rgb.items():
+                        if isinstance(cam_data.frame, str):
+                            cam_data.frame = ImageStringEncoder.decode_image(
+                                cam_data.frame
                             )
-                model_pred.outputs[DataType.RGB_IMAGE] = np.array(rgb_batch)
-            for key, value in model_pred.outputs.items():
-                if isinstance(value, list):
-                    model_pred.outputs[key] = np.array(value)
-                # Remove batch dimension
-                model_pred.outputs[key] = model_pred.outputs[key][0]
-            return model_pred
+                if sync_point_pred.depth_images:
+                    # Decode depth images back to numpy arrays
+                    depth = sync_point_pred.depth_images
+                    for cam_name, cam_data in depth.items():
+                        if isinstance(cam_data.frame, str):
+                            cam_data.frame = ImageStringEncoder.decode_image(
+                                cam_data.frame
+                            )
+            return sync_point_preds
 
         except requests.exceptions.RequestException as e:
+            if response is not None:
+                raise EndpointError(
+                    "Failed to get prediction from endpoint: "
+                    f"{response.json().get('detail', 'Unknown error')}"
+                )
             raise EndpointError(f"Failed to get prediction from endpoint: {str(e)}")
         except Exception as e:
             raise EndpointError(f"Error processing endpoint response: {str(e)}")
@@ -270,7 +276,6 @@ class LocalServerPolicy(ServerPolicy):
 
     def __init__(
         self,
-        robot: Robot,
         org_id: str,
         model_path: Path,
         job_id: Optional[str] = None,
@@ -287,7 +292,7 @@ class LocalServerPolicy(ServerPolicy):
             port: Port to run the server on
             host: Host to bind to
         """
-        super().__init__(robot, f"http://{host}:{port}")
+        super().__init__(f"http://{host}:{port}")
         self.org_id = org_id
         self.job_id = job_id
         self.model_path = model_path
@@ -328,8 +333,6 @@ class LocalServerPolicy(ServerPolicy):
 
         self.server_process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
             # Ensure clean process termination
             preexec_fn=os.setsid if hasattr(os, "setsid") else None,
         )
@@ -412,23 +415,21 @@ class LocalServerPolicy(ServerPolicy):
 class RemoteServerPolicy(ServerPolicy):
     """Policy for connecting to remote endpoints on the Neuracore platform."""
 
-    def __init__(self, robot: Robot, base_url: str, headers: dict[str, str]):
+    def __init__(self, base_url: str, headers: dict[str, str]):
         """Initialize the remote server policy.
 
         Args:
-            robot: Robot instance for accessing sensor streams.
             base_url: Base URL of the remote server.
             headers: HTTP headers for authentication.
         """
-        super().__init__(robot, base_url, headers)
+        super().__init__(base_url, headers)
 
 
 # Main connection functions
 def policy(
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
-    robot_name: Optional[str] = None,
-    instance: int = 0,
+    output_mapping: Optional[dict[DataType, list[str]]] = None,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process.
 
@@ -436,12 +437,12 @@ def policy(
         train_run_name: Name of the training run to load the model from.
         robot_name: Robot identifier.
         instance: Instance number of the robot.
+        output_mapping: Optional mapping of data types to output keys.
+
 
     Returns:
         DirectPolicy instance for direct model inference.
     """
-    robot = _get_robot(robot_name, instance)
-
     org_id = get_current_org()
     job_id = None
     if train_run_name is not None:
@@ -453,7 +454,10 @@ def policy(
         raise ValueError("Must specify either train_run_name or model_file")
 
     return DirectPolicy(
-        robot=robot, org_id=org_id, job_id=job_id, model_path=model_path
+        org_id=org_id,
+        job_id=job_id,
+        model_path=model_path,
+        output_mapping=output_mapping,
     )
 
 
@@ -461,8 +465,6 @@ def policy_local_server(
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
     port: int = 8080,
-    robot_name: Optional[str] = None,
-    instance: int = 0,
     host: str = "127.0.0.1",
     job_id: Optional[str] = None,
 ) -> LocalServerPolicy:
@@ -484,8 +486,6 @@ def policy_local_server(
     if train_run_name and model_file:
         raise ValueError("Cannot specify both train_run_name and model_file")
 
-    robot = _get_robot(robot_name, instance)
-
     org_id = get_current_org()
 
     # Download model
@@ -499,7 +499,6 @@ def policy_local_server(
         raise ValueError("Must specify either train_run_name or model_file")
 
     return LocalServerPolicy(
-        robot=robot,
         org_id=org_id,
         model_path=model_path,
         job_id=job_id,
@@ -510,8 +509,6 @@ def policy_local_server(
 
 def policy_remote_server(
     endpoint_name: str,
-    robot_name: Optional[str] = None,
-    instance: int = 0,
 ) -> RemoteServerPolicy:
     """Launch a remote server policy connected to a deployed endpoint.
 
@@ -525,7 +522,6 @@ def policy_remote_server(
     """
     auth = get_auth()
     org_id = get_current_org()
-    robot = _get_robot(robot_name, instance)
 
     try:
         # Find endpoint by name
@@ -546,7 +542,6 @@ def policy_remote_server(
             )
 
         return RemoteServerPolicy(
-            robot=robot,
             base_url=f"{API_URL}/org/{org_id}/models/endpoints/{endpoint['id']}",
             headers=auth.get_headers(),
         )

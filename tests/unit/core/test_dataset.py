@@ -172,7 +172,9 @@ def synced_data():
         depth_images={"cam2": CameraData(timestamp=1.0, frame_idx=1)},
     )
 
-    return SyncedData(frames=[frame1, frame2], start_time=0.0, end_time=1.0)
+    return SyncedData(
+        frames=[frame1, frame2], start_time=0.0, end_time=1.0, robot_id="robot1"
+    )
 
 
 @pytest.fixture

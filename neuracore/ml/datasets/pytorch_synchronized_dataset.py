@@ -155,7 +155,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                         sample.inputs.rgb_images = (
                             self._create_camera_maskable_input_data(
                                 rgbs_for_each_camera,
-                                self.dataset_description.max_num_rgb_images,
+                                self.dataset_description.rgb_images.max_len,
                             )
                         )
                     if DataType.RGB_IMAGE in self.output_data_types:
@@ -167,7 +167,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                         sample.outputs.rgb_images = (
                             self._create_camera_maskable_output_data(
                                 future_frames,
-                                self.dataset_description.max_num_rgb_images,
+                                self.dataset_description.rgb_images.max_len,
                             )
                         )
 
@@ -180,7 +180,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                         sample.inputs.depth_images = (
                             self._create_camera_maskable_input_data(
                                 depth_for_each_camera,
-                                self.dataset_description.max_num_depth_images,
+                                self.dataset_description.depth_images.max_len,
                             )
                         )
                     if DataType.DEPTH_IMAGE in self.output_data_types:
@@ -192,7 +192,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                         sample.outputs.depth_images = (
                             self._create_camera_maskable_output_data(
                                 future_frames,
-                                self.dataset_description.max_num_depth_images,
+                                self.dataset_description.depth_images.max_len,
                             )
                         )
 
@@ -469,13 +469,11 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         )
         return MaskableData(stacked_data, stacked_mask)
 
-    def _create_pose_maskable_input_data(
-        self, poses: dict[str, PoseData]
-    ) -> MaskableData:
+    def _create_pose_maskable_input_data(self, poses: PoseData) -> MaskableData:
         """Create MaskableData for pose input."""
         all_poses = []
-        for pose_name, pose_data in poses.items():
-            all_poses.extend(pose_data.pose[pose_name])  # 6DOF pose
+        for pose_name, pose_data in poses.pose.items():
+            all_poses.extend(pose_data)  # 6DOF pose
 
         pose_tensor = torch.tensor(all_poses, dtype=torch.float32)
         max_len = self.dataset_description.poses.max_len
@@ -493,7 +491,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         return MaskableData(pose_tensor, pose_mask)
 
     def _create_pose_maskable_output_data(
-        self, poses_list: list[dict[str, PoseData]]
+        self, poses_list: list[PoseData]
     ) -> MaskableData:
         """Create MaskableData for pose output."""
         maskable_data_for_each_t = [

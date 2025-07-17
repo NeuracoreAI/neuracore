@@ -90,7 +90,7 @@ class ACT(NeuracoreModel):
         # Vision components
         self.image_encoders = nn.ModuleList([
             ACTImageEncoder(output_dim=hidden_dim)
-            for _ in range(self.dataset_description.max_num_rgb_images)
+            for _ in range(self.dataset_description.rgb_images.max_len)
         ])
 
         state_input_dim = (

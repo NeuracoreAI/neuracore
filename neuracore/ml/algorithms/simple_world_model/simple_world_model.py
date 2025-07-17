@@ -68,7 +68,7 @@ class SimpleWorldModel(NeuracoreModel):
         # Image encoders for each camera
         self.image_encoders = nn.ModuleList([
             ImageEncoder(output_dim=self.cnn_output_dim)
-            for _ in range(self.dataset_description.max_num_rgb_images)
+            for _ in range(self.dataset_description.rgb_images.max_len)
         ])
 
         # Determine total state input dimension
@@ -109,7 +109,7 @@ class SimpleWorldModel(NeuracoreModel):
                 feature_map_sizes=[64, 128, 256, 512],
                 condition_dim=condition_dim,  # state + action + image encoding
             )
-            for _ in range(self.dataset_description.max_num_rgb_images)
+            for _ in range(self.dataset_description.rgb_images.max_len)
         ])
 
         self.transform = torch.nn.Sequential(
@@ -211,7 +211,7 @@ class SimpleWorldModel(NeuracoreModel):
             torch.FloatTensor: Predicted future images [B, T, cameras, 3, H, W]
         """
         batch_size = len(batch)
-        num_cameras = self.dataset_description.max_num_rgb_images
+        num_cameras = self.dataset_description.rgb_images.max_len
 
         # Process current images from each camera
         image_features = []

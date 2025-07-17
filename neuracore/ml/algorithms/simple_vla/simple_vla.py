@@ -82,7 +82,7 @@ class SimpleVLA(NeuracoreModel):
         # Vision encoders - one for each camera
         self.image_encoders = nn.ModuleList([
             ImageEncoder(output_dim=self.cnn_output_dim)
-            for _ in range(self.dataset_description.max_num_rgb_images)
+            for _ in range(self.dataset_description.rgb_images.max_len)
         ])
 
         # Language encoder
@@ -103,7 +103,7 @@ class SimpleVLA(NeuracoreModel):
             self.state_embed = nn.Linear(state_input_dim, hidden_dim)
 
         # Multimodal fusion module
-        vision_dim = self.dataset_description.max_num_rgb_images * cnn_output_dim
+        vision_dim = self.dataset_description.rgb_images.max_len * cnn_output_dim
         self.fusion = MultimodalFusion(
             vision_dim=vision_dim,
             language_dim=self.language_output_dim,
@@ -287,7 +287,7 @@ class SimpleVLA(NeuracoreModel):
         else:
             combined_image_features = torch.zeros(
                 batch_size,
-                self.dataset_description.max_num_rgb_images * self.cnn_output_dim,
+                self.dataset_description.rgb_images.max_len * self.cnn_output_dim,
                 device=self.device,
             )
 

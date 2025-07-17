@@ -3,7 +3,7 @@ import pytest
 
 import neuracore as nc
 from neuracore.core.const import API_URL
-from neuracore.core.nc_types import DataType, ModelPrediction
+from neuracore.core.nc_types import JointData, SyncPoint
 
 
 def test_connect_endpoint(
@@ -29,9 +29,14 @@ def test_connect_endpoint(
     # Mock endpoint prediction
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/models/endpoints/test_endpoint_id/predict",
-        json=ModelPrediction(
-            outputs={DataType.JOINT_TARGET_POSITIONS: [[0.1, 0.2, 0.3]]}
-        ).model_dump(mode="json"),
+        json=[
+            SyncPoint(
+                joint_target_positions=JointData(
+                    values={"joint_1": 0.1, "joint_2": 0.2, "joint_3": 0.3},
+                )
+            ).model_dump()
+            for _ in range(3)
+        ],
         status_code=200,
     )
 
@@ -41,10 +46,15 @@ def test_connect_endpoint(
     nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
 
     # Test prediction
-    pred = endpoint.predict()
-    assert isinstance(pred, ModelPrediction)
-    assert pred.outputs[DataType.JOINT_TARGET_POSITIONS].shape == (3,)
-    assert list(pred.outputs[DataType.JOINT_TARGET_POSITIONS]) == [0.1, 0.2, 0.3]
+    preds = endpoint.predict()
+    assert isinstance(preds, list)
+    pred = preds[0]
+    assert pred.joint_target_positions is not None
+    assert pred.joint_target_positions.values == {
+        "joint_1": 0.1,
+        "joint_2": 0.2,
+        "joint_3": 0.3,
+    }
 
 
 def test_connect_nonexistent_endpoint(
@@ -125,9 +135,14 @@ def test_connect_local_endpoint(
 
     mock_auth_requests.post(
         f"{localhost}/predict",
-        json=ModelPrediction(
-            outputs={DataType.JOINT_TARGET_POSITIONS: [0.1, 0.2, 0.3]}
-        ).model_dump(mode="json"),
+        json=[
+            SyncPoint(
+                joint_positions=JointData(
+                    values={"joint_1": 0.5, "joint_2": 0.6, "joint_3": 0.7},
+                ),
+            ).model_dump()
+            for _ in range(3)
+        ],
         status_code=200,
     )
 
@@ -149,7 +164,16 @@ def test_connect_local_endpoint(
 
     # Test prediction
     pred = local_endpoint.predict()
-    assert isinstance(pred, ModelPrediction)
+    assert isinstance(pred, list)
+    assert len(pred) == 3
+    for p in pred:
+        assert isinstance(p, SyncPoint)
+        assert p.joint_positions is not None
+        assert p.joint_positions.values == {
+            "joint_1": 0.5,
+            "joint_2": 0.6,
+            "joint_3": 0.7,
+        }
     local_endpoint.disconnect()
 
 
@@ -290,9 +314,14 @@ def test_connect_local_endpoint_with_train_run(
 
     mock_auth_requests.post(
         f"{localhost}/predict",
-        json=ModelPrediction(
-            outputs={DataType.JOINT_TARGET_POSITIONS: [0.1, 0.2, 0.3]}
-        ).model_dump(mode="json"),
+        json=[
+            SyncPoint(
+                joint_positions=JointData(
+                    values={"joint_1": 0.5, "joint_2": 0.6, "joint_3": 0.7},
+                )
+            ).model_dump()
+            for _ in range(3)
+        ],
         status_code=200,
     )
 
@@ -323,7 +352,16 @@ def test_connect_local_endpoint_with_train_run(
 
     # Test prediction
     pred = local_endpoint.predict()
-    assert isinstance(pred, ModelPrediction)
+    assert isinstance(pred, list)
+    assert len(pred) == 3
+    for p in pred:
+        assert isinstance(p, SyncPoint)
+        assert p.joint_positions is not None
+        assert p.joint_positions.values == {
+            "joint_1": 0.5,
+            "joint_2": 0.6,
+            "joint_3": 0.7,
+        }
     local_endpoint.disconnect()
 
 
