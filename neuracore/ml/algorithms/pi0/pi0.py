@@ -106,7 +106,7 @@ class Pi0(NeuracoreModel):
         self.action_dim = self.dataset_description.joint_target_positions.max_len
         self.action_horizon = self.output_prediction_horizon
         self.vlm_max_text_tokens = vlm_max_text_tokens
-        num_rgbs = model_init_description.dataset_description.max_num_rgb_images
+        num_rgbs = model_init_description.dataset_description.rgb_images.max_len
         self.vlm_max_tokens = num_rgbs * 256 + self.vlm_max_text_tokens
         self.num_inference_steps = num_inference_steps
         self.flow_sig_min = flow_sig_min
@@ -273,7 +273,7 @@ class Pi0(NeuracoreModel):
             raise ValueError("RGB images are required but not provided")
         images = []
         image_masks = []
-        for cam_id in range(self.dataset_description.max_num_rgb_images):
+        for cam_id in range(self.dataset_description.rgb_images.max_len):
             image = self.image_normalizer(batch.rgb_images.data[:, cam_id])
             # Normalize from range [0,1] to [-1,1] as expected by siglip
             image = image * 2.0 - 1.0
@@ -591,7 +591,7 @@ class Pi0(NeuracoreModel):
         """
         t_start = time.time()
         batch_size = len(batch)
-        if self.dataset_description.max_num_rgb_images > 0:
+        if self.dataset_description.rgb_images.max_len > 0:
             # (B, Predict_Horizon, VLM_EMBED_DIM)
             if batch.rgb_images is None:
                 raise ValueError("RGB images are required")
@@ -664,7 +664,7 @@ class Pi0(NeuracoreModel):
         # Calculate conditional flow
         _t = t.view(-1, 1, 1)
         psi_t = (1 - (1 - self.flow_sig_min) * _t) * x0 + _t * x1
-        if self.dataset_description.max_num_rgb_images > 0:
+        if self.dataset_description.rgb_images.max_len > 0:
             # (B, Predict_Horizon, VLM_EMBED_DIM)
             if (
                 inference_sample.rgb_images is None

@@ -12,7 +12,26 @@ from enum import Enum
 from typing import Any, NamedTuple, Optional, Union
 from uuid import uuid4
 
+import numpy as np
 from pydantic import BaseModel, Field, NonNegativeInt
+
+
+def _sort_dict_by_keys(data_dict: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Sort a dictionary by its keys to ensure consistent ordering.
+
+    This is a helper function used internally by the data models to ensure
+    consistent dictionary ordering. Use the model's order() or
+    sort_in_place() methods instead of calling this directly.
+
+    Args:
+        data_dict: Dictionary to sort, or None
+
+    Returns:
+        New dictionary with keys sorted alphabetically, or None if input was None
+    """
+    if data_dict is None:
+        return None
+    return {key: data_dict[key] for key in sorted(data_dict.keys())}
 
 
 class NCData(BaseModel):
@@ -23,6 +42,15 @@ class NCData(BaseModel):
     """
 
     timestamp: float = Field(default_factory=lambda: time.time())
+
+    def order(self) -> "NCData":
+        """Return a new instance with sorted data.
+
+        This method should be overridden by subclasses to implement specific
+        ordering logic for the data type. The base class implementation does
+        nothing and returns self.
+        """
+        return self
 
 
 class JointData(NCData):
@@ -35,6 +63,26 @@ class JointData(NCData):
 
     values: dict[str, float]
     additional_values: Optional[dict[str, float]] = None
+
+    def order(self) -> "JointData":
+        """Return a new JointData instance with sorted joint names.
+
+        Returns:
+            New JointData with alphabetically sorted joint names.
+        """
+        return JointData(
+            timestamp=self.timestamp,
+            values=_sort_dict_by_keys(self.values) or {},
+            additional_values=_sort_dict_by_keys(self.additional_values),
+        )
+
+    def numpy(self) -> np.ndarray:
+        """Convert the joint values to a NumPy array.
+
+        Returns:
+            NumPy array of joint values.
+        """
+        return np.array(list(self.values.values()), dtype=np.float32)
 
 
 class CameraData(NCData):
@@ -61,6 +109,16 @@ class PoseData(NCData):
 
     pose: dict[str, list[float]]
 
+    def order(self) -> "PoseData":
+        """Return a new PoseData instance with sorted pose coordinates.
+
+        Returns:
+            New PoseData with alphabetically sorted pose coordinate names.
+        """
+        return PoseData(
+            timestamp=self.timestamp, pose=_sort_dict_by_keys(self.pose) or {}
+        )
+
 
 class EndEffectorData(NCData):
     """End-effector state data including gripper and tool configurations.
@@ -70,6 +128,17 @@ class EndEffectorData(NCData):
     """
 
     open_amounts: dict[str, float]
+
+    def order(self) -> "EndEffectorData":
+        """Return a new EndEffectorData instance with sorted effector names.
+
+        Returns:
+            New EndEffectorData with alphabetically sorted effector names.
+        """
+        return EndEffectorData(
+            timestamp=self.timestamp,
+            open_amounts=_sort_dict_by_keys(self.open_amounts) or {},
+        )
 
 
 class PointCloudData(NCData):
@@ -119,12 +188,74 @@ class SyncPoint(BaseModel):
     joint_torques: Optional[JointData] = None
     joint_target_positions: Optional[JointData] = None
     end_effectors: Optional[EndEffectorData] = None
-    poses: Optional[dict[str, PoseData]] = None
+    poses: Optional[PoseData] = None
     rgb_images: Optional[dict[str, CameraData]] = None
     depth_images: Optional[dict[str, CameraData]] = None
     point_clouds: Optional[dict[str, PointCloudData]] = None
     language_data: Optional[LanguageData] = None
     custom_data: Optional[dict[str, CustomData]] = None
+    robot_id: Optional[str] = None
+
+    def order(self) -> "SyncPoint":
+        """Return a new SyncPoint with all dictionary data consistently ordered.
+
+        This method ensures all dictionary keys in the sync point are sorted
+        alphabetically to provide consistent ordering for machine learning models.
+        This is critical for model training and inference as it ensures deterministic
+        input ordering across different sync points.
+
+        The following fields are ordered:
+        - RGB images (by camera name)
+        - Depth images (by camera name)
+        - Point clouds (by sensor name)
+        - Custom data (by data type name)
+        - Joint data values (by joint name)
+        - Pose data (by pose name and pose coordinate names)
+        - End effector data (by effector name)
+
+        Returns:
+            New SyncPoint with all dictionary data consistently ordered.
+
+        Example:
+            >>> sync_point = SyncPoint(
+            ...     rgb_images={"cam_2": data2, "cam_1": data1},
+            ...     joint_positions=JointData(values={"joint_2": 1.0, "joint_1": 0.5})
+            ... )
+            >>> ordered = sync_point.order()
+            >>> list(ordered.rgb_images.keys())
+            ['cam_1', 'cam_2']
+            >>> list(ordered.joint_positions.values.keys())
+            ['joint_1', 'joint_2']
+        """
+        return SyncPoint(
+            timestamp=self.timestamp,
+            # Order joint data using their get_ordered methods
+            joint_positions=(
+                self.joint_positions.order() if self.joint_positions else None
+            ),
+            joint_velocities=(
+                self.joint_velocities.order() if self.joint_velocities else None
+            ),
+            joint_torques=(self.joint_torques.order() if self.joint_torques else None),
+            joint_target_positions=(
+                self.joint_target_positions.order()
+                if self.joint_target_positions
+                else None
+            ),
+            # Order end effector data
+            end_effectors=(self.end_effectors.order() if self.end_effectors else None),
+            # Order pose data (both pose names and pose coordinates)
+            poses=self.poses.order() if self.poses else None,
+            # Order camera data by camera/sensor names
+            rgb_images=_sort_dict_by_keys(self.rgb_images),
+            depth_images=_sort_dict_by_keys(self.depth_images),
+            point_clouds=_sort_dict_by_keys(self.point_clouds),
+            # Language data doesn't need ordering (single value)
+            language_data=self.language_data,
+            # Order custom data by data type names
+            custom_data=_sort_dict_by_keys(self.custom_data),
+            robot_id=self.robot_id,
+        )
 
 
 class SyncedData(BaseModel):
@@ -138,6 +269,20 @@ class SyncedData(BaseModel):
     frames: list[SyncPoint]
     start_time: float
     end_time: float
+    robot_id: str
+
+    def order(self) -> "SyncedData":
+        """Return a new SyncedData with all sync points ordered.
+
+        Returns:
+            New SyncedData with all sync points having consistent ordering.
+        """
+        return SyncedData(
+            frames=[frame.order() for frame in self.frames],
+            start_time=self.start_time,
+            end_time=self.end_time,
+            robot_id=self.robot_id,
+        )
 
 
 class DataType(str, Enum):
@@ -171,12 +316,21 @@ class DataItemStats(BaseModel):
     Contains statistical information about data arrays including means,
     standard deviations, counts, and maximum lengths for normalization
     and model configuration purposes.
+
+    Attributes:
+        mean: List of means for each data dimension
+        std: List of standard deviations for each data dimension
+        count: List of counts for each data dimension
+        max_len: Maximum length of the data arrays
+        robot_to_ncdata_keys: Mapping of robot ids to their associated
+            data keys for this data type
     """
 
     mean: list[float] = Field(default_factory=list)
     std: list[float] = Field(default_factory=list)
     count: list[int] = Field(default_factory=list)
     max_len: int = Field(default_factory=lambda data: len(data["mean"]))
+    robot_to_ncdata_keys: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class DatasetDescription(BaseModel):
@@ -200,15 +354,15 @@ class DatasetDescription(BaseModel):
     poses: DataItemStats = Field(default_factory=DataItemStats)
 
     # Visual data counts
-    max_num_rgb_images: int = 0
-    max_num_depth_images: int = 0
-    max_num_point_clouds: int = 0
+    rgb_images: DataItemStats = Field(default_factory=DataItemStats)
+    depth_images: DataItemStats = Field(default_factory=DataItemStats)
+    point_clouds: DataItemStats = Field(default_factory=DataItemStats)
 
     # Language data
-    max_language_length: int = 0
+    language: DataItemStats = Field(default_factory=DataItemStats)
 
     # Custom data statistics
-    custom_data_stats: dict[str, DataItemStats] = Field(default_factory=dict)
+    custom_data: dict[str, DataItemStats] = Field(default_factory=dict)
 
     def get_data_types(self) -> list[DataType]:
         """Determine which data types are present in the dataset.
@@ -241,24 +395,24 @@ class DatasetDescription(BaseModel):
             data_types.append(DataType.POSES)
 
         # Visual data
-        if self.max_num_rgb_images > 0:
+        if self.rgb_images.max_len > 0:
             data_types.append(DataType.RGB_IMAGE)
-        if self.max_num_depth_images > 0:
+        if self.depth_images.max_len > 0:
             data_types.append(DataType.DEPTH_IMAGE)
-        if self.max_num_point_clouds > 0:
+        if self.point_clouds.max_len > 0:
             data_types.append(DataType.POINT_CLOUD)
 
         # Language data
-        if self.max_language_length > 0:
+        if self.language.max_len > 0:
             data_types.append(DataType.LANGUAGE)
 
         # Custom data
-        if self.custom_data_stats:
+        if self.custom_data:
             data_types.append(DataType.CUSTOM)
 
         return data_types
 
-    def add_custom_data_stats(
+    def add_custom_data(
         self, key: str, stats: DataItemStats, max_length: int = 0
     ) -> None:
         """Add statistics for a custom data type.
@@ -268,7 +422,7 @@ class DatasetDescription(BaseModel):
             stats: Statistical information for the custom data
             max_length: Maximum length of the custom data arrays
         """
-        self.custom_data_stats[key] = stats
+        self.custom_data[key] = stats
 
 
 class RecordingDescription(BaseModel):
@@ -291,18 +445,18 @@ class RecordingDescription(BaseModel):
     poses: DataItemStats = Field(default_factory=DataItemStats)
 
     # Visual data counts
-    num_rgb_images: int = 0
-    num_depth_images: int = 0
-    num_point_clouds: int = 0
+    rgb_images: DataItemStats = Field(default_factory=DataItemStats)
+    depth_images: DataItemStats = Field(default_factory=DataItemStats)
+    point_clouds: DataItemStats = Field(default_factory=DataItemStats)
 
     # Language data
-    max_language_length: int = 0
+    language: DataItemStats = Field(default_factory=DataItemStats)
 
     # Episode metadata
     episode_length: int = 0
 
     # Custom data statistics
-    custom_data_stats: dict[str, DataItemStats] = Field(default_factory=dict)
+    custom_data: dict[str, DataItemStats] = Field(default_factory=dict)
 
     def get_data_types(self) -> list[DataType]:
         """Determine which data types are present in the recording.
@@ -335,19 +489,19 @@ class RecordingDescription(BaseModel):
             data_types.append(DataType.POSES)
 
         # Visual data
-        if self.num_rgb_images > 0:
+        if self.rgb_images.max_len > 0:
             data_types.append(DataType.RGB_IMAGE)
-        if self.num_depth_images > 0:
+        if self.depth_images.max_len > 0:
             data_types.append(DataType.DEPTH_IMAGE)
-        if self.num_point_clouds > 0:
+        if self.point_clouds.max_len > 0:
             data_types.append(DataType.POINT_CLOUD)
 
         # Language data
-        if self.max_language_length > 0:
+        if self.language.max_len > 0:
             data_types.append(DataType.LANGUAGE)
 
         # Custom data
-        if self.custom_data_stats:
+        if self.custom_data:
             data_types.append(DataType.CUSTOM)
 
         return data_types

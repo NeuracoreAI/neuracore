@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from neuracore.core.nc_types import DataType, ModelPrediction, SyncPoint
+from neuracore.core.nc_types import SyncPoint
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 
 logger = logging.getLogger(__name__)
@@ -73,8 +73,8 @@ class ModelServer:
             return {"status": "healthy", "timestamp": time.time()}
 
         # Main prediction endpoint
-        @app.post(PREDICT_ENDPOINT, response_model=ModelPrediction)
-        async def predict(sync_point: SyncPoint) -> ModelPrediction:
+        @app.post(PREDICT_ENDPOINT, response_model=list[SyncPoint])
+        async def predict(sync_point: SyncPoint) -> list[SyncPoint]:
             try:
                 # Decode base64 images before inference
                 sync_point = self._decode_images(sync_point)
@@ -83,7 +83,10 @@ class ModelServer:
                 prediction = self.policy_inference(sync_point)
 
                 # Encode images in response if needed
-                return self._encode_output_images(prediction)
+                return [
+                    self._encode_outputs(pred_sync_point)
+                    for pred_sync_point in prediction
+                ]
 
             except Exception as e:
                 logger.error(f"Prediction error: {str(e)}")
@@ -132,86 +135,54 @@ class ModelServer:
 
         return sync_point
 
-    def _encode_output_images(self, prediction: ModelPrediction) -> ModelPrediction:
+    def _encode_outputs(self, prediction: SyncPoint) -> SyncPoint:
         """Encode output images to base64 for response.
 
         Args:
-            prediction: ModelPrediction with potentially numpy array images
+            prediction: SyncPoint with potentially numpy array images
 
         Returns:
-            ModelPrediction with base64-encoded images
+            SyncPoint with base64-encoded images
         """
         # Handle RGB image outputs
-        if DataType.RGB_IMAGE in prediction.outputs:
-            rgbs = prediction.outputs[DataType.RGB_IMAGE]
-            assert isinstance(rgbs, np.ndarray)
-            # Convert numpy arrays to base64 strings
-            str_rets = []
-            assert len(rgbs.shape) == 6  # [B, T, CAMs, H, W, C]
-            for b_idx in range(rgbs.shape[0]):
-                batch_images = []
-                for t_idx in range(rgbs.shape[1]):
-                    time_images = []
-                    for cam_idx in range(rgbs.shape[2]):
-                        image = rgbs[b_idx, t_idx, cam_idx]
-                        if image.shape[0] == 3:  # CHW format
-                            image = np.transpose(image, (1, 2, 0))  # Convert to HWC
-                        if image.dtype != np.uint8:
-                            image = np.clip(image, 0, 255).astype(np.uint8)
-                        time_images.append(ImageStringEncoder.encode_image(image))
-                    batch_images.append(time_images)
-                str_rets.append(batch_images)
-            prediction.outputs[DataType.RGB_IMAGE] = str_rets
+        if prediction.rgb_images:
+            rgbs = prediction.rgb_images
+            for camera_name, camera_data in rgbs.items():
+                assert isinstance(camera_data.frame, np.ndarray)
+                image = camera_data.frame
+                assert len(image.shape) == 3  # [H, W, C]
+                if image.shape[0] == 3:  # CHW format
+                    image = np.transpose(image, (1, 2, 0))  # Convert to HWC
+                if image.dtype != np.uint8:
+                    image = np.clip(image, 0, 255).astype(np.uint8)
+                camera_data.frame = ImageStringEncoder.encode_image(image)
 
-        # Handle depth image outputs
-        if DataType.DEPTH_IMAGE in prediction.outputs:
-            depths = prediction.outputs[DataType.DEPTH_IMAGE]
-            assert isinstance(depths, np.ndarray)
-            str_rets = []
-            assert len(depths.shape) == 5  # [B, T, CAMs, H, W, C]
-            for b_idx in range(depths.shape[0]):
-                batch_images = []
-                for t_idx in range(depths.shape[1]):
-                    time_images = []
-                    for cam_idx in range(depths.shape[2]):
-                        depth = depths[b_idx, t_idx, cam_idx]
-                        if depth.shape[0] == 1:  # Remove channel dimension
-                            depth = depth[0]
-                        # Normalize depth to 0-255 range
-                        depth_norm = (
-                            (depth - depth.min())
-                            / (depth.max() - depth.min() + 1e-8)
-                            * 255
-                        )
-                        depth_norm = depth_norm.astype(np.uint8)
-                        time_images.append(ImageStringEncoder.encode_image(depth_norm))
-                    batch_images.append(time_images)
-                str_rets.append(batch_images)
-                prediction.outputs[DataType.DEPTH_IMAGE] = str_rets
+        if prediction.depth_images:
+            depths = prediction.depth_images
+            for camera_name, camera_data in depths.items():
+                assert isinstance(camera_data.frame, np.ndarray)
+                depth = camera_data.frame
+                assert len(depth.shape) == 3  # [H, W, C]
+                if depth.shape[0] == 1:  # Remove channel dimension
+                    depth = depth[0]
+                # Normalize depth to 0-255 range
+                depth_norm = (
+                    (depth - depth.min()) / (depth.max() - depth.min() + 1e-8) * 255
+                )
+                depth_norm = depth_norm.astype(np.uint8)
+                camera_data.frame = ImageStringEncoder.encode_image(depth_norm)
 
-        # Handle other outputs (convert numpy arrays to lists)
-        for data_type in [
-            DataType.JOINT_TARGET_POSITIONS,
-            DataType.JOINT_POSITIONS,
-            DataType.JOINT_VELOCITIES,
-            DataType.JOINT_TORQUES,
-            DataType.END_EFFECTORS,
-            DataType.POSES,
-            DataType.POINT_CLOUD,
-        ]:
-            if data_type in prediction.outputs:
-                output_data = prediction.outputs[data_type]
-                if isinstance(output_data, np.ndarray):
-                    prediction.outputs[data_type] = output_data.tolist()
-
-        # Handle custom data outputs
-        if DataType.CUSTOM in prediction.outputs:
-            custom_data = prediction.outputs[DataType.CUSTOM]
-            if isinstance(custom_data, dict):
-                for key, value in custom_data.items():
-                    if isinstance(value, np.ndarray):
-                        custom_data[key] = value.tolist()
-            prediction.outputs[DataType.CUSTOM] = custom_data
+        # Convert all SyncPoint attributes to lists if they are numpy arrays
+        for attr in prediction.__dict__:
+            value = getattr(prediction, attr)
+            if isinstance(value, np.ndarray):
+                # Convert numpy array to list
+                setattr(prediction, attr, value.tolist())
+            elif isinstance(value, dict):
+                # Convert numpy arrays in dicts to lists
+                for key, item in value.items():
+                    if isinstance(item, np.ndarray):
+                        value[key] = item.tolist()
 
         return prediction
 

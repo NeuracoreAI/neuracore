@@ -10,11 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `nc.get_data_gatherer` a new method that provides a method to consume the live data from the current and remote nodes connected to a robot.
+- `nc.get_latest_sync_point` a new method that creates a sync point from gathering data logged by a robot. 
 - `nc.policy()`, `nc.policy_local_server()` and `nc.policy_remote_server()` now also gather data from remote nodes by default now. to avoid this behavior use the new `NEURACORE_CONSUME_LIVE_DATA` environment variable or provide your own sync point.
 
 ### Changed
 
+- Policy predictions now return a list of SyncPoint's, rather than a ModelPrediction object.
 - `NEURACORE_LIVE_DATA_ENABLED` has been split into two new environment variables `NEURACORE_PROVIDE_LIVE_DATA` and `NEURACORE_CONSUME_LIVE_DATA`
 
 ### Removed

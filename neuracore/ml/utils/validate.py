@@ -116,7 +116,7 @@ def _create_end_effector_data(maskable_data: MaskableData) -> EndEffectorData:
     )
 
 
-def _create_pose_data(maskable_data: MaskableData) -> dict[str, PoseData]:
+def _create_pose_data(maskable_data: MaskableData) -> PoseData:
     """Convert MaskableData to PoseData format for testing.
 
     Args:
@@ -133,11 +133,9 @@ def _create_pose_data(maskable_data: MaskableData) -> dict[str, PoseData]:
     for i in range(0, len(pose_values), 6):
         if i + 5 < len(pose_values):
             pose_name = f"pose{i//6}"
-            poses[pose_name] = PoseData(
-                timestamp=t, pose={pose_name: pose_values[i : i + 6]}
-            )
+            poses[pose_name] = pose_values[i : i + 6]
 
-    return poses
+    return PoseData(timestamp=t, pose=poses)
 
 
 def _create_point_cloud_data(maskable_data: MaskableData) -> dict[str, PointCloudData]:
@@ -354,19 +352,19 @@ def run_validation(
         logger.info("Optimizer step successful")
         algo_check.successfully_optimiser_step = True
 
-        # Check 4: Can export to TorchScript
-        logger.info("Testing TorchScript export")
+        # Check 4: Can export to NC archive
+        logger.info("Testing NC archive export")
         with tempfile.TemporaryDirectory():
             try:
                 artifacts_dir = output_dir
                 create_nc_archive(model, artifacts_dir, algorithm_config)
 
                 algo_check.successfully_exported_model = True
-                logger.info("TorchScript export successful")
+                logger.info("NC archive export successful")
 
             except Exception as e:
-                logger.error(f"TorchScript export failed: {str(e)}")
-                raise ValueError(f"Model cannot be exported to TorchScript: {str(e)}")
+                logger.error(f"NC archive export failed: {str(e)}")
+                raise ValueError(f"Model cannot be exported to NC archive: {str(e)}")
 
             if skip_endpoint_check:
                 algo_check.successfully_launched_endpoint = True
@@ -379,8 +377,19 @@ def run_validation(
                         port=port,
                     )
 
-                    # Create comprehensive sync point with all available data types
-                    sync_point = SyncPoint(timestamp=time.time())
+                except Exception as e:
+                    if policy is not None:
+                        policy.disconnect()
+                    error = (
+                        f"Failed to connect to local endpoint on port {port}: {str(e)}"
+                    )
+                    logger.error(error)
+                    raise ValueError(error)
+
+                try:
+                    sync_point = SyncPoint(
+                        timestamp=time.time(), robot_id=dataset.robot.id
+                    )
 
                     # Add joint data
                     if batch.inputs.joint_positions:
@@ -476,20 +485,11 @@ def run_validation(
                     action = policy.predict(sync_point)
                     logger.info(f"Exported model loaded successfully, action: {action}")
 
-                    # Validate that the action contains expected output data types
-                    if hasattr(action, "outputs") and action.outputs:
-                        logger.info(
-                            f"Action output types: {list(action.outputs.keys())}"
-                        )
-                        for output_type in supported_output_data_types:
-                            if output_type in action.outputs:
-                                logger.info(
-                                    f"✓ Output type {output_type} found in action"
-                                )
-                            else:
-                                logger.warning(
-                                    f"⚠ Output type {output_type} not found in action"
-                                )
+                    for pred_sync_point in action:
+                        if not isinstance(pred_sync_point, SyncPoint):
+                            raise ValueError(
+                                "Policy prediction did not return a SyncPoint object"
+                            )
 
                     policy.disconnect()
                     algo_check.successfully_launched_endpoint = True
@@ -497,8 +497,9 @@ def run_validation(
                 except Exception as e:
                     if policy:
                         policy.disconnect()
-                    logger.error(f"Failed to load exported model: {str(e)}")
-                    raise ValueError(f"Model cannot be loaded from export: {str(e)}")
+                    error = f"Failed to get prediction from local endpoint: {str(e)}"
+                    logger.error(error)
+                    raise ValueError(error)
 
         # All checks passed!
         logger.info("✓ All validation checks passed successfully")

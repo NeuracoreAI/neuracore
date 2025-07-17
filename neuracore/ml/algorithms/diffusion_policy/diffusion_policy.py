@@ -88,17 +88,17 @@ class DiffusionPolicy(NeuracoreModel):
         # Vision components
         self.image_encoders = nn.ModuleList([
             DiffusionPolicyImageEncoder(feature_dim=hidden_dim)
-            for _ in range(self.dataset_description.max_num_rgb_images)
+            for _ in range(self.dataset_description.rgb_images.max_len)
         ])
         global_cond_dim = (
             self.dataset_description.joint_positions.max_len
             + self.dataset_description.joint_velocities.max_len
             + self.dataset_description.joint_torques.max_len
         )
-        if self.dataset_description.max_num_rgb_images > 0:
+        if self.dataset_description.rgb_images.max_len > 0:
             global_cond_dim += (
                 self.image_encoders[0].feature_dim
-                * self.dataset_description.max_num_rgb_images
+                * self.dataset_description.rgb_images.max_len
             )
 
         self.unet = DiffusionConditionalUnet1d(

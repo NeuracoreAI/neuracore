@@ -24,14 +24,13 @@ from neuracore.core.get_latest_sync_point import (
 from neuracore.core.get_latest_sync_point import (
     get_latest_sync_point as _get_latest_sync_point,
 )
-from neuracore.core.nc_types import SyncPoint
+from neuracore.core.nc_types import DataType, SyncPoint
 
 
 def policy(
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
-    robot_name: Optional[str] = None,
-    instance: int = 0,
+    output_mapping: Optional[dict[DataType, list[str]]] = None,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process without any server.
 
@@ -40,9 +39,8 @@ def policy(
 
     Args:
         train_run_name: Name of the training run to load the model from.
-        robot_name: Robot name that predictions and data will be associated with.
-            If not provided, uses the last initialized robot from global state.
-        instance: Instance number of the robot for multi-instance deployments.
+        model_file: Path to the model file to load. If provided, overrides
+        output_mapping: Optional mapping of output data types to response fields.
 
     Returns:
         DirectPolicy object that provides direct in-process model inference.
@@ -51,15 +49,13 @@ def policy(
         EndpointError: If the model download or initialization fails.
         ConfigError: If there is an error trying to get the current org.
     """
-    return _policy(train_run_name, model_file, robot_name, instance)
+    return _policy(train_run_name, model_file, output_mapping=output_mapping)
 
 
 def policy_local_server(
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
     port: int = 8080,
-    robot_name: Optional[str] = None,
-    instance: int = 0,
     host: str = "127.0.0.1",
 ) -> LocalServerPolicy:
     """Launch and connect to a local server policy.
@@ -70,9 +66,6 @@ def policy_local_server(
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load.
         port: TCP port number where the local server will run.
-        robot_name: Robot name that predictions and data will be associated with.
-            If not provided, uses the last initialized robot from global state.
-        instance: Instance number of the robot for multi-instance deployments.
         host: Host address to bind the server to. Defaults to localhost.
 
     Returns:
@@ -82,16 +75,10 @@ def policy_local_server(
         EndpointError: If the server startup or model initialization fails.
         ConfigError: If there is an error trying to get the current org.
     """
-    return _policy_local_server(
-        train_run_name, model_file, port, robot_name, instance, host
-    )
+    return _policy_local_server(train_run_name, model_file, port, host)
 
 
-def policy_remote_server(
-    endpoint_name: str,
-    robot_name: Optional[str] = None,
-    instance: int = 0,
-) -> RemoteServerPolicy:
+def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:
     """Connects to a policy that is remotely running on neuracore.
 
     Connects to a model endpoint deployed on the Neuracore cloud platform.
@@ -99,9 +86,6 @@ def policy_remote_server(
 
     Args:
         endpoint_name: Name of the deployed endpoint to connect to.
-        robot_name: Robot name that predictions and data will be associated with.
-            If not provided, uses the last initialized robot from global state.
-        instance: Instance number of the robot for multi-instance deployments.
 
     Returns:
         RemoteServerPolicy object for making predictions with the remote endpoint.
@@ -111,7 +95,7 @@ def policy_remote_server(
             name, authentication issues, or network problems.
         ConfigError: If there is an error trying to get the current org.
     """
-    return _policy_remote_server(endpoint_name, robot_name, instance)
+    return _policy_remote_server(endpoint_name)
 
 
 # Deployment management functions

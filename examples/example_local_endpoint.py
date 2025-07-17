@@ -4,7 +4,6 @@ from common.ee_sim_env import sample_box_pose
 from common.sim_env import BOX_POSE, make_sim_env
 
 import neuracore as nc
-from neuracore.core.nc_types import DataType
 
 TRAINING_JOB_NAME = "MyTrainingJob"
 
@@ -17,7 +16,9 @@ def main():
         overwrite=False,
     )
     # If you have a train run name, you can use it to connect to a local. E.g.:
-    policy = nc.policy(train_run_name=TRAINING_JOB_NAME)
+    policy = nc.policy(
+        train_run_name=TRAINING_JOB_NAME,
+    )
 
     # If you know the path to the local model.nc.zip file, you can use it directly as:
     # policy = nc.policy(model_file=PATH/TO/MODEL.nc.zip)
@@ -58,10 +59,15 @@ def main():
                     nc.log_rgb(key, value)
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
-                prediction = policy.predict()
-                action = prediction.outputs[DataType.JOINT_TARGET_POSITIONS]
-                horizon = action.shape[0]
-            a = action[idx_in_horizon]
+                predicted_sync_points = policy.predict()
+                joint_target_positions = [
+                    sp.joint_target_positions for sp in predicted_sync_points
+                ]
+                actions = [
+                    jtp.numpy() for jtp in joint_target_positions if jtp is not None
+                ]
+                horizon = len(actions)
+            a = actions[idx_in_horizon]
             ts = env.step(a)
             episode_max = max(episode_max, ts.reward)
 

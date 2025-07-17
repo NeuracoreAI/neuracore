@@ -70,11 +70,11 @@ def sample_dataset_description():
         joint_target_positions=DataItemStats(mean=[0.0] * 7, std=[1.0] * 7, max_len=7),
         end_effector_states=DataItemStats(mean=[0.0] * 2, std=[1.0] * 2, max_len=2),
         poses=DataItemStats(mean=[0.0] * 12, std=[1.0] * 12, max_len=12),
-        max_num_rgb_images=2,
-        max_num_depth_images=2,
-        max_num_point_clouds=1,
-        max_language_length=50,
-        custom_data_stats={
+        rgb_images=DataItemStats(max_len=2),
+        depth_images=DataItemStats(max_len=2),
+        point_clouds=DataItemStats(max_len=1),
+        language=DataItemStats(max_len=50),
+        custom_data={
             "sensor_1": DataItemStats(mean=[0.0] * 5, std=[1.0] * 5, max_len=5),
             "sensor_2": DataItemStats(mean=[0.0] * 3, std=[1.0] * 3, max_len=3),
         },
@@ -113,12 +113,12 @@ def sample_sync_point(mock_image, mock_depth_image):
         end_effectors=EndEffectorData(
             open_amounts={"gripper_1": 0.5, "gripper_2": 0.8}
         ),
-        poses={
-            "end_effector": PoseData(
-                pose={"end_effector": [1.0, 2.0, 3.0, 0.0, 0.0, 0.0]}
-            ),
-            "object": PoseData(pose={"object": [4.0, 5.0, 6.0, 0.1, 0.2, 0.3]}),
-        },
+        poses=PoseData(
+            pose={
+                "end_effector": [1.0, 2.0, 3.0, 0.0, 0.0, 0.0],
+                "object": [4.0, 5.0, 6.0, 0.1, 0.2, 0.3],
+            }
+        ),
         rgb_images={
             "camera_1": CameraData(frame=mock_image, timestamp=1234567890.0),
             "camera_2": CameraData(frame=mock_image, timestamp=1234567890.1),
@@ -869,12 +869,12 @@ class TestHelperMethods:
             output_prediction_horizon=2,
         )
 
-        poses = {
-            "end_effector": PoseData(
-                pose={"end_effector": [1.0, 2.0, 3.0, 0.0, 0.0, 0.0]}
-            ),
-            "object": PoseData(pose={"object": [4.0, 5.0, 6.0, 0.1, 0.2, 0.3]}),
-        }
+        poses = PoseData(
+            pose={
+                "end_effector": [1.0, 2.0, 3.0, 0.0, 0.0, 0.0],
+                "object": [4.0, 5.0, 6.0, 0.1, 0.2, 0.3],
+            }
+        )
 
         maskable_data = dataset._create_pose_maskable_input_data(poses)
 
@@ -950,7 +950,7 @@ class TestHelperMethods:
         camera_data = [mock_image, mock_image]  # 2 cameras
 
         maskable_data = dataset._create_camera_maskable_input_data(
-            camera_data, dataset.dataset_description.max_num_rgb_images
+            camera_data, dataset.dataset_description.rgb_images.max_len
         )
 
         assert isinstance(maskable_data, MaskableData)

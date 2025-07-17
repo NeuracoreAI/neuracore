@@ -67,8 +67,10 @@ def model_init_description() -> ModelInitDescription:
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
         ),
-        max_num_rgb_images=CAMS,
-        max_language_length=LANGUAGE_MAX_LEN,
+        rgb_images=DataItemStats(
+            max_len=CAMS,
+        ),
+        language=DataItemStats(max_len=LANGUAGE_MAX_LEN),
     )
     return ModelInitDescription(
         dataset_description=dataset_description,

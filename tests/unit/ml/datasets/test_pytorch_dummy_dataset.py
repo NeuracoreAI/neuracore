@@ -100,8 +100,8 @@ class TestPytorchDummyDataset:
         # Check dataset description is properly initialized
         desc = dataset.dataset_description
         assert desc.joint_positions.max_len == 6
-        assert desc.max_num_rgb_images == 2
-        assert desc.max_num_point_clouds == 1
+        assert desc.rgb_images.max_len == 2
+        assert desc.point_clouds.max_len == 1
 
     def test_initialization_invalid_params(self):
         """Test initialization with invalid parameters."""
@@ -580,7 +580,7 @@ class TestDatasetDescription:
         assert all(mean == 0.0 for mean in desc.joint_positions.mean)
 
         # Check RGB images
-        assert desc.max_num_rgb_images == 2
+        assert desc.rgb_images.max_len == 2
 
         # Check joint target positions
         assert desc.joint_target_positions.max_len == 7
@@ -614,7 +614,7 @@ class TestDatasetDescription:
         assert desc.joint_torques.max_len > 0
         assert desc.end_effector_states.max_len > 0
         assert desc.poses.max_len > 0
-        assert desc.max_num_rgb_images > 0
-        assert desc.max_num_depth_images > 0
-        assert desc.max_num_point_clouds > 0
-        assert desc.max_language_length > 0
+        assert desc.rgb_images.max_len > 0
+        assert desc.depth_images.max_len > 0
+        assert desc.point_clouds.max_len > 0
+        assert desc.language.max_len > 0
