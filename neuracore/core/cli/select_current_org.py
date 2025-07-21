@@ -5,7 +5,9 @@ neuracore operations interactively. It provides a list of their organizations
 and a input to select which to use and saves to global config.
 """
 
+import argparse
 import os
+from typing import Optional
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.config_manager import get_config_manager
@@ -15,11 +17,15 @@ from neuracore.core.organizations import Organization, list_my_orgs
 from ..const import MAX_INPUT_ATTEMPTS
 
 
-def select_current_org() -> Organization:
+def select_current_org(org_name_or_id: Optional[str] = None) -> Organization:
     """Prompt the user to select on of their organizations.
 
+    Args:
+        org_name_or_id: The name or id of the organization to select. If not
+            provided or not found, the user will be prompted to select one.
+
     Returns:
-        The  selected organization's name and id
+        The selected organization's name and id
 
     Raises:
         AuthenticationError: If the user is not logged in
@@ -34,6 +40,21 @@ def select_current_org() -> Organization:
             "organization first"
         )
         raise OrganizationError("No organizations")
+
+    if org_name_or_id is not None:
+        pre_selected_org = next(
+            (
+                org
+                for org in orgs
+                if org.name.strip() == org_name_or_id.strip()
+                or org.id == org_name_or_id.strip()
+            ),
+            None,
+        )
+        if pre_selected_org is not None:
+            return pre_selected_org
+        else:
+            print(f"Organization not found with name or id: {org_name_or_id}")
 
     elif len(orgs) == 1:
         print(f"One organization found, using organization:{os.linesep}{orgs[0].name}")
@@ -78,7 +99,17 @@ def main() -> None:
     try:
         if not auth.is_authenticated:
             auth.login()
-        organization = select_current_org()
+
+        parser = argparse.ArgumentParser(
+            description="Select an organization to use",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+        parser.add_argument(
+            "--org-name", "-org-id", "-n", "-o", required=False, type=str
+        )
+        args = parser.parse_args()
+
+        organization = select_current_org(org_name_or_id=args.org_name)
         config_manager = get_config_manager()
         config_manager.config.current_org_id = organization.id
         config_manager.save_config()

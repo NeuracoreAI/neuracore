@@ -78,11 +78,15 @@ Neuracore provides several command-line tools for authentication, organization m
 nc-login
 ```
 
+Use the `--email` and `--password` option if you wish to login non-interactively.
+
 ### Organization Management
 ```bash
 # Select current organization (interactive selection)
 nc-select-org
 ```
+
+Use the `--org-name` option if you wish to select the org non-interactively.
 
 ### Server Operations
 ```bash

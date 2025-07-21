@@ -9,7 +9,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from concurrent.futures import Future
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Tuple
 
 from aiohttp import ClientSession
 from typing_extensions import TypeAlias
@@ -43,8 +43,13 @@ from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutin
 logger = logging.getLogger(__name__)
 
 
-# Mapping each robot instance to its set of node's stream id's
-InstanceStreamMap: TypeAlias = Dict[RobotInstanceIdentifier, Set[str]]
+# Mapping each robot instance to its nodes and a hash over it's connections
+InstanceStreamMap: TypeAlias = Dict[RobotInstanceIdentifier, Dict[str, int]]
+
+# Mapping each robot to its connections to each node
+InstanceConnectionMap: TypeAlias = Dict[
+    RobotInstanceIdentifier, Dict[str, Tuple[str, int]]
+]
 
 
 class OrgNodesManager(BaseSSEConsumer):
@@ -62,7 +67,7 @@ class OrgNodesManager(BaseSSEConsumer):
         background_coroutine_tracker: Optional[BackgroundCoroutineTracker] = None,
         client_session: Optional[ClientSession] = None,
         auth: Optional[Auth] = None,
-        stream_manager_factory: Optional[StreamManagerOrchestrator] = None,
+        stream_manager_orchestrator: Optional[StreamManagerOrchestrator] = None,
     ) -> None:
         """Initialize the organization node manager.
 
@@ -80,7 +85,7 @@ class OrgNodesManager(BaseSSEConsumer):
                 if not provided.
             auth: The auth instance used to connect to the signalling server or
                 defaults to the global auth provider if not provided.
-            stream_manager_factory: the factory used to create stream managers
+            stream_manager_orchestrator: the factory used to create stream managers
 
         """
         super().__init__(
@@ -89,15 +94,19 @@ class OrgNodesManager(BaseSSEConsumer):
             background_coroutine_tracker=background_coroutine_tracker,
             client_session=client_session,
         )
-        self.stream_manager_factory = (
-            stream_manager_factory or StreamManagerOrchestrator()
+        self.stream_manager_orchestrator = (
+            stream_manager_orchestrator or StreamManagerOrchestrator()
         )
 
         self.org_id = org_id or get_current_org()
         self.auth = auth or get_auth()
 
         self.consumers: Dict[RobotInstanceIdentifier, ClientConsumerStreamManager] = {}
-        self.last_nodes: InstanceStreamMap = defaultdict(set)
+
+        self.connections: InstanceConnectionMap = defaultdict(dict)
+
+        self.last_nodes: InstanceStreamMap = defaultdict(dict)
+
         self.last_update: Optional[AvailableRobotCapacityUpdate] = None
 
     def get_sse_client_config(self) -> EventSourceConfig:
@@ -122,13 +131,14 @@ class OrgNodesManager(BaseSSEConsumer):
         """
         robot_update = AvailableRobotCapacityUpdate.model_validate_json(message_data)
         new_nodes = self.get_instance_stream_map(robot_update)
-        self.apply_stream_changes(self.last_nodes, new_nodes)
+        self._apply_stream_changes(self.last_nodes, new_nodes)
         self.last_update = robot_update
         self.last_nodes = new_nodes
 
         for consumer in self.consumers:
             track_info = self._get_last_robot_tracks(
-                consumer.robot_id, consumer.robot_instance
+                robot_id=consumer.robot_id,
+                robot_instance=consumer.robot_instance,
             )
             self.consumers[consumer].current_track_information = track_info
 
@@ -163,23 +173,24 @@ class OrgNodesManager(BaseSSEConsumer):
         if key in self.consumers:
             return self.consumers[key]
 
-        self.consumers[key] = self.stream_manager_factory.get_consumer_manager(
+        self.consumers[key] = self.stream_manager_orchestrator.get_consumer_manager(
             robot_id=robot_id, robot_instance=robot_instance
         )
 
         self.consumers[key].current_track_information = self._get_last_robot_tracks(
-            robot_id, robot_instance
+            robot_id=robot_id, robot_instance=robot_instance
         )
 
         if self.last_nodes is None:
             return self.consumers[key]
 
-        for remote_stream_id in self.last_nodes[key]:
+        for remote_stream_id, track_hash in self.last_nodes[key].items():
             self.background_tracker.submit_background_coroutine(
-                self.create_new_connection(
+                self._create_new_connection(
                     manager=self.consumers[key],
+                    track_hash=track_hash,
                     connection_request=OpenConnectionRequest(
-                        from_id=self.stream_manager_factory.signalling_consumer.local_stream_id,
+                        from_id=self.stream_manager_orchestrator.signalling_consumer.local_stream_id,
                         to_id=remote_stream_id,
                         robot_id=robot_id,
                         robot_instance=robot_instance,
@@ -190,8 +201,8 @@ class OrgNodesManager(BaseSSEConsumer):
 
         return self.consumers[key]
 
-    @staticmethod
     def get_instance_stream_map(
+        self,
         update: AvailableRobotCapacityUpdate,
     ) -> InstanceStreamMap:
         """Reduces the availability update down to just the available nodes.
@@ -202,18 +213,31 @@ class OrgNodesManager(BaseSSEConsumer):
         Returns:
             InstanceStreamMap: a mapping from each robot to its set of stream ids.
         """
-        instance_stream_map = defaultdict(set)
+        local_stream_id = (
+            self.stream_manager_orchestrator.signalling_consumer.local_stream_id
+        )
+
+        instance_stream_map: InstanceStreamMap = defaultdict(dict)
         for robot in update.robots:
             for instance in robot.instances.values():
+                nodes = {}
+                for steam_id, track_list in instance.tracks.items():
+                    if steam_id == local_stream_id:
+                        continue
+                    track_hash = hash(tuple(sorted(track.id for track in track_list)))
+                    nodes[steam_id] = track_hash
+
                 instance_stream_map[
                     RobotInstanceIdentifier(
                         robot_id=robot.robot_id, robot_instance=instance.robot_instance
                     )
-                ] = set(instance.tracks.keys())
+                ] = nodes
+
         return instance_stream_map
 
-    async def create_new_connection(
+    async def _create_new_connection(
         self,
+        track_hash: int,
         manager: ClientConsumerStreamManager,
         connection_request: OpenConnectionRequest,
     ) -> None:
@@ -223,6 +247,7 @@ class OrgNodesManager(BaseSSEConsumer):
         the signalling consumer.
 
         Args:
+            track_hash: a hash over the tracks this connection is setup to handle.
             manager: the consumer manager that will be responsible for this new
                 connection.
             connection_request: the details of the connection to be opened.
@@ -236,11 +261,43 @@ class OrgNodesManager(BaseSSEConsumer):
         connection_message = HandshakeMessage.model_validate(await response.json())
         assert connection_message.type == MessageType.OPEN_CONNECTION
 
-        await self.stream_manager_factory.signalling_consumer.create_new_connection(
+        robot_identifier = RobotInstanceIdentifier(
+            robot_id=connection_request.robot_id,
+            robot_instance=connection_request.robot_instance,
+        )
+        existing_connection = self.connections[robot_identifier].pop(
+            connection_request.to_id, None
+        )
+        if existing_connection is not None:
+            self.background_tracker.submit_background_coroutine(
+                self.consumers[robot_identifier].remove_connection(
+                    existing_connection[0]
+                )
+            )
+
+        self.connections[robot_identifier][connection_request.to_id] = (
+            connection_message.connection_id,
+            track_hash,
+        )
+
+        signalling_consumer = self.stream_manager_orchestrator.signalling_consumer
+
+        connection_enabled = await signalling_consumer.create_new_connection(
             message=connection_message, manager=manager
         )
 
-    def apply_stream_changes(
+        @connection_enabled.on(EnabledManager.DISABLED)
+        async def on_close() -> None:
+            current_connection_details = self.connections[robot_identifier].get(
+                connection_request.to_id, None
+            )
+            if current_connection_details is None:
+                return
+            connection_id, _ = current_connection_details
+            if connection_message.connection_id == connection_id:
+                self.connections[robot_identifier].pop(connection_request.to_id, None)
+
+    def _apply_stream_changes(
         self, old: InstanceStreamMap, current: InstanceStreamMap
     ) -> None:
         """Apply the changes in the available nodes between versions.
@@ -248,36 +305,34 @@ class OrgNodesManager(BaseSSEConsumer):
         this is done by adding or removing connections in the relevant managers.
 
         Args:
-            old (InstanceStreamMap): the available nodes before the change
-            current (InstanceStreamMap): the new nodes available for connection.
+            old: the available nodes before the change
+            current: the new nodes available for connection.
         """
         local_stream_id = (
-            self.stream_manager_factory.signalling_consumer.local_stream_id
+            self.stream_manager_orchestrator.signalling_consumer.local_stream_id
         )
 
         for robot, manager in self.consumers.items():
             robot_id, robot_instance = robot
-            old_streams = old[robot]
-            current_streams = current[robot]
+            old_streams = set(self.connections[robot].keys())
+            current_streams = set(current[robot].keys())
 
             removed_streams = old_streams - current_streams
             added_streams = current_streams - old_streams
+            existing_streams = current_streams & old_streams
 
             for removed_stream in removed_streams:
-                if removed_stream == local_stream_id:
-                    continue
+                (connection_id, _) = self.connections[robot].pop(removed_stream)
 
                 self.background_tracker.submit_background_coroutine(
-                    self.consumers[robot].remove_connection(removed_stream)
+                    self.consumers[robot].remove_connection(connection_id)
                 )
 
             for added_stream in added_streams:
-                if added_stream == local_stream_id:
-                    continue
-
                 self.background_tracker.submit_background_coroutine(
-                    self.create_new_connection(
+                    self._create_new_connection(
                         manager=manager,
+                        track_hash=current[robot][added_stream],
                         connection_request=OpenConnectionRequest(
                             from_id=local_stream_id,
                             to_id=added_stream,
@@ -288,7 +343,31 @@ class OrgNodesManager(BaseSSEConsumer):
                     )
                 )
 
-    def remove_robot_consumer(self, robot_id: str, robot_instance: int) -> None:
+            for existing_stream in existing_streams:
+                old_track_hash = old[robot][existing_stream]
+                current_track_hash = current[robot][existing_stream]
+                if old_track_hash == current_track_hash:
+                    continue
+
+                (connection_id, _) = self.connections[robot].pop(existing_stream)
+                self.background_tracker.submit_background_coroutine(
+                    self.consumers[robot].remove_connection(connection_id)
+                )
+                self.background_tracker.submit_background_coroutine(
+                    self._create_new_connection(
+                        manager=manager,
+                        track_hash=current[robot][existing_stream],
+                        connection_request=OpenConnectionRequest(
+                            from_id=local_stream_id,
+                            to_id=existing_stream,
+                            robot_id=robot_id,
+                            robot_instance=robot_instance,
+                            video_format=VideoFormat.NEURACORE_CUSTOM,
+                        ),
+                    )
+                )
+
+    def _remove_robot_consumer(self, robot_id: str, robot_instance: int) -> None:
         """Remove a consumer for a specific robot instance.
 
         Args:
