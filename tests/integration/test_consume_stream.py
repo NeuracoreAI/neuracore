@@ -20,6 +20,9 @@ rgb_test_image = np.full((10, 10, 3), 100, dtype=np.uint8)
 rgb_test_image[0, 0] = [255, 0, 0]  # Red pixel to identify the image
 
 
+MAXIMUM_WAITING_TIME_S = 60
+
+
 def remote_node_logger(robot_name: str, instance: int, ready_event: Event):
     """
     Simulates a remote node that logs data for a given robot instance.
@@ -52,7 +55,8 @@ def remote_node_logger(robot_name: str, instance: int, ready_event: Event):
         ready_event.set()
 
         # Keep the process alive for a while so the main process can fetch data.
-        time.sleep(10)
+        while True:
+            time.sleep(1)
 
     except Exception as e:
         # Log any exceptions to help with debugging.
@@ -88,22 +92,31 @@ def test_get_latest_data_from_multiple_nodes():
     )
 
     # Wait for the remote node to be up and to have logged its data.
-    is_ready = remote_ready_event.wait(timeout=45)
+    is_ready = remote_ready_event.wait(timeout=MAXIMUM_WAITING_TIME_S)
     assert is_ready, "Remote node process did not signal readiness in time."
 
     # 4. Fetch and verify data: Call get_latest_data and check the SyncPoint.
-
-    while not nc.check_remote_nodes_connected(
-        num_remote_nodes=1, robot_name=robot_name, instance=instance
-    ):
-        time.sleep(0.25)
-
-    sync_point = nc.get_latest_sync_point(
-        robot_name=robot_name, instance=instance, include_remote=True
-    )
-
-    # 5. Assertions:
     try:
+        start_connection_time = time.time()
+        while not nc.check_remote_nodes_connected(
+            num_remote_nodes=1, robot_name=robot_name, instance=instance
+        ):
+            if time.time() - start_connection_time > MAXIMUM_WAITING_TIME_S:
+                assert False, "Timed out waiting for remote nodes to fully connect."
+            time.sleep(0.25)
+
+        sync_point = nc.get_latest_sync_point(
+            robot_name=robot_name, instance=instance, include_remote=True
+        )
+
+        assert nc.check_remote_nodes_connected(
+            num_remote_nodes=1, robot_name=robot_name, instance=instance
+        ), "Remote nodes should remain connected after fetching data."
+
+        # 5. Assertions:
+
+        assert sync_point is not None, "SyncPoint not found"
+
         # --- Verify data from the main process ---
         assert (
             sync_point.joint_velocities is not None

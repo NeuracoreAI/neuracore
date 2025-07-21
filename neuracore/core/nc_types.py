@@ -552,7 +552,7 @@ class SyncedDataset(BaseModel):
     Attributes:
         id: Unique identifier for the synced dataset.
         parent_id: Unique identifier of the corresponding dataset.
-        freq: Frequency at which dataset was proccessed.
+        freq: Frequency at which dataset was processed.
         name: Human-readable name for the dataset.
         created_at: Unix timestamp of dataset creation.
         modified_at: Unix timestamp of last modification.

@@ -5,7 +5,9 @@ user authentication. It prompts for email and password credentials, obtains
 an access token, and creates a new API key for CLI usage.
 """
 
-from getpass import getpass  # For hidden password input
+import argparse
+from getpass import getpass
+from typing import Optional  # For hidden password input
 
 import requests
 from pydantic import BaseModel, ValidationError
@@ -30,13 +32,19 @@ class Token(BaseModel):
     token_type: str
 
 
-def generate_api_key() -> str:
+def generate_api_key(
+    email: Optional[str] = None, password: Optional[str] = None
+) -> str:
     """Generate a new API key through interactive user authentication.
 
     Prompts the user for their registered email and password, authenticates
     with the Neuracore server to obtain an access token, then uses that token
     to create a new API key for programmatic access. The process is interactive
     and handles authentication securely by hiding password input.
+
+    Args:
+        email: Optionally provide the email to try initially
+        password: Optionally provide the password to try initially
 
     Returns:
         The generated API key string if successful, None if authentication
@@ -51,8 +59,10 @@ def generate_api_key() -> str:
     access_token = None
     for i in range(MAX_INPUT_ATTEMPTS):
         try:
-            email = input("Enter your registered email: ")
-            password = getpass("Enter your password: ")
+            if not email:
+                email = input("Enter your registered email: ")
+            if not password:
+                password = getpass("Enter your password: ")
             auth_response = requests.post(
                 f"{API_URL}/auth/token",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -63,6 +73,8 @@ def generate_api_key() -> str:
 
                 again = get_user_confirmation("Do you wish to try again?")
                 if again:
+                    email = None
+                    password = None
                     continue
                 else:
                     raise InputError("Invalid Email or Password")
@@ -106,7 +118,27 @@ def generate_api_key() -> str:
 def main() -> None:
     """Main function to run the API key generation process."""
     try:
-        generate_api_key()
+        parser = argparse.ArgumentParser(
+            description="Generate a new API key for access to the neuracore platform.",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+        parser.add_argument(
+            "--email",
+            "--username",
+            "-e",
+            required=False,
+            type=str,
+            help="The email to login with.",
+        )
+        parser.add_argument(
+            "--password",
+            "-p",
+            required=False,
+            type=str,
+            help="The password to login with.",
+        )
+        args = parser.parse_args()
+        generate_api_key(email=args.email, password=args.password)
     except AuthenticationError:
         print("Failed to generate API key, please try again later")
     except InputError:

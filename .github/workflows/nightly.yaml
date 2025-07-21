@@ -1,12 +1,9 @@
-name: Python Package CI
+name: Nightly Integration Tests
 
 on:
-  pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
 
 jobs:
   pre-commit:
@@ -39,9 +36,14 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install ".[dev,ml]"
-    
-    - name: Run tests with pytest
+
+    - name: Run Integration Test
       env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        NEURACORE_API_URL: "https://staging.api.neuracore.app/api"
+        SERVICE_ACCOUNT_USERNAME: ${{ secrets.SERVICE_ACCOUNT_USERNAME }}
+        SERVICE_ACCOUNT_PASSWORD: ${{ secrets.SERVICE_ACCOUNT_PASSWORD }}
+        SERVICE_ORG: ${{ secrets.SERVICE_ORG }}
       run: |
-        pytest tests/unit
+        nc-login --email "$SERVICE_ACCOUNT_USERNAME" --password "$SERVICE_ACCOUNT_PASSWORD"
+        nc-select-org --org-id "$SERVICE_ORG"
+        pytest tests/integration

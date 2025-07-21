@@ -90,7 +90,7 @@ class PierToPierConsumerConnection:
         self.local_stream_id = local_stream_id
         self.remote_stream_id = remote_stream_id
         self.connection_details = connection_details
-        self._expected_tracks = expected_tracks
+        self.expected_tracks = expected_tracks
 
         if connection_details.video_format != VideoFormat.NEURACORE_CUSTOM:
             raise ValueError(
@@ -139,41 +139,6 @@ class PierToPierConsumerConnection:
 
         self.latest_data = SyncPoint()
 
-    @property
-    def expected_tracks(self) -> List[RobotStreamTrack]:
-        """Get the expected tracks for this connection.
-
-        Returns:
-            The list of expected tracks
-        """
-        return self._expected_tracks
-
-    @expected_tracks.setter
-    def expected_tracks(self, tracks: List[RobotStreamTrack]) -> None:
-        """Set the expected tracks for this connection.
-
-        Args:
-            tracks: the updated list of expected tracks
-        """
-        self._expected_tracks = tracks
-        for track in tracks:
-            if (
-                track.mid in self.data_channels
-                and track.id not in self.connected_data_channels
-            ):
-                self._connect_data_channel(self.data_channels[track.mid], track)
-
-        current_tracks = set(track.id for track in tracks)
-        removed_tracks = [
-            (track_id, channel)
-            for track_id, channel in self.connected_data_channels.items()
-            if track_id not in current_tracks
-        ]
-
-        for track_id, channel in removed_tracks:
-            channel.remove_all_listeners()
-            self.connected_data_channels.pop(track_id)
-
     def fully_connected(self) -> bool:
         """Get whether all expected remote tracks are connected.
 
@@ -195,15 +160,13 @@ class PierToPierConsumerConnection:
         """
         assert data_channel.label == track.mid, "Incorrect data channel for track"
 
-        self.connected_data_channels[track.id] = data_channel
-
         @data_channel.on("message")
         def on_message(message: Union[bytes, str]) -> None:
             assert isinstance(message, str), "Only string messages supported."
-
             self.latest_data = merge_sync_points(
                 self.latest_data, parse_sync_point(message, track)
             )
+            self.connected_data_channels[track.id] = data_channel
 
     def get_latest_data(self) -> SyncPoint:
         """Get the latest data  provided on this connection.

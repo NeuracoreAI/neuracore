@@ -150,7 +150,7 @@ class SignallingEventsConsumer(BaseSSEConsumer):
 
     async def create_new_connection(
         self, message: HandshakeMessage, manager: BaseP2PStreamManager
-    ) -> None:
+    ) -> EnabledManager:
         """Add a connection manager listing to route signalling messages.
 
         Args:
@@ -159,12 +159,15 @@ class SignallingEventsConsumer(BaseSSEConsumer):
 
         Raises:
             ValueError: if the message type is not OPEN_CONNECTION
+
+        Returns:
+            The enabled manager for this connection.
         """
         if message.type != MessageType.OPEN_CONNECTION:
             raise ValueError("Message type must be OPEN_CONNECTION")
 
         if manager.enabled_manager.is_disabled():
-            return
+            return manager.enabled_manager
 
         connection_details = OpenConnectionDetails.model_validate_json(message.data)
 
@@ -185,6 +188,8 @@ class SignallingEventsConsumer(BaseSSEConsumer):
             self.background_tracker.submit_background_coroutine(
                 manager.on_message(queued_message)
             )
+
+        return connection_enabled
 
     def remove_connection(self, connection_id: str) -> None:
         """Remove a connection manager listing to route signalling messages.
