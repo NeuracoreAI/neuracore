@@ -24,6 +24,7 @@ import requests
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.exceptions import InsufficientSyncPointError
 from neuracore.core.get_latest_sync_point import get_latest_sync_point
 from neuracore.core.utils.download import download_with_progress
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
@@ -39,6 +40,8 @@ from .exceptions import EndpointError
 from .nc_types import DataType, SyncPoint
 
 logger = logging.getLogger(__name__)
+
+PREDICTION_WAIT_TIME = 0.1
 
 
 class Policy:
@@ -59,13 +62,62 @@ class Policy:
         if epoch is None and checkpoint_file is None:
             raise ValueError("Must specify either epoch or checkpoint_file.")
 
-    def predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
-        """Make a prediction using the policy."""
-        raise NotImplementedError("Subclasses must implement this method.")
+    def predict(
+        self, sync_point: Optional[SyncPoint] = None, timeout: float = 5
+    ) -> list[SyncPoint]:
+        """Get action predictions from the model.
+
+        Sends robot sensor data to the model and receives action predictions.
+        Automatically creates a sync point from current robot data if none
+        is provided.
+
+        Args:
+            sync_point: Synchronized sensor data to send to the model. If None,
+                creates a new sync point from the robot's current sensor data.
+            timeout: Maximum time to wait (in seconds) to accumulate asynchronous
+                sensor data. Raises error if timeout is reached without sufficient data.
+
+        Returns:
+            Model predictions as a list of SyncPoint objects.
+
+        Raises:
+            InsufficientSyncPointError: If the sync point doesn't contain required data.
+            EndpointError: If prediction request fails or response is invalid.
+        """
+        if timeout <= 0:
+            raise ValueError("Timeout must be a positive number.")
+        t = time.time()
+        sync_points = None
+        while sync_points is None:
+            try:
+                sync_points = self._predict(sync_point)
+            except InsufficientSyncPointError as e:
+                if time.time() - t > timeout:
+                    raise e
+                time.sleep(PREDICTION_WAIT_TIME)
+        return sync_points
 
     def disconnect(self) -> None:
         """Disconnect from the policy and clean up resources."""
         pass
+
+    def _predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
+        """Internal get action predictions from the model.
+
+        Sends robot sensor data to the model and receives action predictions.
+        Automatically creates a sync point from current robot data if none
+        is provided.
+
+        Args:
+            sync_point: Synchronized sensor data to send to the model. If None,
+                creates a new sync point from the robot's current sensor data.
+
+        Returns:
+            Model predictions as a list of SyncPoint objects.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement the _predict method to run model inference."
+        )
 
 
 class DirectPolicy(Policy):
@@ -107,14 +159,17 @@ class DirectPolicy(Policy):
         super().set_checkpoint(epoch, checkpoint_file)
         self._policy.set_checkpoint(epoch, checkpoint_file)
 
-    def predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
+    def _predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
         """Run direct model inference.
 
         Args:
             sync_point: Optional sync point. If None, creates from robot sensors.
 
         Returns:
-            Model predictions.
+            Model predictions as a list of SyncPoint objects.
+
+        Raises:
+            InsufficientSyncPointError: If the sync point doesn't contain required data.
         """
         if sync_point is None:
             sync_point = get_latest_sync_point()
@@ -179,7 +234,7 @@ class ServerPolicy(Policy):
         except requests.exceptions.RequestException as e:
             raise EndpointError(f"Failed to set checkpoint: {str(e)}")
 
-    def predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
+    def _predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
         """Get action predictions from the model endpoint.
 
         Sends robot sensor data to the model and receives action predictions.
@@ -194,7 +249,7 @@ class ServerPolicy(Policy):
             Model predictions including actions and any generated outputs.
 
         Raises:
-            EndpointError: If prediction request fails or response is invalid.
+            InsufficientSyncPointError: If the sync point doesn't contain required data.
             ValueError: If payload size exceeds limits for remote endpoints.
         """
         if sync_point is None:
@@ -258,6 +313,10 @@ class ServerPolicy(Policy):
 
         except requests.exceptions.RequestException as e:
             if response is not None:
+                if response.status_code == 422:
+                    raise InsufficientSyncPointError(
+                        "Insufficient sync point data for inference."
+                    )
                 raise EndpointError(
                     "Failed to get prediction from endpoint: "
                     f"{response.json().get('detail', 'Unknown error')}"

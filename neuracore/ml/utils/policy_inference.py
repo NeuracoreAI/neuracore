@@ -606,6 +606,55 @@ class PolicyInference:
 
         return sync_points
 
+    def _validate_input_sync_point(self, sync_point: SyncPoint) -> None:
+        """Validate the sync point with what the model had as input.
+
+        Ensures that the sync point contains all required data types
+        as specified in the model's input data types.
+
+        Args:
+            sync_point: SyncPoint containing data from a single time step.
+
+        Raises:
+            ValueError: If the sync point does not contain required data types.
+        """
+        input_data_types = self.model.model_init_description.input_data_types
+        missing_data_types = []
+        for data_type in input_data_types:
+            if data_type == DataType.JOINT_POSITIONS and not sync_point.joint_positions:
+                missing_data_types.append("joint positions")
+            elif (
+                data_type == DataType.JOINT_VELOCITIES
+                and not sync_point.joint_velocities
+            ):
+                missing_data_types.append("joint velocities")
+            elif data_type == DataType.JOINT_TORQUES and not sync_point.joint_torques:
+                missing_data_types.append("joint torques")
+            elif (
+                data_type == DataType.JOINT_TARGET_POSITIONS
+                and not sync_point.joint_target_positions
+            ):
+                missing_data_types.append("joint target positions")
+            elif data_type == DataType.END_EFFECTORS and not sync_point.end_effectors:
+                missing_data_types.append("end effector states")
+            elif data_type == DataType.POSES and not sync_point.poses:
+                missing_data_types.append("poses")
+            elif data_type == DataType.RGB_IMAGE and not sync_point.rgb_images:
+                missing_data_types.append("RGB images")
+            elif data_type == DataType.DEPTH_IMAGE and not sync_point.depth_images:
+                missing_data_types.append("depth images")
+            elif data_type == DataType.POINT_CLOUD and not sync_point.point_clouds:
+                missing_data_types.append("point clouds")
+            elif data_type == DataType.LANGUAGE and not sync_point.language_data:
+                missing_data_types.append("language data")
+            elif data_type == DataType.CUSTOM and not sync_point.custom_data:
+                missing_data_types.append("custom data")
+        if missing_data_types:
+            raise ValueError(
+                "SyncPoint is missing required data types: "
+                f"{', '.join(missing_data_types)}"
+            )
+
     def __call__(self, sync_point: SyncPoint) -> list[SyncPoint]:
         """Process a single sync point and run inference.
 
@@ -621,6 +670,7 @@ class PolicyInference:
             if active_robot is None:
                 raise ValueError("No active robot set. Please set an active robot.")
             sync_point.robot_id = active_robot.id
+        self._validate_input_sync_point(sync_point)
         batch = self._preprocess(sync_point)
         with torch.no_grad():
             batch_output: ModelPrediction = self.model(batch)

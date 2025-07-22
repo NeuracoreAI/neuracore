@@ -7,6 +7,8 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
 
+from neuracore import InsufficientSyncPointError
+
 from .const import QOS_BEST_EFFORT
 
 # ruff: noqa: E402
@@ -68,7 +70,6 @@ class SimulationNodePrediction(Node):
 
         self.env = make_sim_env()
         self.ts = self.env.reset()
-        self.skips = 100
 
         # Create all timers in a specific order, with simulation_step last
         self.joint_states_timer = self.create_timer(
@@ -87,14 +88,11 @@ class SimulationNodePrediction(Node):
 
     def simulation_step(self):
         """Execute one simulation step, keeping GL context on the same thread"""
-        if self.skips > 0:
-            self.skips -= 1
+        try:
+            predicted_syn_points = self.policy.predict(timeout=5)
+        except InsufficientSyncPointError:
+            self.get_logger().warn("Insufficient sync point data, skipping step.")
             return
-        sp = nc.get_latest_sync_point()
-        if sp.joint_positions is None or sp.rgb_images is None:
-            self.get_logger().warn("No joint positions in sync point, skipping step.")
-            return
-        predicted_syn_points = self.policy.predict()
         action = predicted_syn_points[0]
         assert action.joint_target_positions
         self.get_logger().info(

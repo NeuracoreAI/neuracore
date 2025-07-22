@@ -31,3 +31,9 @@ class InputError(Exception):
 
 class ConfigError(Exception):
     """Exception raised when there is an error attempting to read or write config."""
+
+
+class InsufficientSyncPointError(Exception):
+    """Exception when SyncPoint doesn't contain sufficient data for inference."""
+
+    pass
