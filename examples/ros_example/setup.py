@@ -40,7 +40,7 @@ setup(
             "simulation_node = ros_example.simulation_node:main",
             "data_logger_node = ros_example.data_logger_node:main",
             "action_generator_node = ros_example.action_generator_node:main",
-            # 'traditional_sync_node = ros_example.traditional_sync_node:main',
+            "simulation_node_prediction = ros_example.simulation_node_prediction:main",
         ],
     },
 )
