@@ -59,7 +59,7 @@ def main():
                     nc.log_rgb(key, value)
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
-                predicted_sync_points = policy.predict()
+                predicted_sync_points = policy.predict(timeout=5)
                 joint_target_positions = [
                     sp.joint_target_positions for sp in predicted_sync_points
                 ]

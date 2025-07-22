@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from neuracore.core.exceptions import InsufficientSyncPointError
 from neuracore.core.nc_types import SyncPoint
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 
@@ -80,7 +81,14 @@ class ModelServer:
                 sync_point = self._decode_images(sync_point)
 
                 # Run inference
-                prediction = self.policy_inference(sync_point)
+                try:
+                    prediction = self.policy_inference(sync_point)
+                except InsufficientSyncPointError as e:
+                    logger.error(f"Insufficient sync point data: {str(e)}")
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Insufficient sync point data for inference.",
+                    )
 
                 # Encode images in response if needed
                 return [
