@@ -6,7 +6,6 @@ error handling, and device management.
 """
 
 import os
-import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -53,11 +52,8 @@ def mock_tokenizer():
 @pytest.fixture
 def temp_cache_dir():
     """Create a temporary cache directory for testing."""
-    temp_dir = tempfile.mkdtemp()
-    yield temp_dir
-    # Cleanup
-    if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir)
+    with tempfile.TemporaryDirectory() as tmp_dirname:
+        yield tmp_dirname
 
 
 @pytest.fixture
@@ -1236,16 +1232,18 @@ class TestErrorRecovery:
         cache_file = dataset.cache_dir / "ep_0_frame_0.pt"
         cache_file.write_text("corrupted data")
 
-        with patch.object(dataset, "_memory_monitor") as mock_monitor:
+        with patch.object(dataset, "_memory_monitor") as mock_monitor, patch(
+            "torch.load", wraps=torch.load
+        ) as mock_load:
             mock_monitor.check_memory.return_value = None
 
-            # Should handle corrupted cache gracefully and regenerate
-            with patch("torch.load") as mock_load:
-                mock_load.side_effect = Exception("Corrupted cache")
+            # Should fall back to regenerating the sample
+            sample = dataset.load_sample(episode_idx=0, timestep=0)
 
-                # Should fall back to regenerating the sample
-                sample = dataset.load_sample(episode_idx=0, timestep=0)
-                assert sample is not None
+            # Should try to load corrupted file
+            mock_load.assert_called_once_with(cache_file, weights_only=True)
+            # Should continue as if it did not exist
+            assert sample is not None
 
 
 @pytest.mark.integration
