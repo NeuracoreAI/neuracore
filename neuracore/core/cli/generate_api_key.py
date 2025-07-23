@@ -126,6 +126,7 @@ def main() -> None:
             "--email",
             "--username",
             "-e",
+            dest="email",
             required=False,
             type=str,
             help="The email to login with.",
@@ -133,6 +134,7 @@ def main() -> None:
         parser.add_argument(
             "--password",
             "-p",
+            dest="password",
             required=False,
             type=str,
             help="The password to login with.",

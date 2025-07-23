@@ -104,8 +104,17 @@ def main() -> None:
         description="Select an organization to use",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--org-name", "--org-id", "-n", "-o", required=False, type=str)
-    org_name_or_id = parser.parse_args().org_name
+    parser.add_argument(
+        "--org-name",
+        "--org-id",
+        "-n",
+        "-o",
+        dest="org_name_or_id",
+        required=False,
+        type=str,
+        help="The name or id of the organization to select.",
+    )
+    org_name_or_id = parser.parse_args().org_name_or_id
 
     auth = get_auth()
     try:
