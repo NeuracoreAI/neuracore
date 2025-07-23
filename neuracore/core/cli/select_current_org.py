@@ -14,7 +14,7 @@ from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.exceptions import AuthenticationError, InputError, OrganizationError
 from neuracore.core.organizations import Organization, list_my_orgs
 
-from ..const import MAX_INPUT_ATTEMPTS
+from ..const import MAX_INPUT_ATTEMPTS, REJECTION_INPUT
 
 
 def select_current_org(org_name_or_id: Optional[str] = None) -> Organization:
@@ -69,7 +69,10 @@ def select_current_org(org_name_or_id: Optional[str] = None) -> Organization:
     for i in range(MAX_INPUT_ATTEMPTS):
         try:
             print(orgs_prompt)
-            input_selection = int(input(input_prompt))
+            input_raw = input(input_prompt)
+            if input_raw.lower().strip() in REJECTION_INPUT:
+                raise InputError("Exited")
+            input_selection = int(input_raw)
             if input_selection < 1:
                 raise ValueError()
             if input_selection > max_input:
@@ -87,6 +90,8 @@ def select_current_org(org_name_or_id: Optional[str] = None) -> Organization:
                 print("Please try again.")
         except KeyboardInterrupt:
             raise InputError("User cancelled the operation.")
+        except InputError:
+            raise
         except Exception as e:
             print(e)
     print("Out of attempts.")
@@ -95,29 +100,29 @@ def select_current_org(org_name_or_id: Optional[str] = None) -> Organization:
 
 def main() -> None:
     """Main function to run the organization selection process."""
+    parser = argparse.ArgumentParser(
+        description="Select an organization to use",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--org-name", "--org-id", "-n", "-o", required=False, type=str)
+    org_name_or_id = parser.parse_args().org_name
+
     auth = get_auth()
     try:
         if not auth.is_authenticated:
             auth.login()
 
-        parser = argparse.ArgumentParser(
-            description="Select an organization to use",
-            formatter_class=argparse.RawDescriptionHelpFormatter,
-        )
-        parser.add_argument(
-            "--org-name", "-org-id", "-n", "-o", required=False, type=str
-        )
-        args = parser.parse_args()
-
-        organization = select_current_org(org_name_or_id=args.org_name)
+        organization = select_current_org(org_name_or_id=org_name_or_id)
         config_manager = get_config_manager()
         config_manager.config.current_org_id = organization.id
         config_manager.save_config()
 
     except AuthenticationError:
         print("Failed to Authenticate, please try again")
-    except (OrganizationError, InputError):
-        print("Failed to select organization")
+    except OrganizationError:
+        print("Failed to select organization, please try again")
+    except InputError:
+        print("No organization selected")
 
 
 if __name__ == "__main__":
