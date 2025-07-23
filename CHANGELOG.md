@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- None
+
+### Changed
+
+- None
+
+### Removed
+
+- None
+
+### Fixed
+
+- None
+
+
+## [3.0.0]
+
+### Added
+
 - `nc.get_latest_sync_point()` a new method that creates a sync point from gathering data logged by a robot. 
 - `nc.check_remote_nodes_connected()` a new method to be used in tandem with `get_latest_sync_point` to ensure the expected remote nodes have been fully connected.
 - `nc.policy()`, `nc.policy_local_server()` and `nc.policy_remote_server()` now also gather data from remote nodes by default now. to avoid this behavior use the new `NEURACORE_CONSUME_LIVE_DATA` environment variable or provide your own sync point.
