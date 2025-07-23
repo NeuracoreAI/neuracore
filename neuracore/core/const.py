@@ -53,4 +53,5 @@ REJECTION_INPUT = {
     "don't",
     "exit",
     "quit",
+    "q",
 }
