@@ -11,6 +11,8 @@ from typing import Optional
 
 from pyee.asyncio import AsyncIOEventEmitter
 
+from neuracore.core.streaming.event_loop_utils import get_running_loop
+
 
 class EnabledManager(AsyncIOEventEmitter):
     """Thread-safe manager for enabled/disabled state with event notifications.
@@ -31,7 +33,8 @@ class EnabledManager(AsyncIOEventEmitter):
             initial_state: Initial enabled/disabled state
             loop: Optional event loop for async event emission
         """
-        super().__init__(loop)
+        self.loop = loop or get_running_loop()
+        super().__init__(loop=self.loop)
         self._is_enabled = initial_state
         self.lock = threading.Lock()
 
@@ -42,7 +45,7 @@ class EnabledManager(AsyncIOEventEmitter):
             bool: True if enabled, False if disabled
         """
         with self.lock:
-            return self._is_enabled
+            return self._is_enabled and not self.loop.is_closed()
 
     def is_disabled(self) -> bool:
         """Check if the manager is in disabled state.
@@ -50,8 +53,7 @@ class EnabledManager(AsyncIOEventEmitter):
         Returns:
             bool: True if disabled, False if enabled
         """
-        with self.lock:
-            return not self._is_enabled
+        return not self.is_enabled()
 
     def disable(self) -> None:
         """Disable the manager and emit notification.

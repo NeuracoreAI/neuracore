@@ -1,7 +1,5 @@
 import io
-import pathlib
 import re
-import tempfile
 from fractions import Fraction
 
 import av
@@ -20,15 +18,6 @@ CODEC = "h264"
 PIX_FMT = "yuv420p"
 FREQ = 30
 PTS_FRACT = 90000  # Common timebase for h264
-
-
-@pytest.fixture
-def temp_config_dir(monkeypatch):
-    """Fixture to create a temporary config directory."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Mock home directory for testing
-        monkeypatch.setattr("pathlib.Path.home", lambda: pathlib.Path(tmpdir))
-        yield tmpdir
 
 
 @pytest.fixture
@@ -295,7 +284,9 @@ class TestDataset:
         assert dataset.recordings[0]["id"] == "rec1"
         assert dataset.recordings[1]["id"] == "rec2"
 
-    def test_get_existing_dataset(self, mock_auth_requests, mock_dataset_api):
+    def test_get_existing_dataset(
+        self, temp_config_dir, reset_neuracore, mock_auth_requests, mock_dataset_api
+    ):
         """Test getting an existing dataset by name."""
         dataset = Dataset.get_by_name("test_dataset")
 
@@ -314,7 +305,7 @@ class TestDataset:
         with pytest.raises(DatasetError, match="Dataset 'nonexistent' not found"):
             Dataset.get_by_name("nonexistent")
 
-    def test_create_dataset(self, mock_auth_requests, mock_dataset_api):
+    def test_create_dataset(self, temp_config_dir, mock_dataset_api, reset_neuracore):
         """Test creating a new dataset."""
         dataset = Dataset.create(
             "test_dataset", description="Test description", tags=["test"], shared=False

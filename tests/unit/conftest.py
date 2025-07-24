@@ -1,6 +1,7 @@
 import pathlib
 import re
 import tempfile
+from unittest.mock import patch
 
 import pytest
 import requests_mock
@@ -19,9 +20,9 @@ def temp_config_dir(monkeypatch):
     """Fixture to create a temporary config directory."""
     with tempfile.TemporaryDirectory() as tmpdir:
         # Mock home directory for testing
-        monkeypatch.setattr("pathlib.Path.home", lambda: pathlib.Path(tmpdir))
-        config_manager.CONFIG_DIR = pathlib.Path(tmpdir) / ".neuracore"
-        yield tmpdir
+        tmpdir = pathlib.Path(tmpdir)
+        with patch.object(config_manager, "CONFIG_DIR", tmpdir):
+            yield tmpdir
 
 
 MOCKED_ORG_ID = "test-org-id"

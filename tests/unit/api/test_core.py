@@ -1,5 +1,4 @@
 import json
-import pathlib
 
 import requests_mock
 
@@ -23,7 +22,7 @@ def test_login_with_api_key(temp_config_dir, monkeypatch):
         nc.login("test_api_key")
 
         # Check config file was created
-        config_file = pathlib.Path(temp_config_dir) / ".neuracore" / "config.json"
+        config_file = temp_config_dir / "config.json"
         assert config_file.exists()
 
         # Verify config contents
@@ -40,9 +39,7 @@ def test_login_with_api_key(temp_config_dir, monkeypatch):
 def test_logout(temp_config_dir, monkeypatch):
     """Test logout functionality."""
     # Create a dummy config directory
-    config_dir = pathlib.Path(temp_config_dir) / ".neuracore"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_file = config_dir / "config.json"
+    config_file = temp_config_dir / "config.json"
 
     # Write initial config
     with open(config_file, "w") as f:

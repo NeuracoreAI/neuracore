@@ -25,7 +25,7 @@ class BackgroundCoroutineTracker:
                     provided.
         """
         self.background_tasks: List[asyncio.Task] = []
-        self.loop = loop
+        self.loop = loop or get_running_loop()
 
     def _task_done(self, task: asyncio.Task) -> None:
         """Cleanup after task completion.
@@ -42,11 +42,6 @@ class BackgroundCoroutineTracker:
         except Exception as e:
             logger.exception("Background task raised exception: %s", e)
 
-    async def _submit_background_coroutine(self, coroutine: Coroutine) -> None:
-        task = asyncio.create_task(coroutine)
-        self.background_tasks.append(task)
-        task.add_done_callback(self._task_done)
-
     def submit_background_coroutine(self, coroutine: Coroutine) -> None:
         """Submit coroutine to run later.
 
@@ -56,16 +51,16 @@ class BackgroundCoroutineTracker:
         Args:
             coroutine: the coroutine to be run at another time.
         """
-        try:
-            task = asyncio.create_task(coroutine)
+        if self.loop.is_closed():
+            logger.warning("Cannot submit coroutine; event loop is closed.")
+            return
+
+        def _submit_coroutine(coroutine: Coroutine) -> None:
+            task = self.loop.create_task(coroutine)
             self.background_tasks.append(task)
             task.add_done_callback(self._task_done)
-        except RuntimeError:
-            if not self.loop:
-                self.loop = get_running_loop()
-            asyncio.run_coroutine_threadsafe(
-                self._submit_background_coroutine(coroutine), self.loop
-            )
+
+        self.loop.call_soon_threadsafe(_submit_coroutine, coroutine)
 
     def stop_background_coroutines(self) -> None:
         """Stop all background coroutines.

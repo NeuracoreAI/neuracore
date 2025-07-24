@@ -171,6 +171,21 @@ def connect_robot(
     return robot
 
 
+def is_recording(robot_name: Optional[str] = None, instance: int = 0) -> bool:
+    """Check if a robot is currently recording.
+
+    Args:
+        robot_name: Robot identifier. If not provided, uses the currently
+            active robot from the global state.
+        instance: Instance number of the robot for multi-instance scenarios.
+
+    Returns:
+        bool: True if the robot is recording, False otherwise.
+    """
+    robot = _get_robot(robot_name, instance)
+    return robot.is_recording()
+
+
 def start_recording(robot_name: Optional[str] = None, instance: int = 0) -> None:
     """Start recording data for a specific robot.
 
