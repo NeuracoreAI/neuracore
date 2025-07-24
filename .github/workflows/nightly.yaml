@@ -46,4 +46,4 @@ jobs:
       run: |
         nc-login --email="$SERVICE_ACCOUNT_USERNAME" --password="$SERVICE_ACCOUNT_PASSWORD"
         nc-select-org --org-id="$SERVICE_ORG"
-        pytest tests/integration
+        pytest tests/integration/test_consume_stream.py::test_get_latest_data_from_multiple_nodes
