@@ -18,12 +18,12 @@ from neuracore.core.exceptions import RobotError
 from neuracore.core.nc_types import (
     CameraData,
     CustomData,
+    DataType,
     EndEffectorData,
     JointData,
     LanguageData,
     PointCloudData,
     PoseData,
-    TrackKind,
 )
 from neuracore.core.robot import Robot
 from neuracore.core.streaming.data_stream import (
@@ -72,7 +72,7 @@ def start_stream(robot: Robot, data_stream: DataStream) -> None:
 
 
 def _log_joint_data(
-    data_type: str,
+    data_type: DataType,
     joint_data: dict[str, float],
     additional_urdf_data: Optional[dict[str, float]] = None,
     robot_name: Optional[str] = None,
@@ -112,10 +112,10 @@ def _log_joint_data(
 
     robot = _get_robot(robot_name, instance)
     joint_group_id = _create_group_id_from_dict(joint_data)
-    joint_str_id = f"{data_type}_{joint_group_id}"
+    joint_str_id = f"{data_type.value}_{joint_group_id}"
     joint_stream = robot.get_data_stream(joint_str_id)
     if joint_stream is None:
-        joint_stream = JsonDataStream(f"{data_type}/{joint_group_id}.json")
+        joint_stream = JsonDataStream(f"{data_type.value}/{joint_group_id}.json")
         robot.add_data_stream(joint_str_id, joint_stream)
 
     start_stream(robot, joint_stream)
@@ -133,7 +133,7 @@ def _log_joint_data(
         raise RobotError("Robot not initialized. Call init() first.")
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
-    ).get_json_source(data_type, TrackKind.JOINTS, sensor_key=joint_str_id).publish(
+    ).get_json_source(data_type.value, data_type, sensor_key=joint_str_id).publish(
         data.model_dump(mode="json")
     )
 
@@ -166,7 +166,7 @@ def _validate_extrinsics_intrinsics(
 
 
 def _log_camera_data(
-    camera_type: TrackKind,
+    camera_type: DataType,
     camera_id: str,
     image: np.ndarray,
     extrinsics: Optional[np.ndarray] = None,
@@ -178,7 +178,7 @@ def _log_camera_data(
     """Log camera data for a robot.
 
     Args:
-        camera_type: Type of camera (e.g. TrackKind.RGB or TrackKind.DEPTH)
+        camera_type: Type of camera (e.g. DataType.RGB_IMAGE or DataType.DEPTH_IMAGE)
         camera_id: Unique identifier for the camera
         image: Image data as numpy array
         extrinsics: Optional extrinsics matrix (4x4)
@@ -191,18 +191,22 @@ def _log_camera_data(
         RobotError: If no robot is active and no robot_name provided
         ValueError: If image format is invalid or camera type is unsupported
     """
-    assert camera_type in (TrackKind.RGB, TrackKind.DEPTH), "Unsupported camera type"
+    assert camera_type in (
+        DataType.RGB_IMAGE,
+        DataType.DEPTH_IMAGE,
+    ), "Unsupported camera type"
 
     timestamp = timestamp or time.time()
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name, instance)
-    full_cam_id = f"{camera_type.value}_{camera_id}"
+    cam_type_prefix = "rgb" if camera_type == DataType.RGB_IMAGE else "depth"
+    full_cam_id = f"{cam_type_prefix}_{camera_id}"
 
     stream = robot.get_data_stream(full_cam_id)
     if stream is None:
-        if camera_type == TrackKind.RGB:
+        if camera_type == DataType.RGB_IMAGE:
             stream = RGBDataStream(full_cam_id, image.shape[1], image.shape[0])
-        elif camera_type == TrackKind.DEPTH:
+        elif camera_type == DataType.DEPTH_IMAGE:
             stream = DepthDataStream(full_cam_id, image.shape[1], image.shape[0])
         else:
             raise ValueError(f"Invalid camera type: {camera_type}")
@@ -362,7 +366,7 @@ def log_custom_data(
 
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
-    ).get_json_source(name, TrackKind.CUSTOM, sensor_key=str_id).publish(
+    ).get_json_source(name, DataType.CUSTOM, sensor_key=str_id).publish(
         custom_data.model_dump(mode="json")
     )
 
@@ -390,7 +394,7 @@ def log_joint_positions(
         ValueError: If positions is not a dictionary of floats
     """
     _log_joint_data(
-        "joint_positions",
+        DataType.JOINT_POSITIONS,
         positions,
         additional_urdf_positions,
         robot_name,
@@ -423,7 +427,7 @@ def log_joint_target_positions(
         ValueError: If target_positions is not a dictionary of floats
     """
     _log_joint_data(
-        "joint_target_positions",
+        DataType.JOINT_TARGET_POSITIONS,
         target_positions,
         additional_urdf_positions,
         robot_name,
@@ -455,7 +459,7 @@ def log_joint_velocities(
         ValueError: If velocities is not a dictionary of floats
     """
     _log_joint_data(
-        "joint_velocities",
+        DataType.JOINT_VELOCITIES,
         velocities,
         additional_urdf_velocities,
         robot_name,
@@ -487,7 +491,7 @@ def log_joint_torques(
         ValueError: If torques is not a dictionary of floats
     """
     _log_joint_data(
-        "joint_torques",
+        DataType.JOINT_TORQUES,
         torques,
         additional_urdf_torques,
         robot_name,
@@ -544,7 +548,7 @@ def log_pose_data(
 
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
-    ).get_json_source(str_id, TrackKind.POSE, sensor_key=str_id).publish(
+    ).get_json_source(str_id, DataType.POSES, sensor_key=str_id).publish(
         pose_data.model_dump(mode="json")
     )
 
@@ -597,7 +601,7 @@ def log_gripper_data(
 
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
-    ).get_json_source(str_id, TrackKind.GRIPPER, str_id).publish(
+    ).get_json_source(str_id, DataType.END_EFFECTORS, str_id).publish(
         end_effector_data.model_dump(mode="json")
     )
 
@@ -642,7 +646,7 @@ def log_language(
 
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
-    ).get_json_source(str_id, TrackKind.LANGUAGE, sensor_key=str_id).publish(
+    ).get_json_source(str_id, DataType.LANGUAGE, sensor_key=str_id).publish(
         data.model_dump(mode="json")
     )
 
@@ -676,7 +680,7 @@ def log_rgb(
     if image.dtype != np.uint8:
         raise ValueError("Image must be uint8 with range 0-255")
     _log_camera_data(
-        TrackKind.RGB,
+        DataType.RGB_IMAGE,
         camera_id,
         image,
         extrinsics,
@@ -724,7 +728,7 @@ def log_depth(
             "The values you are passing in are likely in millimeters."
         )
     _log_camera_data(
-        TrackKind.DEPTH,
+        DataType.DEPTH_IMAGE,
         camera_id,
         depth,
         extrinsics,
@@ -810,6 +814,6 @@ def log_point_cloud(
 
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
-    ).get_json_source(camera_id, TrackKind.POINT_CLOUD, sensor_key=str_id).publish(
+    ).get_json_source(camera_id, DataType.POINT_CLOUD, sensor_key=str_id).publish(
         point_data.model_dump(mode="json")
     )

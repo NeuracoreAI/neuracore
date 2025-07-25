@@ -7,7 +7,7 @@ connection management, and automatic reconnection with exponential backoff.
 
 import asyncio
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 from aiohttp import ClientSession
 
@@ -16,6 +16,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.nc_types import (
     AvailableRobotInstance,
+    DataType,
     HandshakeMessage,
     MessageType,
     OpenConnectionDetails,
@@ -189,6 +190,19 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
             for stream_id in self.current_track_information.tracks.keys()
             if stream_id != self.local_stream_id
         )
+
+    def list_data_types(self) -> Set[DataType]:
+        """Get all of the current datatypes provided by remote nodes of this robot.
+
+        Returns:
+            Set of datatypes provided.
+        """
+        if self.current_track_information is None:
+            return set()
+        output = set()
+        for track_set in self.current_track_information.tracks.values():
+            output |= set(track.kind for track in track_set)
+        return output
 
     async def create_new_connection(
         self,

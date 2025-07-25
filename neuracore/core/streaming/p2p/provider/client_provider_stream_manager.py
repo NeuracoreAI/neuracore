@@ -16,11 +16,11 @@ from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.nc_types import (
+    DataType,
     HandshakeMessage,
     MessageType,
     OpenConnectionDetails,
     RobotStreamTrack,
-    TrackKind,
     VideoFormat,
 )
 from neuracore.core.streaming.p2p.base_p2p_connection_manager import (
@@ -99,13 +99,14 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         return self.streaming
 
     def get_video_source(
-        self, sensor_name: str, kind: TrackKind, sensor_key: str
+        self, sensor_name: str, kind: DataType, sensor_key: str
     ) -> VideoSource:
         """Get or create a video source for streaming camera data.
 
         Args:
             sensor_name: Name of the sensor/camera
-            kind: Type of video data (TrackKind.RGB or TrackKind.DEPTH are supported)
+            kind: Type of video data. DataType.RGB_IMAGE or DataType.DEPTH_IMAGE
+                are supported
             sensor_key: custom key for caching.
 
         Returns:
@@ -118,9 +119,9 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         self.background_tracker.submit_background_coroutine(
             self.submit_track(mid, kind, sensor_name)
         )
-        if kind == TrackKind.RGB:
+        if kind == DataType.RGB_IMAGE:
             video_source = VideoSource(mid=mid, stream_enabled=self.streaming)
-        elif kind == TrackKind.DEPTH:
+        elif kind == DataType.DEPTH_IMAGE:
             video_source = DepthVideoSource(mid=mid, stream_enabled=self.streaming)
         else:
             raise ValueError(f"Unsupported video kind {kind}")
@@ -140,7 +141,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         return video_source
 
     def get_json_source(
-        self, sensor_name: str, kind: TrackKind, sensor_key: str
+        self, sensor_name: str, kind: DataType, sensor_key: str
     ) -> JSONSource:
         """Get or create a JSON source for streaming structured data.
 
@@ -169,7 +170,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
 
         return source
 
-    async def submit_track(self, mid: str, kind: TrackKind, label: str) -> None:
+    async def submit_track(self, mid: str, kind: DataType, label: str) -> None:
         """Submit a new track to the signaling server.
 
         Args:
