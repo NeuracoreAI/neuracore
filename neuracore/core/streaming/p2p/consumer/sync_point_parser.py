@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from neuracore.core.nc_types import (
     CameraData,
     CustomData,
+    DataType,
     EndEffectorData,
     JointData,
     LanguageData,
@@ -14,7 +15,6 @@ from neuracore.core.nc_types import (
     PoseData,
     RobotStreamTrack,
     SyncPoint,
-    TrackKind,
 )
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 
@@ -33,48 +33,58 @@ def parse_sync_point(message_data: str, track_details: RobotStreamTrack) -> Sync
         ValueError: If the track kind is unsupported or data validation fails.
     """
     try:
-        if track_details.kind == TrackKind.JOINTS:
+        if track_details.kind in (
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+            DataType.JOINT_TARGET_POSITIONS,
+        ):
             joint_data = JointData.model_validate_json(message_data)
-            return SyncPoint.model_validate(
-                {track_details.label: joint_data, "timestamp": joint_data.timestamp}
-            )
-        if track_details.kind == TrackKind.LANGUAGE:
+            return SyncPoint.model_validate({
+                track_details.kind.value: joint_data,
+                "timestamp": joint_data.timestamp,
+            })
+        if track_details.kind == DataType.LANGUAGE:
             language_data = LanguageData.model_validate_json(message_data)
             return SyncPoint(
                 language_data=language_data, timestamp=language_data.timestamp
             )
 
-        if track_details.kind in (TrackKind.DEPTH, TrackKind.RGB):
+        if track_details.kind in (DataType.DEPTH_IMAGE, DataType.RGB_IMAGE):
             camera_data = CameraData.model_validate_json(message_data)
 
             camera_data.frame = ImageStringEncoder.decode_image(camera_data.frame)
 
-            camera_id = f"{track_details.kind.value}_{track_details.label}"
+            cam_type_prefix = (
+                "rgb" if track_details.kind == DataType.RGB_IMAGE else "depth"
+            )
+            camera_id = f"{cam_type_prefix}_{track_details.label}"
+
             return SyncPoint.model_validate({
-                f"{track_details.kind.value}_images": {camera_id: camera_data},
+                f"{cam_type_prefix}_images": {camera_id: camera_data},
                 "timestamp": camera_data.timestamp,
             })
-        if track_details.kind == TrackKind.GRIPPER:
+        if track_details.kind == DataType.END_EFFECTORS:
             end_effectors = EndEffectorData.model_validate_json(message_data)
             return SyncPoint(
                 end_effectors=end_effectors, timestamp=end_effectors.timestamp
             )
 
-        if track_details.kind == TrackKind.POINT_CLOUD:
+        if track_details.kind == DataType.POINT_CLOUD:
             point_cloud = PointCloudData.model_validate_json(message_data)
             return SyncPoint(
                 point_clouds={track_details.label: point_cloud},
                 timestamp=point_cloud.timestamp,
             )
 
-        if track_details.kind == TrackKind.CUSTOM:
+        if track_details.kind == DataType.CUSTOM:
             custom_data = CustomData.model_validate_json(message_data)
             return SyncPoint(
                 custom_data={track_details.label: custom_data},
                 timestamp=custom_data.timestamp,
             )
 
-        if track_details.kind == TrackKind.POSE:
+        if track_details.kind == DataType.POSES:
             pose_data = PoseData.model_validate_json(message_data)
             # This doesn't match the schema but it is what the sync data does
             return SyncPoint(poses=pose_data, timestamp=pose_data.timestamp)

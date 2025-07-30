@@ -6,7 +6,7 @@ including deployment, status monitoring, and deletion operations.
 """
 
 import json
-from typing import Optional
+from typing import Iterable, Optional
 
 import requests
 
@@ -231,12 +231,16 @@ def get_latest_sync_point(
 
 
 def check_remote_nodes_connected(
-    num_remote_nodes: int = 0, robot_name: Optional[str] = None, instance: int = 0
+    num_remote_nodes: int = 0,
+    data_types: Optional[Iterable[DataType]] = None,
+    robot_name: Optional[str] = None,
+    instance: int = 0,
 ) -> bool:
     """Checks if the required remote nodes are connected to the robot.
 
     Args:
-        num_remote_nodes: The number of remote nodes that are expected to connect
+        num_remote_nodes: The number of remote nodes that are expected to connect.
+        data_types: The required set of datatypes to be provided by remote nodes.
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
 
@@ -247,5 +251,7 @@ def check_remote_nodes_connected(
         RobotError: If the robot is not initialized.
     """
     return _check_remote_nodes_connected(
-        robot=_get_robot(robot_name, instance), num_remote_nodes=num_remote_nodes
+        robot=_get_robot(robot_name, instance),
+        num_remote_nodes=num_remote_nodes,
+        data_types=data_types,
     )

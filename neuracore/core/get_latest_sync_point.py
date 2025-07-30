@@ -7,13 +7,19 @@ sources via the Neuracore platform's live data streaming capabilities.
 """
 
 import time
-from typing import Optional
+from typing import Iterable, Optional
 
 import numpy as np
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.exceptions import RobotError
-from neuracore.core.nc_types import CameraData, JointData, LanguageData, SyncPoint
+from neuracore.core.nc_types import (
+    CameraData,
+    DataType,
+    JointData,
+    LanguageData,
+    SyncPoint,
+)
 from neuracore.core.robot import Robot
 from neuracore.core.streaming.p2p.consumer.org_nodes_manager import (
     get_org_nodes_manager,
@@ -50,7 +56,11 @@ def _maybe_add_existing_data(
     return existing
 
 
-def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
+def check_remote_nodes_connected(
+    robot: Robot,
+    num_remote_nodes: int = 0,
+    data_types: Optional[Iterable[DataType]] = None,
+) -> bool:
     """Check if the specified number of remote nodes are connected for a robot.
 
     Always false if live data is disabled.
@@ -59,6 +69,7 @@ def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
     Args:
         robot: The robot instance.
         num_remote_nodes: The number of remote nodes expected to be connected.
+        data_types: The required set of datatypes to be provided.
 
     Returns:
         True if the specified number of remote nodes are connected, False otherwise.
@@ -79,6 +90,12 @@ def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
     )
 
     if consumer_manager.num_remote_nodes() < num_remote_nodes:
+        return False
+
+    expected_datatypes = set(data_types or [])
+    remaining_datatypes = expected_datatypes - consumer_manager.list_data_types()
+
+    if remaining_datatypes:
         return False
 
     return consumer_manager.all_remote_nodes_connected()

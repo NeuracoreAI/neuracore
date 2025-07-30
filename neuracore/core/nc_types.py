@@ -735,19 +735,6 @@ class RobotInstanceIdentifier(NamedTuple):
     robot_instance: int
 
 
-class TrackKind(str, Enum):
-    """Enumerates the supported track kinds for streaming."""
-
-    JOINTS = "joints"
-    RGB = "rgb"
-    DEPTH = "depth"
-    LANGUAGE = "language"
-    GRIPPER = "gripper"
-    POINT_CLOUD = "point_cloud"
-    POSE = "pose"
-    CUSTOM = "custom"
-
-
 class RobotStreamTrack(BaseModel):
     """Metadata for a robot's media stream track.
 
@@ -769,7 +756,7 @@ class RobotStreamTrack(BaseModel):
     robot_id: str
     robot_instance: NonNegativeInt
     stream_id: str
-    kind: TrackKind
+    kind: DataType
     label: str
     mid: str
     id: str = Field(default_factory=lambda: uuid4().hex)
