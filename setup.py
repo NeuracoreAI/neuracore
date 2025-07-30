@@ -19,7 +19,7 @@ setup(
     description="Neuracore Client Library",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/neuracore/neuracore",
+    url="https://github.com/neuracoreai/neuracore",
     packages=find_packages(exclude=["tests*", "examples*"]),
     classifiers=[
         "Development Status :: 3 - Alpha",

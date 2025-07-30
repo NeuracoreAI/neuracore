@@ -365,7 +365,7 @@ Configure Neuracore behavior with environment variables (case insensitive, prefi
 ## Development Setup
 
 ```bash
-git clone https://github.com/neuracore/neuracore
+git clone https://github.com/neuracoreai/neuracore
 cd neuracore
 pip install -e .[dev,ml]
 ```
