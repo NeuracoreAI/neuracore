@@ -150,7 +150,7 @@ class TrainingStorageHandler:
                 )
             with open(load_path, "wb") as f:
                 f.write(response.content)
-        return torch.load(load_path)
+        return torch.load(load_path, weights_only=True)
 
     def save_model_artifacts(self, model: nn.Module, output_dir: Path) -> None:
         """Save model artifacts to storage.

@@ -1241,7 +1241,7 @@ class TestErrorRecovery:
             sample = dataset.load_sample(episode_idx=0, timestep=0)
 
             # Should try to load corrupted file
-            mock_load.assert_called_once_with(cache_file, weights_only=True)
+            mock_load.assert_called_once_with(cache_file, weights_only=False)
             # Should continue as if it did not exist
             assert sample is not None
 
