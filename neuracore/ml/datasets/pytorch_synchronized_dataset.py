@@ -126,7 +126,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
             if tensor_cache_path.exists():
                 try:
-                    return torch.load(tensor_cache_path, weights_only=True)
+                    return torch.load(tensor_cache_path, weights_only=False)
                 except (
                     EOFError,
                     UnpicklingError,
