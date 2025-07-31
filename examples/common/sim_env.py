@@ -97,14 +97,23 @@ class BimanualViperXTask(base.Task):
         obs["qpos"] = self.get_qpos(physics)
         obs["qvel"] = self.get_qvel(physics)
         obs["env_state"] = self.get_env_state(physics)
-        obs["images"] = dict()
-        obs["images"]["top"] = physics.render(height=480, width=640, camera_id="top")
-        obs["images"]["angle"] = physics.render(
-            height=480, width=640, camera_id="angle"
-        )
-        obs["images"]["vis"] = physics.render(
-            height=480, width=640, camera_id="front_close"
-        )
+
+        # Define cameras and resolution in one place
+        camera_names = ["top", "angle", "front_close"]
+        resolution = (480, 640)
+        height, width = resolution
+
+        # Capture RGB and Depth in loops
+        obs["images"] = {}
+        obs["depth"] = {}
+        for cam in camera_names:
+            obs["images"][cam] = physics.render(
+                height=height, width=width, camera_id=cam
+            )
+            depth = physics.render(
+                height=height, width=width, camera_id=cam, depth=True
+            )
+            obs["depth"][cam] = depth.reshape(height, width).astype(np.float16)
 
         return obs
 

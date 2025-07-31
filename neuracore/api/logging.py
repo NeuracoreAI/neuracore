@@ -764,24 +764,22 @@ def log_point_cloud(
     timestamp = timestamp or time.time()
     if not isinstance(points, np.ndarray):
         raise ValueError("Point cloud must be a numpy array")
-    if points.dtype != np.float32:
-        raise ValueError("Point cloud must be float32")
+    if points.dtype not in (np.float16, np.float32):
+        raise ValueError("Point cloud must be float16 or float32")
     if points.shape[1] != 3:
         raise ValueError("Point cloud must have 3 columns")
     if points.shape[0] > 307200:
         raise ValueError("Point cloud must have at most 307200 points")
+
     if rgb_points is not None:
         if not isinstance(rgb_points, np.ndarray):
             raise ValueError("RGB point cloud must be a numpy array")
         if rgb_points.dtype != np.uint8:
             raise ValueError("RGB point cloud must be uint8")
         if rgb_points.shape[0] != points.shape[0]:
-            raise ValueError(
-                "RGB point cloud must have the same number of points as the point cloud"
-            )
+            raise ValueError("RGB point cloud must match number of points")
         if rgb_points.shape[1] != 3:
             raise ValueError("RGB point cloud must have 3 columns")
-        rgb_points = rgb_points.tolist()
 
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name, instance)
@@ -797,17 +795,15 @@ def log_point_cloud(
 
     point_data = PointCloudData(
         timestamp=timestamp,
-        points=points.tolist(),
+        points=points,
         rgb_points=rgb_points,
         extrinsics=extrinsics,
         intrinsics=intrinsics,
     )
 
     stream.log(point_data)
-
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
-
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
     ).get_json_source(camera_id, TrackKind.POINT_CLOUD, sensor_key=str_id).publish(
