@@ -143,7 +143,11 @@ class Robot:
                 self._upload_urdf_and_meshes()
                 if self._temp_dir:
                     self._temp_dir.cleanup()
-
+        except requests.exceptions.ConnectionError:
+            raise RobotError((
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            ))
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to initialize robot: {str(e)}")
 
@@ -222,7 +226,11 @@ class Robot:
                 robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
             return recording_id
-
+        except requests.exceptions.ConnectionError:
+            raise RobotError((
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            ))
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to start recording: {str(e)}")
 
@@ -261,7 +269,11 @@ class Robot:
             get_recording_state_manager().recording_stopped(
                 robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
-
+        except requests.exceptions.ConnectionError:
+            raise RobotError((
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            ))
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to stop recording: {str(e)}")
 
@@ -435,7 +447,11 @@ class Robot:
             response.raise_for_status()
 
             logger.info(f"Successfully uploaded URDF package for robot {self.id}")
-
+        except requests.exceptions.ConnectionError:
+            raise RobotError((
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            ))
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to upload URDF package: {str(e)}")
         except Exception as e:

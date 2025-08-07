@@ -231,6 +231,11 @@ class ServerPolicy(Policy):
                     f"{response.status_code} - {response.text}"
                 )
             response.raise_for_status()
+        except requests.exceptions.ConnectionError:
+            raise EndpointError((
+                "Failed to connect to endpoint, "
+                "please check your internet connection and try again."
+            ))
         except requests.exceptions.RequestException as e:
             raise EndpointError(f"Failed to set checkpoint: {str(e)}")
 
@@ -310,7 +315,11 @@ class ServerPolicy(Policy):
                                 cam_data.frame
                             )
             return sync_point_preds
-
+        except requests.exceptions.ConnectionError:
+            raise EndpointError((
+                "Failed to connect to endpoint, "
+                "please check your internet connection and try again."
+            ))
         except requests.exceptions.RequestException as e:
             if response is not None:
                 if response.status_code == 422:
@@ -604,7 +613,11 @@ def policy_remote_server(
             base_url=f"{API_URL}/org/{org_id}/models/endpoints/{endpoint['id']}",
             headers=auth.get_headers(),
         )
-
+    except requests.exceptions.ConnectionError:
+        raise EndpointError((
+            "Failed to connect to endpoint: Connection Error. "
+            "Please check your internet connection and try again."
+        ))
     except requests.exceptions.RequestException as e:
         raise EndpointError(f"Failed to connect to endpoint: {str(e)}")
 
