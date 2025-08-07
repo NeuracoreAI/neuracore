@@ -87,6 +87,11 @@ def generate_api_key(
             raise InputError("User cancelled the operation.")
         except ValidationError:
             raise AuthenticationError("Invalid token from server")
+        except requests.exceptions.ConnectionError:
+            raise AuthenticationError((
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            ))
         except requests.exceptions.RequestException as e:
             raise AuthenticationError(f"Failed to get Auth Token: {e}")
 
@@ -110,7 +115,11 @@ def generate_api_key(
         return api_key
     except ValidationError:
         raise AuthenticationError("Invalid api-key from server")
-
+    except requests.exceptions.ConnectionError:
+        raise AuthenticationError((
+            "Failed to connect to neuracore server, "
+            "please check your internet connection and try again."
+        ))
     except requests.exceptions.RequestException as e:
         raise AuthenticationError(f"Failed to create API key: {e}")
 

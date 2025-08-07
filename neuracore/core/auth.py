@@ -66,6 +66,11 @@ class Auth(metaclass=SingletonMetaclass):
                 )
             token_data = response.json()
             self._access_token = token_data["access_token"]
+        except requests.exceptions.ConnectionError:
+            raise AuthenticationError((
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            ))
         except requests.exceptions.RequestException:
             raise AuthenticationError(
                 "Could not verify API key. Please check your key and try again."
