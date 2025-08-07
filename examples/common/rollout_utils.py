@@ -1,82 +1,104 @@
-import numpy as np
+"""Utilities for rolling out policies and collecting trajectories."""
 
-from .constants import EPISODE_LENGTH, PUPPET_GRIPPER_POSITION_NORMALIZE_FN
-from .ee_sim_env import make_ee_sim_env
+from typing import Dict, List
+
+from .base_env import BimanualViperXTask
 from .scripted_policy import PickAndTransferPolicy
+from .transfer_cube import BOX_POSE, make_ee_sim_env
 
 
 def rollout_policy(
     inject_noise: bool = False,
     onscreen_render: bool = False,
     render_cam_name: str = "angle",
-) -> tuple[list[dict], dict, float]:
-    """
-    Rolls out the pick and transfer policy and returns the action trajectory.
+) -> List[Dict[str, float]]:
+    """Roll out the pick and transfer policy and return action trajectory.
 
     Args:
-        inject_noise: Whether to inject noise into the actions
-        onscreen_render: Whether to render onscreen
-        render_cam_name: Name of camera to render from
+        inject_noise: Whether to inject noise into policy actions.
+        onscreen_render: Whether to render episode onscreen.
+        render_cam_name: Camera name for rendering.
 
     Returns:
-        action_traj: List of actions to replay
-        subtask_info: Environment state info
-        episode_max_reward: Maximum reward achieved
+        List of action dictionaries for each timestep.
     """
     # Setup environment and policy
     env = make_ee_sim_env()
-    ts = env.reset()
-    episode = [ts]
+    obs = env.reset()
+    episode = [obs]
     policy = PickAndTransferPolicy(inject_noise)
 
-    # Setup visualization if needed
+    # Setup visualization if requested
+    plt_img = None
     if onscreen_render:
         import matplotlib.pyplot as plt
 
         ax = plt.subplot()
-        plt_img = ax.imshow(ts.observation["images"][render_cam_name])
+        plt_img = ax.imshow(obs.cameras[render_cam_name].rgb)
         plt.ion()
 
-    # Execute policy
-    for step in range(EPISODE_LENGTH):
+    # Execute policy for full episode
+    for step in range(BimanualViperXTask.EPISODE_LENGTH):
+        # Create timestep-like object for policy
+        ts = type("TimeStep", (), {"observation": obs.model_dump()})()
         action = policy(ts)
-        ts = env.step(action)
-        episode.append(ts)
 
-        if onscreen_render:
-            plt_img.set_data(ts.observation["images"][render_cam_name])
+        obs, reward, done = env.step(action)
+        obs.reward = reward
+        episode.append(obs)
+
+        # Update visualization
+        if onscreen_render and plt_img is not None:
+            plt_img.set_data(obs.cameras[render_cam_name].rgb)
             plt.pause(0.002)
 
+        if done:
+            break
+
+    # Clean up visualization
     if onscreen_render:
         plt.close()
 
-    # Calculate rewards
-    episode_max_reward = np.max([ts.reward for ts in episode[1:]])
-
-    # Convert joint trajectory to action trajectory
-    joint_trajectory = [ts.observation["qpos"] for ts in episode]
-    gripper_ctrl_traj = [ts.observation["gripper_ctrl"] for ts in episode]
-
+    # Extract action trajectory
     action_traj = []
-    for joint_dict, ctrl in zip(joint_trajectory, gripper_ctrl_traj):
-        joint_action = {}
-        # Split into left and right joint actions
-        left_joint_actions = {k: v for k, v in list(joint_dict.items())[:6]}
-        right_joint_actions = {k: v for k, v in list(joint_dict.items())[6 + 2 : -2]}
+    for obs in episode:
+        if hasattr(obs, "qpos") and hasattr(obs, "gripper_ctrl"):
+            joint_action = _extract_joint_action(obs)
+            action_traj.append(joint_action)
 
-        # Combine actions with normalized gripper positions
-        joint_action.update(left_joint_actions)
-        joint_action["vx300s_left/gripper_open"] = PUPPET_GRIPPER_POSITION_NORMALIZE_FN(
-            ctrl[0]
-        )
-        joint_action.update(right_joint_actions)
-        joint_action["vx300s_right/gripper_open"] = (
-            PUPPET_GRIPPER_POSITION_NORMALIZE_FN(ctrl[2])
-        )
+    # Store initial environment state globally
+    if episode:
+        BOX_POSE[0] = episode[0].env_state.copy()
 
-        action_traj.append(joint_action)
+    return action_traj
 
-    # Get initial environment state
-    subtask_info = episode[0].observation["env_state"].copy()
 
-    return action_traj, subtask_info, episode_max_reward
+def _extract_joint_action(obs) -> Dict[str, float]:
+    """Extract joint action dictionary from observation.
+
+    Args:
+        obs: Observation containing joint positions and gripper control.
+
+    Returns:
+        Dictionary mapping joint names to action values.
+    """
+    joint_dict = obs.qpos.copy()
+    ctrl = obs.gripper_ctrl
+
+    # Split into left and right joint actions
+    joint_items = list(joint_dict.items())
+    left_joint_actions = {k: v for k, v in joint_items[:6]}
+    right_joint_actions = {k: v for k, v in joint_items[8:14]}  # Skip gripper joints
+
+    # Create complete action dictionary
+    joint_action = {}
+    joint_action.update(left_joint_actions)
+    joint_action["vx300s_left/gripper_open"] = (
+        BimanualViperXTask.normalize_gripper_position(ctrl[0])
+    )
+    joint_action.update(right_joint_actions)
+    joint_action["vx300s_right/gripper_open"] = (
+        BimanualViperXTask.normalize_gripper_position(ctrl[2])
+    )
+
+    return joint_action

@@ -3,9 +3,8 @@ import os
 import time
 
 import numpy as np
-from common.constants import BIMANUAL_VIPERX_URDF_PATH
 from common.rollout_utils import rollout_policy
-from common.sim_env import BOX_POSE, make_sim_env
+from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
 
 import neuracore as nc
 
@@ -19,14 +18,13 @@ def main(args):
     nc.login()
     nc.connect_robot(
         robot_name="Mujoco VX300s",
-        urdf_path=BIMANUAL_VIPERX_URDF_PATH,
+        urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
         overwrite=False,
     )
 
     # Setup parameters
     record = args["record"]
     num_episodes = args["num_episodes"]
-    camera_names = ["angle"]
 
     if record:
         nc.create_dataset(
@@ -35,17 +33,15 @@ def main(args):
         )
         print("Created Dataset...")
 
-    success = []
     for episode_idx in range(num_episodes):
         print(f"Starting episode {episode_idx}")
 
         # Get action trajectory from policy rollout
-        action_traj, subtask_info, max_reward = rollout_policy()
+        action_traj = rollout_policy()
 
         # Setup environment for replay with neuracore logging
-        BOX_POSE[0] = subtask_info
         env = make_sim_env()
-        ts = env.reset()
+        obs = env.reset()
 
         # Start recording if enabled
         if record:
@@ -54,31 +50,26 @@ def main(args):
         # Log initial state
         t = time.time()
         CUSTOM_DATA = [1, 2, 3, 4, 5]
+        CAM_NAME = "angle"
         nc.log_custom_data("my_custom_data", CUSTOM_DATA, timestamp=t)
-        nc.log_joint_positions(ts.observation["qpos"], timestamp=t)
-        nc.log_joint_velocities(ts.observation["qvel"], timestamp=t)
+        nc.log_joint_positions(obs.qpos, timestamp=t)
+        nc.log_joint_velocities(obs.qvel, timestamp=t)
         nc.log_language("Pick up the cube and pass it to the other robot", timestamp=t)
-        for cam_name in camera_names:
-            nc.log_rgb(cam_name, ts.observation["images"][cam_name], timestamp=t)
+        nc.log_rgb(CAM_NAME, obs.cameras[CAM_NAME].rgb, timestamp=t)
 
         # Execute action trajectory while logging
-        episode_replay = [ts]
         for action in action_traj:
-            ts = env.step(list(action.values()))
+            obs, reward, done = env.step(np.array(list(action.values())))
 
             t += 0.02
             nc.log_custom_data("my_custom_data", CUSTOM_DATA, timestamp=t)
-            nc.log_joint_positions(ts.observation["qpos"], timestamp=t)
-            nc.log_joint_velocities(ts.observation["qvel"], timestamp=t)
+            nc.log_joint_positions(obs.qpos, timestamp=t)
+            nc.log_joint_velocities(obs.qvel, timestamp=t)
             nc.log_language(
                 "Pick up the cube and pass it to the other robot", timestamp=t
             )
-
             nc.log_joint_target_positions(action, timestamp=t)
-            for cam_name in camera_names:
-                nc.log_rgb(cam_name, ts.observation["images"][cam_name], timestamp=t)
-
-            episode_replay.append(ts)
+            nc.log_rgb(CAM_NAME, obs.cameras[CAM_NAME].rgb, timestamp=t)
 
         # Stop recording if enabled
         if record:
@@ -86,20 +77,7 @@ def main(args):
             nc.stop_recording()
             print("Finished recording!")
 
-        # Calculate episode results
-        episode_return = np.sum([ts.reward for ts in episode_replay[1:]])
-        episode_max_reward = np.max([ts.reward for ts in episode_replay[1:]])
-
-        if episode_max_reward == env.task.max_reward:
-            success.append(1)
-            print(f"Episode {episode_idx} Successful, return: {episode_return}")
-        else:
-            success.append(0)
-            print(f"Episode {episode_idx} Failed")
-
-    print(
-        f"Success rate: {np.mean(success)*100:.1f}% ({np.sum(success)}/{len(success)})"
-    )
+        print(f"Episode {episode_idx} done")
 
 
 if __name__ == "__main__":

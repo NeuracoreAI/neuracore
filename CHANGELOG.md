@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- None
+- Moved from Mujoco 2.3.7 to Mujoco 3+ for the examples
 
 ### Removed
 

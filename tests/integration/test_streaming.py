@@ -15,7 +15,7 @@ import neuracore as nc
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "..", "..", "examples"))
 # ruff: noqa: E402
-from common.constants import BIMANUAL_VIPERX_URDF_PATH
+from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
 
 # How much time we allow for nc.calls
 TIME_GRACE_S = 0.01
@@ -336,7 +336,9 @@ def run_streaming_test(config):
     # Set up
     logger.info(f"Starting test with config: {config}")
     nc.login()
-    nc.connect_robot(TEST_ROBOT, urdf_path=BIMANUAL_VIPERX_URDF_PATH, overwrite=False)
+    nc.connect_robot(
+        TEST_ROBOT, urdf_path=str(BIMANUAL_VIPERX_URDF_PATH), overwrite=False
+    )
     nc.create_dataset(
         config.dataset_name,
         description=(

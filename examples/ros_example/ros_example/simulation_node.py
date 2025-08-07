@@ -2,6 +2,7 @@
 import sys
 import threading
 
+import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from rclpy.executors import SingleThreadedExecutor
@@ -12,17 +13,11 @@ from .const import QOS_BEST_EFFORT
 
 # ruff: noqa: E402
 sys.path.append("/ros2_ws/src/neuracore/examples")
-from common.constants import (  # CAMERA_NAMES
-    BIMANUAL_VIPERX_URDF_PATH,
-    LEFT_ARM_JOINT_NAMES,
-    LEFT_GRIPPER_JOINT_NAMES,
-    RIGHT_ARM_JOINT_NAMES,
-    RIGHT_GRIPPER_JOINT_NAMES,
-)
+from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
 
 import neuracore as nc
 
-CAMERA_NAMES = ["top", "angle", "vis"]
+CAMERA_NAMES = ["angle"]
 
 
 class SimulationNode(Node):
@@ -38,7 +33,7 @@ class SimulationNode(Node):
         nc.login()
         nc.connect_robot(
             robot_name="Mujoco VX300s",
-            urdf_path=BIMANUAL_VIPERX_URDF_PATH,
+            urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
             overwrite=False,
         )
 
@@ -65,7 +60,7 @@ class SimulationNode(Node):
         self.action_lock = threading.Lock()
 
         self.env = None
-        self.ts = None
+        self.obs = None
         self.action_traj = []
         self.current_action_traj = []
         self.record = True
@@ -102,21 +97,20 @@ class SimulationNode(Node):
         """Initialize the environment on the main thread before setting up timers"""
         try:
             from common.rollout_utils import rollout_policy
-            from common.sim_env import BOX_POSE, make_sim_env
+            from common.transfer_cube import make_sim_env
 
             self.get_logger().info(
                 "Generating a demo action trajectory. This will take a few moments..."
             )
-            self.action_traj, subtask_info, max_reward = rollout_policy()
+            self.action_traj = rollout_policy()
             self.current_action_traj = self.action_traj.copy()
             self.get_logger().info(
                 "Demo action trajectory generated successfully! "
                 "This will now be replayed as if a human is controlling the robot."
             )
 
-            BOX_POSE[0] = subtask_info
             self.env = make_sim_env()
-            self.ts = self.env.reset()
+            self.obs = self.env.reset()
 
         except Exception as e:
             self.get_logger().error(f"Error initializing environment: {e}")
@@ -131,7 +125,7 @@ class SimulationNode(Node):
             if len(self.current_action_traj) > 0:
                 action = self.current_action_traj.pop(0)
                 nc.log_joint_target_positions(action)
-                self.ts = self.env.step(list(action.values()))
+                self.obs, _, _ = self.env.step(np.array(list(action.values())))
             else:
                 if self.record:
                     nc.stop_recording()
@@ -150,7 +144,7 @@ class SimulationNode(Node):
                     return
 
                 # Reset the action trajectory
-                self.ts = self.env.reset()
+                self.obs = self.env.reset()
                 self.current_action_traj = self.action_traj.copy()
 
                 if self.record:
@@ -163,11 +157,11 @@ class SimulationNode(Node):
     def publish_joint_states(self):
         """Publish joint states without modifying the environment"""
         try:
-            if not self.ts or self.is_complete:
+            if not self.obs or self.is_complete:
                 return
 
             # Extract joint positions from the simulation state
-            qpos = self.ts.observation["qpos"]
+            qpos = self.obs.qpos
 
             # Create JointState messages
             left_js = JointState()
@@ -177,8 +171,12 @@ class SimulationNode(Node):
             left_js.header.stamp = self.get_clock().now().to_msg()
             right_js.header.stamp = self.get_clock().now().to_msg()
 
-            left_js.name = LEFT_ARM_JOINT_NAMES + LEFT_GRIPPER_JOINT_NAMES
-            right_js.name = RIGHT_ARM_JOINT_NAMES + RIGHT_GRIPPER_JOINT_NAMES
+            left_js.name = (
+                self.env.LEFT_ARM_JOINT_NAMES + self.env.LEFT_GRIPPER_JOINT_NAMES
+            )
+            right_js.name = (
+                self.env.RIGHT_ARM_JOINT_NAMES + self.env.RIGHT_GRIPPER_JOINT_NAMES
+            )
 
             # Set joint positions
             left_js.position = [qpos[joint] for joint in left_js.name]
@@ -193,16 +191,13 @@ class SimulationNode(Node):
     def publish_camera_images(self):
         """Publish camera images without modifying the environment"""
         try:
-            if not self.ts or self.is_complete:
+            if not self.obs or self.is_complete:
                 return
 
-            # Extract images from the simulation state
-            images = self.ts.observation["images"]
-
             # Publish each camera image
-            for cam_name, img in images.items():
+            for cam_name, cam_data in self.obs.cameras.items():
                 # Convert to ROS Image message
-                img_msg = self.cv_bridge.cv2_to_imgmsg(img, encoding="rgb8")
+                img_msg = self.cv_bridge.cv2_to_imgmsg(cam_data.rgb, encoding="rgb8")
                 img_msg.header.stamp = self.get_clock().now().to_msg()
                 img_msg.header.frame_id = f"camera_{cam_name}_frame"
 
