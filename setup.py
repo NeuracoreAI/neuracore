@@ -52,8 +52,7 @@ setup(
     extras_require={
         "examples": [
             "matplotlib>=3.3.0",
-            "mujoco==2.3.7",
-            "dm_control==1.0.14",
+            "mujoco>3",
             "pyquaternion>=0.9.5",
         ],
         "mjcf": [

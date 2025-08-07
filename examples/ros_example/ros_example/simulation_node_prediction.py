@@ -13,13 +13,7 @@ from .const import QOS_BEST_EFFORT
 
 # ruff: noqa: E402
 sys.path.append("/ros2_ws/src/neuracore/examples")
-from common.constants import (  # CAMERA_NAMES
-    BIMANUAL_VIPERX_URDF_PATH,
-    LEFT_ARM_JOINT_NAMES,
-    LEFT_GRIPPER_JOINT_NAMES,
-    RIGHT_ARM_JOINT_NAMES,
-    RIGHT_GRIPPER_JOINT_NAMES,
-)
+from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
 
 import neuracore as nc
 
@@ -38,7 +32,7 @@ class SimulationNodePrediction(Node):
         nc.login()
         nc.connect_robot(
             robot_name="Mujoco VX300s",
-            urdf_path=BIMANUAL_VIPERX_URDF_PATH,
+            urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
             overwrite=False,
         )
         self.policy = nc.policy(train_run_name=self.training_run_name)
@@ -63,13 +57,13 @@ class SimulationNodePrediction(Node):
         # Initialize simulation
         self.cv_bridge = CvBridge()
         self.env = None
-        self.ts = None
+        self.obs = None
 
         # Initialize environment first, before setting up timers
-        from common.sim_env import make_sim_env
+        from common.transfer_cube import make_sim_env
 
         self.env = make_sim_env()
-        self.ts = self.env.reset()
+        self.obs = self.env.reset()
 
         # Create all timers in a specific order, with simulation_step last
         self.joint_states_timer = self.create_timer(
@@ -98,16 +92,16 @@ class SimulationNodePrediction(Node):
         self.get_logger().info(
             f"Executing action: {action.joint_target_positions.numpy()}"
         )
-        self.ts = self.env.step(list(action.joint_target_positions.numpy()))
+        self.obs, _, _ = self.env.step(list(action.joint_target_positions.numpy()))
 
     def publish_joint_states(self):
         """Publish joint states without modifying the environment"""
         try:
-            if not self.ts:
+            if not self.obs:
                 return
 
             # Extract joint positions from the simulation state
-            qpos = self.ts.observation["qpos"]
+            qpos = self.obs.qpos
 
             # Create JointState messages
             left_js = JointState()
@@ -117,8 +111,12 @@ class SimulationNodePrediction(Node):
             left_js.header.stamp = self.get_clock().now().to_msg()
             right_js.header.stamp = self.get_clock().now().to_msg()
 
-            left_js.name = LEFT_ARM_JOINT_NAMES + LEFT_GRIPPER_JOINT_NAMES
-            right_js.name = RIGHT_ARM_JOINT_NAMES + RIGHT_GRIPPER_JOINT_NAMES
+            left_js.name = (
+                self.env.LEFT_ARM_JOINT_NAMES + self.env.LEFT_GRIPPER_JOINT_NAMES
+            )
+            right_js.name = (
+                self.env.RIGHT_ARM_JOINT_NAMES + self.env.RIGHT_GRIPPER_JOINT_NAMES
+            )
 
             # Set joint positions
             left_js.position = [qpos[joint] for joint in left_js.name]
@@ -133,16 +131,13 @@ class SimulationNodePrediction(Node):
     def publish_camera_images(self):
         """Publish camera images without modifying the environment"""
         try:
-            if not self.ts:
+            if not self.obs:
                 return
 
-            # Extract images from the simulation state
-            images = self.ts.observation["images"]
-
             # Publish each camera image
-            for cam_name, img in images.items():
+            for cam_name, cam_data in self.obs.cameras.items():
                 # Convert to ROS Image message
-                img_msg = self.cv_bridge.cv2_to_imgmsg(img, encoding="rgb8")
+                img_msg = self.cv_bridge.cv2_to_imgmsg(cam_data.rgb, encoding="rgb8")
                 img_msg.header.stamp = self.get_clock().now().to_msg()
                 img_msg.header.frame_id = f"camera_{cam_name}_frame"
 
