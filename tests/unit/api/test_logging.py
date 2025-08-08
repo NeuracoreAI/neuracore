@@ -4,6 +4,7 @@ import pytest
 import neuracore as nc
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import RobotError
+from neuracore.core.nc_types import CameraData, EndEffectorData, JointData, SyncPoint
 
 
 def test_log_joints_and_cams(
@@ -181,7 +182,8 @@ def test_log_synced_data(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    nc.connect_robot(robot_name="test_robot", instance=0, urdf_path=mock_urdf)
 
     # Prepare test data
     joint_positions = {"joint1": 0.5, "joint2": -0.3}
@@ -190,24 +192,30 @@ def test_log_synced_data(
     gripper_open_amounts = {"gripper1": 0.5}
 
     # RGB images
-    rgb_data = {"cam1": np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)}
+    rgb_data = {
+        "cam1": CameraData(
+            frame=np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+        )
+    }
 
     # Depth images
-    depth_data = {"cam1": np.ones((100, 100), dtype=np.float32) * 0.5}
+    depth_data = {"cam1": CameraData(frame=np.ones((100, 100), dtype=np.float32) * 0.5)}
 
     # Point clouds (empty for this test)
     point_cloud_data = {}
 
     # Log synced data
-    nc.log_synced_data(
-        joint_positions=joint_positions,
-        joint_velocities=joint_velocities,
-        joint_torques=joint_torques,
-        joint_target_positions=joint_positions,
-        gripper_open_amounts=gripper_open_amounts,
-        rgb_data=rgb_data,
-        depth_data=depth_data,
-        point_cloud_data=point_cloud_data,
+    nc.log_sync_point(
+        SyncPoint(
+            joint_positions=JointData(values=joint_positions),
+            joint_velocities=JointData(values=joint_velocities),
+            joint_torques=JointData(values=joint_torques),
+            joint_target_positions=JointData(values=joint_positions),
+            end_effectors=EndEffectorData(open_amounts=gripper_open_amounts),
+            rgb_images=rgb_data,
+            depth_images=depth_data,
+            point_clouds=point_cloud_data,
+        )
     )
 
 

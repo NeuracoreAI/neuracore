@@ -10,6 +10,7 @@ import hashlib
 import json
 import time
 from typing import Any, Dict, List, Optional
+from warnings import warn
 
 import numpy as np
 
@@ -23,6 +24,7 @@ from neuracore.core.nc_types import (
     LanguageData,
     PointCloudData,
     PoseData,
+    SyncPoint,
     TrackKind,
 )
 from neuracore.core.robot import Robot
@@ -69,6 +71,132 @@ def start_stream(robot: Robot, data_stream: DataStream) -> None:
     current_recording = robot.get_current_recording_id()
     if current_recording is not None and not data_stream.is_recording():
         data_stream.start_recording(current_recording)
+
+
+def log_sync_point(
+    sync_point: SyncPoint,
+    robot_name: Optional[str] = None,
+    instance: int = 0,
+) -> None:
+    """Logs a sync point.
+
+    Args:
+        sync_point: The sync point to log.
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+    """
+    # TODO: It would be better if we did this in reverse and just use SyncPoints instead
+    # passing around unwrapped NCData
+    robot = _get_robot(robot_name, instance)
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    # Log joint data
+    if sync_point.joint_positions:
+        log_joint_positions(
+            positions=sync_point.joint_positions.values,
+            additional_urdf_positions=sync_point.joint_positions.additional_values,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=sync_point.timestamp,
+        )
+    if sync_point.joint_velocities:
+        log_joint_velocities(
+            velocities=sync_point.joint_velocities.values,
+            additional_urdf_velocities=sync_point.joint_velocities.additional_values,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=sync_point.timestamp,
+        )
+    if sync_point.joint_torques:
+        log_joint_torques(
+            torques=sync_point.joint_torques.values,
+            additional_urdf_torques=sync_point.joint_torques.additional_values,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=sync_point.timestamp,
+        )
+    if sync_point.joint_target_positions:
+        log_joint_target_positions(
+            target_positions=sync_point.joint_target_positions.values,
+            additional_urdf_positions=sync_point.joint_target_positions.additional_values,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=sync_point.timestamp,
+        )
+
+    # Log pose data
+    if sync_point.poses:
+        log_pose_data(
+            poses=sync_point.poses.pose,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=sync_point.timestamp,
+        )
+
+    # Log gripper data
+    if sync_point.end_effectors:
+        log_gripper_data(
+            open_amounts=sync_point.end_effectors.open_amounts,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=sync_point.timestamp,
+        )
+
+    # Log camera data
+    if sync_point.rgb_images:
+        for camera_id, cam_data in sync_point.rgb_images.items():
+            log_rgb(
+                camera_id=camera_id,
+                image=cam_data.frame,
+                extrinsics=cam_data.extrinsics,
+                intrinsics=cam_data.intrinsics,
+                robot_name=robot_name,
+                instance=instance,
+                timestamp=sync_point.timestamp,
+            )
+    if sync_point.depth_images:
+        for camera_id, cam_data in sync_point.depth_images.items():
+            log_depth(
+                camera_id=camera_id,
+                depth=cam_data.frame,
+                extrinsics=cam_data.extrinsics,
+                intrinsics=cam_data.intrinsics,
+                robot_name=robot_name,
+                instance=instance,
+                timestamp=sync_point.timestamp,
+            )
+    if sync_point.point_clouds:
+        for camera_id, point_cloud in sync_point.point_clouds.items():
+            log_point_cloud(
+                camera_id=camera_id,
+                points=point_cloud.points,
+                rgb_points=point_cloud.rgb_points,
+                extrinsics=point_cloud.extrinsics,
+                intrinsics=point_cloud.intrinsics,
+                robot_name=robot_name,
+                instance=instance,
+                timestamp=sync_point.timestamp,
+            )
+
+    if sync_point.custom_data:
+        for name, data in sync_point.custom_data.items():
+            log_custom_data(
+                name=name,
+                data=data,
+                robot_name=robot_name,
+                instance=instance,
+                timestamp=sync_point.timestamp,
+            )
+
+    # Log language data
+    if sync_point.language_data:
+        log_language(
+            language=sync_point.language_data.text,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=sync_point.timestamp,
+        )
 
 
 def _log_joint_data(
@@ -249,7 +377,9 @@ def log_synced_data(
     instance: int = 0,
     timestamp: Optional[float] = None,
 ) -> None:
-    """Log synchronized data from multiple sensors.
+    """Deprecated, please use log_sync_point instead.
+
+    Log synchronized data from multiple sensors.
 
     Useful for simulated data, or when relying on ROS to sync the data.
 
@@ -266,6 +396,7 @@ def log_synced_data(
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
     """
+    warn("log_synced_data is deprecated. Please use log_sync_point instead.")
     timestamp = timestamp or time.time()
     log_joint_positions(
         joint_positions, robot_name=robot_name, instance=instance, timestamp=timestamp

@@ -18,17 +18,28 @@ class Recording:
     frequency and data types, and to iterate over the synchronized data.
     """
 
-    def __init__(self, dataset: "Dataset", recording_id: str, size_bytes: int):
+    def __init__(
+        self,
+        dataset: "Dataset",
+        recording_id: str,
+        size_bytes: int,
+        robot_id: str,
+        instance: int,
+    ):
         """Initialize episode iterator for a specific recording.
 
         Args:
             dataset: Parent Dataset instance.
             recording_id: Unique identifier for the recording episode.
             size_bytes: Size of the recording episode in bytes.
+            robot_id: The robot that created this recording.
+            instance: The instance of the robot that created this recording.
         """
         self.dataset = dataset
         self.id = recording_id
         self.size_bytes = size_bytes
+        self.robot_id = robot_id
+        self.instance = instance
 
     def synchronize(
         self,
@@ -50,6 +61,8 @@ class Recording:
         return SynchronizedRecording(
             dataset=self.dataset,
             recording_id=self.id,
+            robot_id=self.robot_id,
+            instance=self.instance,
             frequency=frequency,
             data_types=data_types or [],
         )

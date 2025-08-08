@@ -32,6 +32,8 @@ class SynchronizedRecording:
         self,
         dataset: "Dataset",
         recording_id: str,
+        robot_id: str,
+        instance: int,
         frequency: int = 0,
         data_types: Optional[list[DataType]] = None,
     ):
@@ -40,6 +42,8 @@ class SynchronizedRecording:
         Args:
             dataset: Parent Dataset instance.
             recording_id: Recording ID string.
+            robot_id: The robot that created this recording.
+            instance: The instance of the robot that created this recording.
             frequency: Frequency at which to synchronize the recording.
             data_types: List of DataType to include in synchronization.
         """
@@ -48,6 +52,8 @@ class SynchronizedRecording:
         self.frequency = frequency
         self.data_types = data_types or []
         self.cache_dir: Optional[Path] = dataset.cache_dir
+        self.robot_id = robot_id
+        self.instance = instance
 
         self._recording_synced = self._get_synced_data()
         _rgb = self._recording_synced.frames[0].rgb_images

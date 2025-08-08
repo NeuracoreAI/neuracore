@@ -10,11 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- None
+- `nc.log_sync_point()` this is a new more versatile way of logging synced data.
 
 ### Changed
 
 - Moved from Mujoco 2.3.7 to Mujoco 3+ for the examples
+- Deprecated `log_synced_data` in favour of the new `log_sync_point`
 
 ### Removed
 

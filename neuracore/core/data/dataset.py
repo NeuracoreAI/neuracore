@@ -356,9 +356,11 @@ class Dataset:
                 if not 0 <= idx < len(self.recordings):
                     raise IndexError("Dataset index out of range")
                 return Recording(
-                    self,
-                    self.recordings[idx]["id"],
-                    self.recordings[idx]["total_bytes"],
+                    dataset=self,
+                    recording_id=self.recordings[idx]["id"],
+                    size_bytes=self.recordings[idx]["total_bytes"],
+                    robot_id=self.recordings[idx]["robot_id"],
+                    instance=self.recordings[idx]["instance"],
                 )
             raise TypeError(
                 f"Dataset indices must be integers or slices, not {type(idx)}"
@@ -378,4 +380,10 @@ class Dataset:
 
         recording = self.recordings[self._recording_idx]
         self._recording_idx += 1  # Increment counter
-        return Recording(self, recording["id"], recording["total_bytes"])
+        return Recording(
+            dataset=self,
+            recording_id=recording["id"],
+            size_bytes=recording["total_bytes"],
+            robot_id=recording["robot_id"],
+            instance=recording["instance"],
+        )
