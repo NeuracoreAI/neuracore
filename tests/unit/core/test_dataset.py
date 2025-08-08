@@ -114,11 +114,15 @@ def recordings_list():
         {
             "id": "rec1",
             "name": "recording1",
+            "robot_id": "robot1",
+            "instance": 1,
             "total_bytes": 512,
             "created_at": "2023-01-01T00:00:00Z",
         },
         {
             "id": "rec2",
+            "robot_id": "robot2",
+            "instance": 1,
             "name": "recording2",
             "total_bytes": 512,
             "created_at": "2023-01-02T00:00:00Z",
