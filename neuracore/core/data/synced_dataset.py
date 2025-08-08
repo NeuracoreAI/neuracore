@@ -99,6 +99,8 @@ class SynchronizedDataset:
                     synced_recording = SynchronizedRecording(
                         recording_id=self.dataset.recordings[idx]["id"],
                         dataset=self.dataset,
+                        robot_id=self.dataset.recordings[idx]["robot_id"],
+                        instance=self.dataset.recordings[idx]["instance"],
                         frequency=self.frequency,
                         data_types=self.data_types,
                     )
@@ -128,6 +130,8 @@ class SynchronizedDataset:
         return SynchronizedRecording(
             recording_id=recording["id"],
             dataset=self.dataset,
+            robot_id=recording["robot_id"],
+            instance=recording["instance"],
             frequency=self.frequency,
             data_types=self.data_types,
         )
