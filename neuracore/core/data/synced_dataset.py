@@ -50,6 +50,7 @@ class SynchronizedDataset:
         Returns:
             Self for iteration over episodes.
         """
+        self._recording_idx = 0
         return self
 
     def __len__(self) -> int:
