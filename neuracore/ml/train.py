@@ -115,7 +115,8 @@ def determine_optimal_batch_size(
         output_prediction_horizon=cfg.output_prediction_horizon,
     )
 
-    if cfg.algorithm is not None:
+    algorithm_config: dict[str, Any] = {}
+    if "algorithm" in cfg:
         model = hydra.utils.instantiate(
             cfg.algorithm,
             model_init_description=model_init_description,
@@ -128,7 +129,8 @@ def determine_optimal_batch_size(
         )
     else:
         raise ValueError(
-            "Either 'algorithm' or 'algorithm_id' must be provided in the configuration"
+            "Either 'algorithm' or 'algorithm_id' "
+            "must be provided in the configuration"
         )
 
     # Determine per-GPU batch size
