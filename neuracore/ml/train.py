@@ -408,13 +408,6 @@ def main(cfg: DictConfig) -> None:
     # Check if distributed training is enabled and multiple GPUs are available
     world_size = torch.cuda.device_count()
 
-    # Handle batch size configuration
-    if isinstance(batch_size, str) and batch_size.lower() == "auto":
-        optimal_batch_size = determine_optimal_batch_size(cfg, synchronized_dataset)
-        batch_size = optimal_batch_size
-    else:
-        batch_size = int(batch_size)
-
     if cfg.algorithm_id is not None:
         # Download the algorithm so that it can be processed later
         logger.info(f"Downloading algorithm from cloud with ID: {cfg.algorithm_id}")
@@ -422,6 +415,13 @@ def main(cfg: DictConfig) -> None:
         extract_dir = Path(cfg.local_output_dir) / "algorithm"
         storage_handler.download_algorithm(extract_dir=extract_dir)
         logger.info(f"Algorithm extracted to {extract_dir}")
+
+    # Handle batch size configuration
+    if isinstance(batch_size, str) and batch_size.lower() == "auto":
+        optimal_batch_size = determine_optimal_batch_size(cfg, synchronized_dataset)
+        batch_size = optimal_batch_size
+    else:
+        batch_size = int(batch_size)
 
     if world_size > 1:
         # Use multiprocessing to launch multiple processes
