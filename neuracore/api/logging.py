@@ -9,8 +9,8 @@ import base64
 import hashlib
 import json
 import time
-from typing import Any, Dict, List, Optional
-from warnings import warn
+from typing import Any, Dict, List, Optional, Tuple
+from warnings import filterwarnings, warn
 
 import numpy as np
 
@@ -39,6 +39,15 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
 from neuracore.core.utils.depth_utils import MAX_DEPTH
+
+
+class ExperimentalPointCloudWarning(UserWarning):
+    """Warning for experimental point cloud features."""
+
+    pass
+
+
+filterwarnings("once", category=ExperimentalPointCloudWarning)
 
 
 def _create_group_id_from_dict(joint_names: Dict[str, Any]) -> str:
@@ -268,7 +277,7 @@ def _log_joint_data(
 
 def _validate_extrinsics_intrinsics(
     extrinsics: Optional[np.ndarray], intrinsics: Optional[np.ndarray]
-) -> tuple[Optional[list[list[float]]], Optional[list[list[float]]]]:
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """Validate and convert camera extrinsics and intrinsics matrices.
 
     Args:
@@ -276,7 +285,7 @@ def _validate_extrinsics_intrinsics(
         intrinsics: Optional intrinsics matrix as numpy array
 
     Returns:
-        tuple: Converted extrinsics and intrinsics as lists of lists
+        Tuple of validated (intrinsics, extrinsics) matrices
 
     Raises:
         ValueError: If matrices have incorrect shapes
@@ -284,12 +293,11 @@ def _validate_extrinsics_intrinsics(
     if extrinsics is not None:
         if not isinstance(extrinsics, np.ndarray) or extrinsics.shape != (4, 4):
             raise ValueError("Extrinsics must be a numpy array of shape (4, 4)")
-        extrinsics = extrinsics.tolist()
-
+        extrinsics = extrinsics.astype(np.float16)
     if intrinsics is not None:
         if not isinstance(intrinsics, np.ndarray) or intrinsics.shape != (3, 3):
             raise ValueError("Intrinsics must be a numpy array of shape (3, 3)")
-        intrinsics = intrinsics.tolist()
+        intrinsics = intrinsics.astype(np.float16)
     return extrinsics, intrinsics
 
 
@@ -347,6 +355,11 @@ def _log_camera_data(
             f"Camera image dimensions {image.shape[1]}x{image.shape[0]} do not match "
             f"stream dimensions {stream.width}x{stream.height}"
         )
+
+    if extrinsics is not None:
+        extrinsics = extrinsics.tolist()
+    if intrinsics is not None:
+        intrinsics = intrinsics.tolist()
 
     camera_data = CameraData(
         timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics
@@ -892,15 +905,20 @@ def log_point_cloud(
         RobotError: If no robot is active and no robot_name provided
         ValueError: If point cloud format is invalid
     """
+    warn(
+        "Point cloud logging is experimental and may change in future releases.",
+        ExperimentalPointCloudWarning,
+    )
     timestamp = timestamp or time.time()
     if not isinstance(points, np.ndarray):
         raise ValueError("Point cloud must be a numpy array")
-    if points.dtype != np.float32:
-        raise ValueError("Point cloud must be float32")
+    if points.dtype != np.float16:
+        raise ValueError("Point cloud must be float16")
     if points.shape[1] != 3:
         raise ValueError("Point cloud must have 3 columns")
     if points.shape[0] > 307200:
         raise ValueError("Point cloud must have at most 307200 points")
+
     if rgb_points is not None:
         if not isinstance(rgb_points, np.ndarray):
             raise ValueError("RGB point cloud must be a numpy array")
@@ -912,7 +930,6 @@ def log_point_cloud(
             )
         if rgb_points.shape[1] != 3:
             raise ValueError("RGB point cloud must have 3 columns")
-        rgb_points = rgb_points.tolist()
 
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name, instance)
@@ -925,22 +942,21 @@ def log_point_cloud(
         stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
     start_stream(robot, stream)
-
     point_data = PointCloudData(
         timestamp=timestamp,
-        points=points.tolist(),
+        points=points,
         rgb_points=rgb_points,
         extrinsics=extrinsics,
         intrinsics=intrinsics,
     )
-
     stream.log(point_data)
-
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
 
-    StreamManagerOrchestrator().get_provider_manager(
-        robot.id, robot.instance
-    ).get_json_source(camera_id, TrackKind.POINT_CLOUD, sensor_key=str_id).publish(
-        point_data.model_dump(mode="json")
+    json_data = point_data.model_dump(mode="json")
+    src = (
+        StreamManagerOrchestrator()
+        .get_provider_manager(robot.id, robot.instance)
+        .get_json_source(camera_id, TrackKind.POINT_CLOUD, sensor_key=str_id)
     )
+    src.publish(json_data)

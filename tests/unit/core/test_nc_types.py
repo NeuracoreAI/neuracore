@@ -58,8 +58,10 @@ def sync_point_unordered() -> SyncPoint:
         },
         # Point cloud data with unordered keys
         point_clouds={
-            "lidar_2": PointCloudData(points=[[1, 2, 3], [4, 5, 6]]),
-            "lidar_1": PointCloudData(points=[[7, 8, 9]]),
+            "lidar_2": PointCloudData(
+                points=np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float16)
+            ),
+            "lidar_1": PointCloudData(points=np.array([[7, 8, 9]], dtype=np.float16)),
         },
         # Custom data with unordered keys
         custom_data={

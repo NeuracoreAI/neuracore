@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -124,7 +125,10 @@ def sample_sync_point(mock_image, mock_depth_image):
         },
         point_clouds={
             "lidar_1": PointCloudData(
-                points=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
+                points=np.array(
+                    [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+                    dtype=np.float16,
+                )
             )
         },
         language_data=LanguageData(text="Pick up the red block"),
@@ -890,7 +894,9 @@ class TestHelperMethods:
         )
 
         point_clouds = {
-            "lidar_1": PointCloudData(points=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+            "lidar_1": PointCloudData(
+                points=np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float16)
+            )
         }
 
         maskable_data = dataset._create_point_cloud_maskable_input_data(point_clouds)

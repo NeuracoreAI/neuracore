@@ -162,7 +162,7 @@ def test_log_point_cloud(
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
     # Create a small point cloud (1000 points x 3 dimensions)
-    points = np.random.rand(1000, 3).astype(np.float32)
+    points = np.random.rand(1000, 3).astype(np.float16)
 
     # Optional RGB data for each point
     rgb_points = np.random.randint(0, 256, (1000, 3), dtype=np.uint8)

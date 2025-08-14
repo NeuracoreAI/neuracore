@@ -153,7 +153,7 @@ def _create_point_cloud_data(maskable_data: MaskableData) -> dict[str, PointClou
 
     for cloud_idx in range(maskable_data.data.shape[1]):
         if maskable_data.mask[0, cloud_idx] > 0:  # Check if this cloud is valid
-            points = maskable_data.data[0, cloud_idx].cpu().numpy().tolist()
+            points = maskable_data.data[0, cloud_idx].cpu().numpy().astype(np.float16)
             point_clouds[f"cloud{cloud_idx}"] = PointCloudData(
                 timestamp=t, points=points
             )

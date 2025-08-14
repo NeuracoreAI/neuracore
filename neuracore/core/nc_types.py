@@ -7,15 +7,21 @@ support for serialization via Pydantic.
 """
 
 import base64
-import gzip
 import time
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, NamedTuple, Optional, Union
+from typing import Any, NamedTuple, Optional, Tuple, Union
 from uuid import uuid4
 
 import numpy as np
-from pydantic import BaseModel, Field, NonNegativeInt, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    NonNegativeInt,
+    field_serializer,
+    field_validator,
+)
 
 
 def _sort_dict_by_keys(data_dict: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
@@ -150,50 +156,123 @@ class PointCloudData(NCData):
     optional colour information and camera calibration for registration.
     """
 
-    points: list[list[float]]
-    rgb_points: Optional[list[list[int]]] = None
-    extrinsics: Optional[list[list[float]]] = None
-    intrinsics: Optional[list[list[float]]] = None
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    points: Optional[np.ndarray] = None  # (N, 3) float16
+    rgb_points: Optional[np.ndarray] = None  # (N, 3) uint8
+    extrinsics: Optional[np.ndarray] = None  # (4, 4) float16
+    intrinsics: Optional[np.ndarray] = None  # (3, 3) float16
 
     @staticmethod
-    def _decode(data: str, dtype: type, cols: int) -> list[Any]:
-        """Decode a compressed Base64-encoded array into a list of points."""
-        decompressed = gzip.decompress(base64.b64decode(data))
-        arr = np.frombuffer(decompressed, dtype=dtype).reshape(-1, cols)
-        return arr.tolist()
+    def _encode(arr: np.ndarray, dtype: Any) -> str:
+        return base64.b64encode(arr.astype(dtype).tobytes()).decode("utf-8")
 
     @staticmethod
-    def _encode(arr: list, dtype: type) -> str:
-        """Encode a list of points into compressed Base64 format."""
-        np_arr = np.array(arr, dtype=dtype)
-        compressed = gzip.compress(np_arr.tobytes(), compresslevel=3)
-        return base64.b64encode(compressed).decode("utf-8")
+    def _decode(data: str, dtype: Any, shape: Tuple[int, ...]) -> np.ndarray:
+        return np.frombuffer(
+            base64.b64decode(data.encode("utf-8")), dtype=dtype
+        ).reshape(*shape)
 
     @field_validator("points", mode="before")
     @classmethod
-    def decode_points(
-        cls, v: Optional[Union[str, list[list[float]]]]
-    ) -> Optional[list[list[float]]]:
-        """Decode points if provided as a compressed Base64 string."""
-        return cls._decode(v, np.float32, 3) if isinstance(v, str) else v
+    def decode_points(cls, v: Union[str, np.ndarray]) -> Optional[np.ndarray]:
+        """Decode base64 string to NumPy array if needed.
+
+        Args:
+            v: Base64 encoded string or NumPy array
+
+        Returns:
+            Decoded NumPy array or None
+        """
+        return cls._decode(v, np.float16, (-1, 3)) if isinstance(v, str) else v
 
     @field_validator("rgb_points", mode="before")
     @classmethod
-    def decode_rgb_points(
-        cls, v: Optional[Union[str, list[list[int]]]]
-    ) -> Optional[list[list[int]]]:
-        """Decode RGB points if provided as a compressed Base64 string."""
-        return cls._decode(v, np.uint8, 3) if isinstance(v, str) else v
+    def decode_rgb_points(cls, v: Union[str, np.ndarray]) -> Optional[np.ndarray]:
+        """Decode base64 string to NumPy array if needed.
 
+        Args:
+            v: Base64 encoded string or NumPy array
+
+        Returns:
+            Decoded NumPy array or None
+        """
+        return cls._decode(v, np.uint8, (-1, 3)) if isinstance(v, str) else v
+
+    @field_validator("extrinsics", mode="before")
+    @classmethod
+    def decode_extrinsics(cls, v: Union[str, np.ndarray]) -> Optional[np.ndarray]:
+        """Decode base64 string to NumPy array if needed.
+
+        Args:
+            v: Base64 encoded string or NumPy array
+
+        Returns:
+            Decoded NumPy array or None
+        """
+        return cls._decode(v, np.float16, (4, 4)) if isinstance(v, str) else v
+
+    @field_validator("intrinsics", mode="before")
+    @classmethod
+    def decode_intrinsics(cls, v: Union[str, np.ndarray]) -> Optional[np.ndarray]:
+        """Decode base64 string to NumPy array if needed.
+
+        Args:
+            v: Base64 encoded string or NumPy array
+
+        Returns:
+            Decoded NumPy array or None
+        """
+        return cls._decode(v, np.float16, (3, 3)) if isinstance(v, str) else v
+
+    # --- Serializers (encode on dump) ---
     @field_serializer("points", when_used="json")
-    def serialize_points(self, v: Optional[list[list[float]]]) -> Optional[str]:
-        """Serialize points to compressed Base64 format for JSON responses."""
-        return self._encode(v, np.float32) if v is not None else None
+    def serialize_points(self, v: Optional[np.ndarray]) -> Optional[str]:
+        """Encode NumPy array to base64 string if needed.
+
+        Args:
+            v: NumPy array to encode
+
+        Returns:
+            Base64 encoded string or None
+        """
+        return self._encode(v, np.float16) if v is not None else None
 
     @field_serializer("rgb_points", when_used="json")
-    def serialize_rgb_points(self, v: Optional[list[list[int]]]) -> Optional[str]:
-        """Serialize RGB points to compressed Base64 format for JSON responses."""
+    def serialize_rgb_points(self, v: Optional[np.ndarray]) -> Optional[str]:
+        """Encode NumPy array to base64 string if needed.
+
+        Args:
+            v: NumPy array to encode
+
+        Returns:
+            Base64 encoded string or None
+        """
         return self._encode(v, np.uint8) if v is not None else None
+
+    @field_serializer("extrinsics", when_used="json")
+    def serialize_extrinsics(self, v: Optional[np.ndarray]) -> Optional[str]:
+        """Encode NumPy array to base64 string if needed.
+
+        Args:
+            v: NumPy array to encode
+
+        Returns:
+            Base64 encoded string or None
+        """
+        return self._encode(v, np.float16) if v is not None else None
+
+    @field_serializer("intrinsics", when_used="json")
+    def serialize_intrinsics(self, v: Optional[np.ndarray]) -> Optional[str]:
+        """Encode NumPy array to base64 string if needed.
+
+        Args:
+            v: NumPy array to encode
+
+        Returns:
+            Base64 encoded string or None
+        """
+        return self._encode(v, np.float16) if v is not None else None
 
 
 class LanguageData(NCData):
