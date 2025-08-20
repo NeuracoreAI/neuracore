@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `nc.log_sync_point()` this is a new more versatile way of logging synced data.
+- `nc.download_urdf()` new method to get the urdf package for an existing robot
 
 ### Changed
 

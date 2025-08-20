@@ -171,6 +171,27 @@ def connect_robot(
     return robot
 
 
+def download_urdf(
+    destination_path: str, robot_name: Optional[str] = None, instance: int = 0
+) -> None:
+    """Download the robot's URDF and mesh package.
+
+    Downloads a ZIP archive of the robot's URDF and mesh files and extracts
+    it to the specified destination path.
+
+    Args:
+        destination_path: The directory path to save and extract the package.
+        robot_name: Robot identifier. If not provided, uses the currently
+            active robot from the global state.
+        instance: Instance number of the robot for multi-instance scenarios.
+
+    Raises:
+        RobotError: If the robot is not initialized, or if download/extraction fails.
+    """
+    robot = _get_robot(robot_name, instance)
+    robot.download_package(destination_path)
+
+
 def is_recording(robot_name: Optional[str] = None, instance: int = 0) -> bool:
     """Check if a robot is currently recording.
 

@@ -320,6 +320,54 @@ class Robot:
             robot_id=self.id, instance=self.instance
         )
 
+    def download_package(self, destination_path: str) -> None:
+        """Download the robot's URDF and mesh package.
+
+        Downloads a ZIP archive of the robot's URDF and mesh files and extracts
+        it to the specified destination path.
+
+        Args:
+            destination_path: The directory path to save and extract the package.
+
+        Raises:
+            RobotError: If the robot is not initialized, or if download/extraction
+                fails.
+        """
+        if not self.id:
+            raise RobotError("Robot not initialized. Call init() first.")
+
+        try:
+            response = requests.get(
+                f"{API_URL}/org/{self.org_id}/robots/{self.id}/package?is_shared={self.shared}",
+                headers=self._auth.get_headers(),
+                stream=True,
+            )
+            response.raise_for_status()
+
+            Path(destination_path).mkdir(parents=True, exist_ok=True)
+
+            zip_buffer = io.BytesIO()
+            for chunk in response.iter_content(chunk_size=8192):
+                zip_buffer.write(chunk)
+            zip_buffer.seek(0)
+
+            with zipfile.ZipFile(zip_buffer) as zf:
+                zf.extractall(destination_path)
+
+            logger.info(
+                "Successfully downloaded and extracted URDF package "
+                f"for robot {self.id} to {destination_path}"
+            )
+        except requests.exceptions.ConnectionError:
+            raise RobotError(
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            )
+        except requests.exceptions.RequestException as e:
+            raise RobotError(f"Failed to download URDF package: {str(e)}")
+        except Exception as e:
+            raise RobotError(f"Error downloading or extracting URDF package: {str(e)}")
+
     def _package_urdf(self) -> dict:
         """Package URDF file and associated meshes into a ZIP archive.
 
