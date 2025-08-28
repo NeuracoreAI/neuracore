@@ -13,7 +13,9 @@ import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+from threading import Lock
 from typing import Optional
+from warnings import warn
 
 import requests
 
@@ -81,11 +83,13 @@ class Robot:
         self._auth: Auth = get_auth()
         self._temp_dir = None
         self._data_streams: dict[str, DataStream] = dict()
-        self._recording_manager = get_recording_state_manager()
 
+        self._recording_manager = get_recording_state_manager()
         self._recording_manager.add_listener(
             RecordingStateManager.RECORDING_STOPPED, self._recording_stopped
         )
+        self._stop_streams_lock = Lock()
+
         self.org_id = org_id or get_current_org()
 
         if urdf_path and mjcf_path:
@@ -221,7 +225,13 @@ class Robot:
             response.raise_for_status()
             # Inform the state manager immediately to skip the round trip.
 
-            recording_id = response.json()
+            recording_details = response.json()
+            recording_id = recording_details["id"]
+            assert isinstance(recording_id, str)
+
+            if "start_time" in recording_details:
+                warn("This recording had already been started!")
+
             get_recording_state_manager().recording_started(
                 robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
@@ -292,9 +302,10 @@ class Robot:
         """
         if self.id != robot_id or self.instance != instance:
             return
-        for stream_id, data_stream in self._data_streams.items():
-            if data_stream.is_recording():
-                data_stream.stop_recording()
+        with self._stop_streams_lock:
+            for data_stream in self._data_streams.values():
+                if data_stream.is_recording():
+                    data_stream.stop_recording()
 
     def is_recording(self) -> bool:
         """Check if the robot is currently recording data.
