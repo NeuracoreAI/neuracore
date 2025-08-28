@@ -9,6 +9,7 @@ recording sessions.
 import logging
 import time
 from typing import Optional
+from warnings import warn
 
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.organizations import list_my_orgs
@@ -204,8 +205,6 @@ def start_recording(robot_name: Optional[str] = None, instance: int = 0) -> None
             has been set.
     """
     robot = _get_robot(robot_name, instance)
-    if robot.is_recording():
-        raise RobotError("Recording already in progress. Call stop_recording() first.")
     active_dataset_id = GlobalSingleton()._active_dataset_id
     if active_dataset_id is None:
         raise RobotError("No active dataset. Call create_dataset() first.")
@@ -232,7 +231,10 @@ def stop_recording(
     """
     robot = _get_robot(robot_name, instance)
     if not robot.is_recording():
-        logger.warning("No active recordings to stop.")
+        warn(
+            "No active recordings to stop. "
+            "Your recording may have been stopped by another node."
+        )
         return
     recording_id = robot.get_current_recording_id()
     if not recording_id:
