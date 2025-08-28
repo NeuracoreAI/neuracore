@@ -1,5 +1,7 @@
 """This module provides a method to get the currently select organization id."""
 
+import os
+
 from neuracore.core.cli.input_lock import user_input_lock
 from neuracore.core.cli.select_current_org import select_current_org
 from neuracore.core.config.config_manager import get_config_manager
@@ -16,12 +18,17 @@ def get_current_org() -> str:
 
     If the organization is selected interactively it is persisted to the config.
 
+    overridden by the `NEURACORE_ORG_ID` environment variable.
+
     Returns:
         The selected organization's id
 
     Raises:
         ConfigError: If there is an error trying to get the config
     """
+    if "NEURACORE_ORG_ID" in os.environ:
+        return os.environ["NEURACORE_ORG_ID"]
+
     with user_input_lock:
         config_manager = get_config_manager()
         org_id = config_manager.config.current_org_id
