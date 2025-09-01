@@ -6,6 +6,8 @@ and model predictions. All data types include automatic timestamping and
 support for serialization via Pydantic.
 """
 
+import base64
+import gzip
 import time
 from datetime import datetime, timezone
 from enum import Enum
@@ -13,7 +15,7 @@ from typing import Any, NamedTuple, Optional, Union
 from uuid import uuid4
 
 import numpy as np
-from pydantic import BaseModel, Field, NonNegativeInt
+from pydantic import BaseModel, Field, NonNegativeInt, field_serializer, field_validator
 
 
 def _sort_dict_by_keys(data_dict: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
@@ -142,16 +144,56 @@ class EndEffectorData(NCData):
 
 
 class PointCloudData(NCData):
-    """3D point cloud data with optional RGB coloring and camera parameters.
+    """3D point cloud data with optional RGB colouring and camera parameters.
 
     Represents 3D spatial data from depth sensors or LiDAR systems with
-    optional color information and camera calibration for registration.
+    optional colour information and camera calibration for registration.
     """
 
     points: list[list[float]]
     rgb_points: Optional[list[list[int]]] = None
     extrinsics: Optional[list[list[float]]] = None
     intrinsics: Optional[list[list[float]]] = None
+
+    @staticmethod
+    def _decode(data: str, dtype: type, cols: int) -> list[Any]:
+        """Decode a compressed Base64-encoded array into a list of points."""
+        decompressed = gzip.decompress(base64.b64decode(data))
+        arr = np.frombuffer(decompressed, dtype=dtype).reshape(-1, cols)
+        return arr.tolist()
+
+    @staticmethod
+    def _encode(arr: list, dtype: type) -> str:
+        """Encode a list of points into compressed Base64 format."""
+        np_arr = np.array(arr, dtype=dtype)
+        compressed = gzip.compress(np_arr.tobytes(), compresslevel=3)
+        return base64.b64encode(compressed).decode("utf-8")
+
+    @field_validator("points", mode="before")
+    @classmethod
+    def decode_points(
+        cls, v: Optional[Union[str, list[list[float]]]]
+    ) -> Optional[list[list[float]]]:
+        """Decode points if provided as a compressed Base64 string."""
+        return cls._decode(v, np.float32, 3) if isinstance(v, str) else v
+
+    @field_validator("rgb_points", mode="before")
+    @classmethod
+    def decode_rgb_points(
+        cls, v: Optional[Union[str, list[list[int]]]]
+    ) -> Optional[list[list[int]]]:
+        """Decode RGB points if provided as a compressed Base64 string."""
+        return cls._decode(v, np.uint8, 3) if isinstance(v, str) else v
+
+    @field_serializer("points", when_used="json")
+    def serialize_points(self, v: Optional[list[list[float]]]) -> Optional[str]:
+        """Serialize points to compressed Base64 format for JSON responses."""
+        return self._encode(v, np.float32) if v is not None else None
+
+    @field_serializer("rgb_points", when_used="json")
+    def serialize_rgb_points(self, v: Optional[list[list[int]]]) -> Optional[str]:
+        """Serialize RGB points to compressed Base64 format for JSON responses."""
+        return self._encode(v, np.uint8) if v is not None else None
 
 
 class LanguageData(NCData):
