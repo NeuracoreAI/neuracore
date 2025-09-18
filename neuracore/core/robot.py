@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -18,7 +19,7 @@ from typing import Optional
 from warnings import warn
 
 import requests
-
+from neuracore.logs.endpoint_csv_logger import EndpointCSVLogger
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.nc_types import RobotInstanceIdentifier
 from neuracore.core.streaming.data_stream import DataStream
@@ -33,6 +34,9 @@ from .exceptions import RobotError, ValidationError
 
 logger = logging.getLogger(__name__)
 
+init_logger  = EndpointCSVLogger("robots", "POST")
+start_recording_logger = EndpointCSVLogger("start", "POST")
+stop_recording_logger = EndpointCSVLogger("stop", "POST")
 
 class Robot:
     """Represents a robot instance with kinematic model and data streaming capabilities.
@@ -129,16 +133,21 @@ class Robot:
             raise RobotError("Not authenticated. Please call nc.login() first.")
 
         try:
-            response = requests.post(
-                f"{API_URL}/org/{self.org_id}/robots?is_shared={self.shared}",
+            print('Initing robot instance')
+            endpoint = "/robots"
+            url = f"{API_URL}/org/{self.org_id}/robots?is_shared={self.shared}"
+            start = time.perf_counter()
+            response = requests.post(url, 
                 json={
                     "name": self.name,
                     "instance": self.instance,
-                    "overwrite": self.overwrite,
-                },  # TODO: Add camera support
-                headers=self._auth.get_headers(),
-            )
+                    "overwrite": self.overwrite
+                    }, 
+                headers=self._auth.get_headers()
+                )
             response.raise_for_status()
+            duration = time.perf_counter() - start
+            init_logger.log(self.name, duration, response.status_code)
             response_body = response.json()
             self.id = response_body["robot_id"]
             has_urdf = response_body["has_urdf"]
@@ -147,12 +156,16 @@ class Robot:
                 self._upload_urdf_and_meshes()
                 if self._temp_dir:
                     self._temp_dir.cleanup()
-        except requests.exceptions.ConnectionError:
-            raise RobotError((
-                "Failed to connect to neuracore server, "
-                "please check your internet connection and try again."
-            ))
+        # except requests.exceptions.ConnectionError as e:
+            
+        #     raise RobotError((
+        #         "Failed to connect to neuracore server, "
+        #         "please check your internet connection and try again."
+        #     ))
         except requests.exceptions.RequestException as e:
+            duration = time.perf_counter() - start
+            init_logger.log(self.name, duration,
+                            getattr(e.response, "status_code", None), str(e))
             raise RobotError(f"Failed to initialize robot: {str(e)}")
 
     def add_data_stream(self, stream_id: str, stream: DataStream) -> None:
@@ -212,9 +225,11 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         try:
-
+            endpoint = 'start'
+            url = f"{API_URL}/org/{self.org_id}/recording/start"
+            start = time.perf_counter()
             response = requests.post(
-                f"{API_URL}/org/{self.org_id}/recording/start",
+                url,
                 headers=self._auth.get_headers(),
                 json={
                     "robot_id": self.id,
@@ -223,6 +238,8 @@ class Robot:
                 },
             )
             response.raise_for_status()
+            duration = time.perf_counter() - start
+            start_recording_logger.log(dataset_id, duration, response.status_code)
             # Inform the state manager immediately to skip the round trip.
 
             recording_details = response.json()
@@ -236,12 +253,15 @@ class Robot:
                 robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
             return recording_id
-        except requests.exceptions.ConnectionError:
-            raise RobotError((
-                "Failed to connect to neuracore server, "
-                "please check your internet connection and try again."
-            ))
+        # except requests.exceptions.ConnectionError:
+        #     raise RobotError((
+        #         "Failed to connect to neuracore server, "
+        #         "please check your internet connection and try again."
+        #     ))
         except requests.exceptions.RequestException as e:
+            duration = time.perf_counter() - start
+            start_recording_logger.log(dataset_id, duration,
+                            getattr(e.response, "status_code", None), str(e), getattr(e.response, "reason", None))
             raise RobotError(f"Failed to start recording: {str(e)}")
 
     def stop_recording(self, recording_id: str) -> None:
@@ -261,15 +281,18 @@ class Robot:
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
-
+        start = time.perf_counter()
         try:
+            endpoint = 'stop'
+            url = f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}"
             response = requests.post(
-                f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}",
+                url,
                 headers=self._auth.get_headers(),
             )
 
             response.raise_for_status()
-
+            duration = time.perf_counter() - start
+            stop_recording_logger.log(recording_id, duration, response.status_code)
             if response.json() == "WrongUser":
                 raise RobotError("Cannot stop recording initiated by another user")
 
@@ -279,12 +302,15 @@ class Robot:
             get_recording_state_manager().recording_stopped(
                 robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
-        except requests.exceptions.ConnectionError:
-            raise RobotError((
-                "Failed to connect to neuracore server, "
-                "please check your internet connection and try again."
-            ))
+        # except requests.exceptions.ConnectionError:
+        #     raise RobotError((
+        #         "Failed to connect to neuracore server, "
+        #         "please check your internet connection and try again."
+        #     ))
         except requests.exceptions.RequestException as e:
+            duration = time.perf_counter() - start
+            stop_recording_logger.log(recording_id, duration,
+                            getattr(e.response, "status_code", None), str(e), getattr(e.response, "reason", None))
             raise RobotError(f"Failed to stop recording: {str(e)}")
 
     def _recording_stopped(

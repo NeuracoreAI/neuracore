@@ -12,6 +12,7 @@ from tqdm import tqdm
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
+from neuracore.logs.endpoint_csv_logger import EndpointCSVLogger
 
 from ..auth import Auth, get_auth
 from ..const import API_URL
@@ -22,7 +23,8 @@ DEFAULT_CACHE_DIR = Path(tempfile.gettempdir() + "/neuracore_cache")
 
 
 logger = logging.getLogger(__name__)
-
+get_by_name_logger = EndpointCSVLogger("by_name", 'GET')
+create_dataset_logger = EndpointCSVLogger("datasets", 'POST')
 
 class Dataset:
     """Class representing a dataset in Neuracore."""
@@ -132,24 +134,33 @@ class Dataset:
         """
         auth: Auth = get_auth()
         org_id = get_current_org()
-        req = requests.get(
-            f"{API_URL}/org/{org_id}/datasets/search/by-name",
-            params={"name": name},
-            headers=auth.get_headers(),
-        )
-        if req.status_code != 200:
-            if non_exist_ok:
-                return None
-            raise DatasetError(f"Dataset '{name}' not found.")
-        dataset_json = req.json()
-        return Dataset(
-            id=dataset_json["id"],
-            org_id=org_id,
-            name=dataset_json["name"],
-            size_bytes=dataset_json["size_bytes"],
-            tags=dataset_json["tags"],
-            is_shared=dataset_json["is_shared"],
-        )
+        url = f"{API_URL}/org/{org_id}/datasets/search/by-name"
+        start = time.perf_counter()
+        try:
+            req = requests.get(
+                url,
+                params={"name": name},
+                headers=auth.get_headers(),
+            )
+            req.raise_for_status()
+            duration = time.perf_counter() - start
+            get_by_name_logger.log(name, duration, req.status_code)
+            if req.status_code != 200:
+                if non_exist_ok:
+                    return None
+                raise DatasetError(f"Dataset '{name}' not found.")
+            dataset_json = req.json()
+            return Dataset(
+                id=dataset_json["id"],
+                org_id=org_id,
+                name=dataset_json["name"],
+                size_bytes=dataset_json["size_bytes"],
+                tags=dataset_json["tags"],
+                is_shared=dataset_json["is_shared"],
+            )
+        except Exception as e:
+            duration = time.perf_counter() - start
+            get_by_name_logger.log(name, duration, getattr(e.response, "status_code", None), getattr(e.response, 'reason', None))
 
     @staticmethod
     def create(
@@ -208,26 +219,35 @@ class Dataset:
         """
         auth: Auth = get_auth()
         org_id = get_current_org()
-        response = requests.post(
-            f"{API_URL}/org/{org_id}/datasets",
-            headers=auth.get_headers(),
-            json={
-                "name": name,
-                "description": description,
-                "tags": tags,
-                "is_shared": shared,
-            },
-        )
-        response.raise_for_status()
-        dataset_json = response.json()
-        return Dataset(
-            id=dataset_json["id"],
-            org_id=org_id,
-            name=dataset_json["name"],
-            size_bytes=dataset_json["size_bytes"],
-            tags=dataset_json["tags"],
-            is_shared=dataset_json["is_shared"],
-        )
+        endpoint = 'datasets'
+        url = f"{API_URL}/org/{org_id}/datasets"
+        start = time.perf_counter()
+        try:
+            response = requests.post(
+                url,
+                headers=auth.get_headers(),
+                json={
+                    "name": name,
+                    "description": description,
+                    "tags": tags,
+                    "is_shared": shared,
+                },
+            )
+            response.raise_for_status()
+            duration = time.perf_counter() - start
+            create_dataset_logger.log(name, duration, response.status_code)
+            dataset_json = response.json()
+            return Dataset(
+                id=dataset_json["id"],
+                org_id=org_id,
+                name=dataset_json["name"],
+                size_bytes=dataset_json["size_bytes"],
+                tags=dataset_json["tags"],
+                is_shared=dataset_json["is_shared"],
+            )
+        except Exception as e:
+            duration = time.perf_counter() - start
+            create_dataset_logger.log(name, duration, getattr(e.response, "status_code", None), getattr(e.response, 'reason', None))
 
     def _synchronize(
         self, frequency: int = 0, data_types: Optional[list[DataType]] = None

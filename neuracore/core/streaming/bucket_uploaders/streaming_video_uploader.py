@@ -12,6 +12,7 @@ import logging
 import queue
 import threading
 from fractions import Fraction
+import time
 from typing import Callable, Optional
 
 import av
@@ -22,7 +23,7 @@ from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.nc_types import CameraData
-
+from neuracore.logs.endpoint_csv_logger import EndpointCSVLogger
 from .bucket_uploader import BucketUploader
 from .resumable_upload import ResumableUpload
 
@@ -33,6 +34,7 @@ CHUNK_MULTIPLE = 256 * 1024  # Chunk size multiple of 256 KiB
 MB_CHUNK = 4 * CHUNK_MULTIPLE
 CHUNK_SIZE = 64 * MB_CHUNK
 
+endpoint_logger = EndpointCSVLogger("resumable_upload_url", "GET")
 
 class StreamingVideoUploader(BucketUploader):
     """A video encoder that handles variable framerate streaming and chunked uploads.
@@ -317,18 +319,26 @@ class StreamingVideoUploader(BucketUploader):
             "content_type": "application/json",
         }
         org_id = get_current_org()
-        upload_url_response = requests.get(
-            f"{API_URL}/org/{org_id}/recording/{self.uploader.recording_id}/resumable_upload_url",
-            params=params,
-            headers=get_auth().get_headers(),
-        )
-        upload_url_response.raise_for_status()
-        upload_url = upload_url_response.json()["url"]
-        for i in range(0, len(self.frame_metadatas)):
-            self.frame_metadatas[i].frame_idx = i
-        data = json.dumps([fm.model_dump(mode="json") for fm in self.frame_metadatas])
-        response = requests.put(
-            upload_url, headers={"Content-Length": str(len(data))}, data=data
-        )
-        response.raise_for_status()
-        self.frame_metadatas = []
+        endpoint = 'resumable_upload_url'
+        url = f"{API_URL}/org/{org_id}/recording/{self.uploader.recording_id}/{endpoint}"
+        start = time.perf_counter()
+        try:
+            upload_url_response = requests.get(
+                url,
+                params=params,
+                headers=get_auth().get_headers(),
+            )
+            upload_url_response.raise_for_status()
+            duration = time.perf_counter() - start
+            endpoint_logger.log(self.uploader.recording_id, duration, upload_url_response.status_code)
+            upload_url = upload_url_response.json()["url"]
+            for i in range(0, len(self.frame_metadatas)):
+                self.frame_metadatas[i].frame_idx = i
+            data = json.dumps([fm.model_dump(mode="json") for fm in self.frame_metadatas])
+            response = requests.put(
+                upload_url, headers={"Content-Length": str(len(data))}, data=data
+            )
+            self.frame_metadatas = []
+        except Exception as e:
+            duration = time.perf_counter() - start
+            endpoint_logger.log(self.uploader.recording_id, duration, getattr(e.response, 'status_code', None), getattr(e.response, 'reason', None))

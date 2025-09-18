@@ -6,14 +6,16 @@ recording data streams and track active stream counts via API calls.
 
 import threading
 from abc import ABC, abstractmethod
+import time
 
 import requests
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
+from neuracore.logs.endpoint_csv_logger import EndpointCSVLogger
 
-
+endpoint_logger = EndpointCSVLogger("update_num_active_streams", "PUT")
 class BucketUploader(ABC):
     """Abstract base class for uploading recording data to cloud storage buckets.
 
@@ -51,17 +53,25 @@ class BucketUploader(ABC):
         """
         assert delta in (1, -1), "Value must be 1 or -1"
         org_id = get_current_org()
-        response = requests.put(
-            f"{API_URL}/org/{org_id}/recording/{self.recording_id}/update_num_active_streams",
-            params={
-                "delta": delta,
-            },
-            headers=get_auth().get_headers(),
-        )
-        response.raise_for_status()
-        if response.status_code != 200:
-            raise ValueError("Failed to update number of active streams")
-
+        endpoint = 'update_num_active_streams'
+        url = f"{API_URL}/org/{org_id}/recording/{self.recording_id}/{endpoint}"
+        start = time.perf_counter()
+        try:
+            response = requests.put(
+                url,
+                params={
+                    "delta": delta,
+                },
+                headers=get_auth().get_headers(),
+            )
+            response.raise_for_status()
+            duration = time.perf_counter() - start
+            endpoint_logger.log(self.recording_id, duration, response.status_code)
+            if response.status_code != 200:
+                raise ValueError("Failed to update number of active streams")
+        except Exception as e:
+            duration = time.perf_counter() - start
+            endpoint_logger.log(self.recording_id, duration, getattr(e.response, "status_code", None), getattr(e.response, 'reason', None))
     @abstractmethod
     def finish(self) -> threading.Thread:
         """Complete the upload process and return a thread for async execution.

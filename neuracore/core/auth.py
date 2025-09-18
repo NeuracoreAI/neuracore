@@ -7,10 +7,11 @@ the application.
 """
 
 import os
+import time
 from typing import Optional
 
 import requests
-
+from neuracore.logs.endpoint_csv_logger import EndpointCSVLogger
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.config.get_api_key import get_api_key
 from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
@@ -18,7 +19,7 @@ from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
 from .const import API_URL
 from .exceptions import AuthenticationError
 
-
+endpoint_logger = EndpointCSVLogger("verify-api-key", "POST")
 class Auth(metaclass=SingletonMetaclass):
     """Singleton class for managing Neuracore authentication state.
 
@@ -56,22 +57,30 @@ class Auth(metaclass=SingletonMetaclass):
 
         # Verify API key with server and get access token
         try:
+            endpoint = 'verify-api-key'
+            url = f"{API_URL}/auth/verify-api-key"
+            start = time.perf_counter()
             response = requests.post(
-                f"{API_URL}/auth/verify-api-key",
+                url,
                 json={"api_key": api_key},
             )
+            response.raise_for_status()
+            duration = time.perf_counter() - start
+            endpoint_logger.log(api_key, duration, response.status_code)
             if response.status_code != 200:
                 raise AuthenticationError(
                     "Could not verify API key. Please check your key and try again."
                 )
             token_data = response.json()
             self._access_token = token_data["access_token"]
-        except requests.exceptions.ConnectionError:
-            raise AuthenticationError((
-                "Failed to connect to neuracore server, "
-                "please check your internet connection and try again."
-            ))
-        except requests.exceptions.RequestException:
+        # except requests.exceptions.ConnectionError:
+        #     raise AuthenticationError((
+        #         "Failed to connect to neuracore server, "
+        #         "please check your internet connection and try again."
+        #     ))
+        except requests.exceptions.RequestException as e:
+            duration = time.perf_counter() - start
+            endpoint_logger.log(api_key, duration, e.response.status_code, e.response.reason)
             raise AuthenticationError(
                 "Could not verify API key. Please check your key and try again."
             )
