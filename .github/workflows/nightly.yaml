@@ -40,10 +40,8 @@ jobs:
     - name: Run Integration Test
       env:
         NEURACORE_API_URL: "https://staging.api.neuracore.app/api"
-        SERVICE_ACCOUNT_USERNAME: ${{ secrets.SERVICE_ACCOUNT_USERNAME }}
-        SERVICE_ACCOUNT_PASSWORD: ${{ secrets.SERVICE_ACCOUNT_PASSWORD }}
         SERVICE_ORG: ${{ vars.SERVICE_ORG }}
+        NEURACORE_API_KEY: ${{ secrets.SERVICE_ACCOUNT_API_KEY }}
       run: |
-        nc-login --email="$SERVICE_ACCOUNT_USERNAME" --password="$SERVICE_ACCOUNT_PASSWORD"
         nc-select-org --org-id="$SERVICE_ORG"
         pytest tests/integration/test_consume_stream.py::test_get_latest_data_from_multiple_nodes
