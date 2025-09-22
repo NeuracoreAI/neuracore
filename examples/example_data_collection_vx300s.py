@@ -6,7 +6,8 @@ import numpy as np
 from common.rollout_utils import rollout_policy
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
 
-import neuracore as nc
+# import neuracore as nc
+import neuracore_new_data_format as nc
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
