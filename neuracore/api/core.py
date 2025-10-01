@@ -166,6 +166,10 @@ def connect_robot(
     validate_version()
     robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     GlobalSingleton()._active_robot = robot
+    if robot.archived is True:
+        warn(
+            f"This robot '{robot.name}' is archived. Was this intentional?",
+        )
     # Initialize push update managers
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
