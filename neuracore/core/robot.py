@@ -80,6 +80,7 @@ class Robot:
         self.overwrite = overwrite
         self.shared = shared
         self.id: Optional[str] = None
+        self.archived: Optional[bool] = None
         self._auth: Auth = get_auth()
         self._temp_dir = None
         self._data_streams: dict[str, DataStream] = dict()
@@ -141,6 +142,7 @@ class Robot:
             response.raise_for_status()
             response_body = response.json()
             self.id = response_body["robot_id"]
+            self.archived = response_body.get("archived")
             has_urdf = response_body["has_urdf"]
             # Upload URDF and meshes if provided
             if self.urdf_path and not has_urdf:
