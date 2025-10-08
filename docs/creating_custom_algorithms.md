@@ -173,7 +173,7 @@ my_algorithm/
 
 ### Option 2: Private Algorithm Upload
 
-1. Go to https://www.neuracore.app/dashboard/algorithms
+1. Go to the "Algorithms" tab on Neuracore Dashboard
 2. Click the "Upload Algorithm" button
 3. Either:
    - Upload a single Python file containing your `NeuracoreModel` extension
