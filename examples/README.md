@@ -26,11 +26,13 @@ The data collection example demonstrates how to:
 - Visualize the robot in real-time
 - Save demonstrations for future use
 
+**NOTE:** You might need to set the `MUJOCO_GL` environment to `egl` using `export MUJOCO_GL=egl` if your RGB Camera Feed visualizations are glitchy on the Robot Data Visualiser Console.
+
 1. Run the example:
 ```bash
 python example_data_collection_vx300s.py
 ```
-2. Navigate to the [robots](https://neuracore.app/dashboard/robots) tab in the app
+2. Navigate to the "Robots" tab in the Neuracore Dashboard
 3. You should see a live view of your robot running!
 
 To record demonstrations:
@@ -38,8 +40,8 @@ To record demonstrations:
 ```bash
 python example_data_collection_vx300s.py --record
 ```
-2. The script will automatically start and stop recordings for each demonstration. You can see this process happening in the [robots](https://neuracore.app/dashboard/robots) tab in the app
-3. Navigate to the [data](https://neuracore.app/dashboard/data) tab in the app to see your dataset
+2. The script will automatically start and stop recordings for each demonstration. You can see this process happening in the "Robots" tab in the Neuracore Dashboard
+3. Navigate to the "Data" tab in the Neuracore Dashboard to see your dataset
 
 
 ### Launching Training
@@ -50,7 +52,7 @@ Launch training example show how to:
 **NOTE: Before running this example:**
 - Collect a dataset following the example: [Data Collection](#data-collection)
 
-Now that you have some data, navigate to [https://neuracore.app/dashboard/training](https://neuracore.app/dashboard/training) to launch a training run on your newly collected data.
+Now that you have some data, navigate to "Data" tab in the Neuracore Dashboard to launch a training run on your newly collected data.
 
 Alternatively, you can launch training runs from the python API:
 
@@ -71,7 +73,7 @@ The local deployment example shows how to:
 **NOTE: Before running this example:**
 - Collect a dataset following the example: [Data Collection](#data-collection)
 - Start a training run by:
-   - Go to your [training dashboard ](https://www.neuracore.app/dashboard/training) and start a training run
+   - Go to the "Training" tab on the Neuracore Dashboard and start a training run
    - Or follow [Launching Training](#launching-training) to start a training run
 - Wait for the training run to finish
 
@@ -95,10 +97,10 @@ The server deployment example shows how to:
 **NOTE: Before running this example:**
 - Collect a dataset following the example: [Data Collection](#data-collection)
 - Start a training run by:
-   - Go to your [training dashboard ](https://www.neuracore.app/dashboard/training) and start a training run
+   - Go to the "Training" tab on your Neuracore Dashboard and start a training run
    - Or follow [Launching Training](#launching-training) to start a training run
 - Wait for the training run to finish
-- Go to your [endpoint dashboard ](https://www.neuracore.app/dashboard/endpoints) and start an endpoint. Call it __"MyExampleEndpoint"__
+- Go to the "Endpoint" tab on your Neuracore Dashboard and start an endpoint. Call it __"MyExampleEndpoint"__
 - Wait for the status to be active
 
 One you have completed the steps above:

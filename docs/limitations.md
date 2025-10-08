@@ -52,7 +52,7 @@ Useful resources:
 
 #### Live Data Monitoring
 
-Each viewer connected to the robot via the [Neuracore dashboard](https://www.neuracore.app/dashboard/robots) adds an additional video stream. Although monitoring uses lossy compression and is capped at 30 FPS, it increases encoding load—especially when combined with recording.
+Each viewer connected to the robot via the Neuracore Dashboard adds an additional video stream. Although monitoring uses lossy compression and is capped at 30 FPS, it increases encoding load—especially when combined with recording.
 
 To reduce load:
 
