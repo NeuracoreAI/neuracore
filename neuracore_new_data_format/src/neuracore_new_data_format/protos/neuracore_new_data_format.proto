@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package neuracore_new_data_format;
+
+message FloatArray {
+    repeated float values = 1;
+    repeated int64 shape = 2; 
+}
+
+message JointData {
+    double timestamp = 1;
+    map<string, float> values = 2;
+    map<string, float> additional_values = 3;
+}
+
+message CameraMetadata {
+    double timestamp = 1;
+    string camera_id = 2;
+    int64 frame_idx = 3;
+    repeated FloatArray extrinsics = 4;
+    repeated FloatArray intrinsics = 5;
+}
+
+message CameraData {
+    CameraMetadata metadata = 1;
+    bytes frame = 2;
+}
+
+message VideoBlob {
+    bytes blob = 1;
+}
+
+message LanguageData {
+    double timestamp = 1;
+    string text = 2;
+}
+
+message CustomData {
+    double timestamp = 1;
+    string name = 2;
+    string json_data = 3; // JSON-encoded data
+}

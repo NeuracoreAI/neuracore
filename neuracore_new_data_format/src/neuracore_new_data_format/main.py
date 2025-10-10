@@ -1,9 +1,9 @@
 from typing import Any, Optional
 
-from neuracore_new_data_format.recording import RecordingFactory, RecordingType
 import numpy as np
 
 from neuracore_new_data_format.dataset import Dataset
+from neuracore_new_data_format.recording import RecordingFactory, RecordingType
 
 
 class Robot:
@@ -68,7 +68,8 @@ def connect_robot(
 
 
 _current_dataset: Dataset | None = None
-recording_factory = RecordingFactory(RecordingType.SQLITE)
+recording_factory = RecordingFactory(RecordingType.MCAP)
+
 
 def get_dataset() -> Dataset:
     assert _current_dataset is not None, "No active dataset"

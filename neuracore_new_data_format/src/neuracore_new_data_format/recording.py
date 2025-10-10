@@ -1,10 +1,18 @@
+import sqlite3
 from abc import ABC, abstractmethod
 from enum import Enum
-import sqlite3
 from typing import Generator
 
-from neuracore_new_data_format.data_marshaller.data_marshaller import (
-    DataMarshaller,
+from mcap.writer import CompressionType
+from mcap_protobuf.writer import Writer
+
+from neuracore_new_data_format.data_marshaller.data_marshaller import DataMarshaller
+from neuracore_new_data_format.data_marshaller.mcap_marshaller import (
+    CameraDataMcapMarshaller,
+    CustomDataMcapMarshaller,
+    JointDataMcapMarshaller,
+    LanguageDataMcapMarshaller,
+    ReaderGenerator,
 )
 from neuracore_new_data_format.data_marshaller.sqlite_marshallers import (
     CameraDataSqliteMarshaller,
@@ -33,17 +41,9 @@ class Recording(ABC):
     def log_data(self, data_type: str, data: NCData):
         self._get_marshaller(data_type).write(data)
 
-        self.batch_size += 1
-        if self.batch_size > BATCH_SIZE:
-            self.con.commit()
-            self.batch_size = 0
-
     def stop(self):
         for marshaller in self.data_marshaller.values():
             marshaller.close()
-
-        self.con.commit()
-        self.con.close()
 
     def read_data(self, data_type: str) -> Generator[NCData, None, None]:
         yield from self._get_marshaller(data_type).read()
@@ -77,6 +77,18 @@ class SqliteRecording(Recording):
         self.cur.execute("PRAGMA foreign_keys = OFF;")
 
         self.data_marshaller: dict[str, DataMarshaller] = {}
+
+    def log_data(self, data_type, data):
+        super().log_data(data_type, data)
+        self.batch_size += 1
+        if self.batch_size > BATCH_SIZE:
+            self.con.commit()
+            self.batch_size = 0
+
+    def stop(self):
+        super().stop()
+        self.con.commit()
+        self.con.close()
 
     def _get_marshaller(self, data_type: str):
 
@@ -114,6 +126,49 @@ class SqliteRecording(Recording):
 class McapRecording(Recording):
     def __init__(self, name: str):
         self.name = name
+        self.file = open(f"{self.name}.mcap", "wb")
+        self.writer = Writer(
+            output=self.file,
+            enable_crcs=False,
+            compression=CompressionType.NONE,
+        )
+        self.reader = ReaderGenerator(filename=f"{self.name}.mcap")
+        self.data_marshaller: dict[str, DataMarshaller] = {}
 
     def _get_marshaller(self, data_type: str):
-        raise NotImplementedError("_get_marshaller not implemented yet")
+        if data_type in self.data_marshaller:
+            return self.data_marshaller[data_type]
+
+        match data_type:
+            case "custom":
+                self.data_marshaller[data_type] = CustomDataMcapMarshaller(
+                    writer=self.writer, reader=self.reader
+                )
+            case (
+                "joint_positions"
+                | "joint_velocities"
+                | "joint_torques"
+                | "joint_target_positions"
+            ):
+                self.data_marshaller[data_type] = JointDataMcapMarshaller(
+                    writer=self.writer, reader=self.reader, data_type=data_type
+                )
+            case "language":
+                self.data_marshaller[data_type] = LanguageDataMcapMarshaller(
+                    writer=self.writer, reader=self.reader
+                )
+            case "rgb":
+                self.data_marshaller[data_type] = CameraDataMcapMarshaller(
+                    writer=self.writer, reader=self.reader
+                )
+            case _:
+                raise ValueError(f"Unknown data type: {data_type}")
+
+        return self.data_marshaller[data_type]
+
+    def stop(self):
+        super().stop()
+        print(f"stop recording {self.name}")
+        self.writer.finish()
+        self.file.flush()
+        self.file.close()

@@ -69,5 +69,3 @@ def test_log_and_read_camera_data_rgb():
     finally:
         if os.path.exists(db_file):
             os.remove(db_file)
-
-

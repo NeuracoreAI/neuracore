@@ -1,11 +1,20 @@
-
-
 import json
 from sqlite3 import Cursor
 from typing import Generator
-from neuracore_new_data_format.data_marshaller.data_marshaller import CameraDataEncoder, DataMarshaller
-from neuracore_new_data_format.ncdata import CameraData, CustomData, JointData, LanguageData, NCData
+
 import numpy as np
+
+from neuracore_new_data_format.data_marshaller.data_marshaller import (
+    CameraDataEncoder,
+    DataMarshaller,
+)
+from neuracore_new_data_format.ncdata import (
+    CameraData,
+    CustomData,
+    JointData,
+    LanguageData,
+    NCData,
+)
 
 
 class SqliteMarshaller(DataMarshaller):
@@ -162,6 +171,51 @@ class CameraDataMetadataSqliteMarshaller(SqliteMarshaller):
         )
 
 
+class CameraDataVideoSqliteMarshaller:
+    TABLE_NAME = "camera_data"
+
+    def __init__(self, cur: Cursor, camera_id: str, encoder: CameraDataEncoder):
+        self.cur = cur
+        self.camera_id = camera_id
+        self.encoder = encoder
+
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.TABLE_NAME} (
+                camera_id TEXT,
+                frames BLOB
+            )
+            """
+        )
+
+    def add_frame(self, frame: np.ndarray, timestamp: float) -> None:
+        """
+        Add a numpy RGB frame to the encoder with a timestamp in seconds.
+        PTS is calculated relative to the first frame.
+        """
+        self.encoder.add_frame(frame, timestamp)
+
+    def read_frames(self) -> list[np.ndarray]:
+        """
+        Decode MP4 bytes back into frames.
+        Returns list of frame ndarray
+        """
+        self.cur.execute(
+            f"SELECT frames FROM {self.TABLE_NAME} WHERE camera_id = ?",
+            (self.camera_id,),
+        )
+        blob = self.cur.fetchone()[0]
+        return self.encoder.read_frames(blob)
+
+    def close(self) -> None:
+        """Finalize encoding and write MP4 bytes to SQLite."""
+        blob = self.encoder.get_blob()
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE_NAME} (camera_id, frames) VALUES (?, ?)",
+            (self.camera_id, blob),
+        )
+
+
 class CameraDataSqliteMarshaller(SqliteMarshaller):
     def __init__(
         self,
@@ -170,22 +224,24 @@ class CameraDataSqliteMarshaller(SqliteMarshaller):
         super().__init__(cur=cur)
 
         self.metadata_marshaller: dict[str, CameraDataMetadataSqliteMarshaller] = {}
-        self.video_encoders: dict[str, CameraDataEncoder] = {}
+        self.video_marshallers: dict[str, CameraDataVideoSqliteMarshaller] = {}
 
-    def get_metadata_marshaller(self, camera_id: str) -> CameraDataMetadataSqliteMarshaller:
+    def get_metadata_marshaller(
+        self, camera_id: str
+    ) -> CameraDataMetadataSqliteMarshaller:
         if camera_id not in self.metadata_marshaller:
             self.metadata_marshaller[camera_id] = CameraDataMetadataSqliteMarshaller(
                 cur=self.cur, camera_id=camera_id
             )
         return self.metadata_marshaller[camera_id]
 
-    def get_video_encoder(self, camera_id: str) -> CameraDataEncoder:
-        if camera_id not in self.video_encoders:
-            self.video_encoders[camera_id] = CameraDataEncoder(
-                cur=self.cur, camera_id=camera_id
+    def get_video_encoder(self, camera_id: str) -> CameraDataVideoSqliteMarshaller:
+        if camera_id not in self.video_marshallers:
+            self.video_marshallers[camera_id] = CameraDataVideoSqliteMarshaller(
+                cur=self.cur, camera_id=camera_id, encoder=CameraDataEncoder()
             )
 
-        return self.video_encoders[camera_id]
+        return self.video_marshallers[camera_id]
 
     def write(
         self,
@@ -204,12 +260,12 @@ class CameraDataSqliteMarshaller(SqliteMarshaller):
             yield from metadata_marshaller.read(frames)
 
     def close(self):
-        for video_encoder in self.video_encoders.values():
+        for video_encoder in self.video_marshallers.values():
             video_encoder.close()
 
     def list_camera_ids(self) -> list[str]:
         self.cur.execute(
-            f"SELECT DISTINCT camera_id FROM {CameraDataEncoder.TABLE_NAME}"
+            f"SELECT DISTINCT camera_id FROM {CameraDataVideoSqliteMarshaller.TABLE_NAME}"
         )
         return [row[0] for row in self.cur.fetchall()]
 
