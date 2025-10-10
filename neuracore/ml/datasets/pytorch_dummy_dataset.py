@@ -200,7 +200,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         """
         try:
             sample = TrainingSample(
-                output_predicition_mask=torch.ones(
+                output_prediction_mask=torch.ones(
                     (self.output_prediction_horizon,), dtype=torch.float32
                 ),
             )
@@ -411,7 +411,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         return BatchedTrainingSamples(
             inputs=self._collate_fn([s.inputs for s in samples], self.input_data_types),
             outputs=bd,
-            output_predicition_mask=torch.stack(
-                [sample.output_predicition_mask for sample in samples]
+            output_prediction_mask=torch.stack(
+                [sample.output_prediction_mask for sample in samples]
             ),
         )

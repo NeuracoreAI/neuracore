@@ -152,7 +152,7 @@ class StreamingReader(io.BufferedIOBase):
         """Check if the stream supports seeking operations.
 
         Returns:
-            Always False, as streaming responses cannot be seeked.
+            Always False, as streaming responses cannot be sought.
         """
         return False
 

@@ -355,7 +355,7 @@ class PytorchNeuracoreDataset(Dataset, ABC):
             outputs=self._collate_fn(
                 [s.outputs for s in samples], self.output_data_types
             ),
-            output_predicition_mask=torch.stack(
-                [sample.output_predicition_mask for sample in samples]
+            output_prediction_mask=torch.stack(
+                [sample.output_prediction_mask for sample in samples]
             ),
         )

@@ -1,4 +1,4 @@
-# Neuarcore ROS2 Example
+# Neuracore ROS2 Example
 
 Example showing how there is no need to synchronise your data across nodes -- Neuracore does this for you!
 

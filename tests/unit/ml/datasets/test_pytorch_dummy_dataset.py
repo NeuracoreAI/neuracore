@@ -145,13 +145,13 @@ class TestPytorchDummyDataset:
         assert isinstance(sample, BatchedTrainingSamples)
         assert sample.inputs is not None
         assert sample.outputs is not None
-        assert sample.output_predicition_mask is not None
+        assert sample.output_prediction_mask is not None
 
         # Check prediction mask shape
-        assert sample.output_predicition_mask.shape == (
+        assert sample.output_prediction_mask.shape == (
             dataset.output_prediction_horizon,
         )
-        assert torch.all(sample.output_predicition_mask == 1.0)
+        assert torch.all(sample.output_prediction_mask == 1.0)
 
     def test_joint_data_generation(self):
         """Test joint data generation and properties."""
@@ -358,7 +358,7 @@ class TestPytorchDummyDataset:
         assert batched.outputs.joint_target_positions.data.shape[0] == 3
 
         # Check prediction mask
-        assert batched.output_predicition_mask.shape == (
+        assert batched.output_prediction_mask.shape == (
             3,
             dataset.output_prediction_horizon,
         )
@@ -488,7 +488,7 @@ class TestPytorchDummyDataset:
             output_prediction_horizon=20,
         )
         sample = dataset[0]
-        assert sample.output_predicition_mask.shape == (20,)
+        assert sample.output_prediction_mask.shape == (20,)
 
     def test_memory_efficiency(self):
         """Test that the dataset doesn't consume excessive memory."""
@@ -518,8 +518,8 @@ class TestPytorchDummyDataset:
         )
 
         sample = dataset[0]
-        assert sample.output_predicition_mask.shape == (horizon,)
-        assert torch.all(sample.output_predicition_mask == 1.0)
+        assert sample.output_prediction_mask.shape == (horizon,)
+        assert torch.all(sample.output_prediction_mask == 1.0)
 
     @pytest.mark.parametrize(
         "data_type",
