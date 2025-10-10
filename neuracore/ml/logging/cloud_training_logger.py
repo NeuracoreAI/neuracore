@@ -174,10 +174,20 @@ class CloudTrainingLogger(TrainingLogger):
         if len(self._store) == 0:
             return
         org_id = get_current_org()
+        metricsData = {
+            "metrics": {
+                name: {
+                    "data": {
+                        int(step): float(value) for step, value in step_map.items()
+                    }
+                }
+                for name, step_map in self._store.items()
+            }
+        }
         response = requests.put(
             f"{API_URL}/org/{org_id}/training/jobs/{self.training_id}/metrics",
             headers=get_auth().get_headers(),
-            json={"metrics": self._store},
+            json={metricsData},
         )
         response.raise_for_status()
         self._store.clear()  # Clear local store after successful sync
