@@ -107,7 +107,7 @@ class MyCustomAlgorithm(NeuracoreModel):
         loss = nn.functional.mse_loss(predictions.outputs[DataType.JOINT_TARGET_POSITIONS], targets)
         
         return BatchedTrainingOutputs(
-            output_predicitons=predictions.outputs[DataType.JOINT_TARGET_POSITIONS],
+            output_predictions=predictions.outputs[DataType.JOINT_TARGET_POSITIONS],
             losses={"mse_loss": loss},
             metrics={},  # You can add custom metrics here
         )

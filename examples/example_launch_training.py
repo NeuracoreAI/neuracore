@@ -69,7 +69,7 @@ if __name__ == "__main__":
 
     parser = create_parser()
     args = parser.parse_args()
-    trainig_name = args.name
+    training_name = args.name
     gpu_type = args.gpu_type
     num_gpus = args.num_gpus
     frequency = args.frequency
@@ -84,7 +84,7 @@ if __name__ == "__main__":
     }
 
     job_data = nc.start_training_run(
-        name=trainig_name,
+        name=training_name,
         gpu_type=gpu_type,
         num_gpus=num_gpus,
         frequency=frequency,

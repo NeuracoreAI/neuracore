@@ -548,7 +548,7 @@ class ACT(NeuracoreModel):
             "kl_loss": kl_loss,
         }
         return BatchedTrainingOutputs(
-            output_predicitons=action_preds,
+            output_predictions=action_preds,
             losses=losses,
             metrics=metrics,
         )

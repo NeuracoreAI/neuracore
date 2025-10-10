@@ -428,7 +428,7 @@ class DiffusionPolicy(NeuracoreModel):
             "mse_loss": loss,
         }
         return BatchedTrainingOutputs(
-            output_predicitons=pred,
+            output_predictions=pred,
             losses=losses,
             metrics=metrics,
         )

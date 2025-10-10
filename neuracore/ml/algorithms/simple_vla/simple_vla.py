@@ -405,7 +405,7 @@ class SimpleVLA(NeuracoreModel):
             )
 
         return BatchedTrainingOutputs(
-            output_predicitons=action_predictions,
+            output_predictions=action_predictions,
             losses=losses,
             metrics=metrics,
         )

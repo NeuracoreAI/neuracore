@@ -390,7 +390,7 @@ class SimpleWorldModel(NeuracoreModel):
             losses["reconstruction_loss"] = reconstruction_loss
 
         return BatchedTrainingOutputs(
-            output_predicitons=predicted_future_images,
+            output_predictions=predicted_future_images,
             losses=losses,
             metrics=metrics,
         )
