@@ -1,11 +1,11 @@
+import sqlite3
 from abc import ABC, abstractmethod
 from enum import Enum
-import sqlite3
 from typing import Generator
 
-from neuracore_new_data_format.data_marshaller.data_marshaller import (
-    DataMarshaller,
-)
+from mcap_protobuf.writer import Writer
+
+from neuracore_new_data_format.data_marshaller.data_marshaller import DataMarshaller
 from neuracore_new_data_format.data_marshaller.sqlite_marshallers import (
     CameraDataSqliteMarshaller,
     CustomDataSqliteMarshaller,
@@ -33,17 +33,9 @@ class Recording(ABC):
     def log_data(self, data_type: str, data: NCData):
         self._get_marshaller(data_type).write(data)
 
-        self.batch_size += 1
-        if self.batch_size > BATCH_SIZE:
-            self.con.commit()
-            self.batch_size = 0
-
     def stop(self):
         for marshaller in self.data_marshaller.values():
             marshaller.close()
-
-        self.con.commit()
-        self.con.close()
 
     def read_data(self, data_type: str) -> Generator[NCData, None, None]:
         yield from self._get_marshaller(data_type).read()
@@ -77,6 +69,18 @@ class SqliteRecording(Recording):
         self.cur.execute("PRAGMA foreign_keys = OFF;")
 
         self.data_marshaller: dict[str, DataMarshaller] = {}
+
+    def log_data(self, data_type, data):
+        super().log_data(data_type, data)
+        self.batch_size += 1
+        if self.batch_size > BATCH_SIZE:
+            self.con.commit()
+            self.batch_size = 0
+
+    def stop(self):
+        super().stop()
+        self.con.commit()
+        self.con.close()
 
     def _get_marshaller(self, data_type: str):
 
@@ -114,6 +118,13 @@ class SqliteRecording(Recording):
 class McapRecording(Recording):
     def __init__(self, name: str):
         self.name = name
+        self.filename = f"{self.name}.mcap"
+        self.writer = Writer(output=self.filename)
 
     def _get_marshaller(self, data_type: str):
         raise NotImplementedError("_get_marshaller not implemented yet")
+
+    def stop(self):
+        super().stop()
+        self.writer.finish()
+        self

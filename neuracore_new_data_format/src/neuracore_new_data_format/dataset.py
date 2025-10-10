@@ -10,7 +10,7 @@ from neuracore_new_data_format.ncdata import (
     JointData,
     LanguageData,
 )
-from neuracore_new_data_format.recording import RecordingFactory, Recording
+from neuracore_new_data_format.recording import Recording, RecordingFactory
 
 
 class Dataset:

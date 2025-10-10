@@ -1,16 +1,12 @@
 import io
-
 from abc import ABC, abstractmethod
 from fractions import Fraction
-from sqlite3 import Cursor
 from typing import Generator
 
 import av
 import numpy as np
 
-from neuracore_new_data_format.ncdata import (
-    NCData,
-)
+from neuracore_new_data_format.ncdata import NCData
 
 
 class MarshallingOutput(ABC):
@@ -40,22 +36,9 @@ class CameraDataEncoder:
 
     def __init__(
         self,
-        cur: Cursor,
-        camera_id: str,
         codec: str = "libx264",
         pixel_format: str = "yuv444p10le",
     ):
-        self.cur = cur
-        self.camera_id = camera_id
-
-        cur.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {self.TABLE_NAME} (
-                camera_id TEXT,
-                frames BLOB
-            )
-            """
-        )
 
         self.codec = codec
         self.pixel_format = pixel_format
@@ -115,16 +98,11 @@ class CameraDataEncoder:
         for packet in self.stream.encode(av_frame):
             self.container.mux(packet)
 
-    def read_frames(self) -> list[np.ndarray]:
+    def read_frames(self, blob: bytes) -> list[np.ndarray]:
         """
         Decode MP4 bytes back into frames.
         Returns list of frame ndarray
         """
-        self.cur.execute(
-            f"SELECT frames FROM {self.TABLE_NAME} WHERE camera_id = ?",
-            (self.camera_id,),
-        )
-        blob = self.cur.fetchone()[0]
         buffer = io.BytesIO(blob)
         container = av.open(buffer, mode="r", format="mp4")
 
@@ -134,15 +112,11 @@ class CameraDataEncoder:
                 frames.append(frame.to_ndarray(format="rgb24"))
         return frames
 
-    def close(self) -> None:
+    def get_blob(self) -> bytes:
         """Finalize encoding and write MP4 bytes to SQLite."""
         if self.stream is not None:
             for packet in self.stream.encode(None):
                 self.container.mux(packet)
         self.container.close()
 
-        blob = self.buffer.getvalue()
-        self.cur.execute(
-            f"INSERT INTO {self.TABLE_NAME} (camera_id, frames) VALUES (?, ?)",
-            (self.camera_id, blob),
-        )
+        return self.buffer.getvalue()
