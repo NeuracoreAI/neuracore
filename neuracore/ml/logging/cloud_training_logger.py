@@ -187,7 +187,7 @@ class CloudTrainingLogger(TrainingLogger):
         response = requests.put(
             f"{API_URL}/org/{org_id}/training/jobs/{self.training_id}/metrics",
             headers=get_auth().get_headers(),
-            json={metricsData},
+            json=metricsData,
         )
         response.raise_for_status()
         self._store.clear()  # Clear local store after successful sync
