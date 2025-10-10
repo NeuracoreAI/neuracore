@@ -214,18 +214,18 @@ class BatchedTrainingOutputs:
 
     def __init__(
         self,
-        output_predicitons: torch.FloatTensor,
+        output_predictions: torch.FloatTensor,
         losses: dict[str, torch.FloatTensor],
         metrics: dict[str, torch.FloatTensor],
     ):
         """Initialize batched training outputs.
 
         Args:
-            output_predicitons: Model predictions for the batch
+            output_predictions: Model predictions for the batch
             losses: Dictionary of named loss values
             metrics: Dictionary of named evaluation metrics
         """
-        self.output_predictions = output_predicitons
+        self.output_predictions = output_predictions
         self.losses = losses
         self.metrics = metrics
 

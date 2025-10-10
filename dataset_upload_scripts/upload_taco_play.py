@@ -147,7 +147,7 @@ def upload_taco_play():
         description=(
             "The robot interacts with toy blocks, it pick and places them,"
             "stacks them, "
-            "unstacks them, opens drawers, sliding doors and turrns on LED"
+            "unstacks them, opens drawers, sliding doors and turns on LED"
             "lights by pushing buttons."
         ),
         tags=["franka", "play", "teleop", "table", "multi-view", "depth", "language"],

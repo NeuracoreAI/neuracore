@@ -128,7 +128,7 @@ class Pi0(NeuracoreModel):
         )
         self.vlm_embedding_module = self.vlm.get_input_embeddings()
         assert self.vlm_processor.tokenizer.padding_side == "right"
-        # Diable finetuning of the VLM
+        # Disable finetuning of the VLM
         for param in self.vlm.parameters():
             param.requires_grad = False
 
@@ -697,7 +697,7 @@ class Pi0(NeuracoreModel):
             "mse_loss": loss,
         }
         return BatchedTrainingOutputs(
-            output_predicitons=v_psi,
+            output_predictions=v_psi,
             losses=losses,
             metrics=metrics,
         )
