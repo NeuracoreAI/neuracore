@@ -153,7 +153,7 @@ def sample_batch() -> BatchedTrainingSamples:
                 torch.ones(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
             )
         ),
-        output_predicition_mask=torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
+        output_prediction_mask=torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
     )
 
 
@@ -210,7 +210,7 @@ def sample_batch_full() -> BatchedTrainingSamples:
                 torch.ones(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
             )
         ),
-        output_predicition_mask=torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
+        output_prediction_mask=torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
     )
 
 

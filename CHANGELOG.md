@@ -170,7 +170,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Ability to upload MJCF in addition to URDF
-- Value/type checks on logging funtions
+- Value/type checks on logging functions
 - Ability to stream datasets to python
 - Ability to download model endpoints via 'nc.connect_local_endpoint(train_run_name="MyTrainRun")'
 

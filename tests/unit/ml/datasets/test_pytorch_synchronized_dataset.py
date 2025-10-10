@@ -314,7 +314,7 @@ class TestDataLoading:
         assert isinstance(sample, BatchedTrainingSamples)
         assert sample.inputs is not None
         assert sample.outputs is not None
-        assert sample.output_predicition_mask is not None
+        assert sample.output_prediction_mask is not None
 
         # Check that login was called
         mock_login.assert_called_once()
@@ -347,7 +347,7 @@ class TestDataLoading:
 
             # Samples should be identical (loaded from cache)
             assert torch.equal(
-                sample1.output_predicition_mask, sample2.output_predicition_mask
+                sample1.output_prediction_mask, sample2.output_prediction_mask
             )
 
     @patch("neuracore.login")
@@ -1238,9 +1238,10 @@ class TestErrorRecovery:
         cache_file = dataset.cache_dir / "ep_0_frame_0.pt"
         cache_file.write_text("corrupted data")
 
-        with patch.object(dataset, "_memory_monitor") as mock_monitor, patch(
-            "torch.load", wraps=torch.load
-        ) as mock_load:
+        with (
+            patch.object(dataset, "_memory_monitor") as mock_monitor,
+            patch("torch.load", wraps=torch.load) as mock_load,
+        ):
             mock_monitor.check_memory.return_value = None
 
             # Should fall back to regenerating the sample

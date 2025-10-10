@@ -141,7 +141,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 logger.warning("Low disk space. Some cache files were removed.")
 
             sample = TrainingSample(
-                output_predicition_mask=torch.ones(
+                output_prediction_mask=torch.ones(
                     (self.output_prediction_horizon,), dtype=torch.float32
                 ),
             )
@@ -384,7 +384,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                         self._create_custom_maskable_output_data(future_custom_data)
                     )
 
-            sample.output_predicition_mask = self._create_output_prediction_mask(
+            sample.output_prediction_mask = self._create_output_prediction_mask(
                 episode_length,
                 timestep,
                 self.output_prediction_horizon,

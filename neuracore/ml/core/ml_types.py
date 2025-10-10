@@ -162,7 +162,7 @@ class BatchedTrainingSamples:
 
     def __init__(
         self,
-        output_predicition_mask: Optional[torch.FloatTensor] = None,
+        output_prediction_mask: Optional[torch.FloatTensor] = None,
         inputs: Optional[BatchedData] = None,
         outputs: Optional[BatchedData] = None,
     ):
@@ -171,11 +171,11 @@ class BatchedTrainingSamples:
         Args:
             inputs: Input data for the model
             outputs: Target output data for supervision
-            output_predicition_mask: Mask indicating which outputs to predict
+            output_prediction_mask: Mask indicating which outputs to predict
         """
         self.inputs = inputs or BatchedData()
         self.outputs = outputs or BatchedData()
-        self.output_predicition_mask = output_predicition_mask
+        self.output_prediction_mask = output_prediction_mask
 
     def to(self, device: torch.device) -> "BatchedTrainingSamples":
         """Move all tensors to the specified device.
@@ -189,9 +189,9 @@ class BatchedTrainingSamples:
         return BatchedTrainingSamples(
             inputs=self.inputs.to(device),
             outputs=self.outputs.to(device),
-            output_predicition_mask=(
-                self.output_predicition_mask.to(device)
-                if self.output_predicition_mask is not None
+            output_prediction_mask=(
+                self.output_prediction_mask.to(device)
+                if self.output_prediction_mask is not None
                 else None
             ),
         )
