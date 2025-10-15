@@ -1,6 +1,10 @@
 """Exceptions for Neuracore."""
 
 
+class EncodingError(Exception):
+    """Raised for issues with encoding video."""
+
+
 class EndpointError(Exception):
     """Raised for endpoint-related errors."""
 

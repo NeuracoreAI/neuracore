@@ -21,6 +21,7 @@ import requests
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
+from neuracore.core.exceptions import EncodingError
 from neuracore.core.nc_types import CameraData
 
 from .bucket_uploader import BucketUploader
@@ -90,6 +91,8 @@ class StreamingVideoUploader(BucketUploader):
         self.video_name = video_name
         self.codec_context_options = codec_context_options
         self._streaming_done = False
+        self.container_format = "mp4"
+        self._check_codec_support()
         self._upload_queue: queue.Queue = queue.Queue()
         # Thread will continue, even if main thread exits
         self._upload_thread = threading.Thread(target=self._upload_loop, daemon=False)
@@ -122,12 +125,12 @@ class StreamingVideoUploader(BucketUploader):
         self.container = av.open(
             self.buffer,
             mode="w",
-            format="mp4",
+            format=self.container_format,
             options={"movflags": "frag_keyframe+empty_moov"},
         )
 
         # Create video stream
-        self.stream = self.container.add_stream(self.codec)
+        self.stream = self.container.add_stream(self.codec, rate=PTS_FRACT)
         self.stream.width = self.width
         self.stream.height = self.height
         self.stream.pix_fmt = self.pixel_format
@@ -148,6 +151,33 @@ class StreamingVideoUploader(BucketUploader):
         self.upload_buffer = bytearray()
         self.last_write_position = 0
         self.frame_metadatas: list[CameraData] = []
+
+    def _check_codec_support(self) -> None:
+        """Check if the current FFmpeg/PyAV setup supports our encoding target."""
+        if self.container_format not in av.formats_available:
+            raise EncodingError(
+                f"The container` format '{self.container_format}' is not supported "
+                "by PyAV. Make sure your PyAV build supports this container format."
+            )
+
+        if self.codec not in av.codecs_available:
+            raise EncodingError(
+                f"The codec '{self.codec}' is not available in your PyAV/FFmpeg build. "
+                "Please check your FFmpeg installation and PyAV build configuration."
+            )
+
+        codec = av.Codec(self.codec, "w")
+        supported_pix_fmts = {format.name for format in codec.video_formats}
+        if self.pixel_format not in supported_pix_fmts:
+            supported_formats_str = ", ".join(sorted(supported_pix_fmts)) or "unknown"
+            raise EncodingError(
+                f"The codec '{self.codec}' does not support pixel format "
+                "'{self.pixel_format}'.\n"
+                f"Supported formats: {supported_formats_str}\n\n"
+                "You may need to:\n"
+                " 1. Install full FFmpeg (e.g. `sudo apt install -y ffmpeg`)\n"
+                " 2. Rebuild PyAV against it (`pip install --no-binary av av`)"
+            )
 
     def _upload_loop(self) -> None:
         """Main video encoding and upload loop running in a separate thread.
