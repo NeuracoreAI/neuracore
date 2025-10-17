@@ -136,6 +136,7 @@ parentid
 patchelf
 pbar
 perceptrons
+pgoa
 Pieb
 pinnochio
 PJRT
@@ -198,6 +199,7 @@ xdata
 xlabel
 xmat
 xmlstr
+xquat
 xyzrgb
 ylabel
 znear

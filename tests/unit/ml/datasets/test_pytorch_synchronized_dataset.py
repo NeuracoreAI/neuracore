@@ -223,6 +223,8 @@ class TestPytorchSynchronizedDatasetInitialization:
             DataType.DEPTH_IMAGE,
             DataType.POINT_CLOUD,
             DataType.END_EFFECTORS,
+            DataType.END_EFFECTOR_POSES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.POSES,
             DataType.LANGUAGE,
             DataType.CUSTOM,

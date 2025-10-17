@@ -20,8 +20,10 @@ from neuracore.core.nc_types import (
     CameraData,
     CustomData,
     EndEffectorData,
+    EndEffectorPoseData,
     JointData,
     LanguageData,
+    ParallelGripperOpenAmountData,
     PointCloudData,
     PoseData,
     SyncPoint,
@@ -134,6 +136,24 @@ def log_sync_point(
             timestamp=sync_point.timestamp,
         )
 
+    # Log end effector poses
+    if sync_point.end_effector_poses:
+        log_end_effector_poses(
+            poses=sync_point.end_effector_poses.poses,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=sync_point.timestamp,
+        )
+
+    # Log parallel gripper open amounts
+    if sync_point.parallel_gripper_open_amounts:
+        log_parallel_gripper_open_amounts(
+            open_amounts=sync_point.parallel_gripper_open_amounts.open_amounts,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=sync_point.timestamp,
+        )
+
     # Log pose data
     if sync_point.poses:
         log_pose_data(
@@ -151,7 +171,6 @@ def log_sync_point(
             instance=instance,
             timestamp=sync_point.timestamp,
         )
-
     # Log camera data
     if sync_point.rgb_images:
         for camera_id, cam_data in sync_point.rgb_images.items():
@@ -743,6 +762,138 @@ def log_gripper_data(
         robot.id, robot.instance
     ).get_json_source(str_id, TrackKind.GRIPPER, str_id).publish(
         end_effector_data.model_dump(mode="json")
+    )
+
+
+def log_end_effector_poses(
+    poses: dict[str, list[float]],
+    robot_name: Optional[str] = None,
+    instance: int = 0,
+    timestamp: Optional[float] = None,
+) -> None:
+    """Log end-effector pose data for a robot.
+
+    Args:
+        poses: Dictionary mapping end-effector names to pose data
+            (7-element lists: [x, y, z, qx, qy, qz, qw])
+        robot_name: Optional robot ID
+        instance: Optional instance number
+        timestamp: Optional timestamp
+    """
+    timestamp = timestamp or time.time()
+    if not isinstance(poses, dict):
+        raise ValueError(
+            "End effector poses must be a dictionary "
+            "mapping end effector names to poses."
+        )
+    for ee_name, ee_pose in poses.items():
+        if not isinstance(ee_pose, list):
+            raise ValueError(
+                f"End effector pose must be a list. "
+                f"{ee_pose} is of type {type(ee_pose)}"
+            )
+        if len(ee_pose) != 7:
+            raise ValueError(
+                f"End effector pose must be a 7-element list. "
+                f"{ee_name} is of length {len(ee_pose)}."
+            )
+        if not isinstance(ee_name, str):
+            raise ValueError(
+                f"End effector names must be strings. "
+                f"{ee_name} is of type {type(ee_name)}"
+            )
+        # check if last 4 elements of pose are a valid quaternion
+        orientation = ee_pose[3:]
+        if not np.isclose(np.linalg.norm(orientation), 1.0, atol=1e-4):
+            raise ValueError(
+                f"End effector pose must be a valid unit quaternion. "
+                f"{orientation} is not a valid unit quaternion."
+            )
+
+    robot = _get_robot(robot_name, instance)
+    group_id = _create_group_id_from_dict(poses)
+    str_id = f"{group_id}_end_effector_poses"
+    stream = robot.get_data_stream(str_id)
+    if stream is None:
+        stream = JsonDataStream(f"end_effector_poses/{group_id}.json")
+        robot.add_data_stream(str_id, stream)
+
+    start_stream(robot, stream)
+    assert isinstance(stream, JsonDataStream)
+
+    ee_pose_data = EndEffectorPoseData(timestamp=timestamp, poses=poses)
+    stream.log(ee_pose_data)
+
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(str_id, TrackKind.END_EFFECTOR_POSE, sensor_key=str_id).publish(
+        ee_pose_data.model_dump(mode="json")
+    )
+
+
+def log_parallel_gripper_open_amounts(
+    open_amounts: dict[str, float],
+    robot_name: Optional[str] = None,
+    instance: int = 0,
+    timestamp: Optional[float] = None,
+) -> None:
+    """Log parallel gripper open amount data for a robot.
+
+    Args:
+        open_amounts: Dictionary mapping gripper names to
+            open amounts (0.0 = closed, 1.0 = fully open)
+        robot_name: Optional robot ID
+        instance: Optional instance number
+        timestamp: Optional timestamp
+    """
+    timestamp = timestamp or time.time()
+    if not isinstance(open_amounts, dict):
+        raise ValueError(
+            "Parallel gripper open amounts must be a dictionary "
+            "mapping gripper names to open amounts."
+        )
+    for pg_name, pg_open_amount in open_amounts.items():
+        if not isinstance(pg_name, str):
+            raise ValueError(
+                f"Parallel gripper names must be strings. "
+                f"{pg_name} is not a string."
+            )
+        if not isinstance(pg_open_amount, float):
+            raise ValueError(
+                f"Parallel gripper open amounts must be floats. "
+                f"{pg_open_amount} is not a float."
+            )
+        if pg_open_amount < 0.0 or pg_open_amount > 1.0:
+            raise ValueError(
+                "Parallel gripper open amounts must be between 0.0 and 1.0."
+            )
+
+    robot = _get_robot(robot_name, instance)
+    group_id = _create_group_id_from_dict(open_amounts)
+    str_id = f"{group_id}_parallel_gripper_open_amounts"
+    stream = robot.get_data_stream(str_id)
+    if stream is None:
+        stream = JsonDataStream(f"parallel_gripper_open_amounts/{group_id}.json")
+        robot.add_data_stream(str_id, stream)
+
+    start_stream(robot, stream)
+    assert isinstance(stream, JsonDataStream)
+
+    parallel_gripper_open_amount_data = ParallelGripperOpenAmountData(
+        timestamp=timestamp, open_amounts=open_amounts
+    )
+    stream.log(parallel_gripper_open_amount_data)
+
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(str_id, TrackKind.PARALLEL_GRIPPER_OPEN_AMOUNT, str_id).publish(
+        parallel_gripper_open_amount_data.model_dump(mode="json")
     )
 
 

@@ -1,6 +1,6 @@
 """Base MuJoCo environment classes with improved organization."""
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import mujoco
 import numpy as np
@@ -29,6 +29,8 @@ class Observation(BaseModel):
     mocap_pose_right: Optional[np.ndarray] = None
     gripper_ctrl: Optional[np.ndarray] = None
     reward: Optional[float] = None
+    end_effector_poses: Optional[Dict[str, List[float]]] = None
+    gripper_open_amounts: Optional[Dict[str, float]] = None
 
     class Config:
         arbitrary_types_allowed = True
@@ -370,6 +372,71 @@ class BimanualViperXTask(MuJoCoEnvironment):
         """
         raise NotImplementedError
 
+    def _get_end_effector_pose(self, effector_name: str) -> List[float] | None:
+        """Get end effector pose from MuJoCo body positions and orientations.
+
+        Args:
+            effector_name: Name of the end effector.
+
+        Returns:
+            End effector pose as 7-element list [x, y, z, qx, qy, qz, qw].
+        """
+        effector_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_BODY, effector_name
+        )
+        if effector_id == -1:
+            return None
+        x, y, z = self.data.xpos[effector_id].copy()
+        qw, qx, qy, qz = self.data.xquat[effector_id].copy()
+        return [x, y, z, qx, qy, qz, qw]
+
+    def get_end_effector_poses(self) -> Dict[str, List[float]]:
+        """Get end effector poses from MuJoCo body positions and orientations.
+
+        Returns:
+            Dictionary mapping end effector names to
+            7-element pose lists [x, y, z, qx, qy, qz, qw].
+        """
+        poses = {}
+
+        left_ee_pose = self._get_end_effector_pose("vx300s_left/gripper_link")
+        if left_ee_pose is not None:
+            poses["left_ee"] = left_ee_pose
+
+        right_ee_pose = self._get_end_effector_pose("vx300s_right/gripper_link")
+        if right_ee_pose is not None:
+            poses["right_ee"] = right_ee_pose
+
+        return poses
+
+    def _get_gripper_open_amount(self, gripper_name: str) -> float:
+        """Get gripper open amount from gripper finger joint position.
+
+        Args:
+            gripper_name: Name of the gripper.
+
+        Returns:
+            Normalized gripper open amount [0, 1].
+        """
+        qpos_dict = self.get_qpos()
+        gripper_pos = qpos_dict.get(gripper_name, 0.0)
+        return self.normalize_gripper_position(gripper_pos)
+
+    def get_gripper_open_amounts(self) -> Dict[str, float]:
+        """Get gripper open amounts from gripper finger joint positions.
+
+        Returns:
+            Dictionary mapping gripper names to normalized open amounts [0, 1].
+        """
+        open_amounts = {}
+        open_amounts["left_gripper"] = self._get_gripper_open_amount(
+            "vx300s_left/left_finger"
+        )
+        open_amounts["right_gripper"] = self._get_gripper_open_amount(
+            "vx300s_right/left_finger"
+        )
+        return open_amounts
+
     def get_observation(self) -> Observation:
         """Get complete observation with camera data.
 
@@ -395,6 +462,8 @@ class BimanualViperXTask(MuJoCoEnvironment):
             qvel=self.get_qvel(),
             env_state=self.get_env_state(),
             cameras=cameras,
+            end_effector_poses=self.get_end_effector_poses(),
+            gripper_open_amounts=self.get_gripper_open_amounts(),
         )
 
     def sample_box_pose(self) -> np.ndarray:

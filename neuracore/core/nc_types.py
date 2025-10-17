@@ -149,6 +149,47 @@ class EndEffectorData(NCData):
         )
 
 
+class EndEffectorPoseData(NCData):
+    """End-effector pose data.
+
+    Contains the pose of end-effectors as a 7-element list containing the
+    position and unit quaternion orientation [x, y, z, qx, qy, qz, qw].
+    """
+
+    poses: dict[str, list[float]]
+
+    def order(self) -> "EndEffectorPoseData":
+        """Return a new EndEffectorPoseData instance with sorted effector names.
+
+        Returns:
+            New EndEffectorPoseData with alphabetically sorted effector names.
+        """
+        return EndEffectorPoseData(
+            timestamp=self.timestamp,
+            poses=_sort_dict_by_keys(self.poses) or {},
+        )
+
+
+class ParallelGripperOpenAmountData(NCData):
+    """Open amount data for parallel end effector gripper.
+
+    Contains the state of parallel gripper opening amounts.
+    """
+
+    open_amounts: dict[str, float]
+
+    def order(self) -> "ParallelGripperOpenAmountData":
+        """Return a new Gripper Open Amount instance with sorted gripper names.
+
+        Returns:
+            New ParallelGripperOpenAmountData with alphabetically sorted gripper names.
+        """
+        return ParallelGripperOpenAmountData(
+            timestamp=self.timestamp,
+            open_amounts=_sort_dict_by_keys(self.open_amounts) or {},
+        )
+
+
 class PointCloudData(NCData):
     """3D point cloud data with optional RGB colouring and camera parameters.
 
@@ -309,6 +350,8 @@ class SyncPoint(BaseModel):
     joint_torques: Optional[JointData] = None
     joint_target_positions: Optional[JointData] = None
     end_effectors: Optional[EndEffectorData] = None
+    end_effector_poses: Optional[EndEffectorPoseData] = None
+    parallel_gripper_open_amounts: Optional[ParallelGripperOpenAmountData] = None
     poses: Optional[PoseData] = None
     rgb_images: Optional[dict[str, CameraData]] = None
     depth_images: Optional[dict[str, CameraData]] = None
@@ -367,6 +410,16 @@ class SyncPoint(BaseModel):
             end_effectors=(self.end_effectors.order() if self.end_effectors else None),
             # Order pose data (both pose names and pose coordinates)
             poses=self.poses.order() if self.poses else None,
+            # Order end effector pose data
+            end_effector_poses=(
+                self.end_effector_poses.order() if self.end_effector_poses else None
+            ),
+            # Order parallel gripper open amount data
+            parallel_gripper_open_amounts=(
+                self.parallel_gripper_open_amounts.order()
+                if self.parallel_gripper_open_amounts
+                else None
+            ),
             # Order camera data by camera/sensor names
             rgb_images=_sort_dict_by_keys(self.rgb_images),
             depth_images=_sort_dict_by_keys(self.depth_images),
@@ -419,6 +472,8 @@ class DataType(str, Enum):
     JOINT_TORQUES = "joint_torques"
     JOINT_TARGET_POSITIONS = "joint_target_positions"
     END_EFFECTORS = "end_effectors"
+    END_EFFECTOR_POSES = "end_effector_poses"
+    PARALLEL_GRIPPER_OPEN_AMOUNTS = "parallel_gripper_open_amounts"
 
     # Vision
     RGB_IMAGE = "rgb_image"
@@ -471,6 +526,12 @@ class DatasetDescription(BaseModel):
     # End-effector statistics
     end_effector_states: DataItemStats = Field(default_factory=DataItemStats)
 
+    # End-effector poses statistics
+    end_effector_poses: DataItemStats = Field(default_factory=DataItemStats)
+
+    # Parallel gripper open amount statistics
+    parallel_gripper_open_amounts: DataItemStats = Field(default_factory=DataItemStats)
+
     # Pose statistics
     poses: DataItemStats = Field(default_factory=DataItemStats)
 
@@ -510,6 +571,14 @@ class DatasetDescription(BaseModel):
         # End-effector data
         if self.end_effector_states.max_len > 0:
             data_types.append(DataType.END_EFFECTORS)
+
+        # End effector pose data
+        if self.end_effector_poses.max_len > 0:
+            data_types.append(DataType.END_EFFECTOR_POSES)
+
+        # Parallel gripper open amount data
+        if self.parallel_gripper_open_amounts.max_len > 0:
+            data_types.append(DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS)
 
         # Pose data
         if self.poses.max_len > 0:
@@ -562,6 +631,12 @@ class RecordingDescription(BaseModel):
     # End-effector statistics
     end_effector_states: DataItemStats = Field(default_factory=DataItemStats)
 
+    # End-effector pose statistics
+    end_effector_poses: DataItemStats = Field(default_factory=DataItemStats)
+
+    # Parallel gripper open amount statistics
+    parallel_gripper_open_amounts: DataItemStats = Field(default_factory=DataItemStats)
+
     # Pose statistics
     poses: DataItemStats = Field(default_factory=DataItemStats)
 
@@ -604,6 +679,14 @@ class RecordingDescription(BaseModel):
         # End-effector data
         if self.end_effector_states.max_len > 0:
             data_types.append(DataType.END_EFFECTORS)
+
+        # End-effector pose data
+        if self.end_effector_poses.max_len > 0:
+            data_types.append(DataType.END_EFFECTOR_POSES)
+
+        # Parallel gripper open amount data
+        if self.parallel_gripper_open_amounts.max_len > 0:
+            data_types.append(DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS)
 
         # Pose data
         if self.poses.max_len > 0:
@@ -864,6 +947,8 @@ class TrackKind(str, Enum):
     DEPTH = "depth"
     LANGUAGE = "language"
     GRIPPER = "gripper"
+    END_EFFECTOR_POSE = "end_effector_pose"
+    PARALLEL_GRIPPER_OPEN_AMOUNT = "parallel_gripper_open_amount"
     POINT_CLOUD = "point_cloud"
     POSE = "pose"
     CUSTOM = "custom"
