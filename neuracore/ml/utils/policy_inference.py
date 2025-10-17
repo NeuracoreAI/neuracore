@@ -20,9 +20,11 @@ from neuracore.core.nc_types import (
     DataItemStats,
     DataType,
     EndEffectorData,
+    EndEffectorPoseData,
     JointData,
     LanguageData,
     ModelPrediction,
+    ParallelGripperOpenAmountData,
     PointCloudData,
     PoseData,
     SyncPoint,
@@ -131,6 +133,20 @@ class PolicyInference:
                 "poses",
             )
             output_mapping[DataType.POSES] = keys
+        if DataType.END_EFFECTOR_POSES in output_data_types:
+            keys = self._validate_robot_to_ncdata_keys(
+                robot_id,
+                self.dataset_description.end_effector_poses,
+                "end effector poses",
+            )
+            output_mapping[DataType.END_EFFECTOR_POSES] = keys
+        if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in output_data_types:
+            keys = self._validate_robot_to_ncdata_keys(
+                robot_id,
+                self.dataset_description.parallel_gripper_open_amounts,
+                "parallel gripper open amounts",
+            )
+            output_mapping[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS] = keys
         if DataType.RGB_IMAGE in output_data_types:
             keys = self._validate_robot_to_ncdata_keys(
                 robot_id,
@@ -258,6 +274,38 @@ class PolicyInference:
         values[0, : len(ee_values)] = ee_values
         mask[0, : len(ee_values)] = 1.0
 
+        return MaskableData(
+            torch.tensor(values, dtype=torch.float32),
+            torch.tensor(mask, dtype=torch.float32),
+        )
+
+    def _process_end_effector_pose_data(
+        self, end_effector_pose_data: EndEffectorPoseData, max_len: int
+    ) -> MaskableData:
+        """Process end-effector pose data into batched tensor format."""
+        values = np.zeros((1, max_len))
+        mask = np.zeros((1, max_len))
+
+        all_poses = list(end_effector_pose_data.poses.values())
+        values[0, : len(all_poses)] = all_poses
+        mask[0, : len(all_poses)] = 1.0
+        return MaskableData(
+            torch.tensor(values, dtype=torch.float32),
+            torch.tensor(mask, dtype=torch.float32),
+        )
+
+    def _process_parallel_gripper_open_amount_data(
+        self,
+        parallel_gripper_open_amount_data: ParallelGripperOpenAmountData,
+        max_len: int,
+    ) -> MaskableData:
+        """Process parallel gripper open amount data into batched tensor format."""
+        values = np.zeros((1, max_len))
+        mask = np.zeros((1, max_len))
+
+        all_open_amounts = list(parallel_gripper_open_amount_data.open_amounts.values())
+        values[0, : len(all_open_amounts)] = all_open_amounts
+        mask[0, : len(all_open_amounts)] = 1.0
         return MaskableData(
             torch.tensor(values, dtype=torch.float32),
             torch.tensor(mask, dtype=torch.float32),
@@ -418,6 +466,21 @@ class PolicyInference:
                 self.dataset_description.end_effector_states.max_len,
             )
 
+        # Process end-effector pose data
+        if sync_point.end_effector_poses:
+            batch.end_effector_poses = self._process_end_effector_pose_data(
+                sync_point.end_effector_poses,
+                self.dataset_description.end_effector_poses.max_len,
+            )
+        # Process parallel gripper data
+        if sync_point.parallel_gripper_open_amounts:
+            batch.parallel_gripper_open_amounts = (
+                self._process_parallel_gripper_open_amount_data(
+                    sync_point.parallel_gripper_open_amounts,
+                    self.dataset_description.parallel_gripper_open_amounts.max_len,
+                )
+            )
+
         # Process pose data
         if sync_point.poses:
             batch.poses = self._process_pose_data(
@@ -539,19 +602,17 @@ class PolicyInference:
                     sync_points[t].joint_target_positions = JointData(
                         values=dict(zip(keys, output[t].tolist()))
                     )
-            elif data_type == DataType.END_EFFECTORS:
+            elif data_type == DataType.END_EFFECTOR_POSES:
                 for t in range(horizon):
-                    sync_points[t].end_effectors = EndEffectorData(
-                        open_amounts=dict(zip(keys, output[t].tolist())),
+                    sync_points[t].end_effector_poses = EndEffectorPoseData(
+                        poses=dict(zip(keys, output[t].tolist()))
                     )
-            elif data_type == DataType.POSES:
+            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
                 for t in range(horizon):
-                    # Assuming output is a flat array of pose values
-                    sync_points[t].poses = PoseData(
-                        pose={
-                            key: output[t, i * 7 : (i + 1) * 7].tolist()
-                            for i, key in enumerate(keys)
-                        }
+                    sync_points[t].parallel_gripper_open_amounts = (
+                        ParallelGripperOpenAmountData(
+                            open_amounts=dict(zip(keys, output[t].tolist()))
+                        )
                     )
             elif data_type == DataType.POINT_CLOUD:
                 # [T, CLOUDs, N, 3]
@@ -637,6 +698,16 @@ class PolicyInference:
                 missing_data_types.append("joint target positions")
             elif data_type == DataType.END_EFFECTORS and not sync_point.end_effectors:
                 missing_data_types.append("end effector states")
+            elif (
+                data_type == DataType.END_EFFECTOR_POSES
+                and not sync_point.end_effector_poses
+            ):
+                missing_data_types.append("end effector poses")
+            elif (
+                data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS
+                and not sync_point.parallel_gripper_open_amounts
+            ):
+                missing_data_types.append("parallel gripper open amounts")
             elif data_type == DataType.POSES and not sync_point.poses:
                 missing_data_types.append("poses")
             elif data_type == DataType.RGB_IMAGE and not sync_point.rgb_images:

@@ -8,8 +8,10 @@ from neuracore.core.nc_types import (
     CameraData,
     CustomData,
     EndEffectorData,
+    EndEffectorPoseData,
     JointData,
     LanguageData,
+    ParallelGripperOpenAmountData,
     PointCloudData,
     PoseData,
     RobotStreamTrack,
@@ -59,6 +61,23 @@ def parse_sync_point(message_data: str, track_details: RobotStreamTrack) -> Sync
             return SyncPoint(
                 end_effectors=end_effectors, timestamp=end_effectors.timestamp
             )
+        if track_details.kind == TrackKind.END_EFFECTOR_POSE:
+            end_effector_poses = EndEffectorPoseData.model_validate_json(message_data)
+            return SyncPoint(
+                end_effector_poses={track_details.label: end_effector_poses},
+                timestamp=end_effector_poses.timestamp,
+            )
+
+        if track_details.kind == TrackKind.PARALLEL_GRIPPER_OPEN_AMOUNT:
+            parallel_gripper_open_amounts = (
+                ParallelGripperOpenAmountData.model_validate_json(message_data)
+            )
+            return SyncPoint(
+                parallel_gripper_open_amounts={
+                    track_details.label: parallel_gripper_open_amounts
+                },
+                timestamp=parallel_gripper_open_amounts.timestamp,
+            )
 
         if track_details.kind == TrackKind.POINT_CLOUD:
             point_cloud = PointCloudData.model_validate_json(message_data)
@@ -106,11 +125,12 @@ def merge_sync_points(*args: SyncPoint) -> SyncPoint:
     merged_sync_point_dict: dict[str, Any] = {}
 
     for sync_point in sorted_points:
-
+        # Joint Positions, Velocities, Torques, Target Positions
         if sync_point.joint_positions is not None:
             if "joint_positions" not in merged_sync_point_dict:
                 merged_sync_point_dict["joint_positions"] = {}
             merged_sync_point_dict["joint_positions"].update(sync_point.joint_positions)
+
         if sync_point.joint_velocities is not None:
             if "joint_velocities" not in merged_sync_point_dict:
                 merged_sync_point_dict["joint_velocities"] = {}
@@ -121,32 +141,65 @@ def merge_sync_points(*args: SyncPoint) -> SyncPoint:
             if "joint_torques" not in merged_sync_point_dict:
                 merged_sync_point_dict["joint_torques"] = {}
             merged_sync_point_dict["joint_torques"].update(sync_point.joint_torques)
+
         if sync_point.joint_target_positions is not None:
             if "joint_target_positions" not in merged_sync_point_dict:
                 merged_sync_point_dict["joint_target_positions"] = {}
             merged_sync_point_dict["joint_target_positions"].update(
                 sync_point.joint_target_positions
             )
+
+        # Camera Data
         if sync_point.rgb_images is not None:
             if "rgb_images" not in merged_sync_point_dict:
                 merged_sync_point_dict["rgb_images"] = {}
             merged_sync_point_dict["rgb_images"].update(sync_point.rgb_images)
+
         if sync_point.depth_images is not None:
             if "depth_images" not in merged_sync_point_dict:
                 merged_sync_point_dict["depth_images"] = {}
             merged_sync_point_dict["depth_images"].update(sync_point.depth_images)
+
+        # Point Clouds
         if sync_point.point_clouds is not None:
             if "point_clouds" not in merged_sync_point_dict:
                 merged_sync_point_dict["point_clouds"] = {}
             merged_sync_point_dict["point_clouds"].update(sync_point.point_clouds)
+
+        # End Effector Data
         if sync_point.end_effectors is not None:
             if "end_effectors" not in merged_sync_point_dict:
                 merged_sync_point_dict["end_effectors"] = {}
             merged_sync_point_dict["end_effectors"].update(sync_point.end_effectors)
+
+        # End Effector Poses
+        if sync_point.end_effector_poses is not None:
+            if "end_effector_poses" not in merged_sync_point_dict:
+                merged_sync_point_dict["end_effector_poses"] = {}
+            merged_sync_point_dict["end_effector_poses"].update(
+                sync_point.end_effector_poses
+            )
+
+        # Parallel Gripper Open Amounts
+        if sync_point.parallel_gripper_open_amounts is not None:
+            if "parallel_gripper_open_amount" not in merged_sync_point_dict:
+                merged_sync_point_dict["parallel_gripper_open_amount"] = {}
+            merged_sync_point_dict["parallel_gripper_open_amount"].update(
+                sync_point.parallel_gripper_open_amounts
+            )
+        # Pose Data
+        if sync_point.poses is not None:
+            if "poses" not in merged_sync_point_dict:
+                merged_sync_point_dict["poses"] = {}
+            merged_sync_point_dict["poses"].update(sync_point.poses)
+
+        # Language Data
         if sync_point.language_data is not None:
             if "language_data" not in merged_sync_point_dict:
                 merged_sync_point_dict["language_data"] = {}
             merged_sync_point_dict["language_data"].update(sync_point.language_data)
+
+        # Custom Data
         if sync_point.custom_data is not None:
             if "custom_data" not in merged_sync_point_dict:
                 merged_sync_point_dict["custom_data"] = {}

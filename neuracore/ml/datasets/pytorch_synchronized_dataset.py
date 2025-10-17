@@ -20,7 +20,9 @@ from neuracore.core.nc_types import (
     CustomData,
     DataType,
     EndEffectorData,
+    EndEffectorPoseData,
     JointData,
+    ParallelGripperOpenAmountData,
     PointCloudData,
     PoseData,
     SyncPoint,
@@ -335,6 +337,43 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                         )
                     )
 
+            if sync_point.end_effector_poses:
+                if DataType.END_EFFECTOR_POSES in self.input_data_types:
+                    sample.inputs.end_effector_poses = (
+                        self._create_end_effector_pose_maskable_input_data(
+                            sync_point.end_effector_poses
+                        )
+                    )
+                if DataType.END_EFFECTOR_POSES in self.output_data_types:
+                    future_ee_poses = [
+                        sp.end_effector_poses
+                        for sp in future_sync_points
+                        if sp.end_effector_poses is not None
+                    ]
+                    sample.outputs.end_effector_poses = (
+                        self._create_end_effector_pose_maskable_output_data(
+                            future_ee_poses
+                        )
+                    )
+            if sync_point.parallel_gripper_open_amounts:
+                if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.input_data_types:
+                    sample.inputs.parallel_gripper_open_amounts = (
+                        self._create_parallel_gripper_open_amounts_maskable_input_data(
+                            sync_point.parallel_gripper_open_amounts
+                        )
+                    )
+                if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.output_data_types:
+                    future_parallel_gripper_open_amounts = [
+                        sp.parallel_gripper_open_amounts
+                        for sp in future_sync_points
+                        if sp.parallel_gripper_open_amounts is not None
+                    ]
+                    sample.outputs.parallel_gripper_open_amounts = (
+                        self._create_parallel_gripper_open_amounts_maskable_output_data(
+                            future_parallel_gripper_open_amounts
+                        )
+                    )
+
             # Process pose data
             if sync_point.poses:
                 if DataType.POSES in self.input_data_types:
@@ -463,6 +502,87 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             self._create_end_effector_maskable_input_data(eed)
             for eed in end_effector_data
         ]
+        stacked_data = torch.stack(
+            [maskable_data.data for maskable_data in maskable_data_for_each_t]
+        )
+        stacked_mask = torch.stack(
+            [maskable_data.mask for maskable_data in maskable_data_for_each_t]
+        )
+        return MaskableData(stacked_data, stacked_mask)
+
+    def _create_end_effector_pose_maskable_output_data(
+        self, end_effector_data: list[EndEffectorPoseData]
+    ) -> MaskableData:
+        """Create MaskableData for end-effector pose output."""
+        maskable_data_for_each_t = [
+            self._create_end_effector_pose_maskable_input_data(eed)
+            for eed in end_effector_data
+        ]
+        stacked_data = torch.stack(
+            [maskable_data.data for maskable_data in maskable_data_for_each_t]
+        )
+        stacked_mask = torch.stack(
+            [maskable_data.mask for maskable_data in maskable_data_for_each_t]
+        )
+        return MaskableData(stacked_data, stacked_mask)
+
+    def _create_end_effector_pose_maskable_input_data(
+        self, end_effector_pose_data: EndEffectorPoseData
+    ) -> MaskableData:
+        """Create MaskableData for end-effector pose input."""
+        ee_poses = []
+        for ee_name, ee_pose in end_effector_pose_data.poses.items():
+            ee_poses.extend(ee_pose)  # 6DOF pose
+
+        ee_tensor = torch.tensor(ee_poses, dtype=torch.float32)
+        max_len = self.dataset_description.end_effector_poses.max_len
+        num_existing = ee_tensor.shape[0]
+        extra = max_len - num_existing
+
+        if extra > 0:
+            ee_tensor = torch.cat(
+                [ee_tensor, torch.zeros(extra, dtype=torch.float32)], dim=0
+            )
+
+        ee_mask = torch.tensor(
+            [1.0] * num_existing + [0.0] * extra, dtype=torch.float32
+        )
+        return MaskableData(ee_tensor, ee_mask)
+
+    def _create_parallel_gripper_open_amounts_maskable_input_data(
+        self, parallel_gripper_open_amounts: ParallelGripperOpenAmountData
+    ) -> MaskableData:
+        """Create MaskableData for parallel gripper open amounts input."""
+        parallel_gripper_open_amounts_tensor = torch.tensor(
+            list(parallel_gripper_open_amounts.values()), dtype=torch.float32
+        )
+        max_len = self.dataset_description.parallel_gripper_open_amounts.max_len
+        num_existing = parallel_gripper_open_amounts_tensor.shape[0]
+        extra = max_len - num_existing
+        if extra > 0:
+            parallel_gripper_open_amounts_tensor = torch.cat(
+                [
+                    parallel_gripper_open_amounts_tensor,
+                    torch.zeros(extra, dtype=torch.float32),
+                ],
+                dim=0,
+            )
+        parallel_gripper_open_amounts_mask = torch.tensor(
+            [1.0] * num_existing + [0.0] * extra, dtype=torch.float32
+        )
+        return MaskableData(
+            parallel_gripper_open_amounts_tensor, parallel_gripper_open_amounts_mask
+        )
+
+    def _create_parallel_gripper_open_amounts_maskable_output_data(
+        self, parallel_gripper_open_amounts_list: list[ParallelGripperOpenAmountData]
+    ) -> MaskableData:
+        """Create MaskableData for parallel gripper open amounts output."""
+        maskable_data_for_each_t = [
+            self._create_parallel_gripper_open_amounts_maskable_input_data(pgoa)
+            for pgoa in parallel_gripper_open_amounts_list
+        ]
+
         stacked_data = torch.stack(
             [maskable_data.data for maskable_data in maskable_data_for_each_t]
         )
