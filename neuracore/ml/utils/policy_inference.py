@@ -20,6 +20,7 @@ from neuracore.core.nc_types import (
     DataItemStats,
     DataType,
     EndEffectorData,
+    EndEffectorPoseData,
     JointData,
     LanguageData,
     ModelPrediction,
@@ -131,6 +132,23 @@ class PolicyInference:
                 "poses",
             )
             output_mapping[DataType.POSES] = keys
+        
+        if DataType.END_EFFECTOR_POSES in output_data_types:
+            keys = self._validate_robot_to_ncdata_keys(
+                robot_id,
+                self.dataset_description.end_effector_poses,
+                "end effector poses",
+            )
+            output_mapping[DataType.END_EFFECTOR_POSES] = keys
+        
+        if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in output_data_types:
+            keys = self._validate_robot_to_ncdata_keys(
+                robot_id,
+                self.dataset_description.parallel_gripper_open_amounts,
+                "parallel gripper open amounts",
+            )
+            output_mapping[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS] = keys
+        
         if DataType.RGB_IMAGE in output_data_types:
             keys = self._validate_robot_to_ncdata_keys(
                 robot_id,
@@ -217,9 +235,9 @@ class PolicyInference:
                 break
 
             image = camera_data.frame
-            assert isinstance(
-                image, np.ndarray
-            ), f"Expected numpy array for image, got {type(image)}"
+            assert isinstance(image, np.ndarray), (
+                f"Expected numpy array for image, got {type(image)}"
+            )
 
             # Handle different image formats
             if is_depth:
@@ -235,10 +253,12 @@ class PolicyInference:
             image = Image.fromarray(
                 image.transpose(1, 2, 0) if not is_depth else image[0]
             )
-            transform = T.Compose([
-                T.Resize((224, 224)),
-                T.ToTensor(),
-            ])
+            transform = T.Compose(
+                [
+                    T.Resize((224, 224)),
+                    T.ToTensor(),
+                ]
+            )
             values[0, j] = transform(image).numpy()
             mask[0, j] = 1.0
 
@@ -418,6 +438,9 @@ class PolicyInference:
                 self.dataset_description.end_effector_states.max_len,
             )
 
+        # TODO: Process end-effector pose data
+        # TODO: Process parallel gripper data
+        
         # Process pose data
         if sync_point.poses:
             batch.poses = self._process_pose_data(
@@ -539,20 +562,14 @@ class PolicyInference:
                     sync_points[t].joint_target_positions = JointData(
                         values=dict(zip(keys, output[t].tolist()))
                     )
-            elif data_type == DataType.END_EFFECTORS:
+            elif data_type == DataType.END_EFFECTOR_POSES:
+                # [T, CAMs, H, W, C]
+                camera_names = keys
                 for t in range(horizon):
-                    sync_points[t].end_effectors = EndEffectorData(
-                        open_amounts=dict(zip(keys, output[t].tolist())),
-                    )
-            elif data_type == DataType.POSES:
-                for t in range(horizon):
-                    # Assuming output is a flat array of pose values
-                    sync_points[t].poses = PoseData(
-                        pose={
-                            key: output[t, i * 7 : (i + 1) * 7].tolist()
-                            for i, key in enumerate(keys)
-                        }
-                    )
+                    sync_points[t].rgb_images = {
+                        cam_name: EndEffectorPoseData(frame=output[t, i])
+                        for i, cam_name in enumerate(camera_names)
+                    }
             elif data_type == DataType.POINT_CLOUD:
                 # [T, CLOUDs, N, 3]
                 for i in range(horizon):

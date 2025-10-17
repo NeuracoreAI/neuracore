@@ -123,6 +123,27 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 },
             )
 
+        # End-effector pose data
+        if DataType.END_EFFECTOR_POSES in self.data_types:
+            self.dataset_description.end_effector_poses = DataItemStats(
+                mean=np.zeros(7),
+                std=np.ones(7),
+                max_len=7,  # 7DOF pose
+                robot_to_ncdata_keys={
+                    self.robot.id: [f"end_effector_pose_{i}" for i in range(7)]
+                },
+            )
+        # Parallel gripper open amounts
+        if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.data_types
+            self.dataset_description.parallel_gripper_open_amounts = DataItemStats(
+                mean=np.zeros(1),
+                std=np.ones(1),
+                max_len=1,  # single value
+                robot_to_ncdata_keys={
+                    self.robot.id: ["parallel_gripper_open_amount"]
+                },
+            )
+
         # Pose data
         if DataType.POSES in self.data_types:
             self.dataset_description.poses = DataItemStats(
@@ -302,6 +323,30 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 if DataType.END_EFFECTORS in self.output_data_types:
                     sample.outputs.end_effectors = end_effectors
 
+            # End-effector pose data
+            if DataType.END_EFFECTOR_POSES in self.data_types:
+                max_ee_pose_len = self.dataset_description.end_effector_poses.max_len
+                end_effector_poses = MaskableData(
+                    torch.zeros((max_ee_pose_len,), dtype=torch.float32),
+                    torch.ones((max_ee_pose_len,), dtype=torch.float32),
+                )
+                if DataType.END_EFFECTOR_POSES in self.input_data_types:
+                    sample.inputs.end_effector_poses = end_effector_poses
+                if DataType.END_EFFECTOR_POSES in self.output_data_types:
+                    sample.outputs.end_effector_poses = end_effector_poses
+            
+            # Parallel gripper open amounts
+            if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.data_types:
+                max_pg_len = self.dataset_description.parallel_gripper_open_amounts.max_len
+                parallel_gripper_open_amounts = MaskableData(
+                    torch.zeros((max_pg_len,), dtype=torch.float32),
+                    torch.ones((max_pg_len,), dtype=torch.float32),
+                )
+                if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.input_data_types:
+                    sample.inputs.parallel_gripper_open_amounts = parallel_gripper_open_amounts
+                if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.output_data_types:
+                    sample.outputs.parallel_gripper_open_amounts = parallel_gripper_open_amounts
+            
             # Pose data
             if DataType.POSES in self.data_types:
                 max_pose_len = self.dataset_description.poses.max_len

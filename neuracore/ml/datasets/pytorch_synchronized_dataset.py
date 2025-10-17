@@ -20,6 +20,8 @@ from neuracore.core.nc_types import (
     CustomData,
     DataType,
     EndEffectorData,
+    EndEffectorPoseData,
+    ParallelGripperOpenAmountData,
     JointData,
     PointCloudData,
     PoseData,
@@ -335,6 +337,42 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                         )
                     )
 
+            if sync_point.end_effector_poses:
+                if DataType.END_EFFECTOR_POSES in self.input_data_types:
+                    sample.inputs.end_effector_poses = (
+                        self._create_end_effector_pose_maskable_input_data(
+                            sync_point.end_effector_poses
+                        )
+                    )
+                if DataType.END_EFFECTOR_POSES in self.output_data_types:
+                    future_ee_poses = [
+                        sp.end_effector_poses
+                        for sp in future_sync_points
+                        if sp.end_effector_poses is not None
+                    ]
+                    sample.outputs.end_effector_poses = (
+                        self._create_end_effector_pose_maskable_output_data(future_ee_poses)
+                    )
+            if sync_point.parallel_gripper_open_amounts:
+                if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.input_data_types:
+                    sample.inputs.parallel_gripper_open_amounts = (
+                        self._create_joint_maskable_input_data(
+                            sync_point.parallel_gripper_open_amounts,
+                            self.dataset_description.parallel_gripper_open_amounts.max_len,
+                        )
+                    )
+                if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.output_data_types:
+                    sample.outputs.parallel_gripper_open_amounts = (
+                        self._create_joint_maskable_output_data(
+                            [
+                                sp.parallel_gripper_open_amounts
+                                for sp in future_sync_points
+                                if sp.parallel_gripper_open_amounts is not None
+                            ],
+                            self.dataset_description.parallel_gripper_open_amounts.max_len,
+                        )
+                    )
+            
             # Process pose data
             if sync_point.poses:
                 if DataType.POSES in self.input_data_types:
@@ -471,6 +509,46 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         )
         return MaskableData(stacked_data, stacked_mask)
 
+    def _create_end_effector_pose_maskable_output_data(
+        self, end_effector_data: list[EndEffectorPoseData]
+    ) -> MaskableData:
+        """Create MaskableData for end-effector pose output."""
+        maskable_data_for_each_t = [
+            self._create_end_effector_pose_maskable_input_data(eed)
+            for eed in end_effector_data
+        ]
+        stacked_data = torch.stack(
+            [maskable_data.data for maskable_data in maskable_data_for_each_t]
+        )
+        stacked_mask = torch.stack(
+            [maskable_data.mask for maskable_data in maskable_data_for_each_t]
+        )
+        return MaskableData(stacked_data, stacked_mask)
+
+    def _create_end_effector_pose_maskable_input_data(
+        self, end_effector_pose_data: EndEffectorPoseData
+    ) -> MaskableData:
+        """Create MaskableData for end-effector pose input."""
+        ee_poses = []
+        for ee_name, ee_pose in end_effector_pose_data.poses.items():
+            ee_poses.extend(ee_pose)  # 6DOF pose
+
+        ee_tensor = torch.tensor(ee_poses, dtype=torch.float32)
+        max_len = self.dataset_description.end_effector_poses.max_len
+        num_existing = ee_tensor.shape[0]
+        extra = max_len - num_existing
+
+        if extra > 0:
+            ee_tensor = torch.cat(
+                [ee_tensor, torch.zeros(extra, dtype=torch.float32)], dim=0
+            )
+
+        ee_mask = torch.tensor(
+            [1.0] * num_existing + [0.0] * extra, dtype=torch.float32
+        )
+        return MaskableData(ee_tensor, ee_mask)
+        
+        
     def _create_pose_maskable_input_data(self, poses: PoseData) -> MaskableData:
         """Create MaskableData for pose input."""
         all_poses = []
@@ -491,6 +569,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             [1.0] * num_existing + [0.0] * extra, dtype=torch.float32
         )
         return MaskableData(pose_tensor, pose_mask)
+
 
     def _create_pose_maskable_output_data(
         self, poses_list: list[PoseData]

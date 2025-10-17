@@ -70,7 +70,17 @@ def main(args):
             )
             nc.log_joint_target_positions(action, timestamp=t)
             nc.log_rgb(CAM_NAME, obs.cameras[CAM_NAME].rgb, timestamp=t)
-
+            nc.log_parallel_gripper_open_amounts({
+                "left_gripper": 0.5,
+                "right_gripper": 0.7
+            }, timestamp=t)
+            nc.log_end_effector_poses(
+                {
+                    "right_end_effector": [1, 2, 3, 0.5, 0.5, 0.5, 0.5],
+                    "left_end_effector": [4, 2, 3, 0.5, 0.5, 0.5, 0.5],
+                },
+                timestamp=t,
+            )
         # Stop recording if enabled
         if record:
             print("Finishing recording...")

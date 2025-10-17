@@ -73,6 +73,8 @@ class BatchedData:
         joint_torques: Optional[MaskableData] = None,
         joint_target_positions: Optional[MaskableData] = None,
         end_effectors: Optional[MaskableData] = None,
+        end_effector_poses: Optional[MaskableData] = None,
+        parallel_gripper_open_amounts: Optional[MaskableData] = None,
         poses: Optional[MaskableData] = None,
         rgb_images: Optional[MaskableData] = None,
         depth_images: Optional[MaskableData] = None,
@@ -88,7 +90,9 @@ class BatchedData:
             joint_torques: Joint torque data with mask
             joint_target_positions: Target joint position data with mask
             end_effectors: End-effector state data with mask
-            poses: 6DOF pose data with mask
+            end_effector_poses: 7DOF end-effector pose data with mask
+            parallel_gripper_open_amounts: Parallel gripper open amount data with mask
+            poses: 7DOF pose data with mask
             rgb_images: RGB image data with mask
             depth_images: Depth image data with mask
             point_clouds: Point cloud data with mask
@@ -100,6 +104,8 @@ class BatchedData:
         self.joint_torques = joint_torques
         self.joint_target_positions = joint_target_positions
         self.end_effectors = end_effectors
+        self.end_effector_poses = end_effector_poses
+        self.parallel_gripper_open_amounts = parallel_gripper_open_amounts
         self.poses = poses
         self.rgb_images = rgb_images
         self.depth_images = depth_images
@@ -121,7 +127,10 @@ class BatchedData:
             joint_velocities=_to_device(self.joint_velocities, device),
             joint_torques=_to_device(self.joint_torques, device),
             joint_target_positions=_to_device(self.joint_target_positions, device),
+            
             end_effectors=_to_device(self.end_effectors, device),
+            end_effector_poses=_to_device(self.end_effector_poses, device),
+            parallel_gripper_open_amounts=_to_device(self.parallel_gripper_open_amounts, device),
             poses=_to_device(self.poses, device),
             rgb_images=_to_device(self.rgb_images, device),
             depth_images=_to_device(self.depth_images, device),
@@ -244,6 +253,8 @@ class BatchedInferenceSamples:
         joint_torques: Optional[MaskableData] = None,
         joint_target_positions: Optional[MaskableData] = None,
         end_effectors: Optional[MaskableData] = None,
+        end_effector_poses: Optional[MaskableData] = None,
+        parallel_gripper_open_amounts: Optional[MaskableData] = None,
         poses: Optional[MaskableData] = None,
         rgb_images: Optional[MaskableData] = None,
         depth_images: Optional[MaskableData] = None,
@@ -259,6 +270,8 @@ class BatchedInferenceSamples:
             joint_torques: Joint torque data with mask
             joint_target_positions: Target joint position data with mask
             end_effectors: End-effector state data with mask
+            end_effector_poses: 7DOF end-effector pose data with mask
+            parallel_gripper_open_amounts: Parallel gripper open amount data with mask
             poses: 6DOF pose data with mask
             rgb_images: RGB image data with mask
             depth_images: Depth image data with mask
@@ -271,6 +284,8 @@ class BatchedInferenceSamples:
         self.joint_torques = joint_torques
         self.joint_target_positions = joint_target_positions
         self.end_effectors = end_effectors
+        self.end_effector_poses = end_effector_poses
+        self.parallel_gripper_open_amounts = parallel_gripper_open_amounts
         self.poses = poses
         self.rgb_images = rgb_images
         self.depth_images = depth_images
@@ -293,6 +308,8 @@ class BatchedInferenceSamples:
             joint_torques=_to_device(self.joint_torques, device),
             joint_target_positions=_to_device(self.joint_target_positions, device),
             end_effectors=_to_device(self.end_effectors, device),
+            end_effector_poses=_to_device(self.end_effector_poses, device),
+            parallel_gripper_open_amounts=_to_device(self.parallel_gripper_open_amounts, device),
             poses=_to_device(self.poses, device),
             rgb_images=_to_device(self.rgb_images, device),
             depth_images=_to_device(self.depth_images, device),
