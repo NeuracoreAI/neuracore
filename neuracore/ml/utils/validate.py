@@ -24,10 +24,12 @@ from ...core.nc_types import (
     CustomData,
     DataType,
     EndEffectorData,
+    EndEffectorPoseData,
     JointData,
     LanguageData,
     ModelDevice,
     ModelInitDescription,
+    ParallelGripperOpenAmountData,
     PointCloudData,
     PoseData,
     SyncPoint,
@@ -111,6 +113,47 @@ def _create_end_effector_data(maskable_data: MaskableData) -> EndEffectorData:
         timestamp=t,
         open_amounts={
             f"gripper{i}": v
+            for i, v in enumerate(maskable_data.data[0].cpu().numpy().tolist())
+        },
+    )
+
+
+def _create_end_effector_pose_data(maskable_data: MaskableData) -> EndEffectorPoseData:
+    """Convert MaskableData to EndEffectorPoseData format for testing.
+
+    Args:
+        maskable_data: Batched end-effector pose data from the training pipeline.
+
+    Returns:
+        EndEffectorPoseData object with properly formatted values.
+    """
+    t = time.time()
+    return EndEffectorPoseData(
+        timestamp=t,
+        poses={
+            f"end_effector{i}": v
+            for i, v in enumerate(maskable_data.data[0].cpu().numpy().tolist())
+        },
+    )
+
+
+def _create_parallel_gripper_open_amount_data(
+    maskable_data: MaskableData,
+) -> ParallelGripperOpenAmountData:
+    """Convert MaskableData to ParallelGripperOpenAmountData format for testing.
+
+    Args:
+        maskable_data: Batched parallel gripper open amount
+        data from the training pipeline.
+
+    Returns:
+        ParallelGripperOpenAmountData object with properly formatted values.
+    """
+    t = time.time()
+    return ParallelGripperOpenAmountData(
+        timestamp=t,
+        open_amounts={
+            f"parallel_gripper{i}": v
             for i, v in enumerate(maskable_data.data[0].cpu().numpy().tolist())
         },
     )
@@ -407,6 +450,20 @@ def run_validation(
                     if batch.inputs.joint_target_positions:
                         sync_point.joint_target_positions = _create_joint_data(
                             batch.inputs.joint_target_positions
+                        )
+
+                    # Add end-effector pose data
+                    if batch.inputs.end_effector_poses:
+                        sync_point.end_effector_poses = _create_end_effector_pose_data(
+                            batch.inputs.end_effector_poses
+                        )
+
+                    # Add parallel gripper open amount data
+                    if batch.inputs.parallel_gripper_open_amounts:
+                        sync_point.parallel_gripper_open_amounts = (
+                            _create_parallel_gripper_open_amount_data(
+                                batch.inputs.parallel_gripper_open_amounts
+                            )
                         )
 
                     # Add end-effector data

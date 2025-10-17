@@ -52,6 +52,8 @@ class TestPytorchDummyDataset:
                 DataType.DEPTH_IMAGE,
                 DataType.POINT_CLOUD,
                 DataType.END_EFFECTORS,
+                DataType.END_EFFECTOR_POSES,
+                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
                 DataType.POSES,
                 DataType.LANGUAGE,
                 DataType.CUSTOM,
@@ -102,6 +104,8 @@ class TestPytorchDummyDataset:
         assert desc.joint_positions.max_len == 6
         assert desc.rgb_images.max_len == 2
         assert desc.point_clouds.max_len == 1
+        assert desc.end_effector_poses.max_len == 7
+        assert desc.parallel_gripper_open_amounts.max_len == 1
 
     def test_initialization_invalid_params(self):
         """Test initialization with invalid parameters."""
@@ -244,6 +248,48 @@ class TestPytorchDummyDataset:
         assert ee_data.shape == (2,)  # 2 end-effectors
         assert ee_mask.shape == (2,)
         assert torch.all(ee_mask == 1.0)
+
+    def test_end_effector_pose_data_generation(self):
+        """Test end-effector pose data generation."""
+        dataset = PytorchDummyDataset(
+            input_data_types=[DataType.END_EFFECTOR_POSES],
+            output_data_types=[DataType.END_EFFECTOR_POSES],
+            num_samples=3,
+        )
+
+        sample = dataset[0]
+
+        # Test input end-effector poses
+        assert sample.inputs.end_effector_poses is not None
+        assert isinstance(sample.inputs.end_effector_poses, MaskableData)
+        assert sample.inputs.end_effector_poses.data.shape == (7,)
+        assert sample.inputs.end_effector_poses.mask.shape == (7,)
+        assert torch.all(sample.inputs.end_effector_poses.mask == 1.0)
+
+        # Test output end-effector poses
+        assert sample.outputs.end_effector_poses is not None
+        assert sample.outputs.end_effector_poses.data.shape == (7,)
+
+    def test_parallel_gripper_open_amount_data_generation(self):
+        """Test parallel gripper open amount data generation."""
+        dataset = PytorchDummyDataset(
+            input_data_types=[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS],
+            output_data_types=[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS],
+            num_samples=3,
+        )
+
+        sample = dataset[0]
+
+        # Test input parallel gripper open amounts
+        assert sample.inputs.parallel_gripper_open_amounts is not None
+        assert isinstance(sample.inputs.parallel_gripper_open_amounts, MaskableData)
+        assert sample.inputs.parallel_gripper_open_amounts.data.shape == (1,)
+        assert sample.inputs.parallel_gripper_open_amounts.mask.shape == (1,)
+        assert torch.all(sample.inputs.parallel_gripper_open_amounts.mask == 1.0)
+
+        # Test output parallel gripper open amounts
+        assert sample.outputs.parallel_gripper_open_amounts is not None
+        assert sample.outputs.parallel_gripper_open_amounts.data.shape == (1,)
 
     def test_pose_data_generation(self):
         """Test pose data generation."""
@@ -595,6 +641,8 @@ class TestDatasetDescription:
             DataType.DEPTH_IMAGE,
             DataType.POINT_CLOUD,
             DataType.END_EFFECTORS,
+            DataType.END_EFFECTOR_POSES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.POSES,
             DataType.LANGUAGE,
         ]
@@ -614,6 +662,8 @@ class TestDatasetDescription:
         assert desc.joint_torques.max_len > 0
         assert desc.end_effector_states.max_len > 0
         assert desc.poses.max_len > 0
+        assert desc.end_effector_poses.max_len > 0
+        assert desc.parallel_gripper_open_amounts.max_len > 0
         assert desc.rgb_images.max_len > 0
         assert desc.depth_images.max_len > 0
         assert desc.point_clouds.max_len > 0

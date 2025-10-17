@@ -262,3 +262,107 @@ def test_log_invalid_data_format(
         nc.log_depth(
             "camera", np.ones((100, 100), dtype=np.float32) * 1000
         )  # Too large
+
+    # Test invalid end effector poses format (not a dictionary)
+    with pytest.raises(
+        ValueError,
+        match="End effector poses must be a dictionary "
+        "mapping end effector names to poses."
+        "",
+    ):
+        nc.log_end_effector_poses("not_a_dictionary")
+
+    # Test invalid end effector pose name (not a string)
+    with pytest.raises(ValueError, match="End effector names must be strings."):
+        nc.log_end_effector_poses({
+            123: [0.6, 0.4, 0.3, 0.0, 0.7071, 0.0, 0.7071],
+        })
+
+    # Test invalid end effector pose quaternions
+    with pytest.raises(
+        ValueError, match="End effector pose must be a valid unit quaternion."
+    ):
+        nc.log_end_effector_poses({
+            "right_ee": [0.6, 0.4, 0.3, 0.0, 1.0, 0.0, 1.0],
+        })
+
+    # Test invalid end effector pose format (not a list)
+    with pytest.raises(ValueError, match="End effector pose must be a list"):
+        nc.log_end_effector_poses({
+            "left_ee": "not_a_list",
+        })
+
+    # Test invalid end effector pose length (not 7 elements)
+    with pytest.raises(ValueError, match="End effector pose must be a 7-element list"):
+        nc.log_end_effector_poses({"left_ee": [0.5, 0.3, 0.2, 0.5, 0.5, 0.5]})
+
+    # Test invalid parallel gripper open amounts format (not a dictionary)
+    with pytest.raises(
+        ValueError,
+        match="Parallel gripper open amounts must be a dictionary "
+        "mapping gripper names to open amounts.",
+    ):
+        nc.log_parallel_gripper_open_amounts("not_a_dictionary")
+
+    # Test invalid parallel gripper open amount value (not a float)
+    with pytest.raises(
+        ValueError, match="Parallel gripper open amounts must be floats."
+    ):
+        nc.log_parallel_gripper_open_amounts({
+            "gripper1": "not_a_float",
+            "gripper2": [0.5],
+            "gripper3": (0.5),
+            "gripper4": {0.5},
+        })
+
+    # Test invalid parallel gripper open amounts value (not between 0.0 and 1.0)
+    with pytest.raises(
+        ValueError, match="Parallel gripper open amounts must be between 0.0 and 1.0."
+    ):
+        nc.log_parallel_gripper_open_amounts({
+            "gripper1": -0.5,
+            "gripper2": 1.5,
+        })
+
+    # Test invalid parallel gripper name (not a string)
+    with pytest.raises(ValueError, match="Parallel gripper names must be strings."):
+        nc.log_parallel_gripper_open_amounts({
+            123: 0.5,
+            100.0: 0.5,
+        })
+
+
+def test_log_end_effector_poses(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test logging end effector pose data."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    # Log end effector poses
+    nc.log_end_effector_poses({
+        "left_ee": [0.5, 0.3, 0.2, 0.5, 0.5, 0.5, 0.5],
+        "right_ee": [0.6, 0.4, 0.3, 0.0, 0.7071, 0.0, 0.7071],
+    })
+
+
+def test_log_parallel_gripper_open_amounts(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test logging parallel gripper open amounts."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.log_parallel_gripper_open_amounts({
+        "gripper1": 0.5,
+        "gripper2": 0.7,
+    })

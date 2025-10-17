@@ -238,6 +238,40 @@ class PytorchNeuracoreDataset(Dataset, ABC):
                 ),
             )
 
+        # End Effector Poses
+        if DataType.END_EFFECTOR_POSES in data_types:
+            if any(s.end_effector_poses is None for s in samples):
+                raise ValueError(
+                    "All samples must have end_effector_poses when "
+                    "END_EFFECTOR_POSES data type is requested"
+                )
+            bd.end_effector_poses = MaskableData(
+                torch.stack(
+                    [cast(MaskableData, s.end_effector_poses).data for s in samples]
+                ),
+                torch.stack(
+                    [cast(MaskableData, s.end_effector_poses).mask for s in samples]
+                ),
+            )
+
+        # Parallel Gripper Open Amount Data
+        if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in data_types:
+            if any(s.parallel_gripper_open_amounts is None for s in samples):
+                raise ValueError(
+                    "All samples must have parallel_gripper_open_amounts when "
+                    "GRIPPER_OPEN_AMOUNTS data type is requested"
+                )
+            bd.parallel_gripper_open_amounts = MaskableData(
+                torch.stack([
+                    cast(MaskableData, s.parallel_gripper_open_amounts).data
+                    for s in samples
+                ]),
+                torch.stack([
+                    cast(MaskableData, s.parallel_gripper_open_amounts).mask
+                    for s in samples
+                ]),
+            )
+
         # Pose data
         if DataType.POSES in data_types:
             if any(s.poses is None for s in samples):
