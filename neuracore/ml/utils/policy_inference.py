@@ -21,10 +21,10 @@ from neuracore.core.nc_types import (
     DataType,
     EndEffectorData,
     EndEffectorPoseData,
-    ParallelGripperOpenAmountData,
     JointData,
     LanguageData,
     ModelPrediction,
+    ParallelGripperOpenAmountData,
     PointCloudData,
     PoseData,
     SyncPoint,
@@ -233,9 +233,9 @@ class PolicyInference:
                 break
 
             image = camera_data.frame
-            assert isinstance(image, np.ndarray), (
-                f"Expected numpy array for image, got {type(image)}"
-            )
+            assert isinstance(
+                image, np.ndarray
+            ), f"Expected numpy array for image, got {type(image)}"
 
             # Handle different image formats
             if is_depth:
@@ -251,12 +251,10 @@ class PolicyInference:
             image = Image.fromarray(
                 image.transpose(1, 2, 0) if not is_depth else image[0]
             )
-            transform = T.Compose(
-                [
-                    T.Resize((224, 224)),
-                    T.ToTensor(),
-                ]
-            )
+            transform = T.Compose([
+                T.Resize((224, 224)),
+                T.ToTensor(),
+            ])
             values[0, j] = transform(image).numpy()
             mask[0, j] = 1.0
 
@@ -281,7 +279,9 @@ class PolicyInference:
             torch.tensor(mask, dtype=torch.float32),
         )
 
-    def _process_end_effector_pose_data(self, end_effector_pose_data: EndEffectorPoseData, max_len: int) -> MaskableData:
+    def _process_end_effector_pose_data(
+        self, end_effector_pose_data: EndEffectorPoseData, max_len: int
+    ) -> MaskableData:
         """Process end-effector pose data into batched tensor format."""
         values = np.zeros((1, max_len))
         mask = np.zeros((1, max_len))
@@ -293,8 +293,12 @@ class PolicyInference:
             torch.tensor(values, dtype=torch.float32),
             torch.tensor(mask, dtype=torch.float32),
         )
-    
-    def _process_parallel_gripper_open_amount_data(self, parallel_gripper_open_amount_data: ParallelGripperOpenAmountData, max_len: int) -> MaskableData:
+
+    def _process_parallel_gripper_open_amount_data(
+        self,
+        parallel_gripper_open_amount_data: ParallelGripperOpenAmountData,
+        max_len: int,
+    ) -> MaskableData:
         """Process parallel gripper open amount data into batched tensor format."""
         values = np.zeros((1, max_len))
         mask = np.zeros((1, max_len))
@@ -470,11 +474,13 @@ class PolicyInference:
             )
         # Process parallel gripper data
         if sync_point.parallel_gripper_open_amounts:
-            batch.parallel_gripper_open_amounts = self._process_parallel_gripper_open_amount_data(
-                sync_point.parallel_gripper_open_amounts,
-                self.dataset_description.parallel_gripper_open_amounts.max_len,
+            batch.parallel_gripper_open_amounts = (
+                self._process_parallel_gripper_open_amount_data(
+                    sync_point.parallel_gripper_open_amounts,
+                    self.dataset_description.parallel_gripper_open_amounts.max_len,
+                )
             )
-        
+
         # Process pose data
         if sync_point.poses:
             batch.poses = self._process_pose_data(
@@ -488,7 +494,6 @@ class PolicyInference:
                 sync_point.point_clouds,
                 self.dataset_description.point_clouds.max_len,
             )
-        
 
         # Process language data
         if sync_point.language_data:

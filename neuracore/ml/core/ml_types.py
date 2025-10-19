@@ -127,7 +127,6 @@ class BatchedData:
             joint_velocities=_to_device(self.joint_velocities, device),
             joint_torques=_to_device(self.joint_torques, device),
             joint_target_positions=_to_device(self.joint_target_positions, device),
-            
             end_effectors=_to_device(self.end_effectors, device),
             end_effector_poses=_to_device(self.end_effector_poses, device),
             parallel_gripper_open_amounts=_to_device(

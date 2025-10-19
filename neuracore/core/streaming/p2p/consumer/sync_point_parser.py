@@ -9,9 +9,9 @@ from neuracore.core.nc_types import (
     CustomData,
     EndEffectorData,
     EndEffectorPoseData,
-    ParallelGripperOpenAmountData,
     JointData,
     LanguageData,
+    ParallelGripperOpenAmountData,
     PointCloudData,
     PoseData,
     RobotStreamTrack,
@@ -52,12 +52,10 @@ def parse_sync_point(message_data: str, track_details: RobotStreamTrack) -> Sync
             camera_data.frame = ImageStringEncoder.decode_image(camera_data.frame)
 
             camera_id = f"{track_details.kind.value}_{track_details.label}"
-            return SyncPoint.model_validate(
-                {
-                    f"{track_details.kind.value}_images": {camera_id: camera_data},
-                    "timestamp": camera_data.timestamp,
-                }
-            )
+            return SyncPoint.model_validate({
+                f"{track_details.kind.value}_images": {camera_id: camera_data},
+                "timestamp": camera_data.timestamp,
+            })
         if track_details.kind == TrackKind.GRIPPER:
             end_effectors = EndEffectorData.model_validate_json(message_data)
             return SyncPoint(

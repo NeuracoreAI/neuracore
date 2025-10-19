@@ -24,7 +24,9 @@ from ...core.nc_types import (
     CustomData,
     DataType,
     EndEffectorData,
+    EndEffectorPoseData,
     JointData,
+    ParallelGripperOpenAmountData,
     LanguageData,
     ModelDevice,
     ModelInitDescription,
@@ -115,6 +117,41 @@ def _create_end_effector_data(maskable_data: MaskableData) -> EndEffectorData:
         },
     )
 
+def _create_end_effector_pose_data(maskable_data: MaskableData) -> EndEffectorPoseData:
+    """Convert MaskableData to EndEffectorPoseData format for testing.
+
+    Args:
+        maskable_data: Batched end-effector pose data from the training pipeline.
+
+    Returns:
+        EndEffectorPoseData object with properly formatted values.
+    """
+    t = time.time()
+    return EndEffectorPoseData(
+        timestamp=t,
+        poses={
+            f"pose{i}": v
+            for i, v in enumerate(maskable_data.data[0].cpu().numpy().tolist())
+        },
+    )
+
+def _create_parallel_gripper_open_amount_data(maskable_data: MaskableData) -> ParallelGripperOpenAmountData:
+    """Convert MaskableData to ParallelGripperOpenAmountData format for testing.
+
+    Args:
+        maskable_data: Batched parallel gripper open amount data from the training pipeline.
+
+    Returns:
+        ParallelGripperOpenAmountData object with properly formatted values.
+    """
+    t = time.time()
+    return ParallelGripperOpenAmountData(
+        timestamp=t,
+        open_amounts={
+            f"gripper{i}": v
+            for i, v in enumerate(maskable_data.data[0].cpu().numpy().tolist())
+        },
+    )
 
 def _create_pose_data(maskable_data: MaskableData) -> PoseData:
     """Convert MaskableData to PoseData format for testing.

@@ -21,8 +21,8 @@ from neuracore.core.nc_types import (
     DataType,
     EndEffectorData,
     EndEffectorPoseData,
-    ParallelGripperOpenAmountData,
     JointData,
+    ParallelGripperOpenAmountData,
     PointCloudData,
     PoseData,
     SyncPoint,
@@ -611,7 +611,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             [1.0] * num_existing + [0.0] * extra, dtype=torch.float32
         )
         return MaskableData(pose_tensor, pose_mask)
-
 
     def _create_pose_maskable_output_data(
         self, poses_list: list[PoseData]

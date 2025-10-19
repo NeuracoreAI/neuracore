@@ -279,7 +279,7 @@ def test_log_end_effector_poses(
     # Log end effector poses
     nc.log_end_effector_poses({
         "left_ee": [0.5, 0.3, 0.2, 0.5, 0.5, 0.5, 0.5],
-        "right_ee": [0.6, 0.4, 0.3, 0.0, 0.707, 0.0, 0.707],
+        "right_ee": [0.6, 0.4, 0.3, 0.0, 0.7071, 0.0, 0.7071],
     })
 
 

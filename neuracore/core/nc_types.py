@@ -107,7 +107,6 @@ class CameraData(NCData):
     frame: Optional[Union[Any, str]] = None  # Only filled in when using dataset iter
 
 
-
 class PoseData(NCData):
     """6DOF pose data for objects, end-effectors, or coordinate frames.
 
@@ -157,6 +156,7 @@ class EndEffectorPoseData(NCData):
     """
 
     poses: dict[str, list[float]]
+
     def order(self) -> "EndEffectorPoseData":
         """Return a new EndEffectorPoseData instance with sorted effector names.
 
@@ -178,7 +178,7 @@ class ParallelGripperOpenAmountData(NCData):
     open_amounts: dict[str, float]
 
     def order(self) -> "ParallelGripperOpenAmountData":
-        """Return a new ParallelGripperOpenAmountData instance with sorted gripper names.
+        """Return a new Gripper Open Amount instance with sorted gripper names.
 
         Returns:
             New ParallelGripperOpenAmountData with alphabetically sorted gripper names.

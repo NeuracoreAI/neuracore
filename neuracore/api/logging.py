@@ -21,9 +21,9 @@ from neuracore.core.nc_types import (
     CustomData,
     EndEffectorData,
     EndEffectorPoseData,
-    ParallelGripperOpenAmountData,
     JointData,
     LanguageData,
+    ParallelGripperOpenAmountData,
     PointCloudData,
     PoseData,
     SyncPoint,
@@ -281,9 +281,9 @@ def _log_joint_data(
         values=joint_data,
         additional_values=additional_urdf_data,
     )
-    assert isinstance(joint_stream, JsonDataStream), (
-        "Expected stream to be instance of JSONDataStream"
-    )
+    assert isinstance(
+        joint_stream, JsonDataStream
+    ), "Expected stream to be instance of JSONDataStream"
     joint_stream.log(data=data)
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
@@ -365,9 +365,9 @@ def _log_camera_data(
 
     start_stream(robot, stream)
 
-    assert isinstance(stream, VideoDataStream), (
-        "Expected stream as instance of VideoDataStream"
-    )
+    assert isinstance(
+        stream, VideoDataStream
+    ), "Expected stream as instance of VideoDataStream"
 
     if stream.width != image.shape[1] or stream.height != image.shape[0]:
         raise ValueError(
@@ -513,9 +513,9 @@ def log_custom_data(
         raise ValueError(
             "Data is not serializable. Please ensure that all data is serializable."
         )
-    assert isinstance(stream, JsonDataStream), (
-        "Expected stream to be instance of JSONDataStream"
-    )
+    assert isinstance(
+        stream, JsonDataStream
+    ), "Expected stream to be instance of JSONDataStream"
 
     custom_data = CustomData(timestamp=timestamp, data=data)
     stream.log(custom_data)
@@ -695,9 +695,9 @@ def log_pose_data(
         robot.add_data_stream(str_id, stream)
 
     start_stream(robot, stream)
-    assert isinstance(stream, JsonDataStream), (
-        "Expected stream to be instance of JSONDataStream"
-    )
+    assert isinstance(
+        stream, JsonDataStream
+    ), "Expected stream to be instance of JSONDataStream"
 
     pose_data = PoseData(timestamp=timestamp, pose=poses)
     stream.log(pose_data)
@@ -749,9 +749,9 @@ def log_gripper_data(
 
     start_stream(robot, stream)
 
-    assert isinstance(stream, JsonDataStream), (
-        "Expected stream to be instance of EndEffectorData"
-    )
+    assert isinstance(
+        stream, JsonDataStream
+    ), "Expected stream to be instance of EndEffectorData"
     end_effector_data = EndEffectorData(timestamp=timestamp, open_amounts=open_amounts)
     stream.log(end_effector_data)
 
@@ -789,10 +789,10 @@ def log_end_effector_poses(
         if len(value) != 7:
             raise ValueError(f"Poses must be lists of length 7. {key} is not length 7.")
         # check if last 4 elements of pose are a valid quaternion
-        if not np.isclose(np.linalg.norm(value[-4:]), 1.0, atol=1e-6):
+        if not np.isclose(np.linalg.norm(value[3:]), 1.0, atol=1e-4):
             raise ValueError(
                 f"Poses must be valid unit quaternions. "
-                f"{key} is not a valid unit quaternion."
+                f"{key} pose is not a valid unit quaternion."
             )
     robot = _get_robot(robot_name, instance)
     group_id = _create_group_id_from_dict(poses)
@@ -866,6 +866,7 @@ def log_parallel_gripper_open_amounts(
         parallel_gripper_open_amount_data.model_dump(mode="json")
     )
 
+
 def log_language(
     language: str,
     robot_name: Optional[str] = None,
@@ -894,9 +895,9 @@ def log_language(
         stream = JsonDataStream("language_annotations.json")
         robot.add_data_stream(str_id, stream)
     start_stream(robot, stream)
-    assert isinstance(stream, JsonDataStream), (
-        "Expected stream to be instance of JSONDataStream"
-    )
+    assert isinstance(
+        stream, JsonDataStream
+    ), "Expected stream to be instance of JSONDataStream"
 
     data = LanguageData(timestamp=timestamp, text=language)
     stream.log(data)
@@ -1058,9 +1059,9 @@ def log_point_cloud(
     if stream is None:
         stream = JsonDataStream(f"point_clouds/{camera_id}.json")
         robot.add_data_stream(str_id, stream)
-    assert isinstance(stream, JsonDataStream), (
-        "Expected stream to be instance of JSONDataStream"
-    )
+    assert isinstance(
+        stream, JsonDataStream
+    ), "Expected stream to be instance of JSONDataStream"
     start_stream(robot, stream)
     point_data = PointCloudData(
         timestamp=timestamp,
