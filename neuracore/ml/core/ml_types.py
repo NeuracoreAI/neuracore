@@ -130,7 +130,9 @@ class BatchedData:
             
             end_effectors=_to_device(self.end_effectors, device),
             end_effector_poses=_to_device(self.end_effector_poses, device),
-            parallel_gripper_open_amounts=_to_device(self.parallel_gripper_open_amounts, device),
+            parallel_gripper_open_amounts=_to_device(
+                self.parallel_gripper_open_amounts, device
+            ),
             poses=_to_device(self.poses, device),
             rgb_images=_to_device(self.rgb_images, device),
             depth_images=_to_device(self.depth_images, device),
@@ -309,7 +311,9 @@ class BatchedInferenceSamples:
             joint_target_positions=_to_device(self.joint_target_positions, device),
             end_effectors=_to_device(self.end_effectors, device),
             end_effector_poses=_to_device(self.end_effector_poses, device),
-            parallel_gripper_open_amounts=_to_device(self.parallel_gripper_open_amounts, device),
+            parallel_gripper_open_amounts=_to_device(
+                self.parallel_gripper_open_amounts, device
+            ),
             poses=_to_device(self.poses, device),
             rgb_images=_to_device(self.rgb_images, device),
             depth_images=_to_device(self.depth_images, device),

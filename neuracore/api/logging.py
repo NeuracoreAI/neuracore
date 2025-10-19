@@ -136,28 +136,24 @@ def log_sync_point(
             timestamp=sync_point.timestamp,
         )
 
-    # Log end effector poses  
-    if sync_point.end_effector_poses:  
-        log_end_effector_poses(  
-            poses=sync_point.end_effector_poses.poses,  
-            robot_name=robot_name,  
-            instance=instance,  
-            timestamp=sync_point.timestamp,  
+    # Log end effector poses
+    if sync_point.end_effector_poses:
+        log_end_effector_poses(
+            poses=sync_point.end_effector_poses.poses,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=sync_point.timestamp,
         )
 
     # Log parallel gripper open amounts
     if sync_point.parallel_gripper_open_amounts:
-        for (
-            parallel_gripper_name,
-            open_amount,
-        ) in sync_point.parallel_gripper_open_amounts.items():
-            log_parallel_gripper_open_amount(
-                name=parallel_gripper_name,
-                open_amount=open_amount,
-                robot_name=robot_name,
-                instance=instance,
-                timestamp=sync_point.timestamp,
-            )
+        log_parallel_gripper_open_amounts(
+            open_amounts=sync_point.parallel_gripper_open_amounts.open_amounts,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=sync_point.timestamp,
+        )
+
     # Log pose data
     if sync_point.poses:
         log_pose_data(
@@ -769,85 +765,91 @@ def log_gripper_data(
     )
 
 
-def log_end_effector_poses(  
-    poses: dict[str, list[float]],  
-    robot_name: Optional[str] = None,  
-    instance: int = 0,  
-    timestamp: Optional[float] = None,  
-) -> None:  
-    """Log end-effector pose data for a robot.  
-      
-    Args:  
-        poses: Dictionary mapping end-effector names to pose data  
-            (7-element lists: [x, y, z, qx, qy, qz, qw])  
-        robot_name: Optional robot ID  
-        instance: Optional instance number  
-        timestamp: Optional timestamp  
-    """  
-    timestamp = timestamp or time.time()  
-    if not isinstance(poses, dict):  
-        raise ValueError("Poses must be a dictionary of lists")  
-    for key, value in poses.items():  
-        if not isinstance(value, list):  
-            raise ValueError(f"Poses must be lists. {key} is not a list.")  
-        if len(value) != 7:  
-            raise ValueError(f"Poses must be lists of length 7. {key} is not length 7.")  
-      
-    robot = _get_robot(robot_name, instance)  
-    group_id = _create_group_id_from_dict(poses)  
-    str_id = f"{group_id}_end_effector_poses"  
-    stream = robot.get_data_stream(str_id)  
-    if stream is None:  
-        stream = JsonDataStream(f"end_effector_poses/{group_id}.json")  
-        robot.add_data_stream(str_id, stream)  
-      
-    start_stream(robot, stream)  
-    assert isinstance(stream, JsonDataStream)  
-      
-    ee_pose_data = EndEffectorPoseData(timestamp=timestamp, poses=poses)  
-    stream.log(ee_pose_data)  
-      
-    if robot.id is None:  
-        raise RobotError("Robot not initialized. Call init() first.")  
-      
-    StreamManagerOrchestrator().get_provider_manager(  
-        robot.id, robot.instance  
-    ).get_json_source(str_id, TrackKind.END_EFFECTOR_POSE, sensor_key=str_id).publish(  
-        ee_pose_data.model_dump(mode="json")  
+def log_end_effector_poses(
+    poses: dict[str, list[float]],
+    robot_name: Optional[str] = None,
+    instance: int = 0,
+    timestamp: Optional[float] = None,
+) -> None:
+    """Log end-effector pose data for a robot.
+
+    Args:
+        poses: Dictionary mapping end-effector names to pose data
+            (7-element lists: [x, y, z, qx, qy, qz, qw])
+        robot_name: Optional robot ID
+        instance: Optional instance number
+        timestamp: Optional timestamp
+    """
+    timestamp = timestamp or time.time()
+    if not isinstance(poses, dict):
+        raise ValueError("Poses must be a dictionary of lists")
+    for key, value in poses.items():
+        if not isinstance(value, list):
+            raise ValueError(f"Poses must be lists. {key} is not a list.")
+        if len(value) != 7:
+            raise ValueError(f"Poses must be lists of length 7. {key} is not length 7.")
+        # check if last 4 elements of pose are a valid quaternion
+        if not np.isclose(np.linalg.norm(value[-4:]), 1.0, atol=1e-6):
+            raise ValueError(
+                f"Poses must be valid unit quaternions. "
+                f"{key} is not a valid unit quaternion."
+            )
+    robot = _get_robot(robot_name, instance)
+    group_id = _create_group_id_from_dict(poses)
+    str_id = f"{group_id}_end_effector_poses"
+    stream = robot.get_data_stream(str_id)
+    if stream is None:
+        stream = JsonDataStream(f"end_effector_poses/{group_id}.json")
+        robot.add_data_stream(str_id, stream)
+
+    start_stream(robot, stream)
+    assert isinstance(stream, JsonDataStream)
+
+    ee_pose_data = EndEffectorPoseData(timestamp=timestamp, poses=poses)
+    stream.log(ee_pose_data)
+
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(str_id, TrackKind.END_EFFECTOR_POSE, sensor_key=str_id).publish(
+        ee_pose_data.model_dump(mode="json")
     )
 
-def log_parallel_gripper_open_amounts(  
-    open_amounts: dict[str, float],  
-    robot_name: Optional[str] = None,  
-    instance: int = 0,  
-    timestamp: Optional[float] = None,  
-) -> None:  
-    """Log parallel gripper open amount data for a robot.  
-      
-    Args:  
-        open_amounts: Dictionary mapping gripper names to  
-            open amounts (0.0 = closed, 1.0 = fully open)  
-        robot_name: Optional robot ID  
-        instance: Optional instance number  
-        timestamp: Optional timestamp  
-    """  
-    timestamp = timestamp or time.time()  
-    if not isinstance(open_amounts, dict):  
-        raise ValueError("Gripper open amounts must be a dictionary of floats")  
-    for key, value in open_amounts.items():  
-        if not isinstance(value, float):  
-            raise ValueError(  
-                f"Gripper open amounts must be floats. {key} is not a float."  
-            )  
-    robot = _get_robot(robot_name, instance)  
-    group_id = _create_group_id_from_dict(open_amounts)  
-    str_id = f"{group_id}_parallel_gripper_open_amounts"  
-    stream = robot.get_data_stream(str_id)  
-    if stream is None:  
-        stream = JsonDataStream(f"parallel_gripper_open_amounts/{group_id}.json")  
-        robot.add_data_stream(str_id, stream)  
-      
-    start_stream(robot, stream)  
+
+def log_parallel_gripper_open_amounts(
+    open_amounts: dict[str, float],
+    robot_name: Optional[str] = None,
+    instance: int = 0,
+    timestamp: Optional[float] = None,
+) -> None:
+    """Log parallel gripper open amount data for a robot.
+
+    Args:
+        open_amounts: Dictionary mapping gripper names to
+            open amounts (0.0 = closed, 1.0 = fully open)
+        robot_name: Optional robot ID
+        instance: Optional instance number
+        timestamp: Optional timestamp
+    """
+    timestamp = timestamp or time.time()
+    if not isinstance(open_amounts, dict):
+        raise ValueError("Gripper open amounts must be a dictionary of floats")
+    for key, value in open_amounts.items():
+        if not isinstance(value, float):
+            raise ValueError(
+                f"Gripper open amounts must be floats. {key} is not a float."
+            )
+    robot = _get_robot(robot_name, instance)
+    group_id = _create_group_id_from_dict(open_amounts)
+    str_id = f"{group_id}_parallel_gripper_open_amounts"
+    stream = robot.get_data_stream(str_id)
+    if stream is None:
+        stream = JsonDataStream(f"parallel_gripper_open_amounts/{group_id}.json")
+        robot.add_data_stream(str_id, stream)
+
+    start_stream(robot, stream)
     assert isinstance(stream, JsonDataStream)
 
     parallel_gripper_open_amount_data = ParallelGripperOpenAmountData(
@@ -856,10 +858,10 @@ def log_parallel_gripper_open_amounts(
     stream.log(parallel_gripper_open_amount_data)
 
     if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")  
-      
-    StreamManagerOrchestrator().get_provider_manager(  
-        robot.id, robot.instance  
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
     ).get_json_source(str_id, TrackKind.PARALLEL_GRIPPER_OPEN_AMOUNT, str_id).publish(
         parallel_gripper_open_amount_data.model_dump(mode="json")
     )

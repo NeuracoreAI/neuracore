@@ -410,7 +410,9 @@ class SyncPoint(BaseModel):
             # Order pose data (both pose names and pose coordinates)
             poses=self.poses.order() if self.poses else None,
             # Order end effector pose data
-            end_effector_poses=(self.end_effector_poses.order() if self.end_effector_poses else None),
+            end_effector_poses=(
+                self.end_effector_poses.order() if self.end_effector_poses else None
+            ),
             # Order parallel gripper open amount data
             parallel_gripper_open_amounts=(
                 self.parallel_gripper_open_amounts.order()

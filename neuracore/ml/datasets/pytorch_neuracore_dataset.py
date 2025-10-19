@@ -262,12 +262,14 @@ class PytorchNeuracoreDataset(Dataset, ABC):
                     "GRIPPER_OPEN_AMOUNTS data type is requested"
                 )
             bd.parallel_gripper_open_amounts = MaskableData(
-                torch.stack(
-                    [cast(MaskableData, s.parallel_gripper_open_amounts).data for s in samples]
-                ),
-                torch.stack(
-                    [cast(MaskableData, s.parallel_gripper_open_amounts).mask for s in samples]
-                ),
+                torch.stack([
+                    cast(MaskableData, s.parallel_gripper_open_amounts).data
+                    for s in samples
+                ]),
+                torch.stack([
+                    cast(MaskableData, s.parallel_gripper_open_amounts).mask
+                    for s in samples
+                ]),
             )
 
         # Pose data

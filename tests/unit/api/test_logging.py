@@ -263,20 +263,38 @@ def test_log_invalid_data_format(
             "camera", np.ones((100, 100), dtype=np.float32) * 1000
         )  # Too large
 
-def test_log_end_effector_poses(  
-    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id  
-):  
-    """Test logging end effector pose data."""  
-    nc.login("test_api_key")  
-    mock_auth_requests.post(  
-        f"{API_URL}/org/{mocked_org_id}/robots",  
-        json={"robot_id": "mock_robot_id", "has_urdf": True},  
-        status_code=200,  
-    )  
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)  
-      
-    # Log end effector poses  
-    nc.log_end_effector_poses({  
-        "left_ee": [0.5, 0.3, 0.2, 0.0, 0.0, 0.0, 1.0],  
-        "right_ee": [0.6, 0.4, 0.3, 0.0, 0.707, 0.0, 0.707],  
+
+def test_log_end_effector_poses(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test logging end effector pose data."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    # Log end effector poses
+    nc.log_end_effector_poses({
+        "left_ee": [0.5, 0.3, 0.2, 0.5, 0.5, 0.5, 0.5],
+        "right_ee": [0.6, 0.4, 0.3, 0.0, 0.707, 0.0, 0.707],
+    })
+
+
+def test_log_parallel_gripper_open_amounts(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test logging parallel gripper open amounts."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.log_parallel_gripper_open_amounts({
+        "gripper1": 0.5,
+        "gripper2": 0.7,
     })

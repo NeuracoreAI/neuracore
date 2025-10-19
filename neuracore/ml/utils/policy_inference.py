@@ -21,6 +21,7 @@ from neuracore.core.nc_types import (
     DataType,
     EndEffectorData,
     EndEffectorPoseData,
+    ParallelGripperOpenAmountData,
     JointData,
     LanguageData,
     ModelPrediction,
@@ -132,7 +133,6 @@ class PolicyInference:
                 "poses",
             )
             output_mapping[DataType.POSES] = keys
-        
         if DataType.END_EFFECTOR_POSES in output_data_types:
             keys = self._validate_robot_to_ncdata_keys(
                 robot_id,
@@ -140,7 +140,6 @@ class PolicyInference:
                 "end effector poses",
             )
             output_mapping[DataType.END_EFFECTOR_POSES] = keys
-        
         if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in output_data_types:
             keys = self._validate_robot_to_ncdata_keys(
                 robot_id,
@@ -148,7 +147,6 @@ class PolicyInference:
                 "parallel gripper open amounts",
             )
             output_mapping[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS] = keys
-        
         if DataType.RGB_IMAGE in output_data_types:
             keys = self._validate_robot_to_ncdata_keys(
                 robot_id,
@@ -278,6 +276,32 @@ class PolicyInference:
         values[0, : len(ee_values)] = ee_values
         mask[0, : len(ee_values)] = 1.0
 
+        return MaskableData(
+            torch.tensor(values, dtype=torch.float32),
+            torch.tensor(mask, dtype=torch.float32),
+        )
+
+    def _process_end_effector_pose_data(self, end_effector_pose_data: EndEffectorPoseData, max_len: int) -> MaskableData:
+        """Process end-effector pose data into batched tensor format."""
+        values = np.zeros((1, max_len))
+        mask = np.zeros((1, max_len))
+
+        all_poses = list(end_effector_pose_data.poses.values())
+        values[0, : len(all_poses)] = all_poses
+        mask[0, : len(all_poses)] = 1.0
+        return MaskableData(
+            torch.tensor(values, dtype=torch.float32),
+            torch.tensor(mask, dtype=torch.float32),
+        )
+    
+    def _process_parallel_gripper_open_amount_data(self, parallel_gripper_open_amount_data: ParallelGripperOpenAmountData, max_len: int) -> MaskableData:
+        """Process parallel gripper open amount data into batched tensor format."""
+        values = np.zeros((1, max_len))
+        mask = np.zeros((1, max_len))
+
+        all_open_amounts = list(parallel_gripper_open_amount_data.open_amounts.values())
+        values[0, : len(all_open_amounts)] = all_open_amounts
+        mask[0, : len(all_open_amounts)] = 1.0
         return MaskableData(
             torch.tensor(values, dtype=torch.float32),
             torch.tensor(mask, dtype=torch.float32),
@@ -438,8 +462,18 @@ class PolicyInference:
                 self.dataset_description.end_effector_states.max_len,
             )
 
-        # TODO: Process end-effector pose data
-        # TODO: Process parallel gripper data
+        # Process end-effector pose data
+        if sync_point.end_effector_poses:
+            batch.end_effector_poses = self._process_end_effector_pose_data(
+                sync_point.end_effector_poses,
+                self.dataset_description.end_effector_poses.max_len,
+            )
+        # Process parallel gripper data
+        if sync_point.parallel_gripper_open_amounts:
+            batch.parallel_gripper_open_amounts = self._process_parallel_gripper_open_amount_data(
+                sync_point.parallel_gripper_open_amounts,
+                self.dataset_description.parallel_gripper_open_amounts.max_len,
+            )
         
         # Process pose data
         if sync_point.poses:
@@ -454,6 +488,7 @@ class PolicyInference:
                 sync_point.point_clouds,
                 self.dataset_description.point_clouds.max_len,
             )
+        
 
         # Process language data
         if sync_point.language_data:

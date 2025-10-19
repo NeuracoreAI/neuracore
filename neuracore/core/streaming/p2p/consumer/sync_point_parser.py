@@ -189,7 +189,6 @@ def merge_sync_points(*args: SyncPoint) -> SyncPoint:
             merged_sync_point_dict["parallel_gripper_open_amount"].update(
                 sync_point.parallel_gripper_open_amounts
             )
-        
         # Pose Data
         if sync_point.poses is not None:
             if "poses" not in merged_sync_point_dict:

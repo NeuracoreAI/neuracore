@@ -134,14 +134,12 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 },
             )
         # Parallel gripper open amounts
-        if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.data_types
+        if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.data_types:
             self.dataset_description.parallel_gripper_open_amounts = DataItemStats(
                 mean=np.zeros(1),
                 std=np.ones(1),
                 max_len=1,  # single value
-                robot_to_ncdata_keys={
-                    self.robot.id: ["parallel_gripper_open_amount"]
-                },
+                robot_to_ncdata_keys={self.robot.id: ["parallel_gripper_open_amount"]},
             )
 
         # Pose data
@@ -334,19 +332,25 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                     sample.inputs.end_effector_poses = end_effector_poses
                 if DataType.END_EFFECTOR_POSES in self.output_data_types:
                     sample.outputs.end_effector_poses = end_effector_poses
-            
+
             # Parallel gripper open amounts
             if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.data_types:
-                max_pg_len = self.dataset_description.parallel_gripper_open_amounts.max_len
+                max_pg_len = (
+                    self.dataset_description.parallel_gripper_open_amounts.max_len
+                )
                 parallel_gripper_open_amounts = MaskableData(
                     torch.zeros((max_pg_len,), dtype=torch.float32),
                     torch.ones((max_pg_len,), dtype=torch.float32),
                 )
                 if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.input_data_types:
-                    sample.inputs.parallel_gripper_open_amounts = parallel_gripper_open_amounts
+                    sample.inputs.parallel_gripper_open_amounts = (
+                        parallel_gripper_open_amounts
+                    )
                 if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.output_data_types:
-                    sample.outputs.parallel_gripper_open_amounts = parallel_gripper_open_amounts
-            
+                    sample.outputs.parallel_gripper_open_amounts = (
+                        parallel_gripper_open_amounts
+                    )
+
             # Pose data
             if DataType.POSES in self.data_types:
                 max_pose_len = self.dataset_description.poses.max_len
