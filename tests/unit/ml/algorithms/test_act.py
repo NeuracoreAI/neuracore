@@ -29,6 +29,7 @@ CAMS = 1
 JOINT_POSITION_DIM = 32
 OUTPUT_PRED_DIM = JOINT_POSITION_DIM
 PRED_HORIZON = 10
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @pytest.fixture
@@ -147,9 +148,7 @@ def test_model_construction(
     model_init_description: ModelInitDescription, model_config: dict
 ):
     model = ACT(model_init_description, **model_config)
-    # Use CUDA if available, otherwise CPU
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
+    model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
 
 
@@ -159,10 +158,8 @@ def test_model_forward(
     sample_inference_batch: BatchedInferenceSamples,
 ):
     model = ACT(model_init_description, **model_config)
-    # Use CUDA if available, otherwise CPU
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    sample_inference_batch = sample_inference_batch.to(device)
+    model = model.to(DEVICE)
+    sample_inference_batch = sample_inference_batch.to(DEVICE)
     output = model(sample_inference_batch)
     assert isinstance(output, ModelPrediction)
     assert DataType.JOINT_TARGET_POSITIONS in output.outputs
@@ -179,10 +176,8 @@ def test_model_backward(
     sample_batch: BatchedTrainingSamples,
 ):
     model = ACT(model_init_description, **model_config)
-    # Use CUDA if available, otherwise CPU
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    sample_batch = sample_batch.to(device)
+    model = model.to(DEVICE)
+    sample_batch = sample_batch.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_batch)
 
     # Compute loss
