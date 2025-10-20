@@ -42,6 +42,19 @@ class ResumableUpload:
         self.total_bytes_uploaded = 0
         self.max_retries = 5
 
+    @classmethod
+    def from_session_url(cls, session_url: str, content_type: str, *, max_retries: int = 5) -> "ResumableUpload":
+        """Attach to an already-created resumable session URL."""
+        self = object.__new__(cls)  # bypass __init__
+        self.recording_id = ""
+        self.filepath = ""
+        self.content_type = content_type
+        self.session_uri = session_url
+        self.total_bytes_uploaded = 0
+        self.max_retries = max_retries
+        return self
+
+
     def _get_upload_session_uri(self) -> str:
         """Get a resumable upload session URI from the backend.
 

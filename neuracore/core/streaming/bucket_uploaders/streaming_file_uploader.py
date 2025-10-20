@@ -12,8 +12,9 @@ import queue
 import threading
 from typing import Any, Dict, List
 
+from neuracore.core.streaming.presigned_urls import get_presigned_upload_url
+
 from .bucket_uploader import BucketUploader
-from .resumable_upload import ResumableUpload
 
 logger = logging.getLogger(__name__)
 
@@ -62,37 +63,40 @@ class StreamingJsonUploader(BucketUploader):
     def _thread_setup(self) -> None:
         """Setup thread-local resources for the upload loop.
 
-        Initializes the resumable uploader, adjusts chunk size to meet requirements,
-        creates in-memory buffers, and sets up tracking variables for the JSON
-        streaming process.
+        Initializes the uploader, aligns chunk size, creates buffers, and
+        sets up tracking variables for the JSON streaming process.
         """
-        # Ensure chunk_size is a multiple of 256 KiB
+        # Align chunk size to 256 KiB
         if self.chunk_size % CHUNK_MULTIPLE != 0:
             self.chunk_size = ((self.chunk_size // CHUNK_MULTIPLE) + 1) * CHUNK_MULTIPLE
             logger.debug(
-                f"Adjusted chunk size to {self.chunk_size/1024:.0f} "
-                f"KiB to ensure it's a multiple of {CHUNK_MULTIPLE/1024:.0f} KiB"
+                f"Adjusted chunk size to {self.chunk_size/1024:.0f} KiB "
+                f"to ensure it's a multiple of {CHUNK_MULTIPLE/1024:.0f} KiB"
             )
 
-        self.uploader = ResumableUpload(
-            self.recording_id, self.filepath, "application/json"
-        )
+        content_type = "application/json"
 
-        # Create in-memory buffer
+        # Ask API for a presigned/session URL for this object
+        upload_session_url = get_presigned_upload_url(
+            recording_id=self.recording_id,
+            filepath=self.filepath,
+            content_type=content_type,
+        )
+        from .uploader_factory import make_chunk_uploader
+        self.chunk_uploader = make_chunk_uploader(upload_session_url, content_type)
+
+        # In-memory buffer we write JSON into
         self.buffer = io.BytesIO()
 
-        # Track bytes and buffer positions
+        # Byte accounting & cursors
         self.total_bytes_written = 0
-
-        # Create a dedicated buffer for upload chunks
         self.upload_buffer = bytearray()
         self.last_write_position = 0
 
-        # Store all data entries
+        # Accumulated data and formatting state
         self.data_entries: List[Dict[str, Any]] = []
-
-        # Track if we've already started the JSON array
         self.json_array_started = False
+
 
     def _upload_loop(self) -> None:
         """Upload chunks in a separate thread.
@@ -144,15 +148,13 @@ class StreamingJsonUploader(BucketUploader):
         # Upload any remaining data in the upload buffer
         if len(self.upload_buffer) > 0:
             final_chunk = bytes(self.upload_buffer)
-            success = self.uploader.upload_chunk(final_chunk, is_final=True)
-
-            if not success:
-                raise RuntimeError("Failed to upload final chunk")
+            self.chunk_uploader.upload_chunks([final_chunk], finalize=True)
 
         logger.debug(
-            "JSON streaming and upload complete: "
-            f"{self.uploader.total_bytes_uploaded} bytes"
+            "JSON streaming and upload complete (bytes written: %d)",
+            self.total_bytes_written,
         )
+
         self._update_num_active_streams(-1)
 
     def add_frame(self, data_entry: Dict[str, Any]) -> None:
@@ -208,35 +210,20 @@ class StreamingJsonUploader(BucketUploader):
             # Return to end of buffer for further writing
             self.buffer.seek(current_pos)
 
-            # Upload complete chunks
-            self._upload_chunks()
+            if self.chunk_uploader.supports_midstream_uploads:
+                self._upload_chunks()
+
 
         # Total bytes written
         self.total_bytes_written = current_pos
 
     def _upload_chunks(self) -> None:
-        """Upload complete chunks of the configured size.
-
-        Processes the upload buffer and uploads chunks of exactly chunk_size
-        bytes when enough data is available. Continues until insufficient
-        data remains for a complete chunk.
-
-        Raises:
-            RuntimeError: If any chunk upload fails.
-        """
-        # Upload complete chunks while we have enough data
+        bufs: list[bytes] = []
         while len(self.upload_buffer) >= self.chunk_size:
-            # Extract a chunk of exactly chunk_size bytes
-            chunk = bytes(self.upload_buffer[: self.chunk_size])
-
-            # Remove this chunk from our upload buffer
+            bufs.append(bytes(self.upload_buffer[: self.chunk_size]))
             self.upload_buffer = self.upload_buffer[self.chunk_size :]
-
-            # Upload the chunk
-            success = self.uploader.upload_chunk(chunk, is_final=False)
-
-            if not success:
-                raise RuntimeError("Failed to upload chunk")
+        if bufs:
+            self.chunk_uploader.upload_chunks(bufs, finalize=False)
 
     def finish(self) -> threading.Thread:
         """Complete the streaming process and initiate final upload.

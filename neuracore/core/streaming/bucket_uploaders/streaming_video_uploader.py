@@ -15,17 +15,14 @@ from fractions import Fraction
 from typing import Callable, Optional
 
 import av
+from neuracore.core.streaming.presigned_urls import get_presigned_upload_url
 import numpy as np
-import requests
 
-from neuracore.core.auth import get_auth
-from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import API_URL
 from neuracore.core.exceptions import EncodingError
 from neuracore.core.nc_types import CameraData
 
+
 from .bucket_uploader import BucketUploader
-from .resumable_upload import ResumableUpload
 
 logger = logging.getLogger(__name__)
 
@@ -102,26 +99,35 @@ class StreamingVideoUploader(BucketUploader):
     def _thread_setup(self) -> None:
         """Setup thread-local resources for the video encoding and upload loop.
 
-        Initializes the video encoder, adjusts chunk size requirements, creates
-        the MP4 container with fragmented headers for streaming, and sets up
-        tracking variables for timestamp management and buffer handling.
+        Initializes the encoder, aligns chunk size, sets up the fragmented MP4
+        container, and prepares upload buffers and state.
         """
-        # Ensure chunk_size is a multiple of 256 KiB
+        # Align chunk size to 256 KiB
         if self.chunk_size % CHUNK_MULTIPLE != 0:
             self.chunk_size = ((self.chunk_size // CHUNK_MULTIPLE) + 1) * CHUNK_MULTIPLE
             logger.debug(
-                f"Adjusted chunk size to {self.chunk_size/1024:.0f} "
-                "KiB to ensure it's a multiple of {CHUNK_MULTIPLE} MiB"
+                f"Adjusted chunk size to {self.chunk_size/1024:.0f} KiB "
+                f"to ensure it's a multiple of {CHUNK_MULTIPLE/1024:.0f} KiB"
             )
 
-        self.uploader = ResumableUpload(
-            self.recording_id, f"{self.path}/{self.video_name}", "video/mp4"
+        object_path = f"{self.path}/{self.video_name}"
+        content_type = "video/mp4"
+
+        # Ask API for a presigned/session URL for this video object
+        upload_session_url = get_presigned_upload_url(
+            recording_id=self.recording_id,
+            filepath=object_path,
+            content_type=content_type,
         )
 
-        # Create in-memory buffer
+        # Build the correct uploader (S3 vs GCP) from the URL
+        from .uploader_factory import make_chunk_uploader
+        self.chunk_uploader = make_chunk_uploader(upload_session_url, content_type)
+
+        # In-memory buffer PyAV writes into
         self.buffer = io.BytesIO()
 
-        # Open output container to write to memory buffer
+        # Fragmented MP4 for streaming-friendly output
         self.container = av.open(
             self.buffer,
             mode="w",
@@ -129,28 +135,28 @@ class StreamingVideoUploader(BucketUploader):
             options={"movflags": "frag_keyframe+empty_moov"},
         )
 
-        # Create video stream
+        # Video stream configuration
         self.stream = self.container.add_stream(self.codec, rate=PTS_FRACT)
         self.stream.width = self.width
         self.stream.height = self.height
         self.stream.pix_fmt = self.pixel_format
         if self.codec_context_options is not None:
             self.stream.codec_context.options = self.codec_context_options
-
         self.stream.time_base = Fraction(1, PTS_FRACT)
 
-        # Keep track of timestamps
+        # Timestamp & byte tracking
         self.first_timestamp: Optional[float] = None
         self.last_pts: Optional[int] = None
-
-        # Track bytes and buffer positions
         self.total_bytes_written = 0
         self.last_upload_position = 0
 
-        # Create a dedicated buffer for upload chunks
+        # Upload staging
         self.upload_buffer = bytearray()
         self.last_write_position = 0
+
+        # Frame metadata for sidecar
         self.frame_metadatas: list[CameraData] = []
+
 
     def _check_codec_support(self) -> None:
         """Check if the current FFmpeg/PyAV setup supports our encoding target."""
@@ -213,16 +219,15 @@ class StreamingVideoUploader(BucketUploader):
         self.upload_buffer.extend(chunk_data)
         self.last_write_position = current_pos
 
-        final_chunk = bytes(self.upload_buffer)
-        success = self.uploader.upload_chunk(final_chunk, is_final=True)
-
-        if not success:
-            raise RuntimeError("Failed to upload final chunk")
+        if len(self.upload_buffer) > 0:
+            final_chunk = bytes(self.upload_buffer)
+            self.chunk_uploader.upload_chunks([final_chunk], finalize=True) 
 
         logger.debug(
-            "Video encoding and upload complete: "
-            f"{self.uploader.total_bytes_uploaded} bytes"
+            "Video encoding and upload complete (bytes written: %d)",
+            self.total_bytes_written,
         )
+
         self._upload_json_data()
         self._update_num_active_streams(-1)
 
@@ -287,35 +292,23 @@ class StreamingVideoUploader(BucketUploader):
             self.upload_buffer.extend(chunk_data)
             self.last_write_position = current_pos
             self.buffer.seek(current_pos)
-            self._upload_chunks()
+            
+            if self.chunk_uploader.supports_midstream_uploads:
+                self._upload_chunks()
+
 
         # Total bytes written
         self.total_bytes_written = current_pos
         self.frame_metadatas.append(frame_metadata)
 
     def _upload_chunks(self) -> None:
-        """Upload complete chunks of the configured size.
-
-        Processes the upload buffer and uploads chunks of exactly chunk_size
-        bytes when enough data is available. Continues until insufficient
-        data remains for a complete chunk.
-
-        Raises:
-            RuntimeError: If any chunk upload fails.
-        """
-        # Upload complete chunks while we have enough data
+        bufs: list[bytes] = []
         while len(self.upload_buffer) >= self.chunk_size:
-            # Extract a chunk of exactly chunk_size bytes
-            chunk = bytes(self.upload_buffer[: self.chunk_size])
-
-            # Remove this chunk from our upload buffer
+            bufs.append(bytes(self.upload_buffer[: self.chunk_size]))
             self.upload_buffer = self.upload_buffer[self.chunk_size :]
+        if bufs:
+            self.chunk_uploader.upload_chunks(bufs, finalize=False)
 
-            # Upload the chunk
-            success = self.uploader.upload_chunk(chunk, is_final=False)
-
-            if not success:
-                raise RuntimeError("Failed to upload chunk")
 
     def finish(self) -> threading.Thread:
         """Complete the video encoding process and initiate final upload.
@@ -333,32 +326,21 @@ class StreamingVideoUploader(BucketUploader):
         return self._upload_thread
 
     def _upload_json_data(self) -> None:
-        """Upload frame metadata as a JSON file to cloud storage.
-
-        Creates a separate metadata file containing all frame information
-        including timestamps and frame indices for synchronization with
-        other data streams in the recording.
-
-        Raises:
-            requests.HTTPError: If the metadata upload fails.
-        """
-        params = {
-            "filepath": f"{self.path}/metadata.json",
-            "content_type": "application/json",
-        }
-        org_id = get_current_org()
-        upload_url_response = requests.get(
-            f"{API_URL}/org/{org_id}/recording/{self.uploader.recording_id}/resumable_upload_url",
-            params=params,
-            headers=get_auth().get_headers(),
-        )
-        upload_url_response.raise_for_status()
-        upload_url = upload_url_response.json()["url"]
-        for i in range(0, len(self.frame_metadatas)):
+        sidecar_path = f"{self.path}/metadata.json"
+        for i in range(len(self.frame_metadatas)):
             self.frame_metadatas[i].frame_idx = i
-        data = json.dumps([fm.model_dump(mode="json") for fm in self.frame_metadatas])
-        response = requests.put(
-            upload_url, headers={"Content-Length": str(len(data))}, data=data
+        payload = [fm.model_dump(mode="json") for fm in self.frame_metadatas]
+        payload_bytes = json.dumps(payload).encode("utf-8")
+
+        from neuracore.core.streaming.presigned_urls import get_presigned_upload_url
+        from .uploader_factory import make_chunk_uploader
+
+        sidecar_url = get_presigned_upload_url(
+            recording_id=self.recording_id,
+            filepath=sidecar_path,
+            content_type="application/json",
         )
-        response.raise_for_status()
+        metadata_sidecar_uploader = make_chunk_uploader(sidecar_url, "application/json")
+        metadata_sidecar_uploader.upload_chunks([payload_bytes], finalize=True)
         self.frame_metadatas = []
+
