@@ -365,6 +365,12 @@ def main(cfg: DictConfig) -> None:
     logger.info("Training configuration:")
     logger.info(OmegaConf.to_yaml(cfg))
 
+    if isinstance(cfg.batch_size, str) and cfg.batch_size.lower() == "auto":
+        raise ValueError(
+            "batch_size=auto is temporarily disabled. "
+            "Please set an explicit positive integer, e.g., batch_size=32."
+        )
+
     if "algorithm" in cfg and cfg.algorithm_id is not None:
         raise ValueError(
             "Both 'algorithm' and 'algorithm_id' are provided. "
