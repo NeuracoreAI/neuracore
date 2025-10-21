@@ -30,7 +30,7 @@ JOINT_POSITION_DIM = 32
 OUTPUT_PRED_DIM = JOINT_POSITION_DIM
 PRED_HORIZON = 10
 LANGUAGE_MAX_LEN = 512  # Maximum length for language tokens
-DEVICE = torch.device("cpu")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @pytest.fixture
