@@ -39,6 +39,12 @@ class BackgroundCoroutineTracker:
             task.result()
         except asyncio.CancelledError:
             logger.info("Background task cancelled")
+        except RuntimeError as e:
+            if "cannot schedule new futures after shutdown" in str(e).lower():
+                logger.debug("Event loop is shutting down; ignoring exception.")
+                pass
+            else:
+                logger.exception("Background task runtime error: %s", e)
         except Exception as e:
             logger.exception("Background task raised exception: %s", e)
 
