@@ -396,3 +396,18 @@ class BimanualViperXTask(MuJoCoEnvironment):
             env_state=self.get_env_state(),
             cameras=cameras,
         )
+
+    def sample_box_pose(self) -> np.ndarray:
+        """Sample random box pose within workspace.
+
+        Returns:
+            Box pose array (position + quaternion).
+        """
+        x_range = [0.0, 0.2]
+        y_range = [0.4, 0.6]
+        z_range = [0.05, 0.05]
+
+        ranges = np.array([x_range, y_range, z_range])
+        cube_position = self.random.uniform(ranges[:, 0], ranges[:, 1])
+        cube_quat = np.array([1, 0, 0, 0])
+        return np.concatenate([cube_position, cube_quat])
