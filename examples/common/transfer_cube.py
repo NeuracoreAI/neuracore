@@ -131,21 +131,6 @@ class TransferCubeEETask(BimanualViperXTask):
         """Initialize end-effector control transfer cube task."""
         super().__init__(str(BIMANUAL_EE_VIPERX_MJCF_PATH))
 
-    def sample_box_pose(self) -> np.ndarray:
-        """Sample random box pose within workspace.
-
-        Returns:
-            Box pose array (position + quaternion).
-        """
-        x_range = [0.0, 0.2]
-        y_range = [0.4, 0.6]
-        z_range = [0.05, 0.05]
-
-        ranges = np.array([x_range, y_range, z_range])
-        cube_position = self.random.uniform(ranges[:, 0], ranges[:, 1])
-        cube_quat = np.array([1, 0, 0, 0])
-        return np.concatenate([cube_position, cube_quat])
-
     def before_step(self, action: np.ndarray) -> None:
         """Process mocap control action before stepping.
 
