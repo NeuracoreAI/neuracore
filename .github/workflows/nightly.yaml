@@ -19,8 +19,10 @@ jobs:
     needs: pre-commit
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ['3.9', '3.10', '3.11']
+        environment: [staging, production]
 
     steps:
     - name: Checkout code
@@ -39,11 +41,7 @@ jobs:
 
     - name: Run Integration Test
       env:
-        NEURACORE_API_URL: "https://staging.api.neuracore.app/api"
-        SERVICE_ACCOUNT_USERNAME: ${{ secrets.SERVICE_ACCOUNT_USERNAME }}
-        SERVICE_ACCOUNT_PASSWORD: ${{ secrets.SERVICE_ACCOUNT_PASSWORD }}
-        SERVICE_ORG: ${{ vars.SERVICE_ORG }}
-      run: |
-        nc-login --email="$SERVICE_ACCOUNT_USERNAME" --password="$SERVICE_ACCOUNT_PASSWORD"
-        nc-select-org --org-id="$SERVICE_ORG"
-        pytest tests/integration/test_consume_stream.py::test_get_latest_data_from_multiple_nodes
+        NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://api.staging.neuracore.app/api' || 'https://api.neuracore.app/api' }}
+        NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
+      run: pytest tests/integration/test_consume_stream.py::test_get_latest_data_from_multiple_nodes
