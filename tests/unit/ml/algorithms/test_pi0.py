@@ -31,8 +31,8 @@ JOINT_POSITION_DIM = 16
 OUTPUT_PRED_DIM = JOINT_POSITION_DIM
 PRED_HORIZON = 8
 LANGUAGE_MAX_LEN = 128  # Maximum length for language tokens
+# Use cpu because the model takes a lot of vram
 DEVICE = torch.device("cpu")
-
 SKIP_TEST = os.environ.get("CI", "false").lower() == "true"
 
 
@@ -83,6 +83,7 @@ def model_init_description() -> ModelInitDescription:
         ],
         output_data_types=[DataType.JOINT_TARGET_POSITIONS],
         output_prediction_horizon=PRED_HORIZON,
+        device=DEVICE.type,
     )
 
 
@@ -248,5 +249,6 @@ def test_run_validation(tmp_path: Path, mock_login):
         port=random.randint(10000, 20000),
         skip_endpoint_check=False,
         algorithm_config=PI_TINY_ARGS,
+        device=DEVICE.type,
     )
     assert len(error_msg) == 0
