@@ -102,13 +102,13 @@ def generate_api_key(
     # Use the access token to request an API key
     try:
         headers = {"Authorization": f"Bearer {access_token}"}
-        api_key_response = requests.post(
+        api_key_response = requests.get(
             f"{API_URL}/auth/api-key",
             headers=headers,
         )
         api_key_response.raise_for_status()
         api_key = APIKey.model_validate(api_key_response.json()).key
-        print(f"Your new API key is: {api_key}")
+        print(f"Your API key is: {api_key}")
         config_manager = get_config_manager()
         config_manager.config.api_key = api_key
         config_manager.save_config()
