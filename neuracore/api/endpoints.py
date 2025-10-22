@@ -55,6 +55,7 @@ def policy(
 def policy_local_server(
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
+    device: Optional[str] = None,
     port: int = 8080,
     host: str = "127.0.0.1",
 ) -> LocalServerPolicy:
@@ -65,6 +66,7 @@ def policy_local_server(
     Args:
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load.
+        device: Model to be loaded on
         port: TCP port number where the local server will run.
         host: Host address to bind the server to. Defaults to localhost.
 
@@ -75,7 +77,7 @@ def policy_local_server(
         EndpointError: If the server startup or model initialization fails.
         ConfigError: If there is an error trying to get the current org.
     """
-    return _policy_local_server(train_run_name, model_file, port, host)
+    return _policy_local_server(train_run_name, model_file, device, port, host)
 
 
 def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:

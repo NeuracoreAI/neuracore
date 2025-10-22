@@ -346,6 +346,7 @@ class LocalServerPolicy(ServerPolicy):
         self,
         org_id: str,
         model_path: Path,
+        device: Optional[str] = None,
         job_id: Optional[str] = None,
         port: int = 8080,
         host: str = "127.0.0.1",
@@ -356,6 +357,7 @@ class LocalServerPolicy(ServerPolicy):
             robot: Robot instance for accessing sensor streams.
             org_id: Organization ID
             model_path: Path to the .nc.zip model file
+            device: Device model to be loaded on
             job_id: Optional job ID to associate with the server
             port: Port to run the server on
             host: Host to bind to
@@ -364,6 +366,7 @@ class LocalServerPolicy(ServerPolicy):
         self.org_id = org_id
         self.job_id = job_id
         self.model_path = model_path
+        self.device = device
         self.port = port
         self.host = host
         self.server_process: Optional[Popen] = None
@@ -388,6 +391,8 @@ class LocalServerPolicy(ServerPolicy):
             "--log-level",
             "info",
         ]
+        if self.device:
+            cmd.extend(["--device", self.device])
         if self.job_id:
             cmd.extend(["--job-id", self.job_id])
 
@@ -532,6 +537,7 @@ def policy(
 def policy_local_server(
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
+    device: Optional[str] = None,
     port: int = 8080,
     host: str = "127.0.0.1",
     job_id: Optional[str] = None,
@@ -541,6 +547,7 @@ def policy_local_server(
     Args:
         train_run_name: Name of the training run to load the model from.
         port: Port to run the server on.
+        device: Device model to be loaded on
         robot_name: Robot identifier.
         instance: Instance number of the robot.
         host: Host to bind to.
@@ -569,6 +576,7 @@ def policy_local_server(
     return LocalServerPolicy(
         org_id=org_id,
         model_path=model_path,
+        device=device,
         job_id=job_id,
         port=port,
         host=host,
