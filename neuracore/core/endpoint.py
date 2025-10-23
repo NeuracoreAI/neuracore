@@ -357,7 +357,7 @@ class LocalServerPolicy(ServerPolicy):
             robot: Robot instance for accessing sensor streams.
             org_id: Organization ID
             model_path: Path to the .nc.zip model file
-            device: Device model to be loaded on
+            device: Device to load the model on
             job_id: Optional job ID to associate with the server
             port: Port to run the server on
             host: Host to bind to
@@ -547,7 +547,7 @@ def policy_local_server(
     Args:
         train_run_name: Name of the training run to load the model from.
         port: Port to run the server on.
-        device: Device model to be loaded on
+        device: Device to load the model on
         robot_name: Robot identifier.
         instance: Instance number of the robot.
         host: Host to bind to.

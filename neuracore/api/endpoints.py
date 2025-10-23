@@ -66,7 +66,7 @@ def policy_local_server(
     Args:
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load.
-        device: Model to be loaded on
+        device: Device to load the model on.
         port: TCP port number where the local server will run.
         host: Host address to bind the server to. Defaults to localhost.
 

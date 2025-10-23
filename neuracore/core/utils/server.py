@@ -48,7 +48,7 @@ class ModelServer:
             model_file: Path to the .nc.zip model archive
             org_id: Organization ID for the model
             job_id: Job ID for the model
-            device: Device the model loaded on
+            device: Device to load the model on
         """
         # Import here to avoid the need for pytorch unless the user uses this policy
         from neuracore.ml.utils.policy_inference import PolicyInference
@@ -240,7 +240,7 @@ def start_server(
         host: Host to bind to
         port: Port to bind to
         log_level: Logging level
-        device: Device model loaded on
+        device: Device to load the model on
 
     Returns:
         ModelServer instance
