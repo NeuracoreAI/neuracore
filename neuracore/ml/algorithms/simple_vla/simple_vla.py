@@ -460,7 +460,7 @@ class SimpleVLA(NeuracoreModel):
         Returns:
             list[DataType]: List of supported output data types
         """
-        return [DataType.JOINT_TARGET_POSITIONS]
+        return [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]
 
     @staticmethod
     def tokenize_text(text: list[str]) -> tuple[torch.Tensor, torch.Tensor]:

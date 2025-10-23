@@ -599,4 +599,4 @@ class ACT(NeuracoreModel):
         Returns:
             list[DataType]: List of supported output data types
         """
-        return [DataType.JOINT_TARGET_POSITIONS]
+        return [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]
