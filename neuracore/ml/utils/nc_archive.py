@@ -136,7 +136,7 @@ def extract_nc_archive(archive_file: Path, output_dir: Path) -> dict[str, Path]:
 
 
 def load_model_from_nc_archive(
-    archive_file: Path, extract_to: Optional[Path] = None
+    archive_file: Path, extract_to: Optional[Path] = None, device: Optional[str] = None
 ) -> NeuracoreModel:
     """Load a Neuracore model from a NC.ZIP archive file.
 
@@ -147,6 +147,7 @@ def load_model_from_nc_archive(
         archive_file: Path to the NC.ZIP file.
         extract_to: Optional directory to extract files to.
             If None, uses a temporary directory.
+        device: Optional device model to be loaded on
 
     Returns:
         NeuracoreModel: The reconstructed model instance ready for inference.
@@ -174,7 +175,10 @@ def load_model_from_nc_archive(
         model_init_description = ModelInitDescription.model_validate(
             model_init_description
         )
-        model_init_description.device = ModelDevice.AUTO
+
+        model_init_description.device = (
+            ModelDevice(device) if device else ModelDevice.AUTO
+        )
 
         # Load algorithm config if present
         algorithm_config = {}

@@ -155,6 +155,10 @@ class GemmaMoELayer(nn.Module):
         for name, config in expert_configs.items():
             # Create Gemma config for this expert
             gemma_config = GemmaConfig(**asdict(config))
+            # Ensure attention implementation is set to eager to avoid None lookups
+            # in ALL_ATTENTION_FUNCTIONS during CustomGemmaAttention.forward
+            setattr(gemma_config, "_attn_implementation", "eager")
+            setattr(gemma_config, "attn_implementation", "eager")
             self.experts[name] = GemmaDecoderLayer(gemma_config, layer_idx)
             self.experts[name].self_attn = CustomGemmaAttention(
                 config=gemma_config, layer_idx=layer_idx

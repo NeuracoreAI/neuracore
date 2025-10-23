@@ -11,6 +11,7 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -203,6 +204,7 @@ def run_validation(
     port: int = 8080,
     skip_endpoint_check: bool = False,
     algorithm_config: dict = {},
+    device: Optional[str] = None,
 ) -> tuple[AlgorithmCheck, str]:
     """Run comprehensive validation tests on a Neuracore algorithm.
 
@@ -286,7 +288,7 @@ def run_validation(
             input_data_types=supported_input_data_types,
             output_data_types=supported_output_data_types,
             output_prediction_horizon=dataset.output_prediction_horizon,
-            device=ModelDevice.AUTO,
+            device=ModelDevice(device) if device else ModelDevice.AUTO,
         )
 
         # Check 1: Can initialize the model
@@ -375,6 +377,7 @@ def run_validation(
                     policy = nc.policy_local_server(
                         model_file=str(artifacts_dir / "model.nc.zip"),
                         port=port,
+                        device=device,
                     )
 
                 except Exception as e:

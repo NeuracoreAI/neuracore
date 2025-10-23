@@ -71,6 +71,7 @@ class Pi0(NeuracoreModel):
         flow_beta: float = 1.0,
         lr: float = 5e-5,
         weight_decay: float = 0.0,
+        dtype: torch.dtype = torch.float32,
     ):
         """Initialize the Pi0 model.
 
@@ -92,8 +93,8 @@ class Pi0(NeuracoreModel):
             flow_alpha: Alpha parameter for the flow beta distribution.
             flow_beta: Beta parameter for the flow beta distribution.
             lr: Learning rate for the model.
-            lr_backbone: Learning rate for the backbone.
             weight_decay: Weight decay for the model.
+            dtype: Data type for model parameters and computations.
         """
         super().__init__(model_init_description)
 
@@ -118,11 +119,11 @@ class Pi0(NeuracoreModel):
             + self.dataset_description.joint_velocities.max_len
             + self.dataset_description.joint_torques.max_len
         )
-        self.dtype = torch.float32
+        self.dtype = dtype
 
-        self.vlm = PaliGemmaForConditionalGeneration.from_pretrained(VLM_BACKBONE).to(
-            self.device
-        )
+        self.vlm = PaliGemmaForConditionalGeneration.from_pretrained(
+            VLM_BACKBONE, dtype=self.dtype, attn_implementation="eager"
+        ).to(self.device)
         self.vlm_processor = AutoProcessor.from_pretrained(
             VLM_BACKBONE, padding_side="right"
         )
@@ -131,7 +132,6 @@ class Pi0(NeuracoreModel):
         # Disable finetuning of the VLM
         for param in self.vlm.parameters():
             param.requires_grad = False
-
         # Create a mixture of experts (MoE) model consisting of 2 experts:
         # 1. VLM expert
         # 2. Action expert
@@ -512,7 +512,6 @@ class Pi0(NeuracoreModel):
             pad_masks.append(img_mask)
 
         language_embeddings = self.vlm_embedding_module(language_tokens)
-
         embs.append(language_embeddings)
         pad_masks.append(language_masks)
 
@@ -626,7 +625,7 @@ class Pi0(NeuracoreModel):
             t += delta_t
         prediction_time = time.time() - t_start
         predictions = self._unnormalize_actions(action)
-        predictions = predictions.detach().cpu().numpy()
+        predictions = predictions.detach().cpu().float().numpy()
         return ModelPrediction(
             outputs={DataType.JOINT_TARGET_POSITIONS: predictions},
             prediction_time=prediction_time,

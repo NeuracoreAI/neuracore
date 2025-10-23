@@ -35,20 +35,33 @@ class CheckpointRequest(BaseModel):
 class ModelServer:
     """Lightweight model server using FastAPI."""
 
-    def __init__(self, model_file: Path, org_id: str, job_id: Optional[str] = None):
+    def __init__(
+        self,
+        model_file: Path,
+        org_id: str,
+        job_id: Optional[str] = None,
+        device: Optional[str] = None,
+    ):
         """Initialize the model server.
 
         Args:
             model_file: Path to the .nc.zip model archive
             org_id: Organization ID for the model
             job_id: Job ID for the model
+            device: Device the model loaded on
         """
         # Import here to avoid the need for pytorch unless the user uses this policy
         from neuracore.ml.utils.policy_inference import PolicyInference
 
-        self.policy_inference = PolicyInference(
-            org_id=org_id, job_id=job_id, model_file=model_file
-        )
+        # Only pass the device argument if it's not None, for compatibility
+        if device is not None:
+            self.policy_inference = PolicyInference(
+                org_id=org_id, job_id=job_id, model_file=model_file, device=device
+            )
+        else:
+            self.policy_inference = PolicyInference(
+                org_id=org_id, job_id=job_id, model_file=model_file
+            )
         self.app = self._create_app()
 
     def _create_app(self) -> FastAPI:
@@ -216,6 +229,7 @@ def start_server(
     host: str = "0.0.0.0",
     port: int = 8080,
     log_level: str = "info",
+    device: Optional[str] = None,
 ) -> ModelServer:
     """Start a model server instance.
 
@@ -226,11 +240,12 @@ def start_server(
         host: Host to bind to
         port: Port to bind to
         log_level: Logging level
+        device: Device model loaded on
 
     Returns:
         ModelServer instance
     """
-    server = ModelServer(model_file, org_id, job_id)
+    server = ModelServer(model_file, org_id, job_id, device)
     server.run(host, port, log_level)
     return server
 
@@ -247,6 +262,7 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8080, help="Port to bind to")
     parser.add_argument("--log-level", default="info", help="Logging level")
+    parser.add_argument("--device", help="Device to load model on (cpu, cuda, etc.)")
 
     args = parser.parse_args()
 
@@ -257,4 +273,5 @@ if __name__ == "__main__":
         host=args.host,
         port=args.port,
         log_level=args.log_level,
+        device=args.device,
     )

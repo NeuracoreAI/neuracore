@@ -53,7 +53,7 @@ class PolicyInference:
         """Initialize the policy inference."""
         self.org_id = org_id
         self.job_id = job_id
-        self.model = load_model_from_nc_archive(model_file)
+        self.model = load_model_from_nc_archive(model_file, device=device)
         self.dataset_description = self.model.model_init_description.dataset_description
         self.device = (
             torch.device(device)
