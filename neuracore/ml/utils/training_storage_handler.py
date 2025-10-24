@@ -119,7 +119,14 @@ class TrainingStorageHandler:
                     data=f,
                     headers={"Content-Type": "application/octet-stream"},
                 )
-            if response.status_code != 200:
+            if response.status_code == 200:
+                try:
+                    save_path.unlink()
+                except Exception as e:
+                    logger.warning(
+                        f"Could not delete local checkpoint {checkpoint_name}: {e}"
+                    )
+            else:
                 logger.error(
                     f"Failed to save checkpoint {checkpoint_name} "
                     f"to cloud: {response.text}"
