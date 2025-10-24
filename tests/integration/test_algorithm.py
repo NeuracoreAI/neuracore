@@ -12,7 +12,7 @@ from neuracore.core.endpoint import Policy
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "..", "..", "examples"))
 # ruff: noqa: E402
-from examples.common.transfer_cube import BOX_POSE, TransferCubeTask, make_sim_env
+from common.transfer_cube import BOX_POSE, TransferCubeTask, make_sim_env
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,11 +28,11 @@ GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
 FREQUENCY = 50
 BATCH_SIZE = 32
-EPOCHS = 10
-OUTPUT_PREDICTION_HORIZON = 50
+EPOCHS = 80
+OUTPUT_PREDICTION_HORIZON = 10
 NUM_ROLLOUTS = 10
 ONSCREEN_RENDER = False
-TRAINING_TIMEOUT_MINUTES = 180
+TRAINING_TIMEOUT_MINUTES = 360
 
 
 def eval_model(
@@ -70,7 +70,9 @@ def eval_model(
                     sp.joint_target_positions for sp in predicted_sync_points
                 ]
                 actions = [
-                    jtp.numpy() for jtp in joint_target_positions if jtp is not None
+                    jtp.numpy(order=env.ACTION_KEYS)
+                    for jtp in joint_target_positions
+                    if jtp is not None
                 ]
                 horizon = len(actions)
             a = actions[idx_in_horizon]
@@ -93,7 +95,7 @@ def eval_model(
 
 
 @pytest.mark.parametrize(
-    "algorithm_name, input_data_types, output_data_types",
+    "algorithm_name, input_data_types, output_data_types, min_success_rate",
     [
         (
             "CNNMLP",
@@ -170,7 +172,6 @@ class TestAlgorithm:
                 f"Training job did not complete and is in status: {training_job_status}"
             )
 
-        endpoint_id = None
         endpoint_name = f"{ENDPOINT_NAME} - {algorithm_name}"
         try:
             endpoint_data = nc.deploy_model(
@@ -179,8 +180,8 @@ class TestAlgorithm:
             )
             endpoint_id = endpoint_data["id"]
         except Exception as e:
-            assert endpoint_id is not None
-            nc.delete_endpoint(endpoint_id)
+            if endpoint_id is not None:
+                nc.delete_endpoint(endpoint_id)
             raise e
 
         try:
@@ -220,3 +221,4 @@ class TestAlgorithm:
             raise ValueError(f"Success rate is too low: {success_rate}")
 
         logger.info(f"Success rate: {success_rate}")
+        nc.delete_endpoint(endpoint_id)
