@@ -294,6 +294,14 @@ class BimanualViperXTask(MuJoCoEnvironment):
         "vx300s_right/left_finger",
         "vx300s_right/right_finger",
     ]
+    LEFT_GRIPPER_OPEN = "vx300s_left/gripper_open"
+    RIGHT_GRIPPER_OPEN = "vx300s_right/gripper_open"
+    ACTION_KEYS = (
+        LEFT_ARM_JOINT_NAMES
+        + [LEFT_GRIPPER_OPEN]
+        + RIGHT_ARM_JOINT_NAMES
+        + [RIGHT_GRIPPER_OPEN]
+    )
 
     def __init__(
         self, model_path: str, random: Optional[np.random.Generator] = None

@@ -59,7 +59,9 @@ def main():
                     sp.joint_target_positions for sp in predicted_sync_points
                 ]
                 actions = [
-                    jtp.numpy() for jtp in joint_target_positions if jtp is not None
+                    jtp.numpy(order=env.ACTION_KEYS)
+                    for jtp in joint_target_positions
+                    if jtp is not None
                 ]
                 horizon = len(actions)
 

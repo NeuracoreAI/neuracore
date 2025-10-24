@@ -10,7 +10,7 @@ import base64
 import time
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, NamedTuple, Optional, Tuple, Union
+from typing import Any, List, NamedTuple, Optional, Tuple, Union
 from uuid import uuid4
 
 import numpy as np
@@ -84,13 +84,20 @@ class JointData(NCData):
             additional_values=_sort_dict_by_keys(self.additional_values),
         )
 
-    def numpy(self) -> np.ndarray:
+    def numpy(self, order: Optional[List[str]] = None) -> np.ndarray:
         """Convert the joint values to a NumPy array.
+
+        Args:
+            order: The order in which the numpy array is returned.
 
         Returns:
             NumPy array of joint values.
         """
-        return np.array(list(self.values.values()), dtype=np.float32)
+        if order is not None:
+            values = [self.values[name] for name in order]
+        else:
+            values = list(self.values.values())
+        return np.array(values, dtype=np.float32)
 
 
 class CameraData(NCData):
