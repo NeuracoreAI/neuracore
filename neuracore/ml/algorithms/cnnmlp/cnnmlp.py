@@ -163,7 +163,7 @@ class CNNMLP(NeuracoreModel):
         else:
             action_data_item_stats = self.dataset_description.joint_positions
         self.max_output_size = action_data_item_stats.max_len
-
+        breakpoint()
         # Predict entire sequence at once
         self.output_size = self.max_output_size * self.output_prediction_horizon
         self.mlp = self._build_mlp(

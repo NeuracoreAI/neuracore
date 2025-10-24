@@ -1,6 +1,7 @@
 import argparse
 
 import neuracore as nc
+from neuracore.core.nc_types import DataType
 
 
 def create_parser():
@@ -61,6 +62,12 @@ def create_parser():
         default=50,
         help="Prediction horizon.",
     )
+    parser.add_argument(
+        "--output_data_types",
+        type=list[DataType],
+        default=[DataType.JOINT_TARGET_POSITIONS],
+        help="Output data types to use for training.",
+    )
     return parser
 
 
@@ -75,6 +82,7 @@ if __name__ == "__main__":
     frequency = args.frequency
     algorithm_name = args.algorithm_name
     dataset_name = args.dataset_name
+    output_data_types = args.output_data_types
     # Here, algorithm specific configs can be added.
     # Uses default values, if not defined.
     algorithm_config = {
@@ -91,6 +99,7 @@ if __name__ == "__main__":
         algorithm_name=algorithm_name,
         dataset_name=dataset_name,
         algorithm_config=algorithm_config,
+        output_data_types=output_data_types,
     )
 
     print("Training job started")
