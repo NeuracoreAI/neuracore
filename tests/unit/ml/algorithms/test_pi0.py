@@ -171,7 +171,6 @@ def mock_dataloader(sample_batch):
     return MockDataLoader()
 
 
-@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
 def test_model_construction(
     model_init_description: ModelInitDescription, model_config: dict
 ):
@@ -180,7 +179,6 @@ def test_model_construction(
     assert isinstance(model, nn.Module)
 
 
-@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
 def test_model_forward(
     model_init_description: ModelInitDescription,
     model_config: dict,
@@ -199,7 +197,6 @@ def test_model_forward(
     )
 
 
-@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
 def test_model_backward(
     model_init_description: ModelInitDescription,
     model_config: dict,
@@ -238,7 +235,6 @@ def test_model_backward(
                 ).all(), f"Parameter {name} has non-finite gradients"
 
 
-@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
 def test_run_validation(tmp_path: Path, mock_login):
     # Long timeout due to larger model run on CPU
     os.environ["NEURACORE_ENDPOINT_TIMEOUT"] = "120"
