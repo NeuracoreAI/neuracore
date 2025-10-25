@@ -163,8 +163,8 @@ class CloudTrainingLogger(TrainingLogger):
                 if current_time - self._last_sync_time >= self.sync_interval:
                     self._sync_to_cloud()
                     self._last_sync_time = current_time
-            except Exception as e:
-                logger.error(f"Error during cloud sync: {e}")
+            except Exception:
+                logger.error("Error during cloud sync.", exc_info=True)
 
             # Wait with ability to be interrupted
             self._stop_sync.wait(min(10, self.sync_interval))

@@ -133,8 +133,10 @@ class ResumableUpload:
                     if attempt < self.max_retries - 1:
                         time.sleep(2**attempt)  # Exponential backoff
 
-            except Exception as e:
-                logger.error(f"Exception during upload (attempt {attempt+1}): {e}")
+            except Exception:
+                logger.error(
+                    f"Exception during upload (attempt {attempt+1})", exc_info=True
+                )
                 if attempt < self.max_retries - 1:
                     time.sleep(2**attempt)  # Exponential backoff
 

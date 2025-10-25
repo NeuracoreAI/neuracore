@@ -408,7 +408,6 @@ def run_validation(
                 logger.info("NC archive export successful")
 
             except Exception as e:
-                logger.error(f"NC archive export failed: {str(e)}")
                 raise ValueError(f"Model cannot be exported to NC archive: {str(e)}")
 
             if skip_endpoint_check:
@@ -423,14 +422,12 @@ def run_validation(
                         device=device,
                     )
 
-                except Exception as e:
+                except Exception:
                     if policy is not None:
                         policy.disconnect()
-                    error = (
-                        f"Failed to connect to local endpoint on port {port}: {str(e)}"
+                    raise ValueError(
+                        f"Failed to connect to local endpoint on port {port}."
                     )
-                    logger.error(error)
-                    raise ValueError(error)
 
                 try:
                     sync_point = SyncPoint(
@@ -554,12 +551,10 @@ def run_validation(
                     policy.disconnect()
                     algo_check.successfully_launched_endpoint = True
 
-                except Exception as e:
+                except Exception:
                     if policy:
                         policy.disconnect()
-                    error = f"Failed to get prediction from local endpoint: {str(e)}"
-                    logger.error(error)
-                    raise ValueError(error)
+                    raise ValueError("Failed to get prediction from local endpoint:")
 
         # All checks passed!
         logger.info("✓ All validation checks passed successfully")
@@ -567,6 +562,6 @@ def run_validation(
     except Exception as e:
         error_msg = f"Validation failed: {str(e)}\n"
         error_msg += traceback.format_exc()
-        logger.error(f"Validation failed: {str(error_msg)}")
+        logger.error("Validation failed.", exc_info=True)
 
     return algo_check, error_msg

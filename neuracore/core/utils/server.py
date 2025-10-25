@@ -96,8 +96,8 @@ class ModelServer:
                 # Run inference
                 try:
                     prediction = self.policy_inference(sync_point)
-                except InsufficientSyncPointError as e:
-                    logger.error(f"Insufficient sync point data: {str(e)}")
+                except InsufficientSyncPointError:
+                    logger.error("Insufficient sync point data.")
                     raise HTTPException(
                         status_code=422,
                         detail="Insufficient sync point data for inference.",
@@ -110,7 +110,7 @@ class ModelServer:
                 ]
 
             except Exception as e:
-                logger.error(f"Prediction error: {str(e)}")
+                logger.error("Prediction error.", exc_info=True)
                 raise HTTPException(
                     status_code=500, detail=f"Prediction failed: {str(e)}"
                 )
@@ -120,7 +120,7 @@ class ModelServer:
             try:
                 self.policy_inference.set_checkpoint(request.epoch)
             except Exception as e:
-                logger.error(f"Checkpoint loading error: {str(e)}")
+                logger.error("Checkpoint loading error.", exc_info=True)
                 raise HTTPException(
                     status_code=500, detail=f"Checkpoint loading failed: {str(e)}"
                 )

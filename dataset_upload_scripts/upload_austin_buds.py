@@ -106,8 +106,10 @@ def _process_episode_chunks(
                 timestamp = base_time + (idx / FREQUENCY)
                 _record_step(step, timestamp)
             nc.stop_recording(wait=True)
-        except Exception as e:
-            logger.error(f"Error processing episode {start_idx} to {end_idx}: {str(e)}")
+        except Exception:
+            logger.error(
+                f"Error processing episode {start_idx} to {end_idx}", exc_info=True
+            )
 
 
 def upload_austin_buds():

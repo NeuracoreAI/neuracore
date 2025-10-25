@@ -122,8 +122,8 @@ def _process_episode_chunks(start_idx: int, end_idx: int) -> None:
                 ts = base_time + (i / FREQUENCY)
                 _record_step(step, ts)
 
-        except Exception as e:
-            logger.error(f"Episode {ep_idx} failed: {e}")
+        except Exception:
+            logger.error(f"Episode {ep_idx} failed.", exc_info=True)
         finally:
             if started:
                 try:

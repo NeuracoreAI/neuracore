@@ -433,14 +433,12 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
             return sample
 
-        except Exception as e:
-            import traceback
-
-            traceback.print_exc()
+        except Exception:
             logger.error(
-                f"Error loading frame {timestep} from episode {episode_idx}: {str(e)}"
+                f"Error loading frame {timestep} from episode {episode_idx}.",
+                exc_info=True,
             )
-            raise e
+            raise
 
     def _create_joint_maskable_input_data(
         self, joint_data: JointData, max_len: int

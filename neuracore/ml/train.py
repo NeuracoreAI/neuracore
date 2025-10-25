@@ -338,16 +338,16 @@ def run_training(
                 checkpoint = trainer.load_checkpoint(cfg.resume)
                 start_epoch = checkpoint.get("epoch", 0) + 1
                 logger.info(f"Resumed from checkpoint at epoch {start_epoch}")
-            except Exception as e:
-                logger.error(f"Failed to load checkpoint: {str(e)}")
+            except Exception:
+                logger.error("Failed to load checkpoint.", exc_info=True)
 
         # Start training
         try:
             logger.info("Starting training...")
             trainer.train(start_epoch=start_epoch)
             logger.info("Training completed successfully!")
-        except Exception as e:
-            logger.error(f"Training failed: {str(e)}")
+        except Exception:
+            logger.error("Training failed.", exc_info=True)
             raise
 
     finally:

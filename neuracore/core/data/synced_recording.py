@@ -185,9 +185,10 @@ class SynchronizedRecording:
                         camera_id = future_to_task[future]
                         try:
                             future.result()
-                        except Exception as e:
+                        except Exception:
                             logger.error(
-                                f"Failed to download {cam_type}/{camera_id}: {e}"
+                                f"Failed to download {cam_type}/{camera_id}",
+                                exc_info=True,
                             )
                             raise
 
@@ -291,7 +292,9 @@ class SynchronizedRecording:
                     frame = Image.fromarray(transform_fn(np.array(frame)))
                 cam_data.frame = frame
             else:
-                logger.error(f"No frame available for {camera_type}/{camera_id}")
+                logger.error(
+                    f"No frame available for {camera_type}/{camera_id}", exc_info=True
+                )
                 cam_data.frame = None
 
     def __next__(self) -> SyncPoint:
