@@ -141,7 +141,7 @@ sys.exit(0 if success else 1)
             error_msg = "Failed to validate.\n"
             if e.stderr:
                 error_msg += e.stderr
-            logger.error(error_msg)
+            logger.error(error_msg, exc_info=True)
             # Save error to storage handler if provided
             if storage_handler:
                 storage_handler.save_algorithm_validation_check(

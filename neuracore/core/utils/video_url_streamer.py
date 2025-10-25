@@ -243,8 +243,8 @@ class VideoStreamer:
                 self.frame_count += 1
                 frame_array = frame.to_rgb().to_ndarray()
                 yield frame_array
-        except Exception as e:
-            logger.error(f"Error during streaming: {e}")
+        except Exception:
+            logger.error("Error during streaming.", exc_info=True)
         finally:
             self.close()
 

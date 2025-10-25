@@ -455,7 +455,7 @@ class Robot:
             # Log response for debugging
             logger.info(f"Upload response status: {response.status_code}")
             if response.status_code != 200:
-                logger.error(f"Upload error response: {response.text}")
+                logger.error(f"Upload error response: {response.text}", exc_info=True)
 
             response.raise_for_status()
 
