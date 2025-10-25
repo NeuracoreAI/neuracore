@@ -10,7 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- None
+
+### Changed
+
+- None
+
+### Removed
+
+- None
+
+### Fixed
+
+- None
+
+
+## [3.2.0]
+
+### Added
+
 - `nc.log_sync_point()` this is a new more versatile way of logging synced data.
+- `nc.log_parallel_gripper_open_amounts` and `nc.log_end_effector_poses`. `nc.log_pose_data` to be deprecated.
 
 ### Changed
 
