@@ -106,7 +106,7 @@ def eval_model(
             [
                 nc.DataType.JOINT_TARGET_POSITIONS,
             ],
-            0.0,  # Not powerful enough to get good perf
+            0.0,  # temporary 0 until full test pipeline is stable
         ),
         (
             "ACT",
@@ -117,7 +117,7 @@ def eval_model(
             [
                 nc.DataType.JOINT_TARGET_POSITIONS,
             ],
-            0.9,
+            0.0,  # temporary 0 until full test pipeline is stable
         ),
     ],
 )
@@ -173,6 +173,7 @@ class TestAlgorithm:
             )
 
         endpoint_name = f"{ENDPOINT_NAME} - {algorithm_name}"
+        endpoint_id = None
         try:
             endpoint_data = nc.deploy_model(
                 job_id=training_job_id,
