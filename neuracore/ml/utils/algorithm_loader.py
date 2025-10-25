@@ -102,7 +102,6 @@ class AlgorithmLoader:
                     f.writelines(purged_lines)
         except Exception as e:
             error_msg = f"Failed to process requirements.txt: {e}"
-            logger.error(error_msg)
             raise RequirementsInstallError(error_msg)
 
         try:
@@ -287,11 +286,8 @@ class AlgorithmLoader:
             if found_model:
                 return found_model
 
-        except ImportError as e:
-            logger.error(
-                f"Package import failed for {file_path.name}: "
-                f"{e}\n{traceback.format_exc()}"
-            )
+        except ImportError:
+            logger.error(f"Package import failed for {file_path.name}.", exc_info=True)
         except Exception as e:
             logger.warning(
                 f"Unexpected error in package import for {file_path.name}: {e}"

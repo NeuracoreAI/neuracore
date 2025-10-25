@@ -403,8 +403,8 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
 
             return sample
 
-        except Exception as e:
-            logger.error(f"Error generating random sample: {str(e)}")
+        except Exception:
+            logger.error("Error generating random sample", exc_info=True)
             raise
 
     def __len__(self) -> int:

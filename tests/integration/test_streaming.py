@@ -524,5 +524,4 @@ def test_high_bandwidth():
         assert len(results["joint_mismatches"]) == 0
 
     except Exception as e:
-        logger.error(f"High bandwidth test error: {str(e)}")
         pytest.fail(f"High bandwidth test failed: {str(e)}")

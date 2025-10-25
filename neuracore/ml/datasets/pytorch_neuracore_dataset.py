@@ -135,11 +135,11 @@ class PytorchNeuracoreDataset(Dataset, ABC):
             try:
                 episode_idx = idx % self.num_recordings
                 return self.load_sample(episode_idx)
-            except Exception as e:
+            except Exception:
                 self._error_count += 1
-                logger.error(f"Error loading item {idx}: {str(e)}")
+                logger.error(f"Error loading item {idx}.", exc_info=True)
                 if self._error_count >= self._max_error_count:
-                    raise e
+                    raise
         raise Exception(
             f"Maximum error count ({self._max_error_count}) already reached"
         )

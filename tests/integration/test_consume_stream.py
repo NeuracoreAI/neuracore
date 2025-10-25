@@ -58,9 +58,8 @@ def remote_node_logger(robot_name: str, instance: int, ready_event: Event):
         while True:
             time.sleep(1)
 
-    except Exception as e:
-        # Log any exceptions to help with debugging.
-        logger.error(f"Remote node process failed: {e}", exc_info=True)
+    except Exception:
+        logger.error("Remote node process failed.", exc_info=True)
         # Don't set the event, so the main test will time out and fail.
 
 

@@ -87,8 +87,8 @@ class CacheManager:
                 file_path.unlink()
                 bytes_removed += file_size
                 logger.debug(f"Removed cache file: {file_path}")
-            except Exception as e:
-                logger.error(f"Error removing cache file {file_path}: {str(e)}")
+            except Exception:
+                logger.error(f"Error removing cache file {file_path}.", exc_info=True)
 
         logger.info(
             f"Cache cleanup: removed {num_files_to_remove} "
@@ -136,7 +136,8 @@ class CacheManager:
                 if final_stats["percent_used"] > self.max_usage_percent:
                     logger.error(
                         f"Failed to reduce disk usage below threshold. "
-                        f"Current usage: {final_stats['percent_used']:.1f}%"
+                        f"Current usage: {final_stats['percent_used']:.1f}%",
+                        exc_info=True,
                     )
                     return False
 
