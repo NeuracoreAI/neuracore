@@ -19,6 +19,7 @@ jobs:
     needs: pre-commit
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ['3.11']
         environment: [staging, production]
@@ -42,7 +43,7 @@ jobs:
 
     - name: Run Integration Test
       env:
-        NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://api.staging.neuracore.app/api' || 'https://api.neuracore.app/api' }}
+        NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.app/api' || 'https://api.neuracore.app/api' }}
         NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
       run: |
