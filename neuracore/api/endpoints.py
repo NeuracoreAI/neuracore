@@ -101,7 +101,7 @@ def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:
 
 
 # Deployment management functions
-def deploy_model(job_id: str, name: str) -> dict:
+def deploy_model(job_id: str, name: str, ttl: Optional[int] = None) -> dict:
     """Deploy a trained model to a managed endpoint.
 
     Takes a completed training job and deploys the resulting model to a managed
@@ -112,6 +112,8 @@ def deploy_model(job_id: str, name: str) -> dict:
         job_id: Unique identifier of the completed training job containing
             the model to deploy.
         name: Human-readable name for the endpoint that will be created.
+        ttl: Optional time-to-live in seconds for the endpoint. If provided,
+            the endpoint will be automatically deleted after this duration.
 
     Returns:
         Deployment response containing endpoint details and deployment status.
@@ -131,7 +133,7 @@ def deploy_model(job_id: str, name: str) -> dict:
         response = requests.post(
             f"{API_URL}/org/{org_id}/models/deploy",
             headers=auth.get_headers(),
-            data=json.dumps({"training_id": job_id, "name": name}),
+            data=json.dumps({"training_id": job_id, "name": name, "ttl": ttl}),
         )
         response.raise_for_status()
         return response.json()

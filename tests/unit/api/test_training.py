@@ -195,6 +195,34 @@ def test_get_training_job_status(
     assert status == "pending"
 
 
+def test_delete_training_job(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+):
+    """Test deleting a training job."""
+    # Ensure login
+    nc.login("test_api_key")
+
+    # Mock delete training job endpoint
+    mock_auth_requests.delete(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123",
+        status_code=204,
+    )
+
+    # Delete training job
+    nc.delete_training_job("train_job_123")
+
+    # Verify delete request was made
+    assert mock_auth_requests.called
+    last_request = mock_auth_requests.last_request
+    assert last_request.method == "DELETE"
+    assert (
+        last_request.url == f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123"
+    )
+
+
 def test_get_nonexistent_training_job(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
