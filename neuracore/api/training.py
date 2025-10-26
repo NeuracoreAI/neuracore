@@ -195,3 +195,27 @@ def get_training_job_status(job_id: str) -> str:
         return job_data["status"]
     except Exception as e:
         raise ValueError(f"Error accessing job: {e}")
+
+
+def delete_training_job(job_id: str) -> None:
+    """Delete a training job and free its resources.
+
+    Args:
+        job_id: The ID of the training job to delete
+
+    Raises:
+        ValueError: If there is an error deleting the job
+        requests.exceptions.HTTPError: If the API request returns an error code
+        requests.exceptions.RequestException: If there is a problem with the request
+        ConfigError: If there is an error trying to get the current org
+    """
+    auth = get_auth()
+    org_id = get_current_org()
+    try:
+        response = requests.delete(
+            f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
+            headers=auth.get_headers(),
+        )
+        response.raise_for_status()
+    except Exception as e:
+        raise ValueError(f"Error deleting training job: {e}")

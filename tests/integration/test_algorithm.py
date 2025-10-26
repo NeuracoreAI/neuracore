@@ -65,7 +65,7 @@ def eval_model(
             nc.log_rgb(CAM_NAME, obs.cameras[CAM_NAME].rgb)
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
-                predicted_sync_points = policy.predict(timeout=5)
+                predicted_sync_points = policy.predict(timeout=10)
                 joint_target_positions = [
                     sp.joint_target_positions for sp in predicted_sync_points
                 ]
@@ -178,6 +178,7 @@ class TestAlgorithm:
             endpoint_data = nc.deploy_model(
                 job_id=training_job_id,
                 name=endpoint_name,
+                ttl=60 * 30,  # 30 minutes
             )
             endpoint_id = endpoint_data["id"]
         except Exception as e:
@@ -223,3 +224,4 @@ class TestAlgorithm:
 
         logger.info(f"Success rate: {success_rate}")
         nc.delete_endpoint(endpoint_id)
+        nc.delete_training_job(training_job_id)
