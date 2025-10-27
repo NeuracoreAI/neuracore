@@ -1,6 +1,7 @@
 import argparse
 
 import neuracore as nc
+from neuracore.core.nc_types import DataType
 
 
 def create_parser():
@@ -60,6 +61,12 @@ def create_parser():
         type=int,
         default=50,
         help="Prediction horizon.",
+    )
+    parser.add_argument(
+        "--output_data_types",
+        type=list[DataType],
+        default=[DataType.JOINT_TARGET_POSITIONS],
+        help="Output data types to use for training.",
     )
     return parser
 
