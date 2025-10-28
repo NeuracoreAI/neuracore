@@ -8,7 +8,7 @@ import pytest
 
 import neuracore as nc
 from neuracore.core.endpoint import Policy
-from neuracore.core.nc_types import SyncPoint
+from neuracore.core.nc_types import CameraData, JointData, SyncPoint
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "..", "..", "examples"))
@@ -65,9 +65,9 @@ def eval_model(
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
                 sync_point = SyncPoint(
-                    joint_positions=obs.qpos,
+                    joint_positions=JointData(values=obs.qpos),
                     rgb_images={
-                        CAM_NAME: obs.cameras[CAM_NAME].rgb,
+                        CAM_NAME: CameraData(frame=obs.cameras[CAM_NAME].rgb),
                     },
                 )
                 predicted_sync_points = policy.predict(
