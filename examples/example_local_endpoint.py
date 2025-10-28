@@ -1,5 +1,5 @@
 import matplotlib.pyplot as plt
-from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
+from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, BOX_POSE, make_sim_env
 
 import neuracore as nc
 
@@ -26,17 +26,20 @@ def main():
 
     # Optional. Set the checkpoint to the last epoch.
     # Note by default, model is loaded from the last epoch.
-    policy.set_checkpoint(epoch=-1)
+    # policy.set_checkpoint(epoch=-1)
 
     onscreen_render = True
     render_cam_name = "angle"
     obs_camera_names = ["angle"]
+    num_rollouts = 10
 
-    for episode_idx in range(1):
+    for episode_idx in range(num_rollouts):
         print(f"{episode_idx=}")
 
         # Setup the environment
         env = make_sim_env()
+        # resample the initial cube pose
+        BOX_POSE[0] = env.sample_box_pose()
         obs = env.reset()
 
         # Setup plotting
@@ -70,6 +73,10 @@ def main():
             if onscreen_render:
                 plt_img.set_data(obs.cameras[render_cam_name].rgb)
                 plt.pause(0.002)
+
+            if done:
+                print(f"Episode {episode_idx} done")
+                break
         plt.close()
 
     policy.disconnect()
