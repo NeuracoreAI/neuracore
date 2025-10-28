@@ -12,6 +12,8 @@ import queue
 import threading
 from typing import Any, Dict, List
 
+from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
+
 from .bucket_uploader import BucketUploader
 from .resumable_upload import ResumableUpload
 
@@ -56,6 +58,7 @@ class StreamingJsonUploader(BucketUploader):
         self._upload_queue: queue.Queue = queue.Queue()
         # Thread will continue, even if main thread exits
         self._upload_thread = threading.Thread(target=self._upload_loop, daemon=False)
+        self._recording_manager = get_recording_state_manager()
         self._upload_thread.start()
         self._update_num_active_streams(1)
 
@@ -101,6 +104,10 @@ class StreamingJsonUploader(BucketUploader):
         a JSON array, and uploads them in chunks. Runs until streaming is
         complete and all queued data has been processed.
         """
+        # Skipping uploads of expired recording
+        if self._recording_manager.is_recording_expired(self.recording_id):
+            self.finish()
+            return
         self._thread_setup()
 
         # Write the opening bracket of the JSON array
@@ -224,6 +231,9 @@ class StreamingJsonUploader(BucketUploader):
         Raises:
             RuntimeError: If any chunk upload fails.
         """
+        if self._recording_manager.is_recording_expired(self.recording_id):
+            self.upload_buffer = bytearray()
+            return
         # Upload complete chunks while we have enough data
         while len(self.upload_buffer) >= self.chunk_size:
             # Extract a chunk of exactly chunk_size bytes
