@@ -23,6 +23,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import EncodingError
 from neuracore.core.nc_types import CameraData
+from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 
 from .bucket_uploader import BucketUploader
 from .resumable_upload import ResumableUpload
@@ -96,6 +97,7 @@ class StreamingVideoUploader(BucketUploader):
         self._upload_queue: queue.Queue = queue.Queue()
         # Thread will continue, even if main thread exits
         self._upload_thread = threading.Thread(target=self._upload_loop, daemon=False)
+        self._recording_manager = get_recording_state_manager()
         self._upload_thread.start()
         self._update_num_active_streams(1)
 
@@ -187,6 +189,10 @@ class StreamingVideoUploader(BucketUploader):
         Also uploads frame metadata as a separate JSON file after video
         encoding is complete.
         """
+        # Skipping uploads if recording is expired
+        if self._recording_manager.is_recording_expired(self.recording_id):
+            self.finish()
+            return
         self._thread_setup()
 
         # If final has not been called, or we still have items in the queue
@@ -303,6 +309,10 @@ class StreamingVideoUploader(BucketUploader):
         Raises:
             RuntimeError: If any chunk upload fails.
         """
+        if self._recording_manager.is_recording_expired(self.recording_id):
+            self.upload_buffer = bytearray()
+            return
+
         # Upload complete chunks while we have enough data
         while len(self.upload_buffer) >= self.chunk_size:
             # Extract a chunk of exactly chunk_size bytes
@@ -342,16 +352,22 @@ class StreamingVideoUploader(BucketUploader):
         Raises:
             requests.HTTPError: If the metadata upload fails.
         """
+        if self._recording_manager.is_recording_expired(self.recording_id):
+            return
         params = {
             "filepath": f"{self.path}/metadata.json",
             "content_type": "application/json",
         }
         org_id = get_current_org()
-        upload_url_response = requests.get(
-            f"{API_URL}/org/{org_id}/recording/{self.uploader.recording_id}/resumable_upload_url",
-            params=params,
-            headers=get_auth().get_headers(),
-        )
+        try:
+            upload_url_response = requests.get(
+                f"{API_URL}/org/{org_id}/recording/{self.uploader.recording_id}/resumable_upload_url",
+                params=params,
+                headers=get_auth().get_headers(),
+            )
+        except requests.exceptions.RequestException as e:
+            logger.debug(e)
+            pass
         upload_url_response.raise_for_status()
         upload_url = upload_url_response.json()["url"]
         for i in range(0, len(self.frame_metadatas)):

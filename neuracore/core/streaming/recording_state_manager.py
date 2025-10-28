@@ -9,6 +9,7 @@ state and remote recording triggers.
 import asyncio
 import logging
 from concurrent.futures import Future
+from threading import RLock, Timer
 from typing import Optional
 
 from aiohttp import ClientSession
@@ -46,6 +47,9 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
     RECORDING_STOPPED = "RECORDING_STOPPED"
     RECORDING_SAVED = "RECORDING_SAVED"
 
+    # 5 minutes
+    MAX_RECORDING_DURATION_S = 60 * 5
+
     def __init__(
         self,
         org_id: Optional[str] = None,
@@ -82,6 +86,9 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         self.auth = auth if auth is not None else get_auth()
 
         self.recording_robot_instances: dict[RobotInstanceIdentifier, str] = dict()
+        self._recording_expiry_timers: dict[str, Timer] = {}
+        self._expired_recording_ids: set[str] = set()
+        self._timers_lock = RLock()
 
     def get_current_recording_id(self, robot_id: str, instance: int) -> Optional[str]:
         """Get the current recording ID for a robot instance.
@@ -113,6 +120,35 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         )
         return instance_key in self.recording_robot_instances
 
+    def is_recording_expired(self, recording_id: str) -> bool:
+        """Checks recording expired status.
+
+        Args:
+            recording_id: Unique identifier for the recording session
+
+        Returns:
+            bool: True if recording is expired, False otherwise
+        """
+        return recording_id in self._expired_recording_ids
+
+    def mark_recording_expired(self, recording_id: str) -> None:
+        """Mark the given recording id as expired and warn the user."""
+        if not recording_id:
+            return
+        self._expired_recording_ids.add(recording_id)
+        logger.warning(
+            f"Your recording ({recording_id}) has reached the 5-minute limit"
+            " and was stopped automatically. "
+        )
+        self._recording_expiry_timers.pop(recording_id, None)
+
+    def cancel_expiry_timer(self, recording_id: str) -> None:
+        """Cancel and remove the expiry timer for a given recording id."""
+        with self._timers_lock:
+            timer = self._recording_expiry_timers.pop(recording_id, None)
+        if timer:
+            timer.cancel()
+
     def recording_started(
         self, robot_id: str, instance: int, recording_id: str
     ) -> None:
@@ -137,6 +173,16 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
             self.recording_stopped(robot_id, instance, previous_recording_id)
 
         self.recording_robot_instances[instance_key] = recording_id
+        if recording_id not in self._recording_expiry_timers:
+            recording_expiry_timer = Timer(
+                self.MAX_RECORDING_DURATION_S,
+                self.mark_recording_expired,
+                args=(recording_id,),
+            )
+            recording_expiry_timer.daemon = True
+            recording_expiry_timer.start()
+            self._recording_expiry_timers[recording_id] = recording_expiry_timer
+
         self.emit(
             self.RECORDING_STARTED,
             robot_id=robot_id,
@@ -232,6 +278,7 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         message = RecordingNotification.model_validate_json(message_data)
         # Python 3.9 compatibility: replace match/case with if/elif
         if message.type == RecordingNotificationType.SAVED:
+            self.cancel_expiry_timer(recording_id=message.payload.recording_id)
             self.emit(self.RECORDING_SAVED, **message.payload.model_dump())
         elif message.type in (
             RecordingNotificationType.START,

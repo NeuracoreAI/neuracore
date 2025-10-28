@@ -12,6 +12,7 @@ import requests
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
+from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 
 
 class BucketUploader(ABC):
@@ -33,6 +34,7 @@ class BucketUploader(ABC):
             recording_id: Unique identifier for the recording being uploaded.
         """
         self.recording_id = recording_id
+        self._recording_manager = get_recording_state_manager()
 
     def _update_num_active_streams(self, delta: int) -> None:
         """Update the number of active streams for this recording.
@@ -51,16 +53,18 @@ class BucketUploader(ABC):
         """
         assert delta in (1, -1), "Value must be 1 or -1"
         org_id = get_current_org()
-        response = requests.put(
-            f"{API_URL}/org/{org_id}/recording/{self.recording_id}/update_num_active_streams",
-            params={
-                "delta": delta,
-            },
-            headers=get_auth().get_headers(),
-        )
-        response.raise_for_status()
-        if response.status_code != 200:
-            raise ValueError("Failed to update number of active streams")
+        if self._recording_manager.is_recording_expired(self.recording_id):
+            return
+        try:
+            requests.put(
+                f"{API_URL}/org/{org_id}/recording/{self.recording_id}/update_num_active_streams",
+                params={
+                    "delta": delta,
+                },
+                headers=get_auth().get_headers(),
+            )
+        except requests.exceptions.RequestException:
+            pass
 
     @abstractmethod
     def finish(self) -> threading.Thread:
