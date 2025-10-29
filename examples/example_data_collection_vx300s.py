@@ -75,8 +75,12 @@ def main(args):
             )
             nc.log_joint_target_positions(action, timestamp=t)
             nc.log_rgb(CAM_NAME, obs.cameras[CAM_NAME].rgb, timestamp=t)
-            nc.log_end_effector_poses(obs.end_effector_poses, timestamp=t)
-            nc.log_parallel_gripper_open_amounts(obs.gripper_open_amounts, timestamp=t)
+            if obs.end_effector_poses is not None:
+                nc.log_end_effector_poses(obs.end_effector_poses, timestamp=t)
+            if obs.gripper_open_amounts is not None:
+                nc.log_parallel_gripper_open_amounts(
+                    obs.gripper_open_amounts, timestamp=t
+                )
 
         # Stop recording if enabled
         if record:
