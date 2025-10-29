@@ -12,7 +12,6 @@ with low-cost hardware." arXiv preprint arXiv:2304.13705 (2023).
 import logging
 import time
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -61,7 +60,8 @@ class ACT(NeuracoreModel):
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
         kl_weight: float = 10.0,
-        latent_dim: int = 512,
+        latent_dim: int = 32,
+        use_vae: bool = True,
     ):
         """Initialize the ACT model.
 
@@ -78,6 +78,7 @@ class ACT(NeuracoreModel):
             weight_decay: Weight decay for optimizer
             kl_weight: Weight for KL divergence loss
             latent_dim: Dimension of latent variable space
+            use_vae: Whether to use VAE (Variational Autoencoder) for latent space
         """
         super().__init__(model_init_description)
         self.hidden_dim = hidden_dim
@@ -86,7 +87,7 @@ class ACT(NeuracoreModel):
         self.weight_decay = weight_decay
         self.kl_weight = kl_weight
         self.latent_dim = latent_dim
-
+        self.use_vae = use_vae
         # Vision components
         self.image_encoders = nn.ModuleList([
             ACTImageEncoder(output_dim=hidden_dim)
@@ -162,24 +163,49 @@ class ACT(NeuracoreModel):
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         )
 
-        state_mean = np.concatenate([
-            self.dataset_description.joint_positions.mean,
-            self.dataset_description.joint_velocities.mean,
-            self.dataset_description.joint_torques.mean,
-        ])
-        state_std = np.concatenate([
-            self.dataset_description.joint_positions.std,
-            self.dataset_description.joint_velocities.std,
-            self.dataset_description.joint_torques.std,
-        ])
-        self.joint_state_mean = self._to_torch_float_tensor(state_mean)
-        self.joint_state_std = self._to_torch_float_tensor(state_std)
+        # Determine output configuration
+        self.action_data_type = self.model_init_description.output_data_types[0]
+        # Normalization statistics
+        self._setup_normalization_stats()
 
-        self.joint_target_mean = self._to_torch_float_tensor(
-            self.dataset_description.joint_target_positions.mean
+    def _setup_normalization_stats(self) -> None:
+        """Setup normalization statistics for different data types."""
+        # Joint state normalization
+        state_means = []
+        state_stds = []
+
+        if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_positions.mean)
+            state_stds.extend(self.dataset_description.joint_positions.std)
+        if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_velocities.mean)
+            state_stds.extend(self.dataset_description.joint_velocities.std)
+        if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_torques.mean)
+            state_stds.extend(self.dataset_description.joint_torques.std)
+
+        if state_means:
+            self.register_buffer(
+                "joint_state_mean", self._to_torch_float_tensor(state_means)
+            )
+            self.register_buffer(
+                "joint_state_std", self._to_torch_float_tensor(state_stds)
+            )
+        else:
+            self.register_buffer("joint_state_mean", None)
+            self.register_buffer("joint_state_std", None)
+
+        # Action normalization
+        action_data_item_stats = (
+            self.dataset_description.joint_target_positions
+            if self.action_data_type == DataType.JOINT_TARGET_POSITIONS
+            else self.dataset_description.joint_positions
         )
-        self.joint_target_std = self._to_torch_float_tensor(
-            self.dataset_description.joint_target_positions.std
+        self.register_buffer(
+            "action_mean", self._to_torch_float_tensor(action_data_item_stats.mean)
+        )
+        self.register_buffer(
+            "action_std", self._to_torch_float_tensor(action_data_item_stats.std)
         )
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
@@ -206,18 +232,16 @@ class ACT(NeuracoreModel):
         """
         return (joint_state - self.joint_state_mean) / self.joint_state_std
 
-    def _preprocess_target_joint_pos(
-        self, target_joint_pos: torch.FloatTensor
-    ) -> torch.FloatTensor:
-        """Normalize target joint positions using dataset statistics.
+    def _preprocess_actions(self, actions: torch.FloatTensor) -> torch.FloatTensor:
+        """Normalize actions using dataset statistics.
 
         Args:
-            target_joint_pos: Raw target joint positions
+            actions: Raw actions
 
         Returns:
-            torch.FloatTensor: Normalized target joint positions
+            torch.FloatTensor: Normalized actions
         """
-        return (target_joint_pos - self.joint_target_mean) / self.joint_target_std
+        return (actions - self.action_mean) / self.action_std
 
     def _reparametrize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         """Sample from latent distribution using reparametrization trick.
@@ -490,7 +514,7 @@ class ACT(NeuracoreModel):
         logvar = torch.zeros(batch_size, self.latent_dim, device=self.device)
         action_preds = self._predict_action(mu, logvar, batch)
         prediction_time = time.time() - t
-        predictions = (action_preds * self.joint_target_std) + self.joint_target_mean
+        predictions = (action_preds * self.action_std) + self.action_mean
         predictions = predictions.detach().cpu().numpy()
         return ModelPrediction(
             outputs={DataType.JOINT_TARGET_POSITIONS: predictions},
@@ -509,15 +533,17 @@ class ACT(NeuracoreModel):
         Returns:
             BatchedTrainingOutputs: Training outputs with losses and metrics
         """
-        if batch.outputs.joint_target_positions is None:
-            raise ValueError("Batch output joint target positions is None")
+        if self.action_data_type == DataType.JOINT_TARGET_POSITIONS:
+            assert (
+                batch.outputs.joint_target_positions is not None
+            ), "joint_target_positions required"
+            actions = batch.outputs.joint_target_positions
+        else:
+            assert batch.outputs.joint_positions is not None, "joint_positions required"
+            actions = batch.outputs.joint_positions
 
-        pred_sequence_mask = batch.outputs.joint_target_positions.mask[
-            :, :, 0
-        ]  # [batch_size, T]
-        max_action_mask = batch.outputs.joint_target_positions.mask[
-            :, 0, :
-        ]  # [batch_size, MaxActionSize]
+        pred_sequence_mask = actions.mask[:, :, 0]  # [batch_size, T]
+        max_action_mask = actions.mask[:, 0, :]  # [batch_size, MaxActionSize]
         inference_sample = BatchedInferenceSamples(
             joint_positions=batch.inputs.joint_positions,
             joint_velocities=batch.inputs.joint_velocities,
@@ -527,14 +553,12 @@ class ACT(NeuracoreModel):
         joint_states = self._combine_joint_states(inference_sample)
         mu, logvar = self._encode_latent(
             joint_states,
-            batch.outputs.joint_target_positions.data,
+            actions.data,
             max_action_mask,
             pred_sequence_mask,
         )
         action_preds = self._predict_action(mu, logvar, inference_sample)
-        target_actions = self._preprocess_target_joint_pos(
-            batch.outputs.joint_target_positions.data
-        )
+        target_actions = self._preprocess_actions(actions.data)
 
         l1_loss_all = F.l1_loss(action_preds, target_actions, reduction="none")
         l1_loss = (l1_loss_all * pred_sequence_mask.unsqueeze(-1)).mean()
