@@ -53,6 +53,10 @@ class MemoryMonitor:
         """
         ram = psutil.virtual_memory()
         ram_used_ratio = ram.used / ram.total
+        logger.info(f"Memory usage of ram: {ram.used / (1024**3)} GB")
+        logger.info(f"Memory usage of ram total: {ram.total / (1024**3)} GB")
+        logger.info(f"Memory usage of ram used ratio: {ram_used_ratio}")
+        logger.info(f"Memory usage of ram max utilization: {self.max_ram_utilization}")
         if log:
             ram_used_gb = ram.used / (1024**3)
             ram_total_gb = ram.total / (1024**3)

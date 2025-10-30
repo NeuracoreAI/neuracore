@@ -1,5 +1,6 @@
 """Synchronized recording iterator."""
 
+import copy
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -309,8 +310,8 @@ class SynchronizedRecording:
         if self._iter_idx >= len(self._recording_synced.frames):
             raise StopIteration
 
-        # Get sync point data
-        sync_point = self._recording_synced.frames[self._iter_idx]
+        # Get sync point data, use deepcopy to avoid the memory leak
+        sync_point = copy.deepcopy(self._recording_synced.frames[self._iter_idx])
 
         if sync_point.rgb_images is not None:
             self._populate_video_frames(sync_point.rgb_images)
@@ -362,8 +363,8 @@ class SynchronizedRecording:
         if idx < 0 or idx >= len(self):
             raise IndexError("Index out of range")
 
-        # Get sync point data
-        sync_point: SyncPoint = self._recording_synced.frames[idx]
+        # Get sync point data, use deepcopy to avoid the memory leak
+        sync_point: SyncPoint = copy.deepcopy(self._recording_synced.frames[idx])
 
         # Temporarily set iter_idx for _populate_video_frames
         original_iter_idx = self._iter_idx
