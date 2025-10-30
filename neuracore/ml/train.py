@@ -346,8 +346,8 @@ def run_training(
             logger.info("Starting training...")
             trainer.train(start_epoch=start_epoch)
             logger.info("Training completed successfully!")
-        except Exception as e:
-            logger.error(f"Training failed with error: {e}", exc_info=True)
+        except Exception:
+            logger.error("Training failed.", exc_info=True)
             raise
 
     finally:
