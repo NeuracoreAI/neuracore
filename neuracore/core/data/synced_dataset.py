@@ -127,12 +127,16 @@ class SynchronizedDataset:
             return self._synced_recording_cache[self._recording_idx]
 
         recording = self.dataset.recordings[self._recording_idx]
-        self._recording_idx += 1  # Increment counter
-        return SynchronizedRecording(
-            recording_id=recording["id"],
-            dataset=self.dataset,
-            robot_id=recording["robot_id"],
-            instance=recording["instance"],
-            frequency=self.frequency,
-            data_types=self.data_types,
-        )
+        if self._recording_idx not in self._synced_recording_cache:
+            s = SynchronizedRecording(
+                recording_id=recording["id"],
+                dataset=self.dataset,
+                robot_id=recording["robot_id"],
+                instance=recording["instance"],
+                frequency=self.frequency,
+                data_types=self.data_types,
+            )
+            self._synced_recording_cache[self._recording_idx] = s
+        to_return = self._synced_recording_cache[self._recording_idx]
+        self._recording_idx += 1
+        return to_return
