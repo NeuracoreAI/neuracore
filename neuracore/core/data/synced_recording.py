@@ -310,7 +310,9 @@ class SynchronizedRecording:
         if self._iter_idx >= len(self._recording_synced.frames):
             raise StopIteration
 
-        # Get sync point data, use deepcopy to avoid the memory leak
+        # Get sync point data
+        # Use deepcopy to create a local copy of the synchronized metadata and
+        # will be freed after the function call. This is to avoid the memory leak
         sync_point = copy.deepcopy(self._recording_synced.frames[self._iter_idx])
 
         if sync_point.rgb_images is not None:
@@ -363,7 +365,9 @@ class SynchronizedRecording:
         if idx < 0 or idx >= len(self):
             raise IndexError("Index out of range")
 
-        # Get sync point data, use deepcopy to avoid the memory leak
+        # Get sync point data, use deepcopy to create a local copy of the
+        # synchronized metadata and will be freed after the function call.
+        # This is to avoid the memory leak
         sync_point: SyncPoint = copy.deepcopy(self._recording_synced.frames[idx])
 
         # Temporarily set iter_idx for _populate_video_frames

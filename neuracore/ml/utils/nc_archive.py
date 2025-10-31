@@ -7,6 +7,7 @@ dependency management, and packaging of all required files for inference.
 
 import inspect
 import json
+import logging
 import tempfile
 import zipfile
 from pathlib import Path
@@ -17,6 +18,8 @@ import torch
 from neuracore.core.nc_types import ModelDevice, ModelInitDescription
 from neuracore.ml.core.neuracore_model import NeuracoreModel
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
+
+logger = logging.getLogger(__name__)
 
 
 def create_nc_archive(
@@ -196,18 +199,53 @@ def load_model_from_nc_archive(
         algorithm_loader.install_requirements()
         model_class = algorithm_loader.load_model()
 
-        # Create model instance
-        model = model_class(model_init_description, **algorithm_config)
-        model.to(model.device)  # Move model to the appropriate device
-
-        # Load trained weights if present
+        # Load trained weights first to inspect dimensions if needed
+        state_dict = None
         if "model_weights" in extracted_files:
             state_dict = torch.load(
                 extracted_files["model_weights"],
-                map_location=model.device,
+                map_location="cpu",  # Load to CPU first to inspect
                 weights_only=True,
             )
-            model.load_state_dict(state_dict)
+
+            # Try to infer latent_dim from state_dict if not in config
+            # (for backward compatibility with old archives)
+            if (
+                "latent_dim" not in algorithm_config
+                and "latent_mu.weight" in state_dict
+            ):
+                latent_dim_from_checkpoint = state_dict["latent_mu.weight"].shape[0]
+                logger.warning(
+                    f"Inferred latent_dim={latent_dim_from_checkpoint} "
+                    "from checkpoint. Consider updating algorithm_config in archive."
+                )
+                algorithm_config["latent_dim"] = latent_dim_from_checkpoint
+
+        # Create model instance with corrected config
+        model = model_class(model_init_description, **algorithm_config)
+        model_device = (
+            torch.device(device)
+            if device
+            else (
+                torch.device("cuda")
+                if torch.cuda.is_available()
+                else torch.device("cpu")
+            )
+        )
+        model.to(model_device)  # Move model to the appropriate device
+
+        # Load trained weights if present
+        if state_dict is not None:
+            # Move state_dict to model device
+            state_dict = {k: v.to(model_device) for k, v in state_dict.items()}
+            # Use strict=False to handle dimension mismatches gracefully
+            missing_keys, unexpected_keys = model.load_state_dict(
+                state_dict, strict=False
+            )
+            if missing_keys:
+                logger.warning(f"Missing keys when loading checkpoint: {missing_keys}")
+            if unexpected_keys:
+                logger.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
 
         return model
 

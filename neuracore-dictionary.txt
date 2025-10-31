@@ -86,6 +86,7 @@ keypoints
 killpg
 KINOVA
 kwargs
+kewang
 lerobot
 LEROBOT
 levelname
