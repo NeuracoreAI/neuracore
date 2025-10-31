@@ -75,7 +75,7 @@ def main():
                 plt.pause(0.002)
 
             if done:
-                print(f"Episode {episode_idx} done")
+                print(f"Rollout {episode_idx} done")
                 break
         plt.close()
 
