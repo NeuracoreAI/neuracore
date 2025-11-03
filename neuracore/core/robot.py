@@ -129,6 +129,12 @@ class Robot:
         if not self._auth.is_authenticated:
             raise RobotError("Not authenticated. Please call nc.login() first.")
 
+        if not self.org_id:
+            raise RobotError(
+                "Unauthorised: no organisation selected. "
+                "Run `nc-select-org` and try again."
+            )
+
         try:
             response = requests.post(
                 f"{API_URL}/org/{self.org_id}/robots?is_shared={self.shared}",
@@ -154,6 +160,13 @@ class Robot:
                 "Failed to connect to neuracore server, "
                 "please check your internet connection and try again."
             ))
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 403:
+                raise RobotError(
+                    "Unauthorised: no organisation selected. "
+                    "Run `nc-select-org` and try again."
+                )
+            raise RobotError(f"Failed to initialize robot: {str(e)}")
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to initialize robot: {str(e)}")
 
