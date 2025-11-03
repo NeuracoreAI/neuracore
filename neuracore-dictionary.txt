@@ -30,6 +30,7 @@ ddpm
 DDPM
 denoise
 denoising
+demux
 diaginertia
 distilbert
 docstrings
@@ -54,6 +55,7 @@ FRANKA
 frictionloss
 fromarray
 frombuffer
+fpts
 gelu
 geomadr
 geomid
@@ -146,6 +148,7 @@ preexec
 proprio
 proprios
 PSNR
+pts
 pyquaternion
 pytest
 qpos
@@ -159,6 +162,7 @@ rgba
 rgbd
 rgbs
 rlds
+reseek
 Robotiq
 rosdep
 schematypens
@@ -172,6 +176,7 @@ solref
 squaredcos
 staticmethod
 targetbody
+tbase
 teleop
 tfds
 TFDS
