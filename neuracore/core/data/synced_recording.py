@@ -1,4 +1,4 @@
-"""Synchronized recording iterator."""
+"""Synchronized recording iterator (optimized)."""
 
 import copy
 import logging
@@ -65,12 +65,43 @@ class SynchronizedRecording:
         }
         self._episode_length = len(self._recording_synced.frames)
 
-        self.cache_manager = CacheManager(
-            self.cache_dir,
-        )
+        self.cache_manager = CacheManager(self.cache_dir)
 
         self._iter_idx = 0
         self._suppress_wget_progress = True
+
+        # Caches for open video containers/streams
+        self._video_containers: dict[str, dict[str, av.container.Container]] = {}
+        self._video_streams: dict[str, dict[str, av.video.stream.VideoStream]] = {}
+
+        # NEW: per-camera decode state (to avoid seek each step)
+        # camera_type -> cam_id -> dict(last_pts:int, last_rel_ts:float)
+        self._decode_state: dict[str, dict[str, dict[str, float | int]]] = {
+            "rgbs": {},
+            "depths": {},
+        }
+
+        # NEW: precompute t0 metadata once (absolute timestamps per camera)
+        self._t0_by_type: dict[str, dict[str, float]] = {
+            "rgbs": {},
+            "depths": {},
+        }
+        if _rgb:
+            for cid, cdata in _rgb.items():
+                self._t0_by_type["rgbs"][cid] = cdata.timestamp
+        if _depth:
+            for cid, cdata in _depth.items():
+                self._t0_by_type["depths"][cid] = cdata.timestamp
+
+        # Optional: small thread pool for per-step multi-camera decode
+        self._per_step_workers = int(
+            os.environ.get("NEURACORE_PER_STEP_DECODE_THREADS", "0")
+        )
+        self._executor: Optional[ThreadPoolExecutor] = None
+        if self._per_step_workers and self._per_step_workers > 0:
+            self._executor = ThreadPoolExecutor(max_workers=self._per_step_workers)
+
+    # ---------------- API calls ----------------
 
     def _get_synced_data(self) -> SyncedData:
         """Retrieve synchronized metadata for the recording.
@@ -127,7 +158,6 @@ class SynchronizedRecording:
             video_cache_path: Path to the directory where videos are cached.
         """
         video_file = video_cache_path / f"{camera_id}.mp4"
-
         if video_file.exists():
             logger.info(f"Video already exists: {video_file}")
             return
@@ -162,104 +192,169 @@ class SynchronizedRecording:
                 continue
 
             video_cache_path.mkdir(parents=True, exist_ok=True)
-
             camera_ids = self._camera_ids[cam_type]
             if not camera_ids:
                 continue
 
-            num_parallel_downloads = int(
+            num_parallel = int(
                 os.environ.get("NEURACORE_NUM_PARALLEL_VIDEO_DOWNLOADS", "4")
             )
-            if num_parallel_downloads <= 1:
+            if num_parallel <= 1:
                 for camera_id in camera_ids:
                     self._download_video(cam_type, camera_id, video_cache_path)
             else:
-                with ThreadPoolExecutor(max_workers=num_parallel_downloads) as executor:
-                    future_to_task = {
+                with ThreadPoolExecutor(max_workers=num_parallel) as executor:
+                    futures = [
                         executor.submit(
-                            self._download_video, cam_type, camera_id, video_cache_path
-                        ): camera_id
-                        for camera_id in camera_ids
-                    }
+                            self._download_video, cam_type, cid, video_cache_path
+                        )
+                        for cid in camera_ids
+                    ]
+                    for f in as_completed(futures):
+                        f.result()
 
-                    for future in as_completed(future_to_task):
-                        camera_id = future_to_task[future]
-                        try:
-                            future.result()
-                        except Exception:
-                            logger.error(
-                                f"Failed to download {cam_type}/{camera_id}",
-                                exc_info=True,
-                            )
-                            raise
+    # ---------------- optimized video frame access ----------------
+
+    def _ensure_open(self, camera_type: str, cam_id: str, video_file: Path) -> None:
+        """Open a video file and initialize decode state.
+
+        Args:
+            camera_type: Type of camera (e.g., "rgbs", "depths").
+            cam_id: Unique identifier for the camera.
+            video_file: Path to the video file.
+        """
+        if camera_type not in self._video_containers:
+            self._video_containers[camera_type] = {}
+            self._video_streams[camera_type] = {}
+        if cam_id not in self._video_containers[camera_type]:
+            container = av.open(str(video_file))
+            stream = container.streams.video[0]
+            self._video_containers[camera_type][cam_id] = container
+            self._video_streams[camera_type][cam_id] = stream
+            # initialize decode state
+            self._decode_state[camera_type][cam_id] = {
+                "last_pts": -1,  # last decoded pts
+                "last_rel_ts": -1.0,  # last requested relative seconds
+            }
+
+    def _decode_to_target(
+        self,
+        camera_type: str,
+        cam_id: str,
+        target_rel_ts: float,
+        *,
+        allow_reseek_back_gap_s: float = 0.05,
+    ) -> np.ndarray:
+        """Decode forward to the frame at/after target_rel_ts (seconds from t0).
+
+        We only reseek if the target is sufficiently behind the last decoded
+        position.
+        """
+        container = self._video_containers[camera_type][cam_id]
+        stream = self._video_streams[camera_type][cam_id]
+        state = self._decode_state[camera_type][cam_id]
+
+        fps = float(stream.average_rate) if stream.average_rate else 0.0
+        tbase = float(stream.time_base) if stream.time_base else (1.0 / max(fps, 1.0))
+        target_pts = int(target_rel_ts / tbase)
+
+        last_pts = int(state["last_pts"])
+        last_rel_ts = float(state["last_rel_ts"])
+
+        # If we are going forward (normal __next__), decode forward without seek.
+        # Only reseek if target is quite earlier than last decoded time (random access).
+        going_back = (last_pts >= 0) and (
+            target_rel_ts + allow_reseek_back_gap_s < last_rel_ts
+        )
+
+        if last_pts < 0 or going_back:
+            # Initial access or big backward jump -> seek once near the target
+            container.seek(target_pts, any_frame=False, stream=stream)
+            state["last_pts"] = -1  # reset cursor
+
+        # Decode forward until we hit or pass target_pts
+        for packet in container.demux(stream):
+            for frame in packet.decode():
+                fpts = frame.pts if frame.pts is not None else None
+                if fpts is None:
+                    # estimate via last_pts + 1 frame
+                    fpts = last_pts + int(1.0 / tbase) if last_pts >= 0 else target_pts
+                state["last_pts"] = fpts
+                cur_rel_ts = fpts * tbase
+                state["last_rel_ts"] = cur_rel_ts
+                if fpts >= target_pts:
+                    # Return as NumPy RGB to avoid extra conversions
+                    return frame.to_rgb().to_ndarray()
+
+        raise ValueError(
+            f"No frame found for {camera_type}/{cam_id} at rel_ts={target_rel_ts:.6f}s"
+        )
 
     def _get_video_frames(
         self,
         camera_type: str,
         cam_metadata: dict[str, CameraData],
-        t0_cam_metadata: dict[str, CameraData],
-    ) -> list[Image.Image]:
+    ) -> dict[str, np.ndarray]:
         """Get video frames for multiple cameras with timing synchronization.
 
         Args:
             camera_type: Type of camera (e.g., "rgbs", "depths").
             cam_metadata: Dictionary of camera metadata with camera IDs as keys.
-            t0_cam_metadata: Metadata for the first frame of each camera type.
 
         Returns:
-            List of synchronized PIL Image frames for each camera.
+            Dictionary mapping camera IDs to NumPy RGB arrays.
 
         Raises:
             ValueError: If no frames are found for a camera at the specified timestamp.
         """
         camera_ids = list(cam_metadata.keys())
+        out: dict[str, np.ndarray] = {}
 
+        if not camera_ids:
+            return out
+
+        # Paths & ensure downloaded
         if self.cache_dir:
             video_cache_path = self.cache_dir / f"{self.id}_videos" / camera_type
             video_cache_path.mkdir(parents=True, exist_ok=True)
-
-            # Ensure cache space and download videos if needed
             for cam_id in camera_ids:
                 video_file = video_cache_path / f"{cam_id}.mp4"
                 if not video_file.exists():
-                    # Ensure space before downloading
                     self.cache_manager.ensure_space_available()
                     self._download_video(camera_type, cam_id, video_cache_path)
 
-        image_frame_for_each_camera = []
-        for cam_id, cam_data in cam_metadata.items():
-            video_file = video_cache_path / f"{cam_id}.mp4"
-            container = av.open(str(video_file))
-            video_stream = container.streams.video[0]
+        # Open if needed and decode each camera (optionally in parallel)
+        def _job(cid: str) -> tuple[str, np.ndarray]:
+            video_cache_path = (
+                self.cache_dir / f"{self.id}_videos" / camera_type
+                if self.cache_dir
+                else None
+            )
+            video_file = (
+                (video_cache_path / f"{cid}.mp4")
+                if video_cache_path
+                else Path(f"{cid}.mp4")
+            )
+            self._ensure_open(camera_type, cid, video_file)
+            # relative timestamp from precomputed t0
+            t0 = self._t0_by_type[camera_type].get(cid, 0.0)
+            rel_ts = cam_metadata[cid].timestamp - t0
+            arr = self._decode_to_target(camera_type, cid, rel_ts)
+            return cid, arr
 
-            # Calculate target frame based on timestamp difference
-            start_time = t0_cam_metadata[cam_id].timestamp
-            ts = cam_data.timestamp - start_time
-            target_pts = int(ts / float(video_stream.time_base))
+        if self._executor:
+            futures = [self._executor.submit(_job, cid) for cid in camera_ids]
+            for f in as_completed(futures):
+                cid, arr = f.result()
+                out[cid] = arr
+        else:
+            for cid in camera_ids:
+                c, arr = _job(cid)
+                out[c] = arr
 
-            # Seek to approximate position
-            container.seek(target_pts, stream=video_stream)
+        return out
 
-            # Find the closest frame to our target
-            cam_frame: Optional[np.ndarray] = None
-            for frame in container.decode(video=0):
-                frame_pts = frame.pts
-                diff = frame_pts - target_pts
-
-                if diff >= 0:
-                    cam_frame = Image.fromarray(frame.to_rgb().to_ndarray())
-                    break
-
-            if cam_frame is None:
-                raise ValueError(
-                    f"No frame found for {camera_type}/{cam_id} "
-                    f"at timestamp {cam_data.timestamp}"
-                )
-
-            image_frame_for_each_camera.append(cam_frame)
-            container.close()
-
-        return image_frame_for_each_camera
+    # ---------------- public helpers ----------------
 
     def _populate_video_frames(
         self,
@@ -274,29 +369,63 @@ class SynchronizedRecording:
         """
         camera_type = "rgbs" if transform_fn is None else "depths"
 
-        # Ensure videos for this camera type are downloaded
+        # Ensure videos for this camera type are downloaded once
         self._ensure_videos_downloaded(camera_type)
 
-        # Get t0 metadata for timing calculations
-        t0_cam_metadata = getattr(
-            self._recording_synced.frames[0], f"{camera_type.rstrip('s')}_images", {}
-        )
+        # Decode all cameras for this step
+        rgb_map = self._get_video_frames(camera_type, camera_data)
 
-        # Get frames using the original timing-based method
-        frame_lists = self._get_video_frames(camera_type, camera_data, t0_cam_metadata)
-
-        # Apply transforms and assign frames to camera data
-        for i, (camera_id, cam_data) in enumerate(camera_data.items()):
-            if i < len(frame_lists) and frame_lists[i] is not None:
-                frame = frame_lists[i]
-                if transform_fn:
-                    frame = Image.fromarray(transform_fn(np.array(frame)))
-                cam_data.frame = frame
-            else:
-                logger.error(
-                    f"No frame available for {camera_type}/{camera_id}", exc_info=True
-                )
+        for cam_id, cam_data in camera_data.items():
+            arr = rgb_map.get(cam_id, None)
+            if arr is None:
+                logger.error(f"No frame available for {camera_type}/{cam_id}")
                 cam_data.frame = None
+                continue
+            # Optional transform (e.g., depth)
+            if transform_fn is not None:
+                # rgb_to_depth expects ndarray; returns ndarray
+                arr = transform_fn(arr)
+            # Assign as PIL Image at the end to keep API unchanged
+            if arr.ndim == 2:
+                img = Image.fromarray(arr)
+            else:
+                img = Image.fromarray(arr.astype(np.uint8))
+            cam_data.frame = img
+
+    # ---------------- lifecycle ----------------
+
+    def _close_video_containers(self) -> None:
+        """Close all open video containers and clear caches."""
+        for camera_type in self._video_containers:
+            for _, container in self._video_containers[camera_type].items():
+                try:
+                    container.close()
+                except Exception:
+                    pass
+        self._video_containers.clear()
+        self._video_streams.clear()
+        self._decode_state = {"rgbs": {}, "depths": {}}
+
+    def close(self) -> None:
+        """Explicitly close all resources.
+
+        This method should be called when done accessing the recording to free
+        file handles and shutdown thread pools. It is safe to call multiple times.
+        """
+        self._close_video_containers()
+        if self._executor:
+            self._executor.shutdown(wait=False)
+            self._executor = None
+
+    def __del__(self) -> None:
+        """Cleanup when object is garbage collected (best effort)."""
+        try:
+            if hasattr(self, "_video_containers"):
+                self.close()
+        except Exception:
+            pass
+
+    # ---------------- iteration / indexing ----------------
 
     def __next__(self) -> SyncPoint:
         """Get the next synchronized data point in the episode.
@@ -332,6 +461,8 @@ class SynchronizedRecording:
         Returns:
             SynchronizedRecording instance for iteration.
         """
+        # Reset decode state/containers between full passes
+        self._close_video_containers()
         self._iter_idx = 0
         return self
 
@@ -361,9 +492,8 @@ class SynchronizedRecording:
             start, stop, step = idx.indices(len(self))
             return [cast(SyncPoint, self[i]) for i in range(start, stop, step)]
 
-        if idx < 0:
-            idx += len(self)
-        if idx < 0 or idx >= len(self):
+        idx = idx if idx >= 0 else idx + len(self)
+        if not 0 <= idx < len(self):
             raise IndexError("Index out of range")
 
         # we dont't want self._recording_synced.frames to hold the real video
@@ -372,14 +502,12 @@ class SynchronizedRecording:
         # a local copy of the sync point to avoid this issue.
         sync_point: SyncPoint = copy.deepcopy(self._recording_synced.frames[idx])
 
-        # Temporarily set iter_idx for _populate_video_frames
+        # Temporarily set iter_idx and keep decode cursors viable
         original_iter_idx = self._iter_idx
         self._iter_idx = idx
-
         try:
             if sync_point.rgb_images is not None:
                 self._populate_video_frames(sync_point.rgb_images)
-
             if sync_point.depth_images is not None:
                 self._populate_video_frames(
                     sync_point.depth_images, transform_fn=rgb_to_depth
