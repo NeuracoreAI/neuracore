@@ -298,14 +298,9 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 if DataType.JOINT_TARGET_POSITIONS in self.output_data_types:
                     # We dont need to shift the sync_point by 1, since we are
                     # using the target joint positions as the action
-                    jtp_points = cast(
-                        list[SyncPoint],
-                        synced_recording[
-                            timestep : timestep + self.output_prediction_horizon
-                        ],
-                    )
-                    for _ in range(self.output_prediction_horizon - len(jtp_points)):
-                        jtp_points.append(jtp_points[-1])
+                    jtp_points = [sync_point] + future_sync_points
+                    jtp_points = jtp_points[:self.output_prediction_horizon]
+
                     sample.outputs.joint_target_positions = (
                         self._create_joint_maskable_output_data(
                             [
