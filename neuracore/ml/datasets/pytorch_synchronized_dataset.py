@@ -81,6 +81,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
         # Setup cache
         if cache_dir is None:
+            # TODO: Add dataset name and ID to the cache directory
             cache_dir = os.path.join(tempfile.gettempdir(), "episodic_dataset_cache")
         self.cache_dir = Path(cache_dir)
         if self.cache_dir.exists():
