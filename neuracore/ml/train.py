@@ -1,5 +1,6 @@
 """Hydra-based training script for Neuracore models."""
 
+import datetime
 import gc
 import logging
 import os
@@ -325,7 +326,10 @@ def run_training(
             val_loader=val_loader,
             training_logger=training_logger,
             storage_handler=training_storage_handler,
-            output_dir=Path(cfg.local_output_dir),
+            output_dir=Path(cfg.local_output_dir)
+            / model.__class__.__name__
+            / hydra.utils.get_original_cwd()
+            / f"{datetime.datetime.now():%Y-%m-%d_%H-%M-%S}",
             num_epochs=cfg.epochs,
             rank=rank,
             world_size=world_size,

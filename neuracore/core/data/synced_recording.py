@@ -242,8 +242,6 @@ class SynchronizedRecording:
         camera_type: str,
         cam_id: str,
         target_rel_ts: float,
-        *,
-        allow_reseek_back_gap_s: float = 0.05,
     ) -> np.ndarray:
         """Decode forward to the frame at/after target_rel_ts (seconds from t0).
 
@@ -253,6 +251,8 @@ class SynchronizedRecording:
         container = self._video_containers[camera_type][cam_id]
         stream = self._video_streams[camera_type][cam_id]
         state = self._decode_state[camera_type][cam_id]
+
+        allow_reseek_back_gap_s = 1.0 / self.frequency
 
         fps = float(stream.average_rate) if stream.average_rate else 0.0
         tbase = float(stream.time_base) if stream.time_base else (1.0 / max(fps, 1.0))
@@ -502,18 +502,11 @@ class SynchronizedRecording:
         # a local copy of the sync point to avoid this issue.
         sync_point: SyncPoint = copy.deepcopy(self._recording_synced.frames[idx])
 
-        # Temporarily set iter_idx and keep decode cursors viable
-        original_iter_idx = self._iter_idx
-        self._iter_idx = idx
-        try:
-            if sync_point.rgb_images is not None:
-                self._populate_video_frames(sync_point.rgb_images)
-            if sync_point.depth_images is not None:
-                self._populate_video_frames(
-                    sync_point.depth_images, transform_fn=rgb_to_depth
-                )
-        finally:
-            # Restore original iter_idx
-            self._iter_idx = original_iter_idx
+        if sync_point.rgb_images is not None:
+            self._populate_video_frames(sync_point.rgb_images)
+        if sync_point.depth_images is not None:
+            self._populate_video_frames(
+                sync_point.depth_images, transform_fn=rgb_to_depth
+            )
 
         return sync_point

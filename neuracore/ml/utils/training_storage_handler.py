@@ -105,7 +105,7 @@ class TrainingStorageHandler:
             checkpoint: Checkpoint dictionary to save.
             checkpoint_name: Name of the checkpoint file.
         """
-        save_path = self.local_dir / checkpoint_name
+        save_path = self.local_dir / "checkpoints" / checkpoint_name
         save_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(checkpoint, save_path)
         if self.log_to_cloud:
