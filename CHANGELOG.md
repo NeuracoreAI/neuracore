@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- None
+- Temporarily moved back to Mujoco 2.3.7 from Mujoco 3+ for the examples while we look at tuning the physics parameters
 
 
 ## [3.2.0]
