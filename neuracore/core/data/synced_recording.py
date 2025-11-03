@@ -101,8 +101,6 @@ class SynchronizedRecording:
         if self._per_step_workers and self._per_step_workers > 0:
             self._executor = ThreadPoolExecutor(max_workers=self._per_step_workers)
 
-    # ---------------- API calls ----------------
-
     def _get_synced_data(self) -> SyncedData:
         """Retrieve synchronized metadata for the recording.
 
@@ -213,8 +211,6 @@ class SynchronizedRecording:
                     for f in as_completed(futures):
                         f.result()
 
-    # ---------------- optimized video frame access ----------------
-
     def _ensure_open(self, camera_type: str, cam_id: str, video_file: Path) -> None:
         """Open a video file and initialize decode state.
 
@@ -233,8 +229,8 @@ class SynchronizedRecording:
             self._video_streams[camera_type][cam_id] = stream
             # initialize decode state
             self._decode_state[camera_type][cam_id] = {
-                "last_pts": -1,  # last decoded pts
-                "last_rel_ts": -1.0,  # last requested relative seconds
+                "last_pts": -1,
+                "last_rel_ts": -1.0,
             }
 
     def _decode_to_target(
@@ -242,13 +238,22 @@ class SynchronizedRecording:
         camera_type: str,
         cam_id: str,
         target_rel_ts: float,
-        *,
-        allow_reseek_back_gap_s: float = 0.05,
     ) -> np.ndarray:
         """Decode forward to the frame at/after target_rel_ts (seconds from t0).
 
         We only reseek if the target is sufficiently behind the last decoded
         position.
+
+        Args:
+            camera_type: Type of camera (e.g., "rgbs", "depths").
+            cam_id: Unique identifier for the camera.
+            target_rel_ts: Relative timestamp to decode to (seconds from t0).
+
+        Returns:
+            Numpy array of the decoded frame.
+
+        Raises:
+            ValueError: If no frame is found for the camera at the specified timestamp.
         """
         container = self._video_containers[camera_type][cam_id]
         stream = self._video_streams[camera_type][cam_id]
@@ -257,6 +262,7 @@ class SynchronizedRecording:
         fps = float(stream.average_rate) if stream.average_rate else 0.0
         tbase = float(stream.time_base) if stream.time_base else (1.0 / max(fps, 1.0))
         target_pts = int(target_rel_ts / tbase)
+        allow_reseek_back_gap_s = 1.0 / self.frequency
 
         last_pts = int(state["last_pts"])
         last_rel_ts = float(state["last_rel_ts"])
@@ -354,8 +360,6 @@ class SynchronizedRecording:
 
         return out
 
-    # ---------------- public helpers ----------------
-
     def _populate_video_frames(
         self,
         camera_data: dict[str, CameraData],
@@ -385,14 +389,12 @@ class SynchronizedRecording:
             if transform_fn is not None:
                 # rgb_to_depth expects ndarray; returns ndarray
                 arr = transform_fn(arr)
-            # Assign as PIL Image at the end to keep API unchanged
+            # Assign as PIL Image at the end
             if arr.ndim == 2:
                 img = Image.fromarray(arr)
             else:
                 img = Image.fromarray(arr.astype(np.uint8))
             cam_data.frame = img
-
-    # ---------------- lifecycle ----------------
 
     def _close_video_containers(self) -> None:
         """Close all open video containers and clear caches."""
@@ -410,7 +412,7 @@ class SynchronizedRecording:
         """Explicitly close all resources.
 
         This method should be called when done accessing the recording to free
-        file handles and shutdown thread pools. It is safe to call multiple times.
+        file handles and shutdown thread pools.
         """
         self._close_video_containers()
         if self._executor:
@@ -485,7 +487,6 @@ class SynchronizedRecording:
 
         Raises:
             IndexError: If the index is out of range.
-            TypeError: If the index is not an integer or slice.
         """
         if isinstance(idx, slice):
             # Handle slice objects
@@ -502,18 +503,11 @@ class SynchronizedRecording:
         # a local copy of the sync point to avoid this issue.
         sync_point: SyncPoint = copy.deepcopy(self._recording_synced.frames[idx])
 
-        # Temporarily set iter_idx and keep decode cursors viable
-        original_iter_idx = self._iter_idx
-        self._iter_idx = idx
-        try:
-            if sync_point.rgb_images is not None:
-                self._populate_video_frames(sync_point.rgb_images)
-            if sync_point.depth_images is not None:
-                self._populate_video_frames(
-                    sync_point.depth_images, transform_fn=rgb_to_depth
-                )
-        finally:
-            # Restore original iter_idx
-            self._iter_idx = original_iter_idx
+        if sync_point.rgb_images is not None:
+            self._populate_video_frames(sync_point.rgb_images)
+        if sync_point.depth_images is not None:
+            self._populate_video_frames(
+                sync_point.depth_images, transform_fn=rgb_to_depth
+            )
 
         return sync_point
