@@ -64,6 +64,7 @@ class DistributedTrainer:
         clip_grad_norm: Optional[float] = None,
         rank: int = 0,
         world_size: int = 1,
+        compile_model: bool = False,
     ):
         """Initialize the distributed trainer.
 
@@ -87,13 +88,24 @@ class DistributedTrainer:
         )
         logger.info(f"Process {rank} using device: {self.device}")
 
+        # Compile the model if requested
+        self.compile_model: bool = compile_model
+
+        # Preserve original, uncompiled model reference for artifact packaging
+        self._uncompiled_model_for_artifacts = model
+
         # Set up the model for distributed training
         self.model = model.to(self.device)
         if torch.cuda.is_available() and world_size > 1:
             self.model = NestedModule(self.model).to(self.device)
+            if self.compile_model:
+                self.model = torch.compile(self.model)
             self.model = DDP(
                 self.model, device_ids=[rank], find_unused_parameters=False
             )
+        else:
+            if self.compile_model:
+                self.model = torch.compile(self.model)
 
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -110,7 +122,7 @@ class DistributedTrainer:
         self.optimizers = model.configure_optimizers()
 
         # Initialize best metrics
-        self.best_val_loss = float("inf")
+        self.best_val_loss: float = float("inf")
         self.global_train_step = 0
         self.global_val_step = 0
 
@@ -150,6 +162,7 @@ class DistributedTrainer:
             batch = batch.to(self.device)
 
             # Forward pass
+
             if self.world_size > 1:
                 batch_output = self.model(batch)
             else:
@@ -201,6 +214,7 @@ class DistributedTrainer:
         )
         self._log_scalars(avg_epoch_losses, epoch, prefix="train/epoch/loss")
         self._log_scalars(avg_epoch_metrics, epoch, prefix="train/epoch/metrics")
+
         return avg_epoch_losses
 
     def validate(self, epoch: int) -> dict[str, float]:
@@ -226,6 +240,7 @@ class DistributedTrainer:
             batch = batch.to(self.device)
 
             # Forward pass
+
             if self.world_size > 1:
                 batch_output = self.model(batch)
             else:
@@ -250,6 +265,7 @@ class DistributedTrainer:
         )
         self._log_scalars(avg_losses, self.global_val_step, prefix="val/epoch/loss")
         self._log_scalars(avg_metrics, self.global_val_step, prefix="val/epoch/metrics")
+
         return avg_losses
 
     def train(self, start_epoch: int = 0) -> None:
@@ -283,8 +299,9 @@ class DistributedTrainer:
                     self.save_checkpoint(epoch, train_loss_metrics, is_best=is_best)
 
                     # Save model artifacts
+                    # Always save artifacts from the original (uncompiled) model
                     self.storage_handler.save_model_artifacts(
-                        model=self.get_model_without_ddp(),
+                        model=self._uncompiled_model_for_artifacts,
                         output_dir=self.output_dir,
                     )
 
@@ -454,17 +471,21 @@ class DistributedTrainer:
         """
         # Accumulate losses
         if batch_output.losses:
-            epoch_losses.append({
-                k: v.item() if isinstance(v, torch.Tensor) else v
-                for k, v in batch_output.losses.items()
-            })
+            epoch_losses.append(
+                {
+                    k: v.item() if isinstance(v, torch.Tensor) else v
+                    for k, v in batch_output.losses.items()
+                }
+            )
 
         # Accumulate metrics
         if batch_output.metrics:
-            epoch_metrics.append({
-                k: v.item() if isinstance(v, torch.Tensor) else v
-                for k, v in batch_output.metrics.items()
-            })
+            epoch_metrics.append(
+                {
+                    k: v.item() if isinstance(v, torch.Tensor) else v
+                    for k, v in batch_output.metrics.items()
+                }
+            )
 
         return epoch_losses, epoch_metrics
 

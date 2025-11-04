@@ -64,9 +64,9 @@ def get_algorithm_config_and_class(
     cfg: DictConfig,
 ) -> Tuple[type[NeuracoreModel], Dict[str, Any]]:
     """Get model class and algorithm configuration."""
-    assert (
-        cfg.algorithm_id is not None
-    ), "Algorithm ID must be provided in the configuration"
+    assert cfg.algorithm_id is not None, (
+        "Algorithm ID must be provided in the configuration"
+    )
     #  Assume algorithm already downloaded
     extract_dir = Path(cfg.local_output_dir) / "algorithm"
     algorithm_loader = AlgorithmLoader(extract_dir)
@@ -129,8 +129,7 @@ def determine_optimal_batch_size(
         )
     else:
         raise ValueError(
-            "Either 'algorithm' or 'algorithm_id' "
-            "must be provided in the configuration"
+            "Either 'algorithm' or 'algorithm_id' must be provided in the configuration"
         )
 
     # Determine per-GPU batch size
@@ -330,6 +329,7 @@ def run_training(
             log_freq=cfg.logging_frequency,
             rank=rank,
             world_size=world_size,
+            compile_model=bool(getattr(cfg, "compile_model", False)),
         )
 
         # Resume from checkpoint if specified
@@ -368,12 +368,11 @@ def main(cfg: DictConfig) -> None:
 
     if "algorithm" in cfg and cfg.algorithm_id is not None:
         raise ValueError(
-            "Both 'algorithm' and 'algorithm_id' are provided. "
-            "Please specify only one."
+            "Both 'algorithm' and 'algorithm_id' are provided. Please specify only one."
         )
     if "algorithm" not in cfg and cfg.algorithm_id is None:
         raise ValueError(
-            "Neither 'algorithm' nor 'algorithm_id' is provided. " "Please specify one."
+            "Neither 'algorithm' nor 'algorithm_id' is provided. Please specify one."
         )
 
     if cfg.dataset_id is None and cfg.dataset_name is None:
