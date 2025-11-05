@@ -29,8 +29,7 @@ GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
 FREQUENCY = 50
 BATCH_SIZE = 32
-EPOCHS = 80
-OUTPUT_PREDICTION_HORIZON = 10
+OUTPUT_PREDICTION_HORIZON = 50
 NUM_ROLLOUTS = 10
 ONSCREEN_RENDER = False
 TRAINING_TIMEOUT_MINUTES = 360
@@ -102,7 +101,7 @@ def eval_model(
 
 
 @pytest.mark.parametrize(
-    "algorithm_name, input_data_types, output_data_types, min_success_rate",
+    "algorithm_name, input_data_types, output_data_types, epochs, min_success_rate",
     [
         (
             "CNNMLP",
@@ -113,7 +112,8 @@ def eval_model(
             [
                 nc.DataType.JOINT_TARGET_POSITIONS,
             ],
-            0.0,  # temporary 0 until full test pipeline is stable
+            100,
+            0.5,
         ),
         (
             "ACT",
@@ -124,7 +124,20 @@ def eval_model(
             [
                 nc.DataType.JOINT_TARGET_POSITIONS,
             ],
-            0.0,  # temporary 0 until full test pipeline is stable
+            10,
+            0.9,
+        ),
+        (
+            "DiffusionPolicy",
+            [
+                nc.DataType.RGB_IMAGE,
+                nc.DataType.JOINT_POSITIONS,
+            ],
+            [
+                nc.DataType.JOINT_TARGET_POSITIONS,
+            ],
+            10,
+            0.9,
         ),
     ],
 )
@@ -136,13 +149,14 @@ class TestAlgorithm:
         algorithm_name: str,
         input_data_types: list,
         output_data_types: list,
+        epochs: int,
         min_success_rate: float,
     ) -> None:
         nc.login()
 
         algorithm_config = {
             "batch_size": BATCH_SIZE,
-            "epochs": EPOCHS,
+            "epochs": epochs,
             "output_prediction_horizon": OUTPUT_PREDICTION_HORIZON,
         }
         logger.info("Starting training job...")
