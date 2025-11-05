@@ -14,12 +14,12 @@ def main():
         overwrite=False,
     )
     # If you have a train run name, you can use it to connect to a local. E.g.:
-    policy = nc.policy(
-        train_run_name=TRAINING_JOB_NAME,
-    )
+    # policy = nc.policy(
+    #     train_run_name=TRAINING_JOB_NAME,
+    # )
 
     # If you know the path to the local model.nc.zip file, you can use it directly as:
-    # policy = nc.policy(model_file=PATH/TO/MODEL.nc.zip)
+    policy = nc.policy(model_file="/home/kewang/Downloads/model.nc.zip")
 
     # Alternatively, you can connect to a local endpoint that has been started
     # policy = nc.policy_local_server(train_run_name=TRAINING_JOB_NAME)
@@ -67,6 +67,8 @@ def main():
                     if jtp is not None
                 ]
                 horizon = len(actions)
+                print(f"Horizon: {horizon}")
+                breakpoint()
             a = actions[idx_in_horizon]
             obs, reward, done = env.step(a)
 

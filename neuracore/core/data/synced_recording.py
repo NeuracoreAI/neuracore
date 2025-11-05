@@ -55,6 +55,7 @@ class SynchronizedRecording:
         self.cache_dir: Optional[Path] = dataset.cache_dir
         self.robot_id = robot_id
         self.instance = instance
+        self.video_decoded = False
 
         self._recording_synced = self._get_synced_data()
         _rgb = self._recording_synced.frames[0].rgb_images
@@ -261,6 +262,90 @@ class SynchronizedRecording:
 
         return image_frame_for_each_camera
 
+    def decode_video(self, camera_type: str | None = None) -> None:
+        """Decode and save only the frames referenced in self._recording_synced.frames.
+
+        For each frame metadata entry, seek directly to its timestamp using
+        container.seek() and store the decoded frame as a .npy array (lossless RGB).
+        No index or step map is created — only the requested frames are stored.
+
+        Args:
+            camera_type: "rgbs", "depths", or None for all camera types.
+        """
+        if self.video_decoded:
+            return
+
+        if not self.cache_dir:
+            raise RuntimeError("Cannot decode without a cache directory set.")
+
+        cam_types = [camera_type] if camera_type else list(self._camera_ids.keys())
+
+        for cam_type in cam_types:
+            # Make sure videos are available
+            self._ensure_videos_downloaded(cam_type)
+
+            # Base directories
+            video_cache_path = self.cache_dir / f"{self.id}_videos" / cam_type
+            frames_root = (
+                self.cache_dir / f"{self.id}_frames" / cam_type / f"{self.frequency}Hz"
+            )
+            frames_root.mkdir(parents=True, exist_ok=True)
+
+            # Time sync metadata
+            t0_cam_metadata = getattr(
+                self._recording_synced.frames[0],
+                f"{cam_type.rstrip('s')}_images",
+                {},
+            )
+
+            for cam_id in self._camera_ids[cam_type]:
+                video_file = video_cache_path / f"{cam_id}.mp4"
+                cam_frames_dir = frames_root / cam_id
+                cam_frames_dir.mkdir(parents=True, exist_ok=True)
+
+                # Skip if already decoded (frames exist)
+                if any(cam_frames_dir.glob("*.npy")):
+                    continue
+
+                # Open the video
+                container = av.open(str(video_file))
+                video_stream = container.streams.video[0]
+                time_base = float(video_stream.time_base)
+
+                # Base timestamp reference for this camera
+                if cam_id not in t0_cam_metadata:
+                    container.close()
+                    continue
+                t0 = t0_cam_metadata[cam_id].timestamp
+
+                print(f"Decoding frames for {cam_type}/{cam_id} ...")
+
+                # Go through each synchronized frame
+                for step_idx, sp in enumerate(self._recording_synced.frames):
+                    cam_meta_all = getattr(sp, f"{cam_type.rstrip('s')}_images", None)
+                    if not cam_meta_all or cam_id not in cam_meta_all:
+                        continue
+
+                    cam_meta = cam_meta_all[cam_id]
+                    ts = cam_meta.timestamp - t0
+                    target_pts = int(ts / time_base)
+
+                    # Seek to the approximate position
+                    container.seek(target_pts, stream=video_stream)
+
+                    # Decode one frame after seek
+                    for frame in container.decode(video=0):
+                        if frame.pts is None:
+                            continue
+                        # This is the first frame after or at the target
+                        rgb = frame.to_rgb().to_ndarray()
+                        np.save(cam_frames_dir / f"{step_idx:06d}.npy", rgb)
+                        break  # move to next step
+
+                container.close()
+                print(f"✅ Done decoding {cam_id}. Saved frames to {cam_frames_dir}")
+        self.video_decoded = True
+
     def _populate_video_frames(
         self,
         camera_data: dict[str, CameraData],
@@ -275,28 +360,34 @@ class SynchronizedRecording:
         camera_type = "rgbs" if transform_fn is None else "depths"
 
         # Ensure videos for this camera type are downloaded
-        self._ensure_videos_downloaded(camera_type)
+        if not self.video_decoded:
+            self._ensure_videos_downloaded(camera_type)
+            self.decode_video(camera_type)
 
-        # Get t0 metadata for timing calculations
-        t0_cam_metadata = getattr(
-            self._recording_synced.frames[0], f"{camera_type.rstrip('s')}_images", {}
-        )
+        # Try pre-decoded fast path (step-indexed .npy files)
+        if self.cache_dir:
+            frames_root = (
+                self.cache_dir
+                / f"{self.id}_frames"
+                / camera_type
+                / f"{self.frequency}Hz"
+            )
+            if frames_root.exists():
+                can_use_cache = True
+                for cam_id, cam_data in camera_data.items():
+                    fpath = frames_root / cam_id / f"{self._iter_idx:06d}.npy"
+                    if not fpath.exists():
+                        can_use_cache = False
+                        break
 
-        # Get frames using the original timing-based method
-        frame_lists = self._get_video_frames(camera_type, camera_data, t0_cam_metadata)
-
-        # Apply transforms and assign frames to camera data
-        for i, (camera_id, cam_data) in enumerate(camera_data.items()):
-            if i < len(frame_lists) and frame_lists[i] is not None:
-                frame = frame_lists[i]
-                if transform_fn:
-                    frame = Image.fromarray(transform_fn(np.array(frame)))
-                cam_data.frame = frame
-            else:
-                logger.error(
-                    f"No frame available for {camera_type}/{camera_id}", exc_info=True
-                )
-                cam_data.frame = None
+                if can_use_cache:
+                    for cam_id, cam_data in camera_data.items():
+                        fpath = frames_root / cam_id / f"{self._iter_idx:06d}.npy"
+                        arr = np.load(fpath, mmap_mode="r")
+                        if transform_fn:
+                            arr = transform_fn(arr)
+                        cam_data.frame = Image.fromarray(arr)
+                    return
 
     def __next__(self) -> SyncPoint:
         """Get the next synchronized data point in the episode.
@@ -361,10 +452,9 @@ class SynchronizedRecording:
             start, stop, step = idx.indices(len(self))
             return [cast(SyncPoint, self[i]) for i in range(start, stop, step)]
 
-        if idx < 0:
-            idx += len(self)
-        if idx < 0 or idx >= len(self):
+        if not isinstance(idx, int) or not -len(self) <= idx < len(self):
             raise IndexError("Index out of range")
+        idx %= len(self)
 
         # we dont't want self._recording_synced.frames to hold the real video
         # data in the ram. Because it will be very large with the increasing

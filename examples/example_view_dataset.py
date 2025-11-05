@@ -75,18 +75,22 @@ def visualize_episode(
 
 nc.login()
 # CMU Play Fusion is one of the many public/shared datasets you have access to
-dataset = nc.get_dataset("ASU Table Top")
+dataset = nc.get_dataset("My Test Dataset VX300s")
 synced_dataset = dataset.synchronize(
-    frequency=1,
-    data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE],
+    frequency=50,
+    data_types=[
+        DataType.JOINT_POSITIONS,
+        DataType.RGB_IMAGE,
+        DataType.JOINT_TARGET_POSITIONS,
+    ],
 )
 print(f"Number of episodes: {len(dataset)}")
 joint_positions = []
 first_camera_images = []
 for episode in synced_dataset[:1]:
     print(f"Episode length is {len(episode)}")
-    for step in episode:
-        joint_positions.append(step.joint_positions)
+    for i, step in enumerate(episode):
+        joint_positions.append(step.joint_target_positions)
         if step.rgb_images is not None:
             for cam_id, cam_data in step.rgb_images.items():
                 first_camera_images.append(cam_data.frame)
