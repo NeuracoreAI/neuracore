@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Optional
 
 from neuracore.core.data.synced_recording import SynchronizedRecording
 
-from ..exceptions import DatasetError
+from ..exceptions import SynchronizationError
 from ..nc_types import DataType
 
 if TYPE_CHECKING:
@@ -50,14 +50,28 @@ class Recording:
 
         Args:
             frequency: Frequency at which to synchronize the episode.
+                Use 0 for aperiodic data.
             data_types: List of DataType to include in synchronization.
                 If None, uses the default data types from the recording.
 
         Raises:
-            DatasetError: If synchronization fails.
+            SynchronizationError: If synchronization fails.
         """
-        if frequency <= 0:
-            raise DatasetError("Frequency must be greater than 0")
+        if frequency < 0:
+            raise SynchronizationError("Frequency must be >= 0")
+
+        # check valid data types if provided
+        if data_types is not None:
+            if not all(isinstance(dt, DataType) for dt in data_types):
+                raise ValueError(
+                    "Invalid data types provided. "
+                    "All items must be DataType enum values."
+                )
+            if not set(data_types).issubset(set(self.dataset.data_types)):
+                raise SynchronizationError(
+                    "Invalid data type requested for synchronization"
+                )
+
         return SynchronizedRecording(
             dataset=self.dataset,
             recording_id=self.id,

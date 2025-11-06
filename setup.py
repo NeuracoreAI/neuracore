@@ -40,7 +40,7 @@ setup(
         "tqdm>=4.66.0",
         "requests-oauthlib",
         "pydantic>=2.10",
-        "av>=14.4.0",
+        "av==14.4.0",
         "aiortc",
         "aiohttp-sse-client",
         "numpy-stl",

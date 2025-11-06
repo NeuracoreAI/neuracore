@@ -2,8 +2,7 @@
 
 import copy
 import logging
-import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional, Union, cast
 
@@ -37,6 +36,7 @@ class SynchronizedRecording:
         instance: int,
         frequency: int = 0,
         data_types: Optional[list[DataType]] = None,
+        prefetch_videos: bool = False,
     ):
         """Initialize episode iterator for a specific recording.
 
@@ -47,30 +47,28 @@ class SynchronizedRecording:
             instance: The instance of the robot that created this recording.
             frequency: Frequency at which to synchronize the recording.
             data_types: List of DataType to include in synchronization.
+            prefetch_videos: Whether to prefetch video data to cache on initialization.
         """
         self.dataset = dataset
         self.id = recording_id
         self.frequency = frequency
         self.data_types = data_types or []
-        self.cache_dir: Optional[Path] = dataset.cache_dir
+        self.cache_dir: Path = dataset.cache_dir
         self.robot_id = robot_id
         self.instance = instance
 
         self._recording_synced = self._get_synced_data()
-        _rgb = self._recording_synced.frames[0].rgb_images
-        _depth = self._recording_synced.frames[0].depth_images
-        self._camera_ids = {
-            "rgbs": list(_rgb.keys()) if _rgb else [],
-            "depths": list(_depth.keys()) if _depth else [],
-        }
         self._episode_length = len(self._recording_synced.frames)
-
         self.cache_manager = CacheManager(
             self.cache_dir,
         )
-
         self._iter_idx = 0
         self._suppress_wget_progress = True
+
+        if prefetch_videos:
+            cache = self.dataset.cache_dir / f"{self.id}" / f"{self.frequency}Hz"
+            if not cache.exists():
+                self._get_sync_point(0)
 
     def _get_synced_data(self) -> SyncedData:
         """Retrieve synchronized metadata for the recording.
@@ -116,214 +114,105 @@ class SynchronizedRecording:
         response.raise_for_status()
         return response.json()["url"]
 
-    def _download_video(
-        self, camera_type: str, camera_id: str, video_cache_path: Path
+    def _download_video_and_cache_frames_to_disk(
+        self, camera_type: str, camera_id: str, video_frame_cache_path: Path
     ) -> None:
-        """Download a single video using wget with progress bar.
+        """Download video and cache individual frames as images.
 
         Args:
             camera_type: Type of camera (e.g., "rgbs", "depths").
             camera_id: Unique identifier for the camera.
-            video_cache_path: Path to the directory where videos are cached.
+            video_frame_cache_path: Path to the directory where video frames are cached.
         """
-        video_file = video_cache_path / f"{camera_id}.mp4"
-
-        if video_file.exists():
-            logger.info(f"Video already exists: {video_file}")
-            return
-
-        # Ensure cache space is available before downloading
+        # Create a temporary video file path
         self.cache_manager.ensure_space_available()
-        url = self._get_video_url(camera_type, camera_id)
-        wget.download(
-            url,
-            str(video_file),
-            bar=None if self._suppress_wget_progress else wget.bar_adaptive,
-        )
-
-    def _ensure_videos_downloaded(self, camera_type: str) -> None:
-        """Download videos for specific camera type if not already downloaded.
-
-        Args:
-            camera_type: Type of camera (e.g., "rgbs", "depths").
-        """
-        if not self.cache_dir:
-            return
-
-        camera_types_to_download = (
-            [camera_type] if camera_type else list(self._camera_ids.keys())
-        )
-
-        for cam_type in camera_types_to_download:
-            video_cache_path = self.cache_dir / f"{self.id}_videos" / cam_type
-
-            # Check if videos already exist
-            if video_cache_path.exists() and any(video_cache_path.glob("*.mp4")):
-                continue
-
-            video_cache_path.mkdir(parents=True, exist_ok=True)
-
-            camera_ids = self._camera_ids[cam_type]
-            if not camera_ids:
-                continue
-
-            num_parallel_downloads = int(
-                os.environ.get("NEURACORE_NUM_PARALLEL_VIDEO_DOWNLOADS", "4")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_location = Path(temp_dir) / f"{camera_id}{camera_type}.mp4"
+            wget.download(
+                self._get_video_url(camera_type, camera_id),
+                str(video_location),
+                bar=None if self._suppress_wget_progress else wget.bar_adaptive,
             )
-            if num_parallel_downloads <= 1:
-                for camera_id in camera_ids:
-                    self._download_video(cam_type, camera_id, video_cache_path)
-            else:
-                with ThreadPoolExecutor(max_workers=num_parallel_downloads) as executor:
-                    future_to_task = {
-                        executor.submit(
-                            self._download_video, cam_type, camera_id, video_cache_path
-                        ): camera_id
-                        for camera_id in camera_ids
-                    }
+            container = av.open(str(video_location))
+            try:
+                for i, frame in enumerate(container.decode(video=0)):
+                    frame_image = Image.fromarray(frame.to_rgb().to_ndarray())
+                    frame_file = video_frame_cache_path / f"{i}.png"
+                    frame_image.save(frame_file)
+            finally:
+                container.close()
 
-                    for future in as_completed(future_to_task):
-                        camera_id = future_to_task[future]
-                        try:
-                            future.result()
-                        except Exception:
-                            logger.error(
-                                f"Failed to download {cam_type}/{camera_id}",
-                                exc_info=True,
-                            )
-                            raise
-
-    def _get_video_frames(
+    def _get_frame_from_disk_cache(
         self,
         camera_type: str,
-        cam_metadata: dict[str, CameraData],
-        t0_cam_metadata: dict[str, CameraData],
-    ) -> list[Image.Image]:
-        """Get video frames for multiple cameras with timing synchronization.
+        camera_data: dict[str, CameraData],
+        transform_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    ) -> dict[str, CameraData]:
+        """Get video frame from disk cache for camera data.
 
         Args:
             camera_type: Type of camera (e.g., "rgbs", "depths").
-            cam_metadata: Dictionary of camera metadata with camera IDs as keys.
-            t0_cam_metadata: Metadata for the first frame of each camera type.
+            camera_data: Dictionary of camera data with camera IDs as keys.
+            frame_idx: Index of the frame to retrieve.
+            transform_fn: Optional function to transform frames (e.g., rgb_to_depth).
 
         Returns:
-            List of synchronized PIL Image frames for each camera.
-
-        Raises:
-            ValueError: If no frames are found for a camera at the specified timestamp.
+            Dictionary of CameraData with populated frames.
         """
-        camera_ids = list(cam_metadata.keys())
-
-        if self.cache_dir:
-            video_cache_path = self.cache_dir / f"{self.id}_videos" / camera_type
-            video_cache_path.mkdir(parents=True, exist_ok=True)
-
-            # Ensure cache space and download videos if needed
-            for cam_id in camera_ids:
-                video_file = video_cache_path / f"{cam_id}.mp4"
-                if not video_file.exists():
-                    # Ensure space before downloading
-                    self.cache_manager.ensure_space_available()
-                    self._download_video(camera_type, cam_id, video_cache_path)
-
-        image_frame_for_each_camera = []
-        for cam_id, cam_data in cam_metadata.items():
-            video_file = video_cache_path / f"{cam_id}.mp4"
-            container = av.open(str(video_file))
-            video_stream = container.streams.video[0]
-
-            # Calculate target frame based on timestamp difference
-            start_time = t0_cam_metadata[cam_id].timestamp
-            ts = cam_data.timestamp - start_time
-            target_pts = int(ts / float(video_stream.time_base))
-
-            # Seek to approximate position
-            container.seek(target_pts, stream=video_stream)
-
-            # Find the closest frame to our target
-            cam_frame: Optional[np.ndarray] = None
-            for frame in container.decode(video=0):
-                frame_pts = frame.pts
-                diff = frame_pts - target_pts
-
-                if diff >= 0:
-                    cam_frame = Image.fromarray(frame.to_rgb().to_ndarray())
-                    break
-
-            if cam_frame is None:
-                raise ValueError(
-                    f"No frame found for {camera_type}/{cam_id} "
-                    f"at timestamp {cam_data.timestamp}"
+        for cam_id, cam_data in camera_data.items():
+            cam_id_rgb_root = (
+                self.cache_dir
+                / f"{self.id}"
+                / f"{self.frequency}Hz"
+                / camera_type
+                / cam_id
+            )
+            if not cam_id_rgb_root.exists():
+                # Not in cache, download video and cache frames to disk
+                cam_id_rgb_root.mkdir(parents=True, exist_ok=True)
+                self._download_video_and_cache_frames_to_disk(
+                    camera_type, cam_id, cam_id_rgb_root
                 )
+            frame = Image.open(cam_id_rgb_root / f"{cam_data.frame_idx}.png")
+            if transform_fn:
+                frame = Image.fromarray(transform_fn(np.array(frame)))
+            camera_data[cam_id].frame = frame
+        return camera_data
 
-            image_frame_for_each_camera.append(cam_frame)
-            container.close()
-
-        return image_frame_for_each_camera
-
-    def _populate_video_frames(
-        self,
-        camera_data: dict[str, CameraData],
-        transform_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
-    ) -> None:
-        """Populate video frames for camera data.
+    def _insert_camera_data_intro_sync_point(self, sync_point: SyncPoint) -> SyncPoint:
+        """Populate video frames for a given sync point.
 
         Args:
-            camera_data: Dictionary of camera data with camera IDs as keys.
-            transform_fn: Optional function to transform frames (e.g., rgb_to_depth).
-        """
-        camera_type = "rgbs" if transform_fn is None else "depths"
-
-        # Ensure videos for this camera type are downloaded
-        self._ensure_videos_downloaded(camera_type)
-
-        # Get t0 metadata for timing calculations
-        t0_cam_metadata = getattr(
-            self._recording_synced.frames[0], f"{camera_type.rstrip('s')}_images", {}
-        )
-
-        # Get frames using the original timing-based method
-        frame_lists = self._get_video_frames(camera_type, camera_data, t0_cam_metadata)
-
-        # Apply transforms and assign frames to camera data
-        for i, (camera_id, cam_data) in enumerate(camera_data.items()):
-            if i < len(frame_lists) and frame_lists[i] is not None:
-                frame = frame_lists[i]
-                if transform_fn:
-                    frame = Image.fromarray(transform_fn(np.array(frame)))
-                cam_data.frame = frame
-            else:
-                logger.error(
-                    f"No frame available for {camera_type}/{camera_id}", exc_info=True
-                )
-                cam_data.frame = None
-
-    def __next__(self) -> SyncPoint:
-        """Get the next synchronized data point in the episode.
+            sync_point: SyncPoint object containing camera data.
 
         Returns:
-            SyncPoint object containing synchronized data for the next timestep.
-
-        Raises:
-            StopIteration: When all timesteps have been processed.
+            SyncPoint object with populated video frames.
         """
-        if self._iter_idx >= len(self._recording_synced.frames):
-            raise StopIteration
-
-        # we dont't want self._recording_synced.frames to hold the real video
-        # data in the ram. Because it will be very large with the increasing
-        # number of frames and cause out of memory error. Instead we create
-        # a local copy of the sync point to avoid this issue.
-        sync_point = copy.deepcopy(self._recording_synced.frames[self._iter_idx])
-
         if sync_point.rgb_images is not None:
-            self._populate_video_frames(sync_point.rgb_images)
-        if sync_point.depth_images is not None:
-            self._populate_video_frames(
-                sync_point.depth_images, transform_fn=rgb_to_depth
+            sync_point.rgb_images = self._get_frame_from_disk_cache(
+                "rgbs", sync_point.rgb_images
             )
+        if sync_point.depth_images is not None:
+            sync_point.depth_images = self._get_frame_from_disk_cache(
+                "depths", sync_point.depth_images, transform_fn=rgb_to_depth
+            )
+        return sync_point
 
-        self._iter_idx += 1
+    def _get_sync_point(self, idx: int) -> SyncPoint:
+        """Get synchronized data point at a specific index.
+
+        Args:
+            idx: Index of the sync point to retrieve.
+
+        Returns:
+            SyncPoint object containing synchronized data for the specified index.
+        """
+        # Copy for two reasons:
+        # 1. we dont't want self._recording_synced.frames to hold the real image
+        #    data in the ram. Because it will become large over time
+        # 2. If the user modifies the returned sync point, it won't affect the loader.
+        sync_point = copy.deepcopy(self._recording_synced.frames[idx])
+        sync_point = self._insert_camera_data_intro_sync_point(sync_point)
         return sync_point
 
     def __iter__(self) -> "SynchronizedRecording":
@@ -366,26 +255,19 @@ class SynchronizedRecording:
         if idx < 0 or idx >= len(self):
             raise IndexError("Index out of range")
 
-        # we dont't want self._recording_synced.frames to hold the real video
-        # data in the ram. Because it will be very large with the increasing
-        # number of frames and cause out of memory error. Instead we create
-        # a local copy of the sync point to avoid this issue.
-        sync_point: SyncPoint = copy.deepcopy(self._recording_synced.frames[idx])
+        return self._get_sync_point(idx)
 
-        # Temporarily set iter_idx for _populate_video_frames
-        original_iter_idx = self._iter_idx
-        self._iter_idx = idx
+    def __next__(self) -> SyncPoint:
+        """Get the next synchronized data point in the episode.
 
-        try:
-            if sync_point.rgb_images is not None:
-                self._populate_video_frames(sync_point.rgb_images)
+        Returns:
+            SyncPoint object containing synchronized data for the next timestep.
 
-            if sync_point.depth_images is not None:
-                self._populate_video_frames(
-                    sync_point.depth_images, transform_fn=rgb_to_depth
-                )
-        finally:
-            # Restore original iter_idx
-            self._iter_idx = original_iter_idx
-
+        Raises:
+            StopIteration: When all timesteps have been processed.
+        """
+        if self._iter_idx >= len(self._recording_synced.frames):
+            raise StopIteration
+        sync_point = self._get_sync_point(self._iter_idx)
+        self._iter_idx += 1
         return sync_point
