@@ -5,7 +5,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional, Union, cast
+from typing import TYPE_CHECKING, Callable, Optional, Tuple, Union, cast
 
 import av
 import numpy as np
@@ -69,6 +69,11 @@ class SynchronizedRecording:
         self.cache_manager = CacheManager(
             self.cache_dir,
         )
+
+        self._frame_cache: dict[Tuple[str, str, int], Image.Image] = (
+            {}
+        )  # key: (camera_type, cam_id, step_idx) -> PIL.Image
+        self._ram_cache_max = int(os.environ.get("NEURACORE_FRAME_CACHE_MAX", "256"))
 
         self._iter_idx = 0
         self._suppress_wget_progress = True
@@ -304,10 +309,9 @@ class SynchronizedRecording:
                 cam_frames_dir.mkdir(parents=True, exist_ok=True)
 
                 # Skip if already decoded (frames exist)
-                if any(cam_frames_dir.glob("*.npy")):
+                if any(cam_frames_dir.glob("*.png")):
                     continue
 
-                # Open the video
                 container = av.open(str(video_file))
                 video_stream = container.streams.video[0]
                 time_base = float(video_stream.time_base)
@@ -339,7 +343,8 @@ class SynchronizedRecording:
                             continue
                         # This is the first frame after or at the target
                         rgb = frame.to_rgb().to_ndarray()
-                        np.save(cam_frames_dir / f"{step_idx:06d}.npy", rgb)
+                        img = Image.fromarray(rgb)
+                        img.save(cam_frames_dir / f"{step_idx:06d}.png")
                         break  # move to next step
 
                 container.close()
@@ -361,10 +366,23 @@ class SynchronizedRecording:
 
         # Ensure videos for this camera type are downloaded
         if not self.video_decoded:
-            self._ensure_videos_downloaded(camera_type)
             self.decode_video(camera_type)
 
-        # Try pre-decoded fast path (step-indexed .npy files)
+        all_hit = True
+        cached_imgs = {}
+        for cam_id in camera_data.keys():
+            key = (camera_type, cam_id, self._iter_idx)
+            img = self._frame_cache.get(key)
+            if img is None:
+                all_hit = False
+                break
+            cached_imgs[cam_id] = img
+        if all_hit:
+            for cam_id, cam_data in camera_data.items():
+                img = cached_imgs[cam_id]
+                cam_data.frame = img
+            return
+
         if self.cache_dir:
             frames_root = (
                 self.cache_dir
@@ -374,19 +392,25 @@ class SynchronizedRecording:
             )
             if frames_root.exists():
                 can_use_cache = True
-                for cam_id, cam_data in camera_data.items():
-                    fpath = frames_root / cam_id / f"{self._iter_idx:06d}.npy"
+                to_load = []
+                for cam_id in camera_data.keys():
+                    fpath = frames_root / cam_id / f"{self._iter_idx:06d}.png"
                     if not fpath.exists():
                         can_use_cache = False
                         break
+                    to_load.append((cam_id, fpath))
 
                 if can_use_cache:
-                    for cam_id, cam_data in camera_data.items():
-                        fpath = frames_root / cam_id / f"{self._iter_idx:06d}.npy"
-                        arr = np.load(fpath, mmap_mode="r")
+                    for cam_id, fpath in to_load:
+                        img = Image.open(fpath)
                         if transform_fn:
-                            arr = transform_fn(arr)
-                        cam_data.frame = Image.fromarray(arr)
+                            img = transform_fn(img)
+                        camera_data[cam_id].frame = img
+
+                        key = (camera_type, cam_id, self._iter_idx)
+                        self._frame_cache[key] = img
+                        if len(self._frame_cache) > self._ram_cache_max:
+                            self._frame_cache.clear()
                     return
 
     def __next__(self) -> SyncPoint:

@@ -1,3 +1,5 @@
+import time
+
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import numpy as np
@@ -75,7 +77,7 @@ def visualize_episode(
 
 nc.login()
 # CMU Play Fusion is one of the many public/shared datasets you have access to
-dataset = nc.get_dataset("My Test Dataset VX300s")
+dataset = nc.get_dataset("My Example Dataset")
 synced_dataset = dataset.synchronize(
     frequency=50,
     data_types=[
@@ -87,7 +89,9 @@ synced_dataset = dataset.synchronize(
 print(f"Number of episodes: {len(dataset)}")
 joint_positions = []
 first_camera_images = []
-for episode in synced_dataset[:1]:
+
+start_time = time.time()
+for episode in synced_dataset[:10]:
     print(f"Episode length is {len(episode)}")
     for i, step in enumerate(episode):
         joint_positions.append(step.joint_target_positions)
@@ -95,5 +99,5 @@ for episode in synced_dataset[:1]:
             for cam_id, cam_data in step.rgb_images.items():
                 first_camera_images.append(cam_data.frame)
                 break
-
+print(f"Time taken: {time.time() - start_time}")
 visualize_episode(joint_positions, first_camera_images)
