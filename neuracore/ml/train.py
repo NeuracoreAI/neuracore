@@ -400,7 +400,7 @@ def main(cfg: DictConfig) -> None:
     elif cfg.dataset_name is not None:
         dataset = nc.get_dataset(name=cfg.dataset_name)
     synchronized_dataset = dataset.synchronize(
-        frequency=cfg.frequency, data_types=data_types_to_sync
+        frequency=cfg.frequency, data_types=data_types_to_sync, prefetch_videos=True
     )
 
     # Setup logging for main process
