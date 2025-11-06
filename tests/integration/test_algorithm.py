@@ -29,7 +29,7 @@ GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
 FREQUENCY = 50
 BATCH_SIZE = 32
-OUTPUT_PREDICTION_HORIZON = 50
+OUTPUT_PREDICTION_HORIZON = 100
 NUM_ROLLOUTS = 10
 ONSCREEN_RENDER = False
 TRAINING_TIMEOUT_MINUTES = 360
@@ -113,7 +113,7 @@ def eval_model(
                 nc.DataType.JOINT_TARGET_POSITIONS,
             ],
             100,
-            0.5,
+            0.8,
         ),
         (
             "ACT",
@@ -124,8 +124,8 @@ def eval_model(
             [
                 nc.DataType.JOINT_TARGET_POSITIONS,
             ],
-            10,
-            0.9,
+            20,
+            0.8,
         ),
         (
             "DiffusionPolicy",
@@ -136,8 +136,8 @@ def eval_model(
             [
                 nc.DataType.JOINT_TARGET_POSITIONS,
             ],
-            10,
-            0.9,
+            20,
+            0.8,
         ),
     ],
 )
