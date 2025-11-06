@@ -1,7 +1,10 @@
 """SynchronizedDataset class for managing synchronized datasets."""
 
 import logging
-from typing import TYPE_CHECKING, Optional, Union
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Optional, Union, cast
+
+from tqdm import tqdm
 
 from neuracore.core.data.synced_recording import SynchronizedRecording
 
@@ -23,6 +26,8 @@ class SynchronizedDataset:
         frequency: int,
         data_types: Optional[list[DataType]],
         dataset_description: DatasetDescription,
+        prefetch_videos: bool = False,
+        max_workers: int = 4,
     ):
         """Initialize a dataset from server response data.
 
@@ -31,13 +36,46 @@ class SynchronizedDataset:
             frequency: Frequency of the dataset in Hz.
             data_types: List of data types to include in the dataset.
             dataset_description: Description of the dataset.
+            prefetch_videos: Whether to prefetch video data to cache on initialization.
+            max_workers: Number of threads to use for prefetching videos.
         """
         self.dataset = dataset
         self.frequency = frequency
         self.data_types = data_types or []
         self.dataset_description = dataset_description
+        self._prefetch_videos = prefetch_videos
         self._recording_idx = 0
         self._synced_recording_cache: dict[int, SynchronizedRecording] = {}
+
+        if prefetch_videos:
+            prefetch_needed = False
+            for rec in self.dataset.recordings:
+                cache_dir = (
+                    self.dataset.cache_dir / f"{rec['id']}" / f"{self.frequency}Hz"
+                )
+                if not cache_dir.exists():
+                    prefetch_needed = True
+                    break
+            if prefetch_needed:
+                self._perform_videos_prefetch(max_workers=max_workers)
+
+    def _perform_videos_prefetch(self, max_workers: int) -> None:
+        """Prefetch video data for all recordings using multiple threads.
+
+        Args:
+            max_workers: Number of threads to use for prefetching videos.
+        """
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            list(
+                tqdm(
+                    executor.map(
+                        lambda idx: self[idx], range(len(self.dataset.recordings))
+                    ),
+                    total=len(self.dataset.recordings),
+                    desc="Prefetching videos",
+                    unit="Recording",
+                )
+            )
 
     @property
     def num_transitions(self) -> int:
@@ -79,16 +117,14 @@ class SynchronizedDataset:
         """
         if isinstance(idx, slice):
             # Handle slice
-            self.dataset.recordings = self.dataset.recordings[
-                idx.start : idx.stop : idx.step
-            ]
-            ds = SynchronizedDataset(
-                dataset=self.dataset,
+            dataset = self.dataset[idx.start : idx.stop : idx.step]
+            return SynchronizedDataset(
+                dataset=cast("Dataset", dataset),
                 frequency=self.frequency,
                 data_types=self.data_types,
                 dataset_description=self.dataset_description,
+                prefetch_videos=False,  # Avoid prefetching again
             )
-            return ds
         else:
             # Handle single index
             if isinstance(idx, int):
@@ -104,6 +140,7 @@ class SynchronizedDataset:
                         instance=self.dataset.recordings[idx]["instance"],
                         frequency=self.frequency,
                         data_types=self.data_types,
+                        prefetch_videos=self._prefetch_videos,
                     )
                     self._synced_recording_cache[idx] = synced_recording
                 return self._synced_recording_cache[idx]
@@ -123,20 +160,20 @@ class SynchronizedDataset:
         if self._recording_idx >= len(self.dataset.recordings):
             raise StopIteration
 
-        if self._recording_idx in self._synced_recording_cache:
-            return self._synced_recording_cache[self._recording_idx]
-
-        recording = self.dataset.recordings[self._recording_idx]
         if self._recording_idx not in self._synced_recording_cache:
-            s = SynchronizedRecording(
-                recording_id=recording["id"],
-                dataset=self.dataset,
-                robot_id=recording["robot_id"],
-                instance=recording["instance"],
-                frequency=self.frequency,
-                data_types=self.data_types,
-            )
-            self._synced_recording_cache[self._recording_idx] = s
+            recording = self.dataset.recordings[self._recording_idx]
+            if self._recording_idx not in self._synced_recording_cache:
+                s = SynchronizedRecording(
+                    recording_id=recording["id"],
+                    dataset=self.dataset,
+                    robot_id=recording["robot_id"],
+                    instance=recording["instance"],
+                    frequency=self.frequency,
+                    data_types=self.data_types,
+                    prefetch_videos=self._prefetch_videos,
+                )
+                self._synced_recording_cache[self._recording_idx] = s
+
         to_return = self._synced_recording_cache[self._recording_idx]
         self._recording_idx += 1
         return to_return

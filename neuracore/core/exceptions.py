@@ -25,6 +25,10 @@ class DatasetError(Exception):
     """Exception raised for errors in the dataset module."""
 
 
+class SynchronizationError(Exception):
+    """Exception raised for errors during data synchronization."""
+
+
 class OrganizationError(Exception):
     """Exception raised for errors gathering organization information."""
 

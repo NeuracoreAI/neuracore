@@ -1,7 +1,6 @@
 """Dataset management."""
 
 import logging
-import tempfile
 import time
 from pathlib import Path
 from typing import Optional, Union
@@ -18,7 +17,7 @@ from ..const import API_URL
 from ..exceptions import DatasetError
 from ..nc_types import DataType, SyncedDataset
 
-DEFAULT_CACHE_DIR = Path(tempfile.gettempdir() + "/neuracore_cache")
+DEFAULT_CACHE_DIR = Path.home() / ".neuracore_cache"
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +34,7 @@ class Dataset:
         size_bytes: int,
         tags: list[str],
         is_shared: bool,
+        data_types: list[DataType],
         recordings: Optional[list[dict]] = None,
     ):
         """Initialize a dataset from server response data.
@@ -48,6 +48,7 @@ class Dataset:
             is_shared: Whether the dataset is shared/open-source.
             recordings: Optional list of recordings in the dataset.
                 If not provided, recordings will be fetched from the server.
+            data_types: Optional list of DataType available in the dataset.
         """
         self.id = id
         self.org_id = org_id
@@ -56,6 +57,7 @@ class Dataset:
         self.tags = tags
         self.is_shared = is_shared
         self.recordings = recordings or self._get_recordings()
+        self.data_types = data_types or []
         self.num_recordings = len(self.recordings)
         self._recording_idx = 0
         self.cache_dir = DEFAULT_CACHE_DIR
@@ -112,6 +114,7 @@ class Dataset:
             size_bytes=dataset_json["size_bytes"],
             tags=dataset_json["tags"],
             is_shared=dataset_json["is_shared"],
+            data_types=dataset_json.get("all_data_types", {}).keys(),
         )
 
     @staticmethod
@@ -149,6 +152,7 @@ class Dataset:
             size_bytes=dataset_json["size_bytes"],
             tags=dataset_json["tags"],
             is_shared=dataset_json["is_shared"],
+            data_types=dataset_json.get("all_data_types", {}).keys(),
         )
 
     @staticmethod
@@ -227,6 +231,7 @@ class Dataset:
             size_bytes=dataset_json["size_bytes"],
             tags=dataset_json["tags"],
             is_shared=dataset_json["is_shared"],
+            data_types=dataset_json.get("all_data_types", {}).keys(),
         )
 
     def _synchronize(
@@ -261,7 +266,10 @@ class Dataset:
         return SyncedDataset.model_validate(dataset_json)
 
     def synchronize(
-        self, frequency: int = 0, data_types: Optional[list[DataType]] = None
+        self,
+        frequency: int = 0,
+        data_types: Optional[list[DataType]] = None,
+        prefetch_videos: bool = False,
     ) -> SynchronizedDataset:
         """Synchronize the dataset with specified frequency and data types.
 
@@ -270,6 +278,7 @@ class Dataset:
                 If 0, uses the default frequency.
             data_types: List of DataType to include in synchronization.
                 If None, uses the default data types from the dataset.
+            prefetch_videos: Whether to prefetch video data for the synchronized data.
 
         Returns:
             SynchronizedDataset instance containing synchronized data.
@@ -302,6 +311,7 @@ class Dataset:
             frequency=frequency,
             data_types=data_types,
             dataset_description=synced_dataset.dataset_description,
+            prefetch_videos=prefetch_videos,
         )
 
     def __iter__(self) -> "Dataset":
@@ -338,7 +348,7 @@ class Dataset:
         if isinstance(idx, slice):
             # Handle slice
             recordings = self.recordings[idx.start : idx.stop : idx.step]
-            ds = Dataset(
+            return Dataset(
                 id=self.id,
                 org_id=self.org_id,
                 name=self.name,
@@ -346,8 +356,8 @@ class Dataset:
                 tags=self.tags,
                 is_shared=self.is_shared,
                 recordings=recordings,
+                data_types=self.data_types,
             )
-            return ds
         else:
             # Handle single index
             if isinstance(idx, int):
