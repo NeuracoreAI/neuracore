@@ -138,7 +138,9 @@ class DistributedTrainer:
 
         # Progress bar only on rank 0
         pbar = tqdm(
-            self.train_loader, desc=f"Training Epoch {epoch}", disable=self.rank != 0
+            self.train_loader,
+            desc=f"Training Epoch {epoch}",
+            disable=self.rank != 0 or self.storage_handler.log_to_cloud,
         )
 
         for batch_idx, batch in enumerate(pbar):
@@ -217,7 +219,7 @@ class DistributedTrainer:
         pbar = tqdm(
             self.val_loader,
             desc=f"Validation Epoch {epoch}",
-            disable=self.rank != 0,
+            disable=self.rank != 0 or self.storage_handler.log_to_cloud,
         )
 
         for batch_idx, batch in enumerate(pbar):
