@@ -58,6 +58,7 @@ class DistributedTrainer:
         storage_handler: TrainingStorageHandler,
         output_dir: Path,
         num_epochs: int,
+        log_freq: int = 50,
         save_freq: int = 1,
         save_checkpoints: bool = True,
         clip_grad_norm: Optional[float] = None,
@@ -74,6 +75,7 @@ class DistributedTrainer:
             storage_handler: Handler for model storage
             output_dir: Directory for output files
             num_epochs: Number of epochs to train
+            log_freq: Frequency to log metrics (in steps)
             save_freq: Frequency to save checkpoints (in epochs)
             save_checkpoints: Whether to save checkpoints
             clip_grad_norm: Maximum norm for gradient clipping
@@ -99,6 +101,7 @@ class DistributedTrainer:
         self.storage_handler = storage_handler
         self.output_dir = output_dir
         self.num_epochs = num_epochs
+        self.log_freq = log_freq
         self.save_freq = save_freq
         self.save_checkpoints = save_checkpoints
         self.clip_grad_norm = clip_grad_norm
@@ -163,16 +166,19 @@ class DistributedTrainer:
             for optimizer in self.optimizers:
                 optimizer.step()
 
-            self._log_scalars(
-                batch_output.losses, self.global_train_step, prefix="train/step/loss"
-            )
-            self._log_scalars(
-                batch_output.metrics,
-                self.global_train_step,
-                prefix="train/step/metrics",
-            )
-            self._log_gradients(self.global_train_step)
-            self._log_weights(self.global_train_step)
+            if self.log_freq > 0 and self.global_train_step % self.log_freq == 0:
+                self._log_scalars(
+                    batch_output.losses,
+                    self.global_train_step,
+                    prefix="train/step/loss",
+                )
+                self._log_scalars(
+                    batch_output.metrics,
+                    self.global_train_step,
+                    prefix="train/step/metrics",
+                )
+                self._log_gradients(self.global_train_step)
+                self._log_weights(self.global_train_step)
             pbar.set_postfix(
                 {"loss": f"{loss.item():.4f}", "step": self.global_train_step}
             )
@@ -223,14 +229,15 @@ class DistributedTrainer:
             else:
                 batch_output = self.model.training_step(batch)
 
-            self._log_scalars(
-                batch_output.losses, self.global_val_step, prefix="val/step/loss"
-            )
-            self._log_scalars(
-                batch_output.metrics,
-                self.global_val_step,
-                prefix="val/step/metrics",
-            )
+            if self.log_freq > 0 and self.global_val_step % self.log_freq == 0:
+                self._log_scalars(
+                    batch_output.losses, self.global_val_step, prefix="val/step/loss"
+                )
+                self._log_scalars(
+                    batch_output.metrics,
+                    self.global_val_step,
+                    prefix="val/step/metrics",
+                )
             val_losses, val_metrics = self._accumulate_epoch_metrics(
                 batch_output, val_losses, val_metrics
             )

@@ -8,6 +8,7 @@ seed: 42
 epochs: 100
 output_prediction_horizon: 10
 validation_split: 0.2
+logging_frequency: 50
 
 # Batch size (can be "auto" for automatic tuning or an integer)
 batch_size: "auto"

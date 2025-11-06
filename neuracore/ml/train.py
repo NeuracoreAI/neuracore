@@ -327,6 +327,7 @@ def run_training(
             storage_handler=training_storage_handler,
             output_dir=Path(cfg.local_output_dir),
             num_epochs=cfg.epochs,
+            log_freq=cfg.logging_frequency,
             rank=rank,
             world_size=world_size,
         )
