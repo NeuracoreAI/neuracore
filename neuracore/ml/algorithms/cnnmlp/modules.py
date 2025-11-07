@@ -30,11 +30,11 @@ class ImageEncoder(nn.Module):
         """
         super().__init__()
         # Use pretrained ResNet but remove final layer
-        self.backbone = self._build_backbone(backbone)
-        self.proj_2d = nn.Conv2d(512, output_dim, kernel_size=1)
+        self.backbone, fc_input_dim = self._build_backbone(backbone)
+        self.proj_2d = nn.Conv2d(fc_input_dim, output_dim, kernel_size=1)
         self.linear = nn.Linear(ImageEncoder.OUTPUT_CNN_W_H * output_dim, output_dim)
 
-    def _build_backbone(self, backbone_name: str) -> nn.Module:
+    def _build_backbone(self, backbone_name: str) -> tuple[nn.Module, int]:
         """Build backbone CNN by removing classification layers.
 
         Args:
@@ -42,9 +42,10 @@ class ImageEncoder(nn.Module):
 
         Returns:
             nn.Module: ResNet backbone without final classification layers
+            int: Input dimension of the final fully connected layer
         """
         resnet = getattr(models, backbone_name)(pretrained=True)
-        return nn.Sequential(*list(resnet.children())[:-2])
+        return nn.Sequential(*list(resnet.children())[:-2]), resnet.fc.in_features
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through image encoder.
