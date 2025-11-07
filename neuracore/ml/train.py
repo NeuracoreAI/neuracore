@@ -364,7 +364,7 @@ def main(cfg: DictConfig) -> None:
     """Main function to run the training script."""
     # Print configuration
     logger.info("Training configuration:")
-    logger.info(OmegaConf.to_yaml(cfg))
+    logger.info(OmegaConf.to_yaml(cfg, resolve=True))
 
     if "algorithm" in cfg and cfg.algorithm_id is not None:
         raise ValueError(
