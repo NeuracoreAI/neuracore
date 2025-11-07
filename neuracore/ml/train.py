@@ -60,25 +60,45 @@ def setup_logging(output_dir: str, rank: int = 0) -> None:
         )
 
 
-def get_algorithm_config_and_class(
+def get_model_and_algorithm_config(
     cfg: DictConfig,
-) -> Tuple[type[NeuracoreModel], Dict[str, Any]]:
-    """Get model class and algorithm configuration."""
-    assert (
-        cfg.algorithm_id is not None
-    ), "Algorithm ID must be provided in the configuration"
-    #  Assume algorithm already downloaded
-    extract_dir = Path(cfg.local_output_dir) / "algorithm"
-    algorithm_loader = AlgorithmLoader(extract_dir)
-    model_class = algorithm_loader.load_model()
+    model_init_description: ModelInitDescription,
+) -> Tuple[NeuracoreModel, Dict[str, Any]]:
+    """Get model and algorithm configuration."""
+    algorithm_config: Dict[str, Any] = {}
+    if "algorithm" in cfg:
+        algorithm_config = OmegaConf.to_container(cfg.algorithm, resolve=True)
+        algorithm_config.pop("_target_", None)
+        logger.info("Using custom algorithm parameters")
+        logger.info(f"Algorithm parameters: {algorithm_config}")
 
-    # Use algorithm_params for custom parameters
-    algorithm_config = {}
-    if cfg.algorithm_params is not None:
-        algorithm_config = OmegaConf.to_container(cfg.algorithm_params, resolve=True)
-    logger.info("Using custom algorithm parameters")
-    logger.info(f"Algorithm parameters: {algorithm_config}")
-    return model_class, algorithm_config
+        model = hydra.utils.instantiate(
+            cfg.algorithm,
+            model_init_description=model_init_description,
+            **algorithm_config,
+        )
+    elif cfg.algorithm_id is not None:
+        # Use algorithm_params for custom parameters
+        if cfg.algorithm_params is not None:
+            algorithm_config = OmegaConf.to_container(
+                cfg.algorithm_params, resolve=True
+            )
+            logger.info("Using custom algorithm parameters")
+            logger.info(f"Algorithm parameters: {algorithm_config}")
+
+        extract_dir = Path(cfg.local_output_dir) / "algorithm"
+        algorithm_loader = AlgorithmLoader(extract_dir)
+        model_class = algorithm_loader.load_model()
+        model = model_class(
+            model_init_description=model_init_description,
+            **algorithm_config,
+        )
+    else:
+        raise ValueError(
+            "Either 'algorithm' or 'algorithm_id' "
+            "must be provided in the configuration"
+        )
+    return model, algorithm_config
 
 
 def convert_data_types(data_types_list: list[str]) -> list[DataType]:
@@ -115,23 +135,9 @@ def determine_optimal_batch_size(
         output_prediction_horizon=cfg.output_prediction_horizon,
     )
 
-    algorithm_config: dict[str, Any] = {}
-    if "algorithm" in cfg:
-        model = hydra.utils.instantiate(
-            cfg.algorithm,
-            model_init_description=model_init_description,
-        )
-    elif cfg.algorithm_id is not None:
-        model_class, algorithm_config = get_algorithm_config_and_class(cfg)
-        model = model_class(
-            model_init_description=model_init_description,
-            **algorithm_config,
-        )
-    else:
-        raise ValueError(
-            "Either 'algorithm' or 'algorithm_id' "
-            "must be provided in the configuration"
-        )
+    model, algorithm_config = get_model_and_algorithm_config(
+        cfg, model_init_description
+    )
 
     # Determine per-GPU batch size
     optimal_batch_size = find_optimal_batch_size(
@@ -277,23 +283,9 @@ def run_training(
             output_prediction_horizon=cfg.output_prediction_horizon,
         )
 
-        algorithm_config: dict[str, Any] = {}
-        if "algorithm" in cfg:
-            model = hydra.utils.instantiate(
-                cfg.algorithm,
-                model_init_description=model_init_description,
-            )
-        elif cfg.algorithm_id is not None:
-            model_class, algorithm_config = get_algorithm_config_and_class(cfg)
-            model = model_class(
-                model_init_description=model_init_description,
-                **algorithm_config,
-            )
-        else:
-            raise ValueError(
-                "Either 'algorithm' or 'algorithm_id' "
-                "must be provided in the configuration"
-            )
+        model, algorithm_config = get_model_and_algorithm_config(
+            cfg, model_init_description
+        )
 
         training_storage_handler = TrainingStorageHandler(
             local_dir=cfg.local_output_dir,
