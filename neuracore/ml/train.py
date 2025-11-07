@@ -334,9 +334,9 @@ def run_training(
 
         # Resume from checkpoint if specified
         start_epoch = 0
-        if cfg.resume:
+        if cfg.resume_checkpoint_path is not None:
             try:
-                checkpoint = trainer.load_checkpoint(cfg.resume)
+                checkpoint = trainer.load_checkpoint(cfg.resume_checkpoint_path)
                 start_epoch = checkpoint.get("epoch", 0) + 1
                 logger.info(f"Resumed from checkpoint at epoch {start_epoch}")
             except Exception:

@@ -38,7 +38,7 @@ local_output_dir: ${oc.env:HOME}/neuracore_logs
 algorithm_params: null
 
 # Resume training
-resume: null  # Path to checkpoint to resume from
+resume_checkpoint_path: null  # Path to checkpoint to resume from
 
 # Hydra configuration
 hydra:
