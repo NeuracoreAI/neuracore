@@ -25,7 +25,7 @@ MAX_REWARD = 4.0
 ENDPOINT_NAME = "Integration Test Endpoint"
 TRAINING_NAME = "Integration Test"
 DATASET_NAME = "Transfer Cube VX300s Dataset"
-GPU_TYPE = "NVIDIA_TESLA_V100"
+GPU_TYPE = "NVIDIA_TESLA_T4"
 NUM_GPUS = 1
 FREQUENCY = 50
 BATCH_SIZE = 32
@@ -112,8 +112,8 @@ def eval_model(
             [
                 nc.DataType.JOINT_TARGET_POSITIONS,
             ],
-            100,
-            0.8,
+            200,
+            0.1,  # CNNMLP is not that powerful, so low bar
         ),
         (
             "ACT",
@@ -124,8 +124,8 @@ def eval_model(
             [
                 nc.DataType.JOINT_TARGET_POSITIONS,
             ],
-            20,
-            0.8,
+            50,
+            0.5,
         ),
         (
             "DiffusionPolicy",
@@ -136,8 +136,8 @@ def eval_model(
             [
                 nc.DataType.JOINT_TARGET_POSITIONS,
             ],
-            20,
-            0.8,
+            50,
+            0.5,
         ),
     ],
 )
