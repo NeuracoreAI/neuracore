@@ -133,6 +133,7 @@ class DirectPolicy(Policy):
         org_id: str,
         job_id: Optional[str] = None,
         output_mapping: Optional[dict[DataType, list[str]]] = None,
+        device: Optional[str] = None,
     ):
         """Initialize the direct policy with a robot instance."""
         super().__init__()
@@ -144,6 +145,7 @@ class DirectPolicy(Policy):
             job_id=job_id,
             model_file=model_path,
             output_mapping=output_mapping,
+            device=device,
         )
 
     def set_checkpoint(
@@ -503,6 +505,7 @@ def policy(
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
     output_mapping: Optional[dict[DataType, list[str]]] = None,
+    device: Optional[str] = None,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process.
 
@@ -511,7 +514,7 @@ def policy(
         robot_name: Robot identifier.
         instance: Instance number of the robot.
         output_mapping: Optional mapping of data types to output keys.
-
+        device: Torch device to run the model on (CPU or GPU, or MPS).
 
     Returns:
         DirectPolicy instance for direct model inference.
@@ -531,6 +534,7 @@ def policy(
         job_id=job_id,
         model_path=model_path,
         output_mapping=output_mapping,
+        device=device,
     )
 
 

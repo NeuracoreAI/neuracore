@@ -31,6 +31,7 @@ from neuracore.core.nc_types import (
 )
 from neuracore.core.utils.download import download_with_progress
 from neuracore.ml import BatchedInferenceSamples, MaskableData
+from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.nc_archive import load_model_from_nc_archive
 
 logger = logging.getLogger(__name__)
@@ -57,15 +58,7 @@ class PolicyInference:
         self.job_id = job_id
         self.model = load_model_from_nc_archive(model_file, device=device)
         self.dataset_description = self.model.model_init_description.dataset_description
-        self.device = (
-            torch.device(device)
-            if device
-            else (
-                torch.device("cuda")
-                if torch.cuda.is_available()
-                else torch.device("cpu")
-            )
-        )
+        self.device = torch.device(device) if device else get_default_device()
         self.output_mapping = output_mapping
         self.robot_ids_to_output_mapping: dict[str, dict[DataType, list[str]]] = {}
 

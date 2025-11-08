@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from torch.utils.data import DataLoader
 
 import neuracore as nc
+from neuracore.ml.utils.device_utils import get_default_device
 
 from ...core.nc_types import (
     CameraData,
@@ -28,7 +29,6 @@ from ...core.nc_types import (
     EndEffectorPoseData,
     JointData,
     LanguageData,
-    ModelDevice,
     ModelInitDescription,
     ParallelGripperOpenAmountData,
     PointCloudData,
@@ -247,7 +247,7 @@ def run_validation(
     port: int = 8080,
     skip_endpoint_check: bool = False,
     algorithm_config: dict = {},
-    device: Optional[str] = None,
+    device: Optional[torch.device] = None,
 ) -> tuple[AlgorithmCheck, str]:
     """Run comprehensive validation tests on a Neuracore algorithm.
 
@@ -263,6 +263,7 @@ def run_validation(
         skip_endpoint_check: Whether to skip the endpoint deployment test.
             Useful for faster validation when deployment testing isn't needed.
         algorithm_config: Custom configuration arguments for the algorithm.
+        device: Torch device to run the validation on (e.g., 'cpu' or 'cuda').
 
     Returns:
         A tuple containing:
@@ -274,6 +275,8 @@ def run_validation(
             if critical validation steps fail.
     """
     nc.stop_live_data()
+
+    device = device or get_default_device()
 
     # find the first folder that contains Python files
     python_files = list(algorithm_dir.rglob("*.py"))
@@ -331,13 +334,14 @@ def run_validation(
             input_data_types=supported_input_data_types,
             output_data_types=supported_output_data_types,
             output_prediction_horizon=dataset.output_prediction_horizon,
-            device=ModelDevice(device) if device else ModelDevice.AUTO,
         )
 
         # Check 1: Can initialize the model
         logger.info("Initializing model")
         model = model_class(
-            model_init_description=model_init_description, **algorithm_config
+            model_init_description=model_init_description,
+            device=device,
+            **algorithm_config,
         )
         model = model.to(model.device)
         logger.info(
@@ -419,7 +423,7 @@ def run_validation(
                     policy = nc.policy_local_server(
                         model_file=str(artifacts_dir / "model.nc.zip"),
                         port=port,
-                        device=device,
+                        device=str(device),
                     )
 
                 except Exception:

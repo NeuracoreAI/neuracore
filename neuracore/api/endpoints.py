@@ -31,6 +31,7 @@ def policy(
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
     output_mapping: Optional[dict[DataType, list[str]]] = None,
+    device: Optional[str] = None,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process without any server.
 
@@ -41,6 +42,7 @@ def policy(
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load. If provided, overrides
         output_mapping: Optional mapping of output data types to response fields.
+        device: Torch device to run the model on (CPU or GPU, or MPS)
 
     Returns:
         DirectPolicy object that provides direct in-process model inference.
@@ -49,7 +51,9 @@ def policy(
         EndpointError: If the model download or initialization fails.
         ConfigError: If there is an error trying to get the current org.
     """
-    return _policy(train_run_name, model_file, output_mapping=output_mapping)
+    return _policy(
+        train_run_name, model_file, output_mapping=output_mapping, device=device
+    )
 
 
 def policy_local_server(
@@ -66,7 +70,7 @@ def policy_local_server(
     Args:
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load.
-        device: Model to be loaded on
+        device: Torch device to run the model on (CPU or GPU, or MPS)
         port: TCP port number where the local server will run.
         host: Host address to bind the server to. Defaults to localhost.
 

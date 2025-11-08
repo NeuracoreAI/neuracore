@@ -61,7 +61,8 @@ setup(
         "ml": [
             "torch",
             "torchvision",
-            "transformers",
+            "transformers==4.57.1",
+            "huggingface-hub==0.34.0",
             "diffusers>=0.27.2",
             "einops",
             "hydra-core>=1.3.0",

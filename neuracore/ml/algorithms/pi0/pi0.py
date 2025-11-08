@@ -54,6 +54,7 @@ class Pi0(NeuracoreModel):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
+        device: torch.device,
         vlm_expert_intermediate_size: int = 16384,
         vlm_expert_num_heads: int = 8,
         vlm_expert_num_kv_heads: int = 1,
@@ -77,6 +78,7 @@ class Pi0(NeuracoreModel):
 
         Args:
             model_init_description: Model initialization configuration.
+            device: Torch device to run the model on (CPU or GPU, or MPS).
             vlm_expert_intermediate_size: Intermediate size of the VLM expert.
             vlm_expert_num_heads: Number of attention heads in the VLM expert.
             vlm_expert_num_kv_heads: Number of key-value heads in the VLM expert.
@@ -96,7 +98,7 @@ class Pi0(NeuracoreModel):
             weight_decay: Weight decay for the model.
             dtype: Data type for model parameters and computations.
         """
-        super().__init__(model_init_description)
+        super().__init__(model_init_description, device)
 
         if not os.environ.get("HF_TOKEN"):
             raise ValueError(

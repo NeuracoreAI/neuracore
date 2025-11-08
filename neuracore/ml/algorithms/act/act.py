@@ -51,6 +51,7 @@ class ACT(NeuracoreModel):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
+        device: torch.device,
         hidden_dim: int = 512,
         num_encoder_layers: int = 4,
         num_decoder_layers: int = 1,
@@ -67,6 +68,7 @@ class ACT(NeuracoreModel):
 
         Args:
             model_init_description: Model initialization parameters
+            device: Torch device to run the model on (CPU or GPU, or MPS)
             hidden_dim: Hidden dimension for transformer layers
             num_encoder_layers: Number of transformer encoder layers
             num_decoder_layers: Number of transformer decoder layers
@@ -79,7 +81,7 @@ class ACT(NeuracoreModel):
             kl_weight: Weight for KL divergence loss
             latent_dim: Dimension of latent variable space
         """
-        super().__init__(model_init_description)
+        super().__init__(model_init_description, device)
         self.hidden_dim = hidden_dim
         self.lr = lr
         self.lr_backbone = lr_backbone

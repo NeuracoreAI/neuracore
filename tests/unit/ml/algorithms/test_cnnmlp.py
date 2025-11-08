@@ -22,6 +22,7 @@ from neuracore.ml import (
 )
 from neuracore.ml.algorithms.cnnmlp.cnnmlp import CNNMLP
 from neuracore.ml.core.ml_types import BatchedData
+from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.validate import run_validation
 
 BS = 2
@@ -29,7 +30,7 @@ CAMS = 1
 JOINT_POSITION_DIM = 32
 OUTPUT_PRED_DIM = JOINT_POSITION_DIM
 PRED_HORIZON = 10
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = get_default_device()
 
 
 @pytest.fixture
@@ -258,7 +259,7 @@ def mock_dataloader(sample_batch):
 def test_model_construction(
     model_init_description_partial: ModelInitDescription, model_config: dict
 ):
-    model = CNNMLP(model_init_description_partial, **model_config)
+    model = CNNMLP(model_init_description_partial, DEVICE, **model_config)
     model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
 
@@ -268,7 +269,7 @@ def test_model_forward(
     model_config: dict,
     sample_inference_batch: BatchedInferenceSamples,
 ):
-    model = CNNMLP(model_init_description_partial, **model_config)
+    model = CNNMLP(model_init_description_partial, DEVICE, **model_config)
     model = model.to(DEVICE)
     sample_inference_batch = sample_inference_batch.to(DEVICE)
     output = model(sample_inference_batch)
@@ -286,13 +287,13 @@ def test_model_backward(
     model_config: dict,
     sample_batch: BatchedTrainingSamples,
 ):
-    model = CNNMLP(model_init_description_partial, **model_config)
+    model = CNNMLP(model_init_description_partial, DEVICE, **model_config)
     model = model.to(DEVICE)
     sample_batch = sample_batch.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_batch)
 
     # Compute loss
-    loss = output.losses["mse_loss"]
+    loss = output.losses["l1_loss"]
 
     # Perform backward pass
     loss.backward()
@@ -309,13 +310,13 @@ def test_model_backward_full_description(
     model_config: dict,
     sample_batch_full: BatchedTrainingSamples,
 ):
-    model = CNNMLP(model_init_description_full, **model_config)
+    model = CNNMLP(model_init_description_full, DEVICE, **model_config)
     model = model.to(DEVICE)
     sample_batch_full = sample_batch_full.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_batch_full)
 
     # Compute loss
-    loss = output.losses["mse_loss"]
+    loss = output.losses["l1_loss"]
 
     # Perform backward pass
     loss.backward()
@@ -333,6 +334,7 @@ def test_run_validation(tmp_path: Path, mock_login):
         output_dir=tmp_path,
         algorithm_dir=algorithm_dir,
         port=random.randint(10000, 20000),
+        device=DEVICE,
     )
     if len(error_msg) > 0:
         raise RuntimeError(error_msg)

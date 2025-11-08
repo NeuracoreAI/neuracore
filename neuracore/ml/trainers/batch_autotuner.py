@@ -46,9 +46,7 @@ class BatchSizeAutotuner:
         self.min_batch_size = min_batch_size
         self.max_batch_size = max_batch_size
         self.num_iterations = num_iterations
-        self.device = torch.device(
-            f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
-        )
+        self.device = model.device
         self.model = model.to(self.device)
 
         # create optimizers

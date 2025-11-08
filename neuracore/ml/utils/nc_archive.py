@@ -14,9 +14,10 @@ from typing import Any, Optional
 
 import torch
 
-from neuracore.core.nc_types import ModelDevice, ModelInitDescription
+from neuracore.core.nc_types import ModelInitDescription
 from neuracore.ml.core.neuracore_model import NeuracoreModel
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
+from neuracore.ml.utils.device_utils import get_default_device
 
 
 def create_nc_archive(
@@ -176,10 +177,6 @@ def load_model_from_nc_archive(
             model_init_description
         )
 
-        model_init_description.device = (
-            ModelDevice(device) if device else ModelDevice.AUTO
-        )
-
         # Load algorithm config if present
         algorithm_config = {}
         if "algorithm_config" in extracted_files:
@@ -197,7 +194,11 @@ def load_model_from_nc_archive(
         model_class = algorithm_loader.load_model()
 
         # Create model instance
-        model = model_class(model_init_description, **algorithm_config)
+        if device:
+            torch_device = torch.device(device)
+        else:
+            torch_device = get_default_device()
+        model = model_class(model_init_description, torch_device, **algorithm_config)
         model.to(model.device)  # Move model to the appropriate device
 
         # Load trained weights if present
