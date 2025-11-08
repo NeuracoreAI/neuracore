@@ -62,6 +62,7 @@ class DistributedTrainer:
         log_freq: int = 50,
         save_freq: int = 1,
         save_checkpoints: bool = True,
+        keep_last_n_checkpoints: int = 5,
         clip_grad_norm: Optional[float] = None,
         rank: int = 0,
         world_size: int = 1,
@@ -80,12 +81,17 @@ class DistributedTrainer:
             log_freq: Frequency to log metrics (in steps)
             save_freq: Frequency to save checkpoints (in epochs)
             save_checkpoints: Whether to save checkpoints
+            keep_last_n_checkpoints: Number of checkpoints to keep
             clip_grad_norm: Maximum norm for gradient clipping
             rank: Rank of this process
             world_size: Total number of processes/GPUs
             device: Optional device to use for training
         """
+        if keep_last_n_checkpoints <= 0:
+            raise ValueError("keep_last_n_checkpoints must be greater than 0")
+
         self.device = device or get_default_device(gpu_index=rank)
+
         logger.info(f"Process {rank} using device: {self.device}")
 
         # Set up the model for distributed training
@@ -105,13 +111,11 @@ class DistributedTrainer:
         self.log_freq = log_freq
         self.save_freq = save_freq
         self.save_checkpoints = save_checkpoints
+        self.keep_last_n_checkpoints = keep_last_n_checkpoints
         self.clip_grad_norm = clip_grad_norm
         self.rank = rank
         self.world_size = world_size
         self.optimizers = model.configure_optimizers()
-
-        # Initialize best metrics
-        self.best_val_loss = float("inf")
         self.global_train_step = 0
         self.global_val_step = 0
 
@@ -277,11 +281,7 @@ class DistributedTrainer:
 
                 # Save checkpoint and artifacts periodically (only from rank 0)
                 if self.rank == 0 and epoch % self.save_freq == 0:
-                    reduced_loss = sum(train_loss_metrics.values()) / len(
-                        train_loss_metrics
-                    )
-                    is_best = reduced_loss < self.best_val_loss
-                    self.save_checkpoint(epoch, train_loss_metrics, is_best=is_best)
+                    self.save_checkpoint(epoch, train_loss_metrics)
 
                     # Save model artifacts
                     self.storage_handler.save_model_artifacts(
@@ -332,13 +332,12 @@ class DistributedTrainer:
             return self.model.module.neuracore_model
         return self.model
 
-    def save_checkpoint(self, epoch: int, metrics: dict, is_best: bool = False) -> None:
+    def save_checkpoint(self, epoch: int, metrics: dict) -> None:
         """Save checkpoint with metadata.
 
         Args:
             epoch: Current epoch number
             metrics: Metrics to save in the checkpoint
-            is_best: Whether this is the best model so far
         """
         if not self.save_checkpoints or self.rank != 0:
             return
@@ -352,18 +351,23 @@ class DistributedTrainer:
             "model_state": model_state,
             "optimizer_states": [opt.state_dict() for opt in self.optimizers],
             "metrics": metrics,
-            "best_val_loss": self.best_val_loss,
             "global_train_step": self.global_train_step,
             "global_val_step": self.global_val_step,
         }
 
         # Save regular checkpoint
-        self.storage_handler.save_checkpoint(checkpoint, "checkpoint_latest.pt")
-        self.storage_handler.save_checkpoint(checkpoint, f"checkpoint_{epoch}.pt")
-
-        # Save best model if needed
-        if is_best:
-            self.storage_handler.save_checkpoint(checkpoint, "checkpoint_best.pt")
+        # TODO: remove latest in future PR and just keep numbered ones
+        latest_checkpoint_path = self.checkpoint_dir / "checkpoint_latest.pt"
+        checkpoint_path = self.checkpoint_dir / f"checkpoint_{epoch}.pt"
+        self.storage_handler.save_checkpoint(checkpoint, latest_checkpoint_path)
+        self.storage_handler.save_checkpoint(checkpoint, checkpoint_path)
+        checkpoint_epoch_to_remove = epoch - self.keep_last_n_checkpoints
+        if checkpoint_epoch_to_remove > 0:
+            checkpoint_to_remove = (
+                self.checkpoint_dir / f"checkpoint_{checkpoint_epoch_to_remove}.pt"
+            )
+            if checkpoint_to_remove.exists():
+                checkpoint_to_remove.unlink()
 
         logger.info("... checkpoint saved!")
 
@@ -384,7 +388,6 @@ class DistributedTrainer:
             self.optimizers, checkpoint["optimizer_states"]
         ):
             optimizer.load_state_dict(opt_state)
-        self.best_val_loss = checkpoint.get("best_val_loss", float("inf"))
 
         # Restore step counters
         self.global_train_step = checkpoint.get("global_train_step", 0)

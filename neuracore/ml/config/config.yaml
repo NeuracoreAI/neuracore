@@ -9,6 +9,7 @@ epochs: 100
 output_prediction_horizon: 10
 validation_split: 0.2
 logging_frequency: 50
+keep_last_n_checkpoints: 5 
 device: null  # e.g., "cuda:0", "mps", "cpu"
 
 # Batch size (can be "auto" for automatic tuning or an integer)
@@ -32,7 +33,7 @@ output_data_types:
 algorithm_id: null    # For cloud training
 training_id: null     # For cloud training
 org_id: null         # For cloud training
-local_output_dir: ${oc.env:HOME}/.neuracore/training
+local_output_dir: ${oc.env:HOME}/.neuracore/training/runs/${now:%Y-%m-%d_%H-%M-%S}
 
 # Custom algorithm parameters (used when algorithm_id is provided)
 # These will be passed directly to the algorithm constructor
@@ -44,7 +45,7 @@ resume_checkpoint_path: null  # Path to checkpoint to resume from
 # Hydra configuration
 hydra:
   run:
-    dir: ${local_output_dir}/hydra_outputs/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${local_output_dir}
   sweep:
-    dir: ${local_output_dir}/hydra_sweeps/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${local_output_dir}
     subdir: ${hydra:job.num}

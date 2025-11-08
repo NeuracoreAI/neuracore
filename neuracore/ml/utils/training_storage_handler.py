@@ -98,19 +98,19 @@ class TrainingStorageHandler:
             )
         return response.json()["url"]
 
-    def save_checkpoint(self, checkpoint: dict, checkpoint_name: str) -> None:
+    def save_checkpoint(self, checkpoint: dict, relative_checkpoint_path: Path) -> None:
         """Save checkpoint to storage.
 
         Args:
             checkpoint: Checkpoint dictionary to save.
-            checkpoint_name: Name of the checkpoint file.
+            relative_checkpoint_path: Relative path for the checkpoint file.
         """
-        save_path = self.local_dir / checkpoint_name
+        save_path = self.local_dir / relative_checkpoint_path
         save_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(checkpoint, save_path)
         if self.log_to_cloud:
             upload_url = self._get_upload_url(
-                filepath="checkpoints/" + checkpoint_name,
+                filepath=f"checkpoints/{relative_checkpoint_path.name}",
                 content_type="application/octet-stream",
             )
             with open(save_path, "rb") as f:
@@ -124,11 +124,12 @@ class TrainingStorageHandler:
                     save_path.unlink()
                 except Exception as e:
                     logger.warning(
-                        f"Could not delete local checkpoint {checkpoint_name}: {e}"
+                        "Could not delete local checkpoint "
+                        f"{relative_checkpoint_path}: {e}"
                     )
             else:
                 logger.error(
-                    f"Failed to save checkpoint {checkpoint_name} "
+                    f"Failed to save checkpoint {relative_checkpoint_path} "
                     f"to cloud: {response.text}"
                 )
                 return
