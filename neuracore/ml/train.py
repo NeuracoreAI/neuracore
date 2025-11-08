@@ -4,7 +4,7 @@ import gc
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import hydra
 import torch
@@ -29,6 +29,7 @@ from neuracore.ml.trainers.distributed_trainer import (
 )
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
+from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
 # Environment setup
@@ -63,6 +64,7 @@ def setup_logging(output_dir: str, rank: int = 0) -> None:
 def get_model_and_algorithm_config(
     cfg: DictConfig,
     model_init_description: ModelInitDescription,
+    device: torch.device,
 ) -> Tuple[NeuracoreModel, Dict[str, Any]]:
     """Get model and algorithm configuration."""
     algorithm_config: Dict[str, Any] = {}
@@ -75,6 +77,7 @@ def get_model_and_algorithm_config(
         model = hydra.utils.instantiate(
             cfg.algorithm,
             model_init_description=model_init_description,
+            device=device,
             **algorithm_config,
         )
     elif cfg.algorithm_id is not None:
@@ -91,6 +94,7 @@ def get_model_and_algorithm_config(
         model_class = algorithm_loader.load_model()
         model = model_class(
             model_init_description=model_init_description,
+            device=device,
             **algorithm_config,
         )
     else:
@@ -109,6 +113,7 @@ def convert_data_types(data_types_list: list[str]) -> list[DataType]:
 def determine_optimal_batch_size(
     cfg: DictConfig,
     synchronized_dataset: SynchronizedDataset,
+    device: Optional[torch.device] = None,
 ) -> int:
     """Run batch size autotuning on a single GPU and return the result."""
     logger.info("Starting batch size autotuning on GPU 0...")
@@ -136,7 +141,7 @@ def determine_optimal_batch_size(
     )
 
     model, algorithm_config = get_model_and_algorithm_config(
-        cfg, model_init_description
+        cfg, model_init_description, device=device
     )
 
     # Determine per-GPU batch size
@@ -173,6 +178,7 @@ def run_training(
     cfg: DictConfig,
     batch_size: int,
     synchronized_dataset: SynchronizedDataset,
+    device: Optional[torch.device] = None,
 ) -> None:
     """Run the training process for a single GPU."""
     # Setup for distributed training
@@ -284,7 +290,7 @@ def run_training(
         )
 
         model, algorithm_config = get_model_and_algorithm_config(
-            cfg, model_init_description
+            cfg, model_init_description, device=device
         )
 
         training_storage_handler = TrainingStorageHandler(
@@ -322,6 +328,7 @@ def run_training(
             log_freq=cfg.logging_frequency,
             rank=rank,
             world_size=world_size,
+            device=device,
         )
 
         # Resume from checkpoint if specified
@@ -409,9 +416,17 @@ def main(cfg: DictConfig) -> None:
         storage_handler.download_algorithm(extract_dir=extract_dir)
         logger.info(f"Algorithm extracted to {extract_dir}")
 
+    device = None
+    if cfg.device is not None:
+        device = torch.device(cfg.device)
+    else:
+        device = get_default_device()
+
     # Handle batch size configuration
     if isinstance(batch_size, str) and batch_size.lower() == "auto":
-        optimal_batch_size = determine_optimal_batch_size(cfg, synchronized_dataset)
+        optimal_batch_size = determine_optimal_batch_size(
+            cfg, synchronized_dataset, device=device
+        )
         batch_size = optimal_batch_size
     else:
         batch_size = int(batch_size)
@@ -420,13 +435,13 @@ def main(cfg: DictConfig) -> None:
         # Use multiprocessing to launch multiple processes
         mp.spawn(
             run_training,
-            args=(world_size, cfg, batch_size, synchronized_dataset),
+            args=(world_size, cfg, batch_size, synchronized_dataset, device),
             nprocs=world_size,
             join=True,
         )
     else:
         # Single GPU or CPU training
-        run_training(0, 1, cfg, batch_size, synchronized_dataset)
+        run_training(0, 1, cfg, batch_size, synchronized_dataset, device)
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ class DiffusionPolicy(NeuracoreModel):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
+        device: torch.device,
         hidden_dim: int = 256,
         unet_down_dims: Tuple[int, ...] = (
             512,
@@ -62,6 +63,7 @@ class DiffusionPolicy(NeuracoreModel):
 
         Args:
             model_init_description: Model initialization configuration.
+            device: Torch device to run the model on (CPU or GPU, or MPS).
             hidden_dim: Hidden dimension for image encoders.
             unet_down_dims: Downsampling dimensions for UNet.
             unet_kernel_size: Kernel size for UNet convolutions.
@@ -81,7 +83,7 @@ class DiffusionPolicy(NeuracoreModel):
             weight_decay: Weight decay for optimization.
             prediction_type: Type of prediction ("epsilon" or "sample").
         """
-        super().__init__(model_init_description)
+        super().__init__(model_init_description, device)
         self.lr = lr
         self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay

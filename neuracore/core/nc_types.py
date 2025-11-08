@@ -718,15 +718,6 @@ class RecordingDescription(BaseModel):
         return data_types
 
 
-class ModelDevice(str, Enum):
-    """Enumeration of device types for model training and inference."""
-
-    CPU = "cpu"
-    CUDA = "cuda"
-    MPS = "mps"
-    AUTO = "auto"
-
-
 class ModelInitDescription(BaseModel):
     """Configuration specification for initializing Neuracore models.
 
@@ -739,7 +730,6 @@ class ModelInitDescription(BaseModel):
     input_data_types: list[DataType]
     output_data_types: list[DataType]
     output_prediction_horizon: int = 1
-    device: ModelDevice = ModelDevice.AUTO
 
 
 class ModelPrediction(BaseModel):

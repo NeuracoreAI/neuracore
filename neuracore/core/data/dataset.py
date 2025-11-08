@@ -17,7 +17,7 @@ from ..const import API_URL
 from ..exceptions import DatasetError
 from ..nc_types import DataType, SyncedDataset
 
-DEFAULT_CACHE_DIR = Path.home() / ".neuracore_cache"
+DEFAULT_CACHE_DIR = Path.home() / ".neuracore" / "training" / "dataset_cache"
 
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ class Dataset:
             size_bytes=dataset_json["size_bytes"],
             tags=dataset_json["tags"],
             is_shared=dataset_json["is_shared"],
-            data_types=dataset_json.get("all_data_types", {}).keys(),
+            data_types=list(dataset_json.get("all_data_types", {}).keys()),
         )
 
     @staticmethod
@@ -152,7 +152,7 @@ class Dataset:
             size_bytes=dataset_json["size_bytes"],
             tags=dataset_json["tags"],
             is_shared=dataset_json["is_shared"],
-            data_types=dataset_json.get("all_data_types", {}).keys(),
+            data_types=list(dataset_json.get("all_data_types", {}).keys()),
         )
 
     @staticmethod
@@ -231,7 +231,7 @@ class Dataset:
             size_bytes=dataset_json["size_bytes"],
             tags=dataset_json["tags"],
             is_shared=dataset_json["is_shared"],
-            data_types=dataset_json.get("all_data_types", {}).keys(),
+            data_types=list(dataset_json.get("all_data_types", {}).keys()),
         )
 
     def _synchronize(

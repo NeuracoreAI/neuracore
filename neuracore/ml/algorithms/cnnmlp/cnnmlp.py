@@ -47,6 +47,7 @@ class CNNMLP(NeuracoreModel):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
+        device: torch.device,
         hidden_dim: int = 512,
         cnn_output_dim: int = 64,
         num_layers: int = 3,
@@ -58,6 +59,7 @@ class CNNMLP(NeuracoreModel):
 
         Args:
             model_init_description: Model initialization parameters
+            device: Torch device to run the model on (CPU or GPU, or MPS)
             hidden_dim: Hidden dimension for MLP layers
             cnn_output_dim: Output dimension for CNN encoders
             num_layers: Number of MLP layers
@@ -65,7 +67,7 @@ class CNNMLP(NeuracoreModel):
             lr_backbone: Learning rate for CNN backbone
             weight_decay: Weight decay for optimizer
         """
-        super().__init__(model_init_description)
+        super().__init__(model_init_description, device)
         self.hidden_dim = hidden_dim
         self.cnn_output_dim = cnn_output_dim
         self.num_layers = num_layers
@@ -496,7 +498,7 @@ class CNNMLP(NeuracoreModel):
         metrics: Dict[str, Any] = {}
 
         if self.training:
-            losses["mse_loss"] = nn.functional.mse_loss(
+            losses["l1_loss"] = nn.functional.l1_loss(
                 action_predictions, target_actions
             )
 

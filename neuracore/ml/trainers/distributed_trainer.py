@@ -16,6 +16,7 @@ from tqdm import tqdm
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.core.ml_types import BatchedTrainingSamples
 from neuracore.ml.logging.training_logger import TrainingLogger
+from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.memory_monitor import MemoryMonitor, OutOfMemoryError
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
@@ -64,6 +65,7 @@ class DistributedTrainer:
         clip_grad_norm: Optional[float] = None,
         rank: int = 0,
         world_size: int = 1,
+        device: Optional[torch.device] = None,
     ):
         """Initialize the distributed trainer.
 
@@ -81,10 +83,9 @@ class DistributedTrainer:
             clip_grad_norm: Maximum norm for gradient clipping
             rank: Rank of this process
             world_size: Total number of processes/GPUs
+            device: Optional device to use for training
         """
-        self.device = torch.device(
-            f"cuda:{rank}" if torch.cuda.is_available() else "cpu"
-        )
+        self.device = device or get_default_device(gpu_index=rank)
         logger.info(f"Process {rank} using device: {self.device}")
 
         # Set up the model for distributed training
