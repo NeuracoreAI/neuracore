@@ -5,9 +5,6 @@ functionality including data loading, caching, multi-modal data processing,
 error handling, and device management.
 """
 
-import os
-import tempfile
-from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -48,13 +45,6 @@ def mock_tokenizer():
         )
 
     return tokenizer
-
-
-@pytest.fixture
-def temp_cache_dir():
-    """Create a temporary cache directory for testing."""
-    with tempfile.TemporaryDirectory() as tmp_dirname:
-        yield tmp_dirname
 
 
 @pytest.fixture
@@ -191,14 +181,13 @@ def mock_synchronized_dataset(mock_synced_recording, sample_dataset_description)
 class TestPytorchSynchronizedDatasetInitialization:
     """Test dataset initialization and configuration."""
 
-    def test_basic_initialization(self, mock_synchronized_dataset, temp_cache_dir):
+    def test_basic_initialization(self, mock_synchronized_dataset):
         """Test basic dataset initialization."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=5,
-            cache_dir=temp_cache_dir,
         )
 
         assert dataset.synchronized_dataset == mock_synchronized_dataset
@@ -208,11 +197,10 @@ class TestPytorchSynchronizedDatasetInitialization:
         ]
         assert dataset.output_data_types == [DataType.JOINT_TARGET_POSITIONS]
         assert dataset.output_prediction_horizon == 5
-        assert dataset.cache_dir == Path(temp_cache_dir)
         assert len(dataset) == 50  # num_transitions
 
     def test_initialization_with_all_data_types(
-        self, mock_synchronized_dataset, mock_tokenizer, temp_cache_dir
+        self, mock_synchronized_dataset, mock_tokenizer
     ):
         """Test initialization with all supported data types."""
         all_input_types = [
@@ -235,7 +223,6 @@ class TestPytorchSynchronizedDatasetInitialization:
             input_data_types=all_input_types,
             output_data_types=[DataType.JOINT_TARGET_POSITIONS, DataType.END_EFFECTORS],
             output_prediction_horizon=8,
-            cache_dir=temp_cache_dir,
             tokenize_text=mock_tokenizer,
         )
 
@@ -245,7 +232,7 @@ class TestPytorchSynchronizedDatasetInitialization:
             all_input_types + [DataType.JOINT_TARGET_POSITIONS, DataType.END_EFFECTORS]
         )
 
-    def test_initialization_invalid_synchronized_dataset(self, temp_cache_dir):
+    def test_initialization_invalid_synchronized_dataset(self):
         """Test initialization with invalid synchronized dataset."""
         with pytest.raises(
             TypeError,
@@ -256,57 +243,20 @@ class TestPytorchSynchronizedDatasetInitialization:
                 input_data_types=[DataType.JOINT_POSITIONS],
                 output_data_types=[DataType.JOINT_TARGET_POSITIONS],
                 output_prediction_horizon=5,
-                cache_dir=temp_cache_dir,
             )
-
-    def test_default_cache_dir(self, mock_synchronized_dataset):
-        """Test initialization with default cache directory."""
-        dataset = PytorchSynchronizedDataset(
-            synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.JOINT_POSITIONS],
-            output_data_types=[DataType.JOINT_TARGET_POSITIONS],
-            output_prediction_horizon=5,
-        )
-
-        # Should create a default cache directory in temp
-        assert dataset.cache_dir.name == "episodic_dataset_cache"
-        assert dataset.cache_dir.exists()
-
-    def test_cache_directory_cleanup(self, mock_synchronized_dataset, temp_cache_dir):
-        """Test that existing cache directory is cleaned up."""
-        # Create some files in the cache directory
-        test_file = Path(temp_cache_dir) / "test_file.txt"
-        test_file.write_text("test content")
-        assert test_file.exists()
-
-        # Initialize dataset (should clean up cache)
-        dataset = PytorchSynchronizedDataset(
-            synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.JOINT_POSITIONS],
-            output_data_types=[DataType.JOINT_TARGET_POSITIONS],
-            output_prediction_horizon=5,
-            cache_dir=temp_cache_dir,
-        )
-
-        # Cache directory should exist but be empty
-        assert dataset.cache_dir.exists()
-        assert not test_file.exists()
 
 
 class TestDataLoading:
     """Test data loading functionality."""
 
     @patch("neuracore.login")
-    def test_load_sample_basic(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_load_sample_basic(self, mock_login, mock_synchronized_dataset):
         """Test basic sample loading."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -322,47 +272,13 @@ class TestDataLoading:
         mock_login.assert_called_once()
 
     @patch("neuracore.login")
-    def test_load_sample_with_caching(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
-        """Test sample loading with caching."""
-        dataset = PytorchSynchronizedDataset(
-            synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.JOINT_POSITIONS],
-            output_data_types=[DataType.JOINT_TARGET_POSITIONS],
-            output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
-        )
-
-        with patch.object(dataset, "_memory_monitor") as mock_monitor:
-            mock_monitor.check_memory.return_value = None
-
-            # First load - should create cache
-            sample1 = dataset.load_sample(episode_idx=0, timestep=2)
-
-            # Check cache file was created
-            cache_file = dataset.cache_dir / "ep_0_frame_2.pt"
-            assert cache_file.exists()
-
-            # Second load - should use cache
-            sample2 = dataset.load_sample(episode_idx=0, timestep=2)
-
-            # Samples should be identical (loaded from cache)
-            assert torch.equal(
-                sample1.output_prediction_mask, sample2.output_prediction_mask
-            )
-
-    @patch("neuracore.login")
-    def test_load_sample_memory_monitoring(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_load_sample_memory_monitoring(self, mock_login, mock_synchronized_dataset):
         """Test memory monitoring during sample loading."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.JOINT_POSITIONS],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -381,16 +297,13 @@ class TestDataTypeProcessing:
     """Test processing of different data types."""
 
     @patch("neuracore.login")
-    def test_joint_data_processing(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_joint_data_processing(self, mock_login, mock_synchronized_dataset):
         """Test joint data processing."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.JOINT_POSITIONS, DataType.JOINT_VELOCITIES],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=2,
-            cache_dir=temp_cache_dir,
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -417,16 +330,13 @@ class TestDataTypeProcessing:
         )  # prediction_horizon x max_len
 
     @patch("neuracore.login")
-    def test_image_data_processing(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_image_data_processing(self, mock_login, mock_synchronized_dataset):
         """Test RGB and depth image processing."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.RGB_IMAGE, DataType.DEPTH_IMAGE],
             output_data_types=[DataType.RGB_IMAGE],
             output_prediction_horizon=2,
-            cache_dir=temp_cache_dir,
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -465,16 +375,13 @@ class TestDataTypeProcessing:
         )  # prediction_horizon x cameras x channels x h x w
 
     @patch("neuracore.login")
-    def test_point_cloud_processing(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_point_cloud_processing(self, mock_login, mock_synchronized_dataset):
         """Test point cloud data processing."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.POINT_CLOUD],
             output_data_types=[DataType.POINT_CLOUD],
             output_prediction_horizon=2,
-            cache_dir=temp_cache_dir,
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -501,16 +408,13 @@ class TestDataTypeProcessing:
         )  # prediction_horizon x clouds x points x xyz
 
     @patch("neuracore.login")
-    def test_end_effector_processing(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_end_effector_processing(self, mock_login, mock_synchronized_dataset):
         """Test end-effector data processing."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.END_EFFECTORS],
             output_data_types=[DataType.END_EFFECTORS],
             output_prediction_horizon=2,
-            cache_dir=temp_cache_dir,
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -532,16 +436,13 @@ class TestDataTypeProcessing:
         assert output_ee_data.shape == (2, 2)  # prediction_horizon x max_len
 
     @patch("neuracore.login")
-    def test_pose_processing(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_pose_processing(self, mock_login, mock_synchronized_dataset):
         """Test pose data processing."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.POSES],
             output_data_types=[DataType.POSES],
             output_prediction_horizon=2,
-            cache_dir=temp_cache_dir,
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -564,7 +465,7 @@ class TestDataTypeProcessing:
 
     @patch("neuracore.login")
     def test_language_processing(
-        self, mock_login, mock_synchronized_dataset, mock_tokenizer, temp_cache_dir
+        self, mock_login, mock_synchronized_dataset, mock_tokenizer
     ):
         """Test language data processing."""
         dataset = PytorchSynchronizedDataset(
@@ -572,7 +473,6 @@ class TestDataTypeProcessing:
             input_data_types=[DataType.LANGUAGE],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=2,
-            cache_dir=temp_cache_dir,
             tokenize_text=mock_tokenizer,
         )
 
@@ -590,7 +490,7 @@ class TestDataTypeProcessing:
 
     @patch("neuracore.login")
     def test_language_processing_without_tokenizer(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
+        self, mock_login, mock_synchronized_dataset
     ):
         """Test language processing fails without tokenizer."""
         dataset = PytorchSynchronizedDataset(
@@ -598,7 +498,6 @@ class TestDataTypeProcessing:
             input_data_types=[DataType.LANGUAGE],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=2,
-            cache_dir=temp_cache_dir,
             # No tokenize_text provided
         )
 
@@ -609,16 +508,13 @@ class TestDataTypeProcessing:
                 dataset.load_sample(episode_idx=0, timestep=0)
 
     @patch("neuracore.login")
-    def test_custom_data_processing(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_custom_data_processing(self, mock_login, mock_synchronized_dataset):
         """Test custom data processing."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.CUSTOM],
             output_data_types=[DataType.CUSTOM],
             output_prediction_horizon=2,
-            cache_dir=temp_cache_dir,
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -644,76 +540,14 @@ class TestCacheManagement:
     """Test caching functionality."""
 
     @patch("neuracore.login")
-    def test_cache_space_management(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_cache_space_management(self, mock_login, mock_synchronized_dataset):
         """Test cache space management."""
-        dataset = PytorchSynchronizedDataset(
+        PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.JOINT_POSITIONS],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=2,
-            cache_dir=temp_cache_dir,
         )
-
-        with patch.object(
-            dataset.cache_manager, "ensure_space_available"
-        ) as mock_ensure_space:
-            mock_ensure_space.return_value = True
-
-            with patch.object(dataset, "_memory_monitor") as mock_monitor:
-                mock_monitor.check_memory.return_value = None
-                dataset.load_sample(episode_idx=0, timestep=0)
-
-            # Should check for space availability
-            mock_ensure_space.assert_called()
-
-    @patch("neuracore.login")
-    def test_cache_space_low_warning(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
-        """Test warning when cache space is low."""
-        dataset = PytorchSynchronizedDataset(
-            synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.JOINT_POSITIONS],
-            output_data_types=[DataType.JOINT_TARGET_POSITIONS],
-            output_prediction_horizon=2,
-            cache_dir=temp_cache_dir,
-        )
-
-        with patch.object(
-            dataset.cache_manager, "ensure_space_available"
-        ) as mock_ensure_space:
-            mock_ensure_space.return_value = False  # Simulate low space
-
-            with patch.object(dataset, "_memory_monitor") as mock_monitor:
-                mock_monitor.check_memory.return_value = None
-
-                with patch(
-                    "neuracore.ml.datasets.pytorch_synchronized_dataset.logger"
-                ) as mock_logger:
-                    dataset.load_sample(episode_idx=0, timestep=0)
-
-                    # Should log warning about low disk space
-                    mock_logger.warning.assert_called_with(
-                        "Low disk space. Some cache files were removed."
-                    )
-
-    def test_cache_file_naming(self, mock_synchronized_dataset, temp_cache_dir):
-        """Test cache file naming convention."""
-        dataset = PytorchSynchronizedDataset(
-            synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.JOINT_POSITIONS],
-            output_data_types=[DataType.JOINT_TARGET_POSITIONS],
-            output_prediction_horizon=2,
-            cache_dir=temp_cache_dir,
-        )
-
-        # Test cache file path generation
-        cache_file = dataset.cache_dir / "ep_5_frame_10.pt"
-        expected_path = Path(temp_cache_dir) / "ep_5_frame_10.pt"
-
-        assert str(cache_file) == str(expected_path)
 
 
 class TestOutputPredictionMask:
@@ -972,16 +806,13 @@ class TestDatasetIntegration:
     """Test dataset integration with PyTorch ecosystem."""
 
     @patch("neuracore.login")
-    def test_getitem_method(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_getitem_method(self, mock_login, mock_synchronized_dataset):
         """Test __getitem__ method."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.JOINT_POSITIONS],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -993,16 +824,13 @@ class TestDatasetIntegration:
         assert sample.outputs is not None
 
     @patch("neuracore.login")
-    def test_getitem_negative_index(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_getitem_negative_index(self, mock_login, mock_synchronized_dataset):
         """Test __getitem__ with negative index."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.JOINT_POSITIONS],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -1012,16 +840,13 @@ class TestDatasetIntegration:
             sample = dataset[-1]
             assert isinstance(sample, BatchedTrainingSamples)
 
-    def test_getitem_index_out_of_bounds(
-        self, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_getitem_index_out_of_bounds(self, mock_synchronized_dataset):
         """Test __getitem__ with out of bounds index."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.JOINT_POSITIONS],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
         )
 
         # Test positive out of bounds
@@ -1032,29 +857,25 @@ class TestDatasetIntegration:
         with pytest.raises(IndexError):
             _ = dataset[-100]
 
-    def test_len_method(self, mock_synchronized_dataset, temp_cache_dir):
+    def test_len_method(self, mock_synchronized_dataset):
         """Test __len__ method."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.JOINT_POSITIONS],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
         )
 
         assert len(dataset) == 50  # num_transitions from mock
 
     @patch("neuracore.login")
-    def test_error_handling_in_getitem(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_error_handling_in_getitem(self, mock_login, mock_synchronized_dataset):
         """Test error handling in __getitem__ method."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.JOINT_POSITIONS],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
         )
 
         with patch.object(dataset, "load_sample") as mock_load_sample:
@@ -1068,49 +889,25 @@ class TestDatasetIntegration:
 class TestPerformanceAndOptimization:
     """Test performance and optimization features."""
 
-    def test_memory_monitoring_initialization(
-        self, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_memory_monitoring_initialization(self, mock_synchronized_dataset):
         """Test memory monitor initialization."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.JOINT_POSITIONS],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
         )
 
         assert dataset._memory_monitor is not None
         assert hasattr(dataset._memory_monitor, "check_memory")
 
-    @patch("neuracore.login")
-    def test_parallel_downloads_environment_variable(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
-        """Test setting parallel downloads environment variable."""
-        dataset = PytorchSynchronizedDataset(
-            synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.JOINT_POSITIONS],
-            output_data_types=[DataType.JOINT_TARGET_POSITIONS],
-            output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
-        )
-
-        with patch.object(dataset, "_memory_monitor") as mock_monitor:
-            mock_monitor.check_memory.return_value = None
-            dataset.load_sample(episode_idx=0, timestep=0)
-
-        # Should set parallel downloads to 0
-        assert os.environ.get("NEURACORE_NUM_PARALLEL_VIDEO_DOWNLOADS") == "0"
-
-    def test_login_state_management(self, mock_synchronized_dataset, temp_cache_dir):
+    def test_login_state_management(self, mock_synchronized_dataset):
         """Test login state management."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.JOINT_POSITIONS],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
         )
 
         # Initially not logged in
@@ -1135,9 +932,7 @@ class TestDataTypeCompatibility:
     """Test compatibility between different data type combinations."""
 
     @patch("neuracore.login")
-    def test_visual_and_joint_combination(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_visual_and_joint_combination(self, mock_login, mock_synchronized_dataset):
         """Test combination of visual and joint data."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
@@ -1148,7 +943,6 @@ class TestDataTypeCompatibility:
             ],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS, DataType.END_EFFECTORS],
             output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -1166,7 +960,7 @@ class TestDataTypeCompatibility:
 
     @patch("neuracore.login")
     def test_all_modalities_combination(
-        self, mock_login, mock_synchronized_dataset, mock_tokenizer, temp_cache_dir
+        self, mock_login, mock_synchronized_dataset, mock_tokenizer
     ):
         """Test combination of all data modalities."""
         all_types = [
@@ -1186,7 +980,6 @@ class TestDataTypeCompatibility:
             input_data_types=all_types,
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=2,
-            cache_dir=temp_cache_dir,
             tokenize_text=mock_tokenizer,
         )
 
@@ -1209,50 +1002,18 @@ class TestDataTypeCompatibility:
 class TestErrorRecovery:
     """Test error recovery and robustness."""
 
-    def test_error_count_tracking(self, mock_synchronized_dataset, temp_cache_dir):
+    def test_error_count_tracking(self, mock_synchronized_dataset):
         """Test error count tracking in parent class."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[DataType.JOINT_POSITIONS],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
         )
 
         # Initial error count should be 0
         assert dataset._error_count == 0
         assert dataset._max_error_count == 100
-
-    @patch("neuracore.login")
-    def test_cache_corruption_recovery(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
-        """Test recovery from cache corruption."""
-        dataset = PytorchSynchronizedDataset(
-            synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.JOINT_POSITIONS],
-            output_data_types=[DataType.JOINT_TARGET_POSITIONS],
-            output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
-        )
-
-        # Create a corrupted cache file
-        cache_file = dataset.cache_dir / "ep_0_frame_0.pt"
-        cache_file.write_text("corrupted data")
-
-        with (
-            patch.object(dataset, "_memory_monitor") as mock_monitor,
-            patch("torch.load", wraps=torch.load) as mock_load,
-        ):
-            mock_monitor.check_memory.return_value = None
-
-            # Should fall back to regenerating the sample
-            sample = dataset.load_sample(episode_idx=0, timestep=0)
-
-            # Should try to load corrupted file
-            mock_load.assert_called_once_with(cache_file, weights_only=False)
-            # Should continue as if it did not exist
-            assert sample is not None
 
 
 @pytest.mark.integration
@@ -1260,9 +1021,7 @@ class TestIntegrationWithPyTorchDataLoader:
     """Integration tests with PyTorch DataLoader."""
 
     @patch("neuracore.login")
-    def test_dataloader_with_collate_fn(
-        self, mock_login, mock_synchronized_dataset, temp_cache_dir
-    ):
+    def test_dataloader_with_collate_fn(self, mock_login, mock_synchronized_dataset):
         """Test DataLoader with custom collate function."""
         from torch.utils.data import DataLoader
 
@@ -1271,7 +1030,6 @@ class TestIntegrationWithPyTorchDataLoader:
             input_data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=3,
-            cache_dir=temp_cache_dir,
         )
 
         dataloader = DataLoader(

@@ -1,11 +1,6 @@
 """PyTorch dataset for loading synchronized robot data with filesystem caching."""
 
 import logging
-import os
-import shutil
-import tempfile
-from pathlib import Path
-from pickle import UnpicklingError
 from typing import Callable, Optional, Set, cast
 
 import numpy as np
@@ -13,7 +8,6 @@ import torch
 from PIL import Image
 
 import neuracore as nc
-from neuracore.core.data.cache_manager import CacheManager
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
 from neuracore.core.nc_types import (
@@ -50,7 +44,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         input_data_types: list[DataType],
         output_data_types: list[DataType],
         output_prediction_horizon: int,
-        cache_dir: Optional[str] = None,
         tokenize_text: Optional[
             Callable[[list[str]], tuple[torch.Tensor, torch.Tensor]]
         ] = None,
@@ -62,7 +55,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             input_data_types: List of input data types to include in the dataset.
             output_data_types: List of output data types to include in the dataset.
             output_prediction_horizon: Number of future timesteps to predict.
-            cache_dir: Directory to use for caching data.
             tokenize_text: Optional function to tokenize text data.
         """
         if not isinstance(synchronized_dataset, SynchronizedDataset):
@@ -78,17 +70,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         )
         self.synchronized_dataset = synchronized_dataset
         self.dataset_description = self.synchronized_dataset.dataset_description
-
-        # Setup cache
-        if cache_dir is None:
-            cache_dir = os.path.join(tempfile.gettempdir(), "episodic_dataset_cache")
-        self.cache_dir = Path(cache_dir)
-        if self.cache_dir.exists():
-            shutil.rmtree(self.cache_dir)  # clear cache directory if it exists
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_manager = CacheManager(
-            self.cache_dir,
-        )
 
         self._max_error_count = 100
         self._error_count = 0
@@ -111,7 +92,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         if not self._logged_in:
             nc.login()
             self._logged_in = True
-            os.environ["NEURACORE_NUM_PARALLEL_VIDEO_DOWNLOADS"] = "0"
 
         if self._mem_check_counter % CHECK_MEMORY_INTERVAL == 0:
             self._memory_monitor.check_memory()
@@ -124,23 +104,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             episode_length = len(synced_recording)
             if timestep is None:
                 timestep = self._get_timestep(episode_length)
-            tensor_cache_path = self.cache_dir / f"ep_{episode_idx}_frame_{timestep}.pt"
-
-            if tensor_cache_path.exists():
-                try:
-                    return torch.load(tensor_cache_path, weights_only=False)
-                except (
-                    EOFError,
-                    UnpicklingError,
-                    RuntimeError,
-                    AttributeError,
-                    ImportError,
-                    ModuleNotFoundError,
-                ) as e:
-                    logger.warning(f"Failed to load tensor from cache: {e}")
-
-            if not self.cache_manager.ensure_space_available():
-                logger.warning("Low disk space. Some cache files were removed.")
 
             sample = TrainingSample(
                 output_prediction_mask=torch.ones(
@@ -423,8 +386,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 timestep,
                 self.output_prediction_horizon,
             )
-
-            torch.save(sample, tensor_cache_path)
 
             return sample
 
