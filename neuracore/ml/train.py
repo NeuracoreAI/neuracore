@@ -326,6 +326,7 @@ def run_training(
             output_dir=Path(cfg.local_output_dir),
             num_epochs=cfg.epochs,
             log_freq=cfg.logging_frequency,
+            keep_last_n_checkpoints=cfg.keep_last_n_checkpoints,
             rank=rank,
             world_size=world_size,
             device=device,
