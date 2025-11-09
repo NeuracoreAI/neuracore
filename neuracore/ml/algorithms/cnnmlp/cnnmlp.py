@@ -49,7 +49,7 @@ class CNNMLP(NeuracoreModel):
         model_init_description: ModelInitDescription,
         device: torch.device,
         hidden_dim: int = 512,
-        cnn_output_dim: int = 64,
+        cnn_output_dim: int = 512,
         num_layers: int = 3,
         lr: float = 1e-4,
         lr_backbone: float = 1e-5,

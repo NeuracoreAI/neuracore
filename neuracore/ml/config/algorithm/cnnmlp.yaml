@@ -2,7 +2,7 @@
 algorithm:
   _target_: neuracore.ml.algorithms.cnnmlp.cnnmlp.CNNMLP
   hidden_dim: 512
-  cnn_output_dim: 64
+  cnn_output_dim: 512
   num_layers: 3
   lr: 1e-4
   lr_backbone: 1e-5
