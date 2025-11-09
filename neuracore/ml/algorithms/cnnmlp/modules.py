@@ -19,6 +19,8 @@ class ImageEncoder(nn.Module):
     vision tasks requiring fixed-size feature representations.
     """
 
+    OUTPUT_CNN_W_H = 7 * 7
+
     def __init__(self, output_dim: int = 512, backbone: str = "resnet18"):
         """Initialize the image encoder.
 
@@ -29,7 +31,8 @@ class ImageEncoder(nn.Module):
         super().__init__()
         # Use pretrained ResNet but remove final layer
         self.backbone = self._build_backbone(backbone)
-        self.proj = nn.Linear(512, output_dim)
+        self.proj_2d = nn.Conv2d(512, output_dim, kernel_size=1)
+        self.linear = nn.Linear(ImageEncoder.OUTPUT_CNN_W_H * output_dim, output_dim)
 
     def _build_backbone(self, backbone_name: str) -> nn.Module:
         """Build backbone CNN by removing classification layers.
@@ -41,7 +44,7 @@ class ImageEncoder(nn.Module):
             nn.Module: ResNet backbone without final classification layers
         """
         resnet = getattr(models, backbone_name)(pretrained=True)
-        return nn.Sequential(*list(resnet.children())[:-1])
+        return nn.Sequential(*list(resnet.children())[:-2])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through image encoder.
@@ -57,5 +60,5 @@ class ImageEncoder(nn.Module):
         """
         batch = x.shape[0]
         x = self.backbone(x)
-        x = x.view(batch, -1)
-        return self.proj(x)
+        x = self.proj_2d(x).view(batch, -1)
+        return self.linear(x)
