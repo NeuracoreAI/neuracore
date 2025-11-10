@@ -77,6 +77,11 @@ def main():
             if done:
                 print(f"Episode {episode_idx} done")
                 break
+        if reward == 4:
+            print(f"Episode {episode_idx} successful.")
+        else:
+            print(f"Episode {episode_idx} failed.")
+
         plt.close()
 
     policy.disconnect()
