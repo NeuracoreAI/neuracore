@@ -589,6 +589,8 @@ class ACT(NeuracoreModel):
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
+            DataType.END_EFFECTOR_POSES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.RGB_IMAGE,
         ]
 
@@ -599,4 +601,9 @@ class ACT(NeuracoreModel):
         Returns:
             list[DataType]: List of supported output data types
         """
-        return [DataType.JOINT_TARGET_POSITIONS]
+        return [
+            DataType.JOINT_TARGET_POSITIONS,
+            DataType.JOINT_POSITIONS,
+            DataType.END_EFFECTOR_POSES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        ]

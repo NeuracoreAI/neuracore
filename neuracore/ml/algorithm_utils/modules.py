@@ -126,8 +126,8 @@ class PoseEncoder(nn.Module):
         super().__init__()
         self.max_poses = max_poses
 
-        # Each pose is 6DOF (x, y, z, rx, ry, rz)
-        pose_dim = 6
+        # Each pose is 7DOF (x, y, z, qx, qy, qz, qw)
+        pose_dim = 7
 
         # Pose-wise encoding
         self.pose_encoder = nn.Sequential(
@@ -150,15 +150,15 @@ class PoseEncoder(nn.Module):
         """Forward pass through pose encoder.
 
         Args:
-            x: Pose data of shape (batch, max_poses * 6) - flattened poses
+            x: Pose data of shape (batch, max_poses * 7) - flattened poses
 
         Returns:
             torch.Tensor: Encoded features of shape (batch, output_dim)
         """
         batch_size = x.shape[0]
 
-        # Reshape to individual poses: (batch, max_poses, 6)
-        x = x.view(batch_size, self.max_poses, 6)
+        # Reshape to individual poses: (batch, max_poses, 7)
+        x = x.view(batch_size, self.max_poses, 7)
 
         # Encode each pose individually
         pose_features = []

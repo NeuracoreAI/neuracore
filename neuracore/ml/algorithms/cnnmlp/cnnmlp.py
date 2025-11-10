@@ -119,20 +119,24 @@ class CNNMLP(NeuracoreModel):
             self.feature_dims["joints"] = cnn_output_dim
 
         # End-effector encoder
-        if DataType.END_EFFECTORS in self.model_init_description.input_data_types:
-            self.encoders["end_effectors"] = EndEffectorEncoder(
+        if (
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS
+            in self.model_init_description.input_data_types
+        ):
+            self.encoders["parallel_gripper_open_amounts"] = EndEffectorEncoder(
                 output_dim=cnn_output_dim,
-                max_effectors=self.dataset_description.end_effector_states.max_len,
+                max_effectors=self.dataset_description.parallel_gripper_open_amounts.max_len,
             )
-            self.feature_dims["end_effectors"] = cnn_output_dim
+            self.feature_dims["parallel_gripper_open_amounts"] = cnn_output_dim
 
         # Pose encoder
-        if DataType.POSES in self.model_init_description.input_data_types:
-            self.encoders["poses"] = PoseEncoder(
+        if DataType.END_EFFECTOR_POSES in self.model_init_description.input_data_types:
+            self.encoders["end_effector_poses"] = PoseEncoder(
                 output_dim=cnn_output_dim,
-                max_poses=self.dataset_description.poses.max_len // 6,  # 6DOF per pose
+                max_poses=self.dataset_description.end_effector_poses.max_len
+                // 7,  # 7DOF per pose
             )
-            self.feature_dims["poses"] = cnn_output_dim
+            self.feature_dims["end_effector_poses"] = cnn_output_dim
 
         # Language encoder (simplified - just use embedding)
         if DataType.LANGUAGE in self.model_init_description.input_data_types:
@@ -160,6 +164,12 @@ class CNNMLP(NeuracoreModel):
         self.action_data_type = self.model_init_description.output_data_types[0]
         if DataType.JOINT_TARGET_POSITIONS == self.action_data_type:
             action_data_item_stats = self.dataset_description.joint_target_positions
+        elif DataType.END_EFFECTOR_POSES == self.action_data_type:
+            action_data_item_stats = self.dataset_description.end_effector_poses
+        elif DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS == self.action_data_type:
+            action_data_item_stats = (
+                self.dataset_description.parallel_gripper_open_amounts
+            )
         else:
             action_data_item_stats = self.dataset_description.joint_positions
         self.max_output_size = action_data_item_stats.max_len
@@ -202,6 +212,20 @@ class CNNMLP(NeuracoreModel):
         if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
             state_means.extend(self.dataset_description.joint_torques.mean)
             state_stds.extend(self.dataset_description.joint_torques.std)
+        if (
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS
+            in self.model_init_description.input_data_types
+        ):
+            state_means.extend(
+                self.dataset_description.parallel_gripper_open_amounts.mean
+            )
+            state_stds.extend(
+                self.dataset_description.parallel_gripper_open_amounts.std
+            )
+
+        if DataType.END_EFFECTOR_POSES in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.end_effector_poses.mean)
+            state_stds.extend(self.dataset_description.end_effector_poses.std)
 
         if state_means:
             self.joint_state_mean = self._to_torch_float_tensor(state_means)
@@ -211,11 +235,16 @@ class CNNMLP(NeuracoreModel):
             self.joint_state_std = None
 
         # Action normalization
-        action_data_item_stats = (
-            self.dataset_description.joint_target_positions
-            if self.action_data_type == DataType.JOINT_TARGET_POSITIONS
-            else self.dataset_description.joint_positions
-        )
+        if self.action_data_type == DataType.JOINT_TARGET_POSITIONS:
+            action_data_item_stats = self.dataset_description.joint_target_positions
+        elif self.action_data_type == DataType.END_EFFECTOR_POSES:
+            action_data_item_stats = self.dataset_description.end_effector_poses
+        elif self.action_data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+            action_data_item_stats = (
+                self.dataset_description.parallel_gripper_open_amounts
+            )
+        else:
+            action_data_item_stats = self.dataset_description.joint_positions
         self.action_mean = self._to_torch_float_tensor(action_data_item_stats.mean)
         self.action_std = self._to_torch_float_tensor(action_data_item_stats.std)
 
@@ -358,15 +387,30 @@ class CNNMLP(NeuracoreModel):
                 joint_states = self._preprocess_joint_state(joint_states)
                 features["joints"] = self.encoders["joints"](joint_states)
 
-        # End-effectors
-        if "end_effectors" in self.encoders and batch.end_effectors is not None:
-            ee_data = batch.end_effectors.data * batch.end_effectors.mask
-            features["end_effectors"] = self.encoders["end_effectors"](ee_data)
+        # Parallel gripper open amounts
+        if (
+            "parallel_gripper_open_amounts" in self.encoders
+            and batch.parallel_gripper_open_amounts is not None
+        ):
+            parallel_gripper_open_amounts_data = (
+                batch.parallel_gripper_open_amounts.data
+                * batch.parallel_gripper_open_amounts.mask
+            )
+            features["parallel_gripper_open_amounts"] = self.encoders[
+                "parallel_gripper_open_amounts"
+            ](parallel_gripper_open_amounts_data)
 
-        # Poses
-        if "poses" in self.encoders and batch.poses is not None:
-            pose_data = batch.poses.data * batch.poses.mask
-            features["poses"] = self.encoders["poses"](pose_data)
+        # End-effector poses
+        if (
+            "end_effector_poses" in self.encoders
+            and batch.end_effector_poses is not None
+        ):
+            end_effector_poses_data = (
+                batch.end_effector_poses.data * batch.end_effector_poses.mask
+            )
+            features["end_effector_poses"] = self.encoders["end_effector_poses"](
+                end_effector_poses_data
+            )
 
         return features
 
@@ -471,8 +515,8 @@ class CNNMLP(NeuracoreModel):
             joint_positions=batch.inputs.joint_positions,
             joint_velocities=batch.inputs.joint_velocities,
             joint_torques=batch.inputs.joint_torques,
-            end_effectors=batch.inputs.end_effectors,
-            poses=batch.inputs.poses,
+            end_effector_poses=batch.inputs.end_effector_poses,
+            parallel_gripper_open_amounts=batch.inputs.parallel_gripper_open_amounts,
             rgb_images=batch.inputs.rgb_images,
             depth_images=batch.inputs.depth_images,
             point_clouds=batch.inputs.point_clouds,
@@ -485,9 +529,21 @@ class CNNMLP(NeuracoreModel):
                 batch.outputs.joint_target_positions is not None
             ), "joint_target_positions required"
             action_data = batch.outputs.joint_target_positions.data
-        else:
+        elif self.action_data_type == DataType.END_EFFECTOR_POSES:
+            assert (
+                batch.outputs.end_effector_poses is not None
+            ), "end_effector_poses required"
+            action_data = batch.outputs.end_effector_poses.data
+        elif self.action_data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+            assert (
+                batch.outputs.parallel_gripper_open_amounts is not None
+            ), "parallel_gripper_open_amounts required"
+            action_data = batch.outputs.parallel_gripper_open_amounts.data
+        elif self.action_data_type == DataType.JOINT_POSITIONS:
             assert batch.outputs.joint_positions is not None, "joint_positions required"
             action_data = batch.outputs.joint_positions.data
+        else:
+            raise ValueError(f"Unsupported action data type: {self.action_data_type}")
 
         target_actions = self._preprocess_actions(action_data)
         action_predictions = self._predict_action(inference_sample)
@@ -541,8 +597,8 @@ class CNNMLP(NeuracoreModel):
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
-            DataType.END_EFFECTORS,
-            DataType.POSES,
+            DataType.END_EFFECTOR_POSES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.RGB_IMAGE,
             DataType.DEPTH_IMAGE,
             DataType.POINT_CLOUD,
@@ -557,7 +613,12 @@ class CNNMLP(NeuracoreModel):
         Returns:
             list[DataType]: List of supported output data types
         """
-        return [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]
+        return [
+            DataType.JOINT_TARGET_POSITIONS,
+            DataType.JOINT_POSITIONS,
+            DataType.END_EFFECTOR_POSES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        ]
 
     @staticmethod
     def tokenize_text(text: list[str]) -> tuple[torch.Tensor, torch.Tensor]:

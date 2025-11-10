@@ -51,6 +51,14 @@ def model_init_description_partial() -> ModelInitDescription:
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
         ),
+        end_effector_poses=DataItemStats(
+            mean=np.zeros(7, dtype=float),
+            std=np.ones(7, dtype=float),
+        ),
+        parallel_gripper_open_amounts=DataItemStats(
+            mean=np.zeros(1, dtype=float),
+            std=np.ones(1, dtype=float),
+        ),
         rgb_images=DataItemStats(
             max_len=CAMS,
         ),
@@ -61,9 +69,16 @@ def model_init_description_partial() -> ModelInitDescription:
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
+            DataType.END_EFFECTOR_POSES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.RGB_IMAGE,
         ],
-        output_data_types=[DataType.JOINT_TARGET_POSITIONS],
+        output_data_types=[
+            DataType.JOINT_TARGET_POSITIONS,
+            DataType.JOINT_POSITIONS,
+            DataType.END_EFFECTOR_POSES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        ],
         output_prediction_horizon=PRED_HORIZON,
     )
 
@@ -87,13 +102,13 @@ def model_init_description_full() -> ModelInitDescription:
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
         ),
-        end_effector_states=DataItemStats(
-            mean=np.zeros(1, dtype=float),
-            std=np.ones(1, dtype=float),
-        ),
-        poses=DataItemStats(
+        end_effector_poses=DataItemStats(
             mean=np.zeros(7, dtype=float),
             std=np.ones(7, dtype=float),
+        ),
+        parallel_gripper_open_amounts=DataItemStats(
+            mean=np.zeros(1, dtype=float),
+            std=np.ones(1, dtype=float),
         ),
         custom_data={
             "sensor_data": DataItemStats(
@@ -117,7 +132,12 @@ def model_init_description_full() -> ModelInitDescription:
     return ModelInitDescription(
         dataset_description=dataset_description,
         input_data_types=CNNMLP.get_supported_input_data_types(),
-        output_data_types=[DataType.JOINT_TARGET_POSITIONS],
+        output_data_types=[
+            DataType.JOINT_TARGET_POSITIONS,
+            DataType.JOINT_POSITIONS,
+            DataType.END_EFFECTOR_POSES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        ],
         output_prediction_horizon=PRED_HORIZON,
     )
 
@@ -146,6 +166,14 @@ def sample_batch() -> BatchedTrainingSamples:
             rgb_images=MaskableData(
                 torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
                 torch.ones(BS, CAMS, dtype=torch.float32),
+            ),
+            end_effector_poses=MaskableData(
+                torch.randn(BS, 7, dtype=torch.float32),
+                torch.ones(BS, 7, dtype=torch.float32),
+            ),
+            parallel_gripper_open_amounts=MaskableData(
+                torch.randn(BS, 1, dtype=torch.float32),
+                torch.ones(BS, 1, dtype=torch.float32),
             ),
         ),
         outputs=BatchedData(
@@ -209,7 +237,19 @@ def sample_batch_full() -> BatchedTrainingSamples:
             joint_target_positions=MaskableData(
                 torch.randn(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
                 torch.ones(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
-            )
+            ),
+            joint_positions=MaskableData(
+                torch.randn(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
+                torch.ones(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
+            ),
+            end_effector_poses=MaskableData(
+                torch.randn(BS, PRED_HORIZON, 7, dtype=torch.float32),
+                torch.ones(BS, PRED_HORIZON, 7, dtype=torch.float32),
+            ),
+            parallel_gripper_open_amounts=MaskableData(
+                torch.randn(BS, PRED_HORIZON, 1, dtype=torch.float32),
+                torch.ones(BS, PRED_HORIZON, 1, dtype=torch.float32),
+            ),
         ),
         output_prediction_mask=torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
     )
@@ -233,6 +273,14 @@ def sample_inference_batch() -> BatchedInferenceSamples:
         rgb_images=MaskableData(
             torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
             torch.ones(BS, CAMS, dtype=torch.float32),
+        ),
+        end_effector_poses=MaskableData(
+            torch.randn(BS, 7, dtype=torch.float32),
+            torch.ones(BS, 7, dtype=torch.float32),
+        ),
+        parallel_gripper_open_amounts=MaskableData(
+            torch.randn(BS, 1, dtype=torch.float32),
+            torch.ones(BS, 1, dtype=torch.float32),
         ),
     )
 

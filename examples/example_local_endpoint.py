@@ -31,7 +31,7 @@ def main():
     onscreen_render = True
     render_cam_name = "angle"
     obs_camera_names = ["angle"]
-    num_rollouts = 10
+    num_rollouts = 40
 
     for episode_idx in range(num_rollouts):
         print(f"{episode_idx=}")
