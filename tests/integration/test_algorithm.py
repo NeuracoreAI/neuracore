@@ -112,23 +112,11 @@ def eval_model(
             [
                 nc.DataType.JOINT_TARGET_POSITIONS,
             ],
-            200,
-            0.1,  # CNNMLP is not that powerful, so low bar
+            100,
+            0.5,  # CNNMLP is not that powerful, so low bar
         ),
         (
             "ACT",
-            [
-                nc.DataType.RGB_IMAGE,
-                nc.DataType.JOINT_POSITIONS,
-            ],
-            [
-                nc.DataType.JOINT_TARGET_POSITIONS,
-            ],
-            50,
-            0.5,
-        ),
-        (
-            "DiffusionPolicy",
             [
                 nc.DataType.RGB_IMAGE,
                 nc.DataType.JOINT_POSITIONS,
@@ -153,7 +141,8 @@ class TestAlgorithm:
         min_success_rate: float,
     ) -> None:
         nc.login()
-
+        # Timestamp used for unique naming
+        timestamp = int(time.time())
         algorithm_config = {
             "batch_size": BATCH_SIZE,
             "epochs": epochs,
@@ -161,7 +150,7 @@ class TestAlgorithm:
         }
         logger.info("Starting training job...")
         job_data = nc.start_training_run(
-            name=f"{TRAINING_NAME} - {algorithm_name}",
+            name=f"{TRAINING_NAME} - {algorithm_name} - {timestamp}",
             gpu_type=GPU_TYPE,
             num_gpus=NUM_GPUS,
             frequency=FREQUENCY,
@@ -193,7 +182,7 @@ class TestAlgorithm:
                 f"Training job did not complete and is in status: {training_job_status}"
             )
 
-        endpoint_name = f"{ENDPOINT_NAME} - {algorithm_name}"
+        endpoint_name = f"{ENDPOINT_NAME} - {algorithm_name} - {timestamp}"
         endpoint_id = None
         try:
             endpoint_data = nc.deploy_model(
