@@ -171,6 +171,7 @@ siglip
 solimp
 solref
 squaredcos
+softmax
 staticmethod
 targetbody
 teleop
