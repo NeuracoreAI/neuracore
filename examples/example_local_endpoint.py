@@ -40,6 +40,13 @@ def save_frames_to_video(
 
 
 def main():
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     nc.login()
     nc.connect_robot(
         robot_name="Mujoco VX300s",
