@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import av
@@ -7,6 +8,8 @@ from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, BOX_POSE, make_sim_e
 import neuracore as nc
 
 TRAINING_JOB_NAME = "MyTrainingJob"
+
+logger = logging.getLogger(__name__)
 
 
 def save_frames_to_video(
@@ -70,7 +73,7 @@ def main():
         video_output_dir.mkdir(exist_ok=True)
 
     for episode_idx in range(num_rollouts):
-        print(f"{episode_idx=}")
+        logger.info(f"{episode_idx=}")
 
         # Setup the environment
         env = make_sim_env()
@@ -124,7 +127,7 @@ def main():
                 plt.pause(0.002)
 
             if done:
-                print(f"Episode {episode_idx} done")
+                logger.info(f"Episode {episode_idx} done")
                 break
         if reward == 4:
             print(f"Episode {episode_idx} successful.")
