@@ -1,9 +1,39 @@
+from pathlib import Path
+
+import av
 import matplotlib.pyplot as plt
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, BOX_POSE, make_sim_env
 
 import neuracore as nc
 
 TRAINING_JOB_NAME = "MyTrainingJob"
+
+
+def save_frames_to_video(
+    frames, output_path: Path, width: int, height: int, fps: int = 30
+):
+    """Save a list of RGB frames to an MP4 video file.
+
+    Args:
+        frames: List of numpy arrays of shape (H, W, 3) with dtype uint8
+        output_path: Path to save the video file
+        width: Video width in pixels
+        height: Video height in pixels
+        fps: Frames per second for the output video
+    """
+    with av.open(str(output_path), mode="w", format="mp4") as container:
+        stream = container.add_stream("libx264", rate=fps)
+        stream.width = width
+        stream.height = height
+
+        for frame_array in frames:
+            frame = av.VideoFrame.from_ndarray(frame_array, format="rgb24")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+
+        # Flush encoder
+        for packet in stream.encode(None):
+            container.mux(packet)
 
 
 def main():
@@ -29,9 +59,15 @@ def main():
     # policy.set_checkpoint(epoch=-1)
 
     onscreen_render = True
+    save_video = True  # Set to True to save video files
+    video_output_dir = Path("videos")  # Directory to save videos
     render_cam_name = "angle"
     obs_camera_names = ["angle"]
     num_rollouts = 10
+
+    # Create video output directory if saving videos
+    if save_video:
+        video_output_dir.mkdir(exist_ok=True)
 
     for episode_idx in range(num_rollouts):
         print(f"{episode_idx=}")
@@ -47,6 +83,15 @@ def main():
             ax = plt.subplot()
             plt_img = ax.imshow(obs.cameras[render_cam_name].rgb)
             plt.ion()
+
+        # Collect frames for video saving
+        frames = [] if save_video else None
+        if save_video:
+            # Get frame dimensions from first observation
+            first_frame = obs.cameras[render_cam_name].rgb
+            frame_height, frame_width = first_frame.shape[:2]
+            # Add initial frame
+            frames.append(first_frame.copy())
 
         horizon = 1
         # Run episode
@@ -69,6 +114,10 @@ def main():
                 horizon = len(actions)
             a = actions[idx_in_horizon]
             obs, reward, done = env.step(a)
+
+            # Collect frame for video
+            if save_video:
+                frames.append(obs.cameras[render_cam_name].rgb.copy())
 
             if onscreen_render:
                 plt_img.set_data(obs.cameras[render_cam_name].rgb)
