@@ -8,9 +8,9 @@ algorithm:
   unet_diffusion_step_embed_dim: 128
   spatial_softmax_num_keypoints: 32
   unet_use_film_scale_modulation: true
-  noise_scheduler_type: "DDPM"
+  noise_scheduler_type: "DDIM"
   num_train_timesteps: 100
-  num_inference_steps: 100
+  num_inference_steps: 25
   beta_start: 0.0001
   beta_end: 0.02
   beta_schedule: "squaredcos_cap_v2"
