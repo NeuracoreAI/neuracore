@@ -177,7 +177,6 @@ class DiffusionPolicy(NeuracoreModel):
                 self.joint_state_mean = None
                 self.joint_state_std = None
 
-            # Always register target stats for mean/std normalization
             self.register_buffer(
                 "joint_target_mean",
                 self._to_torch_float_tensor(
@@ -188,6 +187,37 @@ class DiffusionPolicy(NeuracoreModel):
                 "joint_target_std",
                 self._to_torch_float_tensor(
                     self.dataset_description.joint_target_positions.std
+                ),
+            )
+        elif self.normalization_type == "min_max":
+            state_min = np.concatenate([
+                self.dataset_description.joint_positions.min,
+                self.dataset_description.joint_velocities.min,
+                self.dataset_description.joint_torques.min,
+            ])
+            state_max = np.concatenate([
+                self.dataset_description.joint_positions.max,
+                self.dataset_description.joint_velocities.max,
+                self.dataset_description.joint_torques.max,
+            ])
+            # Register as buffers so they move with the model
+            self.register_buffer(
+                "joint_state_min", self._to_torch_float_tensor(state_min)
+            )
+            self.register_buffer(
+                "joint_state_max", self._to_torch_float_tensor(state_max)
+            )
+
+            self.register_buffer(
+                "joint_target_min",
+                self._to_torch_float_tensor(
+                    self.dataset_description.joint_target_positions.min
+                ),
+            )
+            self.register_buffer(
+                "joint_target_max",
+                self._to_torch_float_tensor(
+                    self.dataset_description.joint_target_positions.max
                 ),
             )
 
