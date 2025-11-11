@@ -44,7 +44,7 @@ class ACTImageEncoder(nn.Module):
         Returns:
             nn.Module: ResNet18 backbone without classification layers
         """
-        resnet = getattr(models, "resnet18")(pretrained=True)
+        resnet = models.get_model("resnet18", weights="DEFAULT")
         return nn.Sequential(*list(resnet.children())[:-2])
 
     def reset_parameters(self) -> None:

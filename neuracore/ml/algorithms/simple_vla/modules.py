@@ -41,7 +41,7 @@ class ImageEncoder(nn.Module):
         Returns:
             nn.Module: ResNet backbone without final classification layers
         """
-        resnet = getattr(models, backbone_name)(pretrained=True)
+        resnet = models.get_model(backbone_name, weights="DEFAULT")
         return nn.Sequential(*list(resnet.children())[:-1])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
