@@ -2,14 +2,14 @@
 algorithm:
   _target_: neuracore.ml.algorithms.diffusion_policy.diffusion_policy.DiffusionPolicy
   hidden_dim: 256
-  unet_down_dims: [512, 1024, 2048]
+  unet_down_dims: [256, 512, 1024]
   unet_kernel_size: 5
   unet_n_groups: 8
   unet_diffusion_step_embed_dim: 128
   unet_use_film_scale_modulation: true
-  noise_scheduler_type: "DDPM"
+  noise_scheduler_type: "DDIM"
   num_train_timesteps: 100
-  num_inference_steps: 100
+  num_inference_steps: 25
   beta_start: 0.0001
   beta_end: 0.02
   beta_schedule: "squaredcos_cap_v2"
@@ -17,5 +17,5 @@ algorithm:
   clip_sample_range: 1.0
   lr: 1e-4
   lr_backbone: 1e-5
-  weight_decay: 1e-4
+  weight_decay: 1e-6
   prediction_type: "epsilon"

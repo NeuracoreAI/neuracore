@@ -54,7 +54,7 @@ class DiffusionPolicy(NeuracoreModel):
         clip_sample_range: float = 1.0,
         lr: float = 1e-4,
         lr_backbone: float = 1e-5,
-        weight_decay: float = 1e-4,
+        weight_decay: float = 1e-6,
         prediction_type: str = "epsilon",
     ):
         """Initialize the Diffusion Policy model.

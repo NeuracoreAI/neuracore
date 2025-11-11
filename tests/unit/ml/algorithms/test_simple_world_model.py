@@ -24,14 +24,13 @@ from neuracore.ml.algorithms.simple_world_model.simple_world_model import (
     SimpleWorldModel,
 )
 from neuracore.ml.core.ml_types import BatchedData
-from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.validate import run_validation
 
 BS = 2
 CAMS = 1
 JOINT_POSITION_DIM = 32
 PRED_HORIZON = 10
-DEVICE = get_default_device()
+DEVICE = torch.get_default_device()
 
 
 @pytest.fixture
