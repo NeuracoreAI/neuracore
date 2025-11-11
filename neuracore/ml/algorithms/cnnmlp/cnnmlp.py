@@ -47,7 +47,6 @@ class CNNMLP(NeuracoreModel):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
-        device: torch.device,
         image_backbone: str = "resnet18",
         hidden_dim: int = 512,
         cnn_output_dim: int = 512,
@@ -60,7 +59,6 @@ class CNNMLP(NeuracoreModel):
 
         Args:
             model_init_description: Model initialization parameters
-            device: Torch device to run the model on (CPU or GPU, or MPS)
             image_backbone: Backbone architecture for image encoders
             hidden_dim: Hidden dimension for MLP layers
             cnn_output_dim: Output dimension for CNN encoders
@@ -69,7 +67,7 @@ class CNNMLP(NeuracoreModel):
             lr_backbone: Learning rate for CNN backbone
             weight_decay: Weight decay for optimizer
         """
-        super().__init__(model_init_description, device)
+        super().__init__(model_init_description)
         self.image_backbone = image_backbone
         self.hidden_dim = hidden_dim
         self.cnn_output_dim = cnn_output_dim
@@ -209,8 +207,12 @@ class CNNMLP(NeuracoreModel):
             state_stds.extend(self.dataset_description.joint_torques.std)
 
         if state_means:
-            self.joint_state_mean = self._to_torch_float_tensor(state_means)
-            self.joint_state_std = self._to_torch_float_tensor(state_stds)
+            self.register_buffer(
+                "joint_state_mean", self._to_torch_float_tensor(state_means)
+            )
+            self.register_buffer(
+                "joint_state_std", self._to_torch_float_tensor(state_stds)
+            )
         else:
             self.joint_state_mean = None
             self.joint_state_std = None
@@ -221,8 +223,12 @@ class CNNMLP(NeuracoreModel):
             if self.action_data_type == DataType.JOINT_TARGET_POSITIONS
             else self.dataset_description.joint_positions
         )
-        self.action_mean = self._to_torch_float_tensor(action_data_item_stats.mean)
-        self.action_std = self._to_torch_float_tensor(action_data_item_stats.std)
+        self.register_buffer(
+            "action_mean", self._to_torch_float_tensor(action_data_item_stats.mean)
+        )
+        self.register_buffer(
+            "action_std", self._to_torch_float_tensor(action_data_item_stats.std)
+        )
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
         """Convert list of floats to torch tensor on the correct device.

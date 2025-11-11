@@ -259,7 +259,7 @@ def mock_dataloader(sample_batch):
 def test_model_construction(
     model_init_description_partial: ModelInitDescription, model_config: dict
 ):
-    model = CNNMLP(model_init_description_partial, DEVICE, **model_config)
+    model = CNNMLP(model_init_description_partial, **model_config)
     model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
 
@@ -269,7 +269,7 @@ def test_model_forward(
     model_config: dict,
     sample_inference_batch: BatchedInferenceSamples,
 ):
-    model = CNNMLP(model_init_description_partial, DEVICE, **model_config)
+    model = CNNMLP(model_init_description_partial, **model_config)
     model = model.to(DEVICE)
     sample_inference_batch = sample_inference_batch.to(DEVICE)
     output = model(sample_inference_batch)
@@ -287,7 +287,7 @@ def test_model_backward(
     model_config: dict,
     sample_batch: BatchedTrainingSamples,
 ):
-    model = CNNMLP(model_init_description_partial, DEVICE, **model_config)
+    model = CNNMLP(model_init_description_partial, **model_config)
     model = model.to(DEVICE)
     sample_batch = sample_batch.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_batch)
@@ -310,7 +310,7 @@ def test_model_backward_full_description(
     model_config: dict,
     sample_batch_full: BatchedTrainingSamples,
 ):
-    model = CNNMLP(model_init_description_full, DEVICE, **model_config)
+    model = CNNMLP(model_init_description_full, **model_config)
     model = model.to(DEVICE)
     sample_batch_full = sample_batch_full.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_batch_full)

@@ -14,7 +14,6 @@ import os
 import time
 from typing import Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -54,7 +53,6 @@ class Pi0(NeuracoreModel):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
-        device: torch.device,
         vlm_expert_intermediate_size: int = 16384,
         vlm_expert_num_heads: int = 8,
         vlm_expert_num_kv_heads: int = 1,
@@ -78,7 +76,6 @@ class Pi0(NeuracoreModel):
 
         Args:
             model_init_description: Model initialization configuration.
-            device: Torch device to run the model on (CPU or GPU, or MPS).
             vlm_expert_intermediate_size: Intermediate size of the VLM expert.
             vlm_expert_num_heads: Number of attention heads in the VLM expert.
             vlm_expert_num_kv_heads: Number of key-value heads in the VLM expert.
@@ -98,7 +95,7 @@ class Pi0(NeuracoreModel):
             weight_decay: Weight decay for the model.
             dtype: Data type for model parameters and computations.
         """
-        super().__init__(model_init_description, device)
+        super().__init__(model_init_description)
 
         if not os.environ.get("HF_TOKEN"):
             raise ValueError(
@@ -125,7 +122,7 @@ class Pi0(NeuracoreModel):
 
         self.vlm = PaliGemmaForConditionalGeneration.from_pretrained(
             VLM_BACKBONE, dtype=self.dtype, attn_implementation="eager"
-        ).to(self.device)
+        )
         self.vlm_processor = AutoProcessor.from_pretrained(
             VLM_BACKBONE, padding_side="right"
         )
@@ -188,21 +185,36 @@ class Pi0(NeuracoreModel):
             T.Resize((224, 224)),
         )
 
-        state_mean = np.concatenate([
-            self.dataset_description.joint_positions.mean,
-            self.dataset_description.joint_velocities.mean,
-            self.dataset_description.joint_torques.mean,
-        ])
-        state_std = np.concatenate([
-            self.dataset_description.joint_positions.std,
-            self.dataset_description.joint_velocities.std,
-            self.dataset_description.joint_torques.std,
-        ])
-        # Register as buffers so they move with the model
-        self.register_buffer(
-            "joint_state_mean", self._to_torch_float_tensor(state_mean)
-        )
-        self.register_buffer("joint_state_std", self._to_torch_float_tensor(state_std))
+        # Normalization statistics
+        self._setup_normalization_stats()
+
+    def _setup_normalization_stats(self) -> None:
+        """Setup normalization statistics for different data types."""
+        # Joint state normalization
+        state_means = []
+        state_stds = []
+
+        if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_positions.mean)
+            state_stds.extend(self.dataset_description.joint_positions.std)
+        if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_velocities.mean)
+            state_stds.extend(self.dataset_description.joint_velocities.std)
+        if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_torques.mean)
+            state_stds.extend(self.dataset_description.joint_torques.std)
+
+        if state_means:
+            # Register as buffers so they move with the model
+            self.register_buffer(
+                "joint_state_mean", self._to_torch_float_tensor(state_means)
+            )
+            self.register_buffer(
+                "joint_state_std", self._to_torch_float_tensor(state_stds)
+            )
+        else:
+            self.joint_state_mean = None
+            self.joint_state_std = None
         self.register_buffer(
             "joint_target_mean",
             self._to_torch_float_tensor(
@@ -217,7 +229,7 @@ class Pi0(NeuracoreModel):
         )
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.Tensor:
-        """Convert list of floats to torch tensor."""
+        """Convert list of floats to torch tensor on the correct device."""
         return torch.tensor(data, dtype=torch.float32, device=self.device)
 
     def _preprocess_joint_state(

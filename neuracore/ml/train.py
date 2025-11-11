@@ -77,7 +77,6 @@ def get_model_and_algorithm_config(
         model = hydra.utils.instantiate(
             cfg.algorithm,
             model_init_description=model_init_description,
-            device=device,
             **algorithm_config,
         )
     elif cfg.algorithm_id is not None:
@@ -94,7 +93,6 @@ def get_model_and_algorithm_config(
         model_class = algorithm_loader.load_model()
         model = model_class(
             model_init_description=model_init_description,
-            device=device,
             **algorithm_config,
         )
     else:
