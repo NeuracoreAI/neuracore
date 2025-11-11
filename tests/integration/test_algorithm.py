@@ -112,8 +112,8 @@ def eval_model(
             [
                 nc.DataType.JOINT_TARGET_POSITIONS,
             ],
-            100,
-            0.5,  # CNNMLP is not that powerful, so low bar
+            50,
+            0.5,
         ),
         (
             "ACT",
