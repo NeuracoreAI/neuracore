@@ -87,6 +87,8 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             self.dataset_description.joint_positions = DataItemStats(
                 mean=np.zeros(6),
                 std=np.ones(6),
+                min=-np.ones(6),
+                max=np.ones(6),
                 max_len=6,
                 robot_to_ncdata_keys={self.robot.id: [f"jps_{i}" for i in range(6)]},
             )
@@ -94,6 +96,8 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             self.dataset_description.joint_velocities = DataItemStats(
                 mean=np.zeros(6),
                 std=np.ones(6),
+                min=-np.ones(6),
+                max=np.ones(6),
                 max_len=6,
                 robot_to_ncdata_keys={self.robot.id: [f"jvs_{i}" for i in range(6)]},
             )
@@ -101,6 +105,8 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             self.dataset_description.joint_torques = DataItemStats(
                 mean=np.zeros(6),
                 std=np.ones(6),
+                min=-np.ones(6),
+                max=np.ones(6),
                 max_len=6,
                 robot_to_ncdata_keys={self.robot.id: [f"jts_{i}" for i in range(6)]},
             )
@@ -108,6 +114,8 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             self.dataset_description.joint_target_positions = DataItemStats(
                 mean=np.zeros(7),
                 std=np.ones(7),
+                min=-np.ones(7),
+                max=np.ones(7),
                 max_len=7,
                 robot_to_ncdata_keys={self.robot.id: [f"jtps_{i}" for i in range(7)]},
             )
@@ -186,12 +194,16 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 "sensor_1": DataItemStats(
                     mean=np.zeros(10),
                     std=np.ones(10),
+                    min=-np.ones(10),
+                    max=np.ones(10),
                     max_len=10,
                     robot_to_ncdata_keys={self.robot.id: ["sensor_1"]},
                 ),
                 "sensor_2": DataItemStats(
                     mean=np.zeros(5),
                     std=np.ones(5),
+                    min=-np.ones(5),
+                    max=np.ones(5),
                     max_len=5,
                     robot_to_ncdata_keys={self.robot.id: ["sensor_2"]},
                 ),

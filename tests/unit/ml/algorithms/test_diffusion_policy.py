@@ -39,18 +39,26 @@ def model_init_description() -> ModelInitDescription:
         joint_positions=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
+            min=-np.ones(JOINT_POSITION_DIM, dtype=float),
+            max=np.ones(JOINT_POSITION_DIM, dtype=float),
         ),
         joint_target_positions=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
+            min=-np.ones(JOINT_POSITION_DIM, dtype=float),
+            max=np.ones(JOINT_POSITION_DIM, dtype=float),
         ),
         joint_velocities=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
+            min=-np.ones(JOINT_POSITION_DIM, dtype=float),
+            max=np.ones(JOINT_POSITION_DIM, dtype=float),
         ),
         joint_torques=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
+            min=-np.ones(JOINT_POSITION_DIM, dtype=float),
+            max=np.ones(JOINT_POSITION_DIM, dtype=float),
         ),
         rgb_images=DataItemStats(
             max_len=CAMS,

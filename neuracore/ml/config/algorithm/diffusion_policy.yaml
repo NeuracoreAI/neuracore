@@ -19,3 +19,4 @@ algorithm:
   lr_backbone: 1e-5
   weight_decay: 1e-6
   prediction_type: "epsilon"
+  normalization_type: "mean_std"  # Options: "mean_std" or "min_max"
