@@ -21,6 +21,7 @@ from neuracore.ml import (
     BatchedTrainingSamples,
     MaskableData,
 )
+from neuracore.ml.algorithms.simple_vla.simple_vla import SimpleVLA
 from neuracore.ml.core.ml_types import BatchedData
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.validate import run_validation
@@ -36,6 +37,7 @@ JOINT_POSITION_DIM = 32
 OUTPUT_PRED_DIM = JOINT_POSITION_DIM
 PRED_HORIZON = 10
 LANGUAGE_MAX_LEN = 512  # Maximum length for language tokens
+LANGUAGE_MAX_LEN = 512  # Maximum length for language tokens
 DEVICE = get_default_device()
 
 
@@ -43,23 +45,23 @@ DEVICE = get_default_device()
 def model_init_description() -> ModelInitDescription:
     dataset_description = DatasetDescription(
         joint_positions=DataItemStats(
-            mean=list(np.zeros(JOINT_POSITION_DIM, dtype=float)),
-            std=list(np.ones(JOINT_POSITION_DIM, dtype=float)),
+            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
+            std=np.ones(JOINT_POSITION_DIM, dtype=float),
             max_len=JOINT_POSITION_DIM,
         ),
         joint_target_positions=DataItemStats(
-            mean=list(np.zeros(JOINT_POSITION_DIM, dtype=float)),
-            std=list(np.ones(JOINT_POSITION_DIM, dtype=float)),
+            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
+            std=np.ones(JOINT_POSITION_DIM, dtype=float),
             max_len=JOINT_POSITION_DIM,
         ),
         joint_velocities=DataItemStats(
-            mean=list(np.zeros(JOINT_POSITION_DIM, dtype=float)),
-            std=list(np.ones(JOINT_POSITION_DIM, dtype=float)),
+            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
+            std=np.ones(JOINT_POSITION_DIM, dtype=float),
             max_len=JOINT_POSITION_DIM,
         ),
         joint_torques=DataItemStats(
-            mean=list(np.zeros(JOINT_POSITION_DIM, dtype=float)),
-            std=list(np.ones(JOINT_POSITION_DIM, dtype=float)),
+            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
+            std=np.ones(JOINT_POSITION_DIM, dtype=float),
             max_len=JOINT_POSITION_DIM,
         ),
         rgb_images=DataItemStats(
