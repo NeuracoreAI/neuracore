@@ -12,12 +12,7 @@ from concurrent.futures import Future
 from typing import Dict, Optional, Tuple
 
 from aiohttp import ClientSession
-from typing_extensions import TypeAlias
-
-from neuracore.core.auth import Auth, get_auth
-from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import API_URL
-from neuracore.core.nc_types import (
+from neuracore_types import (
     AvailableRobotCapacityUpdate,
     AvailableRobotInstance,
     HandshakeMessage,
@@ -26,6 +21,11 @@ from neuracore.core.nc_types import (
     RobotInstanceIdentifier,
     VideoFormat,
 )
+from typing_extensions import TypeAlias
+
+from neuracore.core.auth import Auth, get_auth
+from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.const import API_URL
 from neuracore.core.streaming.base_sse_consumer import (
     BaseSSEConsumer,
     EventSourceConfig,

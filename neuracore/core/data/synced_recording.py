@@ -10,13 +10,13 @@ import av
 import numpy as np
 import requests
 import wget
+from neuracore_types import CameraData, DataType, SyncedData, SyncPoint
 from PIL import Image
 
 from neuracore.core.data.cache_manager import CacheManager
 
 from ..auth import get_auth
 from ..const import API_URL
-from ..nc_types import CameraData, DataType, SyncedData, SyncPoint
 from ..utils.depth_utils import rgb_to_depth
 
 logger = logging.getLogger(__name__)

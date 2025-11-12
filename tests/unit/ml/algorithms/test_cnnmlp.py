@@ -6,14 +6,14 @@ import numpy as np
 import pytest
 import torch
 import torch.nn as nn
-
-from neuracore.core.nc_types import (
+from neuracore_types import (
     DataItemStats,
     DatasetDescription,
     DataType,
     ModelInitDescription,
     ModelPrediction,
 )
+
 from neuracore.ml import (
     BatchedInferenceSamples,
     BatchedTrainingOutputs,

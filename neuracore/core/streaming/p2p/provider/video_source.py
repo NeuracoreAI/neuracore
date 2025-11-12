@@ -22,8 +22,8 @@ from uuid import uuid4
 import av
 import numpy as np
 from aiortc import MediaStreamTrack
+from neuracore_types import CameraData
 
-from neuracore.core.nc_types import CameraData
 from neuracore.core.streaming.p2p.provider.json_source import JSONSource
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 

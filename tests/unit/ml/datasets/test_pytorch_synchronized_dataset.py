@@ -10,10 +10,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
-from PIL import Image
-
-from neuracore.core.data.synced_dataset import SynchronizedDataset
-from neuracore.core.nc_types import (
+from neuracore_types import (
     CameraData,
     CustomData,
     DataItemStats,
@@ -26,6 +23,9 @@ from neuracore.core.nc_types import (
     PoseData,
     SyncPoint,
 )
+from PIL import Image
+
+from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.ml import BatchedTrainingSamples, MaskableData
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,

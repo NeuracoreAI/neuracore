@@ -12,6 +12,7 @@ from abc import ABC
 from typing import Any, List, Optional
 
 import numpy as np
+from neuracore_types import CameraData, NCData
 
 from neuracore.core.streaming.bucket_uploaders.streaming_file_uploader import (
     StreamingJsonUploader,
@@ -20,7 +21,6 @@ from neuracore.core.streaming.bucket_uploaders.streaming_video_uploader import (
     StreamingVideoUploader,
 )
 
-from ..nc_types import CameraData, NCData
 from ..utils.depth_utils import depth_to_rgb
 
 logger = logging.getLogger(__name__)

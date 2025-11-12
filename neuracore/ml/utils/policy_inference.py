@@ -9,12 +9,7 @@ import numpy as np
 import requests
 import torch
 import torchvision.transforms as T
-from PIL import Image
-
-from neuracore.api.globals import GlobalSingleton
-from neuracore.core.auth import get_auth
-from neuracore.core.const import API_URL
-from neuracore.core.nc_types import (
+from neuracore_types import (
     CameraData,
     CustomData,
     DataItemStats,
@@ -29,6 +24,11 @@ from neuracore.core.nc_types import (
     PoseData,
     SyncPoint,
 )
+from PIL import Image
+
+from neuracore.api.globals import GlobalSingleton
+from neuracore.core.auth import get_auth
+from neuracore.core.const import API_URL
 from neuracore.core.utils.download import download_with_progress
 from neuracore.ml import BatchedInferenceSamples, MaskableData
 from neuracore.ml.utils.device_utils import get_default_device

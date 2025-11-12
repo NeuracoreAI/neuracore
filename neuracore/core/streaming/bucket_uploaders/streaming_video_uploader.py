@@ -17,12 +17,12 @@ from typing import Callable, Optional
 import av
 import numpy as np
 import requests
+from neuracore_types import CameraData
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import EncodingError
-from neuracore.core.nc_types import CameraData
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 
 from .bucket_uploader import BucketUploader

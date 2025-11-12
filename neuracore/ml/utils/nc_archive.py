@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import torch
+from neuracore_types import ModelInitDescription
 
-from neuracore.core.nc_types import ModelInitDescription
 from neuracore.ml.core.neuracore_model import NeuracoreModel
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.device_utils import get_default_device

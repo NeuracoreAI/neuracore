@@ -112,7 +112,7 @@ nc.start_live_data(robot_name="MyRobot", instance=0)
 dataset = nc.get_dataset("My Robot Dataset")
 
 # Synchronize data types at a specific frequency
-from neuracore.core.nc_types import DataType
+from neuracore_types import DataType
 
 synced_dataset = dataset.synchronize(
     frequency=10,  # Hz
@@ -295,7 +295,7 @@ Create custom algorithms by extending the `NeuracoreModel` class:
 ```python
 import torch
 from neuracore.ml import NeuracoreModel, BatchedInferenceSamples, BatchedTrainingSamples, BatchedTrainingOutputs
-from neuracore.core.nc_types import DataType, ModelInitDescription, ModelPrediction
+from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 
 class MyCustomAlgorithm(NeuracoreModel):
     def __init__(self, model_init_description: ModelInitDescription, **kwargs):

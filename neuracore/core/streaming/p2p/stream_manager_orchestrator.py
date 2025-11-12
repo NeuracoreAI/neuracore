@@ -9,10 +9,10 @@ import asyncio
 from typing import Optional
 
 from aiohttp import ClientSession, ClientTimeout
+from neuracore_types import RobotInstanceIdentifier
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.nc_types import RobotInstanceIdentifier
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.base_p2p_connection_manager import (
     BaseP2PStreamManager,

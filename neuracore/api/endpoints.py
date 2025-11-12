@@ -9,6 +9,7 @@ import json
 from typing import Optional
 
 import requests
+from neuracore_types import DataType, SyncPoint
 
 from neuracore.api.core import _get_robot
 from neuracore.core.auth import get_auth
@@ -24,7 +25,6 @@ from neuracore.core.get_latest_sync_point import (
 from neuracore.core.get_latest_sync_point import (
     get_latest_sync_point as _get_latest_sync_point,
 )
-from neuracore.core.nc_types import DataType, SyncPoint
 
 
 def policy(

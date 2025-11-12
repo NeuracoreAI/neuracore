@@ -3,10 +3,10 @@
 from unittest.mock import patch
 
 import pytest
+from neuracore_types import DatasetDescription, DataType
 
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
-from neuracore.core.nc_types import DatasetDescription, DataType
 
 
 class TestSynchronizedDataset:

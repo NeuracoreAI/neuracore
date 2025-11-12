@@ -21,6 +21,7 @@ from typing import Optional
 
 import numpy as np
 import requests
+from neuracore_types import DataType, SyncPoint
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.config.get_current_org import get_current_org
@@ -37,7 +38,6 @@ from neuracore.core.utils.server import (
 from .auth import get_auth
 from .const import API_URL
 from .exceptions import EndpointError
-from .nc_types import DataType, SyncPoint
 
 logger = logging.getLogger(__name__)
 

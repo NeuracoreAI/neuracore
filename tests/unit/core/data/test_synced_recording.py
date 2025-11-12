@@ -5,11 +5,11 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+from neuracore_types import SyncPoint
 from PIL import Image
 
 from neuracore.core.const import API_URL
 from neuracore.core.data.synced_recording import SynchronizedRecording
-from neuracore.core.nc_types import SyncPoint
 
 
 class TestSynchronizedRecording:
@@ -62,7 +62,7 @@ class TestSynchronizedRecording:
 
     def test_init_with_data_types(self, dataset_mock, mock_auth_requests):
         """Test initialization with specific data types."""
-        from neuracore.core.nc_types import DataType
+        from neuracore_types import DataType
 
         data_types = [DataType.RGB_IMAGE, DataType.DEPTH_IMAGE]
         synced = SynchronizedRecording(

@@ -24,7 +24,7 @@ Your model must inherit from `NeuracoreModel` and implement several required met
 ```python
 import torch
 import torch.nn as nn
-from neuracore.core.nc_types import DataType, ModelInitDescription, ModelPrediction
+from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 from neuracore.ml import (
     BatchedInferenceSamples,
     BatchedTrainingOutputs,
