@@ -366,8 +366,7 @@ class DistributedTrainer:
             checkpoint_to_remove = (
                 self.checkpoint_dir / f"checkpoint_{checkpoint_epoch_to_remove}.pt"
             )
-            if checkpoint_to_remove.exists():
-                checkpoint_to_remove.unlink()
+            self.storage_handler.delete_checkpoint(checkpoint_to_remove)
 
         logger.info("... checkpoint saved!")
 
