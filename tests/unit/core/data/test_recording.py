@@ -1,12 +1,12 @@
 """Tests for Recording class."""
 
 import pytest
+from neuracore_types import DataType
 
 import neuracore as nc
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_recording import SynchronizedRecording
 from neuracore.core.exceptions import SynchronizationError
-from neuracore.core.nc_types import DataType
 
 
 class TestRecording:

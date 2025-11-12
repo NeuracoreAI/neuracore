@@ -8,8 +8,7 @@ import time
 
 import numpy as np
 import pytest
-
-from neuracore.core.nc_types import (
+from neuracore_types import (
     CameraData,
     CustomData,
     EndEffectorData,

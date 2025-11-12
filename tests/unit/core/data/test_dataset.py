@@ -454,7 +454,7 @@ class TestDatasetSynchronization:
     ):
         """Test synchronizing with specific data types."""
 
-        from neuracore.core.nc_types import DataType
+        from neuracore_types import DataType
 
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
 

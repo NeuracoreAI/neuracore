@@ -8,7 +8,8 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Optional
 
-from neuracore.core.nc_types import HandshakeMessage, OpenConnectionDetails
+from neuracore_types import HandshakeMessage, OpenConnectionDetails
+
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 
 logger = logging.getLogger(__name__)

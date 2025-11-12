@@ -2,10 +2,11 @@
 
 from typing import TYPE_CHECKING, Optional
 
+from neuracore_types import DataType
+
 from neuracore.core.data.synced_recording import SynchronizedRecording
 
 from ..exceptions import SynchronizationError
-from ..nc_types import DataType
 
 if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset

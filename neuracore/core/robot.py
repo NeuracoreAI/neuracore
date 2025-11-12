@@ -18,9 +18,9 @@ from typing import Optional
 from warnings import warn
 
 import requests
+from neuracore_types import RobotInstanceIdentifier
 
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.nc_types import RobotInstanceIdentifier
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import (
     RecordingStateManager,

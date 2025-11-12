@@ -11,8 +11,8 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 
-from neuracore.core.nc_types import DataType, ModelInitDescription, ModelPrediction
 from neuracore.ml import (
     BatchedInferenceSamples,
     BatchedTrainingOutputs,

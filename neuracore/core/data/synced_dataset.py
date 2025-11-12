@@ -4,11 +4,10 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional, Union, cast
 
+from neuracore_types import DatasetDescription, DataType
 from tqdm import tqdm
 
 from neuracore.core.data.synced_recording import SynchronizedRecording
-
-from ..nc_types import DatasetDescription, DataType
 
 if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset

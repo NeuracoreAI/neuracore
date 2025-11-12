@@ -13,10 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from warnings import filterwarnings, warn
 
 import numpy as np
-
-from neuracore.api.core import _get_robot
-from neuracore.core.exceptions import RobotError
-from neuracore.core.nc_types import (
+from neuracore_types import (
     CameraData,
     CustomData,
     EndEffectorData,
@@ -29,6 +26,9 @@ from neuracore.core.nc_types import (
     SyncPoint,
     TrackKind,
 )
+
+from neuracore.api.core import _get_robot
+from neuracore.core.exceptions import RobotError
 from neuracore.core.robot import Robot
 from neuracore.core.streaming.data_stream import (
     DataStream,

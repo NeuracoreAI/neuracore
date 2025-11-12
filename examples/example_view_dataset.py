@@ -1,9 +1,9 @@
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import numpy as np
+from neuracore_types import DataType, JointData
 
 import neuracore as nc
-from neuracore.core.nc_types import DataType, JointData
 
 
 def visualize_episode(

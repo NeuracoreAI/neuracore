@@ -9,11 +9,11 @@ import base64
 import hashlib
 
 import requests
+from neuracore_types import DataType
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
-from neuracore.core.nc_types import DataType
 
 
 # TODO: Receive num active stream updates from the server with the recording
