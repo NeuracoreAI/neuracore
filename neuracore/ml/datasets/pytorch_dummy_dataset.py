@@ -10,8 +10,8 @@ from typing import Callable, Optional
 
 import numpy as np
 import torch
+from neuracore_types import DataItemStats, DatasetDescription, DataType
 
-from neuracore.core.nc_types import DataItemStats, DatasetDescription, DataType
 from neuracore.core.robot import Robot
 from neuracore.ml import BatchedTrainingSamples, MaskableData
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset

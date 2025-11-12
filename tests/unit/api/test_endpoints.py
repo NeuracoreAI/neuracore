@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
+from neuracore_types import JointData, SyncPoint
 
 import neuracore as nc
 from neuracore.core.const import API_URL
-from neuracore.core.nc_types import JointData, SyncPoint
 
 
 def test_connect_endpoint(

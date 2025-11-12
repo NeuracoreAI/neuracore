@@ -13,10 +13,10 @@ import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from neuracore_types import SyncPoint
 from pydantic import BaseModel
 
 from neuracore.core.exceptions import InsufficientSyncPointError
-from neuracore.core.nc_types import SyncPoint
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 
 logger = logging.getLogger(__name__)

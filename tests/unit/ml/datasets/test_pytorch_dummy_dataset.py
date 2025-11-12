@@ -7,8 +7,8 @@ proper tensor shapes, masking, and collation functionality.
 
 import pytest
 import torch
+from neuracore_types import DataType
 
-from neuracore.core.nc_types import DataType
 from neuracore.ml import BatchedTrainingSamples, MaskableData
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
 

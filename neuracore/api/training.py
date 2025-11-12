@@ -9,13 +9,13 @@ import json
 from typing import Any, Optional, cast
 
 import requests
+from neuracore_types import DataType
 
 from neuracore.core.config.get_current_org import get_current_org
 
 from ..core.auth import get_auth
 from ..core.const import API_URL
 from ..core.data.dataset import Dataset
-from ..core.nc_types import DataType
 
 
 def _get_algorithms() -> list[dict]:

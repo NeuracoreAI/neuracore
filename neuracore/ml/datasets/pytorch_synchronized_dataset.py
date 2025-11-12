@@ -5,12 +5,7 @@ from typing import Callable, Optional, Set, cast
 
 import numpy as np
 import torch
-from PIL import Image
-
-import neuracore as nc
-from neuracore.core.data.synced_dataset import SynchronizedDataset
-from neuracore.core.data.synced_recording import SynchronizedRecording
-from neuracore.core.nc_types import (
+from neuracore_types import (
     CustomData,
     DataType,
     EndEffectorData,
@@ -21,6 +16,11 @@ from neuracore.core.nc_types import (
     PoseData,
     SyncPoint,
 )
+from PIL import Image
+
+import neuracore as nc
+from neuracore.core.data.synced_dataset import SynchronizedDataset
+from neuracore.core.data.synced_recording import SynchronizedRecording
 from neuracore.ml import BatchedTrainingSamples, MaskableData
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
 from neuracore.ml.utils.memory_monitor import MemoryMonitor

@@ -9,12 +9,12 @@ from typing import Any, Dict, Optional, Tuple, Union
 import hydra
 import torch
 import torch.multiprocessing as mp
+from neuracore_types import DataType, ModelInitDescription
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 import neuracore as nc
 from neuracore.core.data.synced_dataset import SynchronizedDataset
-from neuracore.core.nc_types import DataType, ModelInitDescription
 from neuracore.ml import NeuracoreModel
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,

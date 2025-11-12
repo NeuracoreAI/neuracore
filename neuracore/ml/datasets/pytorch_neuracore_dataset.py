@@ -11,9 +11,9 @@ from typing import Callable, Optional, Set, cast
 
 import torch
 import torchvision.transforms as T
+from neuracore_types import DataType
 from torch.utils.data import Dataset
 
-from neuracore.core.nc_types import DataType
 from neuracore.ml import BatchedTrainingSamples, MaskableData
 from neuracore.ml.core.ml_types import BatchedData
 

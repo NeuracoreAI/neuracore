@@ -1,10 +1,10 @@
 import numpy as np
 import pytest
+from neuracore_types import CameraData, EndEffectorData, JointData, SyncPoint
 
 import neuracore as nc
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import RobotError
-from neuracore.core.nc_types import CameraData, EndEffectorData, JointData, SyncPoint
 
 
 def test_log_joints_and_cams(

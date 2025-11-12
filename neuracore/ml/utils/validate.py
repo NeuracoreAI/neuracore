@@ -15,13 +15,7 @@ from typing import Optional
 
 import numpy as np
 import torch
-from pydantic import BaseModel
-from torch.utils.data import DataLoader
-
-import neuracore as nc
-from neuracore.ml.utils.device_utils import get_default_device
-
-from ...core.nc_types import (
+from neuracore_types import (
     CameraData,
     CustomData,
     DataType,
@@ -35,6 +29,12 @@ from ...core.nc_types import (
     PoseData,
     SyncPoint,
 )
+from pydantic import BaseModel
+from torch.utils.data import DataLoader
+
+import neuracore as nc
+from neuracore.ml.utils.device_utils import get_default_device
+
 from ..core.ml_types import BatchedTrainingOutputs, BatchedTrainingSamples, MaskableData
 from ..datasets.pytorch_dummy_dataset import PytorchDummyDataset
 from .algorithm_loader import AlgorithmLoader

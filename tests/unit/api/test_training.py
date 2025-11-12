@@ -1,8 +1,8 @@
 import pytest
+from neuracore_types import DataType
 
 import neuracore as nc
 from neuracore.core.const import API_URL
-from neuracore.core.nc_types import DataType
 
 
 @pytest.fixture

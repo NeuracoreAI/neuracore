@@ -2,9 +2,7 @@
 
 from typing import Any
 
-from pydantic import ValidationError
-
-from neuracore.core.nc_types import (
+from neuracore_types import (
     CameraData,
     CustomData,
     EndEffectorData,
@@ -18,6 +16,8 @@ from neuracore.core.nc_types import (
     SyncPoint,
     TrackKind,
 )
+from pydantic import ValidationError
+
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 
 

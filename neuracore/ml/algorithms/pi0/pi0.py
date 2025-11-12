@@ -19,9 +19,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
+from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 from transformers import AutoProcessor, AutoTokenizer, PaliGemmaForConditionalGeneration
 
-from neuracore.core.nc_types import DataType, ModelInitDescription, ModelPrediction
 from neuracore.ml import (
     BatchedInferenceSamples,
     BatchedTrainingOutputs,

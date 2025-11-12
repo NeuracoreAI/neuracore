@@ -7,16 +7,10 @@ from fractions import Fraction
 import av
 import numpy as np
 import pytest
+from neuracore_types import CameraData, DataType, JointData, SyncedData, SyncPoint
 
 import neuracore as nc
 from neuracore.core.const import API_URL
-from neuracore.core.nc_types import (
-    CameraData,
-    DataType,
-    JointData,
-    SyncedData,
-    SyncPoint,
-)
 
 # Constants for video creation
 CODEC = "h264"

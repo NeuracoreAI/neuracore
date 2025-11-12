@@ -10,17 +10,17 @@ import logging
 from typing import Dict, Optional
 
 from aiohttp import ClientSession
-
-from neuracore.core.auth import Auth, get_auth
-from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import API_URL
-from neuracore.core.nc_types import (
+from neuracore_types import (
     AvailableRobotInstance,
     HandshakeMessage,
     MessageType,
     OpenConnectionDetails,
     SyncPoint,
 )
+
+from neuracore.core.auth import Auth, get_auth
+from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.const import API_URL
 from neuracore.core.streaming.p2p.base_p2p_connection_manager import (
     BaseP2PStreamManager,
 )

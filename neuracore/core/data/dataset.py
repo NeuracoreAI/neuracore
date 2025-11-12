@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import requests
+from neuracore_types import DataType, SyncedDataset
 from tqdm import tqdm
 
 from neuracore.core.config.get_current_org import get_current_org
@@ -15,7 +16,6 @@ from neuracore.core.data.synced_dataset import SynchronizedDataset
 from ..auth import Auth, get_auth
 from ..const import API_URL
 from ..exceptions import DatasetError
-from ..nc_types import DataType, SyncedDataset
 
 DEFAULT_CACHE_DIR = Path.home() / ".neuracore" / "training" / "dataset_cache"
 

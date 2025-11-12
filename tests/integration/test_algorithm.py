@@ -5,10 +5,10 @@ import time
 
 import matplotlib.pyplot as plt
 import pytest
+from neuracore_types import CameraData, JointData, SyncPoint
 
 import neuracore as nc
 from neuracore.core.endpoint import Policy
-from neuracore.core.nc_types import CameraData, JointData, SyncPoint
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "..", "..", "examples"))
