@@ -10,6 +10,7 @@ import os
 from typing import Optional
 
 import requests
+from neuracore_types import __version__ as nc_types_version
 
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.config.get_api_key import get_api_key
@@ -108,11 +109,10 @@ class Auth(metaclass=SingletonMetaclass):
                 incompatible versions or server communication issues.
         """
         # Placeholder for version validation logic
-        import neuracore as nc
 
         response = requests.get(
             f"{API_URL}/auth/verify-version",
-            params={"version": nc.__version__},
+            params={"version": nc_types_version},
         )
         if response.status_code != 200:
             raise AuthenticationError(
