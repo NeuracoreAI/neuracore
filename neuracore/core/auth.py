@@ -12,6 +12,7 @@ from typing import Optional
 import requests
 from neuracore_types import __version__ as nc_types_version
 
+from neuracore.api.orgs_fetch import fetch_org_ids
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.config.get_api_key import get_api_key
 from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
@@ -67,6 +68,34 @@ class Auth(metaclass=SingletonMetaclass):
                 )
             token_data = response.json()
             self._access_token = token_data["access_token"]
+
+            if self._access_token is None:
+                raise AuthenticationError(
+                    "Login succeeded but no access token returned."
+                )
+
+            config_manager = get_config_manager()
+            prev_org_id = config_manager.config.current_org_id
+
+            org_ids_optional = fetch_org_ids(self._access_token)
+            fetched_orgs_success = org_ids_optional is not None
+            user_org_ids = org_ids_optional or set()
+
+            has_saved_org = prev_org_id is not None
+            saved_org_no_longer_accessible = (
+                fetched_orgs_success and prev_org_id not in user_org_ids
+            )
+
+            clear_saved_org = has_saved_org and saved_org_no_longer_accessible
+
+            if clear_saved_org:
+                # only clear if the saved org isn’t in the new account’s org list.
+                config_manager.config.current_org_id = None
+
+            # always persist the API key.
+            config_manager.config.api_key = api_key
+            config_manager.save_config()
+
         except requests.exceptions.ConnectionError:
             raise AuthenticationError((
                 "Failed to connect to neuracore server, "
@@ -76,11 +105,6 @@ class Auth(metaclass=SingletonMetaclass):
             raise AuthenticationError(
                 "Could not verify API key. Please check your key and try again."
             )
-
-        config_manager = get_config_manager()
-        if config_manager.config.api_key != api_key:
-            config_manager.config.api_key = api_key
-            config_manager.save_config()
 
     def logout(self) -> None:
         """Clear authentication state and remove saved configuration.
