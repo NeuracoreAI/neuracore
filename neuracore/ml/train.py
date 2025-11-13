@@ -64,7 +64,6 @@ def setup_logging(output_dir: str, rank: int = 0) -> None:
 def get_model_and_algorithm_config(
     cfg: DictConfig,
     model_init_description: ModelInitDescription,
-    device: torch.device,
 ) -> Tuple[NeuracoreModel, Dict[str, Any]]:
     """Get model and algorithm configuration."""
     algorithm_config: Dict[str, Any] = {}
@@ -114,11 +113,15 @@ def determine_optimal_batch_size(
     device: Optional[torch.device] = None,
 ) -> int:
     """Run batch size autotuning on a single GPU and return the result."""
-    # if no gpu, raise an error and prevent the auto tuning from starting
-    if not torch.cuda.is_available():
-        raise ValueError("No GPU available. Autotuning is only supported on GPUs.")
+    if not torch.cuda.is_available() or (
+        device is not None and "cuda" not in device.type
+    ):
+        raise ValueError("Autotuning is only supported on GPUs.")
 
-    logger.info("Starting batch size autotuning on GPU 0...")
+    if device is None:
+        device = get_default_device()
+
+    logger.info(f"Starting batch size autotuning on {device}...")
 
     input_data_types = convert_data_types(cfg.input_data_types)
     output_data_types = convert_data_types(cfg.output_data_types)
@@ -131,8 +134,10 @@ def determine_optimal_batch_size(
     )
 
     model, algorithm_config = get_model_and_algorithm_config(
-        cfg, model_init_description, device=device
+        cfg, model_init_description
     )
+
+    model = model.to(device)
 
     max_batch_size = cfg.max_batch_size if "max_batch_size" in cfg else len(dataset)
     min_batch_size = cfg.min_batch_size if "min_batch_size" in cfg else 2
@@ -282,7 +287,7 @@ def run_training(
         )
 
         model, algorithm_config = get_model_and_algorithm_config(
-            cfg, model_init_description, device=device
+            cfg, model_init_description
         )
 
         training_storage_handler = TrainingStorageHandler(

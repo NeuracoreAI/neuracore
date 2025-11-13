@@ -46,11 +46,9 @@ class BatchSizeAutotuner:
         self.num_iterations = num_iterations
         self.device = model.device
 
-        if not torch.cuda.is_available():
-            raise ValueError(
-                "No GPU available. Autotuning batch size is only supported on GPU."
-            )
-        self.model = model.to(self.device)
+        if not torch.cuda.is_available() or "cuda" not in self.device.type:
+            raise ValueError("Autotuning batch size is only supported on GPUs.")
+        self.model = model
 
         # create optimizers
         self.optimizers = self.model.configure_optimizers()
