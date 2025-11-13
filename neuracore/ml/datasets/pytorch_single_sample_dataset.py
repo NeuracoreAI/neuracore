@@ -1,6 +1,7 @@
 """Dataset that returns the same sample from a real dataset for quick testing."""
 
-from neuracore.core.nc_types import DatasetDescription, DataType
+from neuracore_types import DatasetDescription, DataType
+
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
 
