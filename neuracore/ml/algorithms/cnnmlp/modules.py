@@ -44,7 +44,7 @@ class ImageEncoder(nn.Module):
             nn.Module: ResNet backbone without final classification layers
             int: Input dimension of the final fully connected layer
         """
-        resnet = getattr(models, backbone_name)(pretrained=True)
+        resnet = models.get_model(backbone_name, weights="DEFAULT")
         return nn.Sequential(*list(resnet.children())[:-2]), resnet.fc.in_features
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

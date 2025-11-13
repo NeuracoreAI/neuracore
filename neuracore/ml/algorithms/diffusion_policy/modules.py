@@ -41,7 +41,7 @@ class DiffusionPolicyImageEncoder(nn.Module):
 
     def _build_backbone(self) -> nn.Module:
         """Build backbone CNN, removing avgpool and fc layers."""
-        resnet = getattr(models, "resnet18")(pretrained=True)
+        resnet = models.get_model("resnet18", weights="DEFAULT")
         return nn.Sequential(*list(resnet.children())[:-2])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

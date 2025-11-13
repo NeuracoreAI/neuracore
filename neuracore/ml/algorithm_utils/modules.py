@@ -29,7 +29,7 @@ class DepthImageEncoder(nn.Module):
         """
         super().__init__()
         # Modify ResNet for single-channel input
-        resnet = getattr(models, backbone)(pretrained=True)
+        resnet = models.get_model(backbone, weights="DEFAULT")
 
         # Replace first conv layer for single-channel depth input
         resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
