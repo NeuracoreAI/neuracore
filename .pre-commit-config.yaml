@@ -1,5 +1,5 @@
 default_install_hook_types: [pre-commit]
-default_stages: [commit]
+default_stages: [pre-commit]
 
 repos:
   - repo: https://github.com/pycqa/isort
@@ -30,7 +30,7 @@ repos:
         args: ["--convention=google"]
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: ""
+    rev: v1.18.2
     hooks:
       - id: mypy
         files: neuracore/
