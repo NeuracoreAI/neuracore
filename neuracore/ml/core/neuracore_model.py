@@ -33,14 +33,12 @@ class NeuracoreModel(nn.Module, ABC):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
-        device: torch.device,
     ):
         """Initialize the Neuracore model.
 
         Args:
             model_init_description: Model initialization parameters including
                 input/output data types, dataset description, and prediction horizon
-            device: Torch device to run the model on (CPU or GPU, or MPS)
 
         Raises:
             ValueError: If requested data types are not supported by the model
@@ -49,11 +47,27 @@ class NeuracoreModel(nn.Module, ABC):
         super().__init__()
         self.model_init_description = model_init_description
         self._validate_input_output_types()
-        self.device = device
         self.dataset_description = model_init_description.dataset_description
         self.output_prediction_horizon = (
             model_init_description.output_prediction_horizon
         )
+
+    @property
+    def device(self) -> torch.device:
+        """Get the device for the model.
+
+        Returns:
+            torch.device: The device for the model
+        """
+        try:
+            return next(self.parameters()).device
+        except StopIteration:
+            # No parameters, check buffers
+            try:
+                return next(self.buffers()).device
+            except StopIteration:
+                # No parameters or buffers, default to CPU
+                return torch.device("cpu")
 
     def _validate_input_output_types(self) -> None:
         """Validate that requested data types are supported and available.

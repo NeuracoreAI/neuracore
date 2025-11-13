@@ -176,7 +176,7 @@ def _create_pose_data(maskable_data: MaskableData) -> PoseData:
     poses = {}
     for i in range(0, len(pose_values), 6):
         if i + 5 < len(pose_values):
-            pose_name = f"pose{i//6}"
+            pose_name = f"pose{i // 6}"
             poses[pose_name] = pose_values[i : i + 6]
 
     return PoseData(timestamp=t, pose=poses)
@@ -340,10 +340,9 @@ def run_validation(
         logger.info("Initializing model")
         model = model_class(
             model_init_description=model_init_description,
-            device=device,
             **algorithm_config,
         )
-        model = model.to(model.device)
+        model = model.to(device)
         logger.info(
             "Model initialized with "
             f"{sum(p.numel() for p in model.parameters()):,} parameters"

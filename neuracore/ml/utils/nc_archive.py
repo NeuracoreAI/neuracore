@@ -195,11 +195,11 @@ def load_model_from_nc_archive(
 
         # Create model instance
         if device:
-            torch_device = torch.device(device)
+            device = torch.device(device)
         else:
-            torch_device = get_default_device()
-        model = model_class(model_init_description, torch_device, **algorithm_config)
-        model.to(model.device)  # Move model to the appropriate device
+            device = get_default_device()
+        model = model_class(model_init_description, **algorithm_config)
+        model = model.to(device)
 
         # Load trained weights if present
         if "model_weights" in extracted_files:

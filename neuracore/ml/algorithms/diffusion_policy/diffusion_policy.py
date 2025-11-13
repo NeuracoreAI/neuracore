@@ -4,7 +4,6 @@ import logging
 import time
 from typing import Any, Dict, Optional, Tuple, Union
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -35,7 +34,6 @@ class DiffusionPolicy(NeuracoreModel):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
-        device: torch.device,
         hidden_dim: int = 256,
         unet_down_dims: Tuple[int, ...] = (
             512,
@@ -63,7 +61,6 @@ class DiffusionPolicy(NeuracoreModel):
 
         Args:
             model_init_description: Model initialization configuration.
-            device: Torch device to run the model on (CPU or GPU, or MPS).
             hidden_dim: Hidden dimension for image encoders.
             unet_down_dims: Downsampling dimensions for UNet.
             unet_kernel_size: Kernel size for UNet convolutions.
@@ -83,7 +80,7 @@ class DiffusionPolicy(NeuracoreModel):
             weight_decay: Weight decay for optimization.
             prediction_type: Type of prediction ("epsilon" or "sample").
         """
-        super().__init__(model_init_description, device)
+        super().__init__(model_init_description)
         self.lr = lr
         self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
@@ -134,21 +131,36 @@ class DiffusionPolicy(NeuracoreModel):
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         )
 
-        state_mean = np.concatenate([
-            self.dataset_description.joint_positions.mean,
-            self.dataset_description.joint_velocities.mean,
-            self.dataset_description.joint_torques.mean,
-        ])
-        state_std = np.concatenate([
-            self.dataset_description.joint_positions.std,
-            self.dataset_description.joint_velocities.std,
-            self.dataset_description.joint_torques.std,
-        ])
-        # Register as buffers so they move with the model
-        self.register_buffer(
-            "joint_state_mean", self._to_torch_float_tensor(state_mean)
-        )
-        self.register_buffer("joint_state_std", self._to_torch_float_tensor(state_std))
+        # Normalization statistics
+        self._setup_normalization_stats()
+
+    def _setup_normalization_stats(self) -> None:
+        """Setup normalization statistics for different data types."""
+        # Joint state normalization
+        state_means = []
+        state_stds = []
+
+        if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_positions.mean)
+            state_stds.extend(self.dataset_description.joint_positions.std)
+        if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_velocities.mean)
+            state_stds.extend(self.dataset_description.joint_velocities.std)
+        if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_torques.mean)
+            state_stds.extend(self.dataset_description.joint_torques.std)
+
+        if state_means:
+            # Register as buffers so they move with the model
+            self.register_buffer(
+                "joint_state_mean", self._to_torch_float_tensor(state_means)
+            )
+            self.register_buffer(
+                "joint_state_std", self._to_torch_float_tensor(state_stds)
+            )
+        else:
+            self.joint_state_mean = None
+            self.joint_state_std = None
 
         # Register as buffers so they move with the model
         self.register_buffer(
@@ -165,7 +177,7 @@ class DiffusionPolicy(NeuracoreModel):
         )
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
-        """Convert list of floats to torch tensor."""
+        """Convert list of floats to torch tensor on the correct device."""
         return torch.tensor(data, dtype=torch.float32, device=self.device)
 
     def _preprocess_joint_state(

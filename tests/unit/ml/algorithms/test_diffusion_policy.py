@@ -22,6 +22,7 @@ from neuracore.ml import (
 )
 from neuracore.ml.algorithms.diffusion_policy.diffusion_policy import DiffusionPolicy
 from neuracore.ml.core.ml_types import BatchedData
+from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.validate import run_validation
 
 BS = 2
@@ -29,7 +30,7 @@ CAMS = 1
 JOINT_POSITION_DIM = 32
 OUTPUT_PRED_DIM = JOINT_POSITION_DIM
 PRED_HORIZON = 10
-DEVICE = torch.get_default_device()
+DEVICE = get_default_device()
 
 
 @pytest.fixture
@@ -147,7 +148,8 @@ def mock_dataloader(sample_batch):
 def test_model_construction(
     model_init_description: ModelInitDescription, model_config: dict
 ):
-    model = DiffusionPolicy(model_init_description, DEVICE, **model_config)
+    model = DiffusionPolicy(model_init_description, **model_config)
+    model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
 
 
@@ -156,7 +158,8 @@ def test_model_forward(
     model_config: dict,
     sample_inference_batch: BatchedInferenceSamples,
 ):
-    model = DiffusionPolicy(model_init_description, DEVICE, **model_config)
+    model = DiffusionPolicy(model_init_description, **model_config)
+    model = model.to(DEVICE)
     sample_inference_batch = sample_inference_batch.to(DEVICE)
     output = model(sample_inference_batch)
     assert isinstance(output, ModelPrediction)
@@ -173,7 +176,8 @@ def test_model_backward(
     model_config: dict,
     sample_batch: BatchedTrainingSamples,
 ):
-    model = DiffusionPolicy(model_init_description, DEVICE, **model_config)
+    model = DiffusionPolicy(model_init_description, **model_config)
+    model = model.to(DEVICE)
     sample_batch = sample_batch.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_batch)
 

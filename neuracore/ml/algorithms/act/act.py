@@ -12,7 +12,6 @@ with low-cost hardware." arXiv preprint arXiv:2304.13705 (2023).
 import logging
 import time
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -51,7 +50,6 @@ class ACT(NeuracoreModel):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
-        device: torch.device,
         hidden_dim: int = 512,
         num_encoder_layers: int = 4,
         num_decoder_layers: int = 1,
@@ -68,7 +66,6 @@ class ACT(NeuracoreModel):
 
         Args:
             model_init_description: Model initialization parameters
-            device: Torch device to run the model on (CPU or GPU, or MPS)
             hidden_dim: Hidden dimension for transformer layers
             num_encoder_layers: Number of transformer encoder layers
             num_decoder_layers: Number of transformer decoder layers
@@ -81,7 +78,7 @@ class ACT(NeuracoreModel):
             kl_weight: Weight for KL divergence loss
             latent_dim: Dimension of latent variable space
         """
-        super().__init__(model_init_description, device)
+        super().__init__(model_init_description)
         self.hidden_dim = hidden_dim
         self.lr = lr
         self.lr_backbone = lr_backbone
@@ -164,24 +161,46 @@ class ACT(NeuracoreModel):
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         )
 
-        state_mean = np.concatenate([
-            self.dataset_description.joint_positions.mean,
-            self.dataset_description.joint_velocities.mean,
-            self.dataset_description.joint_torques.mean,
-        ])
-        state_std = np.concatenate([
-            self.dataset_description.joint_positions.std,
-            self.dataset_description.joint_velocities.std,
-            self.dataset_description.joint_torques.std,
-        ])
-        self.joint_state_mean = self._to_torch_float_tensor(state_mean)
-        self.joint_state_std = self._to_torch_float_tensor(state_std)
+        # Normalization statistics
+        self._setup_normalization_stats()
 
-        self.joint_target_mean = self._to_torch_float_tensor(
-            self.dataset_description.joint_target_positions.mean
+    def _setup_normalization_stats(self) -> None:
+        """Setup normalization statistics for different data types."""
+        # Joint state normalization
+        state_means = []
+        state_stds = []
+
+        if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_positions.mean)
+            state_stds.extend(self.dataset_description.joint_positions.std)
+        if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_velocities.mean)
+            state_stds.extend(self.dataset_description.joint_velocities.std)
+        if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
+            state_means.extend(self.dataset_description.joint_torques.mean)
+            state_stds.extend(self.dataset_description.joint_torques.std)
+
+        if state_means:
+            self.register_buffer(
+                "joint_state_mean", self._to_torch_float_tensor(state_means)
+            )
+            self.register_buffer(
+                "joint_state_std", self._to_torch_float_tensor(state_stds)
+            )
+        else:
+            self.joint_state_mean = None
+            self.joint_state_std = None
+        self.register_buffer(
+            "joint_target_mean",
+            self._to_torch_float_tensor(
+                self.dataset_description.joint_target_positions.mean
+            ),
         )
-        self.joint_target_std = self._to_torch_float_tensor(
-            self.dataset_description.joint_target_positions.std
+        self.register_buffer(
+            "joint_target_std",
+            self._to_torch_float_tensor(
+                self.dataset_description.joint_target_positions.std
+            ),
         )
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:

@@ -157,7 +157,8 @@ def mock_dataloader(sample_batch):
 def test_model_construction(
     model_init_description: ModelInitDescription, model_config: dict
 ):
-    model = SimpleWorldModel(model_init_description, DEVICE, **model_config)
+    model = SimpleWorldModel(model_init_description, **model_config)
+    model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
 
 
@@ -166,7 +167,8 @@ def test_model_forward(
     model_config: dict,
     sample_inference_batch: BatchedInferenceSamples,
 ):
-    model = SimpleWorldModel(model_init_description, DEVICE, **model_config)
+    model = SimpleWorldModel(model_init_description, **model_config)
+    model = model.to(DEVICE)
     sample_inference_batch = sample_inference_batch.to(DEVICE)
     output = model(sample_inference_batch)
     assert isinstance(output, ModelPrediction)
@@ -186,7 +188,8 @@ def test_model_backward(
     model_config: dict,
     sample_batch: BatchedTrainingSamples,
 ):
-    model = SimpleWorldModel(model_init_description, DEVICE, **model_config)
+    model = SimpleWorldModel(model_init_description, **model_config)
+    model = model.to(DEVICE)
     sample_batch = sample_batch.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_batch)
 
