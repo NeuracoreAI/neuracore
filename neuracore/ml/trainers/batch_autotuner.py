@@ -26,7 +26,6 @@ class BatchSizeAutotuner:
         min_batch_size: int = 8,
         max_batch_size: int = 512,
         num_iterations: int = 3,
-        gpu_id: int = 0,
     ):
         """Initialize the batch size auto-tuner.
 
@@ -38,7 +37,6 @@ class BatchSizeAutotuner:
             min_batch_size: Minimum batch size to try
             max_batch_size: Maximum batch size to try
             num_iterations: Number of iterations to run for each batch size
-            gpu_id: GPU device to use
         """
         self.dataset = dataset
         self.model_kwargs = model_kwargs
@@ -47,7 +45,10 @@ class BatchSizeAutotuner:
         self.max_batch_size = max_batch_size
         self.num_iterations = num_iterations
         self.device = model.device
-        self.model = model.to(self.device)
+
+        if not torch.cuda.is_available() or "cuda" not in self.device.type:
+            raise ValueError("Autotuning batch size is only supported on GPUs.")
+        self.model = model
 
         # create optimizers
         self.optimizers = self.model.configure_optimizers()
@@ -99,68 +100,12 @@ class BatchSizeAutotuner:
             gc.collect()
 
         # Reduce by 15% to be safe
-        optimal_batch_size = int(optimal_batch_size * 0.85)
-        logger.info(f"Optimal batch size found: {optimal_batch_size}")
-        return optimal_batch_size
-
-    def find_optimal_batch_size_linear(self) -> int:
-        """Find the optimal batch size using linear search.
-
-        Returns:
-            The optimal batch size
-        """
+        reduced_batch_size = int(optimal_batch_size * 0.70)
         logger.info(
-            "Finding optimal batch size between "
-            f"{self.min_batch_size} and {self.max_batch_size}"
+            f"Optimal batch size found {optimal_batch_size}, "
+            f"Reducing it by 30% to {reduced_batch_size}"
         )
-
-        # Try batch sizes in ascending order
-        current_batch_size = self.min_batch_size
-        optimal_batch_size = current_batch_size
-
-        # Try powers of 2 for faster search
-        batch_sizes = [
-            2**i
-            for i in range(
-                max(3, self.min_batch_size.bit_length()),
-                self.max_batch_size.bit_length() + 1,
-            )
-        ]
-
-        # Ensure min_batch_size is included
-        if self.min_batch_size not in batch_sizes:
-            batch_sizes = [self.min_batch_size] + [
-                bs for bs in batch_sizes if bs > self.min_batch_size
-            ]
-
-        # Ensure max_batch_size is included
-        if self.max_batch_size not in batch_sizes:
-            batch_sizes.append(self.max_batch_size)
-
-        batch_sizes = sorted([
-            bs for bs in batch_sizes if self.min_batch_size <= bs <= self.max_batch_size
-        ])
-
-        logger.info(f"Testing batch sizes: {batch_sizes}")
-
-        for batch_size in batch_sizes:
-            success = self._test_batch_size(batch_size)
-
-            if success:
-                optimal_batch_size = batch_size
-                logger.info(f"Batch size {batch_size} works, continuing...")
-            else:
-                logger.info(f"Batch size {batch_size} failed, stopping search")
-                break
-
-            # Clean up memory
-            torch.cuda.empty_cache()
-            gc.collect()
-
-        # Reduce by 15% to be safe
-        optimal_batch_size = int(optimal_batch_size * 0.85)
-        logger.info(f"Optimal batch size found: {optimal_batch_size}")
-        return optimal_batch_size
+        return reduced_batch_size
 
     def _test_batch_size(self, batch_size: int) -> bool:
         """Test if a specific batch size works.
@@ -174,7 +119,6 @@ class BatchSizeAutotuner:
         logger.info(f"Testing batch size: {batch_size}")
 
         try:
-
             memory_monitor = MemoryMonitor(
                 max_ram_utilization=0.8, max_gpu_utilization=1.0
             )
@@ -185,6 +129,7 @@ class BatchSizeAutotuner:
 
             # Get a batch that we can reuse
             batch: BatchedTrainingSamples = next(iter(data_loader))
+
             for i in range(self.num_iterations):
 
                 memory_monitor.check_memory()
@@ -198,8 +143,10 @@ class BatchSizeAutotuner:
 
                 # Forward pass
                 self.model.train()
+
                 for optimizer in self.optimizers:
                     optimizer.zero_grad()
+
                 start_time = time.time()
                 outputs: BatchedTrainingOutputs = self.model.training_step(batch)
                 loss = sum(outputs.losses.values()).mean()
@@ -229,11 +176,13 @@ class BatchSizeAutotuner:
             else:
                 # Re-raise if it's not an OOM error
                 raise
+
         except OutOfMemoryError:
             logger.info(f"Batch size {batch_size} failed due to RAM OOM error ✗")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             return False
+
         finally:
             # Clean up
             if torch.cuda.is_available():
@@ -248,8 +197,6 @@ def find_optimal_batch_size(
     dataloader_kwargs: Optional[Dict[str, Any]] = None,
     min_batch_size: int = 8,
     max_batch_size: int = 512,
-    search_method: str = "binary",
-    gpu_id: int = 0,
 ) -> int:
     """Find the optimal batch size for a given model and dataset.
 
@@ -260,8 +207,6 @@ def find_optimal_batch_size(
         dataloader_kwargs: Additional arguments for the DataLoader
         min_batch_size: Minimum batch size to try
         max_batch_size: Maximum batch size to try
-        search_method: Search method ('binary' or 'linear')
-        gpu_id: GPU device to use
 
     Returns:
         The optimal batch size
@@ -273,14 +218,6 @@ def find_optimal_batch_size(
         dataloader_kwargs=dataloader_kwargs,
         min_batch_size=min_batch_size,
         max_batch_size=max_batch_size,
-        gpu_id=gpu_id,
     )
 
-    if search_method == "binary":
-        return autotuner.find_optimal_batch_size()
-    elif search_method == "linear":
-        return autotuner.find_optimal_batch_size_linear()
-    else:
-        raise ValueError(
-            f"Unknown search method: {search_method}. Use 'binary' or 'linear'."
-        )
+    return autotuner.find_optimal_batch_size()

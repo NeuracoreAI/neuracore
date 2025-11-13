@@ -3,6 +3,7 @@
 import copy
 import logging
 import tempfile
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional, Union, cast
 
@@ -23,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset
+
+MAX_DECODING_ATTEMPTS = 3
 
 
 class SynchronizedRecording:
@@ -167,13 +170,40 @@ class SynchronizedRecording:
                 / camera_type
                 / cam_id
             )
+            frame_file = cam_id_rgb_root / f"{cam_data.frame_idx}.png"
             if not cam_id_rgb_root.exists():
                 # Not in cache, download video and cache frames to disk
                 cam_id_rgb_root.mkdir(parents=True, exist_ok=True)
                 self._download_video_and_cache_frames_to_disk(
                     camera_type, cam_id, cam_id_rgb_root
                 )
-            frame = Image.open(cam_id_rgb_root / f"{cam_data.frame_idx}.png")
+
+            # Check if frame is cached
+            last_num_frames = -1
+            attempts_left = MAX_DECODING_ATTEMPTS
+            while True:
+                try:
+                    # Make sure the frame is successfully cached and decoded
+                    frame = Image.open(frame_file)
+                    break
+                except Exception:
+                    # Check if decoding is progressing
+                    current_num_frames = len(
+                        [1 for i in cam_id_rgb_root.iterdir() if i.suffix == ".png"]
+                    )
+                    if current_num_frames == last_num_frames:
+                        attempts_left -= 1
+                        if attempts_left <= 0:
+                            raise RuntimeError(
+                                f"Decoding timed out for recording {self.id}"
+                            )
+                    else:
+                        last_num_frames = current_num_frames
+                        attempts_left = MAX_DECODING_ATTEMPTS
+
+                    # Wait for decoding to progress and try again
+                    time.sleep(5)
+
             if transform_fn:
                 frame = Image.fromarray(transform_fn(np.array(frame)))
             camera_data[cam_id].frame = frame

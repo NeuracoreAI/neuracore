@@ -14,8 +14,8 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 import neuracore as nc
-from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.ml import NeuracoreModel
+from neuracore.ml.datasets.pytorch_single_sample_dataset import SingleSampleDataset
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
@@ -64,7 +64,6 @@ def setup_logging(output_dir: str, rank: int = 0) -> None:
 def get_model_and_algorithm_config(
     cfg: DictConfig,
     model_init_description: ModelInitDescription,
-    device: torch.device,
 ) -> Tuple[NeuracoreModel, Dict[str, Any]]:
     """Get model and algorithm configuration."""
     algorithm_config: Dict[str, Any] = {}
@@ -110,26 +109,22 @@ def convert_data_types(data_types_list: list[str]) -> list[DataType]:
 
 def determine_optimal_batch_size(
     cfg: DictConfig,
-    synchronized_dataset: SynchronizedDataset,
+    dataset: SingleSampleDataset,
     device: Optional[torch.device] = None,
 ) -> int:
     """Run batch size autotuning on a single GPU and return the result."""
-    logger.info("Starting batch size autotuning on GPU 0...")
+    if not torch.cuda.is_available() or (
+        device is not None and "cuda" not in device.type
+    ):
+        raise ValueError("Autotuning is only supported on GPUs.")
+
+    if device is None:
+        device = get_default_device()
+
+    logger.info(f"Starting batch size autotuning on {device}...")
 
     input_data_types = convert_data_types(cfg.input_data_types)
     output_data_types = convert_data_types(cfg.output_data_types)
-
-    # Setup dataset for autotuning
-    dataset = PytorchSynchronizedDataset(
-        synchronized_dataset=synchronized_dataset,
-        input_data_types=input_data_types,
-        output_data_types=output_data_types,
-        output_prediction_horizon=cfg.output_prediction_horizon,
-    )
-
-    # Create a smaller subset for autotuning
-    train_size = len(dataset)
-    train_dataset = torch.utils.data.Subset(dataset, list(range(train_size)))
 
     model_init_description = ModelInitDescription(
         dataset_description=dataset.dataset_description,
@@ -139,19 +134,30 @@ def determine_optimal_batch_size(
     )
 
     model, algorithm_config = get_model_and_algorithm_config(
-        cfg, model_init_description, device=device
+        cfg, model_init_description
+    )
+
+    model = model.to(device)
+
+    max_batch_size = cfg.max_batch_size if "max_batch_size" in cfg else len(dataset)
+    min_batch_size = cfg.min_batch_size if "min_batch_size" in cfg else 2
+    num_workers = cfg.batch_size_autotuning_num_workers
+
+    logger.info(
+        f"using max_batch_size: {max_batch_size}, "
+        f"min_batch_size: {min_batch_size}, "
+        f"num_workers: {num_workers}"
     )
 
     # Determine per-GPU batch size
     optimal_batch_size = find_optimal_batch_size(
-        dataset=train_dataset,
+        dataset=dataset,
         model=model,
         model_kwargs=algorithm_config,
-        min_batch_size=2,
-        max_batch_size=4096,
-        gpu_id=0,
+        min_batch_size=min_batch_size,
+        max_batch_size=max_batch_size,
         dataloader_kwargs={
-            "num_workers": 4,
+            "num_workers": num_workers,
             "pin_memory": True,
             "persistent_workers": True,
             "collate_fn": dataset.collate_fn,
@@ -167,6 +173,7 @@ def determine_optimal_batch_size(
     logger.info(
         f"Autotuning complete. Optimal batch size per GPU: {optimal_batch_size}"
     )
+
     return optimal_batch_size
 
 
@@ -175,7 +182,7 @@ def run_training(
     world_size: int,
     cfg: DictConfig,
     batch_size: int,
-    synchronized_dataset: SynchronizedDataset,
+    dataset: PytorchSynchronizedDataset,
     device: Optional[torch.device] = None,
 ) -> None:
     """Run the training process for a single GPU."""
@@ -196,14 +203,6 @@ def run_training(
 
         input_data_types = convert_data_types(cfg.input_data_types)
         output_data_types = convert_data_types(cfg.output_data_types)
-
-        # Setup dataset
-        dataset = PytorchSynchronizedDataset(
-            synchronized_dataset=synchronized_dataset,
-            input_data_types=input_data_types,
-            output_data_types=output_data_types,
-            output_prediction_horizon=cfg.output_prediction_horizon,
-        )
 
         # Split dataset
         dataset_size = len(dataset)
@@ -288,7 +287,7 @@ def run_training(
         )
 
         model, algorithm_config = get_model_and_algorithm_config(
-            cfg, model_init_description, device=device
+            cfg, model_init_description
         )
 
         training_storage_handler = TrainingStorageHandler(
@@ -393,10 +392,12 @@ def main(cfg: DictConfig) -> None:
     nc.login()
     if cfg.org_id is not None:
         nc.set_organization(cfg.org_id)
+
     if cfg.dataset_id is not None:
         dataset = nc.get_dataset(id=cfg.dataset_id)
     elif cfg.dataset_name is not None:
         dataset = nc.get_dataset(name=cfg.dataset_name)
+
     synchronized_dataset = dataset.synchronize(
         frequency=cfg.frequency, data_types=data_types_to_sync, prefetch_videos=True
     )
@@ -421,12 +422,35 @@ def main(cfg: DictConfig) -> None:
     else:
         device = get_default_device()
 
+    # Create a pytorch synchronized dataset
+    # NOTE: we are creating it here, and not in training to access the first sample
+    # for batch size autotuning, if used.
+    input_data_types = convert_data_types(cfg.input_data_types)
+    output_data_types = convert_data_types(cfg.output_data_types)
+    pytorch_dataset = PytorchSynchronizedDataset(
+        synchronized_dataset=synchronized_dataset,
+        input_data_types=input_data_types,
+        output_data_types=output_data_types,
+        output_prediction_horizon=cfg.output_prediction_horizon,
+    )
+
     # Handle batch size configuration
     if isinstance(batch_size, str) and batch_size.lower() == "auto":
+        sample = pytorch_dataset.load_sample(0)
+        single_sample_dataset = SingleSampleDataset(
+            sample=sample,
+            input_data_types=input_data_types,
+            output_data_types=output_data_types,
+            output_prediction_horizon=cfg.output_prediction_horizon,
+            dataset_description=pytorch_dataset.dataset_description,
+            num_recordings=len(pytorch_dataset),
+        )
+
         optimal_batch_size = determine_optimal_batch_size(
-            cfg, synchronized_dataset, device=device
+            cfg, single_sample_dataset, device=device
         )
         batch_size = optimal_batch_size
+
     else:
         batch_size = int(batch_size)
 
@@ -434,13 +458,13 @@ def main(cfg: DictConfig) -> None:
         # Use multiprocessing to launch multiple processes
         mp.spawn(
             run_training,
-            args=(world_size, cfg, batch_size, synchronized_dataset, device),
+            args=(world_size, cfg, batch_size, pytorch_dataset, device),
             nprocs=world_size,
             join=True,
         )
     else:
         # Single GPU or CPU training
-        run_training(0, 1, cfg, batch_size, synchronized_dataset, device)
+        run_training(0, 1, cfg, batch_size, pytorch_dataset, device)
 
 
 if __name__ == "__main__":
