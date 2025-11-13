@@ -42,6 +42,8 @@ algorithm_params: null
 # Resume training
 resume_checkpoint_path: null  # Path to checkpoint to resume from
 
+batch_size_autotuning_num_workers: 4 # number of workers to use for batch size autotuning
+
 # Hydra configuration
 hydra:
   run:
