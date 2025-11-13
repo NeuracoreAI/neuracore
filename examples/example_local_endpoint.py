@@ -5,6 +5,9 @@ import neuracore as nc
 
 TRAINING_JOB_NAME = "MyTrainingJob"
 
+# Path to your model.nc.zip file. Usually in the artifacts folder of the training run.
+LOCAL_MODEL_ZIP_PATH = "path/to/your/model.nc.zip"
+
 
 def main():
     nc.login()
@@ -18,8 +21,8 @@ def main():
         train_run_name=TRAINING_JOB_NAME,
     )
 
-    # If you know the path to the local model.nc.zip file, you can use it directly as:
-    # policy = nc.policy(model_file=PATH/TO/MODEL.nc.zip)
+    # You can also use the path to the local model.nc.zip file:
+    # policy = nc.policy(model_file=LOCAL_MODEL_ZIP_PATH)
 
     # Alternatively, you can connect to a local endpoint that has been started
     # policy = nc.policy_local_server(train_run_name=TRAINING_JOB_NAME)
