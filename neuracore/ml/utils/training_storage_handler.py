@@ -160,6 +160,26 @@ class TrainingStorageHandler:
                 f.write(response.content)
         return torch.load(load_path, weights_only=True)
 
+    def delete_checkpoint(self, relative_checkpoint_path: Path) -> None:
+        """Delete checkpoint from storage.
+
+        Args:
+            relative_checkpoint_path: Relative path of the checkpoint file to delete.
+        """
+        checkpoint_path = self.local_dir / relative_checkpoint_path
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+        if self.log_to_cloud:
+            response = self._delete_request(
+                f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/checkpoints/{relative_checkpoint_path.name}"
+            )
+            if response.status_code != 200:
+                logger.error(
+                    f"Failed to delete checkpoint {relative_checkpoint_path} "
+                    f"from cloud: {response.text}"
+                )
+                return
+
     def save_model_artifacts(self, model: nn.Module, output_dir: Path) -> None:
         """Save model artifacts to storage.
 
@@ -248,4 +268,17 @@ class TrainingStorageHandler:
             response = requests.get(
                 url, headers=get_auth().get_headers(), params=params
             )
+        return response
+
+    def _delete_request(self, url: str) -> requests.Response:
+        """Helper method to send a DELETE request.
+
+        Args:
+            url: The URL to send the request to.
+        """
+        response = requests.delete(url, headers=get_auth().get_headers())
+        if response.status_code == 401:
+            logger.warning("Unauthorized request. Token may have expired.")
+            nc.login()
+            response = requests.delete(url, headers=get_auth().get_headers())
         return response
