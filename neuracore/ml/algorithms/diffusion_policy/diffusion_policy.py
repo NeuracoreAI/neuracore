@@ -56,7 +56,7 @@ class DiffusionPolicy(NeuracoreModel):
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-6,
         prediction_type: str = "epsilon",
-        normalization_type: str = "mean_std",
+        normalization_type: str = "min_max",
     ):
         """Initialize the Diffusion Policy model.
 
@@ -236,6 +236,18 @@ class DiffusionPolicy(NeuracoreModel):
         Returns:
             Normalized joint state tensor.
         """
+        # Validate that statistics are not empty
+        if stat1.shape[0] == 0 or stat2.shape[0] == 0:
+            raise ValueError("Normalization statistics are empty.")
+
+        # Validate dimensions match
+        if joint_state.shape[-1] != stat1.shape[0]:
+            raise ValueError(
+                f"Dimension mismatch: joint_state has {joint_state.shape[-1]} features "
+                f"but statistics have {stat1.shape[0]} features. "
+                "This usually means the input data types don't match the dataset."
+            )
+
         if self.normalization_type == "mean_std":
             return (joint_state - stat1) / stat2
         elif self.normalization_type == "min_max":
