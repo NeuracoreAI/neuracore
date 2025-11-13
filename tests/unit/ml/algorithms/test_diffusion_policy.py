@@ -166,11 +166,7 @@ def test_model_forward(
     model_config: dict,
     sample_inference_batch: BatchedInferenceSamples,
 ):
-<<<<<<< HEAD
     model = DiffusionPolicy(model_init_description, **model_config)
-=======
-    model = DiffusionPolicy(model_init_description, DEVICE, **model_config)
->>>>>>> e52c0dd (fix typo)
     model = model.to(DEVICE)
     sample_inference_batch = sample_inference_batch.to(DEVICE)
     output = model(sample_inference_batch)
@@ -188,11 +184,7 @@ def test_model_backward(
     model_config: dict,
     sample_batch: BatchedTrainingSamples,
 ):
-<<<<<<< HEAD
     model = DiffusionPolicy(model_init_description, **model_config)
-=======
-    model = DiffusionPolicy(model_init_description, DEVICE, **model_config)
->>>>>>> e52c0dd (fix typo)
     model = model.to(DEVICE)
     sample_batch = sample_batch.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_batch)
