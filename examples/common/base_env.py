@@ -380,7 +380,7 @@ class BimanualViperXTask(MuJoCoEnvironment):
         """
         raise NotImplementedError
 
-    def _get_end_effector_pose(self, effector_name: str) -> List[float] | None:
+    def _get_end_effector_pose(self, effector_name: str) -> Optional[List[float]]:
         """Get end effector pose from MuJoCo body positions and orientations.
 
         Args:

@@ -1,5 +1,7 @@
 """Dataset that returns the same sample from a real dataset for quick testing."""
 
+from typing import Optional
+
 from neuracore_types import DatasetDescription, DataType
 
 from neuracore.ml import BatchedTrainingSamples
@@ -40,7 +42,7 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
         return self._num_recordings
 
     def load_sample(
-        self, episode_idx: int, timestep: int | None = None
+        self, episode_idx: int, timestep: Optional[int] = None
     ) -> BatchedTrainingSamples:
         """Load the same sample from the dataset.
 
