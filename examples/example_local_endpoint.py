@@ -139,17 +139,7 @@ def main():
         if reward == 4:
             print(f"Episode {episode_idx} successful.")
         else:
-<<<<<<< HEAD
             print(f"Episode {episode_idx} failed.")
-=======
-            logger.info(f"Episode {episode_idx} failed with reward {reward}")
-
-        # Save video if enabled
-        if save_video and frames:
-            video_path = video_output_dir / f"episode_{episode_idx}.mp4"
-            save_frames_to_video(frames, video_path, frame_width, frame_height)
-            logger.info(f"Saved video to {video_path}")
->>>>>>> e52c0dd (fix typo)
 
         plt.close()
 
