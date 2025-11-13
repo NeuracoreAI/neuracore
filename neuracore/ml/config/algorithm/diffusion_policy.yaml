@@ -8,9 +8,9 @@ algorithm:
   unet_diffusion_step_embed_dim: 128
   spatial_softmax_num_keypoints: 32
   unet_use_film_scale_modulation: true
-  noise_scheduler_type: "DDIM"
+  noise_scheduler_type: "DDPM"
   num_train_timesteps: 100
-  num_inference_steps: 25
+  num_inference_steps: 50
   beta_start: 0.0001
   beta_end: 0.02
   beta_schedule: "squaredcos_cap_v2"
@@ -20,4 +20,4 @@ algorithm:
   lr_backbone: 1e-5
   weight_decay: 1e-6
   prediction_type: "epsilon"
-  normalization_type: "min_max" 
+  normalization_type: "min_max"  # Options: "mean_std" or "min_max"
