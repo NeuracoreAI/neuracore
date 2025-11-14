@@ -68,7 +68,7 @@ def main():
     # Note by default, model is loaded from the last epoch.
     # policy.set_checkpoint(epoch=-1)
 
-    onscreen_render = False
+    onscreen_render = True
     save_video = True  # Set to True to save video files
     video_output_dir = Path("videos")  # Directory to save videos
     render_cam_name = "angle"
@@ -105,7 +105,7 @@ def main():
 
         horizon = 1
         # Run episode
-        for i in range(450):
+        for i in range(400):
             nc.log_joint_positions(obs.qpos)
             for key, value in obs.cameras.items():
                 if key in obs_camera_names:
@@ -121,7 +121,7 @@ def main():
                     for jtp in joint_target_positions
                     if jtp is not None
                 ]
-                horizon = len(actions)
+                horizon = int(len(actions) * 0.8)
             a = actions[idx_in_horizon]
             obs, reward, done = env.step(a)
 
@@ -139,7 +139,16 @@ def main():
         if reward == 4:
             print(f"Episode {episode_idx} successful.")
         else:
-            print(f"Episode {episode_idx} failed.")
+            print(f"Episode {episode_idx} failed with reward {reward}.")
+
+        # save the video
+        if save_video:
+            save_frames_to_video(
+                frames,
+                video_output_dir / f"episode_{episode_idx}.mp4",
+                frame_width,
+                frame_height,
+            )
 
         plt.close()
 
