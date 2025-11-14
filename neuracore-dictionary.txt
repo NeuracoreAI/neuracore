@@ -184,6 +184,7 @@ torchserve
 torq
 traj
 UFACTORY
+uncompiled
 unet
 Unet
 Unet's

@@ -39,6 +39,9 @@ local_output_dir: ${oc.env:HOME}/.neuracore/training/runs/${now:%Y-%m-%d_%H-%M-%
 # These will be passed directly to the algorithm constructor
 algorithm_params: null
 
+# Enable model compilation
+compile_model: true
+
 # Resume training
 resume_checkpoint_path: null  # Path to checkpoint to resume from
 

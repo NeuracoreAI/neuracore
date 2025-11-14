@@ -327,6 +327,7 @@ def run_training(
             rank=rank,
             world_size=world_size,
             device=device,
+            compile_model=cfg.compile_model,
         )
 
         # Resume from checkpoint if specified
@@ -365,12 +366,11 @@ def main(cfg: DictConfig) -> None:
 
     if "algorithm" in cfg and cfg.algorithm_id is not None:
         raise ValueError(
-            "Both 'algorithm' and 'algorithm_id' are provided. "
-            "Please specify only one."
+            "Both 'algorithm' and 'algorithm_id' are provided. Please specify only one."
         )
     if "algorithm" not in cfg and cfg.algorithm_id is None:
         raise ValueError(
-            "Neither 'algorithm' nor 'algorithm_id' is provided. " "Please specify one."
+            "Neither 'algorithm' nor 'algorithm_id' is provided. Please specify one."
         )
 
     if cfg.dataset_id is None and cfg.dataset_name is None:

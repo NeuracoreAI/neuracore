@@ -23,9 +23,12 @@ from neuracore.ml import (
 from neuracore.ml.algorithms.cnnmlp.cnnmlp import CNNMLP
 from neuracore.ml.core.ml_types import BatchedData
 from neuracore.ml.utils.device_utils import get_default_device
+from neuracore.ml.logging.training_logger import TrainingLogger
+from neuracore.ml.trainers.distributed_trainer import DistributedTrainer
+from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 from neuracore.ml.utils.validate import run_validation
 
-BS = 2
+BS = 4
 CAMS = 1
 JOINT_POSITION_DIM = 32
 OUTPUT_PRED_DIM = JOINT_POSITION_DIM
@@ -247,11 +250,11 @@ def mock_dataloader(sample_batch):
 
     class MockDataLoader:
         def __iter__(self):
-            for _ in range(2):  # 2 batches per epoch
+            for _ in range(BS):  # BS number of batches per epoch
                 yield generate_batch()
 
         def __len__(self):
-            return 2
+            return BS
 
     return MockDataLoader()
 
@@ -338,3 +341,69 @@ def test_run_validation(tmp_path: Path, mock_login):
     )
     if len(error_msg) > 0:
         raise RuntimeError(error_msg)
+
+
+class _DummyLogger(TrainingLogger):
+    def log_scalar(self, name: str, value: float, step: int) -> None:
+        return None
+
+    def log_scalars(self, scalars: dict[str, float], step: int) -> None:
+        return None
+
+    def log_image(self, name: str, image, step: int, dataformats: str = "CHW") -> None:
+        return None
+
+    def log_images(
+        self, name: str, images, step: int, dataformats: str = "NCHW"
+    ) -> None:
+        return None
+
+    def log_histogram(self, name: str, values, step: int) -> None:
+        return None
+
+    def log_text(self, name: str, text: str, step: int) -> None:
+        return None
+
+    def log_hyperparameters(self, hparams: dict[str, object]) -> None:
+        return None
+
+    def log_model_graph(
+        self, model: torch.nn.Module, input_to_model: torch.Tensor | None = None
+    ) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+@pytest.mark.skipif(
+    not hasattr(torch, "compile"),
+    reason="torch.compile is not available in this PyTorch version",
+)
+def test_training_with_compilation(
+    tmp_path: Path,
+    model_init_description_partial: ModelInitDescription,
+    model_config: dict,
+    mock_dataloader,
+):
+
+    # Common components
+    storage = TrainingStorageHandler(local_dir=str(tmp_path))
+    logger = _DummyLogger()
+    num_epochs = 2
+
+    # Test with compile (should not error)
+    model_compiled = CNNMLP(model_init_description_partial, **model_config)
+    trainer_compiled = DistributedTrainer(
+        model=model_compiled,
+        train_loader=mock_dataloader,
+        val_loader=mock_dataloader,
+        training_logger=logger,
+        storage_handler=storage,
+        output_dir=tmp_path,
+        num_epochs=num_epochs,
+        save_checkpoints=False,
+        compile_model=True,
+    )
+    for e in range(1, num_epochs + 1):
+        trainer_compiled.train_epoch(epoch=e)

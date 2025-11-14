@@ -94,6 +94,12 @@ class DistributedTrainer:
 
         logger.info(f"Process {rank} using device: {self.device}")
 
+        # Compile the model if requested
+        self.compile_model: bool = compile_model
+
+        # Preserve original, uncompiled model reference for artifact packaging
+        self._uncompiled_model_for_artifacts = model
+
         # Set up the model for distributed training
         self.model = model.to(self.device)
         if torch.cuda.is_available() and world_size > 1:
@@ -101,6 +107,10 @@ class DistributedTrainer:
             self.model = DDP(
                 self.model, device_ids=[rank], find_unused_parameters=False
             )
+        if self.compile_model:
+            logger.info(f"Compiling model on device {self.device}")
+            self.model = torch.compile(self.model)
+            logger.info(f"Model compiled successfully on device {self.device}!")
 
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -155,6 +165,7 @@ class DistributedTrainer:
             batch = batch.to(self.device)
 
             # Forward pass
+
             if self.world_size > 1:
                 batch_output = self.model(batch)
             else:
@@ -206,6 +217,7 @@ class DistributedTrainer:
         )
         self._log_scalars(avg_epoch_losses, epoch, prefix="train/epoch/loss")
         self._log_scalars(avg_epoch_metrics, epoch, prefix="train/epoch/metrics")
+
         return avg_epoch_losses
 
     def validate(self, epoch: int) -> dict[str, float]:
@@ -231,6 +243,7 @@ class DistributedTrainer:
             batch = batch.to(self.device)
 
             # Forward pass
+
             if self.world_size > 1:
                 batch_output = self.model(batch)
             else:
@@ -255,6 +268,7 @@ class DistributedTrainer:
         )
         self._log_scalars(avg_losses, self.global_val_step, prefix="val/epoch/loss")
         self._log_scalars(avg_metrics, self.global_val_step, prefix="val/epoch/metrics")
+
         return avg_losses
 
     def train(self, start_epoch: int = 0) -> None:
@@ -284,8 +298,9 @@ class DistributedTrainer:
                     self.save_checkpoint(epoch, train_loss_metrics)
 
                     # Save model artifacts
+                    # Always save artifacts from the original (uncompiled) model
                     self.storage_handler.save_model_artifacts(
-                        model=self.get_model_without_ddp(),
+                        model=self._uncompiled_model_for_artifacts,
                         output_dir=self.output_dir,
                     )
 
