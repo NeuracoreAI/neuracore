@@ -55,6 +55,8 @@ class DiffusionPolicy(NeuracoreModel):
         lr: float = 1e-4,
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-6,
+        optimizer_betas: Tuple[float, float] = (0.9, 0.999),
+        optimizer_eps: float = 1e-8,
         prediction_type: str = "epsilon",
         normalization_type: str = "min_max",
     ):
@@ -79,6 +81,8 @@ class DiffusionPolicy(NeuracoreModel):
             lr: Learning rate for main parameters.
             lr_backbone: Learning rate for backbone parameters.
             weight_decay: Weight decay for optimization.
+            optimizer_betas: Betas for optimizer.
+            optimizer_eps: Epsilon for optimizer.
             prediction_type: Type of prediction ("epsilon" or "sample").
             normalization_type: Type of normalization to use ("mean_std" or "min_max").
         """
@@ -86,7 +90,8 @@ class DiffusionPolicy(NeuracoreModel):
         self.lr = lr
         self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
-
+        self.optimizer_betas = optimizer_betas
+        self.optimizer_eps = optimizer_eps
         # Validate normalization type
         if normalization_type not in ("mean_std", "min_max"):
             raise ValueError(
@@ -147,74 +152,93 @@ class DiffusionPolicy(NeuracoreModel):
     def _setup_normalization_stats(self) -> None:
         """Setup normalization statistics for different data types."""
         # Joint state normalization
-        state_means = []
-        state_stds = []
+        if self.normalization_type == "mean_std":
+            state_means = []
+            state_stds = []
 
-        if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_positions.mean)
-            state_stds.extend(self.dataset_description.joint_positions.std)
-        if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_velocities.mean)
-            state_stds.extend(self.dataset_description.joint_velocities.std)
-        if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_torques.mean)
-            state_stds.extend(self.dataset_description.joint_torques.std)
+            if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
+                state_means.extend(self.dataset_description.joint_positions.mean)
+                state_stds.extend(self.dataset_description.joint_positions.std)
+            if (
+                DataType.JOINT_VELOCITIES
+                in self.model_init_description.input_data_types
+            ):
+                state_means.extend(self.dataset_description.joint_velocities.mean)
+                state_stds.extend(self.dataset_description.joint_velocities.std)
+            if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
+                state_means.extend(self.dataset_description.joint_torques.mean)
+                state_stds.extend(self.dataset_description.joint_torques.std)
 
-        if state_means:
-            # Register as buffers so they move with the model
-            self.register_buffer(
-                "joint_state_mean", self._to_torch_float_tensor(state_means)
-            )
-            self.register_buffer(
-                "joint_state_std", self._to_torch_float_tensor(state_stds)
-            )
-        else:
-            self.joint_state_mean = None
-            self.joint_state_std = None
+            if state_means:
+                # Register as buffers so they move with the model
+                self.register_buffer(
+                    "joint_state_mean", self._to_torch_float_tensor(state_means)
+                )
+                self.register_buffer(
+                    "joint_state_std", self._to_torch_float_tensor(state_stds)
+                )
+            else:
+                self.joint_state_mean = None
+                self.joint_state_std = None
 
-            self.register_buffer(
-                "joint_target_mean",
-                self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.mean
-                ),
-            )
-            self.register_buffer(
-                "joint_target_std",
-                self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.std
-                ),
-            )
+            if (
+                DataType.JOINT_TARGET_POSITIONS
+                in self.model_init_description.output_data_types
+            ):
+                self.register_buffer(
+                    "joint_target_mean",
+                    self._to_torch_float_tensor(
+                        self.dataset_description.joint_target_positions.mean
+                    ),
+                )
+                self.register_buffer(
+                    "joint_target_std",
+                    self._to_torch_float_tensor(
+                        self.dataset_description.joint_target_positions.std
+                    ),
+                )
         elif self.normalization_type == "min_max":
-            state_min = np.concatenate([
-                self.dataset_description.joint_positions.min,
-                self.dataset_description.joint_velocities.min,
-                self.dataset_description.joint_torques.min,
-            ])
-            state_max = np.concatenate([
-                self.dataset_description.joint_positions.max,
-                self.dataset_description.joint_velocities.max,
-                self.dataset_description.joint_torques.max,
-            ])
-            # Register as buffers so they move with the model
-            self.register_buffer(
-                "joint_state_min", self._to_torch_float_tensor(state_min)
-            )
-            self.register_buffer(
-                "joint_state_max", self._to_torch_float_tensor(state_max)
-            )
+            state_max = []
+            state_min = []
+            if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
+                state_min.extend(self.dataset_description.joint_positions.min)
+                state_max.extend(self.dataset_description.joint_positions.max)
+            if (
+                DataType.JOINT_VELOCITIES
+                in self.model_init_description.input_data_types
+            ):
+                state_min.extend(self.dataset_description.joint_velocities.min)
+                state_max.extend(self.dataset_description.joint_velocities.max)
+            if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
+                state_min.extend(self.dataset_description.joint_torques.min)
+                state_max.extend(self.dataset_description.joint_torques.max)
+            if state_min:
+                self.register_buffer(
+                    "joint_state_min", self._to_torch_float_tensor(state_min)
+                )
+                self.register_buffer(
+                    "joint_state_max", self._to_torch_float_tensor(state_max)
+                )
+            else:
+                self.joint_state_min = None
+                self.joint_state_max = None
 
-            self.register_buffer(
-                "joint_target_min",
-                self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.min
-                ),
-            )
-            self.register_buffer(
-                "joint_target_max",
-                self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.max
-                ),
-            )
+            if (
+                DataType.JOINT_TARGET_POSITIONS
+                in self.model_init_description.output_data_types
+            ):
+                self.register_buffer(
+                    "joint_target_min",
+                    self._to_torch_float_tensor(
+                        self.dataset_description.joint_target_positions.min
+                    ),
+                )
+                self.register_buffer(
+                    "joint_target_max",
+                    self._to_torch_float_tensor(
+                        self.dataset_description.joint_target_positions.max
+                    ),
+                )
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
         """Convert list of floats to torch tensor on the correct device."""
@@ -555,6 +579,9 @@ class DiffusionPolicy(NeuracoreModel):
         Uses separate learning rates for image encoder backbone (typically lower)
         and other model parameters to account for pre-trained vision components.
 
+        If lr_backbone is 0, backbone parameters are frozen (requires_grad=False)
+        and excluded from the optimizer to save memory and computation.
+
         Returns:
             list[torch.optim.Optimizer]: List containing the configured optimizer
         """
@@ -567,12 +594,33 @@ class DiffusionPolicy(NeuracoreModel):
             else:
                 other_params.append(param)
 
-        param_groups = [
-            {"params": backbone_params, "lr": self.lr_backbone},
-            {"params": other_params, "lr": self.lr},
-        ]
+        # Build parameter groups, filtering out empty ones
+        param_groups = []
 
-        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+        # If lr_backbone is 0, freeze backbone parameters and exclude from optimizer
+        if self.lr_backbone == 0:
+            for param in backbone_params:
+                param.requires_grad = False
+        elif backbone_params:  # Only add backbone group if it has parameters
+            param_groups.append({"params": backbone_params, "lr": self.lr_backbone})
+
+        # Add other_params group if it has parameters
+        if other_params:
+            param_groups.append({"params": other_params, "lr": self.lr})
+
+        if not param_groups:
+            raise ValueError(
+                "No trainable parameters found. Check that the model has parameters."
+            )
+
+        return [
+            torch.optim.AdamW(
+                param_groups,
+                weight_decay=self.weight_decay,
+                betas=self.optimizer_betas,
+                eps=self.optimizer_eps,
+            )
+        ]
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:

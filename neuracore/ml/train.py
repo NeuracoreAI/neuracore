@@ -274,8 +274,16 @@ def run_training(
             f"and {len(val_loader.dataset)} validation samples"
         )
 
+        # Convert dataset_description to dict to ensure Pydantic v2 compatibility
+        # It may come from neuracore_types while ModelInitDescription expects nc_types
+        dataset_desc_dict = (
+            dataset.dataset_description.model_dump()
+            if hasattr(dataset.dataset_description, "model_dump")
+            else dict(dataset.dataset_description)
+        )
+
         model_init_description = ModelInitDescription(
-            dataset_description=dataset.dataset_description,
+            dataset_description=dataset_desc_dict,
             input_data_types=input_data_types,
             output_data_types=output_data_types,
             output_prediction_horizon=cfg.output_prediction_horizon,
