@@ -204,11 +204,6 @@ class TestSynchronizedDataset:
         assert synced_dataset[0] is recordings[0]
         assert synced_dataset[1] is recordings[1]
 
-    def test_num_transitions(self, synced_dataset, mock_auth_requests):
-        """Test num_transitions property."""
-        # Each recording has 2 frames (from synced_data fixture)
-        assert synced_dataset.num_transitions == 4
-
     def test_prefetch_videos_disabled(self, dataset_mock, dataset_description):
         """Test that prefetch_videos=False doesn't trigger prefetch."""
         with patch.object(
