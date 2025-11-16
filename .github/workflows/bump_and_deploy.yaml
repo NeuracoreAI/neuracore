@@ -1,0 +1,199 @@
+name: Bump and Publish
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+
+  check-version-bump:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      bump_type: ${{ steps.check.outputs.bump_type }}
+      pr_number: ${{ steps.check.outputs.pr_number }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Get merged PR labels
+      id: pr_labels
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const commit = context.sha;
+          
+          // Find the PR associated with this merge commit
+          const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            commit_sha: commit
+          });
+          
+          if (prs.data.length === 0) {
+            console.log('No PR found for this commit');
+            return { bump_type: 'none' };
+          }
+
+          // Define valid version labels
+          const versionLabels = [
+            'version:major',
+            'version:minor', 
+            'version:patch',
+            'version:none'
+          ];
+          
+          const pr = prs.data[0];
+          const firstLabel = pr.labels[0]?.name;
+          let bump_type = firstLabel.split(':')[1];
+          return { bump_type, pr_number: pr.number };
+    
+    - name: Check if release needed
+      id: check
+      run: |
+        BUMP_TYPE="${{ fromJSON(steps.pr_labels.outputs.result).bump_type }}"
+        PR_NUMBER="${{ fromJSON(steps.pr_labels.outputs.result).pr_number }}"
+        
+        if [ "$BUMP_TYPE" = "none" ] || [ -z "$BUMP_TYPE" ]; then
+          echo "No version bump label found - skipping release"
+          echo "should_release=false" >> $GITHUB_OUTPUT
+          echo "bump_type=none" >> $GITHUB_OUTPUT
+        else
+          echo "Version bump type: $BUMP_TYPE"
+          echo "should_release=true" >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+        fi
+
+  version-bump:
+    needs: check-version-bump
+    runs-on: ubuntu-latest
+    if: needs.check-version-bump.outputs.should_release == 'true'
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      new_version: ${{ steps.bump.outputs.new_version }}
+    
+    steps:
+    - name: Generate GitHub App Token
+      id: generate-token
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ vars.NC_VERSION_BUMPER_APP_ID }}
+        private-key: ${{ secrets.NC_VERSION_BUMPER_PRIVATE_KEY }}
+    
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ steps.generate-token.outputs.token }}
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install bump2version
+    
+    - name: Bump version
+      id: bump
+      run: |
+        BUMP_TYPE="${{ needs.check-version-bump.outputs.bump_type }}"
+        
+        echo "Bumping $BUMP_TYPE version"
+
+        # Configure git
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git config user.name "github-actions[bot]"
+        
+        # Use bump2version to bump the version
+        bump2version $BUMP_TYPE --allow-dirty
+        NEW_VERSION=$(grep -m 1 '^current_version = ' .bumpversion.cfg | cut -d'=' -f2 | tr -d ' ')
+        
+        echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+                
+        git push origin main --tags
+
+  publish-python:
+    needs: version-bump
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: main
+        fetch-depth: 0
+    
+    - name: Pull latest changes
+      run: |
+        git pull --tags
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install build tools
+      run: |
+        pip install --upgrade pip
+        pip install build twine
+    
+    - name: Build Python package
+      run: python -m build
+    
+    - name: Publish to PyPI
+      env:
+          TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+      run: twine upload --skip-existing dist/*
+
+  create-release:
+    needs: [version-bump, publish-python]
+    runs-on: ubuntu-latest
+    if: needs.version-bump.outputs.should_release == 'true'
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: main
+        fetch-depth: 0
+    
+    - name: Pull latest changes
+      run: git pull --tags
+    
+    - name: Create GitHub Release
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const version = '${{ needs.version-bump.outputs.new_version }}';
+          
+          await github.rest.repos.createRelease({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            tag_name: `v${version}`,
+            name: `Release v${version}`,
+            body: `## Release v${version}\n\n` +
+                  `Published to:\n` +
+                  `- PyPI: https://pypi.org/project/neuracore/${version}/\n` +
+                  `### Installation\n` +
+                  `\`\`\`bash\n` +
+                  `pip install neuracore==${version}\n` +
+                  `\`\`\``,
+            draft: false,
+            prerelease: false
+          });
