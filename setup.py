@@ -48,7 +48,7 @@ setup(
         "uvicorn[standard]",
         "fastapi",
         "psutil",
-        "neuracore-types>=1.0.1",
+        "neuracore-types~=1.0",
     ],
     extras_require={
         "examples": [
