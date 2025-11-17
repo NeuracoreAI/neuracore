@@ -28,7 +28,7 @@ def main(args):
 
     if record:
         nc.create_dataset(
-            name="Test Min Max",
+            name="Diffusion Min Max 62",
             description="This is an example dataset",
         )
         print("Created Dataset...")

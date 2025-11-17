@@ -599,24 +599,29 @@ class DiffusionPolicy(NeuracoreModel):
             else:
                 other_params.append(param)
 
-        # Build parameter groups, filtering out empty ones
-        param_groups = []
+        param_groups = [
+            {"params": backbone_params, "lr": self.lr_backbone},
+            {"params": other_params, "lr": self.lr},
+        ]
 
-        # If lr_backbone is 0, freeze backbone parameters and exclude from optimizer
-        if self.lr_backbone == 0:
-            for param in backbone_params:
-                param.requires_grad = False
-        elif backbone_params:  # Only add backbone group if it has parameters
-            param_groups.append({"params": backbone_params, "lr": self.lr_backbone})
+        # # Build parameter groups, filtering out empty ones
+        # param_groups = []
 
-        # Add other_params group if it has parameters
-        if other_params:
-            param_groups.append({"params": other_params, "lr": self.lr})
+        # # If lr_backbone is 0, freeze backbone parameters and exclude from optimizer
+        # if self.lr_backbone == 0:
+        #     for param in backbone_params:
+        #         param.requires_grad = False
+        # elif backbone_params:  # Only add backbone group if it has parameters
+        #     param_groups.append({"params": backbone_params, "lr": self.lr_backbone})
 
-        if not param_groups:
-            raise ValueError(
-                "No trainable parameters found. Check that the model has parameters."
-            )
+        # # Add other_params group if it has parameters
+        # if other_params:
+        #     param_groups.append({"params": other_params, "lr": self.lr})
+
+        # if not param_groups:
+        #     raise ValueError(
+        #         "No trainable parameters found. Check that the model has parameters."
+        #     )
 
         return [
             torch.optim.AdamW(

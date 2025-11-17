@@ -59,7 +59,7 @@ def main():
     )
 
     # If you know the path to the local model.nc.zip file, you can use it directly as:
-    # policy = nc.policy(model_file=PATH/TO/MODEL.nc.zip)
+    # policy = nc.policy(model_file=PATH_TO_MODEL.NC.ZIP)
 
     # Alternatively, you can connect to a local endpoint that has been started
     # policy = nc.policy_local_server(train_run_name=TRAINING_JOB_NAME)
@@ -69,7 +69,7 @@ def main():
     # policy.set_checkpoint(epoch=-1)
 
     onscreen_render = True
-    save_video = True  # Set to True to save video files
+    save_video = False  # Set to True to save video files
     video_output_dir = Path("videos")  # Directory to save videos
     render_cam_name = "angle"
     obs_camera_names = ["angle"]
