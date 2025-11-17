@@ -107,6 +107,10 @@ class TrainingStorageHandler:
         """
         save_path = self.local_dir / relative_checkpoint_path
         save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Convert OmegaConf objects to plain Python types
+        # for compatibility with weights_only=True
+        checkpoint = self._convert_omegaconf_to_python(checkpoint)
         torch.save(checkpoint, save_path)
         if self.log_to_cloud:
             upload_url = self._get_upload_url(
@@ -134,6 +138,32 @@ class TrainingStorageHandler:
                 )
                 return
 
+    def _convert_omegaconf_to_python(self, obj: Any) -> Any:
+        """Recursively convert OmegaConf objects to plain Python types.
+
+        Args:
+            obj: Object that may contain OmegaConf objects.
+
+        Returns:
+            Object with OmegaConf objects converted to plain Python types.
+        """
+        try:
+            from omegaconf import DictConfig, ListConfig
+        except ImportError:
+            # OmegaConf not available, return as-is
+            return obj
+
+        if isinstance(obj, DictConfig):
+            return {k: self._convert_omegaconf_to_python(v) for k, v in obj.items()}
+        elif isinstance(obj, ListConfig):
+            return [self._convert_omegaconf_to_python(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {k: self._convert_omegaconf_to_python(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return type(obj)(self._convert_omegaconf_to_python(item) for item in obj)
+        else:
+            return obj
+
     def load_checkpoint(self, checkpoint_name: str) -> dict:
         """Load checkpoint from storage.
 
@@ -158,7 +188,32 @@ class TrainingStorageHandler:
                 )
             with open(load_path, "wb") as f:
                 f.write(response.content)
-        return torch.load(load_path, weights_only=True)
+
+        # Try to load with weights_only=True (secure mode)
+        try:
+            return torch.load(load_path, weights_only=True)
+        except Exception as e:
+            error_str = str(e)
+
+            # Check if the error is related to OmegaConf objects
+            is_omegaconf_error = (
+                "ListConfig" in error_str
+                or "DictConfig" in error_str
+                or "omegaconf" in error_str.lower()
+                or "Unsupported global" in error_str
+                or "was not an allowed global" in error_str
+            )
+
+            if is_omegaconf_error:
+                # Fall back to weights_only=False for OmegaConf compatibility
+                logger.warning(
+                    "Checkpoint contains OmegaConf objects. "
+                    "Loading with weights_only=False instead of True for compatibility."
+                )
+                return torch.load(load_path, weights_only=False)
+            else:
+                # Re-raise if it's a different error
+                raise
 
     def delete_checkpoint(self, relative_checkpoint_path: Path) -> None:
         """Delete checkpoint from storage.

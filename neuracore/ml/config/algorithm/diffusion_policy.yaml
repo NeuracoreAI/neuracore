@@ -10,14 +10,14 @@ algorithm:
   unet_use_film_scale_modulation: true
   noise_scheduler_type: "DDPM"
   num_train_timesteps: 100
-  num_inference_steps: 100
+  num_inference_steps: 50
   beta_start: 0.0001
   beta_end: 0.02
   beta_schedule: "squaredcos_cap_v2"
   clip_sample: true
   clip_sample_range: 1.0
   lr: 1e-4
-  lr_backbone: 0.0
+  lr_backbone: 1e-5
   weight_decay: 1e-6
   optimizer_betas: [0.9, 0.999]
   optimizer_eps: 1e-8
