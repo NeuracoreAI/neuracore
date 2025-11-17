@@ -10,7 +10,7 @@ import time
 from typing import Optional
 
 import numpy as np
-from neuracore_types import CameraData, JointData, LanguageData, SyncPoint
+from neuracore_types import CameraData, DataType, JointData, LanguageData, SyncPoint
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.exceptions import RobotError
@@ -104,7 +104,8 @@ def get_latest_sync_point(
         raise ValueError("No active robot found. Please initialize a robot instance.")
     sync_point = SyncPoint(timestamp=time.time())
     for stream_name, stream in robot.list_all_streams().items():
-        if "rgb" in stream_name:
+        # "rgb" is first 3 characters of the enum value for DataType.RGB_IMAGE
+        if DataType.RGB_IMAGE.value.lower()[:3] in stream_name.lower():
             stream_data = stream.get_latest_data()
             assert isinstance(stream_data, np.ndarray)
             if sync_point.rgb_images is None:
@@ -112,7 +113,8 @@ def get_latest_sync_point(
             sync_point.rgb_images[stream_name] = CameraData(
                 timestamp=time.time(), frame=stream_data
             )
-        elif "depth" in stream_name:
+        # "depth" is first 5 characters of the enum value for DataType.DEPTH_IMAGE
+        elif DataType.DEPTH_IMAGE.value.lower()[:5] in stream_name.lower():
             stream_data = stream.get_latest_data()
             assert isinstance(stream_data, np.ndarray)
             if sync_point.depth_images is None:
@@ -121,22 +123,23 @@ def get_latest_sync_point(
                 timestamp=time.time(),
                 frame=depth_to_rgb(stream_data),
             )
-        elif "joint_positions" in stream_name:
+        elif DataType.JOINT_POSITIONS.value.lower() in stream_name.lower():
             stream_data = stream.get_latest_data()
             assert isinstance(stream_data, JointData)
             sync_point.joint_positions = _maybe_add_existing_data(
                 sync_point.joint_positions, stream_data
             )
-        elif "joint_velocities" in stream_name:
+        elif DataType.JOINT_VELOCITIES.value.lower() in stream_name.lower():
             stream_data = stream.get_latest_data()
             assert isinstance(stream_data, JointData)
             sync_point.joint_velocities = _maybe_add_existing_data(
                 sync_point.joint_velocities, stream_data
             )
-        elif "language" in stream_name:
+        elif DataType.LANGUAGE.value.lower() in stream_name.lower():
             stream_data = stream.get_latest_data()
             assert isinstance(stream_data, LanguageData)
             sync_point.language_data = stream_data
+        # TODO: Add support for other data types
         else:
             raise NotImplementedError(
                 f"Support for stream {stream_name} is not implemented yet"
