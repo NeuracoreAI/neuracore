@@ -243,8 +243,6 @@ class Pi0(NeuracoreModel):
 
     def _unnormalize_actions(self, predicted_actions: torch.Tensor) -> torch.Tensor:
         """Unnormalize the actions."""
-        # Move predicted_actions to the same device as the buffers
-        predicted_actions = predicted_actions.to(self.joint_target_std.device)
         return (predicted_actions * self.joint_target_std) + self.joint_target_mean
 
     def _combine_normalized_joint_states(
