@@ -116,22 +116,15 @@ class DistributedTrainer:
         self.clip_grad_norm = clip_grad_norm
         self.rank = rank
         self.world_size = world_size
-        self.optimizers = model.configure_optimizers()
         self.global_train_step = 0
         self.global_val_step = 0
-        from diffusers.optimization import get_scheduler
 
-        # Create a scheduler for each optimizer
-        self.schedulers = [
-            get_scheduler(
-                name="cosine",
-                optimizer=optimizer,
-                num_warmup_steps=500,
-                num_training_steps=self.num_epochs * len(self.train_loader),
-            )
-            for optimizer in self.optimizers
-        ]
-
+        [self.optimizers, self.schedulers] = model.configure_optimizers()
+        if self.schedulers is not None:
+            num_training_steps = self.num_epochs * len(self.train_loader)
+            for scheduler in self.schedulers:
+                if hasattr(scheduler, "num_training_steps"):
+                    scheduler.num_training_steps = num_training_steps
         # Create checkpoint directory
         if rank == 0:
             self.checkpoint_dir = output_dir / "checkpoints"

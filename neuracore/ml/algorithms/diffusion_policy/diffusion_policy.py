@@ -60,6 +60,9 @@ class DiffusionPolicy(NeuracoreModel):
         optimizer_eps: float = 1e-8,
         prediction_type: str = "epsilon",
         normalization_type: str = "min_max",
+        scheduler_name: str = "cosine",
+        scheduler_num_warmup_steps: int = 500,
+        scheduler_num_training_steps: Optional[int] = None,
     ):
         """Initialize the Diffusion Policy model.
 
@@ -87,6 +90,11 @@ class DiffusionPolicy(NeuracoreModel):
             optimizer_eps: Epsilon for optimizer.
             prediction_type: Type of prediction ("epsilon" or "sample").
             normalization_type: Type of normalization to use ("mean_std" or "min_max").
+            scheduler_name: Name of the learning rate scheduler
+                ("cosine", "linear", etc.).
+            scheduler_num_warmup_steps: Number of warmup steps for the scheduler.
+            scheduler_num_training_steps: Total number of training steps.
+                If None, will be set by trainer.
         """
         super().__init__(model_init_description)
         self.lr = lr
@@ -94,6 +102,9 @@ class DiffusionPolicy(NeuracoreModel):
         self.weight_decay = weight_decay
         self.optimizer_betas = optimizer_betas
         self.optimizer_eps = optimizer_eps
+        self.scheduler_name = scheduler_name
+        self.scheduler_num_warmup_steps = scheduler_num_warmup_steps
+        self.scheduler_num_training_steps = scheduler_num_training_steps
         # Validate normalization type
         if normalization_type not in ("mean_std", "min_max"):
             raise ValueError(
@@ -578,8 +589,10 @@ class DiffusionPolicy(NeuracoreModel):
             metrics=metrics,
         )
 
-    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
-        """Configure optimizer with different learning rates for different components.
+    def configure_optimizers(
+        self,
+    ) -> list[torch.optim.Optimizer | Any]:
+        """Configure optimizer and scheduler with different learning rates.
 
         Uses separate learning rates for image encoder backbone (typically lower)
         and other model parameters to account for pre-trained vision components.
@@ -588,8 +601,11 @@ class DiffusionPolicy(NeuracoreModel):
         and excluded from the optimizer to save memory and computation.
 
         Returns:
-            list[torch.optim.Optimizer]: List containing the configured optimizer
+            list[torch.optim.Optimizer | Any]:
+            List containing [optimizer, scheduler] where scheduler is from diffusers.
         """
+        from diffusers.optimization import get_scheduler
+
         backbone_params = []
         other_params = []
 
@@ -599,38 +615,50 @@ class DiffusionPolicy(NeuracoreModel):
             else:
                 other_params.append(param)
 
-        param_groups = [
-            {"params": backbone_params, "lr": self.lr_backbone},
-            {"params": other_params, "lr": self.lr},
-        ]
+        # Build parameter groups, filtering out empty ones
+        param_groups = []
 
-        # # Build parameter groups, filtering out empty ones
-        # param_groups = []
+        # If lr_backbone is 0, freeze backbone parameters and exclude from optimizer
+        if self.lr_backbone == 0:
+            for param in backbone_params:
+                param.requires_grad = False
+        elif (
+            self.lr_backbone > 0 and backbone_params
+        ):  # Only add backbone group if it has parameters
+            param_groups.append({"params": backbone_params, "lr": self.lr_backbone})
 
-        # # If lr_backbone is 0, freeze backbone parameters and exclude from optimizer
-        # if self.lr_backbone == 0:
-        #     for param in backbone_params:
-        #         param.requires_grad = False
-        # elif backbone_params:  # Only add backbone group if it has parameters
-        #     param_groups.append({"params": backbone_params, "lr": self.lr_backbone})
+        # Add other_params group if it has parameters
+        if other_params:
+            param_groups.append({"params": other_params, "lr": self.lr})
 
-        # # Add other_params group if it has parameters
-        # if other_params:
-        #     param_groups.append({"params": other_params, "lr": self.lr})
-
-        # if not param_groups:
-        #     raise ValueError(
-        #         "No trainable parameters found. Check that the model has parameters."
-        #     )
-
-        return [
-            torch.optim.AdamW(
-                param_groups,
-                weight_decay=self.weight_decay,
-                betas=self.optimizer_betas,
-                eps=self.optimizer_eps,
+        if not param_groups:
+            raise ValueError(
+                "No trainable parameters found. Check that the model has parameters."
             )
-        ]
+
+        optimizer = torch.optim.AdamW(
+            param_groups,
+            weight_decay=self.weight_decay,
+            betas=self.optimizer_betas,
+            eps=self.optimizer_eps,
+        )
+
+        # Create a scheduler for the optimizer
+        # Use provided num_training_steps or a placeholder
+        # that can be updated by trainer
+        num_training_steps = (
+            self.scheduler_num_training_steps
+            if self.scheduler_num_training_steps is not None
+            else 10000  # Placeholder - trainer will update this if needed
+        )
+        scheduler = get_scheduler(
+            name=self.scheduler_name,
+            optimizer=optimizer,
+            num_warmup_steps=self.scheduler_num_warmup_steps,
+            num_training_steps=num_training_steps,
+        )
+
+        return [[optimizer], [scheduler]]
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:

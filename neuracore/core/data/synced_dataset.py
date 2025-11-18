@@ -79,7 +79,7 @@ class SynchronizedDataset:
     @property
     def num_transitions(self) -> int:
         """Get the number of transitions in the dataset."""
-        return self.dataset_description.total_num_transitions
+        return sum(len(synced_recording) for synced_recording in self)
 
     def __iter__(self) -> "SynchronizedDataset":
         """Initialize iterator over episodes in the dataset.

@@ -51,8 +51,7 @@ class BatchSizeAutotuner:
         self.model = model
 
         # create optimizers
-        self.optimizers = self.model.configure_optimizers()
-
+        [self.optimizers, self.schedulers] = self.model.configure_optimizers()
         # Validate batch size ranges
         if min_batch_size > max_batch_size:
             raise ValueError(
