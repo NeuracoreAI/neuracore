@@ -483,6 +483,36 @@ class Robot:
         except Exception as e:
             raise RobotError(f"Error preparing URDF package: {str(e)}")
 
+    def cancel_recording(self, recording_id: str) -> None:
+        """Cancel an active recording without saving any data.
+
+        Args:
+            recording_id: the ID of the recording to cancel.
+        """
+        if not self.id:
+            raise RobotError("Robot not initialized. Call init() first.")
+
+        try:
+            response = requests.post(
+                f"{API_URL}/org/{self.org_id}/recording/cancel?recording_id={recording_id}",
+                headers=self._auth.get_headers(),
+            )
+            response.raise_for_status()
+
+            if response.json() == "WrongUser":
+                raise RobotError("Cannot cancel recording initiated by another user")
+
+            get_recording_state_manager().recording_stopped(
+                robot_id=self.id, instance=self.instance, recording_id=recording_id
+            )
+        except requests.exceptions.ConnectionError:
+            raise RobotError((
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            ))
+        except requests.exceptions.RequestException as e:
+            raise RobotError(f"Failed to cancel recording: {str(e)}")
+
 
 # Global robot registry
 _robots: dict[RobotInstanceIdentifier, Robot] = {}

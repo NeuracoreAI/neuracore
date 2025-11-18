@@ -271,3 +271,20 @@ def stop_live_data(robot_name: Optional[str] = None, instance: int = 0) -> None:
     if not robot.id:
         raise RobotError("Robot not initialized. Call init() first.")
     StreamManagerOrchestrator().remove_manager(robot.id, robot.instance)
+
+
+def cancel_recording(robot_name: Optional[str] = None, instance: int = 0) -> None:
+    """Cancel the current recording for a specific robot without saving any data.
+
+    Args:
+        robot_name: Robot identifier.
+        instance: Instance number of the robot for multi-instance scenarios.
+
+    """
+    robot = _get_robot(robot_name, instance)
+    if not robot.is_recording():
+        return
+    recording_id = robot.get_current_recording_id()
+    if not recording_id:
+        return
+    robot.cancel_recording(recording_id)
