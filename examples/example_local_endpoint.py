@@ -121,7 +121,7 @@ def main():
                     for jtp in joint_target_positions
                     if jtp is not None
                 ]
-                horizon = int(len(actions) * 0.8)
+                horizon = int(len(actions) * 1.0)
             a = actions[idx_in_horizon]
             obs, reward, done = env.step(a)
 
