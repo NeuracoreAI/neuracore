@@ -252,7 +252,7 @@ python -m neuracore.ml.train algorithm=diffusion_policy batch_size=auto dataset_
 python -m neuracore.ml.train --multirun algorithm=cnnmlp algorithm.lr=1e-4,5e-4,1e-3 algorithm.hidden_dim=256,512,1024 dataset_name="my_dataset"
 
 # Multi-modal training with images and language
-python -m neuracore.ml.train algorithm=simple_vla dataset_name="my_multimodal_dataset" input_data_types='["joint_positions","rgb_image","language"]'
+python -m neuracore.ml.train algorithm=simple_vla dataset_name="my_multimodal_dataset" input_data_types='["JOINT_POSITIONS","RGB_IMAGE","LANGUAGE"]'
 ```
 
 ### Configuration Management
@@ -271,11 +271,11 @@ seed: 42
 
 # Multi-modal data support
 input_data_types:
-  - "joint_positions"
-  - "rgb_image"
-  - "language"
+  - "JOINT_POSITIONS"
+  - "RGB_IMAGE"
+  - "LANGUAGE"
 output_data_types:
-  - "joint_target_positions"
+  - "JOINT_TARGET_POSITIONS"
 ```
 
 ### Training Features

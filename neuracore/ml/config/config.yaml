@@ -23,10 +23,10 @@ dataset_name: null
 dataset_id: null
 frequency: 10
 input_data_types:
-  - "joint_positions"
-  - "rgb_image"
+  - "JOINT_POSITIONS"
+  - "RGB_IMAGE"
 output_data_types:
-  - "joint_positions"
+  - "JOINT_POSITIONS"
 
 
 # Paths and IDs (for cloud vs local training)
