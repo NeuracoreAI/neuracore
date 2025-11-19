@@ -60,9 +60,9 @@ class DiffusionPolicy(NeuracoreModel):
         optimizer_eps: float = 1e-8,
         prediction_type: str = "epsilon",
         normalization_type: str = "min_max",
-        scheduler_name: str = "cosine",
-        scheduler_num_warmup_steps: int = 500,
-        scheduler_num_training_steps: Optional[int] = None,
+        lr_scheduler_type: str = "cosine",
+        lr_scheduler_num_warmup_steps: int = 500,
+        lr_scheduler_num_training_steps: Optional[int] = None,
     ):
         """Initialize the Diffusion Policy model.
 
@@ -90,10 +90,10 @@ class DiffusionPolicy(NeuracoreModel):
             optimizer_eps: Epsilon for optimizer.
             prediction_type: Type of prediction ("epsilon" or "sample").
             normalization_type: Type of normalization to use ("mean_std" or "min_max").
-            scheduler_name: Name of the learning rate scheduler
+            lr_scheduler_type: Type of the learning rate scheduler
                 ("cosine", "linear", etc.).
-            scheduler_num_warmup_steps: Number of warmup steps for the scheduler.
-            scheduler_num_training_steps: Total number of training steps.
+            lr_scheduler_num_warmup_steps: Number of warmup steps for the scheduler.
+            lr_scheduler_num_training_steps: Total number of training steps.
                 If None, will be set by trainer.
         """
         super().__init__(model_init_description)
@@ -102,9 +102,9 @@ class DiffusionPolicy(NeuracoreModel):
         self.weight_decay = weight_decay
         self.optimizer_betas = optimizer_betas
         self.optimizer_eps = optimizer_eps
-        self.scheduler_name = scheduler_name
-        self.scheduler_num_warmup_steps = scheduler_num_warmup_steps
-        self.scheduler_num_training_steps = scheduler_num_training_steps
+        self.lr_scheduler_type = lr_scheduler_type
+        self.lr_scheduler_num_warmup_steps = lr_scheduler_num_warmup_steps
+        self.lr_scheduler_num_training_steps = lr_scheduler_num_training_steps
         # Validate normalization type
         if normalization_type not in ("mean_std", "min_max"):
             raise ValueError(
@@ -644,18 +644,17 @@ class DiffusionPolicy(NeuracoreModel):
         )
 
         # Create a scheduler for the optimizer
-        # Use provided num_training_steps or a placeholder
-        # that can be updated by trainer
-        num_training_steps = (
-            self.scheduler_num_training_steps
-            if self.scheduler_num_training_steps is not None
-            else 10000  # Placeholder - trainer will update this if needed
-        )
+        # Use a placeholder for num_training_steps if not provided to avoid error
+        # Later the num_training_steps will be updated by the trainer.
         scheduler = get_scheduler(
-            name=self.scheduler_name,
+            name=self.lr_scheduler_type,
             optimizer=optimizer,
-            num_warmup_steps=self.scheduler_num_warmup_steps,
-            num_training_steps=num_training_steps,
+            num_warmup_steps=self.lr_scheduler_num_warmup_steps,
+            num_training_steps=(
+                self.lr_scheduler_num_training_steps
+                if self.lr_scheduler_num_training_steps is not None
+                else 100000
+            ),
         )
 
         return [[optimizer], [scheduler]]

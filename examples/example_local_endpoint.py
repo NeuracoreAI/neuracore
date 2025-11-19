@@ -73,7 +73,8 @@ def main():
     video_output_dir = Path("videos")  # Directory to save videos
     render_cam_name = "angle"
     obs_camera_names = ["angle"]
-    num_rollouts = 10
+    num_rollouts = 30
+    successful_rollouts = 0
 
     # Create video output directory if saving videos
     if save_video:
@@ -121,7 +122,7 @@ def main():
                     for jtp in joint_target_positions
                     if jtp is not None
                 ]
-                horizon = int(len(actions) * 1.0)
+                horizon = int(len(actions) * 0.5)
             a = actions[idx_in_horizon]
             obs, reward, done = env.step(a)
 
@@ -137,10 +138,11 @@ def main():
                 logger.info(f"Episode {episode_idx} done")
                 break
         if reward == 4:
+            successful_rollouts += 1
             print(f"Episode {episode_idx} successful.")
         else:
             print(f"Episode {episode_idx} failed with reward {reward}.")
-
+        print(f"Successful rollouts: {successful_rollouts}/{num_rollouts}")
         # save the video
         if save_video:
             save_frames_to_video(
