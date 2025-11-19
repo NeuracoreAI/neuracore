@@ -4,7 +4,7 @@ defaults:
   - override hydra/launcher: basic
 
 # Core training parameters
-seed: 42
+seed: 1000
 epochs: 100
 output_prediction_horizon: 100
 validation_split: 0.2

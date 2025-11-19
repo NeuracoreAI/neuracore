@@ -21,13 +21,11 @@ class DiffusionPolicyImageEncoder(nn.Module):
     def __init__(
         self,
         spatial_softmax_num_keypoints: int = 32,
-        feature_dim: int = 256,
     ):
         """Initialize the image encoder.
 
         Args:
             spatial_softmax_num_keypoints: Number of keypoints for spatial softmax.
-            feature_dim: Dimension of output features.
         """
         super().__init__()
 
@@ -35,7 +33,7 @@ class DiffusionPolicyImageEncoder(nn.Module):
         self.backbone = self._build_backbone()
         # ResNet18 without avgpool and fc layers outputs (512, 7, 7) for 224x224 input
         self.pool = SpatialSoftmax((512, 7, 7), num_kp=spatial_softmax_num_keypoints)
-        self.feature_dim = feature_dim
+        self.feature_dim = spatial_softmax_num_keypoints * 2
         self.out = nn.Linear(spatial_softmax_num_keypoints * 2, self.feature_dim)
         self.relu = nn.ReLU()
 
