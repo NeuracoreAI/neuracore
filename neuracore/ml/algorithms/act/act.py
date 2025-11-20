@@ -574,14 +574,16 @@ class ACT(NeuracoreModel):
             metrics=metrics,
         )
 
-    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
+    def configure_optimizers(self) -> dict[str, list[torch.optim.Optimizer] | None]:
         """Configure optimizer with different learning rates for different components.
 
         Uses separate learning rates for image encoder backbone (typically lower)
         and other model parameters to account for pre-trained vision components.
 
         Returns:
-            list[torch.optim.Optimizer]: List containing the configured optimizer
+            dict: Dictionary with keys "optimizers" and "schedulers".
+                - "optimizers": List of optimizers
+                - "schedulers": List of schedulers or None
         """
         backbone_params = []
         other_params = []
@@ -597,7 +599,12 @@ class ACT(NeuracoreModel):
             {"params": other_params, "lr": self.lr},
         ]
 
-        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+        return {
+            "optimizers": [
+                torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)
+            ],
+            "schedulers": None,
+        }
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:

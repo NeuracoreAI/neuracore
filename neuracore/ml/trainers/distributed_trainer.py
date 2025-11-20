@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
@@ -119,7 +120,18 @@ class DistributedTrainer:
         self.global_train_step = 0
         self.global_val_step = 0
 
-        [self.optimizers, self.schedulers] = model.configure_optimizers()
+        optimizer_result = model.configure_optimizers()
+        if isinstance(optimizer_result, dict):
+            optimizers = optimizer_result.get("optimizers")
+            if optimizers is None:
+                raise ValueError("optimizers cannot be None")
+            self.optimizers: list[Optimizer] = optimizers
+            self.schedulers: Optional[list] = optimizer_result.get("schedulers")
+        else:
+            raise ValueError(
+                "configure_optimizers must return a dictionary with keys "
+                "'optimizers' and 'schedulers'"
+            )
         if self.schedulers is not None:
             num_training_steps = self.num_epochs * len(self.train_loader)
             for scheduler in self.schedulers:
@@ -179,8 +191,9 @@ class DistributedTrainer:
             for optimizer in self.optimizers:
                 optimizer.step()
 
-            for scheduler in self.schedulers:
-                scheduler.step()
+            if self.schedulers is not None:
+                for scheduler in self.schedulers:
+                    scheduler.step()
 
             if self.log_freq > 0 and self.global_train_step % self.log_freq == 0:
                 self._log_scalars(
@@ -262,8 +275,8 @@ class DistributedTrainer:
         avg_losses, avg_metrics = self._average_epoch_metrics(
             val_losses, val_metrics, epoch
         )
-        self._log_scalars(avg_losses, self.global_val_step, prefix="val/epoch/loss")
-        self._log_scalars(avg_metrics, self.global_val_step, prefix="val/epoch/metrics")
+        self._log_scalars(avg_losses, epoch, prefix="val/epoch/loss")
+        self._log_scalars(avg_metrics, epoch, prefix="val/epoch/metrics")
         return avg_losses
 
     def train(self, start_epoch: int = 0) -> None:
@@ -359,7 +372,11 @@ class DistributedTrainer:
             "epoch": epoch,
             "model_state": model_state,
             "optimizer_states": [opt.state_dict() for opt in self.optimizers],
-            "scheduler_states": [sch.state_dict() for sch in self.schedulers],
+            "scheduler_states": (
+                [sch.state_dict() for sch in self.schedulers]
+                if self.schedulers is not None
+                else None
+            ),
             "metrics": metrics,
             "global_train_step": self.global_train_step,
             "global_val_step": self.global_val_step,
@@ -397,10 +414,14 @@ class DistributedTrainer:
             self.optimizers, checkpoint["optimizer_states"]
         ):
             optimizer.load_state_dict(opt_state)
-        for scheduler, sch_state in zip(
-            self.schedulers, checkpoint["scheduler_states"]
+        if (
+            self.schedulers is not None
+            and checkpoint.get("scheduler_states") is not None
         ):
-            scheduler.load_state_dict(sch_state)
+            for scheduler, sch_state in zip(
+                self.schedulers, checkpoint["scheduler_states"]
+            ):
+                scheduler.load_state_dict(sch_state)
         # Restore step counters
         self.global_train_step = checkpoint.get("global_train_step", 0)
         self.global_val_step = checkpoint.get("global_val_step", 0)

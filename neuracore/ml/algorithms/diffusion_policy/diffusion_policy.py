@@ -34,7 +34,7 @@ class DiffusionPolicy(NeuracoreModel):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
-        hidden_dim: int = 256,
+        hidden_dim: int = 512,
         unet_down_dims: Tuple[int, ...] = (
             256,
             512,
@@ -115,8 +115,8 @@ class DiffusionPolicy(NeuracoreModel):
         # Vision components
         self.image_encoders = nn.ModuleList([
             DiffusionPolicyImageEncoder(
-                spatial_softmax_num_keypoints=spatial_softmax_num_keypoints,
                 feature_dim=hidden_dim,
+                spatial_softmax_num_keypoints=spatial_softmax_num_keypoints,
             )
             for _ in range(self.dataset_description.rgb_images.max_len)
         ])
@@ -159,7 +159,11 @@ class DiffusionPolicy(NeuracoreModel):
         # Normalize the images with imagenet mean and std
         self.image_normalizer = torch.nn.Sequential(
             T.Resize((224, 224)),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            T.Normalize(
+                mean=[0.16072222590446472, 0.15991183817386628, 0.15994689494371414],
+                std=[0.2003989027316718, 0.1988894954733372, 0.19893645051019113],
+            ),
+            # T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         )
 
         # Normalization statistics
@@ -522,7 +526,6 @@ class DiffusionPolicy(NeuracoreModel):
             joint_velocities=batch.inputs.joint_velocities,
             joint_torques=batch.inputs.joint_torques,
             rgb_images=batch.inputs.rgb_images,
-            joint_target_positions=batch.outputs.joint_target_positions,
         )
         if batch.inputs.rgb_images is None:
             raise ValueError("Failed to find rgb_images")
@@ -591,7 +594,7 @@ class DiffusionPolicy(NeuracoreModel):
 
     def configure_optimizers(
         self,
-    ) -> list[torch.optim.Optimizer | Any]:
+    ) -> dict[str, list[torch.optim.Optimizer] | None]:
         """Configure optimizer and scheduler with different learning rates.
 
         Uses separate learning rates for image encoder backbone (typically lower)
@@ -601,7 +604,9 @@ class DiffusionPolicy(NeuracoreModel):
         and excluded from the optimizer to save memory and computation.
 
         Returns:
-            list[torch.optim.Optimizer | Any]:
+            dict: Dictionary with keys "optimizers" and "schedulers".
+                - "optimizers": List of optimizers
+                - "schedulers": List of schedulers or None
             List containing [optimizer, scheduler] where scheduler is from diffusers.
         """
         from diffusers.optimization import get_scheduler
@@ -657,7 +662,10 @@ class DiffusionPolicy(NeuracoreModel):
             ),
         )
 
-        return [[optimizer], [scheduler]]
+        return {
+            "optimizers": [optimizer],
+            "schedulers": [scheduler],
+        }
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:

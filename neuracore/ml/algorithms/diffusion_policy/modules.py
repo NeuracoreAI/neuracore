@@ -20,11 +20,13 @@ class DiffusionPolicyImageEncoder(nn.Module):
 
     def __init__(
         self,
+        feature_dim: int = 512,
         spatial_softmax_num_keypoints: int = 32,
     ):
         """Initialize the image encoder.
 
         Args:
+            feature_dim: Feature dimension for the image encoder.
             spatial_softmax_num_keypoints: Number of keypoints for spatial softmax.
         """
         super().__init__()
@@ -271,7 +273,7 @@ class DiffusionConditionalUnet1d(nn.Module):
             (batch, horizon, input_dim) diffusion model prediction.
         """
         # Store the original horizon for projection head
-        original_horizon = x.shape[1]
+        x.shape[1]
 
         # For 1D convolutions we'll need feature dimension first.
         x = einops.rearrange(x, "b t d -> b d t")
@@ -316,19 +318,6 @@ class DiffusionConditionalUnet1d(nn.Module):
 
         # Rearrange back to (batch, time, features) format
         x = einops.rearrange(x, "b d t -> b t d")
-
-        # Projection head: ensure output horizon matches input horizon
-        current_horizon = x.shape[1]
-        if current_horizon != original_horizon:
-            # Use interpolation to resize the sequence to match original horizon
-            # Rearrange to (batch, features, time) for interpolation
-            x = einops.rearrange(x, "b t d -> b d t")
-            x = F.interpolate(
-                x, size=original_horizon, mode="linear", align_corners=False
-            )
-            # Rearrange back to (batch, time, features)
-            x = einops.rearrange(x, "b d t -> b t d")
-
         return x
 
 
