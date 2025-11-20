@@ -253,8 +253,8 @@ class DistributedTrainer:
         avg_losses, avg_metrics = self._average_epoch_metrics(
             val_losses, val_metrics, epoch
         )
-        self._log_scalars(avg_losses, self.global_val_step, prefix="val/epoch/loss")
-        self._log_scalars(avg_metrics, self.global_val_step, prefix="val/epoch/metrics")
+        self._log_scalars(avg_losses, epoch, prefix="val/epoch/loss")
+        self._log_scalars(avg_metrics, epoch, prefix="val/epoch/metrics")
         return avg_losses
 
     def train(self, start_epoch: int = 0) -> None:
