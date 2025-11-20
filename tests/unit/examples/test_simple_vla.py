@@ -1,5 +1,6 @@
 import inspect
 import random
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -20,17 +21,21 @@ from neuracore.ml import (
     BatchedTrainingSamples,
     MaskableData,
 )
-from neuracore.ml.algorithms.simple_world_model.simple_world_model import (
-    SimpleWorldModel,
-)
 from neuracore.ml.core.ml_types import BatchedData
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.validate import run_validation
 
+# add examples to path
+sys.path.append(str(Path(__file__).resolve().parents[3]))
+
+from examples.ml.example_custom_algorithm import SimpleVLA  # noqa: E402
+
 BS = 2
 CAMS = 1
 JOINT_POSITION_DIM = 32
+OUTPUT_PRED_DIM = JOINT_POSITION_DIM
 PRED_HORIZON = 10
+LANGUAGE_MAX_LEN = 512  # Maximum length for language tokens
 DEVICE = get_default_device()
 
 
@@ -38,24 +43,29 @@ DEVICE = get_default_device()
 def model_init_description() -> ModelInitDescription:
     dataset_description = DatasetDescription(
         joint_positions=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
+            mean=list(np.zeros(JOINT_POSITION_DIM, dtype=float)),
+            std=list(np.ones(JOINT_POSITION_DIM, dtype=float)),
+            max_len=JOINT_POSITION_DIM,
         ),
         joint_target_positions=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
+            mean=list(np.zeros(JOINT_POSITION_DIM, dtype=float)),
+            std=list(np.ones(JOINT_POSITION_DIM, dtype=float)),
+            max_len=JOINT_POSITION_DIM,
         ),
         joint_velocities=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
+            mean=list(np.zeros(JOINT_POSITION_DIM, dtype=float)),
+            std=list(np.ones(JOINT_POSITION_DIM, dtype=float)),
+            max_len=JOINT_POSITION_DIM,
         ),
         joint_torques=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
+            mean=list(np.zeros(JOINT_POSITION_DIM, dtype=float)),
+            std=list(np.ones(JOINT_POSITION_DIM, dtype=float)),
+            max_len=JOINT_POSITION_DIM,
         ),
         rgb_images=DataItemStats(
             max_len=CAMS,
         ),
+        language=DataItemStats(max_len=LANGUAGE_MAX_LEN),
     )
     return ModelInitDescription(
         dataset_description=dataset_description,
@@ -63,10 +73,10 @@ def model_init_description() -> ModelInitDescription:
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
-            DataType.JOINT_TARGET_POSITIONS,
             DataType.RGB_IMAGE,
+            DataType.LANGUAGE,
         ],
-        output_data_types=[DataType.RGB_IMAGE],
+        output_data_types=[DataType.JOINT_TARGET_POSITIONS],
         output_prediction_horizon=PRED_HORIZON,
     )
 
@@ -81,8 +91,8 @@ def sample_batch() -> BatchedTrainingSamples:
     return BatchedTrainingSamples(
         inputs=BatchedData(
             joint_positions=MaskableData(
-                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float),
+                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float),
             ),
             joint_velocities=MaskableData(
                 torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
@@ -96,17 +106,18 @@ def sample_batch() -> BatchedTrainingSamples:
                 torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
                 torch.ones(BS, CAMS, dtype=torch.float32),
             ),
-            joint_target_positions=MaskableData(
-                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+            language_tokens=MaskableData(  # Add language tokens input
+                torch.randint(0, 1000, (BS, LANGUAGE_MAX_LEN), dtype=torch.long),
+                torch.ones(BS, LANGUAGE_MAX_LEN, dtype=torch.float32),
             ),
         ),
         outputs=BatchedData(
-            rgb_images=MaskableData(
-                torch.randn(BS, PRED_HORIZON, CAMS, 3, 224, 224, dtype=torch.float32),
-                torch.ones(BS, PRED_HORIZON, CAMS, dtype=torch.float32),
-            ),
+            joint_target_positions=MaskableData(
+                torch.randn(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
+                torch.ones(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
+            )
         ),
+        output_prediction_mask=torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
     )
 
 
@@ -125,13 +136,13 @@ def sample_inference_batch() -> BatchedInferenceSamples:
             torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
             torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
         ),
-        joint_target_positions=MaskableData(
-            torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-        ),
         rgb_images=MaskableData(
             torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
             torch.ones(BS, CAMS, dtype=torch.float32),
+        ),
+        language_tokens=MaskableData(  # Add language tokens for inference
+            torch.randint(0, 1000, (BS, LANGUAGE_MAX_LEN), dtype=torch.long),
+            torch.ones(BS, LANGUAGE_MAX_LEN, dtype=torch.float32),
         ),
     )
 
@@ -157,7 +168,7 @@ def mock_dataloader(sample_batch):
 def test_model_construction(
     model_init_description: ModelInitDescription, model_config: dict
 ):
-    model = SimpleWorldModel(model_init_description, **model_config)
+    model = SimpleVLA(model_init_description, **model_config)
     model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
 
@@ -167,19 +178,16 @@ def test_model_forward(
     model_config: dict,
     sample_inference_batch: BatchedInferenceSamples,
 ):
-    model = SimpleWorldModel(model_init_description, **model_config)
+    model = SimpleVLA(model_init_description, **model_config)
     model = model.to(DEVICE)
     sample_inference_batch = sample_inference_batch.to(DEVICE)
     output = model(sample_inference_batch)
     assert isinstance(output, ModelPrediction)
-    assert DataType.RGB_IMAGE in output.outputs
-    assert output.outputs[DataType.RGB_IMAGE].shape == (
+    assert DataType.JOINT_TARGET_POSITIONS in output.outputs
+    assert output.outputs[DataType.JOINT_TARGET_POSITIONS].shape == (
         BS,
         PRED_HORIZON,
-        CAMS,
-        224,
-        224,
-        3,
+        OUTPUT_PRED_DIM,
     )
 
 
@@ -188,13 +196,13 @@ def test_model_backward(
     model_config: dict,
     sample_batch: BatchedTrainingSamples,
 ):
-    model = SimpleWorldModel(model_init_description, **model_config)
+    model = SimpleVLA(model_init_description, **model_config)
     model = model.to(DEVICE)
     sample_batch = sample_batch.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_batch)
 
     # Compute loss
-    loss = output.losses["reconstruction_loss"]
+    loss = output.losses["mse_loss"]
 
     # Perform backward pass
     loss.backward()
@@ -207,7 +215,7 @@ def test_model_backward(
 
 
 def test_run_validation(tmp_path: Path, mock_login):
-    algorithm_dir = Path(inspect.getfile(SimpleWorldModel)).parent
+    algorithm_dir = Path(inspect.getfile(SimpleVLA)).parent
     _, error_msg = run_validation(
         output_dir=tmp_path,
         algorithm_dir=algorithm_dir,
