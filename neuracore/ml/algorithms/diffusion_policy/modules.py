@@ -1,5 +1,6 @@
 """Diffusion Policy model components including UNet, encoders, and utilities."""
 
+import logging
 import math
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -9,6 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
+
+logger = logging.getLogger(__name__)
 
 
 class DiffusionPolicyImageEncoder(nn.Module):
@@ -272,8 +275,8 @@ class DiffusionConditionalUnet1d(nn.Module):
         Returns:
             (batch, horizon, input_dim) diffusion model prediction.
         """
-        # Store the original horizon for projection head
-        x.shape[1]
+        # Store the original horizon to ensure output matches input
+        original_horizon = x.shape[1]
 
         # For 1D convolutions we'll need feature dimension first.
         x = einops.rearrange(x, "b t d -> b d t")
@@ -315,6 +318,18 @@ class DiffusionConditionalUnet1d(nn.Module):
             x = upsample(x)
 
         x = self.final_conv(x)
+
+        # Ensure output horizon matches input horizon
+        current_horizon = x.shape[-1]
+        if current_horizon != original_horizon:
+            # Interpolate to match original horizon
+            x = F.interpolate(
+                x, size=original_horizon, mode="linear", align_corners=False
+            )
+            logger.warning(
+                f"Output horizon {current_horizon} does not match input horizon "
+                f"{original_horizon}. Interpolated to match input horizon."
+            )
 
         # Rearrange back to (batch, time, features) format
         x = einops.rearrange(x, "b d t -> b t d")
