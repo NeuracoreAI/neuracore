@@ -28,7 +28,7 @@ def main(args):
 
     if record:
         nc.create_dataset(
-            name="Diffusion Min Max Test",
+            name="My Example Dataset",
             description="This is an example dataset",
         )
         print("Created Dataset...")
@@ -48,17 +48,15 @@ def main(args):
             if record:
                 nc.start_recording()
 
-            # Log initial state
-            t = time.time()
-            CUSTOM_DATA = [1, 2, 3, 4, 5]
-            CAM_NAME = "angle"
-            nc.log_custom_data("my_custom_data", CUSTOM_DATA, timestamp=t)
-            nc.log_joint_positions(obs.qpos, timestamp=t)
-            nc.log_joint_velocities(obs.qvel, timestamp=t)
-            nc.log_language(
-                "Pick up the cube and pass it to the other robot", timestamp=t
-            )
-            nc.log_rgb(CAM_NAME, obs.cameras[CAM_NAME].rgb, timestamp=t)
+        # Log initial state
+        t = time.time()
+        CUSTOM_DATA = [1, 2, 3, 4, 5]
+        CAM_NAME = "top"
+        nc.log_custom_data("my_custom_data", CUSTOM_DATA, timestamp=t)
+        nc.log_joint_positions(obs.qpos, timestamp=t)
+        nc.log_joint_velocities(obs.qvel, timestamp=t)
+        nc.log_language("Pick up the cube and pass it to the other robot", timestamp=t)
+        nc.log_rgb(CAM_NAME, obs.cameras[CAM_NAME].rgb, timestamp=t)
 
             # Execute action trajectory while logging
             for action in action_traj:

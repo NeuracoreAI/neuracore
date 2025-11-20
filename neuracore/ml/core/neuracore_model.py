@@ -140,11 +140,15 @@ class NeuracoreModel(nn.Module, ABC):
         pass
 
     @abstractmethod
-    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
+    def configure_optimizers(
+        self,
+    ) -> dict[str, list[torch.optim.Optimizer] | None]:
         """Configure and return optimizers for the model.
 
         Returns:
-            list[torch.optim.Optimizer]: List of optimizers for model parameters
+            dict: Dictionary with keys "optimizers" and "schedulers".
+                - "optimizers": List of optimizers for model parameters
+                - "schedulers": List of schedulers or None
         """
         pass
 

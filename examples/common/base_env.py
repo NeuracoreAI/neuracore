@@ -461,8 +461,21 @@ class BimanualViperXTask(MuJoCoEnvironment):
             self.get_camera_extrinsics("angle"),
         )
 
+        # Get top camera data
+        top_rgb = self.render("top")
+        top_depth = self.render("top", depth=True)
+        top_pcd = self.rgbd_to_pointcloud(
+            top_rgb,
+            top_depth,
+            self.get_camera_intrinsics("top"),
+            self.get_camera_extrinsics("top"),
+        )
+
         cameras = {
-            "angle": CameraData(rgb=angle_rgb, depth=angle_depth, point_cloud=angle_pcd)
+            "angle": CameraData(
+                rgb=angle_rgb, depth=angle_depth, point_cloud=angle_pcd
+            ),
+            "top": CameraData(rgb=top_rgb, depth=top_depth, point_cloud=top_pcd),
         }
 
         return Observation(

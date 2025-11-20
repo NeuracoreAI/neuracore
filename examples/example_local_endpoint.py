@@ -71,8 +71,8 @@ def main():
     onscreen_render = True
     save_video = False  # Set to True to save video files
     video_output_dir = Path("videos")  # Directory to save videos
-    render_cam_name = "angle"
-    obs_camera_names = ["angle"]
+    render_cam_name = "top"
+    obs_camera_names = ["top"]
     num_rollouts = 30
     successful_rollouts = 0
 
