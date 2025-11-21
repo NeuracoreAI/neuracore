@@ -70,7 +70,7 @@ def eval_model(
                     },
                 )
                 predicted_sync_points = policy.predict(
-                    sync_point=sync_point, timeout=10
+                    sync_point=sync_point, robot_name="Mujoco VX300s", timeout=10
                 )
                 joint_target_positions = [
                     sp.joint_target_positions for sp in predicted_sync_points

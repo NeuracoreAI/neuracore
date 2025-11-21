@@ -32,6 +32,13 @@ class CheckpointRequest(BaseModel):
     epoch: int
 
 
+class PredictRequest(BaseModel):
+    """Request model for predicting."""
+
+    sync_point: SyncPoint
+    robot_name: Optional[str] = None
+
+
 class ModelServer:
     """Lightweight model server using FastAPI."""
 
@@ -88,14 +95,15 @@ class ModelServer:
 
         # Main prediction endpoint
         @app.post(PREDICT_ENDPOINT, response_model=list[SyncPoint])
-        async def predict(sync_point: SyncPoint) -> list[SyncPoint]:
+        async def predict(request: PredictRequest) -> list[SyncPoint]:
             try:
                 # Decode base64 images before inference
-                sync_point = self._decode_images(sync_point)
+                sync_point = self._decode_images(request.sync_point)
+                robot_name = request.robot_name
 
                 # Run inference
                 try:
-                    prediction = self.policy_inference(sync_point)
+                    prediction = self.policy_inference(sync_point, robot_name)
                 except InsufficientSyncPointError:
                     logger.error("Insufficient sync point data.")
                     raise HTTPException(
