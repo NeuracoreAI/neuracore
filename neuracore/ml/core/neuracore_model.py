@@ -51,6 +51,7 @@ class NeuracoreModel(nn.Module, ABC):
         self.output_prediction_horizon = (
             model_init_description.output_prediction_horizon
         )
+        self.robot_to_output_mapping = self._get_robot_to_output_mapping()
 
     @property
     def device(self) -> torch.device:
@@ -114,6 +115,115 @@ class NeuracoreModel(nn.Module, ABC):
                 "Requested output data types not in dataset: "
                 f"{req_output_data_types - types_in_dataset}"
             )
+
+    def _populate_output_mapping(
+        self,
+        robot_to_output_mapping: dict[str, dict[DataType, list[str]]],
+        keys: dict[str, list[str]],
+        data_type: DataType,
+    ) -> dict[str, dict[DataType, list[str]]]:
+        """Populate the output mapping for a given data type.
+
+        Args:
+            robot_to_output_mapping: Output mapping per robot.
+            keys: Keys for each robot for the given data type.
+            data_type: Data type of the mapping.
+
+        Returns:
+            dict[str, dict[DataType, list[str]]]: Output mapping per robot.
+        """
+        for robot_name in keys.keys():
+            if robot_name not in robot_to_output_mapping:
+                robot_to_output_mapping[robot_name] = {}
+            robot_to_output_mapping[robot_name][data_type] = keys[robot_name]
+        return robot_to_output_mapping
+
+    def _get_robot_to_output_mapping(self) -> dict[str, dict[DataType, list[str]]]:
+        """Get the output mapping from the dataset description for each robot.
+
+        Return the output mapping of robots that have all requested output data types.
+
+        Returns:
+            dict[str, dict[DataType, list[str]]]: Output mapping per robot.
+        """
+        output_data_types = self.model_init_description.output_data_types
+        robot_to_output_mapping: dict[str, dict[DataType, list[str]]] = {}
+        if DataType.JOINT_TARGET_POSITIONS in output_data_types:
+            keys = self.dataset_description.joint_target_positions.robot_to_ncdata_keys
+            robot_to_output_mapping = self._populate_output_mapping(
+                robot_to_output_mapping, keys, DataType.JOINT_TARGET_POSITIONS
+            )
+        if DataType.JOINT_POSITIONS in output_data_types:
+            keys = self.dataset_description.joint_positions.robot_to_ncdata_keys
+            robot_to_output_mapping = self._populate_output_mapping(
+                robot_to_output_mapping, keys, DataType.JOINT_POSITIONS
+            )
+        if DataType.JOINT_VELOCITIES in output_data_types:
+            keys = self.dataset_description.joint_velocities.robot_to_ncdata_keys
+            robot_to_output_mapping = self._populate_output_mapping(
+                robot_to_output_mapping, keys, DataType.JOINT_VELOCITIES
+            )
+        if DataType.JOINT_TORQUES in output_data_types:
+            keys = self.dataset_description.joint_torques.robot_to_ncdata_keys
+            robot_to_output_mapping = self._populate_output_mapping(
+                robot_to_output_mapping, keys, DataType.JOINT_TORQUES
+            )
+        if DataType.END_EFFECTORS in output_data_types:
+            keys = self.dataset_description.end_effector_states.robot_to_ncdata_keys
+            robot_to_output_mapping = self._populate_output_mapping(
+                robot_to_output_mapping, keys, DataType.END_EFFECTORS
+            )
+        if DataType.POSES in output_data_types:
+            keys = self.dataset_description.poses.robot_to_ncdata_keys
+            robot_to_output_mapping = self._populate_output_mapping(
+                robot_to_output_mapping, keys, DataType.POSES
+            )
+        if DataType.END_EFFECTOR_POSES in output_data_types:
+            keys = self.dataset_description.end_effector_poses.robot_to_ncdata_keys
+            robot_to_output_mapping = self._populate_output_mapping(
+                robot_to_output_mapping, keys, DataType.END_EFFECTOR_POSES
+            )
+        if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in output_data_types:
+            keys = (
+                self.dataset_description.parallel_gripper_open_amounts.robot_to_ncdata_keys
+            )
+            robot_to_output_mapping = self._populate_output_mapping(
+                robot_to_output_mapping, keys, DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS
+            )
+        if DataType.RGB_IMAGE in output_data_types:
+            keys = self.dataset_description.rgb_images.robot_to_ncdata_keys
+            robot_to_output_mapping = self._populate_output_mapping(
+                robot_to_output_mapping, keys, DataType.RGB_IMAGE
+            )
+        if DataType.DEPTH_IMAGE in output_data_types:
+            keys = self.dataset_description.depth_images.robot_to_ncdata_keys
+            robot_to_output_mapping = self._populate_output_mapping(
+                robot_to_output_mapping, keys, DataType.DEPTH_IMAGE
+            )
+        if DataType.POINT_CLOUD in output_data_types:
+            keys = self.dataset_description.point_clouds.robot_to_ncdata_keys
+            robot_to_output_mapping = self._populate_output_mapping(
+                robot_to_output_mapping, keys, DataType.POINT_CLOUD
+            )
+        if DataType.LANGUAGE in output_data_types:
+            pass  # Language data typically does not require robot-specific keys
+        if DataType.CUSTOM in output_data_types:
+            for _, data_item_stats in self.dataset_description.custom_data.items():
+                keys = data_item_stats.robot_to_ncdata_keys
+                for robot_name in keys.keys():
+                    if robot_name not in robot_to_output_mapping:
+                        robot_to_output_mapping[robot_name] = {DataType.CUSTOM: []}
+                    robot_to_output_mapping[robot_name][DataType.CUSTOM].extend(
+                        keys[robot_name]
+                    )
+
+        # Remove robots that does not have all output data types
+        for robot_name in robot_to_output_mapping.keys():
+            for data_type in output_data_types:
+                if data_type not in robot_to_output_mapping[robot_name]:
+                    del robot_to_output_mapping[robot_name]
+
+        return robot_to_output_mapping
 
     @abstractmethod
     def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
