@@ -77,15 +77,15 @@ nc.start_recording()
 
 # Log various data types with timestamps
 t = time.time()
-nc.log_joint_positions({'joint1': 0.5, 'joint2': -0.3}, timestamp=t)
-nc.log_joint_velocities({'joint1': 0.1, 'joint2': -0.05}, timestamp=t)
-nc.log_joint_target_positions({'joint1': 0.6, 'joint2': -0.2}, timestamp=t)
+nc.log_joint_positions("right_arm", {'joint1': 0.5, 'joint2': -0.3}, timestamp=t)
+nc.log_joint_velocities("right_arm", {'joint1': 0.1, 'joint2': -0.05}, timestamp=t)
+nc.log_joint_target_positions("right_arm", {'joint1': 0.6, 'joint2': -0.2}, timestamp=t)
 
 # Log camera data
 nc.log_rgb("top_camera", image_array, timestamp=t)
 
 # Log language instructions
-nc.log_language("Pick up the red cube", timestamp=t)
+nc.log_language("instruction", "Pick up the red cube", timestamp=t)
 
 # Log custom data
 custom_sensor_data = [1.2, 3.4, 5.6]
@@ -116,7 +116,7 @@ from neuracore_types import DataType
 
 synced_dataset = dataset.synchronize(
     frequency=10,  # Hz
-    data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE, DataType.LANGUAGE]
+    data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGES, DataType.LANGUAGE]
 )
 
 print(f"Dataset has {len(synced_dataset)} episodes")
@@ -145,7 +145,7 @@ policy = nc.policy(train_run_name="MyTrainingJob")
 policy.set_checkpoint(epoch=-1)
 
 # Predict actions
-predicted_sync_points = policy.predict(timeout=5)
+predicted_sync_points = policy.predict(timeout=5, robot_name="MyRobot")
 joint_target_positions = [sp.joint_target_positions for sp in predicted_sync_points]
 actions = [jtp.numpy() for jtp in joint_target_positions if jtp is not None]
 ```
@@ -156,7 +156,7 @@ actions = [jtp.numpy() for jtp in joint_target_positions if jtp is not None]
 # Connect to a remote endpoint
 try:
     policy = nc.policy_remote_server("MyEndpointName")
-    predicted_sync_points = policy.predict(timeout=5)
+    predicted_sync_points = policy.predict(timeout=5, robot_name="MyRobot")
     # Process predictions...
 except nc.EndpointError:
     print("Endpoint not available. Please start it at neuracore.app/dashboard/endpoints")
@@ -316,7 +316,7 @@ class MyCustomAlgorithm(NeuracoreModel):
         
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:
-        return [DataType.JOINT_POSITIONS, DataType.RGB_IMAGE]
+        return [DataType.JOINT_POSITIONS, DataType.RGB_IMAGES]
         
     @staticmethod
     def get_supported_output_data_types() -> list[DataType]:

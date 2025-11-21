@@ -6,12 +6,14 @@ from pathlib import Path
 from typing import Optional, Union
 
 import requests
-from neuracore_types import DataType, SyncedDataset
+from neuracore_types import DataItemStats, DatasetStatistics, DataType
+from neuracore_types import SynchronizedDataset as SynchronizedDatasetModel
 from tqdm import tqdm
 
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.data.recording import Recording
-from neuracore.core.data.synced_dataset import SynchronizedDataset
+from neuracore.core.data.episode import Episode
+from neuracore.core.data.synchronized_dataset import SynchronizedDataset
+from neuracore.core.robot import list_organization_robots
 
 from ..auth import Auth, get_auth
 from ..const import API_URL
@@ -234,9 +236,43 @@ class Dataset:
             data_types=list(dataset_json.get("all_data_types", {}).keys()),
         )
 
+    def _robot_id_to_name(
+        self, dataset_description: DatasetStatistics
+    ) -> DatasetStatistics:
+        """Convert robot ID to robot name in the dataset description.
+
+        Args:
+            dataset_description: Dataset description with robot IDs.
+
+        Returns:
+            Dataset description with robot names.
+        """
+        shared_robots = list_organization_robots(
+            org_id=self.org_id, is_shared=True, mode="mixed"
+        )
+        private_robots = list_organization_robots(
+            org_id=self.org_id, is_shared=False, mode="mixed"
+        )
+        robots = shared_robots + private_robots
+        robot_id_to_name = {robot["id"]: robot["name"] for robot in robots}
+        for data_item_name in DatasetStatistics.model_fields.keys():
+            data_item = getattr(dataset_description, data_item_name)
+            if isinstance(data_item, DataItemStats):
+                robot_id_to_ncdata_keys = data_item.robot_to_ncdata_keys
+                robot_name_to_ncdata_keys = {}
+                for robot_id, ncdata_keys in robot_id_to_ncdata_keys.items():
+                    if robot_id not in robot_id_to_name:
+                        logger.warning(
+                            f"Robot ID {robot_id} not found in the available robots."
+                        )
+                        continue
+                    robot_name_to_ncdata_keys[robot_id_to_name[robot_id]] = ncdata_keys
+                data_item.robot_to_ncdata_keys = robot_name_to_ncdata_keys
+        return dataset_description
+
     def _synchronize(
         self, frequency: int = 0, data_types: Optional[list[DataType]] = None
-    ) -> SyncedDataset:
+    ) -> SynchronizedDatasetModel:
         """Synchronize the dataset with specified frequency and data types.
 
         Args:
@@ -246,7 +282,7 @@ class Dataset:
                 If None, uses the default data types from the dataset.
 
         Returns:
-            SyncedDataset instance containing synchronized data.
+            SynchronizedDataset instance containing synchronized data.
 
         Raises:
             requests.HTTPError: If the API request fails.
@@ -263,7 +299,7 @@ class Dataset:
         )
         response.raise_for_status()
         dataset_json = response.json()
-        return SyncedDataset.model_validate(dataset_json)
+        return SynchronizedDatasetModel.model_validate(dataset_json)
 
     def synchronize(
         self,
@@ -310,7 +346,9 @@ class Dataset:
             dataset=self,
             frequency=frequency,
             data_types=data_types,
-            dataset_description=synced_dataset.dataset_description,
+            dataset_statistics=self._robot_id_to_name(
+                synced_dataset.dataset_statistics,
+            ),
             prefetch_videos=prefetch_videos,
         )
 
@@ -331,7 +369,7 @@ class Dataset:
         """
         return self.num_recordings
 
-    def __getitem__(self, idx: Union[int, slice]) -> Union[Recording, "Dataset"]:
+    def __getitem__(self, idx: Union[int, slice]) -> Union[Episode, "Dataset"]:
         """Support for indexing and slicing dataset recordings.
 
         Args:
@@ -365,7 +403,7 @@ class Dataset:
                     idx += len(self.recordings)
                 if not 0 <= idx < len(self.recordings):
                     raise IndexError("Dataset index out of range")
-                return Recording(
+                return Episode(
                     dataset=self,
                     recording_id=self.recordings[idx]["id"],
                     size_bytes=self.recordings[idx]["total_bytes"],
@@ -376,7 +414,7 @@ class Dataset:
                 f"Dataset indices must be integers or slices, not {type(idx)}"
             )
 
-    def __next__(self) -> Recording:
+    def __next__(self) -> Episode:
         """Get the next recording in the dataset iteration.
 
         Returns:
@@ -390,7 +428,7 @@ class Dataset:
 
         recording = self.recordings[self._recording_idx]
         self._recording_idx += 1  # Increment counter
-        return Recording(
+        return Episode(
             dataset=self,
             recording_id=recording["id"],
             size_bytes=recording["total_bytes"],

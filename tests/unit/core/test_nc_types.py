@@ -5,120 +5,131 @@ work correctly and ensure consistent ordering across sync points.
 """
 
 import time
+from typing import cast
 
 import numpy as np
 import pytest
 from neuracore_types import (
     CameraData,
     CustomData,
-    EndEffectorData,
+    DataType,
     JointData,
     LanguageData,
     PointCloudData,
     PoseData,
-    SyncedData,
-    SyncPoint,
+    SynchronizedEpisode,
+    SynchronizedPoint,
 )
 
 
 @pytest.fixture
-def sync_point_unordered() -> SyncPoint:
+def sync_point_unordered() -> SynchronizedPoint:
     """Create a test sync point with deliberately unordered dictionary keys."""
-    return SyncPoint(
+    return SynchronizedPoint(
         timestamp=time.time(),
-        # Joint data with unordered keys
-        joint_positions=JointData(
-            values={"joint_2": 1.0, "joint_1": 0.5, "joint_3": 1.5},
-            additional_values={"extra_2": 2.0, "extra_1": 1.0},
-        ),
-        joint_velocities=JointData(
-            values={"joint_3": 0.1, "joint_1": 0.2, "joint_2": 0.3}
-        ),
-        # End effector data with unordered keys
-        end_effectors=EndEffectorData(
-            open_amounts={"gripper_2": 0.8, "gripper_1": 0.2}
-        ),
-        # Pose data with unordered keys
-        poses=PoseData(
-            pose={
-                "pose_2": [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0],
-                "pose_1": [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0],
-            }
-        ),
-        # Camera data with unordered keys
-        rgb_images={
-            "camera_3": CameraData(frame=np.zeros((224, 224, 3))),
-            "camera_1": CameraData(frame=np.zeros((224, 224, 3))),
-            "camera_2": CameraData(frame=np.zeros((224, 224, 3))),
+        data={
+            # Joint positions with unordered keys
+            DataType.JOINT_POSITIONS: {
+                "default": JointData(
+                    values={"joint_2": 1.0, "joint_1": 0.5, "joint_3": 1.5},
+                    additional_values={"extra_2": 2.0, "extra_1": 1.0},
+                )
+            },
+            # Joint velocities with unordered keys
+            DataType.JOINT_VELOCITIES: {
+                "default": JointData(
+                    values={"joint_3": 0.1, "joint_1": 0.2, "joint_2": 0.3}
+                )
+            },
+            # Pose data with unordered keys
+            DataType.POSES: {
+                "pose_2": PoseData(pose=[0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0]),
+                "pose_1": PoseData(pose=[0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0]),
+            },
+            # RGB camera data with unordered keys
+            DataType.RGB_IMAGES: {
+                "camera_3": CameraData(frame=np.zeros((224, 224, 3))),
+                "camera_1": CameraData(frame=np.zeros((224, 224, 3))),
+                "camera_2": CameraData(frame=np.zeros((224, 224, 3))),
+            },
+            # Depth camera data with unordered keys
+            DataType.DEPTH_IMAGES: {
+                "depth_2": CameraData(frame=np.zeros((224, 224))),
+                "depth_1": CameraData(frame=np.zeros((224, 224))),
+            },
+            # Point cloud data with unordered keys
+            DataType.POINT_CLOUDS: {
+                "lidar_2": PointCloudData(
+                    points=np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float16)
+                ),
+                "lidar_1": PointCloudData(
+                    points=np.array([[7, 8, 9]], dtype=np.float16)
+                ),
+            },
+            # Custom data with unordered keys
+            DataType.CUSTOM: {
+                "sensor_z": CustomData(data=[1, 2, 3]),
+                "sensor_a": CustomData(data=[4, 5, 6]),
+            },
+            # Language data
+            DataType.LANGUAGE: {"default": LanguageData(text="Pick up the object")},
         },
-        depth_images={
-            "depth_2": CameraData(frame=np.zeros((224, 224))),
-            "depth_1": CameraData(frame=np.zeros((224, 224))),
-        },
-        # Point cloud data with unordered keys
-        point_clouds={
-            "lidar_2": PointCloudData(
-                points=np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float16)
-            ),
-            "lidar_1": PointCloudData(points=np.array([[7, 8, 9]], dtype=np.float16)),
-        },
-        # Custom data with unordered keys
-        custom_data={
-            "sensor_z": CustomData(data=[1, 2, 3]),
-            "sensor_a": CustomData(data=[4, 5, 6]),
-        },
-        # Language data (no ordering needed)
-        language_data=LanguageData(text="Pick up the object"),
     )
 
 
-def _verify_sync_point_ordering(sync_point_unordered: SyncPoint):
+def _verify_sync_point_ordering(sync_point_unordered: SynchronizedPoint):
     """Test that sync point ordering works correctly."""
     ordered_sync = sync_point_unordered.order()
 
     # Verify that all keys are now sorted
-    assert ordered_sync.joint_positions is not None
-    assert list(ordered_sync.joint_positions.values.keys()) == [
+    assert DataType.JOINT_POSITIONS in ordered_sync.data
+    jd = cast(JointData, list(ordered_sync[DataType.JOINT_POSITIONS].values())[0])
+    assert list(jd.values.keys()) == [
         "joint_1",
         "joint_2",
         "joint_3",
     ]
-    assert ordered_sync.joint_velocities is not None
-    assert list(ordered_sync.joint_velocities.values.keys()) == [
+
+    # Verify joint velocities ordering
+    assert DataType.JOINT_VELOCITIES in ordered_sync.data
+    jv = cast(JointData, list(ordered_sync[DataType.JOINT_VELOCITIES].values())[0])
+    assert list(jv.values.keys()) == [
         "joint_1",
         "joint_2",
         "joint_3",
     ]
-    assert ordered_sync.end_effectors is not None
-    assert list(ordered_sync.end_effectors.open_amounts.keys()) == [
-        "gripper_1",
-        "gripper_2",
-    ]
-    assert ordered_sync.poses is not None
-    assert list(ordered_sync.poses.pose.keys()) == ["pose_1", "pose_2"]
-    assert ordered_sync.rgb_images is not None
-    assert list(ordered_sync.rgb_images.keys()) == ["camera_1", "camera_2", "camera_3"]
-    assert ordered_sync.depth_images is not None
-    assert list(ordered_sync.depth_images.keys()) == ["depth_1", "depth_2"]
-    assert ordered_sync.point_clouds is not None
-    assert list(ordered_sync.point_clouds.keys()) == ["lidar_1", "lidar_2"]
-    assert ordered_sync.custom_data is not None
-    assert list(ordered_sync.custom_data.keys()) == ["sensor_a", "sensor_z"]
 
-    # Verify joint additional values are sorted
-    assert ordered_sync.joint_positions.additional_values is not None
-    assert list(ordered_sync.joint_positions.additional_values.keys()) == [
-        "extra_1",
-        "extra_2",
+    # Verify poses ordering (both the dict keys and pose names should be sorted)
+    assert DataType.POSES in ordered_sync.data
+    assert list(ordered_sync[DataType.POSES].keys()) == ["pose_1", "pose_2"]
+
+    # Verify RGB images ordering
+    assert DataType.RGB_IMAGES in ordered_sync.data
+    assert list(ordered_sync[DataType.RGB_IMAGES].keys()) == [
+        "camera_1",
+        "camera_2",
+        "camera_3",
     ]
 
+    # Verify depth images ordering
+    assert DataType.DEPTH_IMAGES in ordered_sync.data
+    assert list(ordered_sync[DataType.DEPTH_IMAGES].keys()) == ["depth_1", "depth_2"]
 
-def test_sync_point_ordering(sync_point_unordered: SyncPoint):
+    # Verify point clouds ordering
+    assert DataType.POINT_CLOUDS in ordered_sync.data
+    assert list(ordered_sync[DataType.POINT_CLOUDS].keys()) == ["lidar_1", "lidar_2"]
+
+    # Verify custom data ordering
+    assert DataType.CUSTOM in ordered_sync.data
+    assert list(ordered_sync[DataType.CUSTOM].keys()) == ["sensor_a", "sensor_z"]
+
+
+def test_sync_point_ordering(sync_point_unordered: SynchronizedPoint):
     """Test that sync point ordering works correctly."""
     _verify_sync_point_ordering(sync_point_unordered)
 
 
-def test_synced_data_ordering(sync_point_unordered: SyncPoint):
+def test_synced_data_ordering(sync_point_unordered: SynchronizedPoint):
     """Test that synced data ordering works for multiple sync points."""
     # Create multiple unordered sync points
     sync_points = [sync_point_unordered for _ in range(3)]
@@ -128,8 +139,8 @@ def test_synced_data_ordering(sync_point_unordered: SyncPoint):
         sync_point.timestamp = time.time() + i
 
     # Create synced data
-    synced_data = SyncedData(
-        frames=sync_points,
+    synced_data = SynchronizedEpisode(
+        observations=sync_points,
         start_time=sync_points[0].timestamp,
         end_time=sync_points[-1].timestamp,
         robot_id="robot1",
@@ -137,5 +148,5 @@ def test_synced_data_ordering(sync_point_unordered: SyncPoint):
 
     ordered_synced_data = synced_data.order()
 
-    for frame in ordered_synced_data.frames:
+    for frame in ordered_synced_data.observations:
         _verify_sync_point_ordering(frame)

@@ -29,7 +29,7 @@ def algorithm_list_response():
             "description": "CNN + MLP",
             "is_shared": True,
             "supported_input_data_types": [
-                DataType.RGB_IMAGE,
+                DataType.RGB_IMAGES,
                 DataType.JOINT_POSITIONS,
             ],
             "supported_output_data_types": [DataType.JOINT_TARGET_POSITIONS],
@@ -40,7 +40,7 @@ def algorithm_list_response():
             "description": "Action Chunking with Transformers",
             "is_shared": True,
             "supported_input_data_types": [
-                DataType.RGB_IMAGE,
+                DataType.RGB_IMAGES,
                 DataType.JOINT_POSITIONS,
             ],
             "supported_output_data_types": [DataType.JOINT_TARGET_POSITIONS],

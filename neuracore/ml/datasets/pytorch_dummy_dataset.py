@@ -6,11 +6,11 @@ testing, and validation without requiring actual robot demonstration data.
 """
 
 import logging
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 import numpy as np
 import torch
-from neuracore_types import DataItemStats, DatasetDescription, DataType
+from neuracore_types import DataItemStats, DatasetStatistics, DataType
 
 from neuracore.core.robot import Robot
 from neuracore.ml import BatchedTrainingSamples, MaskableData
@@ -19,6 +19,21 @@ from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreData
 logger = logging.getLogger(__name__)
 
 TrainingSample = BatchedTrainingSamples
+
+
+DATA_TYPE_TO_DUMMY_SHAPE_AND_MAX_LEN = {
+    DataType.JOINT_POSITIONS: ((7,), 50),
+    DataType.JOINT_VELOCITIES: ((7,), 50),
+    DataType.JOINT_TORQUES: ((7,), 50),
+    DataType.JOINT_TARGET_POSITIONS: ((7,), 50),
+    DataType.END_EFFECTOR_POSES: ((7,), 50),
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ((1,), 50),
+    DataType.RGB_IMAGES: ((3, 224, 224), 10),
+    DataType.DEPTH_IMAGES: ((1, 224, 224), 10),
+    DataType.POINT_CLOUDS: ((1024, 3), 10),
+    DataType.POSES: ((7,), 50),
+    DataType.LANGUAGE: ((32,), 1),  # Assuming max 32 tokens
+}
 
 
 class PytorchDummyDataset(PytorchNeuracoreDataset):
@@ -80,133 +95,20 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             "Slide the object forward",
         ]
 
-        self.dataset_description = DatasetDescription()
-
-        # Joint data
-        if DataType.JOINT_POSITIONS in self.data_types:
-            self.dataset_description.joint_positions = DataItemStats(
-                mean=np.zeros(6),
-                std=np.ones(6),
-                min=-np.ones(6),
-                max=np.ones(6),
-                max_len=6,
-                robot_to_ncdata_keys={self.robot.id: [f"jps_{i}" for i in range(6)]},
-            )
-        if DataType.JOINT_VELOCITIES in self.data_types:
-            self.dataset_description.joint_velocities = DataItemStats(
-                mean=np.zeros(6),
-                std=np.ones(6),
-                min=-np.ones(6),
-                max=np.ones(6),
-                max_len=6,
-                robot_to_ncdata_keys={self.robot.id: [f"jvs_{i}" for i in range(6)]},
-            )
-        if DataType.JOINT_TORQUES in self.data_types:
-            self.dataset_description.joint_torques = DataItemStats(
-                mean=np.zeros(6),
-                std=np.ones(6),
-                min=-np.ones(6),
-                max=np.ones(6),
-                max_len=6,
-                robot_to_ncdata_keys={self.robot.id: [f"jts_{i}" for i in range(6)]},
-            )
-        if DataType.JOINT_TARGET_POSITIONS in self.data_types:
-            self.dataset_description.joint_target_positions = DataItemStats(
-                mean=np.zeros(7),
-                std=np.ones(7),
-                min=-np.ones(7),
-                max=np.ones(7),
-                max_len=7,
-                robot_to_ncdata_keys={self.robot.id: [f"jtps_{i}" for i in range(7)]},
-            )
-
-        # End-effector data
-        # TODO: Remove later.
-        if DataType.END_EFFECTORS in self.data_types:
-            self.dataset_description.end_effector_states = DataItemStats(
-                mean=np.zeros(2),
-                std=np.ones(2),
-                max_len=2,  # e.g., gripper open amounts
-                robot_to_ncdata_keys={
-                    self.robot.id: [f"end_effector_{i}" for i in range(2)]
-                },
-            )
-
-        # End-effector pose data
-        if DataType.END_EFFECTOR_POSES in self.data_types:
-            self.dataset_description.end_effector_poses = DataItemStats(
-                mean=np.zeros(7),
-                std=np.ones(7),
-                max_len=7,  # 1 gripper x 7DOF pose
-                robot_to_ncdata_keys={
-                    self.robot.id: [f"end_effector_pose_{i}" for i in range(7)]
-                },
-            )
-        # Parallel gripper open amounts
-        if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.data_types:
-            self.dataset_description.parallel_gripper_open_amounts = DataItemStats(
-                mean=np.zeros(1),
-                std=np.ones(1),
-                max_len=1,  # 1 parallel gripper x 1 open amount float value
-                robot_to_ncdata_keys={self.robot.id: ["parallel_gripper_open_amount"]},
-            )
-
-        # Pose data
-        # TODO: Remove or change later.
-        if DataType.POSES in self.data_types:
-            self.dataset_description.poses = DataItemStats(
-                mean=np.zeros(12),
-                std=np.ones(12),
-                max_len=12,  # 2 poses x 6DOF each
-                robot_to_ncdata_keys={self.robot.id: [f"pose_{i}" for i in range(12)]},
-            )
-
-        # Visual data
-        if DataType.RGB_IMAGE in self.data_types:
-            self.dataset_description.rgb_images = DataItemStats(
-                max_len=2,  # e.g., two RGB images per sample
-                robot_to_ncdata_keys={self.robot.id: [f"rgb_{i}" for i in range(2)]},
-            )
-        if DataType.DEPTH_IMAGE in self.data_types:
-            self.dataset_description.depth_images = DataItemStats(
-                max_len=2,  # e.g., two depth images per sample
-                robot_to_ncdata_keys={self.robot.id: [f"depth_{i}" for i in range(2)]},
-            )
-        if DataType.POINT_CLOUD in self.data_types:
-            self.dataset_description.point_clouds = DataItemStats(
-                max_len=1,  # e.g., one point cloud per sample
-                robot_to_ncdata_keys={
-                    self.robot.id: [f"point_cloud_{i}" for i in range(1)]
-                },
-            )
-
-        # Language data
-        if DataType.LANGUAGE in self.data_types:
-            self.dataset_description.language = DataItemStats(
-                max_len=max(
-                    len(instruction) for instruction in self.sample_instructions
+        self.dataset_statistics = DatasetStatistics()
+        for data_type in self.data_types:
+            max_len = DATA_TYPE_TO_DUMMY_SHAPE_AND_MAX_LEN[data_type][1]
+            self.dataset_statistics.data[data_type] = {
+                "dummy_key": DataItemStats(
+                    mean=np.zeros(max_len).tolist(),
+                    std=np.ones(max_len).tolist(),
+                    min=-np.ones(max_len).tolist(),
+                    max=np.ones(max_len).tolist(),
+                    max_len=max_len,
+                    robot_to_ncdata_keys={
+                        self.robot.id: [f"keys_{i}" for i in range(max_len)]
+                    },
                 )
-            )
-
-        # Custom data
-        if DataType.CUSTOM in self.data_types:
-            self.dataset_description.custom_data = {
-                "sensor_1": DataItemStats(
-                    mean=np.zeros(10),
-                    std=np.ones(10),
-                    min=-np.ones(10),
-                    max=np.ones(10),
-                    max_len=10,
-                    robot_to_ncdata_keys={self.robot.id: ["sensor_1"]},
-                ),
-                "sensor_2": DataItemStats(
-                    mean=np.zeros(5),
-                    std=np.ones(5),
-                    min=-np.ones(5),
-                    max=np.ones(5),
-                    max_len=5,
-                    robot_to_ncdata_keys={self.robot.id: ["sensor_2"]},
-                ),
             }
 
         self._error_count = 0
@@ -232,188 +134,49 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             Exception: If there's an error generating the sample data.
         """
         try:
-            sample = TrainingSample(
+            inputs_and_outputs: Dict[DataType, Dict[str, MaskableData]] = {}
+            for data_type in set(self.input_data_types + self.output_data_types):
+                inputs_and_outputs[data_type] = {}
+                for group_name, data_item_stats in self.dataset_statistics.data[
+                    data_type
+                ].items():
+                    max_rgb_len = data_item_stats.max_len
+                    data_shape = DATA_TYPE_TO_DUMMY_SHAPE_AND_MAX_LEN[data_type][0]
+                    data = MaskableData(
+                        data=torch.zeros(
+                            (data_item_stats.max_len, *data_shape), dtype=torch.float32
+                        ),
+                        mask=torch.ones((max_rgb_len,), dtype=torch.float32),
+                    )
+                    inputs_and_outputs[data_type][group_name] = data
+
+            inputs: Dict[DataType, Dict[str, MaskableData]] = {}
+            for data_type in self.input_data_types:
+                inputs[data_type] = {}
+                for group_name, data_item_stats in self.dataset_statistics.data[
+                    data_type
+                ].items():
+                    inputs[data_type][group_name] = inputs_and_outputs[data_type][
+                        group_name
+                    ]
+
+            outputs: Dict[DataType, Dict[str, MaskableData]] = {}
+            for data_type in self.output_data_types:
+                outputs[data_type] = {}
+                for group_name, data_item_stats in self.dataset_statistics.data[
+                    data_type
+                ].items():
+                    outputs[data_type][group_name] = inputs_and_outputs[data_type][
+                        group_name
+                    ]
+
+            return TrainingSample(
+                inputs=inputs,
+                outputs=outputs,
                 output_prediction_mask=torch.ones(
                     (self.output_prediction_horizon,), dtype=torch.float32
                 ),
             )
-
-            # Visual data
-            if DataType.RGB_IMAGE in self.data_types:
-                max_rgb_len = self.dataset_description.rgb_images.max_len
-                rgb_images = MaskableData(
-                    torch.zeros(
-                        (max_rgb_len, 3, *self.image_size), dtype=torch.float32
-                    ),
-                    torch.ones((max_rgb_len,), dtype=torch.float32),
-                )
-                if DataType.RGB_IMAGE in self.input_data_types:
-                    sample.inputs.rgb_images = rgb_images
-                if DataType.RGB_IMAGE in self.output_data_types:
-                    sample.outputs.rgb_images = rgb_images
-
-            if DataType.DEPTH_IMAGE in self.data_types:
-                max_depth_len = self.dataset_description.depth_images.max_len
-                depth_images = MaskableData(
-                    torch.zeros(
-                        (max_depth_len, 1, *self.image_size), dtype=torch.float32
-                    ),
-                    torch.ones((max_depth_len,), dtype=torch.float32),
-                )
-                if DataType.DEPTH_IMAGE in self.input_data_types:
-                    sample.inputs.depth_images = depth_images
-                if DataType.DEPTH_IMAGE in self.output_data_types:
-                    sample.outputs.depth_images = depth_images
-
-            if DataType.POINT_CLOUD in self.data_types:
-                max_pc_len = self.dataset_description.point_clouds.max_len
-                # Point clouds: [num_clouds, num_points, 3 (x,y,z)]
-                num_points = 1024  # Standard point cloud size
-                point_clouds = MaskableData(
-                    torch.randn((max_pc_len, num_points, 3), dtype=torch.float32),
-                    torch.ones((max_pc_len,), dtype=torch.float32),
-                )
-                if DataType.POINT_CLOUD in self.input_data_types:
-                    sample.inputs.point_clouds = point_clouds
-                if DataType.POINT_CLOUD in self.output_data_types:
-                    sample.outputs.point_clouds = point_clouds
-
-            # Joint data
-            if DataType.JOINT_POSITIONS in self.data_types:
-                max_jp_len = self.dataset_description.joint_positions.max_len
-                joint_positions = MaskableData(
-                    torch.zeros((max_jp_len,), dtype=torch.float32),
-                    torch.ones((max_jp_len,), dtype=torch.float32),
-                )
-                if DataType.JOINT_POSITIONS in self.input_data_types:
-                    sample.inputs.joint_positions = joint_positions
-                if DataType.JOINT_POSITIONS in self.output_data_types:
-                    sample.outputs.joint_positions = joint_positions
-
-            if DataType.JOINT_VELOCITIES in self.data_types:
-                max_jv_len = self.dataset_description.joint_velocities.max_len
-                joint_velocities = MaskableData(
-                    torch.zeros((max_jv_len,), dtype=torch.float32),
-                    torch.ones((max_jv_len,), dtype=torch.float32),
-                )
-                if DataType.JOINT_VELOCITIES in self.input_data_types:
-                    sample.inputs.joint_velocities = joint_velocities
-                if DataType.JOINT_VELOCITIES in self.output_data_types:
-                    sample.outputs.joint_velocities = joint_velocities
-
-            if DataType.JOINT_TORQUES in self.data_types:
-                max_jt_len = self.dataset_description.joint_torques.max_len
-                joint_torques = MaskableData(
-                    torch.zeros((max_jt_len,), dtype=torch.float32),
-                    torch.ones((max_jt_len,), dtype=torch.float32),
-                )
-                if DataType.JOINT_TORQUES in self.input_data_types:
-                    sample.inputs.joint_torques = joint_torques
-                if DataType.JOINT_TORQUES in self.output_data_types:
-                    sample.outputs.joint_torques = joint_torques
-
-            if DataType.JOINT_TARGET_POSITIONS in self.data_types:
-                max_jtp_len = self.dataset_description.joint_target_positions.max_len
-                joint_target_positions = MaskableData(
-                    torch.zeros((max_jtp_len,), dtype=torch.float32),
-                    torch.ones((max_jtp_len,), dtype=torch.float32),
-                )
-                if DataType.JOINT_TARGET_POSITIONS in self.input_data_types:
-                    sample.inputs.joint_target_positions = joint_target_positions
-                if DataType.JOINT_TARGET_POSITIONS in self.output_data_types:
-                    sample.outputs.joint_target_positions = joint_target_positions
-
-            # End-effector data
-            if DataType.END_EFFECTORS in self.data_types:
-                max_ee_len = self.dataset_description.end_effector_states.max_len
-                end_effectors = MaskableData(
-                    torch.zeros((max_ee_len,), dtype=torch.float32),
-                    torch.ones((max_ee_len,), dtype=torch.float32),
-                )
-                if DataType.END_EFFECTORS in self.input_data_types:
-                    sample.inputs.end_effectors = end_effectors
-                if DataType.END_EFFECTORS in self.output_data_types:
-                    sample.outputs.end_effectors = end_effectors
-
-            # End-effector pose data
-            if DataType.END_EFFECTOR_POSES in self.data_types:
-                max_ee_pose_len = self.dataset_description.end_effector_poses.max_len
-                end_effector_poses = MaskableData(
-                    torch.zeros((max_ee_pose_len,), dtype=torch.float32),
-                    torch.ones((max_ee_pose_len,), dtype=torch.float32),
-                )
-                if DataType.END_EFFECTOR_POSES in self.input_data_types:
-                    sample.inputs.end_effector_poses = end_effector_poses
-                if DataType.END_EFFECTOR_POSES in self.output_data_types:
-                    sample.outputs.end_effector_poses = end_effector_poses
-
-            # Parallel gripper open amounts
-            if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.data_types:
-                max_pg_len = (
-                    self.dataset_description.parallel_gripper_open_amounts.max_len
-                )
-                parallel_gripper_open_amounts = MaskableData(
-                    torch.zeros((max_pg_len,), dtype=torch.float32),
-                    torch.ones((max_pg_len,), dtype=torch.float32),
-                )
-                if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.input_data_types:
-                    sample.inputs.parallel_gripper_open_amounts = (
-                        parallel_gripper_open_amounts
-                    )
-                if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.output_data_types:
-                    sample.outputs.parallel_gripper_open_amounts = (
-                        parallel_gripper_open_amounts
-                    )
-
-            # Pose data
-            if DataType.POSES in self.data_types:
-                max_pose_len = self.dataset_description.poses.max_len
-                poses = MaskableData(
-                    torch.zeros((max_pose_len,), dtype=torch.float32),
-                    torch.ones((max_pose_len,), dtype=torch.float32),
-                )
-                if DataType.POSES in self.input_data_types:
-                    sample.inputs.poses = poses
-                if DataType.POSES in self.output_data_types:
-                    sample.outputs.poses = poses
-
-            # Language data
-            if DataType.LANGUAGE in self.data_types:
-                if self.tokenize_text is None:
-                    raise ValueError(
-                        "Failed to initialize tokenize_text for DataType.LANGUAGE"
-                    )
-
-                # Randomly select an instruction
-                instruction = np.random.choice(self.sample_instructions)
-                # Tokenize the instruction
-                input_ids, attention_mask = self.tokenize_text([instruction])
-                language_tokens = MaskableData(input_ids, attention_mask)
-
-                if DataType.LANGUAGE in self.input_data_types:
-                    sample.inputs.language_tokens = language_tokens
-                if DataType.LANGUAGE in self.output_data_types:
-                    sample.outputs.language_tokens = language_tokens
-
-            # Custom data
-            if DataType.CUSTOM in self.data_types:
-                # Generate some example custom data
-                custom_data = {
-                    "sensor_1": MaskableData(
-                        torch.randn((10,), dtype=torch.float32),
-                        torch.ones((10,), dtype=torch.float32),
-                    ),
-                    "sensor_2": MaskableData(
-                        torch.randn((5,), dtype=torch.float32),
-                        torch.ones((5,), dtype=torch.float32),
-                    ),
-                }
-                if DataType.CUSTOM in self.input_data_types:
-                    sample.inputs.custom_data = custom_data
-                if DataType.CUSTOM in self.output_data_types:
-                    sample.outputs.custom_data = custom_data
-
-            return sample
 
         except Exception:
             logger.error("Error generating random sample", exc_info=True)
@@ -441,7 +204,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             A BatchedTrainingSamples instance containing the batched inputs,
             outputs, and prediction masks ready for model training.
         """
-        bd = self._collate_fn([s.outputs for s in samples], self.output_data_types)
+        bd = self._collate_fn([s.outputs for s in samples])
         for key in bd.__dict__.keys():
             if bd.__dict__[key] is not None:
                 if isinstance(bd.__dict__[key], MaskableData):
@@ -472,7 +235,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                             )
                             bd.__dict__[key][custom_key] = MaskableData(data, mask)
         return BatchedTrainingSamples(
-            inputs=self._collate_fn([s.inputs for s in samples], self.input_data_types),
+            inputs=self._collate_fn([s.inputs for s in samples]),
             outputs=bd,
             output_prediction_mask=torch.stack(
                 [sample.output_prediction_mask for sample in samples]

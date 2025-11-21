@@ -4,10 +4,10 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional, Union, cast
 
-from neuracore_types import DatasetDescription, DataType
+from neuracore_types import DatasetStatistics, DataType
 from tqdm import tqdm
 
-from neuracore.core.data.synced_recording import SynchronizedRecording
+from neuracore.core.data.synchronized_episode import SynchronizedEpisode
 
 if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset
@@ -24,7 +24,7 @@ class SynchronizedDataset:
         dataset: "Dataset",
         frequency: int,
         data_types: Optional[list[DataType]],
-        dataset_description: DatasetDescription,
+        dataset_statistics: DatasetStatistics,
         prefetch_videos: bool = False,
         max_workers: int = 4,
     ):
@@ -34,17 +34,17 @@ class SynchronizedDataset:
             dataset: Dataset object containing recordings.
             frequency: Frequency of the dataset in Hz.
             data_types: List of data types to include in the dataset.
-            dataset_description: Description of the dataset.
+            dataset_statistics: Statistics of the dataset.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
             max_workers: Number of threads to use for prefetching videos.
         """
         self.dataset = dataset
         self.frequency = frequency
         self.data_types = data_types or []
-        self.dataset_description = dataset_description
+        self.dataset_statistics = dataset_statistics
         self._prefetch_videos = prefetch_videos
         self._recording_idx = 0
-        self._synced_recording_cache: dict[int, SynchronizedRecording] = {}
+        self._synced_recording_cache: dict[int, SynchronizedEpisode] = {}
 
         if prefetch_videos:
             prefetch_needed = False
@@ -79,7 +79,7 @@ class SynchronizedDataset:
     @property
     def num_transitions(self) -> int:
         """Get the number of transitions in the dataset."""
-        return self.dataset_description.total_num_transitions
+        return self.dataset_statistics.total_num_transitions
 
     def __iter__(self) -> "SynchronizedDataset":
         """Initialize iterator over episodes in the dataset.
@@ -100,7 +100,7 @@ class SynchronizedDataset:
 
     def __getitem__(
         self, idx: Union[int, slice]
-    ) -> Union["SynchronizedRecording", "SynchronizedDataset"]:
+    ) -> Union["SynchronizedEpisode", "SynchronizedDataset"]:
         """Support for indexing and slicing dataset episodes.
 
         Args:
@@ -121,7 +121,7 @@ class SynchronizedDataset:
                 dataset=cast("Dataset", dataset),
                 frequency=self.frequency,
                 data_types=self.data_types,
-                dataset_description=self.dataset_description,
+                dataset_statistics=self.dataset_statistics,
                 prefetch_videos=False,  # Avoid prefetching again
             )
         else:
@@ -132,7 +132,7 @@ class SynchronizedDataset:
                 if not 0 <= idx < len(self.dataset.recordings):
                     raise IndexError("Dataset index out of range")
                 if idx not in self._synced_recording_cache:
-                    synced_recording = SynchronizedRecording(
+                    synced_recording = SynchronizedEpisode(
                         recording_id=self.dataset.recordings[idx]["id"],
                         dataset=self.dataset,
                         robot_id=self.dataset.recordings[idx]["robot_id"],
@@ -147,7 +147,7 @@ class SynchronizedDataset:
                 f"Dataset indices must be integers or slices, not {type(idx)}"
             )
 
-    def __next__(self) -> SynchronizedRecording:
+    def __next__(self) -> SynchronizedEpisode:
         """Get the next episode in the dataset iteration.
 
         Returns:
@@ -162,7 +162,7 @@ class SynchronizedDataset:
         if self._recording_idx not in self._synced_recording_cache:
             recording = self.dataset.recordings[self._recording_idx]
             if self._recording_idx not in self._synced_recording_cache:
-                s = SynchronizedRecording(
+                s = SynchronizedEpisode(
                     recording_id=recording["id"],
                     dataset=self.dataset,
                     robot_id=recording["robot_id"],

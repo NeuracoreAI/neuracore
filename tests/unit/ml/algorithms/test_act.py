@@ -8,14 +8,14 @@ import torch
 import torch.nn as nn
 from neuracore_types import (
     DataItemStats,
-    DatasetDescription,
+    DatasetStatistics,
     DataType,
     ModelInitDescription,
     ModelPrediction,
 )
 
 from neuracore.ml import (
-    BatchedInferenceSamples,
+    BatchedInferenceInputs,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     MaskableData,
@@ -35,7 +35,7 @@ DEVICE = get_default_device()
 
 @pytest.fixture
 def model_init_description() -> ModelInitDescription:
-    dataset_description = DatasetDescription(
+    dataset_statistics = DatasetStatistics(
         joint_positions=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
@@ -57,12 +57,12 @@ def model_init_description() -> ModelInitDescription:
         ),
     )
     return ModelInitDescription(
-        dataset_description=dataset_description,
+        dataset_statistics=dataset_statistics,
         input_data_types=[
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
-            DataType.RGB_IMAGE,
+            DataType.RGB_IMAGES,
         ],
         output_data_types=[DataType.JOINT_TARGET_POSITIONS],
         output_prediction_horizon=PRED_HORIZON,
@@ -106,8 +106,8 @@ def sample_batch() -> BatchedTrainingSamples:
 
 
 @pytest.fixture
-def sample_inference_batch() -> BatchedInferenceSamples:
-    return BatchedInferenceSamples(
+def sample_inference_batch() -> BatchedInferenceInputs:
+    return BatchedInferenceInputs(
         joint_positions=MaskableData(
             torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
             torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
@@ -156,7 +156,7 @@ def test_model_construction(
 def test_model_forward(
     model_init_description: ModelInitDescription,
     model_config: dict,
-    sample_inference_batch: BatchedInferenceSamples,
+    sample_inference_batch: BatchedInferenceInputs,
 ):
     model = ACT(model_init_description, **model_config)
     model = model.to(DEVICE)

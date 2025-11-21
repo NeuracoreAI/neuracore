@@ -10,6 +10,8 @@ import neuracore as nc
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
+JOINT_GROUP_NAME = "arm"
+
 
 def main(args):
     """Main function for running the robot demo and logging with neuracore."""
@@ -53,10 +55,16 @@ def main(args):
             CUSTOM_DATA = [1, 2, 3, 4, 5]
             CAM_NAME = "angle"
             nc.log_custom_data("my_custom_data", CUSTOM_DATA, timestamp=t)
-            nc.log_joint_positions(obs.qpos, timestamp=t)
-            nc.log_joint_velocities(obs.qvel, timestamp=t)
+            nc.log_joint_positions(
+                name=JOINT_GROUP_NAME, positions=obs.qpos, timestamp=t
+            )
+            nc.log_joint_velocities(
+                name=JOINT_GROUP_NAME, velocities=obs.qvel, timestamp=t
+            )
             nc.log_language(
-                "Pick up the cube and pass it to the other robot", timestamp=t
+                name="instruction",
+                language="Pick up the cube and pass it to the other robot",
+                timestamp=t,
             )
             nc.log_rgb(CAM_NAME, obs.cameras[CAM_NAME].rgb, timestamp=t)
 
@@ -66,13 +74,21 @@ def main(args):
 
                 t += 0.02
                 nc.log_custom_data("my_custom_data", CUSTOM_DATA, timestamp=t)
-                nc.log_joint_positions(obs.qpos, timestamp=t)
-                nc.log_joint_velocities(obs.qvel, timestamp=t)
-                nc.log_language(
-                    "Pick up the cube and pass it to the other robot", timestamp=t
+                nc.log_joint_positions(
+                    name=JOINT_GROUP_NAME, positions=obs.qpos, timestamp=t
                 )
-                nc.log_joint_target_positions(action, timestamp=t)
-                nc.log_rgb(CAM_NAME, obs.cameras[CAM_NAME].rgb, timestamp=t)
+                nc.log_joint_velocities(
+                    name=JOINT_GROUP_NAME, velocities=obs.qvel, timestamp=t
+                )
+                nc.log_language(
+                    name="instruction",
+                    language="Pick up the cube and pass it to the other robot",
+                    timestamp=t,
+                )
+                nc.log_joint_target_positions(
+                    name=JOINT_GROUP_NAME, target_positions=action, timestamp=t
+                )
+                nc.log_rgb(name=CAM_NAME, rgb=obs.cameras[CAM_NAME].rgb, timestamp=t)
 
             # Stop recording if enabled
             if record:

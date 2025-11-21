@@ -9,7 +9,7 @@ import json
 from typing import Optional
 
 import requests
-from neuracore_types import DataType, SyncPoint
+from neuracore_types import DataType, SynchronizedPoint
 
 from neuracore.api.core import _get_robot
 from neuracore.core.auth import get_auth
@@ -30,7 +30,7 @@ from neuracore.core.get_latest_sync_point import (
 def policy(
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
-    output_mapping: Optional[dict[DataType, list[str]]] = None,
+    robot_to_output_mapping: Optional[dict[str, dict[DataType, list[str]]]] = None,
     device: Optional[str] = None,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process without any server.
@@ -41,7 +41,8 @@ def policy(
     Args:
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load. If provided, overrides
-        output_mapping: Optional mapping of output data types to response fields.
+        robot_to_output_mapping: Output mapping per robot type supported by the model.
+        Each output mapping is a dictionary of data types to list of output names.
         device: Torch device to run the model on (CPU or GPU, or MPS)
 
     Returns:
@@ -52,7 +53,10 @@ def policy(
         ConfigError: If there is an error trying to get the current org.
     """
     return _policy(
-        train_run_name, model_file, output_mapping=output_mapping, device=device
+        train_run_name,
+        model_file,
+        robot_to_output_mapping=robot_to_output_mapping,
+        device=device,
     )
 
 
@@ -213,7 +217,7 @@ def delete_endpoint(endpoint_id: str) -> None:
 
 def get_latest_sync_point(
     robot_name: Optional[str] = None, instance: int = 0, include_remote: bool = True
-) -> SyncPoint:
+) -> SynchronizedPoint:
     """Creates a sync point from gathering data logged by a robot.
 
     Note after instantiation it can take time before data is available from
@@ -227,7 +231,7 @@ def get_latest_sync_point(
             data. This is ignored if NEURACORE_CONSUME_LIVE_DATA is disabled.
 
     Returns:
-        The SyncPoint consisting of the latest data recorded for each of the
+        The SynchronizedPoint consisting of the latest data recorded for each of the
             sensors
 
     Raises:

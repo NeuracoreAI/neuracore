@@ -11,14 +11,15 @@ import av
 import numpy as np
 import requests
 import wget
-from neuracore_types import CameraData, DataType, SyncedData, SyncPoint
+from neuracore_types import CameraData, DataType
+from neuracore_types import SynchronizedEpisode as SynchronizedEpisodeModel
+from neuracore_types import SynchronizedPoint
 from PIL import Image
 
 from neuracore.core.data.cache_manager import CacheManager
 
 from ..auth import get_auth
 from ..const import API_URL
-from ..utils.depth_utils import rgb_to_depth
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
 MAX_DECODING_ATTEMPTS = 3
 
 
-class SynchronizedRecording:
+class SynchronizedEpisode:
     """Synchronized recording iterator."""
 
     def __init__(
@@ -60,8 +61,8 @@ class SynchronizedRecording:
         self.robot_id = robot_id
         self.instance = instance
 
-        self._recording_synced = self._get_synced_data()
-        self._episode_length = len(self._recording_synced.frames)
+        self._episode_synced = self._get_synced_data()
+        self._episode_length = len(self._episode_synced.observations)
         self.cache_manager = CacheManager(
             self.cache_dir,
         )
@@ -73,11 +74,11 @@ class SynchronizedRecording:
             if not cache.exists():
                 self._get_sync_point(0)
 
-    def _get_synced_data(self) -> SyncedData:
+    def _get_synced_data(self) -> SynchronizedEpisodeModel:
         """Retrieve synchronized metadata for the recording.
 
         Returns:
-            SyncedData object containing synchronized frames and metadata.
+            SynchronizedEpisode object containing synchronized frames and metadata.
 
         Raises:
             requests.HTTPError: If the API request fails.
@@ -93,7 +94,7 @@ class SynchronizedRecording:
             headers=auth.get_headers(),
         )
         response.raise_for_status()
-        return SyncedData.model_validate(response.json())
+        return SynchronizedEpisodeModel.model_validate(response.json())
 
     def _get_video_url(self, camera_type: str, camera_id: str) -> str:
         """Get streaming URL for a specific camera's video data.
@@ -147,14 +148,14 @@ class SynchronizedRecording:
 
     def _get_frame_from_disk_cache(
         self,
-        camera_type: str,
+        camera_type: DataType,
         camera_data: dict[str, CameraData],
         transform_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> dict[str, CameraData]:
         """Get video frame from disk cache for camera data.
 
         Args:
-            camera_type: Type of camera (e.g., "rgbs", "depths").
+            camera_type: DataType indicating the type of camera data.
             camera_data: Dictionary of camera data with camera IDs as keys.
             frame_idx: Index of the frame to retrieve.
             transform_fn: Optional function to transform frames (e.g., rgb_to_depth).
@@ -209,43 +210,46 @@ class SynchronizedRecording:
             camera_data[cam_id].frame = frame
         return camera_data
 
-    def _insert_camera_data_intro_sync_point(self, sync_point: SyncPoint) -> SyncPoint:
+    def _insert_camera_data_intro_sync_point(
+        self, sync_point: SynchronizedEpisodeModel
+    ) -> SynchronizedEpisodeModel:
         """Populate video frames for a given sync point.
 
         Args:
-            sync_point: SyncPoint object containing camera data.
+            sync_point: SynchronizedPoint object containing camera data.
 
         Returns:
-            SyncPoint object with populated video frames.
+            SynchronizedPoint object with populated video frames.
         """
-        if sync_point.rgb_images is not None:
-            sync_point.rgb_images = self._get_frame_from_disk_cache(
-                "rgbs", sync_point.rgb_images
+        if DataType.RGB_IMAGES in sync_point.data:
+            sync_point.data[DataType.RGB_IMAGES] = self._get_frame_from_disk_cache(
+                DataType.RGB_IMAGES, sync_point.data[DataType.RGB_IMAGES]
             )
-        if sync_point.depth_images is not None:
-            sync_point.depth_images = self._get_frame_from_disk_cache(
-                "depths", sync_point.depth_images, transform_fn=rgb_to_depth
+        if DataType.DEPTH_IMAGES in sync_point.data:
+            sync_point.data[DataType.DEPTH_IMAGES] = self._get_frame_from_disk_cache(
+                DataType.DEPTH_IMAGES, sync_point.data[DataType.DEPTH_IMAGES]
             )
         return sync_point
 
-    def _get_sync_point(self, idx: int) -> SyncPoint:
+    def _get_sync_point(self, idx: int) -> SynchronizedEpisodeModel:
         """Get synchronized data point at a specific index.
 
         Args:
             idx: Index of the sync point to retrieve.
 
         Returns:
-            SyncPoint object containing synchronized data for the specified index.
+            SynchronizedPoint object containing synchronized data
+                for the specified index.
         """
         # Copy for two reasons:
-        # 1. we dont't want self._recording_synced.frames to hold the real image
+        # 1. we dont't want self._recording_synced.observations to hold the real image
         #    data in the ram. Because it will become large over time
         # 2. If the user modifies the returned sync point, it won't affect the loader.
-        sync_point = copy.deepcopy(self._recording_synced.frames[idx])
+        sync_point = copy.deepcopy(self._episode_synced.observations[idx])
         sync_point = self._insert_camera_data_intro_sync_point(sync_point)
         return sync_point
 
-    def __iter__(self) -> "SynchronizedRecording":
+    def __iter__(self) -> "SynchronizedEpisode":
         """Initialize iteration over the episode.
 
         Returns:
@@ -262,14 +266,17 @@ class SynchronizedRecording:
         """
         return self._episode_length
 
-    def __getitem__(self, idx: Union[int, slice]) -> Union[SyncPoint, list[SyncPoint]]:
+    def __getitem__(
+        self, idx: Union[int, slice]
+    ) -> Union[SynchronizedPoint, list[SynchronizedPoint]]:
         """Support for indexing episode data.
 
         Args:
             idx: Integer index or slice object for accessing sync points.
 
         Returns:
-            SyncPoint object for single index or list of SyncPoint objects for slice.
+            SynchronizedPoint object for single index or list of
+                SynchronizedPoint objects for slice.
 
         Raises:
             IndexError: If the index is out of range.
@@ -278,7 +285,7 @@ class SynchronizedRecording:
         if isinstance(idx, slice):
             # Handle slice objects
             start, stop, step = idx.indices(len(self))
-            return [cast(SyncPoint, self[i]) for i in range(start, stop, step)]
+            return [cast(SynchronizedPoint, self[i]) for i in range(start, stop, step)]
 
         if idx < 0:
             idx += len(self)
@@ -287,16 +294,16 @@ class SynchronizedRecording:
 
         return self._get_sync_point(idx)
 
-    def __next__(self) -> SyncPoint:
+    def __next__(self) -> SynchronizedPoint:
         """Get the next synchronized data point in the episode.
 
         Returns:
-            SyncPoint object containing synchronized data for the next timestep.
+            SynchronizedPoint object containing synchronized data for the next timestep.
 
         Raises:
             StopIteration: When all timesteps have been processed.
         """
-        if self._iter_idx >= len(self._recording_synced.frames):
+        if self._iter_idx >= len(self._episode_synced.observations):
             raise StopIteration
         sync_point = self._get_sync_point(self._iter_idx)
         self._iter_idx += 1

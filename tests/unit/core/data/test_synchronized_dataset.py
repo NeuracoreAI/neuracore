@@ -3,10 +3,10 @@
 from unittest.mock import patch
 
 import pytest
-from neuracore_types import DatasetDescription, DataType
+from neuracore_types import DatasetStatistics, DataType
 
-from neuracore.core.data.synced_dataset import SynchronizedDataset
-from neuracore.core.data.synced_recording import SynchronizedRecording
+from neuracore.core.data.synchronized_dataset import SynchronizedDataset
+from neuracore.core.data.synchronized_episode import SynchronizedEpisode
 
 
 class TestSynchronizedDataset:
@@ -23,38 +23,38 @@ class TestSynchronizedDataset:
         return dataset
 
     @pytest.fixture
-    def dataset_description(self):
+    def dataset_statistics(self):
         """Create a dataset description fixture."""
-        return DatasetDescription()
+        return DatasetStatistics()
 
     @pytest.fixture
-    def synced_dataset(self, dataset_mock, dataset_description):
+    def synced_dataset(self, dataset_mock, dataset_statistics):
         """Create a SynchronizedDataset instance for testing."""
         return SynchronizedDataset(
             dataset=dataset_mock,
             frequency=30,
             data_types=None,
-            dataset_description=dataset_description,
+            dataset_statistics=dataset_statistics,
             prefetch_videos=False,
         )
 
-    def test_init(self, synced_dataset, dataset_mock, dataset_description):
+    def test_init(self, synced_dataset, dataset_mock, dataset_statistics):
         """Test SynchronizedDataset initialization."""
         assert synced_dataset.dataset == dataset_mock
         assert synced_dataset.frequency == 30
         assert synced_dataset.data_types == []
-        assert synced_dataset.dataset_description == dataset_description
+        assert synced_dataset.dataset_statistics == dataset_statistics
         assert synced_dataset._recording_idx == 0
         assert synced_dataset._synced_recording_cache == {}
 
-    def test_init_with_data_types(self, dataset_mock, dataset_description):
+    def test_init_with_data_types(self, dataset_mock, dataset_statistics):
         """Test initialization with specific data types."""
-        data_types = [DataType.RGB_IMAGE, DataType.DEPTH_IMAGE]
+        data_types = [DataType.RGB_IMAGES, DataType.DEPTH_IMAGES]
         synced = SynchronizedDataset(
             dataset=dataset_mock,
             frequency=30,
             data_types=data_types,
-            dataset_description=dataset_description,
+            dataset_statistics=dataset_statistics,
         )
 
         assert synced.data_types == data_types
@@ -75,7 +75,7 @@ class TestSynchronizedDataset:
         """Test accessing a single recording by index."""
         recording = synced_dataset[0]
 
-        assert isinstance(recording, SynchronizedRecording)
+        assert isinstance(recording, SynchronizedEpisode)
         assert recording.id == "rec1"
         assert recording.robot_id == "robot1"
         assert recording.frequency == 30
@@ -84,7 +84,7 @@ class TestSynchronizedDataset:
         """Test accessing the second recording."""
         recording = synced_dataset[1]
 
-        assert isinstance(recording, SynchronizedRecording)
+        assert isinstance(recording, SynchronizedEpisode)
         assert recording.id == "rec2"
         assert recording.robot_id == "robot2"
 
@@ -92,14 +92,14 @@ class TestSynchronizedDataset:
         """Test accessing recordings with negative indices."""
         recording = synced_dataset[-1]
 
-        assert isinstance(recording, SynchronizedRecording)
+        assert isinstance(recording, SynchronizedEpisode)
         assert recording.id == "rec2"
 
     def test_getitem_negative_first(self, synced_dataset, mock_auth_requests):
         """Test accessing first recording with negative index."""
         recording = synced_dataset[-2]
 
-        assert isinstance(recording, SynchronizedRecording)
+        assert isinstance(recording, SynchronizedEpisode)
         assert recording.id == "rec1"
 
     def test_getitem_out_of_range(self, synced_dataset):
@@ -148,14 +148,14 @@ class TestSynchronizedDataset:
 
         assert sliced.frequency == synced_dataset.frequency
         assert sliced.data_types == synced_dataset.data_types
-        assert sliced.dataset_description == synced_dataset.dataset_description
+        assert sliced.dataset_statistics == synced_dataset.dataset_statistics
 
     def test_iteration(self, synced_dataset, mock_auth_requests):
         """Test iterating through synchronized dataset."""
         recordings = list(synced_dataset)
 
         assert len(recordings) == 2
-        assert all(isinstance(r, SynchronizedRecording) for r in recordings)
+        assert all(isinstance(r, SynchronizedEpisode) for r in recordings)
         assert recordings[0].id == "rec1"
         assert recordings[1].id == "rec2"
 
@@ -204,7 +204,7 @@ class TestSynchronizedDataset:
         assert synced_dataset[0] is recordings[0]
         assert synced_dataset[1] is recordings[1]
 
-    def test_prefetch_videos_disabled(self, dataset_mock, dataset_description):
+    def test_prefetch_videos_disabled(self, dataset_mock, dataset_statistics):
         """Test that prefetch_videos=False doesn't trigger prefetch."""
         with patch.object(
             SynchronizedDataset, "_perform_videos_prefetch"
@@ -213,14 +213,14 @@ class TestSynchronizedDataset:
                 dataset=dataset_mock,
                 frequency=30,
                 data_types=None,
-                dataset_description=dataset_description,
+                dataset_statistics=dataset_statistics,
                 prefetch_videos=False,
             )
 
             mock_prefetch.assert_not_called()
 
     def test_prefetch_videos_enabled_no_cache(
-        self, dataset_mock, dataset_description, mock_auth_requests
+        self, dataset_mock, dataset_statistics, mock_auth_requests
     ):
         """Test that prefetch_videos=True triggers prefetch when no cache exists."""
         with patch.object(
@@ -230,14 +230,14 @@ class TestSynchronizedDataset:
                 dataset=dataset_mock,
                 frequency=30,
                 data_types=None,
-                dataset_description=dataset_description,
+                dataset_statistics=dataset_statistics,
                 prefetch_videos=True,
             )
 
             mock_prefetch.assert_called_once()
 
     def test_prefetch_videos_enabled_with_cache(
-        self, dataset_mock, dataset_description, mock_auth_requests, tmp_path
+        self, dataset_mock, dataset_statistics, mock_auth_requests, tmp_path
     ):
         """Test that prefetch is skipped when cache exists."""
         # Create cache directories for all recordings
@@ -252,14 +252,14 @@ class TestSynchronizedDataset:
                 dataset=dataset_mock,
                 frequency=30,
                 data_types=None,
-                dataset_description=dataset_description,
+                dataset_statistics=dataset_statistics,
                 prefetch_videos=True,
             )
 
             mock_prefetch.assert_not_called()
 
     def test_prefetch_videos_partial_cache(
-        self, dataset_mock, dataset_description, mock_auth_requests, tmp_path
+        self, dataset_mock, dataset_statistics, mock_auth_requests, tmp_path
     ):
         """Test that prefetch runs if only some recordings are cached."""
         # Create cache for only first recording
@@ -275,13 +275,13 @@ class TestSynchronizedDataset:
                 dataset=dataset_mock,
                 frequency=30,
                 data_types=None,
-                dataset_description=dataset_description,
+                dataset_statistics=dataset_statistics,
                 prefetch_videos=True,
             )
 
             mock_prefetch.assert_called_once()
 
-    def test_max_workers_parameter(self, dataset_mock, dataset_description):
+    def test_max_workers_parameter(self, dataset_mock, dataset_statistics):
         """Test that max_workers parameter is used in prefetch."""
         with patch.object(
             SynchronizedDataset, "_perform_videos_prefetch"
@@ -290,7 +290,7 @@ class TestSynchronizedDataset:
                 dataset=dataset_mock,
                 frequency=30,
                 data_types=None,
-                dataset_description=dataset_description,
+                dataset_statistics=dataset_statistics,
                 prefetch_videos=True,
                 max_workers=8,
             )
@@ -339,49 +339,49 @@ class TestSynchronizedDataset:
         rec_last = synced_dataset[-1]
         assert recordings[-1] is rec_last
 
-    def test_empty_data_types_list(self, dataset_mock, dataset_description):
+    def test_empty_data_types_list(self, dataset_mock, dataset_statistics):
         """Test initialization with empty data types list."""
         synced = SynchronizedDataset(
             dataset=dataset_mock,
             frequency=30,
             data_types=[],
-            dataset_description=dataset_description,
+            dataset_statistics=dataset_statistics,
         )
 
         assert synced.data_types == []
 
-    def test_multiple_data_types(self, dataset_mock, dataset_description):
+    def test_multiple_data_types(self, dataset_mock, dataset_statistics):
         """Test initialization with multiple data types."""
         data_types = [
-            DataType.RGB_IMAGE,
-            DataType.DEPTH_IMAGE,
+            DataType.RGB_IMAGES,
+            DataType.DEPTH_IMAGES,
             DataType.JOINT_POSITIONS,
         ]
         synced = SynchronizedDataset(
             dataset=dataset_mock,
             frequency=30,
             data_types=data_types,
-            dataset_description=dataset_description,
+            dataset_statistics=dataset_statistics,
         )
 
         assert synced.data_types == data_types
 
     def test_cache_independence_between_instances(
-        self, dataset_mock, dataset_description, mock_auth_requests
+        self, dataset_mock, dataset_statistics, mock_auth_requests
     ):
         """Test that different SynchronizedDataset instances have independent caches."""
         synced1 = SynchronizedDataset(
             dataset=dataset_mock,
             frequency=30,
             data_types=None,
-            dataset_description=dataset_description,
+            dataset_statistics=dataset_statistics,
         )
 
         synced2 = SynchronizedDataset(
             dataset=dataset_mock,
             frequency=30,
             data_types=None,
-            dataset_description=dataset_description,
+            dataset_statistics=dataset_statistics,
         )
 
         # Access in first instance

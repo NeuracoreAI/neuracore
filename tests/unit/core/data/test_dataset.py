@@ -6,8 +6,8 @@ import pytest
 
 from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
-from neuracore.core.data.recording import Recording
-from neuracore.core.data.synced_dataset import SynchronizedDataset
+from neuracore.core.data.episode import Episode
+from neuracore.core.data.synchronized_dataset import SynchronizedDataset
 from neuracore.core.exceptions import DatasetError
 
 
@@ -315,7 +315,7 @@ class TestDatasetIndexingAndSlicing:
 
         recording = dataset[0]
 
-        assert isinstance(recording, Recording)
+        assert isinstance(recording, Episode)
         assert recording.id == "rec1"
 
     def test_getitem_negative_index(self, dataset_dict, recordings_list):
@@ -324,7 +324,7 @@ class TestDatasetIndexingAndSlicing:
 
         recording = dataset[-1]
 
-        assert isinstance(recording, Recording)
+        assert isinstance(recording, Episode)
         assert recording.id == "rec2"
 
     def test_getitem_out_of_range(self, dataset_dict, recordings_list):
@@ -396,7 +396,7 @@ class TestDatasetIteration:
         recordings = list(dataset)
 
         assert len(recordings) == 2
-        assert all(isinstance(r, Recording) for r in recordings)
+        assert all(isinstance(r, Episode) for r in recordings)
         assert recordings[0].id == "rec1"
         assert recordings[1].id == "rec2"
 
@@ -458,7 +458,7 @@ class TestDatasetSynchronization:
 
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
 
-        data_types = [DataType.RGB_IMAGE, DataType.DEPTH_IMAGE]
+        data_types = [DataType.RGB_IMAGES, DataType.DEPTH_IMAGES]
         synced = dataset.synchronize(frequency=30, data_types=data_types)
 
         assert synced.data_types == data_types

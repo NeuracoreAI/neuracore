@@ -1,5 +1,6 @@
 """Shared test fixtures and utilities for dataset tests."""
 
+import copy
 import io
 import re
 from fractions import Fraction
@@ -7,7 +8,13 @@ from fractions import Fraction
 import av
 import numpy as np
 import pytest
-from neuracore_types import CameraData, DataType, JointData, SyncedData, SyncPoint
+from neuracore_types import (
+    CameraData,
+    DataType,
+    JointData,
+    SynchronizedEpisode,
+    SynchronizedPoint,
+)
 
 import neuracore as nc
 from neuracore.core.const import API_URL
@@ -105,7 +112,7 @@ def dataset_dict(mocked_org_id):
         "size_bytes": 1024,
         "tags": ["test", "robotics"],
         "is_shared": False,
-        "data_types": [DataType.RGB_IMAGE, DataType.JOINT_POSITIONS],
+        "data_types": [DataType.RGB_IMAGES, DataType.JOINT_POSITIONS],
     }
 
 
@@ -150,25 +157,39 @@ def synced_data():
         intrinsics=[[500, 0, 112], [0, 500, 112], [0, 0, 1]],
     )
 
+    joint_data_group = {"group1": JointData(timestamp=0.0, values={"joint1": 0.5})}
+    target_joint_data_group = {
+        "group1": JointData(timestamp=1000.0, values={"joint1": 1.0})
+    }
+
     # Create sync points
-    frame1 = SyncPoint(
+    frame1 = SynchronizedPoint(
         timestamp=0.0,
-        joint_positions=JointData(timestamp=0.0, values={"joint1": 0.5}),
-        joint_target_positions=JointData(timestamp=1000.0, values={"joint1": 1.0}),
-        rgb_images={"cam1": camera1},
-        depth_images={"cam2": camera2},
+        data={
+            DataType.JOINT_POSITIONS: joint_data_group,
+            DataType.JOINT_TARGET_POSITIONS: target_joint_data_group,
+            DataType.RGB_IMAGES: {"cam1": camera1},
+            DataType.DEPTH_IMAGES: {"cam2": camera2},
+        },
     )
 
-    frame2 = SyncPoint(
+    camera1 = copy.deepcopy(camera1)
+    camera2 = copy.deepcopy(camera2)
+    camera1.frame_idx = 1
+    camera2.frame_idx = 1
+
+    frame2 = SynchronizedPoint(
         timestamp=1.0,
-        joint_positions=JointData(timestamp=1.0, values={"joint1": 0.7}),
-        joint_target_positions=JointData(timestamp=1.0, values={"joint1": 1.2}),
-        rgb_images={"cam1": CameraData(timestamp=1.0, frame_idx=1)},
-        depth_images={"cam2": CameraData(timestamp=1.0, frame_idx=1)},
+        data={
+            DataType.JOINT_POSITIONS: joint_data_group,
+            DataType.JOINT_TARGET_POSITIONS: target_joint_data_group,
+            DataType.RGB_IMAGES: {"cam1": camera1},
+            DataType.DEPTH_IMAGES: {"cam2": camera2},
+        },
     )
 
-    return SyncedData(
-        frames=[frame1, frame2], start_time=0.0, end_time=1.0, robot_id="robot1"
+    return SynchronizedEpisode(
+        observations=[frame1, frame2], start_time=0.0, end_time=1.0, robot_id="robot1"
     )
 
 
@@ -184,20 +205,26 @@ def synced_data_multiple_frames():
             intrinsics=[[500, 0, 112], [0, 500, 112], [0, 0, 1]],
         )
 
-        frame = SyncPoint(
+        joint_data_group = {
+            "group1": JointData(timestamp=0.0, values={"joint1": 0.5 + i * 0.1})
+        }
+        target_joint_data_group = {
+            "group1": JointData(timestamp=1000.0, values={"joint1": 1.0 + i * 0.1})
+        }
+
+        frame = SynchronizedPoint(
             timestamp=float(i),
-            joint_positions=JointData(
-                timestamp=float(i), values={"joint1": 0.5 + i * 0.1}
-            ),
-            joint_target_positions=JointData(
-                timestamp=float(i), values={"joint1": 1.0 + i * 0.1}
-            ),
-            rgb_images={"cam1": camera},
-            depth_images=None,
+            data={
+                DataType.JOINT_POSITIONS: joint_data_group,
+                DataType.JOINT_TARGET_POSITIONS: target_joint_data_group,
+                DataType.RGB_IMAGES: {"cam1": camera},
+            },
         )
         frames.append(frame)
 
-    return SyncedData(frames=frames, start_time=0.0, end_time=4.0, robot_id="robot1")
+    return SynchronizedEpisode(
+        observations=frames, start_time=0.0, end_time=4.0, robot_id="robot1"
+    )
 
 
 @pytest.fixture

@@ -36,7 +36,7 @@ class TestPytorchDummyDataset:
     def basic_data_types(self):
         """Basic data types for testing."""
         return {
-            "input_types": [DataType.JOINT_POSITIONS, DataType.RGB_IMAGE],
+            "input_types": [DataType.JOINT_POSITIONS, DataType.RGB_IMAGES],
             "output_types": [DataType.JOINT_TARGET_POSITIONS],
         }
 
@@ -48,10 +48,9 @@ class TestPytorchDummyDataset:
                 DataType.JOINT_POSITIONS,
                 DataType.JOINT_VELOCITIES,
                 DataType.JOINT_TORQUES,
-                DataType.RGB_IMAGE,
-                DataType.DEPTH_IMAGE,
-                DataType.POINT_CLOUD,
-                DataType.END_EFFECTORS,
+                DataType.RGB_IMAGES,
+                DataType.DEPTH_IMAGES,
+                DataType.POINT_CLOUDS,
                 DataType.END_EFFECTOR_POSES,
                 DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
                 DataType.POSES,
@@ -60,8 +59,7 @@ class TestPytorchDummyDataset:
             ],
             "output_types": [
                 DataType.JOINT_TARGET_POSITIONS,
-                DataType.RGB_IMAGE,
-                DataType.END_EFFECTORS,
+                DataType.RGB_IMAGES,
             ],
         }
 
@@ -100,7 +98,7 @@ class TestPytorchDummyDataset:
         assert dataset.tokenize_text is not None
 
         # Check dataset description is properly initialized
-        desc = dataset.dataset_description
+        desc = dataset.dataset_statistics
         assert desc.joint_positions.max_len == 6
         assert desc.rgb_images.max_len == 2
         assert desc.point_clouds.max_len == 1
@@ -190,8 +188,8 @@ class TestPytorchDummyDataset:
     def test_image_data_generation(self):
         """Test RGB and depth image generation."""
         dataset = PytorchDummyDataset(
-            input_data_types=[DataType.RGB_IMAGE, DataType.DEPTH_IMAGE],
-            output_data_types=[DataType.RGB_IMAGE],
+            input_data_types=[DataType.RGB_IMAGES, DataType.DEPTH_IMAGES],
+            output_data_types=[DataType.RGB_IMAGES],
             num_samples=3,
         )
 
@@ -215,7 +213,7 @@ class TestPytorchDummyDataset:
     def test_point_cloud_generation(self):
         """Test point cloud data generation."""
         dataset = PytorchDummyDataset(
-            input_data_types=[DataType.POINT_CLOUD],
+            input_data_types=[DataType.POINT_CLOUDS],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             num_samples=3,
         )
@@ -229,25 +227,6 @@ class TestPytorchDummyDataset:
         assert pc_data.shape == (1, 1024, 3)  # 1 cloud, 1024 points, xyz
         assert pc_mask.shape == (1,)
         assert torch.all(pc_mask == 1.0)
-
-    def test_end_effector_data_generation(self):
-        """Test end-effector data generation."""
-        dataset = PytorchDummyDataset(
-            input_data_types=[DataType.END_EFFECTORS],
-            output_data_types=[DataType.END_EFFECTORS],
-            num_samples=3,
-        )
-
-        sample = dataset[0]
-
-        # Test input end-effectors
-        assert sample.inputs.end_effectors is not None
-        ee_data = sample.inputs.end_effectors.data
-        ee_mask = sample.inputs.end_effectors.mask
-
-        assert ee_data.shape == (2,)  # 2 end-effectors
-        assert ee_mask.shape == (2,)
-        assert torch.all(ee_mask == 1.0)
 
     def test_end_effector_pose_data_generation(self):
         """Test end-effector pose data generation."""
@@ -412,8 +391,8 @@ class TestPytorchDummyDataset:
     def test_collate_fn_images(self):
         """Test collation with image data."""
         dataset = PytorchDummyDataset(
-            input_data_types=[DataType.RGB_IMAGE],
-            output_data_types=[DataType.RGB_IMAGE],
+            input_data_types=[DataType.RGB_IMAGES],
+            output_data_types=[DataType.RGB_IMAGES],
             num_samples=5,
         )
 
@@ -437,8 +416,8 @@ class TestPytorchDummyDataset:
     def test_collate_fn_point_clouds(self):
         """Test collation with point cloud data."""
         dataset = PytorchDummyDataset(
-            input_data_types=[DataType.POINT_CLOUD],
-            output_data_types=[DataType.POINT_CLOUD],
+            input_data_types=[DataType.POINT_CLOUDS],
+            output_data_types=[DataType.POINT_CLOUDS],
             num_samples=5,
         )
 
@@ -541,8 +520,8 @@ class TestPytorchDummyDataset:
         # This test ensures that creating a large dataset doesn't immediately
         # allocate memory for all samples (lazy loading)
         dataset = PytorchDummyDataset(
-            input_data_types=[DataType.RGB_IMAGE],
-            output_data_types=[DataType.RGB_IMAGE],
+            input_data_types=[DataType.RGB_IMAGES],
+            output_data_types=[DataType.RGB_IMAGES],
             num_samples=1000,  # Large number
         )
 
@@ -571,9 +550,8 @@ class TestPytorchDummyDataset:
         "data_type",
         [
             DataType.JOINT_POSITIONS,
-            DataType.RGB_IMAGE,
-            DataType.POINT_CLOUD,
-            DataType.END_EFFECTORS,
+            DataType.RGB_IMAGES,
+            DataType.POINT_CLOUDS,
             DataType.POSES,
         ],
     )
@@ -595,28 +573,26 @@ class TestPytorchDummyDataset:
         # Check that the specified data type is present
         if data_type == DataType.JOINT_POSITIONS:
             assert sample.inputs.joint_positions is not None
-        elif data_type == DataType.RGB_IMAGE:
+        elif data_type == DataType.RGB_IMAGES:
             assert sample.inputs.rgb_images is not None
-        elif data_type == DataType.POINT_CLOUD:
+        elif data_type == DataType.POINT_CLOUDS:
             assert sample.inputs.point_clouds is not None
-        elif data_type == DataType.END_EFFECTORS:
-            assert sample.inputs.end_effectors is not None
         elif data_type == DataType.POSES:
             assert sample.inputs.poses is not None
 
 
-class TestDatasetDescription:
+class TestDatasetStatistics:
     """Test the dataset description generation in PytorchDummyDataset."""
 
-    def test_dataset_description_initialization(self):
+    def test_dataset_statistics_initialization(self):
         """Test that dataset description is properly initialized."""
         dataset = PytorchDummyDataset(
-            input_data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE],
+            input_data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGES],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             num_samples=5,
         )
 
-        desc = dataset.dataset_description
+        desc = dataset.dataset_statistics
 
         # Check joint positions
         assert desc.joint_positions.max_len == 6
@@ -631,16 +607,15 @@ class TestDatasetDescription:
         # Check joint target positions
         assert desc.joint_target_positions.max_len == 7
 
-    def test_dataset_description_all_modalities(self, mock_tokenizer):
+    def test_dataset_statistics_all_modalities(self, mock_tokenizer):
         """Test dataset description with all modalities."""
         all_input_types = [
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
-            DataType.RGB_IMAGE,
-            DataType.DEPTH_IMAGE,
-            DataType.POINT_CLOUD,
-            DataType.END_EFFECTORS,
+            DataType.RGB_IMAGES,
+            DataType.DEPTH_IMAGES,
+            DataType.POINT_CLOUDS,
             DataType.END_EFFECTOR_POSES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.POSES,
@@ -654,7 +629,7 @@ class TestDatasetDescription:
             tokenize_text=mock_tokenizer,
         )
 
-        desc = dataset.dataset_description
+        desc = dataset.dataset_statistics
 
         # Check all components are properly initialized
         assert desc.joint_positions.max_len > 0

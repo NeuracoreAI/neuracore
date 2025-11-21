@@ -17,15 +17,15 @@ import tempfile
 import time
 from pathlib import Path
 from subprocess import Popen
-from typing import Optional
+from typing import Optional, cast
 
 import numpy as np
 import requests
-from neuracore_types import DataType, SyncPoint
+from neuracore_types import CameraData, DataType, PredictRequest, SynchronizedPoint
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.exceptions import InsufficientSyncPointError
+from neuracore.core.exceptions import InsufficientSynchronizedPointError
 from neuracore.core.get_latest_sync_point import get_latest_sync_point
 from neuracore.core.utils.download import download_with_progress
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
@@ -63,8 +63,11 @@ class Policy:
             raise ValueError("Must specify either epoch or checkpoint_file.")
 
     def predict(
-        self, sync_point: Optional[SyncPoint] = None, timeout: float = 5
-    ) -> list[SyncPoint]:
+        self,
+        sync_point: Optional[SynchronizedPoint] = None,
+        robot_name: Optional[str] = None,
+        timeout: float = 5,
+    ) -> list[SynchronizedPoint]:
         """Get action predictions from the model.
 
         Sends robot sensor data to the model and receives action predictions.
@@ -74,14 +77,16 @@ class Policy:
         Args:
             sync_point: Synchronized sensor data to send to the model. If None,
                 creates a new sync point from the robot's current sensor data.
+            robot_name: Name of the robot to predict on. If None, uses the active robot.
             timeout: Maximum time to wait (in seconds) to accumulate asynchronous
                 sensor data. Raises error if timeout is reached without sufficient data.
 
         Returns:
-            Model predictions as a list of SyncPoint objects.
+            Model predictions as a list of SynchronizedPoint objects.
 
         Raises:
-            InsufficientSyncPointError: If the sync point doesn't contain required data.
+            InsufficientSynchronizedPointError:
+                If the sync point doesn't contain required data.
             EndpointError: If prediction request fails or response is invalid.
         """
         if timeout <= 0:
@@ -90,8 +95,8 @@ class Policy:
         sync_points = None
         while sync_points is None:
             try:
-                sync_points = self._predict(sync_point)
-            except InsufficientSyncPointError as e:
+                sync_points = self._predict(sync_point, robot_name)
+            except InsufficientSynchronizedPointError as e:
                 if time.time() - t > timeout:
                     raise e
                 time.sleep(PREDICTION_WAIT_TIME)
@@ -101,7 +106,11 @@ class Policy:
         """Disconnect from the policy and clean up resources."""
         pass
 
-    def _predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
+    def _predict(
+        self,
+        sync_point: Optional[SynchronizedPoint] = None,
+        robot_name: Optional[str] = None,
+    ) -> list[SynchronizedPoint]:
         """Internal get action predictions from the model.
 
         Sends robot sensor data to the model and receives action predictions.
@@ -111,9 +120,10 @@ class Policy:
         Args:
             sync_point: Synchronized sensor data to send to the model. If None,
                 creates a new sync point from the robot's current sensor data.
+            robot_name: Name of the robot to predict on. If None, uses the active robot.
 
         Returns:
-            Model predictions as a list of SyncPoint objects.
+            Model predictions as a list of SynchronizedPoint objects.
         """
         raise NotImplementedError(
             "Subclasses must implement the _predict method to run model inference."
@@ -132,7 +142,7 @@ class DirectPolicy(Policy):
         model_path: Path,
         org_id: str,
         job_id: Optional[str] = None,
-        output_mapping: Optional[dict[DataType, list[str]]] = None,
+        robot_to_output_mapping: Optional[dict[str, dict[DataType, list[str]]]] = None,
         device: Optional[str] = None,
     ):
         """Initialize the direct policy with a robot instance."""
@@ -144,7 +154,7 @@ class DirectPolicy(Policy):
             org_id=org_id,
             job_id=job_id,
             model_file=model_path,
-            output_mapping=output_mapping,
+            robot_to_output_mapping=robot_to_output_mapping,
             device=device,
         )
 
@@ -161,21 +171,26 @@ class DirectPolicy(Policy):
         super().set_checkpoint(epoch, checkpoint_file)
         self._policy.set_checkpoint(epoch, checkpoint_file)
 
-    def _predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
+    def _predict(
+        self,
+        sync_point: Optional[SynchronizedPoint] = None,
+        robot_name: Optional[str] = None,
+    ) -> list[SynchronizedPoint]:
         """Run direct model inference.
 
         Args:
             sync_point: Optional sync point. If None, creates from robot sensors.
 
         Returns:
-            Model predictions as a list of SyncPoint objects.
+            Model predictions as a list of SynchronizedPoint objects.
 
         Raises:
-            InsufficientSyncPointError: If the sync point doesn't contain required data.
+            InsufficientSynchronizedPointError:
+                If the sync point doesn't contain required data.
         """
         if sync_point is None:
             sync_point = get_latest_sync_point()
-        return self._policy(sync_point)
+        return self._policy(sync_point, robot_name)
 
 
 class ServerPolicy(Policy):
@@ -241,7 +256,11 @@ class ServerPolicy(Policy):
         except requests.exceptions.RequestException as e:
             raise EndpointError(f"Failed to set checkpoint: {str(e)}")
 
-    def _predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
+    def _predict(
+        self,
+        sync_point: Optional[SynchronizedPoint] = None,
+        robot_name: Optional[str] = None,
+    ) -> list[SynchronizedPoint]:
         """Get action predictions from the model endpoint.
 
         Sends robot sensor data to the model and receives action predictions.
@@ -256,62 +275,66 @@ class ServerPolicy(Policy):
             Model predictions including actions and any generated outputs.
 
         Raises:
-            InsufficientSyncPointError: If the sync point doesn't contain required data.
+            InsufficientSynchronizedPointError:
+                If the sync point doesn't contain required data.
             ValueError: If payload size exceeds limits for remote endpoints.
         """
         if sync_point is None:
             sync_point = get_latest_sync_point()
 
-        if sync_point.robot_id is None:
+        if robot_name is None:
             robot = GlobalSingleton()._active_robot
             if robot is None:
                 raise ValueError(
-                    "No active robot found. Please connect a robot before predicting."
+                    "Robot name must be provided if no active robot is set."
                 )
+            robot_name = robot.name
             sync_point.robot_id = robot.id
 
         # Encode images if they are numpy arrays
-        if sync_point.rgb_images:
-            for key in sync_point.rgb_images:
-                if isinstance(sync_point.rgb_images[key].frame, np.ndarray):
-                    sync_point.rgb_images[key].frame = ImageStringEncoder.encode_image(
-                        sync_point.rgb_images[key].frame
-                    )
-        if sync_point.depth_images:
-            for key in sync_point.depth_images:
-                if isinstance(sync_point.depth_images[key].frame, np.ndarray):
-                    sync_point.depth_images[key].frame = (
-                        ImageStringEncoder.encode_image(
-                            sync_point.depth_images[key].frame
-                        )
-                    )
+        # TODO: [Refactor] Make better use of the new structure
+        if DataType.RGB_IMAGES in sync_point.data:
+            for cam_name, cam_data in sync_point.data[DataType.RGB_IMAGES].items():
+                cam_data = cast(CameraData, cam_data)
+                if isinstance(cam_data.frame, np.ndarray):
+                    cam_data.frame = ImageStringEncoder.encode_image(cam_data.frame)
+        if DataType.DEPTH_IMAGES in sync_point.data:
+            for cam_name, cam_data in sync_point.data[DataType.DEPTH_IMAGES].items():
+                cam_data = cast(CameraData, cam_data)
+                if isinstance(cam_data.frame, np.ndarray):
+                    cam_data.frame = ImageStringEncoder.encode_image(cam_data.frame)
         response = None
         try:
             # Make prediction request
+            predict_request = PredictRequest(
+                sync_point=sync_point,
+                robot_name=robot_name,
+            )
             response = requests.post(
                 f"{self._base_url}{PREDICT_ENDPOINT}",
                 headers=self._headers,
-                json=sync_point.model_dump(mode="json"),
+                json=predict_request.model_dump(mode="json"),
                 timeout=int(os.getenv("NEURACORE_ENDPOINT_TIMEOUT", 10)),
             )
             response.raise_for_status()
 
             # Parse response
             result = response.json()
-            sync_point_preds = [SyncPoint.model_validate(res) for res in result]
+            # TODO: [Refactor] Make better use of the new structure
+            sync_point_preds = [SynchronizedPoint.model_validate(res) for res in result]
             for sync_point_pred in sync_point_preds:
-                if sync_point_pred.rgb_images:
-                    # Decode images back to numpy arrays
-                    rgb = sync_point_pred.rgb_images
+                if DataType.RGB_IMAGES in sync_point_pred.data:
+                    rgb = sync_point_pred.data[DataType.RGB_IMAGES]
                     for cam_name, cam_data in rgb.items():
+                        cam_data = cast(CameraData, cam_data)
                         if isinstance(cam_data.frame, str):
                             cam_data.frame = ImageStringEncoder.decode_image(
                                 cam_data.frame
                             )
-                if sync_point_pred.depth_images:
-                    # Decode depth images back to numpy arrays
-                    depth = sync_point_pred.depth_images
+                if DataType.DEPTH_IMAGES in sync_point_pred.data:
+                    depth = sync_point_pred.data[DataType.DEPTH_IMAGES]
                     for cam_name, cam_data in depth.items():
+                        cam_data = cast(CameraData, cam_data)
                         if isinstance(cam_data.frame, str):
                             cam_data.frame = ImageStringEncoder.decode_image(
                                 cam_data.frame
@@ -325,7 +348,7 @@ class ServerPolicy(Policy):
         except requests.exceptions.RequestException as e:
             if response is not None:
                 if response.status_code == 422:
-                    raise InsufficientSyncPointError(
+                    raise InsufficientSynchronizedPointError(
                         "Insufficient sync point data for inference."
                     )
                 raise EndpointError(
@@ -504,7 +527,7 @@ class RemoteServerPolicy(ServerPolicy):
 def policy(
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
-    output_mapping: Optional[dict[DataType, list[str]]] = None,
+    robot_to_output_mapping: Optional[dict[str, dict[DataType, list[str]]]] = None,
     device: Optional[str] = None,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process.
@@ -513,7 +536,7 @@ def policy(
         train_run_name: Name of the training run to load the model from.
         robot_name: Robot identifier.
         instance: Instance number of the robot.
-        output_mapping: Optional mapping of data types to output keys.
+        robot_to_output_mapping: Output mapping per robot.
         device: Torch device to run the model on (CPU or GPU, or MPS).
 
     Returns:
@@ -533,7 +556,7 @@ def policy(
         org_id=org_id,
         job_id=job_id,
         model_path=model_path,
-        output_mapping=output_mapping,
+        robot_to_output_mapping=robot_to_output_mapping,
         device=device,
     )
 

@@ -8,20 +8,19 @@ import torch
 import torch.nn as nn
 from neuracore_types import (
     DataItemStats,
-    DatasetDescription,
+    DatasetStatistics,
     DataType,
     ModelInitDescription,
     ModelPrediction,
 )
 
 from neuracore.ml import (
-    BatchedInferenceSamples,
+    BatchedInferenceInputs,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     MaskableData,
 )
 from neuracore.ml.algorithms.cnnmlp.cnnmlp import CNNMLP
-from neuracore.ml.core.ml_types import BatchedData
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.validate import run_validation
 
@@ -35,34 +34,46 @@ DEVICE = get_default_device()
 
 @pytest.fixture
 def model_init_description_partial() -> ModelInitDescription:
-    dataset_description = DatasetDescription(
-        joint_positions=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
-        ),
-        joint_target_positions=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
-        ),
-        joint_velocities=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
-        ),
-        joint_torques=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
-        ),
-        rgb_images=DataItemStats(
-            max_len=CAMS,
-        ),
+    dataset_statistics = DatasetStatistics(
+        data={
+            DataType.JOINT_POSITIONS: {
+                "default": DataItemStats(
+                    mean=np.zeros(JOINT_POSITION_DIM, dtype=float).tolist(),
+                    std=np.ones(JOINT_POSITION_DIM, dtype=float).tolist(),
+                )
+            },
+            DataType.JOINT_TARGET_POSITIONS: {
+                "default": DataItemStats(
+                    mean=np.zeros(JOINT_POSITION_DIM, dtype=float).tolist(),
+                    std=np.ones(JOINT_POSITION_DIM, dtype=float).tolist(),
+                )
+            },
+            DataType.JOINT_VELOCITIES: {
+                "default": DataItemStats(
+                    mean=np.zeros(JOINT_POSITION_DIM, dtype=float).tolist(),
+                    std=np.ones(JOINT_POSITION_DIM, dtype=float).tolist(),
+                )
+            },
+            DataType.JOINT_TORQUES: {
+                "default": DataItemStats(
+                    mean=np.zeros(JOINT_POSITION_DIM, dtype=float).tolist(),
+                    std=np.ones(JOINT_POSITION_DIM, dtype=float).tolist(),
+                )
+            },
+            DataType.RGB_IMAGES: {
+                "camera_0": DataItemStats(
+                    max_len=CAMS,
+                )
+            },
+        }
     )
     return ModelInitDescription(
-        dataset_description=dataset_description,
+        dataset_statistics=dataset_statistics,
         input_data_types=[
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
-            DataType.RGB_IMAGE,
+            DataType.RGB_IMAGES,
         ],
         output_data_types=[DataType.JOINT_TARGET_POSITIONS],
         output_prediction_horizon=PRED_HORIZON,
@@ -71,52 +82,74 @@ def model_init_description_partial() -> ModelInitDescription:
 
 @pytest.fixture
 def model_init_description_full() -> ModelInitDescription:
-    dataset_description = DatasetDescription(
-        joint_positions=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
-        ),
-        joint_target_positions=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
-        ),
-        joint_velocities=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
-        ),
-        joint_torques=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
-        ),
-        end_effector_states=DataItemStats(
-            mean=np.zeros(1, dtype=float),
-            std=np.ones(1, dtype=float),
-        ),
-        poses=DataItemStats(
-            mean=np.zeros(7, dtype=float),
-            std=np.ones(7, dtype=float),
-        ),
-        custom_data={
-            "sensor_data": DataItemStats(
-                mean=np.zeros(1, dtype=float),
-                std=np.ones(1, dtype=float),
-            )
-        },
-        rgb_images=DataItemStats(
-            max_len=CAMS,
-        ),
-        depth_images=DataItemStats(
-            max_len=CAMS,
-        ),
-        point_clouds=DataItemStats(
-            max_len=1,
-        ),
-        language=DataItemStats(
-            max_len=512,
-        ),
+    dataset_statistics = DatasetStatistics(
+        data={
+            DataType.JOINT_POSITIONS: {
+                "default": DataItemStats(
+                    mean=np.zeros(JOINT_POSITION_DIM, dtype=float).tolist(),
+                    std=np.ones(JOINT_POSITION_DIM, dtype=float).tolist(),
+                )
+            },
+            DataType.JOINT_TARGET_POSITIONS: {
+                "default": DataItemStats(
+                    mean=np.zeros(JOINT_POSITION_DIM, dtype=float).tolist(),
+                    std=np.ones(JOINT_POSITION_DIM, dtype=float).tolist(),
+                )
+            },
+            DataType.JOINT_VELOCITIES: {
+                "default": DataItemStats(
+                    mean=np.zeros(JOINT_POSITION_DIM, dtype=float).tolist(),
+                    std=np.ones(JOINT_POSITION_DIM, dtype=float).tolist(),
+                )
+            },
+            DataType.JOINT_TORQUES: {
+                "default": DataItemStats(
+                    mean=np.zeros(JOINT_POSITION_DIM, dtype=float).tolist(),
+                    std=np.ones(JOINT_POSITION_DIM, dtype=float).tolist(),
+                )
+            },
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: {
+                "default": DataItemStats(
+                    mean=np.zeros(1, dtype=float).tolist(),
+                    std=np.ones(1, dtype=float).tolist(),
+                )
+            },
+            DataType.POSES: {
+                "default": DataItemStats(
+                    mean=np.zeros(7, dtype=float).tolist(),
+                    std=np.ones(7, dtype=float).tolist(),
+                )
+            },
+            DataType.CUSTOM: {
+                "sensor_data": DataItemStats(
+                    mean=np.zeros(1, dtype=float).tolist(),
+                    std=np.ones(1, dtype=float).tolist(),
+                )
+            },
+            DataType.RGB_IMAGES: {
+                "camera_0": DataItemStats(
+                    max_len=CAMS,
+                )
+            },
+            DataType.DEPTH_IMAGES: {
+                "camera_0": DataItemStats(
+                    max_len=CAMS,
+                )
+            },
+            DataType.POINT_CLOUDS: {
+                "lidar_0": DataItemStats(
+                    max_len=1,
+                )
+            },
+            DataType.LANGUAGE: {
+                "default": DataItemStats(
+                    max_len=512,
+                )
+            },
+        }
     )
     return ModelInitDescription(
-        dataset_description=dataset_description,
+        dataset_statistics=dataset_statistics,
         input_data_types=CNNMLP.get_supported_input_data_types(),
         output_data_types=[DataType.JOINT_TARGET_POSITIONS],
         output_prediction_horizon=PRED_HORIZON,
@@ -131,30 +164,44 @@ def model_config() -> dict:
 @pytest.fixture
 def sample_batch() -> BatchedTrainingSamples:
     return BatchedTrainingSamples(
-        inputs=BatchedData(
-            joint_positions=MaskableData(
-                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            ),
-            joint_velocities=MaskableData(
-                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            ),
-            joint_torques=MaskableData(
-                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            ),
-            rgb_images=MaskableData(
-                torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
-                torch.ones(BS, CAMS, dtype=torch.float32),
-            ),
-        ),
-        outputs=BatchedData(
-            joint_target_positions=MaskableData(
-                torch.randn(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
-            )
-        ),
+        inputs={
+            DataType.JOINT_POSITIONS: {
+                "default": MaskableData(
+                    torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                    torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                )
+            },
+            DataType.JOINT_VELOCITIES: {
+                "default": MaskableData(
+                    torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                    torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                )
+            },
+            DataType.JOINT_TORQUES: {
+                "default": MaskableData(
+                    torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                    torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                )
+            },
+            DataType.RGB_IMAGES: {
+                "camera_0": MaskableData(
+                    torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
+                    torch.ones(BS, CAMS, dtype=torch.float32),
+                )
+            },
+        },
+        outputs={
+            DataType.JOINT_TARGET_POSITIONS: {
+                "default": MaskableData(
+                    torch.randn(
+                        BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32
+                    ),
+                    torch.ones(
+                        BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32
+                    ),
+                )
+            }
+        },
         output_prediction_mask=torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
     )
 
@@ -162,79 +209,107 @@ def sample_batch() -> BatchedTrainingSamples:
 @pytest.fixture
 def sample_batch_full() -> BatchedTrainingSamples:
     return BatchedTrainingSamples(
-        inputs=BatchedData(
-            joint_positions=MaskableData(
-                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            ),
-            joint_velocities=MaskableData(
-                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            ),
-            joint_torques=MaskableData(
-                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            ),
-            rgb_images=MaskableData(
-                torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
-                torch.ones(BS, CAMS, dtype=torch.float32),
-            ),
-            depth_images=MaskableData(
-                torch.randn(BS, CAMS, 1, 224, 224, dtype=torch.float32),
-                torch.ones(BS, CAMS, dtype=torch.float32),
-            ),
-            language_tokens=MaskableData(
-                torch.randint(0, 1000, (BS, 512), dtype=torch.int64),
-                torch.ones(BS, 512, dtype=torch.float32),
-            ),
-            end_effectors=MaskableData(
-                torch.randn(BS, 1, dtype=torch.float32),
-                torch.ones(BS, 1, dtype=torch.float32),
-            ),
-            point_clouds=MaskableData(
-                torch.randn(BS, 1, 100, 3, dtype=torch.float32),
-                torch.ones(BS, 1, dtype=torch.float32),
-            ),
-            poses=MaskableData(
-                torch.randn(BS, 6, dtype=torch.float32),
-                torch.ones(BS, 1, dtype=torch.float32),
-            ),
-            custom_data={
+        inputs={
+            DataType.JOINT_POSITIONS: {
+                "default": MaskableData(
+                    torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                    torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                )
+            },
+            DataType.JOINT_VELOCITIES: {
+                "default": MaskableData(
+                    torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                    torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                )
+            },
+            DataType.JOINT_TORQUES: {
+                "default": MaskableData(
+                    torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                    torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                )
+            },
+            DataType.RGB_IMAGES: {
+                "camera_0": MaskableData(
+                    torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
+                    torch.ones(BS, CAMS, dtype=torch.float32),
+                )
+            },
+            DataType.DEPTH_IMAGES: {
+                "camera_0": MaskableData(
+                    torch.randn(BS, CAMS, 1, 224, 224, dtype=torch.float32),
+                    torch.ones(BS, CAMS, dtype=torch.float32),
+                )
+            },
+            DataType.LANGUAGE: {
+                "default": MaskableData(
+                    torch.randint(0, 1000, (BS, 512), dtype=torch.int64),
+                    torch.ones(BS, 512, dtype=torch.float32),
+                )
+            },
+            DataType.POINT_CLOUDS: {
+                "lidar_0": MaskableData(
+                    torch.randn(BS, 1, 100, 3, dtype=torch.float32),
+                    torch.ones(BS, 1, dtype=torch.float32),
+                )
+            },
+            DataType.POSES: {
+                "default": MaskableData(
+                    torch.randn(BS, 6, dtype=torch.float32),
+                    torch.ones(BS, 1, dtype=torch.float32),
+                )
+            },
+            DataType.CUSTOM: {
                 "sensor_data": MaskableData(
                     torch.randn(BS, 1, dtype=torch.float32),
                     torch.ones(BS, 1, dtype=torch.float32),
                 )
             },
-        ),
-        outputs=BatchedData(
-            joint_target_positions=MaskableData(
-                torch.randn(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
-            )
-        ),
+        },
+        outputs={
+            DataType.JOINT_TARGET_POSITIONS: {
+                "default": MaskableData(
+                    torch.randn(
+                        BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32
+                    ),
+                    torch.ones(
+                        BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32
+                    ),
+                )
+            }
+        },
         output_prediction_mask=torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
     )
 
 
 @pytest.fixture
-def sample_inference_batch() -> BatchedInferenceSamples:
-    return BatchedInferenceSamples(
-        joint_positions=MaskableData(
-            torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-        ),
-        joint_velocities=MaskableData(
-            torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-        ),
-        joint_torques=MaskableData(
-            torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-        ),
-        rgb_images=MaskableData(
-            torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
-            torch.ones(BS, CAMS, dtype=torch.float32),
-        ),
+def sample_inference_batch() -> BatchedInferenceInputs:
+    return BatchedInferenceInputs(
+        inputs={
+            DataType.JOINT_POSITIONS: {
+                "default": MaskableData(
+                    torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                    torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                )
+            },
+            DataType.JOINT_VELOCITIES: {
+                "default": MaskableData(
+                    torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                    torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                )
+            },
+            DataType.JOINT_TORQUES: {
+                "default": MaskableData(
+                    torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                    torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
+                )
+            },
+            DataType.RGB_IMAGES: {
+                "camera_0": MaskableData(
+                    torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
+                    torch.ones(BS, CAMS, dtype=torch.float32),
+                )
+            },
+        }
     )
 
 
@@ -267,7 +342,7 @@ def test_model_construction(
 def test_model_forward(
     model_init_description_partial: ModelInitDescription,
     model_config: dict,
-    sample_inference_batch: BatchedInferenceSamples,
+    sample_inference_batch: BatchedInferenceInputs,
 ):
     model = CNNMLP(model_init_description_partial, **model_config)
     model = model.to(DEVICE)

@@ -13,10 +13,10 @@ import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from neuracore_types import SyncPoint
+from neuracore_types import PredictRequest, SynchronizedPoint
 from pydantic import BaseModel
 
-from neuracore.core.exceptions import InsufficientSyncPointError
+from neuracore.core.exceptions import InsufficientSynchronizedPointError
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 
 logger = logging.getLogger(__name__)
@@ -87,16 +87,17 @@ class ModelServer:
             return {"status": "healthy", "timestamp": time.time()}
 
         # Main prediction endpoint
-        @app.post(PREDICT_ENDPOINT, response_model=list[SyncPoint])
-        async def predict(sync_point: SyncPoint) -> list[SyncPoint]:
+        @app.post(PREDICT_ENDPOINT, response_model=list[SynchronizedPoint])
+        async def predict(request: PredictRequest) -> list[SynchronizedPoint]:
             try:
                 # Decode base64 images before inference
-                sync_point = self._decode_images(sync_point)
+                sync_point = self._decode_images(request.sync_point)
+                robot_name = request.robot_name
 
                 # Run inference
                 try:
-                    prediction = self.policy_inference(sync_point)
-                except InsufficientSyncPointError:
+                    prediction = self.policy_inference(sync_point, robot_name)
+                except InsufficientSynchronizedPointError:
                     logger.error("Insufficient sync point data.")
                     raise HTTPException(
                         status_code=422,
@@ -127,14 +128,14 @@ class ModelServer:
 
         return app
 
-    def _decode_images(self, sync_point: SyncPoint) -> SyncPoint:
+    def _decode_images(self, sync_point: SynchronizedPoint) -> SynchronizedPoint:
         """Decode base64 images in sync point to numpy arrays.
 
         Args:
-            sync_point: SyncPoint with potentially base64-encoded images
+            sync_point: SynchronizedPoint with potentially base64-encoded images
 
         Returns:
-            SyncPoint with decoded numpy array images
+            SynchronizedPoint with decoded numpy array images
         """
         # Decode RGB images
         if sync_point.rgb_images:
@@ -156,14 +157,14 @@ class ModelServer:
 
         return sync_point
 
-    def _encode_outputs(self, prediction: SyncPoint) -> SyncPoint:
+    def _encode_outputs(self, prediction: SynchronizedPoint) -> SynchronizedPoint:
         """Encode output images to base64 for response.
 
         Args:
-            prediction: SyncPoint with potentially numpy array images
+            prediction: SynchronizedPoint with potentially numpy array images
 
         Returns:
-            SyncPoint with base64-encoded images
+            SynchronizedPoint with base64-encoded images
         """
         # Handle RGB image outputs
         if prediction.rgb_images:
@@ -193,7 +194,7 @@ class ModelServer:
                 depth_norm = depth_norm.astype(np.uint8)
                 camera_data.frame = ImageStringEncoder.encode_image(depth_norm)
 
-        # Convert all SyncPoint attributes to lists if they are numpy arrays
+        # Convert all SynchronizedPoint attributes to lists if they are numpy arrays
         for attr in prediction.__dict__:
             value = getattr(prediction, attr)
             if isinstance(value, np.ndarray):

@@ -1,6 +1,8 @@
+from typing import cast
+
 import numpy as np
 import pytest
-from neuracore_types import JointData, SyncPoint
+from neuracore_types import DataType, JointData, SynchronizedPoint
 
 import neuracore as nc
 from neuracore.core.const import API_URL
@@ -27,13 +29,16 @@ def test_connect_endpoint(
     )
 
     # Mock endpoint prediction
+    joint_groups = {
+        "joint_group_1": JointData(
+            values={"joint1": 0.1, "joint2": 0.2, "joint3": 0.3},
+        )
+    }
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/models/endpoints/test_endpoint_id/predict",
         json=[
-            SyncPoint(
-                joint_target_positions=JointData(
-                    values={"joint_1": 0.1, "joint_2": 0.2, "joint_3": 0.3},
-                )
+            SynchronizedPoint(
+                data={DataType.JOINT_POSITIONS: joint_groups}
             ).model_dump()
             for _ in range(3)
         ],
@@ -42,18 +47,25 @@ def test_connect_endpoint(
 
     endpoint = nc.policy_remote_server("test_endpoint")
 
-    nc.log_joint_positions({"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
+    nc.log_joint_positions(
+        name="joint_group_1", positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5}
+    )
     nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
 
     # Test prediction
     preds = endpoint.predict()
     assert isinstance(preds, list)
     pred = preds[0]
-    assert pred.joint_target_positions is not None
-    assert pred.joint_target_positions.values == {
-        "joint_1": 0.1,
-        "joint_2": 0.2,
-        "joint_3": 0.3,
+    assert (
+        DataType.JOINT_POSITIONS in pred.data
+        and pred.data[DataType.JOINT_POSITIONS] is not None
+    )
+    joint_group = cast(JointData, pred.data[DataType.JOINT_POSITIONS]["joint_group_1"])
+    assert isinstance(joint_group, JointData)
+    assert joint_group.values == {
+        "joint1": 0.1,
+        "joint2": 0.2,
+        "joint3": 0.3,
     }
 
 
@@ -133,13 +145,16 @@ def test_connect_local_endpoint(
         status_code=200,
     )
 
+    joint_groups = {
+        "joint_group_1": JointData(
+            values={"joint1": 0.1, "joint2": 0.2, "joint3": 0.3},
+        )
+    }
     mock_auth_requests.post(
         f"{localhost}/predict",
         json=[
-            SyncPoint(
-                joint_positions=JointData(
-                    values={"joint_1": 0.5, "joint_2": 0.6, "joint_3": 0.7},
-                ),
+            SynchronizedPoint(
+                data={DataType.JOINT_POSITIONS: joint_groups}
             ).model_dump()
             for _ in range(3)
         ],
@@ -159,21 +174,25 @@ def test_connect_local_endpoint(
 
     local_endpoint = nc.policy_local_server(model_file=mock_model_mar, port=port)
 
-    nc.log_joint_positions({"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
+    nc.log_joint_positions(
+        name="arm", positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5}
+    )
     nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
 
-    # Test prediction
-    pred = local_endpoint.predict()
-    assert isinstance(pred, list)
-    assert len(pred) == 3
-    for p in pred:
-        assert isinstance(p, SyncPoint)
-        assert p.joint_positions is not None
-        assert p.joint_positions.values == {
-            "joint_1": 0.5,
-            "joint_2": 0.6,
-            "joint_3": 0.7,
-        }
+    preds = local_endpoint.predict()
+    assert isinstance(preds, list)
+    pred = preds[0]
+    assert (
+        DataType.JOINT_POSITIONS in pred.data
+        and pred.data[DataType.JOINT_POSITIONS] is not None
+    )
+    joint_group = cast(JointData, pred.data[DataType.JOINT_POSITIONS]["joint_group_1"])
+    assert isinstance(joint_group, JointData)
+    assert joint_group.values == {
+        "joint1": 0.1,
+        "joint2": 0.2,
+        "joint3": 0.3,
+    }
     local_endpoint.disconnect()
 
 
@@ -312,13 +331,16 @@ def test_connect_local_endpoint_with_train_run(
         status_code=200,
     )
 
+    joint_groups = {
+        "joint_group_1": JointData(
+            values={"joint1": 0.1, "joint2": 0.2, "joint3": 0.3},
+        )
+    }
     mock_auth_requests.post(
         f"{localhost}/predict",
         json=[
-            SyncPoint(
-                joint_positions=JointData(
-                    values={"joint_1": 0.5, "joint_2": 0.6, "joint_3": 0.7},
-                )
+            SynchronizedPoint(
+                data={DataType.JOINT_POSITIONS: joint_groups}
             ).model_dump()
             for _ in range(3)
         ],
@@ -347,21 +369,29 @@ def test_connect_local_endpoint_with_train_run(
 
     # Connect using train run name
     local_endpoint = nc.policy_local_server(train_run_name="test_run", port=port)
-    nc.log_joint_positions({"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
+    nc.log_joint_positions(
+        name="arm", positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5}
+    )
     nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
 
-    # Test prediction
-    pred = local_endpoint.predict()
-    assert isinstance(pred, list)
-    assert len(pred) == 3
-    for p in pred:
-        assert isinstance(p, SyncPoint)
-        assert p.joint_positions is not None
-        assert p.joint_positions.values == {
-            "joint_1": 0.5,
-            "joint_2": 0.6,
-            "joint_3": 0.7,
+    preds = local_endpoint.predict()
+    assert isinstance(preds, list)
+    assert len(preds) == 3
+    for pred in preds:
+        assert (
+            DataType.JOINT_POSITIONS in pred.data
+            and pred.data[DataType.JOINT_POSITIONS] is not None
+        )
+        joint_group = cast(
+            JointData, pred.data[DataType.JOINT_POSITIONS]["joint_group_1"]
+        )
+        assert isinstance(joint_group, JointData)
+        assert joint_group.values == {
+            "joint1": 0.1,
+            "joint2": 0.2,
+            "joint3": 0.3,
         }
+
     local_endpoint.disconnect()
 
 

@@ -19,7 +19,7 @@ import torchvision.transforms as T
 from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 
 from neuracore.ml import (
-    BatchedInferenceSamples,
+    BatchedInferenceInputs,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     NeuracoreModel,
@@ -89,20 +89,20 @@ class ACT(NeuracoreModel):
         # Vision components
         self.image_encoders = nn.ModuleList([
             ACTImageEncoder(output_dim=hidden_dim)
-            for _ in range(self.dataset_description.rgb_images.max_len)
+            for _ in range(self.dataset_statistics.rgb_images.max_len)
         ])
 
         state_input_dim = (
-            self.dataset_description.joint_positions.max_len
-            + self.dataset_description.joint_velocities.max_len
-            + self.dataset_description.joint_torques.max_len
+            self.dataset_statistics.joint_positions.max_len
+            + self.dataset_statistics.joint_velocities.max_len
+            + self.dataset_statistics.joint_torques.max_len
         )
         self.state_embed = None
         if state_input_dim > 0:
             self.state_embed = nn.Linear(state_input_dim, hidden_dim)
 
         self.action_embed = nn.Linear(
-            self.dataset_description.joint_target_positions.max_len, hidden_dim
+            self.dataset_statistics.joint_target_positions.max_len, hidden_dim
         )
 
         # CLS token embedding for latent encoder
@@ -140,7 +140,7 @@ class ACT(NeuracoreModel):
 
         # Output heads
         self.action_head = nn.Linear(
-            hidden_dim, self.dataset_description.joint_target_positions.max_len
+            hidden_dim, self.dataset_statistics.joint_target_positions.max_len
         )
 
         # Latent projections
@@ -171,14 +171,14 @@ class ACT(NeuracoreModel):
         state_stds = []
 
         if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_positions.mean)
-            state_stds.extend(self.dataset_description.joint_positions.std)
+            state_means.extend(self.dataset_statistics.joint_positions.mean)
+            state_stds.extend(self.dataset_statistics.joint_positions.std)
         if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_velocities.mean)
-            state_stds.extend(self.dataset_description.joint_velocities.std)
+            state_means.extend(self.dataset_statistics.joint_velocities.mean)
+            state_stds.extend(self.dataset_statistics.joint_velocities.std)
         if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_torques.mean)
-            state_stds.extend(self.dataset_description.joint_torques.std)
+            state_means.extend(self.dataset_statistics.joint_torques.mean)
+            state_stds.extend(self.dataset_statistics.joint_torques.std)
 
         if state_means:
             self.register_buffer(
@@ -193,13 +193,13 @@ class ACT(NeuracoreModel):
         self.register_buffer(
             "joint_target_mean",
             self._to_torch_float_tensor(
-                self.dataset_description.joint_target_positions.mean
+                self.dataset_statistics.joint_target_positions.mean
             ),
         )
         self.register_buffer(
             "joint_target_std",
             self._to_torch_float_tensor(
-                self.dataset_description.joint_target_positions.std
+                self.dataset_statistics.joint_target_positions.std
             ),
         )
 
@@ -433,7 +433,7 @@ class ACT(NeuracoreModel):
         self,
         mu: torch.FloatTensor,
         logvar: torch.FloatTensor,
-        batch: BatchedInferenceSamples,
+        batch: BatchedInferenceInputs,
     ) -> torch.FloatTensor:
         """Predict action sequence from latent distribution and observations.
 
@@ -465,9 +465,7 @@ class ACT(NeuracoreModel):
             return action_preds
         raise ValueError("No batch rbg_images")
 
-    def _combine_joint_states(
-        self, batch: BatchedInferenceSamples
-    ) -> torch.FloatTensor:
+    def _combine_joint_states(self, batch: BatchedInferenceInputs) -> torch.FloatTensor:
         """Combine different types of joint state data.
 
         Concatenates joint positions, velocities, and torques into a single
@@ -496,7 +494,7 @@ class ACT(NeuracoreModel):
             joint_states = self._preprocess_joint_state(joint_states)
         return joint_states
 
-    def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
+    def forward(self, batch: BatchedInferenceInputs) -> ModelPrediction:
         """Perform inference to predict action sequence.
 
         Args:
@@ -539,7 +537,7 @@ class ACT(NeuracoreModel):
         max_action_mask = batch.outputs.joint_target_positions.mask[
             :, 0, :
         ]  # [batch_size, MaxActionSize]
-        inference_sample = BatchedInferenceSamples(
+        inference_sample = BatchedInferenceInputs(
             joint_positions=batch.inputs.joint_positions,
             joint_velocities=batch.inputs.joint_velocities,
             joint_torques=batch.inputs.joint_torques,
@@ -569,7 +567,6 @@ class ACT(NeuracoreModel):
             "kl_loss": kl_loss,
         }
         return BatchedTrainingOutputs(
-            output_predictions=action_preds,
             losses=losses,
             metrics=metrics,
         )
@@ -610,7 +607,7 @@ class ACT(NeuracoreModel):
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
-            DataType.RGB_IMAGE,
+            DataType.RGB_IMAGES,
         ]
 
     @staticmethod

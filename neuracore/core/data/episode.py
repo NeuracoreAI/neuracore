@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Optional
 
 from neuracore_types import DataType
 
-from neuracore.core.data.synced_recording import SynchronizedRecording
+from neuracore.core.data.synchronized_episode import SynchronizedEpisode
 
 from ..exceptions import SynchronizationError
 
@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset
 
 
-class Recording:
+class Episode:
     """Class representing a recording episode in a dataset.
 
     This class provides methods to synchronize the recording with a specified
@@ -46,7 +46,7 @@ class Recording:
         self,
         frequency: int = 0,
         data_types: Optional[list[DataType]] = None,
-    ) -> SynchronizedRecording:
+    ) -> SynchronizedEpisode:
         """Synchronize the episode with specified frequency and data types.
 
         Args:
@@ -73,7 +73,7 @@ class Recording:
                     "Invalid data type requested for synchronization"
                 )
 
-        return SynchronizedRecording(
+        return SynchronizedEpisode(
             dataset=self.dataset,
             recording_id=self.id,
             robot_id=self.robot_id,

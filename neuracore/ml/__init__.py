@@ -1,8 +1,7 @@
 """Init."""
 
 from .core.ml_types import (
-    BatchedData,
-    BatchedInferenceSamples,
+    BatchedInferenceInputs,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     MaskableData,
@@ -11,9 +10,8 @@ from .core.neuracore_model import NeuracoreModel
 
 __all__ = [
     "NeuracoreModel",
-    "BatchedInferenceSamples",
+    "BatchedInferenceInputs",
     "BatchedTrainingSamples",
     "BatchedTrainingOutputs",
     "MaskableData",
-    "BatchedData",
 ]

@@ -1,12 +1,15 @@
 import sys
+from typing import cast
 
 import matplotlib.pyplot as plt
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
+from neuracore_types import DataType, JointData
 
 import neuracore as nc
 from neuracore import EndpointError
 
 ENDPOINT_NAME = "MyExampleEndpoint"
+JOINT_GROUP_NAME = "arm"
 
 
 def main():
@@ -48,21 +51,23 @@ def main():
 
         # Run episode
         for i in range(400):
-            nc.log_joint_positions(obs.qpos)
+            nc.log_joint_positions(name=JOINT_GROUP_NAME, positions=obs.qpos)
             for key, value in obs.cameras.items():
                 if key in obs_camera_names:
-                    nc.log_rgb(key, value.rgb)
+                    nc.log_rgb(name=key, rgb=value.rgb)
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
                 predicted_sync_points = policy.predict(timeout=5)
                 joint_target_positions = [
-                    sp.joint_target_positions for sp in predicted_sync_points
+                    sp.data[DataType.JOINT_TARGET_POSITIONS]
+                    for sp in predicted_sync_points
                 ]
-                actions = [
-                    jtp.numpy(order=env.ACTION_KEYS)
-                    for jtp in joint_target_positions
-                    if jtp is not None
-                ]
+                actions = []
+                for jtp in joint_target_positions:
+                    joint_data = cast(JointData, jtp[JOINT_GROUP_NAME])
+                    actions.append(
+                        [joint_data.values[jname] for jname in env.ACTION_KEYS]
+                    )
                 horizon = len(actions)
 
             a = actions[idx_in_horizon]

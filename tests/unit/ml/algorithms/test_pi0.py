@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from neuracore_types import (
     DataItemStats,
-    DatasetDescription,
+    DatasetStatistics,
     DataType,
     ModelInitDescription,
     ModelPrediction,
@@ -17,7 +17,7 @@ from neuracore_types import (
 
 from neuracore.ml import (
     BatchedData,
-    BatchedInferenceSamples,
+    BatchedInferenceInputs,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     MaskableData,
@@ -50,7 +50,7 @@ PI_TINY_ARGS = {
 
 @pytest.fixture
 def model_init_description() -> ModelInitDescription:
-    dataset_description = DatasetDescription(
+    dataset_statistics = DatasetStatistics(
         joint_positions=DataItemStats(
             mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
             std=np.ones(JOINT_POSITION_DIM, dtype=float),
@@ -73,12 +73,12 @@ def model_init_description() -> ModelInitDescription:
         language=DataItemStats(max_len=LANGUAGE_MAX_LEN),
     )
     return ModelInitDescription(
-        dataset_description=dataset_description,
+        dataset_statistics=dataset_statistics,
         input_data_types=[
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
-            DataType.RGB_IMAGE,
+            DataType.RGB_IMAGES,
             DataType.LANGUAGE,
         ],
         output_data_types=[DataType.JOINT_TARGET_POSITIONS],
@@ -128,8 +128,8 @@ def sample_batch() -> BatchedTrainingSamples:
 
 
 @pytest.fixture
-def sample_inference_batch() -> BatchedInferenceSamples:
-    return BatchedInferenceSamples(
+def sample_inference_batch() -> BatchedInferenceInputs:
+    return BatchedInferenceInputs(
         joint_positions=MaskableData(
             torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
             torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
@@ -184,7 +184,7 @@ def test_model_construction(
 def test_model_forward(
     model_init_description: ModelInitDescription,
     model_config: dict,
-    sample_inference_batch: BatchedInferenceSamples,
+    sample_inference_batch: BatchedInferenceInputs,
 ):
     model = Pi0(model_init_description, **PI_TINY_ARGS)
     model = model.to(DEVICE)

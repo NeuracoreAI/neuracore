@@ -43,7 +43,7 @@ class LeftArmLoggerNode(Node):
             joint_positions[name] = float(msg.position[i])
 
         # Log only left arm data
-        nc.log_joint_positions(joint_positions)
+        nc.log_joint_positions(name="left_arm", positions=joint_positions)
 
 
 class RightArmLoggerNode(Node):
@@ -72,7 +72,7 @@ class RightArmLoggerNode(Node):
             joint_positions[name] = float(msg.position[i])
 
         # Log only right arm data
-        nc.log_joint_positions(joint_positions)
+        nc.log_joint_positions(name="right_arm", positions=joint_positions)
 
 
 class CameraLoggerNode(Node):
@@ -104,7 +104,7 @@ class CameraLoggerNode(Node):
             # Convert ROS Image to OpenCV format
             cv_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
             # Log image to neuracore
-            nc.log_rgb(cam_name, cv_image)
+            nc.log_rgb(name=cam_name, rgb=cv_image)
         except Exception as e:
             self.get_logger().error(f"Error processing {cam_name} camera: {e}")
 

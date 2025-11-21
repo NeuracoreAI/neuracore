@@ -5,12 +5,56 @@ including depth images, point clouds, poses, end-effectors, and custom data type
 All encoders output features in a consistent format for multimodal fusion.
 """
 
+from enum import Enum
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
+from neuracore_types import DataType
+
+
+class EncoderType(str, Enum):
+    """Enumeration of different encoder types for robot sensor modalities."""
+
+    # Robot state
+    PROPRIOCEPTIVE = "PROPRIOCEPTIVE"
+
+    # Vision
+    RGB_IMAGES = "RGB_IMAGES"
+    DEPTH_IMAGES = "DEPTH_IMAGES"
+    POINT_CLOUDS = "POINT_CLOUDS"
+
+    # Other
+    POSES = "POSES"
+    LANGUAGE = "LANGUAGE"
+    CUSTOM = "CUSTOM"
+
+
+DATA_TYPE_TO_ENCODER_TYPE = {
+    DataType.JOINT_POSITIONS: EncoderType.PROPRIOCEPTIVE,
+    DataType.JOINT_VELOCITIES: EncoderType.PROPRIOCEPTIVE,
+    DataType.JOINT_TORQUES: EncoderType.PROPRIOCEPTIVE,
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: EncoderType.PROPRIOCEPTIVE,
+    DataType.END_EFFECTOR_POSES: EncoderType.POSES,
+    DataType.RGB_IMAGES: EncoderType.RGB_IMAGES,
+    DataType.DEPTH_IMAGES: EncoderType.DEPTH_IMAGES,
+    DataType.POINT_CLOUDS: EncoderType.POINT_CLOUDS,
+    DataType.LANGUAGE: EncoderType.LANGUAGE,
+    DataType.CUSTOM: EncoderType.CUSTOM,
+}
+ENCODER_TYPE_TO_DATA_TYPE = {
+    encoder_type: data_type
+    for data_type, encoder_type in DATA_TYPE_TO_ENCODER_TYPE.items()
+}
+
+PROPRIOCEPTIVE_DATA_TYPES = {
+    DataType.JOINT_POSITIONS,
+    DataType.JOINT_VELOCITIES,
+    DataType.JOINT_TORQUES,
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+}
 
 
 class DepthImageEncoder(nn.Module):
@@ -291,7 +335,7 @@ class MultimodalFusionEncoder(nn.Module):
     for downstream robot learning tasks with attention-based fusion.
     """
 
-    def __init__(self, feature_dims: dict[str, int], output_dim: int = 512):
+    def __init__(self, feature_dims: dict[EncoderType, int], output_dim: int = 512):
         """Initialize the multimodal fusion encoder.
 
         Args:

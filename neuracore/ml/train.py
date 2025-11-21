@@ -127,7 +127,7 @@ def determine_optimal_batch_size(
     output_data_types = convert_data_types(cfg.output_data_types)
 
     model_init_description = ModelInitDescription(
-        dataset_description=dataset.dataset_description,
+        dataset_statistics=dataset.dataset_statistics,
         input_data_types=input_data_types,
         output_data_types=output_data_types,
         output_prediction_horizon=cfg.output_prediction_horizon,
@@ -280,7 +280,7 @@ def run_training(
         )
 
         model_init_description = ModelInitDescription(
-            dataset_description=dataset.dataset_description,
+            dataset_statistics=dataset.dataset_statistics,
             input_data_types=input_data_types,
             output_data_types=output_data_types,
             output_prediction_horizon=cfg.output_prediction_horizon,
@@ -442,7 +442,7 @@ def main(cfg: DictConfig) -> None:
             input_data_types=input_data_types,
             output_data_types=output_data_types,
             output_prediction_horizon=cfg.output_prediction_horizon,
-            dataset_description=pytorch_dataset.dataset_description,
+            dataset_statistics=pytorch_dataset.dataset_statistics,
             num_recordings=len(pytorch_dataset),
         )
 

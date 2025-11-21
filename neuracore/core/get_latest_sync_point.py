@@ -7,10 +7,10 @@ sources via the Neuracore platform's live data streaming capabilities.
 """
 
 import time
-from typing import Optional
+from typing import Optional, cast
 
 import numpy as np
-from neuracore_types import CameraData, DataType, JointData, LanguageData, SyncPoint
+from neuracore_types import CameraData, DataType, JointData, SynchronizedPoint
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.exceptions import RobotError
@@ -86,7 +86,7 @@ def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
 
 def get_latest_sync_point(
     robot: Optional[Robot] = None, include_remote: bool = True
-) -> SyncPoint:
+) -> SynchronizedPoint:
     """Create a synchronized data point from current robot sensor streams.
 
     Collects the latest data from all active robot streams including
@@ -94,52 +94,61 @@ def get_latest_sync_point(
     into a synchronized structure with consistent timestamps.
 
     Returns:
-        SyncPoint containing all current sensor data.
+        SynchronizedPoint containing all current sensor data.
 
     Raises:
         NotImplementedError: If an unsupported stream type is encountered.
     """
+    # TODO: [Refactor] Move away from these if statements
     robot = GlobalSingleton()._active_robot
     if robot is None:
         raise ValueError("No active robot found. Please initialize a robot instance.")
-    sync_point = SyncPoint(timestamp=time.time())
+    sync_point = SynchronizedPoint(timestamp=time.time())
     for stream_name, stream in robot.list_all_streams().items():
-        # "rgb" is first 3 characters of the enum value for DataType.RGB_IMAGE
-        if DataType.RGB_IMAGE.value.lower()[:3] in stream_name.lower():
+        stream_data = stream.get_latest_data()
+        # "rgb" is first 3 characters of the enum value for DataType.RGB_IMAGES
+        if DataType.RGB_IMAGES.value.lower()[:3] in stream_name.lower():
             stream_data = stream.get_latest_data()
             assert isinstance(stream_data, np.ndarray)
-            if sync_point.rgb_images is None:
-                sync_point.rgb_images = {}
-            sync_point.rgb_images[stream_name] = CameraData(
+            if DataType.RGB_IMAGES not in sync_point.data:
+                sync_point[DataType.RGB_IMAGES] = {}
+            sync_point[DataType.RGB_IMAGES][stream_name] = CameraData(
                 timestamp=time.time(), frame=stream_data
             )
-        # "depth" is first 5 characters of the enum value for DataType.DEPTH_IMAGE
-        elif DataType.DEPTH_IMAGE.value.lower()[:5] in stream_name.lower():
+        # "depth" is first 5 characters of the enum value for DataType.DEPTH_IMAGES
+        elif DataType.DEPTH_IMAGES.value.lower()[:5] in stream_name.lower():
             stream_data = stream.get_latest_data()
             assert isinstance(stream_data, np.ndarray)
-            if sync_point.depth_images is None:
-                sync_point.depth_images = {}
-            sync_point.depth_images[stream_name] = CameraData(
+            if DataType.DEPTH_IMAGES not in sync_point.data:
+                sync_point[DataType.DEPTH_IMAGES] = {}
+            sync_point[DataType.DEPTH_IMAGES][stream_name] = CameraData(
                 timestamp=time.time(),
                 frame=depth_to_rgb(stream_data),
             )
         elif DataType.JOINT_POSITIONS.value.lower() in stream_name.lower():
             stream_data = stream.get_latest_data()
             assert isinstance(stream_data, JointData)
-            sync_point.joint_positions = _maybe_add_existing_data(
-                sync_point.joint_positions, stream_data
+            if DataType.JOINT_POSITIONS not in sync_point.data:
+                sync_point[DataType.JOINT_POSITIONS] = {}
+            existing = cast(
+                Optional[JointData],
+                sync_point[DataType.JOINT_POSITIONS].get(stream_name),
+            )
+            sync_point[DataType.JOINT_POSITIONS][stream_name] = (
+                _maybe_add_existing_data(existing, stream_data)
             )
         elif DataType.JOINT_VELOCITIES.value.lower() in stream_name.lower():
             stream_data = stream.get_latest_data()
             assert isinstance(stream_data, JointData)
-            sync_point.joint_velocities = _maybe_add_existing_data(
-                sync_point.joint_velocities, stream_data
+            if DataType.JOINT_VELOCITIES not in sync_point.data:
+                sync_point[DataType.JOINT_VELOCITIES] = {}
+            existing = cast(
+                Optional[JointData],
+                sync_point[DataType.JOINT_VELOCITIES].get(stream_name),
             )
-        elif DataType.LANGUAGE.value.lower() in stream_name.lower():
-            stream_data = stream.get_latest_data()
-            assert isinstance(stream_data, LanguageData)
-            sync_point.language_data = stream_data
-        # TODO: Add support for other data types
+            sync_point[DataType.JOINT_VELOCITIES][stream_name] = (
+                _maybe_add_existing_data(existing, stream_data)
+            )
         else:
             raise NotImplementedError(
                 f"Support for stream {stream_name} is not implemented yet"

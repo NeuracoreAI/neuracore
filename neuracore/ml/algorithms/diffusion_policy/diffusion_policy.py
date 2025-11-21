@@ -13,7 +13,7 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 
 from neuracore.ml import (
-    BatchedInferenceSamples,
+    BatchedInferenceInputs,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     NeuracoreModel,
@@ -102,21 +102,21 @@ class DiffusionPolicy(NeuracoreModel):
                 spatial_softmax_num_keypoints=spatial_softmax_num_keypoints,
                 feature_dim=hidden_dim,
             )
-            for _ in range(self.dataset_description.rgb_images.max_len)
+            for _ in range(self.dataset_statistics.rgb_images.max_len)
         ])
         global_cond_dim = (
-            self.dataset_description.joint_positions.max_len
-            + self.dataset_description.joint_velocities.max_len
-            + self.dataset_description.joint_torques.max_len
+            self.dataset_statistics.joint_positions.max_len
+            + self.dataset_statistics.joint_velocities.max_len
+            + self.dataset_statistics.joint_torques.max_len
         )
-        if self.dataset_description.rgb_images.max_len > 0:
+        if self.dataset_statistics.rgb_images.max_len > 0:
             global_cond_dim += (
                 self.image_encoders[0].feature_dim
-                * self.dataset_description.rgb_images.max_len
+                * self.dataset_statistics.rgb_images.max_len
             )
 
         self.unet = DiffusionConditionalUnet1d(
-            action_dim=self.dataset_description.joint_target_positions.max_len,
+            action_dim=self.dataset_statistics.joint_target_positions.max_len,
             global_cond_dim=global_cond_dim,
             down_dims=unet_down_dims,
             kernel_size=unet_kernel_size,
@@ -155,17 +155,17 @@ class DiffusionPolicy(NeuracoreModel):
             state_means = []
             state_stds = []
             if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-                state_means.extend(self.dataset_description.joint_positions.mean)
-                state_stds.extend(self.dataset_description.joint_positions.std)
+                state_means.extend(self.dataset_statistics.joint_positions.mean)
+                state_stds.extend(self.dataset_statistics.joint_positions.std)
             if (
                 DataType.JOINT_VELOCITIES
                 in self.model_init_description.input_data_types
             ):
-                state_means.extend(self.dataset_description.joint_velocities.mean)
-                state_stds.extend(self.dataset_description.joint_velocities.std)
+                state_means.extend(self.dataset_statistics.joint_velocities.mean)
+                state_stds.extend(self.dataset_statistics.joint_velocities.std)
             if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
-                state_means.extend(self.dataset_description.joint_torques.mean)
-                state_stds.extend(self.dataset_description.joint_torques.std)
+                state_means.extend(self.dataset_statistics.joint_torques.mean)
+                state_stds.extend(self.dataset_statistics.joint_torques.std)
             if state_means:
                 self.register_buffer(
                     "joint_state_mean", self._to_torch_float_tensor(state_means)
@@ -181,13 +181,13 @@ class DiffusionPolicy(NeuracoreModel):
             self.register_buffer(
                 "joint_target_mean",
                 self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.mean
+                    self.dataset_statistics.joint_target_positions.mean
                 ),
             )
             self.register_buffer(
                 "joint_target_std",
                 self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.std
+                    self.dataset_statistics.joint_target_positions.std
                 ),
             )
 
@@ -195,17 +195,17 @@ class DiffusionPolicy(NeuracoreModel):
             state_min = []
             state_max = []
             if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-                state_min.extend(self.dataset_description.joint_positions.min)
-                state_max.extend(self.dataset_description.joint_positions.max)
+                state_min.extend(self.dataset_statistics.joint_positions.min)
+                state_max.extend(self.dataset_statistics.joint_positions.max)
             if (
                 DataType.JOINT_VELOCITIES
                 in self.model_init_description.input_data_types
             ):
-                state_min.extend(self.dataset_description.joint_velocities.min)
-                state_max.extend(self.dataset_description.joint_velocities.max)
+                state_min.extend(self.dataset_statistics.joint_velocities.min)
+                state_max.extend(self.dataset_statistics.joint_velocities.max)
             if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
-                state_min.extend(self.dataset_description.joint_torques.min)
-                state_max.extend(self.dataset_description.joint_torques.max)
+                state_min.extend(self.dataset_statistics.joint_torques.min)
+                state_max.extend(self.dataset_statistics.joint_torques.max)
             if state_min:
                 self.register_buffer(
                     "joint_state_min", self._to_torch_float_tensor(state_min)
@@ -220,13 +220,13 @@ class DiffusionPolicy(NeuracoreModel):
             self.register_buffer(
                 "joint_target_min",
                 self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.min
+                    self.dataset_statistics.joint_target_positions.min
                 ),
             )
             self.register_buffer(
                 "joint_target_max",
                 self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.max
+                    self.dataset_statistics.joint_target_positions.max
                 ),
             )
 
@@ -299,9 +299,7 @@ class DiffusionPolicy(NeuracoreModel):
                 f"Unsupported normalization_type: {self.normalization_type}"
             )
 
-    def _combine_joint_states(
-        self, batch: BatchedInferenceSamples
-    ) -> torch.FloatTensor:
+    def _combine_joint_states(self, batch: BatchedInferenceInputs) -> torch.FloatTensor:
         """Combine joint states."""
         state_inputs = []
         if batch.joint_positions:
@@ -351,7 +349,7 @@ class DiffusionPolicy(NeuracoreModel):
             size=(
                 batch_size,
                 prediction_horizon,
-                self.dataset_description.joint_target_positions.max_len,
+                self.dataset_statistics.joint_target_positions.max_len,
             ),
             dtype=torch.float32,
             device=self.device,
@@ -426,7 +424,7 @@ class DiffusionPolicy(NeuracoreModel):
 
     def _predict_action(
         self,
-        batch: BatchedInferenceSamples,
+        batch: BatchedInferenceInputs,
         prediction_horizon: int,
     ) -> torch.Tensor:
         """Predict action sequence from observations.
@@ -458,7 +456,7 @@ class DiffusionPolicy(NeuracoreModel):
 
         return actions
 
-    def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
+    def forward(self, batch: BatchedInferenceInputs) -> ModelPrediction:
         """Forward pass for inference.
 
         Args:
@@ -491,7 +489,7 @@ class DiffusionPolicy(NeuracoreModel):
         Returns:
             BatchedTrainingOutputs: Training outputs with losses and metrics
         """
-        inference_sample = BatchedInferenceSamples(
+        inference_sample = BatchedInferenceInputs(
             joint_positions=batch.inputs.joint_positions,
             joint_velocities=batch.inputs.joint_velocities,
             joint_torques=batch.inputs.joint_torques,
@@ -558,7 +556,6 @@ class DiffusionPolicy(NeuracoreModel):
             "mse_loss": loss,
         }
         return BatchedTrainingOutputs(
-            output_predictions=pred,
             losses=losses,
             metrics=metrics,
         )
@@ -599,7 +596,7 @@ class DiffusionPolicy(NeuracoreModel):
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
-            DataType.RGB_IMAGE,
+            DataType.RGB_IMAGES,
         ]
 
     @staticmethod

@@ -4,8 +4,8 @@ import pytest
 from neuracore_types import DataType
 
 import neuracore as nc
-from neuracore.core.data.recording import Recording
-from neuracore.core.data.synced_recording import SynchronizedRecording
+from neuracore.core.data.episode import Episode
+from neuracore.core.data.synchronized_episode import SynchronizedEpisode
 from neuracore.core.exceptions import SynchronizationError
 
 
@@ -23,7 +23,7 @@ class TestRecording:
     @pytest.fixture
     def recording(self, dataset_mock):
         """Create a Recording instance for testing."""
-        return Recording(
+        return Episode(
             dataset=dataset_mock,
             recording_id="rec1",
             size_bytes=512,
@@ -43,7 +43,7 @@ class TestRecording:
         """Test synchronizing a recording with valid frequency."""
         synced_rec = recording.synchronize(frequency=30)
 
-        assert isinstance(synced_rec, SynchronizedRecording)
+        assert isinstance(synced_rec, SynchronizedEpisode)
         assert synced_rec.frequency == 30
         assert synced_rec.id == "rec1"
         assert synced_rec.robot_id == "robot1"
@@ -52,7 +52,7 @@ class TestRecording:
     def test_synchronize_with_zero_frequency(self, recording):
         """Test that synchronizing with frequency=0 raises an error."""
         synced_rec = recording.synchronize(frequency=0)
-        assert isinstance(synced_rec, SynchronizedRecording)
+        assert isinstance(synced_rec, SynchronizedEpisode)
         assert synced_rec.frequency == 0
         assert len(synced_rec) == 2
 
@@ -64,16 +64,16 @@ class TestRecording:
     def test_synchronize_with_valid_data_types(self, recording):
         """Test synchronizing with specific data types."""
 
-        data_types = [DataType.RGB_IMAGE, DataType.JOINT_POSITIONS]
+        data_types = [DataType.RGB_IMAGES, DataType.JOINT_POSITIONS]
         synced = recording.synchronize(frequency=30, data_types=data_types)
 
-        assert isinstance(synced, SynchronizedRecording)
+        assert isinstance(synced, SynchronizedEpisode)
         assert synced.data_types == data_types
 
     def test_synchronize_with_invalid_data_types(self, recording):
         """Test synchronizing with invalid data types raises an error."""
 
-        data_types = [DataType.RGB_IMAGE, DataType.DEPTH_IMAGE]
+        data_types = [DataType.RGB_IMAGES, DataType.DEPTH_IMAGES]
         with pytest.raises(
             SynchronizationError,
             match="Invalid data type requested for synchronization",
@@ -84,14 +84,14 @@ class TestRecording:
         """Test synchronizing with empty data types list."""
         synced = recording.synchronize(frequency=30, data_types=[])
 
-        assert isinstance(synced, SynchronizedRecording)
+        assert isinstance(synced, SynchronizedEpisode)
         assert synced.data_types == []
 
     def test_synchronize_with_none_data_types(self, recording):
         """Test synchronizing with None data types (should default to empty list)."""
         synced = recording.synchronize(frequency=30, data_types=None)
 
-        assert isinstance(synced, SynchronizedRecording)
+        assert isinstance(synced, SynchronizedEpisode)
         assert synced.data_types == []
 
     def test_iter_raises_runtime_error(self, recording):

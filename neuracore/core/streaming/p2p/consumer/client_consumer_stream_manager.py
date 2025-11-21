@@ -15,7 +15,7 @@ from neuracore_types import (
     HandshakeMessage,
     MessageType,
     OpenConnectionDetails,
-    SyncPoint,
+    SynchronizedPoint,
 )
 
 from neuracore.core.auth import Auth, get_auth
@@ -139,7 +139,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
 
         return self.ice_config
 
-    def get_latest_data(self) -> SyncPoint:
+    def get_latest_data(self) -> SynchronizedPoint:
         """Gets a sync point consisting of the latest data from all connections.
 
         Returns:

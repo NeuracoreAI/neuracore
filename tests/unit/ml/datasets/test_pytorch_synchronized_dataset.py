@@ -14,18 +14,17 @@ from neuracore_types import (
     CameraData,
     CustomData,
     DataItemStats,
-    DatasetDescription,
+    DatasetStatistics,
     DataType,
-    EndEffectorData,
     JointData,
     LanguageData,
     PointCloudData,
     PoseData,
-    SyncPoint,
+    SynchronizedPoint,
 )
 from PIL import Image
 
-from neuracore.core.data.synced_dataset import SynchronizedDataset
+from neuracore.core.data.synchronized_dataset import SynchronizedDataset
 from neuracore.ml import BatchedTrainingSamples, MaskableData
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
@@ -48,9 +47,9 @@ def mock_tokenizer():
 
 
 @pytest.fixture
-def sample_dataset_description():
+def sample_dataset_statistics():
     """Create a sample dataset description for testing."""
-    return DatasetDescription(
+    return DatasetStatistics(
         joint_positions=DataItemStats(mean=[0.0] * 6, std=[1.0] * 6, max_len=6),
         joint_velocities=DataItemStats(mean=[0.0] * 6, std=[1.0] * 6, max_len=6),
         joint_torques=DataItemStats(mean=[0.0] * 6, std=[1.0] * 6, max_len=6),
@@ -82,8 +81,8 @@ def mock_depth_image():
 
 @pytest.fixture
 def sample_sync_point(mock_image, mock_depth_image):
-    """Create a sample SyncPoint with various data types."""
-    return SyncPoint(
+    """Create a sample SynchronizedPoint with various data types."""
+    return SynchronizedPoint(
         timestamp=1234567890.0,
         joint_positions=JointData(
             values={"joint_1": 0.1, "joint_2": 0.2, "joint_3": 0.3}
@@ -96,9 +95,6 @@ def sample_sync_point(mock_image, mock_depth_image):
         ),
         joint_target_positions=JointData(
             values={"joint_1": 0.15, "joint_2": 0.25, "joint_3": 0.35, "joint_4": 0.45}
-        ),
-        end_effectors=EndEffectorData(
-            open_amounts={"gripper_1": 0.5, "gripper_2": 0.8}
         ),
         poses=PoseData(
             pose={
@@ -157,12 +153,12 @@ def mock_synced_recording(sample_sync_point):
 
 
 @pytest.fixture
-def mock_synchronized_dataset(mock_synced_recording, sample_dataset_description):
+def mock_synchronized_dataset(mock_synced_recording, sample_dataset_statistics):
     """Create a mock SynchronizedDataset for testing."""
 
     class MockSynchronizedDataset(SynchronizedDataset):
         def __init__(self):
-            self.dataset_description = sample_dataset_description
+            self.dataset_statistics = sample_dataset_statistics
             self._recordings = [mock_synced_recording] * 5  # 5 episodes
 
         @property
@@ -185,7 +181,7 @@ class TestPytorchSynchronizedDatasetInitialization:
         """Test basic dataset initialization."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE],
+            input_data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGES],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=5,
         )
@@ -193,7 +189,7 @@ class TestPytorchSynchronizedDatasetInitialization:
         assert dataset.synchronized_dataset == mock_synchronized_dataset
         assert dataset.input_data_types == [
             DataType.JOINT_POSITIONS,
-            DataType.RGB_IMAGE,
+            DataType.RGB_IMAGES,
         ]
         assert dataset.output_data_types == [DataType.JOINT_TARGET_POSITIONS]
         assert dataset.output_prediction_horizon == 5
@@ -207,10 +203,9 @@ class TestPytorchSynchronizedDatasetInitialization:
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
-            DataType.RGB_IMAGE,
-            DataType.DEPTH_IMAGE,
-            DataType.POINT_CLOUD,
-            DataType.END_EFFECTORS,
+            DataType.RGB_IMAGES,
+            DataType.DEPTH_IMAGES,
+            DataType.POINT_CLOUDS,
             DataType.END_EFFECTOR_POSES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.POSES,
@@ -221,7 +216,10 @@ class TestPytorchSynchronizedDatasetInitialization:
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=all_input_types,
-            output_data_types=[DataType.JOINT_TARGET_POSITIONS, DataType.END_EFFECTORS],
+            output_data_types=[
+                DataType.JOINT_TARGET_POSITIONS,
+                DataType.END_EFFECTOR_POSES,
+            ],
             output_prediction_horizon=8,
             tokenize_text=mock_tokenizer,
         )
@@ -229,7 +227,8 @@ class TestPytorchSynchronizedDatasetInitialization:
         assert dataset.tokenize_text == mock_tokenizer
         assert dataset.output_prediction_horizon == 8
         assert set(dataset.data_types) == set(
-            all_input_types + [DataType.JOINT_TARGET_POSITIONS, DataType.END_EFFECTORS]
+            all_input_types
+            + [DataType.JOINT_TARGET_POSITIONS, DataType.END_EFFECTOR_POSES]
         )
 
     def test_initialization_invalid_synchronized_dataset(self):
@@ -254,7 +253,7 @@ class TestDataLoading:
         """Test basic sample loading."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE],
+            input_data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGES],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=3,
         )
@@ -334,8 +333,8 @@ class TestDataTypeProcessing:
         """Test RGB and depth image processing."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.RGB_IMAGE, DataType.DEPTH_IMAGE],
-            output_data_types=[DataType.RGB_IMAGE],
+            input_data_types=[DataType.RGB_IMAGES, DataType.DEPTH_IMAGES],
+            output_data_types=[DataType.RGB_IMAGES],
             output_prediction_horizon=2,
         )
 
@@ -379,8 +378,8 @@ class TestDataTypeProcessing:
         """Test point cloud data processing."""
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.POINT_CLOUD],
-            output_data_types=[DataType.POINT_CLOUD],
+            input_data_types=[DataType.POINT_CLOUDS],
+            output_data_types=[DataType.POINT_CLOUDS],
             output_prediction_horizon=2,
         )
 
@@ -406,34 +405,6 @@ class TestDataTypeProcessing:
             1024,
             3,
         )  # prediction_horizon x clouds x points x xyz
-
-    @patch("neuracore.login")
-    def test_end_effector_processing(self, mock_login, mock_synchronized_dataset):
-        """Test end-effector data processing."""
-        dataset = PytorchSynchronizedDataset(
-            synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.END_EFFECTORS],
-            output_data_types=[DataType.END_EFFECTORS],
-            output_prediction_horizon=2,
-        )
-
-        with patch.object(dataset, "_memory_monitor") as mock_monitor:
-            mock_monitor.check_memory.return_value = None
-            sample = dataset.load_sample(episode_idx=0, timestep=0)
-
-        # Check input end-effectors
-        assert sample.inputs.end_effectors is not None
-        ee_data = sample.inputs.end_effectors.data
-        ee_mask = sample.inputs.end_effectors.mask
-
-        assert ee_data.shape == (2,)  # max_len from dataset description
-        assert ee_mask.shape == (2,)
-
-        # Check output end-effectors
-        assert sample.outputs.end_effectors is not None
-        output_ee_data = sample.outputs.end_effectors.data
-
-        assert output_ee_data.shape == (2, 2)  # prediction_horizon x max_len
 
     @patch("neuracore.login")
     def test_pose_processing(self, mock_login, mock_synchronized_dataset):
@@ -676,25 +647,6 @@ class TestHelperMethods:
         assert maskable_data.data.shape == (2, max_len)  # prediction_horizon x max_len
         assert maskable_data.mask.shape == (2, max_len)
 
-    def test_create_end_effector_maskable_input_data(self, mock_synchronized_dataset):
-        """Test end-effector maskable input creation."""
-
-        dataset = PytorchSynchronizedDataset(
-            synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.END_EFFECTORS],
-            output_data_types=[DataType.JOINT_TARGET_POSITIONS],
-            output_prediction_horizon=2,
-        )
-
-        ee_data = EndEffectorData(open_amounts={"gripper_1": 0.5, "gripper_2": 0.8})
-
-        maskable_data = dataset._create_end_effector_maskable_input_data(ee_data)
-
-        assert isinstance(maskable_data, MaskableData)
-        assert maskable_data.data.shape == (2,)  # max_len from dataset description
-        assert maskable_data.mask.shape == (2,)
-        assert torch.all(maskable_data.mask == 1.0)
-
     def test_create_pose_maskable_input_data(self, mock_synchronized_dataset):
         """Test pose maskable input creation."""
 
@@ -724,7 +676,7 @@ class TestHelperMethods:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.POINT_CLOUD],
+            input_data_types=[DataType.POINT_CLOUDS],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=2,
         )
@@ -780,7 +732,7 @@ class TestHelperMethods:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.RGB_IMAGE],
+            input_data_types=[DataType.RGB_IMAGES],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=2,
         )
@@ -788,7 +740,7 @@ class TestHelperMethods:
         camera_data = [mock_image, mock_image]  # 2 cameras
 
         maskable_data = dataset._create_camera_maskable_input_data(
-            camera_data, dataset.dataset_description.rgb_images.max_len
+            camera_data, dataset.dataset_statistics.rgb_images.max_len
         )
 
         assert isinstance(maskable_data, MaskableData)
@@ -937,11 +889,14 @@ class TestDataTypeCompatibility:
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
             input_data_types=[
-                DataType.RGB_IMAGE,
+                DataType.RGB_IMAGES,
                 DataType.JOINT_POSITIONS,
-                DataType.DEPTH_IMAGE,
+                DataType.DEPTH_IMAGES,
             ],
-            output_data_types=[DataType.JOINT_TARGET_POSITIONS, DataType.END_EFFECTORS],
+            output_data_types=[
+                DataType.JOINT_TARGET_POSITIONS,
+                DataType.END_EFFECTOR_POSES,
+            ],
             output_prediction_horizon=3,
         )
 
@@ -956,7 +911,7 @@ class TestDataTypeCompatibility:
 
         # Check all output types are present
         assert sample.outputs.joint_target_positions is not None
-        assert sample.outputs.end_effectors is not None
+        assert sample.outputs.end_effector_poses is not None
 
     @patch("neuracore.login")
     def test_all_modalities_combination(
@@ -966,10 +921,9 @@ class TestDataTypeCompatibility:
         all_types = [
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
-            DataType.RGB_IMAGE,
-            DataType.DEPTH_IMAGE,
-            DataType.POINT_CLOUD,
-            DataType.END_EFFECTORS,
+            DataType.RGB_IMAGES,
+            DataType.DEPTH_IMAGES,
+            DataType.POINT_CLOUDS,
             DataType.POSES,
             DataType.LANGUAGE,
             DataType.CUSTOM,
@@ -993,7 +947,6 @@ class TestDataTypeCompatibility:
         assert sample.inputs.rgb_images is not None
         assert sample.inputs.depth_images is not None
         assert sample.inputs.point_clouds is not None
-        assert sample.inputs.end_effectors is not None
         assert sample.inputs.poses is not None
         assert sample.inputs.language_tokens is not None
         assert sample.inputs.custom_data is not None
@@ -1027,7 +980,7 @@ class TestIntegrationWithPyTorchDataLoader:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE],
+            input_data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGES],
             output_data_types=[DataType.JOINT_TARGET_POSITIONS],
             output_prediction_horizon=3,
         )

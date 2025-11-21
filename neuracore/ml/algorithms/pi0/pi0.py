@@ -22,7 +22,7 @@ from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 from transformers import AutoProcessor, AutoTokenizer, PaliGemmaForConditionalGeneration
 
 from neuracore.ml import (
-    BatchedInferenceSamples,
+    BatchedInferenceInputs,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     NeuracoreModel,
@@ -103,10 +103,10 @@ class Pi0(NeuracoreModel):
                 "Please set the HF_TOKEN environment variable."
             )
 
-        self.action_dim = self.dataset_description.joint_target_positions.max_len
+        self.action_dim = self.dataset_statistics.joint_target_positions.max_len
         self.action_horizon = self.output_prediction_horizon
         self.vlm_max_text_tokens = vlm_max_text_tokens
-        num_rgbs = model_init_description.dataset_description.rgb_images.max_len
+        num_rgbs = model_init_description.dataset_statistics.rgb_images.max_len
         self.vlm_max_tokens = num_rgbs * 256 + self.vlm_max_text_tokens
         self.num_inference_steps = num_inference_steps
         self.flow_sig_min = flow_sig_min
@@ -114,9 +114,9 @@ class Pi0(NeuracoreModel):
         self.lr = lr
         self.weight_decay = weight_decay
         proprio_dim = (
-            self.dataset_description.joint_positions.max_len
-            + self.dataset_description.joint_velocities.max_len
-            + self.dataset_description.joint_torques.max_len
+            self.dataset_statistics.joint_positions.max_len
+            + self.dataset_statistics.joint_velocities.max_len
+            + self.dataset_statistics.joint_torques.max_len
         )
         self.dtype = dtype
 
@@ -195,14 +195,14 @@ class Pi0(NeuracoreModel):
         state_stds = []
 
         if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_positions.mean)
-            state_stds.extend(self.dataset_description.joint_positions.std)
+            state_means.extend(self.dataset_statistics.joint_positions.mean)
+            state_stds.extend(self.dataset_statistics.joint_positions.std)
         if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_velocities.mean)
-            state_stds.extend(self.dataset_description.joint_velocities.std)
+            state_means.extend(self.dataset_statistics.joint_velocities.mean)
+            state_stds.extend(self.dataset_statistics.joint_velocities.std)
         if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_torques.mean)
-            state_stds.extend(self.dataset_description.joint_torques.std)
+            state_means.extend(self.dataset_statistics.joint_torques.mean)
+            state_stds.extend(self.dataset_statistics.joint_torques.std)
 
         if state_means:
             # Register as buffers so they move with the model
@@ -218,13 +218,13 @@ class Pi0(NeuracoreModel):
         self.register_buffer(
             "joint_target_mean",
             self._to_torch_float_tensor(
-                self.dataset_description.joint_target_positions.mean
+                self.dataset_statistics.joint_target_positions.mean
             ),
         )
         self.register_buffer(
             "joint_target_std",
             self._to_torch_float_tensor(
-                self.dataset_description.joint_target_positions.std
+                self.dataset_statistics.joint_target_positions.std
             ),
         )
 
@@ -246,7 +246,7 @@ class Pi0(NeuracoreModel):
         return (predicted_actions * self.joint_target_std) + self.joint_target_mean
 
     def _combine_normalized_joint_states(
-        self, batch: BatchedInferenceSamples
+        self, batch: BatchedInferenceInputs
     ) -> torch.Tensor:
         """Combine joint states."""
         state_inputs = []
@@ -269,7 +269,7 @@ class Pi0(NeuracoreModel):
             # Return zero tensor if no joint states available
             raise ValueError("No joint states available")
 
-    def _prepare_rgb_images(self, batch: BatchedInferenceSamples) -> torch.Tensor:
+    def _prepare_rgb_images(self, batch: BatchedInferenceInputs) -> torch.Tensor:
         """Prepare the RGB images and masks.
 
         First resize to 224x224 and then normalize values to [-1,1]. And transform
@@ -285,7 +285,7 @@ class Pi0(NeuracoreModel):
             raise ValueError("RGB images are required but not provided")
         images = []
         image_masks = []
-        for cam_id in range(self.dataset_description.rgb_images.max_len):
+        for cam_id in range(self.dataset_statistics.rgb_images.max_len):
             image = self.image_normalizer(batch.rgb_images.data[:, cam_id])
             # Normalize from range [0,1] to [-1,1] as expected by siglip
             image = image * 2.0 - 1.0
@@ -295,7 +295,7 @@ class Pi0(NeuracoreModel):
 
     def _process_language_tokens(
         self,
-        batch: BatchedInferenceSamples,
+        batch: BatchedInferenceInputs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Process the language tokens.
 
@@ -591,7 +591,7 @@ class Pi0(NeuracoreModel):
         action_embeds = proprio_action_embeds[:, 1:]
         return self.action_decoder(action_embeds)
 
-    def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
+    def forward(self, batch: BatchedInferenceInputs) -> ModelPrediction:
         """Forward pass for generating actions.
 
         Args:
@@ -602,7 +602,7 @@ class Pi0(NeuracoreModel):
         """
         t_start = time.time()
         batch_size = len(batch)
-        if self.dataset_description.rgb_images.max_len > 0:
+        if self.dataset_statistics.rgb_images.max_len > 0:
             # (B, Predict_Horizon, VLM_EMBED_DIM)
             if batch.rgb_images is None:
                 raise ValueError("RGB images are required")
@@ -652,7 +652,7 @@ class Pi0(NeuracoreModel):
         Returns:
             BatchedTrainingOutputs: Training outputs with losses and metrics
         """
-        inference_sample = BatchedInferenceSamples(
+        inference_sample = BatchedInferenceInputs(
             joint_positions=batch.inputs.joint_positions,
             joint_velocities=batch.inputs.joint_velocities,
             joint_torques=batch.inputs.joint_torques,
@@ -675,7 +675,7 @@ class Pi0(NeuracoreModel):
         # Calculate conditional flow
         _t = t.view(-1, 1, 1)
         psi_t = (1 - (1 - self.flow_sig_min) * _t) * x0 + _t * x1
-        if self.dataset_description.rgb_images.max_len > 0:
+        if self.dataset_statistics.rgb_images.max_len > 0:
             # (B, Predict_Horizon, VLM_EMBED_DIM)
             if (
                 inference_sample.rgb_images is None
@@ -708,7 +708,6 @@ class Pi0(NeuracoreModel):
             "mse_loss": loss,
         }
         return BatchedTrainingOutputs(
-            output_predictions=v_psi,
             losses=losses,
             metrics=metrics,
         )
@@ -758,7 +757,7 @@ class Pi0(NeuracoreModel):
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
-            DataType.RGB_IMAGE,
+            DataType.RGB_IMAGES,
             DataType.LANGUAGE,
         ]
 

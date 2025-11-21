@@ -78,7 +78,7 @@ nc.login()
 dataset = nc.get_dataset("ASU Table Top")
 synced_dataset = dataset.synchronize(
     frequency=1,
-    data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE],
+    data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGES],
 )
 print(f"Number of episodes: {len(dataset)}")
 joint_positions = []
@@ -86,9 +86,9 @@ first_camera_images = []
 for episode in synced_dataset[:1]:
     print(f"Episode length is {len(episode)}")
     for step in episode:
-        joint_positions.append(step.joint_positions)
-        if step.rgb_images is not None:
-            for cam_id, cam_data in step.rgb_images.items():
+        joint_positions.append(step[DataType.JOINT_POSITIONS])
+        if step[DataType.RGB_IMAGES] is not None:
+            for cam_id, cam_data in step[DataType.RGB_IMAGES].items():
                 first_camera_images.append(cam_data.frame)
                 break
 
