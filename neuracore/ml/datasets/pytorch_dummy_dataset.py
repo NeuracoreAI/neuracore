@@ -90,7 +90,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 min=-np.ones(6),
                 max=np.ones(6),
                 max_len=6,
-                robot_to_ncdata_keys={self.robot.id: [f"jps_{i}" for i in range(6)]},
+                robot_to_ncdata_keys={self.robot.name: [f"jps_{i}" for i in range(6)]},
             )
         if DataType.JOINT_VELOCITIES in self.data_types:
             self.dataset_description.joint_velocities = DataItemStats(
@@ -99,7 +99,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 min=-np.ones(6),
                 max=np.ones(6),
                 max_len=6,
-                robot_to_ncdata_keys={self.robot.id: [f"jvs_{i}" for i in range(6)]},
+                robot_to_ncdata_keys={self.robot.name: [f"jvs_{i}" for i in range(6)]},
             )
         if DataType.JOINT_TORQUES in self.data_types:
             self.dataset_description.joint_torques = DataItemStats(
@@ -108,7 +108,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 min=-np.ones(6),
                 max=np.ones(6),
                 max_len=6,
-                robot_to_ncdata_keys={self.robot.id: [f"jts_{i}" for i in range(6)]},
+                robot_to_ncdata_keys={self.robot.name: [f"jts_{i}" for i in range(6)]},
             )
         if DataType.JOINT_TARGET_POSITIONS in self.data_types:
             self.dataset_description.joint_target_positions = DataItemStats(
@@ -117,7 +117,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 min=-np.ones(7),
                 max=np.ones(7),
                 max_len=7,
-                robot_to_ncdata_keys={self.robot.id: [f"jtps_{i}" for i in range(7)]},
+                robot_to_ncdata_keys={self.robot.name: [f"jtps_{i}" for i in range(7)]},
             )
 
         # End-effector data
@@ -128,7 +128,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 std=np.ones(2),
                 max_len=2,  # e.g., gripper open amounts
                 robot_to_ncdata_keys={
-                    self.robot.id: [f"end_effector_{i}" for i in range(2)]
+                    self.robot.name: [f"end_effector_{i}" for i in range(2)]
                 },
             )
 
@@ -139,7 +139,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 std=np.ones(7),
                 max_len=7,  # 1 gripper x 7DOF pose
                 robot_to_ncdata_keys={
-                    self.robot.id: [f"end_effector_pose_{i}" for i in range(7)]
+                    self.robot.name: [f"end_effector_pose_{i}" for i in range(7)]
                 },
             )
         # Parallel gripper open amounts
@@ -148,7 +148,9 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 mean=np.zeros(1),
                 std=np.ones(1),
                 max_len=1,  # 1 parallel gripper x 1 open amount float value
-                robot_to_ncdata_keys={self.robot.id: ["parallel_gripper_open_amount"]},
+                robot_to_ncdata_keys={
+                    self.robot.name: ["parallel_gripper_open_amount"]
+                },
             )
 
         # Pose data
@@ -158,25 +160,29 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                 mean=np.zeros(12),
                 std=np.ones(12),
                 max_len=12,  # 2 poses x 6DOF each
-                robot_to_ncdata_keys={self.robot.id: [f"pose_{i}" for i in range(12)]},
+                robot_to_ncdata_keys={
+                    self.robot.name: [f"pose_{i}" for i in range(12)]
+                },
             )
 
         # Visual data
         if DataType.RGB_IMAGE in self.data_types:
             self.dataset_description.rgb_images = DataItemStats(
                 max_len=2,  # e.g., two RGB images per sample
-                robot_to_ncdata_keys={self.robot.id: [f"rgb_{i}" for i in range(2)]},
+                robot_to_ncdata_keys={self.robot.name: [f"rgb_{i}" for i in range(2)]},
             )
         if DataType.DEPTH_IMAGE in self.data_types:
             self.dataset_description.depth_images = DataItemStats(
                 max_len=2,  # e.g., two depth images per sample
-                robot_to_ncdata_keys={self.robot.id: [f"depth_{i}" for i in range(2)]},
+                robot_to_ncdata_keys={
+                    self.robot.name: [f"depth_{i}" for i in range(2)]
+                },
             )
         if DataType.POINT_CLOUD in self.data_types:
             self.dataset_description.point_clouds = DataItemStats(
                 max_len=1,  # e.g., one point cloud per sample
                 robot_to_ncdata_keys={
-                    self.robot.id: [f"point_cloud_{i}" for i in range(1)]
+                    self.robot.name: [f"point_cloud_{i}" for i in range(1)]
                 },
             )
 
@@ -197,7 +203,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                     min=-np.ones(10),
                     max=np.ones(10),
                     max_len=10,
-                    robot_to_ncdata_keys={self.robot.id: ["sensor_1"]},
+                    robot_to_ncdata_keys={self.robot.name: ["sensor_1"]},
                 ),
                 "sensor_2": DataItemStats(
                     mean=np.zeros(5),
@@ -205,7 +211,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                     min=-np.ones(5),
                     max=np.ones(5),
                     max_len=5,
-                    robot_to_ncdata_keys={self.robot.id: ["sensor_2"]},
+                    robot_to_ncdata_keys={self.robot.name: ["sensor_2"]},
                 ),
             }
 

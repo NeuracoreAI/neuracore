@@ -21,7 +21,7 @@ from typing import Optional
 
 import numpy as np
 import requests
-from neuracore_types import DataType, SyncPoint
+from neuracore_types import DataType, PredictRequest, SyncPoint
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.config.get_current_org import get_current_org
@@ -63,7 +63,10 @@ class Policy:
             raise ValueError("Must specify either epoch or checkpoint_file.")
 
     def predict(
-        self, sync_point: Optional[SyncPoint] = None, timeout: float = 5
+        self,
+        sync_point: Optional[SyncPoint] = None,
+        robot_name: Optional[str] = None,
+        timeout: float = 5,
     ) -> list[SyncPoint]:
         """Get action predictions from the model.
 
@@ -74,6 +77,7 @@ class Policy:
         Args:
             sync_point: Synchronized sensor data to send to the model. If None,
                 creates a new sync point from the robot's current sensor data.
+            robot_name: Name of the robot to predict on. If None, uses the active robot.
             timeout: Maximum time to wait (in seconds) to accumulate asynchronous
                 sensor data. Raises error if timeout is reached without sufficient data.
 
@@ -90,7 +94,7 @@ class Policy:
         sync_points = None
         while sync_points is None:
             try:
-                sync_points = self._predict(sync_point)
+                sync_points = self._predict(sync_point, robot_name)
             except InsufficientSyncPointError as e:
                 if time.time() - t > timeout:
                     raise e
@@ -101,7 +105,9 @@ class Policy:
         """Disconnect from the policy and clean up resources."""
         pass
 
-    def _predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
+    def _predict(
+        self, sync_point: Optional[SyncPoint] = None, robot_name: Optional[str] = None
+    ) -> list[SyncPoint]:
         """Internal get action predictions from the model.
 
         Sends robot sensor data to the model and receives action predictions.
@@ -111,6 +117,7 @@ class Policy:
         Args:
             sync_point: Synchronized sensor data to send to the model. If None,
                 creates a new sync point from the robot's current sensor data.
+            robot_name: Name of the robot to predict on. If None, uses the active robot.
 
         Returns:
             Model predictions as a list of SyncPoint objects.
@@ -132,7 +139,7 @@ class DirectPolicy(Policy):
         model_path: Path,
         org_id: str,
         job_id: Optional[str] = None,
-        output_mapping: Optional[dict[DataType, list[str]]] = None,
+        robot_to_output_mapping: Optional[dict[str, dict[DataType, list[str]]]] = None,
         device: Optional[str] = None,
     ):
         """Initialize the direct policy with a robot instance."""
@@ -144,7 +151,7 @@ class DirectPolicy(Policy):
             org_id=org_id,
             job_id=job_id,
             model_file=model_path,
-            output_mapping=output_mapping,
+            robot_to_output_mapping=robot_to_output_mapping,
             device=device,
         )
 
@@ -161,7 +168,9 @@ class DirectPolicy(Policy):
         super().set_checkpoint(epoch, checkpoint_file)
         self._policy.set_checkpoint(epoch, checkpoint_file)
 
-    def _predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
+    def _predict(
+        self, sync_point: Optional[SyncPoint] = None, robot_name: Optional[str] = None
+    ) -> list[SyncPoint]:
         """Run direct model inference.
 
         Args:
@@ -175,7 +184,7 @@ class DirectPolicy(Policy):
         """
         if sync_point is None:
             sync_point = get_latest_sync_point()
-        return self._policy(sync_point)
+        return self._policy(sync_point, robot_name)
 
 
 class ServerPolicy(Policy):
@@ -241,7 +250,9 @@ class ServerPolicy(Policy):
         except requests.exceptions.RequestException as e:
             raise EndpointError(f"Failed to set checkpoint: {str(e)}")
 
-    def _predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
+    def _predict(
+        self, sync_point: Optional[SyncPoint] = None, robot_name: Optional[str] = None
+    ) -> list[SyncPoint]:
         """Get action predictions from the model endpoint.
 
         Sends robot sensor data to the model and receives action predictions.
@@ -262,12 +273,13 @@ class ServerPolicy(Policy):
         if sync_point is None:
             sync_point = get_latest_sync_point()
 
-        if sync_point.robot_id is None:
+        if robot_name is None:
             robot = GlobalSingleton()._active_robot
             if robot is None:
                 raise ValueError(
-                    "No active robot found. Please connect a robot before predicting."
+                    "Robot name must be provided if no active robot is set."
                 )
+            robot_name = robot.name
             sync_point.robot_id = robot.id
 
         # Encode images if they are numpy arrays
@@ -288,10 +300,14 @@ class ServerPolicy(Policy):
         response = None
         try:
             # Make prediction request
+            predict_request = PredictRequest(
+                sync_point=sync_point,
+                robot_name=robot_name,
+            )
             response = requests.post(
                 f"{self._base_url}{PREDICT_ENDPOINT}",
                 headers=self._headers,
-                json=sync_point.model_dump(mode="json"),
+                json=predict_request.model_dump(mode="json"),
                 timeout=int(os.getenv("NEURACORE_ENDPOINT_TIMEOUT", 10)),
             )
             response.raise_for_status()
@@ -504,7 +520,7 @@ class RemoteServerPolicy(ServerPolicy):
 def policy(
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
-    output_mapping: Optional[dict[DataType, list[str]]] = None,
+    robot_to_output_mapping: Optional[dict[str, dict[DataType, list[str]]]] = None,
     device: Optional[str] = None,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process.
@@ -513,7 +529,7 @@ def policy(
         train_run_name: Name of the training run to load the model from.
         robot_name: Robot identifier.
         instance: Instance number of the robot.
-        output_mapping: Optional mapping of data types to output keys.
+        robot_to_output_mapping: Output mapping per robot.
         device: Torch device to run the model on (CPU or GPU, or MPS).
 
     Returns:
@@ -533,7 +549,7 @@ def policy(
         org_id=org_id,
         job_id=job_id,
         model_path=model_path,
-        output_mapping=output_mapping,
+        robot_to_output_mapping=robot_to_output_mapping,
         device=device,
     )
 

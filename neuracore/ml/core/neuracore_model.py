@@ -19,6 +19,20 @@ from .ml_types import (
     BatchedTrainingSamples,
 )
 
+DATATYPE_TO_DATASET_DESCRIPTION_ATTR = {
+    DataType.JOINT_TARGET_POSITIONS: "joint_target_positions",
+    DataType.JOINT_POSITIONS: "joint_positions",
+    DataType.JOINT_VELOCITIES: "joint_velocities",
+    DataType.JOINT_TORQUES: "joint_torques",
+    DataType.END_EFFECTORS: "end_effector_states",
+    DataType.END_EFFECTOR_POSES: "end_effector_poses",
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: "parallel_gripper_open_amounts",
+    DataType.RGB_IMAGE: "rgb_images",
+    DataType.DEPTH_IMAGE: "depth_images",
+    DataType.POINT_CLOUD: "point_clouds",
+    DataType.POSES: "poses",
+}
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,6 +65,7 @@ class NeuracoreModel(nn.Module, ABC):
         self.output_prediction_horizon = (
             model_init_description.output_prediction_horizon
         )
+        self.robot_to_output_mapping = self._get_robot_to_output_mapping()
 
     @property
     def device(self) -> torch.device:
@@ -114,6 +129,51 @@ class NeuracoreModel(nn.Module, ABC):
                 "Requested output data types not in dataset: "
                 f"{req_output_data_types - types_in_dataset}"
             )
+
+    def _get_robot_to_output_mapping(self) -> dict[str, dict[DataType, list[str]]]:
+        """Get the output mapping from the dataset description for each robot.
+
+        Return the output mapping of robots that have all requested output data types.
+
+        Returns:
+            dict[str, dict[DataType, list[str]]]: Output mapping per robot.
+        """
+        output_data_types = self.model_init_description.output_data_types
+        robot_to_output_mapping: dict[str, dict[DataType, list[str]]] = {}
+        for data_type in output_data_types:
+            if data_type in DATATYPE_TO_DATASET_DESCRIPTION_ATTR:
+                data_item_stats = getattr(
+                    self.dataset_description,
+                    DATATYPE_TO_DATASET_DESCRIPTION_ATTR[data_type],
+                )
+                keys = data_item_stats.robot_to_ncdata_keys
+                for robot_name in keys.keys():
+                    if robot_name not in robot_to_output_mapping:
+                        robot_to_output_mapping[robot_name] = {}
+                    robot_to_output_mapping[robot_name][data_type] = keys[robot_name]
+            elif data_type == DataType.LANGUAGE:
+                pass  # Language data typically does not require robot-specific keys
+            elif data_type == DataType.CUSTOM:
+                for _, data_item_stats in self.dataset_description.custom_data.items():
+                    keys = data_item_stats.robot_to_ncdata_keys
+                    for robot_name in keys.keys():
+                        if robot_name not in robot_to_output_mapping:
+                            robot_to_output_mapping[robot_name] = {DataType.CUSTOM: []}
+                        robot_to_output_mapping[robot_name][DataType.CUSTOM].extend(
+                            keys[robot_name]
+                        )
+
+        # Remove robots that do not have all output data types
+        for robot_name in robot_to_output_mapping.keys():
+            for data_type in output_data_types:
+                if data_type not in robot_to_output_mapping[robot_name]:
+                    logger.warning(
+                        f"Robot {robot_name} in the dataset does not support "
+                        f"data type {data_type}. Excluding from output mapping."
+                    )
+                    del robot_to_output_mapping[robot_name]
+
+        return robot_to_output_mapping
 
     @abstractmethod
     def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:

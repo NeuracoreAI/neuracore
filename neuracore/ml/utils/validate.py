@@ -542,7 +542,7 @@ def run_validation(
                         )
 
                     # Test the policy prediction
-                    action = policy.predict(sync_point)
+                    action = policy.predict(sync_point, robot_name=dataset.robot.name)
                     logger.info(f"Exported model loaded successfully, action: {action}")
 
                     for pred_sync_point in action:

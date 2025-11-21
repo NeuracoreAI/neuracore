@@ -145,7 +145,7 @@ policy = nc.policy(train_run_name="MyTrainingJob")
 policy.set_checkpoint(epoch=-1)
 
 # Predict actions
-predicted_sync_points = policy.predict(timeout=5)
+predicted_sync_points = policy.predict(timeout=5, robot_name="MyRobot")
 joint_target_positions = [sp.joint_target_positions for sp in predicted_sync_points]
 actions = [jtp.numpy() for jtp in joint_target_positions if jtp is not None]
 ```
@@ -156,7 +156,7 @@ actions = [jtp.numpy() for jtp in joint_target_positions if jtp is not None]
 # Connect to a remote endpoint
 try:
     policy = nc.policy_remote_server("MyEndpointName")
-    predicted_sync_points = policy.predict(timeout=5)
+    predicted_sync_points = policy.predict(timeout=5, robot_name="MyRobot")
     # Process predictions...
 except nc.EndpointError:
     print("Endpoint not available. Please start it at neuracore.app/dashboard/endpoints")

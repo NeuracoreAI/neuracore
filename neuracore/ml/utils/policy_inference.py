@@ -12,7 +12,6 @@ import torchvision.transforms as T
 from neuracore_types import (
     CameraData,
     CustomData,
-    DataItemStats,
     DataType,
     EndEffectorData,
     EndEffectorPoseData,
@@ -51,132 +50,26 @@ class PolicyInference:
         org_id: str,
         job_id: Optional[str] = None,
         device: Optional[str] = None,
-        output_mapping: Optional[dict[DataType, list[str]]] = None,
+        robot_to_output_mapping: Optional[dict[str, dict[DataType, list[str]]]] = None,
     ) -> None:
-        """Initialize the policy inference."""
+        """Initialize the policy inference.
+
+        Args:
+            model_file: Path to the model file to load.
+            org_id: ID of the organization for loading checkpoints.
+            job_id: ID of the training job for loading checkpoints.
+            device: Torch device to run the model inference on.
+            robot_to_output_mapping: Output mapping per supported robot type.
+            Each output mapping is a dictionary of data types to list of output names.
+        """
         self.org_id = org_id
         self.job_id = job_id
         self.model = load_model_from_nc_archive(model_file, device=device)
         self.dataset_description = self.model.model_init_description.dataset_description
         self.device = torch.device(device) if device else get_default_device()
-        self.output_mapping = output_mapping
-        self.robot_ids_to_output_mapping: dict[str, dict[DataType, list[str]]] = {}
-
-    def _validate_robot_to_ncdata_keys(
-        self, robot_id: str, data_item_stats: DataItemStats, data_name: str
-    ) -> list[str]:
-        keys = data_item_stats.robot_to_ncdata_keys.get(robot_id, [])
-        if not keys:
-            raise ValueError(
-                f"No {data_name} found for robot {robot_id} in dataset description."
-            )
-        return keys
-
-    def _get_output_mapping(self, robot_id: Optional[str]) -> dict[DataType, list[str]]:
-        if self.output_mapping is not None:
-            return self.output_mapping
-        if robot_id is None:
-            raise ValueError(
-                "You must either set an active robot or provide an output mapping."
-            )
-        if robot_id in self.robot_ids_to_output_mapping:
-            return self.robot_ids_to_output_mapping[robot_id]
-
-        output_data_types = self.model.model_init_description.output_data_types
-        output_mapping: dict[DataType, list[str]] = {}
-        if DataType.JOINT_TARGET_POSITIONS in output_data_types:
-            keys = self._validate_robot_to_ncdata_keys(
-                robot_id,
-                self.dataset_description.joint_target_positions,
-                "joint target positions",
-            )
-            output_mapping[DataType.JOINT_TARGET_POSITIONS] = keys
-        if DataType.JOINT_POSITIONS in output_data_types:
-            keys = self._validate_robot_to_ncdata_keys(
-                robot_id,
-                self.dataset_description.joint_positions,
-                "joint positions",
-            )
-            output_mapping[DataType.JOINT_POSITIONS] = keys
-        if DataType.JOINT_VELOCITIES in output_data_types:
-            keys = self._validate_robot_to_ncdata_keys(
-                robot_id,
-                self.dataset_description.joint_velocities,
-                "joint velocities",
-            )
-            output_mapping[DataType.JOINT_VELOCITIES] = keys
-        if DataType.JOINT_TORQUES in output_data_types:
-            keys = self._validate_robot_to_ncdata_keys(
-                robot_id,
-                self.dataset_description.joint_torques,
-                "joint torques",
-            )
-            output_mapping[DataType.JOINT_TORQUES] = keys
-        if DataType.END_EFFECTORS in output_data_types:
-            keys = self._validate_robot_to_ncdata_keys(
-                robot_id,
-                self.dataset_description.end_effector_states,
-                "end effector states",
-            )
-            output_mapping[DataType.END_EFFECTORS] = keys
-        if DataType.POSES in output_data_types:
-            keys = self._validate_robot_to_ncdata_keys(
-                robot_id,
-                self.dataset_description.poses,
-                "poses",
-            )
-            output_mapping[DataType.POSES] = keys
-        if DataType.END_EFFECTOR_POSES in output_data_types:
-            keys = self._validate_robot_to_ncdata_keys(
-                robot_id,
-                self.dataset_description.end_effector_poses,
-                "end effector poses",
-            )
-            output_mapping[DataType.END_EFFECTOR_POSES] = keys
-        if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in output_data_types:
-            keys = self._validate_robot_to_ncdata_keys(
-                robot_id,
-                self.dataset_description.parallel_gripper_open_amounts,
-                "parallel gripper open amounts",
-            )
-            output_mapping[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS] = keys
-        if DataType.RGB_IMAGE in output_data_types:
-            keys = self._validate_robot_to_ncdata_keys(
-                robot_id,
-                self.dataset_description.rgb_images,
-                "RGB images",
-            )
-            output_mapping[DataType.RGB_IMAGE] = keys
-        if DataType.DEPTH_IMAGE in output_data_types:
-            keys = self._validate_robot_to_ncdata_keys(
-                robot_id,
-                self.dataset_description.depth_images,
-                "depth images",
-            )
-            output_mapping[DataType.DEPTH_IMAGE] = keys
-        if DataType.POINT_CLOUD in output_data_types:
-            keys = self._validate_robot_to_ncdata_keys(
-                robot_id,
-                self.dataset_description.point_clouds,
-                "point clouds",
-            )
-            output_mapping[DataType.POINT_CLOUD] = keys
-        if DataType.LANGUAGE in output_data_types:
-            pass  # Language data typically does not require robot-specific keys
-        if DataType.CUSTOM in output_data_types:
-            all_custom_keys = []
-            for (
-                custom_data_name,
-                data_item_stats,
-            ) in self.dataset_description.custom_data.items():
-                keys = self._validate_robot_to_ncdata_keys(
-                    robot_id, data_item_stats, "custom data"
-                )
-                all_custom_keys.extend(keys)
-            output_mapping[DataType.CUSTOM] = all_custom_keys
-
-        self.robot_ids_to_output_mapping[robot_id] = output_mapping
-        return output_mapping
+        self.robot_to_output_mapping = (
+            robot_to_output_mapping or self.model.robot_to_output_mapping
+        )
 
     def _process_joint_data(self, joint_data: JointData, max_len: int) -> MaskableData:
         """Process joint state data into batched tensor format.
@@ -719,26 +612,45 @@ class PolicyInference:
                 f"{', '.join(missing_data_types)}"
             )
 
-    def __call__(self, sync_point: SyncPoint) -> list[SyncPoint]:
+    def __call__(
+        self, sync_point: SyncPoint, robot_name: Optional[str] = None
+    ) -> list[SyncPoint]:
         """Process a single sync point and run inference.
 
         Args:
             sync_point: SyncPoint containing data from a single time step.
+            robot_name: Name of the robot to predict on. If None, uses the active robot.
 
         Returns:
-            SyncPoint with model predictions filled in.
+            SyncPoint with model predictions filled in for each robot.
         """
         sync_point = sync_point.order()
-        if sync_point.robot_id is None:
-            active_robot = GlobalSingleton()._active_robot
-            if active_robot is None:
-                raise ValueError("No active robot set. Please set an active robot.")
-            sync_point.robot_id = active_robot.id
+        active_robot = GlobalSingleton()._active_robot
+        available_robots = set(self.robot_to_output_mapping.keys())
+
+        if robot_name is None and active_robot is None:
+            raise ValueError(
+                "Robot name must be provided if no active robot is set. "
+                f"Available robots: {', '.join(available_robots)}"
+            )
+
+        # Fallback to active robot if robot name is not provided
+        if robot_name is None and active_robot is not None:
+            robot_name = active_robot.name
+            if sync_point.robot_id is None:
+                sync_point.robot_id = active_robot.id
+
+        if robot_name not in available_robots:
+            raise ValueError(
+                f"Robot name {robot_name} is not in the list of "
+                f"available robots: {', '.join(available_robots)}"
+            )
+        output_mapping = self.robot_to_output_mapping[robot_name]
+
         self._validate_input_sync_point(sync_point)
         batch = self._preprocess(sync_point)
         with torch.no_grad():
             batch_output: ModelPrediction = self.model(batch)
-            output_mapping = self._get_output_mapping(sync_point.robot_id)
             return self._model_prediction_to_sync_points(
-                batch_output, output_mapping, robot_id=sync_point.robot_id
+                batch_output, output_mapping, sync_point.robot_id
             )

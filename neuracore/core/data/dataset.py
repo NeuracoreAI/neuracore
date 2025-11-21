@@ -6,12 +6,13 @@ from pathlib import Path
 from typing import Optional, Union
 
 import requests
-from neuracore_types import DataType, SyncedDataset
+from neuracore_types import DataItemStats, DatasetDescription, DataType, SyncedDataset
 from tqdm import tqdm
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
+from neuracore.core.robot import list_organization_robots
 
 from ..auth import Auth, get_auth
 from ..const import API_URL
@@ -234,6 +235,40 @@ class Dataset:
             data_types=list(dataset_json.get("all_data_types", {}).keys()),
         )
 
+    def _robot_id_to_name(
+        self, dataset_description: DatasetDescription
+    ) -> DatasetDescription:
+        """Convert robot ID to robot name in the dataset description.
+
+        Args:
+            dataset_description: Dataset description with robot IDs.
+
+        Returns:
+            Dataset description with robot names.
+        """
+        shared_robots = list_organization_robots(
+            org_id=self.org_id, is_shared=True, mode="mixed"
+        )
+        private_robots = list_organization_robots(
+            org_id=self.org_id, is_shared=False, mode="mixed"
+        )
+        robots = shared_robots + private_robots
+        robot_id_to_name = {robot["id"]: robot["name"] for robot in robots}
+        for data_item_name in DatasetDescription.model_fields.keys():
+            data_item = getattr(dataset_description, data_item_name)
+            if isinstance(data_item, DataItemStats):
+                robot_id_to_ncdata_keys = data_item.robot_to_ncdata_keys
+                robot_name_to_ncdata_keys = {}
+                for robot_id, ncdata_keys in robot_id_to_ncdata_keys.items():
+                    if robot_id not in robot_id_to_name:
+                        logger.warning(
+                            f"Robot ID {robot_id} not found in the available robots."
+                        )
+                        continue
+                    robot_name_to_ncdata_keys[robot_id_to_name[robot_id]] = ncdata_keys
+                data_item.robot_to_ncdata_keys = robot_name_to_ncdata_keys
+        return dataset_description
+
     def _synchronize(
         self, frequency: int = 0, data_types: Optional[list[DataType]] = None
     ) -> SyncedDataset:
@@ -310,7 +345,9 @@ class Dataset:
             dataset=self,
             frequency=frequency,
             data_types=data_types,
-            dataset_description=synced_dataset.dataset_description,
+            dataset_description=self._robot_id_to_name(
+                synced_dataset.dataset_description
+            ),
             prefetch_videos=prefetch_videos,
         )
 
