@@ -159,11 +159,7 @@ class DiffusionPolicy(NeuracoreModel):
         # Normalize the images with imagenet mean and std
         self.image_normalizer = torch.nn.Sequential(
             T.Resize((224, 224)),
-            T.Normalize(
-                mean=[0.16072222590446472, 0.15991183817386628, 0.15994689494371414],
-                std=[0.2003989027316718, 0.1988894954733372, 0.19893645051019113],
-            ),
-            # T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         )
 
         # Normalization statistics

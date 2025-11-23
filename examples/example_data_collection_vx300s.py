@@ -28,7 +28,7 @@ def main(args):
 
     if record:
         nc.create_dataset(
-            name="My Example Dataset",
+            name="Top Camera My Example Dataset",
             description="This is an example dataset",
         )
         print("Created Dataset...")
