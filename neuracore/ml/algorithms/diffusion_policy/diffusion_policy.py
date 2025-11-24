@@ -36,9 +36,9 @@ class DiffusionPolicy(NeuracoreModel):
         model_init_description: ModelInitDescription,
         hidden_dim: int = 512,
         unet_down_dims: Tuple[int, ...] = (
-            256,
             512,
             1024,
+            2048,
         ),
         unet_kernel_size: int = 5,
         unet_n_groups: int = 8,
