@@ -21,7 +21,6 @@ from neuracore.ml import (
     BatchedTrainingSamples,
     MaskableData,
 )
-from neuracore.ml.algorithms.simple_vla.simple_vla import SimpleVLA
 from neuracore.ml.core.ml_types import BatchedData
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.validate import run_validation
