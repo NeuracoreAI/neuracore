@@ -116,7 +116,7 @@ class PositionalEncoding(nn.Module):
         )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
+        pe = pe.unsqueeze(1)  # [seq_len, batch, d_model]
         self.register_buffer("pe", pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -128,7 +128,7 @@ class PositionalEncoding(nn.Module):
         Returns:
             torch.Tensor: Input with positional encoding added
         """
-        x = x + self.pe[:, : x.size(1)]
+        x = x + self.pe[: x.size(0), :, :]  # [seq_len, batch, d_model]
         return self.dropout(x)
 
 
