@@ -74,14 +74,12 @@ class PytorchNeuracoreDataset(Dataset, ABC):
 
         # Create tokenizer if language data is used
         self.tokenize_text = tokenize_text
-        self._error_count = 0
-        self._max_error_count = 1
 
     @abstractmethod
     def load_sample(
         self, episode_idx: int, timestep: Optional[int] = None
     ) -> TrainingSample:
-        """Load a single training sample from the dataset.
+        """Load a training sample from the dataset by episode index and timestep.
 
         This method must be implemented by concrete subclasses to define how
         individual samples are loaded and formatted.
@@ -106,11 +104,9 @@ class PytorchNeuracoreDataset(Dataset, ABC):
         """
         pass
 
+    @abstractmethod
     def __getitem__(self, idx: int) -> TrainingSample:
-        """Get a training sample by index with error handling.
-
-        Implements the PyTorch Dataset interface with robust error handling
-        to manage data loading failures gracefully during training.
+        """Get a training sample from the dataset by index.
 
         Args:
             idx: Index of the sample to retrieve.
@@ -121,25 +117,7 @@ class PytorchNeuracoreDataset(Dataset, ABC):
         Raises:
             Exception: If sample loading fails after exhausting retry attempts.
         """
-        if idx < 0:
-            # Handle negative indices by wrapping around
-            idx += len(self)
-        if idx < 0 or idx >= len(self):
-            raise IndexError(
-                f"Index {idx} out of bounds for dataset of size {len(self)}"
-            )
-        while self._error_count < self._max_error_count:
-            try:
-                episode_idx = idx % self.num_recordings
-                return self.load_sample(episode_idx)
-            except Exception:
-                self._error_count += 1
-                logger.error(f"Error loading item {idx}.", exc_info=True)
-                if self._error_count >= self._max_error_count:
-                    raise
-        raise Exception(
-            f"Maximum error count ({self._max_error_count}) already reached"
-        )
+        pass
 
     def _collate_fn(
         self, samples: list[BatchedData], data_types: list[DataType]

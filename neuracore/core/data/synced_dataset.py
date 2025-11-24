@@ -42,10 +42,10 @@ class SynchronizedDataset:
         self.frequency = frequency
         self.data_types = data_types or []
         self.dataset_description = dataset_description
-        self._prefetch_videos = prefetch_videos
         self._recording_idx = 0
         self._synced_recording_cache: dict[int, SynchronizedRecording] = {}
 
+        self._prefetch_videos_needed = False
         if prefetch_videos:
             for rec in self.dataset.recordings:
                 cache_dir = (
@@ -53,15 +53,19 @@ class SynchronizedDataset:
                 )
                 # Check if cache directory exists and contains any files
                 if not cache_dir.exists() or not any(cache_dir.iterdir()):
-                    self._perform_videos_prefetch(max_workers=max_workers)
+                    self._prefetch_videos_needed = True
                     break
+        self._perform_synced_data_prefetch(max_workers=max_workers)
 
-    def _perform_videos_prefetch(self, max_workers: int) -> None:
-        """Prefetch video data for all recordings using multiple threads.
+    def _perform_synced_data_prefetch(self, max_workers: int) -> None:
+        """Prefetch synced data for all recordings using multiple threads.
 
         Args:
-            max_workers: Number of threads to use for prefetching videos.
+            max_workers: Number of threads to use for prefetching synced data.
         """
+        desc = "Prefetching synced data"
+        if self._prefetch_videos_needed:
+            desc += " and videos"
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             list(
                 tqdm(
@@ -69,7 +73,7 @@ class SynchronizedDataset:
                         lambda idx: self[idx], range(len(self.dataset.recordings))
                     ),
                     total=len(self.dataset.recordings),
-                    desc="Prefetching videos",
+                    desc=desc,
                     unit="Recording",
                 )
             )
@@ -137,7 +141,7 @@ class SynchronizedDataset:
                         instance=self.dataset.recordings[idx]["instance"],
                         frequency=self.frequency,
                         data_types=self.data_types,
-                        prefetch_videos=self._prefetch_videos,
+                        prefetch_videos=self._prefetch_videos_needed,
                     )
                     self._synced_recording_cache[idx] = synced_recording
                 return self._synced_recording_cache[idx]
@@ -167,7 +171,7 @@ class SynchronizedDataset:
                     instance=recording["instance"],
                     frequency=self.frequency,
                     data_types=self.data_types,
-                    prefetch_videos=self._prefetch_videos,
+                    prefetch_videos=self._prefetch_videos_needed,
                 )
                 self._synced_recording_cache[self._recording_idx] = s
 

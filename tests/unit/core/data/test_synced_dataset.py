@@ -30,13 +30,18 @@ class TestSynchronizedDataset:
     @pytest.fixture
     def synced_dataset(self, dataset_mock, dataset_description):
         """Create a SynchronizedDataset instance for testing."""
-        return SynchronizedDataset(
-            dataset=dataset_mock,
-            frequency=30,
-            data_types=None,
-            dataset_description=dataset_description,
-            prefetch_videos=False,
-        )
+        with patch.object(
+            SynchronizedDataset, "_perform_synced_data_prefetch"
+        ) as mock_prefetch:
+            synced_dataset = SynchronizedDataset(
+                dataset=dataset_mock,
+                frequency=30,
+                data_types=None,
+                dataset_description=dataset_description,
+                prefetch_videos=False,
+            )
+            mock_prefetch.assert_called_once()
+            return synced_dataset
 
     def test_init(self, synced_dataset, dataset_mock, dataset_description):
         """Test SynchronizedDataset initialization."""
@@ -50,12 +55,17 @@ class TestSynchronizedDataset:
     def test_init_with_data_types(self, dataset_mock, dataset_description):
         """Test initialization with specific data types."""
         data_types = [DataType.RGB_IMAGE, DataType.DEPTH_IMAGE]
-        synced = SynchronizedDataset(
-            dataset=dataset_mock,
-            frequency=30,
-            data_types=data_types,
-            dataset_description=dataset_description,
-        )
+        with patch.object(
+            SynchronizedDataset, "_perform_synced_data_prefetch"
+        ) as mock_prefetch:
+            synced = SynchronizedDataset(
+                dataset=dataset_mock,
+                frequency=30,
+                data_types=data_types,
+                dataset_description=dataset_description,
+                prefetch_videos=False,
+            )
+            mock_prefetch.assert_called_once()
 
         assert synced.data_types == data_types
 
@@ -207,9 +217,9 @@ class TestSynchronizedDataset:
     def test_prefetch_videos_disabled(self, dataset_mock, dataset_description):
         """Test that prefetch_videos=False doesn't trigger prefetch."""
         with patch.object(
-            SynchronizedDataset, "_perform_videos_prefetch"
+            SynchronizedDataset, "_perform_synced_data_prefetch"
         ) as mock_prefetch:
-            SynchronizedDataset(
+            synced_dataset = SynchronizedDataset(
                 dataset=dataset_mock,
                 frequency=30,
                 data_types=None,
@@ -217,16 +227,17 @@ class TestSynchronizedDataset:
                 prefetch_videos=False,
             )
 
-            mock_prefetch.assert_not_called()
+            mock_prefetch.assert_called_once()
+        assert synced_dataset._prefetch_videos_needed is False
 
     def test_prefetch_videos_enabled_no_cache(
         self, dataset_mock, dataset_description, mock_auth_requests
     ):
         """Test that prefetch_videos=True triggers prefetch when no cache exists."""
         with patch.object(
-            SynchronizedDataset, "_perform_videos_prefetch"
+            SynchronizedDataset, "_perform_synced_data_prefetch"
         ) as mock_prefetch:
-            SynchronizedDataset(
+            synced_dataset = SynchronizedDataset(
                 dataset=dataset_mock,
                 frequency=30,
                 data_types=None,
@@ -235,6 +246,7 @@ class TestSynchronizedDataset:
             )
 
             mock_prefetch.assert_called_once()
+        assert synced_dataset._prefetch_videos_needed is True
 
     def test_prefetch_videos_enabled_with_cache(
         self, dataset_mock, dataset_description, mock_auth_requests, tmp_path
@@ -249,9 +261,9 @@ class TestSynchronizedDataset:
             (cache_path / "0.png").touch()
 
         with patch.object(
-            SynchronizedDataset, "_perform_videos_prefetch"
+            SynchronizedDataset, "_perform_synced_data_prefetch"
         ) as mock_prefetch:
-            SynchronizedDataset(
+            synced_dataset = SynchronizedDataset(
                 dataset=dataset_mock,
                 frequency=30,
                 data_types=None,
@@ -259,7 +271,8 @@ class TestSynchronizedDataset:
                 prefetch_videos=True,
             )
 
-            mock_prefetch.assert_not_called()
+            mock_prefetch.assert_called_once()
+        assert synced_dataset._prefetch_videos_needed is False
 
     def test_prefetch_videos_partial_cache(
         self, dataset_mock, dataset_description, mock_auth_requests, tmp_path
@@ -274,9 +287,9 @@ class TestSynchronizedDataset:
         (cache_path / "0.png").touch()
 
         with patch.object(
-            SynchronizedDataset, "_perform_videos_prefetch"
+            SynchronizedDataset, "_perform_synced_data_prefetch"
         ) as mock_prefetch:
-            SynchronizedDataset(
+            synced_dataset = SynchronizedDataset(
                 dataset=dataset_mock,
                 frequency=30,
                 data_types=None,
@@ -285,13 +298,14 @@ class TestSynchronizedDataset:
             )
 
             mock_prefetch.assert_called_once()
+        assert synced_dataset._prefetch_videos_needed is True
 
     def test_max_workers_parameter(self, dataset_mock, dataset_description):
         """Test that max_workers parameter is used in prefetch."""
         with patch.object(
-            SynchronizedDataset, "_perform_videos_prefetch"
+            SynchronizedDataset, "_perform_synced_data_prefetch"
         ) as mock_prefetch:
-            SynchronizedDataset(
+            synced_dataset = SynchronizedDataset(
                 dataset=dataset_mock,
                 frequency=30,
                 data_types=None,
@@ -301,13 +315,14 @@ class TestSynchronizedDataset:
             )
 
             mock_prefetch.assert_called_once_with(max_workers=8)
+        assert synced_dataset._prefetch_videos_needed is True
 
     def test_slice_does_not_prefetch(self, synced_dataset, mock_auth_requests):
         """Test that slicing creates a new dataset without prefetching."""
         sliced = synced_dataset[0:1]
 
         # The sliced dataset should not have prefetch_videos enabled
-        assert sliced._prefetch_videos is False
+        assert sliced._prefetch_videos_needed is False
 
     def test_getitem_with_instance_info(self, synced_dataset, mock_auth_requests):
         """Test that getitem preserves instance information."""
@@ -346,12 +361,17 @@ class TestSynchronizedDataset:
 
     def test_empty_data_types_list(self, dataset_mock, dataset_description):
         """Test initialization with empty data types list."""
-        synced = SynchronizedDataset(
-            dataset=dataset_mock,
-            frequency=30,
-            data_types=[],
-            dataset_description=dataset_description,
-        )
+        with patch.object(
+            SynchronizedDataset, "_perform_synced_data_prefetch"
+        ) as mock_prefetch:
+            synced = SynchronizedDataset(
+                dataset=dataset_mock,
+                frequency=30,
+                data_types=[],
+                dataset_description=dataset_description,
+                prefetch_videos=False,
+            )
+            mock_prefetch.assert_called_once()
 
         assert synced.data_types == []
 
@@ -362,12 +382,17 @@ class TestSynchronizedDataset:
             DataType.DEPTH_IMAGE,
             DataType.JOINT_POSITIONS,
         ]
-        synced = SynchronizedDataset(
-            dataset=dataset_mock,
-            frequency=30,
-            data_types=data_types,
-            dataset_description=dataset_description,
-        )
+        with patch.object(
+            SynchronizedDataset, "_perform_synced_data_prefetch"
+        ) as mock_prefetch:
+            synced = SynchronizedDataset(
+                dataset=dataset_mock,
+                frequency=30,
+                data_types=data_types,
+                dataset_description=dataset_description,
+                prefetch_videos=False,
+            )
+            mock_prefetch.assert_called_once()
 
         assert synced.data_types == data_types
 
@@ -375,19 +400,29 @@ class TestSynchronizedDataset:
         self, dataset_mock, dataset_description, mock_auth_requests
     ):
         """Test that different SynchronizedDataset instances have independent caches."""
-        synced1 = SynchronizedDataset(
-            dataset=dataset_mock,
-            frequency=30,
-            data_types=None,
-            dataset_description=dataset_description,
-        )
+        with patch.object(
+            SynchronizedDataset, "_perform_synced_data_prefetch"
+        ) as mock_prefetch:
+            synced1 = SynchronizedDataset(
+                dataset=dataset_mock,
+                frequency=30,
+                data_types=None,
+                dataset_description=dataset_description,
+                prefetch_videos=False,
+            )
+            mock_prefetch.assert_called_once()
 
-        synced2 = SynchronizedDataset(
-            dataset=dataset_mock,
-            frequency=30,
-            data_types=None,
-            dataset_description=dataset_description,
-        )
+        with patch.object(
+            SynchronizedDataset, "_perform_synced_data_prefetch"
+        ) as mock_prefetch:
+            synced2 = SynchronizedDataset(
+                dataset=dataset_mock,
+                frequency=30,
+                data_types=None,
+                dataset_description=dataset_description,
+                prefetch_videos=False,
+            )
+            mock_prefetch.assert_called_once()
 
         # Access in first instance
         rec1 = synced1[0]

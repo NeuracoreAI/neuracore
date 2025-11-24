@@ -427,6 +427,10 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         """
         return self.num_samples
 
+    def __getitem__(self, idx: int) -> TrainingSample:
+        """Get a training sample."""
+        return self.load_sample(idx)
+
     def collate_fn(self, samples: list[TrainingSample]) -> BatchedTrainingSamples:
         """Collate individual samples into a batched training sample.
 

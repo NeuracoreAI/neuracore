@@ -70,7 +70,8 @@ class SynchronizedRecording:
 
         if prefetch_videos:
             cache = self.dataset.cache_dir / f"{self.id}" / f"{self.frequency}Hz"
-            if not cache.exists():
+            # Check if cache directory exists and contains any files
+            if not cache.exists() or not any(cache.iterdir()):
                 self._get_sync_point(0)
 
     def _get_synced_data(self) -> SyncedData:
