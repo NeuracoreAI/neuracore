@@ -133,7 +133,7 @@ class PytorchNeuracoreDataset(Dataset, ABC):
             )
         while self._error_count < self._max_error_count:
             try:
-                episode_idx = idx % self.num_recordings
+                episode_idx = min(idx // self.num_recordings, self.num_recordings - 1)
                 return self.load_sample(episode_idx)
             except Exception:
                 self._error_count += 1
