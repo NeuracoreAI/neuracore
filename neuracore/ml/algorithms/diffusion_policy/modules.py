@@ -25,26 +25,38 @@ class DiffusionPolicyImageEncoder(nn.Module):
         self,
         feature_dim: int = 512,
         spatial_softmax_num_keypoints: int = 32,
+        use_pretrained_weights: bool = True,
     ):
         """Initialize the image encoder.
 
         Args:
             feature_dim: Feature dimension for the image encoder.
             spatial_softmax_num_keypoints: Number of keypoints for spatial softmax.
+            use_pretrained_weights: Whether to load pretrained ResNet weights.
         """
         super().__init__()
 
         # Use pretrained ResNet but remove final layers
-        self.backbone = self._build_backbone()
+        self.backbone = self._build_backbone(
+            use_pretrained_weights=use_pretrained_weights
+        )
         # ResNet18 without avgpool and fc layers outputs (512, 7, 7) for 224x224 input
         self.pool = SpatialSoftmax((512, 7, 7), num_kp=spatial_softmax_num_keypoints)
         self.feature_dim = feature_dim
         self.out = nn.Linear(spatial_softmax_num_keypoints * 2, self.feature_dim)
         self.relu = nn.ReLU()
 
-    def _build_backbone(self) -> nn.Module:
-        """Build backbone CNN, removing avgpool and fc layers."""
-        resnet = models.get_model("resnet18", weights="DEFAULT")
+    def _build_backbone(self, use_pretrained_weights: bool = True) -> nn.Module:
+        """Build backbone CNN, removing avgpool and fc layers.
+
+        Args:
+            use_pretrained_weights: Whether to load pretrained weights.
+
+        Returns:
+            ResNet backbone without final layers.
+        """
+        weights = "DEFAULT" if use_pretrained_weights else None
+        resnet = models.get_model("resnet18", weights=weights)
         return nn.Sequential(*list(resnet.children())[:-2])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

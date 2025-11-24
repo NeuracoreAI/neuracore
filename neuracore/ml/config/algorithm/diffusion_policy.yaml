@@ -8,6 +8,7 @@ algorithm:
   unet_diffusion_step_embed_dim: 128
   spatial_softmax_num_keypoints: 32
   unet_use_film_scale_modulation: true
+  use_pretrained_weights: true
   noise_scheduler_type: "DDPM"
   num_train_timesteps: 100
   num_inference_steps: 100
@@ -17,7 +18,7 @@ algorithm:
   clip_sample: true
   clip_sample_range: 1.0
   lr: 1e-4
-  lr_backbone: 1e-5
+  lr_backbone: 1e-4
   weight_decay: 1e-6
   optimizer_betas: [0.95, 0.999]
   optimizer_eps: 1e-8

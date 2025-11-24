@@ -75,9 +75,9 @@ def visualize_episode(
 
 nc.login()
 # CMU Play Fusion is one of the many public/shared datasets you have access to
-dataset = nc.get_dataset("ASU Table Top")
+dataset = nc.get_dataset("Top Camera My Example Dataset")
 synced_dataset = dataset.synchronize(
-    frequency=1,
+    frequency=50,
     data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE],
 )
 print(f"Number of episodes: {len(dataset)}")

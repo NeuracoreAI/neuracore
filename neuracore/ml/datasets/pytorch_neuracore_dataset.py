@@ -10,7 +10,6 @@ from abc import ABC, abstractmethod
 from typing import Callable, Optional, Set, cast
 
 import torch
-import torchvision.transforms as T
 from neuracore_types import DataType
 from torch.utils.data import Dataset
 
@@ -70,10 +69,10 @@ class PytorchNeuracoreDataset(Dataset, ABC):
         self.data_types = set(input_data_types + output_data_types)
 
         # Setup camera transform to match EpisodicDataset
-        self.camera_transform = T.Compose([
-            T.Resize((224, 224)),
-            T.ToTensor(),
-        ])
+        # self.camera_transform = T.Compose([
+        #     T.Resize((224, 224)),
+        #     T.ToTensor(),
+        # ])
 
         # Create tokenizer if language data is used
         self.tokenize_text = tokenize_text

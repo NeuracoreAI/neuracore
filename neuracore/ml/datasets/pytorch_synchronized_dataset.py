@@ -5,6 +5,7 @@ from typing import Callable, Optional, Set, cast
 
 import numpy as np
 import torch
+import torchvision.transforms as T
 from neuracore_types import (
     CustomData,
     DataType,
@@ -70,6 +71,9 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         )
         self.synchronized_dataset = synchronized_dataset
         self.dataset_description = self.synchronized_dataset.dataset_description
+
+        # Setup camera transform to convert PIL Images to tensors (no resize)
+        self.camera_transform = T.ToTensor()
 
         self._max_error_count = 100
         self._error_count = 0
