@@ -205,3 +205,4 @@ xquat
 xyzrgb
 ylabel
 znear
+stddev
