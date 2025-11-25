@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from hydra.utils import get_class
 from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 
 from neuracore.ml import (
@@ -67,6 +68,8 @@ class DiffusionPolicy(NeuracoreModel):
         prediction_type: str = "epsilon",
         lr_scheduler_type: str = "cosine",
         lr_scheduler_num_warmup_steps: int = 500,
+        joint_state_normalizer: str = "MinMaxNormalizer",
+        action_normalizer: str = "MinMaxNormalizer",
     ):
         """Initialize the Diffusion Policy model.
 
@@ -98,6 +101,10 @@ class DiffusionPolicy(NeuracoreModel):
             lr_scheduler_type: Type of the learning rate scheduler
                 ("cosine", "linear", etc.).
             lr_scheduler_num_warmup_steps: Number of warmup steps for the scheduler.
+            joint_state_normalizer: Normalizer class
+                (e.g. "MinMaxNormalizer", "MeanStdNormalizer")
+            action_normalizer: Normalizer class
+                (e.g. "MinMaxNormalizer", "MeanStdNormalizer")
         """
         super().__init__(model_init_description)
         self.lr = lr

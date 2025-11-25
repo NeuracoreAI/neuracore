@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
+from hydra.utils import get_class
 from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 from torchvision import models
 from transformers import AutoModel, AutoTokenizer
@@ -224,6 +225,8 @@ class SimpleVLA(NeuracoreModel):
         freeze_backbone: bool = False,
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
+        joint_state_normalizer: str = "MeanStdNormalizer",
+        action_normalizer: str = "MeanStdNormalizer",
     ):
         """Initialize the Simple VLA model.
 
@@ -238,6 +241,10 @@ class SimpleVLA(NeuracoreModel):
             freeze_backbone: Whether to freeze image encoder backbone
             lr_backbone: Learning rate for encoder backbones
             weight_decay: Weight decay for optimizer
+            joint_state_normalizer: Normalizer class
+                (e.g. "MeanStdNormalizer", "MinMaxNormalizer")
+            action_normalizer: Normalizer class
+                (e.g. "MeanStdNormalizer", "MinMaxNormalizer")
         """
         super().__init__(model_init_description)
         self.hidden_dim = hidden_dim

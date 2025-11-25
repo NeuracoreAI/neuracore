@@ -66,6 +66,8 @@ class ACT(NeuracoreModel):
         weight_decay: float = 1e-4,
         kl_weight: float = 10.0,
         latent_dim: int = 512,
+        joint_state_normalizer: str = "MeanStdNormalizer",
+        action_normalizer: str = "MeanStdNormalizer",
     ):
         """Initialize the ACT model.
 
@@ -83,6 +85,10 @@ class ACT(NeuracoreModel):
             weight_decay: Weight decay for optimizer
             kl_weight: Weight for KL divergence loss
             latent_dim: Dimension of latent variable space
+            joint_state_normalizer: Normalizer class
+                (e.g. "MeanStdNormalizer", "MinMaxNormalizer")
+            action_normalizer: Normalizer class
+                (e.g. "MeanStdNormalizer", "MinMaxNormalizer")
         """
         super().__init__(model_init_description)
         self.hidden_dim = hidden_dim

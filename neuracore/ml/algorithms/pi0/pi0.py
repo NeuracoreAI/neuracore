@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
+from hydra.utils import get_class
 from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 from transformers import AutoProcessor, AutoTokenizer, PaliGemmaForConditionalGeneration
 
@@ -74,6 +75,8 @@ class Pi0(NeuracoreModel):
         lr: float = 5e-5,
         weight_decay: float = 0.0,
         dtype: torch.dtype = torch.float32,
+        joint_state_normalizer: str = "MeanStdNormalizer",
+        action_normalizer: str = "MeanStdNormalizer",
     ):
         """Initialize the Pi0 model.
 
@@ -97,6 +100,10 @@ class Pi0(NeuracoreModel):
             lr: Learning rate for the model.
             weight_decay: Weight decay for the model.
             dtype: Data type for model parameters and computations.
+            joint_state_normalizer: Normalizer class
+                (e.g. "MeanStdNormalizer", "MinMaxNormalizer")
+            action_normalizer: Normalizer class
+                (e.g. "MeanStdNormalizer", "MinMaxNormalizer")
         """
         super().__init__(model_init_description)
 
