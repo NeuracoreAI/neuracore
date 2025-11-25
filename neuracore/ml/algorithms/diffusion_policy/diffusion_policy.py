@@ -18,6 +18,7 @@ from neuracore.ml import (
     BatchedTrainingSamples,
     NeuracoreModel,
 )
+from neuracore.ml.algorithm_utils.normalizer import Normalizer
 
 from .modules import DiffusionConditionalUnet1d, DiffusionPolicyImageEncoder
 
@@ -145,159 +146,33 @@ class DiffusionPolicy(NeuracoreModel):
             T.Resize((224, 224)),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         )
-
         # Normalization statistics
-        self._setup_normalization_stats()
+        self.normalizer = Normalizer()
+        self._setup_normalizer()
 
-    def _setup_normalization_stats(self) -> None:
+    def _setup_normalizer(self) -> None:
         """Setup normalization statistics for different data types."""
-        if self.normalization_type == "mean_std":
-            state_means = []
-            state_stds = []
-            if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-                state_means.extend(self.dataset_description.joint_positions.mean)
-                state_stds.extend(self.dataset_description.joint_positions.std)
-            if (
-                DataType.JOINT_VELOCITIES
-                in self.model_init_description.input_data_types
-            ):
-                state_means.extend(self.dataset_description.joint_velocities.mean)
-                state_stds.extend(self.dataset_description.joint_velocities.std)
-            if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
-                state_means.extend(self.dataset_description.joint_torques.mean)
-                state_stds.extend(self.dataset_description.joint_torques.std)
-            if state_means:
-                self.register_buffer(
-                    "joint_state_mean", self._to_torch_float_tensor(state_means)
-                )
-                self.register_buffer(
-                    "joint_state_std", self._to_torch_float_tensor(state_stds)
-                )
-            else:
-                self.joint_state_mean = None
-                self.joint_state_std = None
-
-            # Always register target stats for mean/std normalization
-            self.register_buffer(
-                "joint_target_mean",
-                self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.mean
-                ),
-            )
-            self.register_buffer(
-                "joint_target_std",
-                self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.std
-                ),
-            )
-
-        elif self.normalization_type == "min_max":
-            state_min = []
-            state_max = []
-            if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-                state_min.extend(self.dataset_description.joint_positions.min)
-                state_max.extend(self.dataset_description.joint_positions.max)
-            if (
-                DataType.JOINT_VELOCITIES
-                in self.model_init_description.input_data_types
-            ):
-                state_min.extend(self.dataset_description.joint_velocities.min)
-                state_max.extend(self.dataset_description.joint_velocities.max)
-            if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
-                state_min.extend(self.dataset_description.joint_torques.min)
-                state_max.extend(self.dataset_description.joint_torques.max)
-            if state_min:
-                self.register_buffer(
-                    "joint_state_min", self._to_torch_float_tensor(state_min)
-                )
-                self.register_buffer(
-                    "joint_state_max", self._to_torch_float_tensor(state_max)
-                )
-            else:
-                self.joint_state_min = None
-                self.joint_state_max = None
-            # Always register target stats for min/max normalization
-            self.register_buffer(
-                "joint_target_min",
-                self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.min
-                ),
-            )
-            self.register_buffer(
-                "joint_target_max",
-                self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.max
-                ),
-            )
-
-    def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
-        """Convert list of floats to torch tensor on the correct device."""
-        return torch.tensor(data, dtype=torch.float32, device=self.device)
-
-    def _preprocess_joint_state(
-        self,
-        joint_state: torch.FloatTensor,
-        stat1: torch.FloatTensor,
-        stat2: torch.FloatTensor,
-    ) -> torch.FloatTensor:
-        """Preprocess the states using the configured normalization type.
-
-        Args:
-            joint_state: Input joint state tensor.
-            stat1: First normalization statistic (mean for mean_std, min for min_max).
-            stat2: Second normalization statistic (std for mean_std, max for min_max).
-
-        Returns:
-            Normalized joint state tensor.
-        """
-        # Validate that statistics are not empty
-        if stat1.shape[0] == 0 or stat2.shape[0] == 0:
-            raise ValueError("Normalization statistics are empty.")
-
-        # Validate dimensions match
-        if joint_state.shape[-1] != stat1.shape[0]:
-            raise ValueError(
-                f"Dimension mismatch: joint_state has {joint_state.shape[-1]} features "
-                f"but statistics have {stat1.shape[0]} features. "
-                "This usually means the input data types don't match the dataset."
-            )
-
-        if self.normalization_type == "mean_std":
-            return (joint_state - stat1) / stat2
-        elif self.normalization_type == "min_max":
-            range_val = stat2 - stat1
-            # Avoid division by zero
-            range_val = torch.clamp(range_val, min=1e-8)
-            # Scale to [0, 1], then map to [-1, 1]
-            normalized = (joint_state - stat1) / range_val
-            return normalized * 2.0 - 1.0
-        else:
-            raise ValueError(
-                f"Unsupported normalization_type: {self.normalization_type}"
-            )
-
-    def _unnormalize_actions(
-        self, predicted_actions: torch.FloatTensor
-    ) -> torch.FloatTensor:
-        """Unnormalize the actions using the configured normalization type.
-
-        Args:
-            predicted_actions: Normalized action predictions.
-
-        Returns:
-            Unnormalized action tensor.
-        """
-        if self.normalization_type == "mean_std":
-            return (predicted_actions * self.joint_target_std) + self.joint_target_mean
-        elif self.normalization_type == "min_max":
-            range_val = self.joint_target_max - self.joint_target_min
-            # Avoid division by zero
-            range_val = torch.clamp(range_val, min=1e-8)
-            return (predicted_actions + 1.0) / 2.0 * range_val + self.joint_target_min
-        else:
-            raise ValueError(
-                f"Unsupported normalization_type: {self.normalization_type}"
-            )
+        joint_states = []
+        actions = []
+        if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
+            joint_states.append(self.dataset_description.joint_positions)
+        if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
+            joint_states.append(self.dataset_description.joint_velocities)
+        if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
+            joint_states.append(self.dataset_description.joint_torques)
+        if (
+            DataType.JOINT_TARGET_POSITIONS
+            in self.model_init_description.output_data_types
+        ):
+            actions.append(self.dataset_description.joint_target_positions)
+        self.normalizer.add_statistics(
+            name="joint_states",
+            stats=joint_states,
+            normalization_type=self.normalization_type,
+        )
+        self.normalizer.add_statistics(
+            name="actions", stats=actions, normalization_type=self.normalization_type
+        )
 
     def _combine_joint_states(
         self, batch: BatchedInferenceSamples
@@ -315,14 +190,9 @@ class DiffusionPolicy(NeuracoreModel):
 
         if state_inputs:
             joint_states = torch.cat(state_inputs, dim=-1)
-            if self.normalization_type == "mean_std":
-                joint_states = self._preprocess_joint_state(
-                    joint_states, self.joint_state_mean, self.joint_state_std
-                )
-            elif self.normalization_type == "min_max":
-                joint_states = self._preprocess_joint_state(
-                    joint_states, self.joint_state_min, self.joint_state_max
-                )
+            joint_states = self.normalizer.normalize(
+                name="joint_states", data=joint_states
+            )
             return joint_states
         else:
             # Return zero tensor if no joint states available
@@ -472,7 +342,7 @@ class DiffusionPolicy(NeuracoreModel):
         action_preds = self._predict_action(batch, prediction_horizon)
         prediction_time = time.time() - t
         # unnormalize the actions
-        predictions = self._unnormalize_actions(action_preds)
+        predictions = self.normalizer.unnormalize(name="actions", data=action_preds)
         predictions = predictions.detach().cpu().numpy()
         return ModelPrediction(
             outputs={DataType.JOINT_TARGET_POSITIONS: predictions},
@@ -506,18 +376,9 @@ class DiffusionPolicy(NeuracoreModel):
         )
         if batch.outputs.joint_target_positions is None:
             raise ValueError("Failed to find joint_target_positions")
-        if self.normalization_type == "mean_std":
-            target_actions = self._preprocess_joint_state(
-                batch.outputs.joint_target_positions.data,
-                self.joint_target_mean,
-                self.joint_target_std,
-            )
-        elif self.normalization_type == "min_max":
-            target_actions = self._preprocess_joint_state(
-                batch.outputs.joint_target_positions.data,
-                self.joint_target_min,
-                self.joint_target_max,
-            )
+        target_actions = self.normalizer.normalize(
+            name="actions", data=batch.outputs.joint_target_positions.data
+        )
         target_actions = target_actions * batch.outputs.joint_target_positions.mask
         # Sample noise to add to the trajectory.
         eps = torch.randn(target_actions.shape, device=target_actions.device)
