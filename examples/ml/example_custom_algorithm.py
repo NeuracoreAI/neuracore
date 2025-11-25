@@ -21,6 +21,10 @@ from neuracore.ml import (
     BatchedTrainingSamples,
     NeuracoreModel,
 )
+from neuracore.ml.algorithm_utils.normalizer import MeanStdNormalizer
+
+JOINT_STATE_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
+ACTION_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
 
 
 class ImageEncoder(nn.Module):
@@ -301,55 +305,37 @@ class SimpleVLA(NeuracoreModel):
 
         self.max_output_size = self.dataset_description.joint_target_positions.max_len
 
-        # Normalization statistics
-        self._setup_normalization_stats()
         # Setup parameter groups
         self._setup_optimizer_param_groups()
+        # Setup Normalizer
+        self._setup_normalizer()
 
-    def _setup_normalization_stats(self) -> None:
+    def _setup_normalizer(self) -> None:
         """Setup normalization statistics for different data types."""
         # Joint state normalization
-        state_means = []
-        state_stds = []
-
+        joint_states = []
+        actions = []
         if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_positions.mean)
-            state_stds.extend(self.dataset_description.joint_positions.std)
+            joint_states.append(self.dataset_description.joint_positions)
         if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_velocities.mean)
-            state_stds.extend(self.dataset_description.joint_velocities.std)
+            joint_states.append(self.dataset_description.joint_velocities)
         if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_torques.mean)
-            state_stds.extend(self.dataset_description.joint_torques.std)
-
-        if state_means:
-            self.register_buffer(
-                "joint_state_mean", self._to_torch_float_tensor(state_means)
-            )
-            self.register_buffer(
-                "joint_state_std", self._to_torch_float_tensor(state_stds)
-            )
-        else:
-            self.joint_state_mean = None
-            self.joint_state_std = None
-        self.register_buffer(
-            "joint_target_mean",
-            self._to_torch_float_tensor(
-                self.dataset_description.joint_target_positions.mean
-            ),
+            joint_states.append(self.dataset_description.joint_torques)
+        if (
+            DataType.JOINT_TARGET_POSITIONS
+            in self.model_init_description.output_data_types
+        ):
+            actions.append(self.dataset_description.joint_target_positions)
+        self.joint_state_normalizer = JOINT_STATE_NORMALIZER(
+            name="joint_states", statistics=joint_states
         )
-        self.register_buffer(
-            "joint_target_std",
-            self._to_torch_float_tensor(
-                self.dataset_description.joint_target_positions.std
-            ),
-        )
+        self.action_normalizer = ACTION_NORMALIZER(name="actions", statistics=actions)
 
     def _setup_optimizer_param_groups(self) -> None:
         """Setup parameter groups for optimizer."""
         backbone_params, other_params = [], []
         for name, param in self.named_parameters():
-            if "image_encoders" in name or "language_encoder" in name:
+            if any(backbone in name for backbone in ["image_encoders"]):
                 backbone_params.append(param)
             else:
                 other_params.append(param)
@@ -363,17 +349,6 @@ class SimpleVLA(NeuracoreModel):
                 {"params": backbone_params, "lr": self.lr_backbone},
                 {"params": other_params, "lr": self.lr},
             ]
-
-    def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
-        """Convert list of floats to torch tensor on the correct device.
-
-        Args:
-            data: List of float values
-
-        Returns:
-            torch.FloatTensor: Tensor on the model's device
-        """
-        return torch.tensor(data, dtype=torch.float32, device=self.device)
 
     def _build_mlp(
         self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int
@@ -410,32 +385,6 @@ class SimpleVLA(NeuracoreModel):
         layers.append(nn.Linear(hidden_dim, output_dim))
 
         return nn.Sequential(*layers)
-
-    def _preprocess_joint_state(
-        self, joint_state: torch.FloatTensor
-    ) -> torch.FloatTensor:
-        """Normalize joint state using dataset statistics.
-
-        Args:
-            joint_state: Raw joint state tensor
-
-        Returns:
-            torch.FloatTensor: Normalized joint state
-        """
-        return (joint_state - self.joint_state_mean) / self.joint_state_std
-
-    def _preprocess_target_joint_pos(
-        self, target_joint_pos: torch.FloatTensor
-    ) -> torch.FloatTensor:
-        """Normalize target joint positions using dataset statistics.
-
-        Args:
-            target_joint_pos: Raw target joint positions
-
-        Returns:
-            torch.FloatTensor: Normalized target joint positions
-        """
-        return (target_joint_pos - self.joint_target_mean) / self.joint_target_std
 
     def _process_language_tokens(
         self,
@@ -530,7 +479,7 @@ class SimpleVLA(NeuracoreModel):
 
             if state_inputs:
                 joint_states = torch.cat(state_inputs, dim=-1)
-                joint_states = self._preprocess_joint_state(joint_states)
+                joint_states = self.joint_state_normalizer.normalize(data=joint_states)
                 state_features = self.state_embed(joint_states)
             else:
                 state_features = torch.zeros(
@@ -565,7 +514,7 @@ class SimpleVLA(NeuracoreModel):
         prediction_time = time.time() - t
 
         # Unnormalize predictions
-        predictions = (action_preds * self.joint_target_std) + self.joint_target_mean
+        predictions = self.action_normalizer.unnormalize(data=action_preds)
         predictions = predictions.detach().cpu().numpy()
 
         return ModelPrediction(
@@ -597,8 +546,8 @@ class SimpleVLA(NeuracoreModel):
         # Preprocess target actions
         target_actions = None
         if batch.outputs.joint_target_positions is not None:
-            target_actions = self._preprocess_target_joint_pos(
-                batch.outputs.joint_target_positions.data
+            target_actions = self.action_normalizer.normalize(
+                data=batch.outputs.joint_target_positions.data
             )
 
         # Get model predictions

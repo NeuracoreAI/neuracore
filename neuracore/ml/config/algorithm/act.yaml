@@ -13,3 +13,4 @@ algorithm:
   weight_decay: 1e-4
   kl_weight: 10.0
   latent_dim: 512
+  
