@@ -96,6 +96,7 @@ class DistributedTrainer:
 
         # Set up the model for distributed training
         self.model = model.to(self.device)
+
         if torch.cuda.is_available() and world_size > 1:
             self.model = NestedModule(self.model).to(self.device)
             self.model = DDP(
@@ -115,10 +116,15 @@ class DistributedTrainer:
         self.clip_grad_norm = clip_grad_norm
         self.rank = rank
         self.world_size = world_size
-        self.optimizers = model.configure_optimizers()
         self.global_train_step = 0
         self.global_val_step = 0
 
+        num_training_steps = self.num_epochs * len(self.train_loader)
+        self.optimizers = model.configure_optimizers()
+        self.schedulers = model.configure_schedulers(
+            self.optimizers,
+            num_training_steps,
+        )
         # Create checkpoint directory
         if rank == 0:
             self.checkpoint_dir = output_dir / "checkpoints"
@@ -172,6 +178,10 @@ class DistributedTrainer:
 
             for optimizer in self.optimizers:
                 optimizer.step()
+
+            if self.schedulers:
+                for scheduler in self.schedulers:
+                    scheduler.step()
 
             if self.log_freq > 0 and self.global_train_step % self.log_freq == 0:
                 self._log_scalars(
@@ -350,6 +360,9 @@ class DistributedTrainer:
             "epoch": epoch,
             "model_state": model_state,
             "optimizer_states": [opt.state_dict() for opt in self.optimizers],
+            "scheduler_states": (
+                [sch.state_dict() for sch in self.schedulers] if self.schedulers else []
+            ),
             "metrics": metrics,
             "global_train_step": self.global_train_step,
             "global_val_step": self.global_val_step,
@@ -387,7 +400,11 @@ class DistributedTrainer:
             self.optimizers, checkpoint["optimizer_states"]
         ):
             optimizer.load_state_dict(opt_state)
-
+        if self.schedulers and checkpoint.get("scheduler_states"):
+            for scheduler, sch_state in zip(
+                self.schedulers, checkpoint["scheduler_states"]
+            ):
+                scheduler.load_state_dict(sch_state)
         # Restore step counters
         self.global_train_step = checkpoint.get("global_train_step", 0)
         self.global_val_step = checkpoint.get("global_val_step", 0)
