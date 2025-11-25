@@ -205,3 +205,6 @@ xquat
 xyzrgb
 ylabel
 znear
+stddev
+advs
+idxs
