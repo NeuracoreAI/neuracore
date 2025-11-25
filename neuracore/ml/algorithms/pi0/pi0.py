@@ -750,11 +750,19 @@ class Pi0(NeuracoreModel):
 
     def configure_optimizers(
         self,
+<<<<<<< HEAD
+=======
+        num_training_steps: Optional[int] = None,
+>>>>>>> 7f6e325 (add scheduler and improve diffusion policy)
     ) -> dict[str, Union[list[torch.optim.Optimizer], None]]:
         """Configure optimizer with different learning rates for different components.
 
         Uses separate learning rates for image encoder backbone (typically lower)
         and other model parameters to account for pre-trained vision components.
+
+        Args:
+            num_training_steps: Total number of training steps. Optional, may be used
+                for learning rate scheduling.
 
         Returns:
             dict: Dictionary with keys "optimizers" and "schedulers".
@@ -771,6 +779,7 @@ class Pi0(NeuracoreModel):
             {"params": trainable_params, "lr": self.optimizer_lr},
         ]
 
+<<<<<<< HEAD
         def build_scheduler(optimizer: torch.optim.Optimizer) -> LambdaLR:
             import math
 
@@ -808,6 +817,13 @@ class Pi0(NeuracoreModel):
         return {
             "optimizers": [optimizer],
             "schedulers": [build_scheduler(optimizer)],
+=======
+        return {
+            "optimizers": [
+                torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)
+            ],
+            "schedulers": None,
+>>>>>>> 7f6e325 (add scheduler and improve diffusion policy)
         }
 
     @staticmethod

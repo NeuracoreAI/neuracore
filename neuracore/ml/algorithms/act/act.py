@@ -11,7 +11,7 @@ with low-cost hardware." arXiv preprint arXiv:2304.13705 (2023).
 
 import logging
 import time
-from typing import Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -577,11 +577,16 @@ class ACT(NeuracoreModel):
 
     def configure_optimizers(
         self,
+        num_training_steps: Optional[int] = None,
     ) -> dict[str, Union[list[torch.optim.Optimizer], None]]:
         """Configure optimizer with different learning rates for different components.
 
         Uses separate learning rates for image encoder backbone (typically lower)
         and other model parameters to account for pre-trained vision components.
+
+        Args:
+            num_training_steps: Total number of training steps. Optional, may be used
+                for learning rate scheduling.
 
         Returns:
             dict: Dictionary with keys "optimizers" and "schedulers".

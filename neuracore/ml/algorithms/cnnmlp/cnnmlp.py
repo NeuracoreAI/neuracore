@@ -7,7 +7,7 @@ and outputs entire action sequences.
 """
 
 import time
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -519,11 +519,16 @@ class CNNMLP(NeuracoreModel):
 
     def configure_optimizers(
         self,
+        num_training_steps: Optional[int] = None,
     ) -> dict[str, Union[list[torch.optim.Optimizer], None]]:
         """Configure optimizer with different learning rates for different components.
 
         Uses separate learning rates for image encoder backbones (typically lower)
         and other model parameters.
+
+        Args:
+            num_training_steps: Total number of training steps. Optional, may be used
+                for learning rate scheduling.
 
         Returns:
             dict: Dictionary with keys "optimizers" and "schedulers".

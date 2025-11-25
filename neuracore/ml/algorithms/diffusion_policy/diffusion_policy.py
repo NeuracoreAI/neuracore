@@ -39,6 +39,7 @@ class DiffusionPolicy(NeuracoreModel):
             512,
             1024,
             2048,
+            2048,
         ),
         unet_kernel_size: int = 5,
         unet_n_groups: int = 8,
@@ -59,11 +60,12 @@ class DiffusionPolicy(NeuracoreModel):
         weight_decay: float = 1e-6,
         optimizer_betas: Tuple[float, float] = (0.9, 0.999),
         optimizer_eps: float = 1e-8,
+        optimizer_betas: Tuple[float, float] = (0.9, 0.999),
+        optimizer_eps: float = 1e-8,
         prediction_type: str = "epsilon",
         normalization_type: str = "min_max",
         lr_scheduler_type: str = "cosine",
         lr_scheduler_num_warmup_steps: int = 500,
-        lr_scheduler_num_training_steps: Optional[int] = None,
     ):
         """Initialize the Diffusion Policy model.
 
@@ -90,13 +92,13 @@ class DiffusionPolicy(NeuracoreModel):
             weight_decay: Weight decay for optimization.
             optimizer_betas: Betas for optimizer.
             optimizer_eps: Epsilon for optimizer.
+            optimizer_betas: Betas for optimizer.
+            optimizer_eps: Epsilon for optimizer.
             prediction_type: Type of prediction ("epsilon" or "sample").
             normalization_type: Type of normalization to use ("mean_std" or "min_max").
             lr_scheduler_type: Type of the learning rate scheduler
                 ("cosine", "linear", etc.).
             lr_scheduler_num_warmup_steps: Number of warmup steps for the scheduler.
-            lr_scheduler_num_training_steps: Total number of training steps.
-                If None, will be set by trainer.
         """
         super().__init__(model_init_description)
         self.lr = lr
@@ -106,7 +108,6 @@ class DiffusionPolicy(NeuracoreModel):
         self.optimizer_eps = optimizer_eps
         self.lr_scheduler_type = lr_scheduler_type
         self.lr_scheduler_num_warmup_steps = lr_scheduler_num_warmup_steps
-        self.lr_scheduler_num_training_steps = lr_scheduler_num_training_steps
         # Validate normalization type
         if normalization_type not in ("mean_std", "min_max"):
             raise ValueError(
@@ -590,14 +591,12 @@ class DiffusionPolicy(NeuracoreModel):
 
     def configure_optimizers(
         self,
+        num_training_steps: Optional[int] = None,
     ) -> dict[str, Union[list[torch.optim.Optimizer], None]]:
         """Configure optimizer and scheduler with different learning rates.
 
         Uses separate learning rates for image encoder backbone (typically lower)
         and other model parameters to account for pre-trained vision components.
-
-        If lr_backbone is 0, backbone parameters are frozen (requires_grad=False)
-        and excluded from the optimizer to save memory and computation.
 
         Returns:
             dict: Dictionary with keys "optimizers" and "schedulers".
@@ -605,6 +604,8 @@ class DiffusionPolicy(NeuracoreModel):
                 - "schedulers": List of schedulers or None
             List containing [optimizer, scheduler] where scheduler is from diffusers.
         """
+        from diffusers.optimization import get_scheduler
+
         from diffusers.optimization import get_scheduler
 
         backbone_params = []
@@ -643,20 +644,18 @@ class DiffusionPolicy(NeuracoreModel):
             betas=self.optimizer_betas,
             eps=self.optimizer_eps,
         )
-
-        # Create a scheduler for the optimizer
-        # Use a placeholder for num_training_steps if not provided to avoid error
-        # Later the num_training_steps will be updated by the trainer.
-        scheduler = get_scheduler(
-            name=self.lr_scheduler_type,
-            optimizer=optimizer,
-            num_warmup_steps=self.lr_scheduler_num_warmup_steps,
-            num_training_steps=(
-                self.lr_scheduler_num_training_steps
-                if self.lr_scheduler_num_training_steps is not None
-                else 100000
-            ),
-        )
+        if num_training_steps is not None:
+            # Create a scheduler for the optimizer
+            scheduler = get_scheduler(
+                name=self.lr_scheduler_type,
+                optimizer=optimizer,
+                num_warmup_steps=self.lr_scheduler_num_warmup_steps,
+                num_training_steps=num_training_steps,
+            )
+        else:
+            raise ValueError(
+                "num_training_steps is required for learning rate scheduling"
+            )
 
         return {
             "optimizers": [optimizer],

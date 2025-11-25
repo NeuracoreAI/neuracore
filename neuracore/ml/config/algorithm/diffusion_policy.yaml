@@ -26,4 +26,3 @@ algorithm:
   normalization_type: "min_max"
   lr_scheduler_type: "cosine"
   lr_scheduler_num_warmup_steps: 500
-  lr_scheduler_num_training_steps: null

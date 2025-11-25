@@ -597,11 +597,15 @@ class SimpleVLA(NeuracoreModel):
 
     def configure_optimizers(
         self,
+        num_training_steps: int = 10000,
     ) -> dict[str, Union[list[torch.optim.Optimizer], None]]:
         """Configure optimizer with different learning rates for different components.
 
         Uses separate learning rates for encoder backbones (typically lower)
         and other model parameters.
+
+        Args:
+            num_training_steps: Total number of training steps.
 
         Returns:
             dict: Dictionary with keys "optimizers" and "schedulers".

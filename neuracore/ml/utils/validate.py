@@ -351,7 +351,9 @@ def run_validation(
 
         # Check 2: Can configure optimizer
         logger.info("Configuring optimizer")
-        optimizer_result = model.configure_optimizers()
+        optimizer_result = model.configure_optimizers(
+            num_training_steps=len(dataloader)
+        )
         if isinstance(optimizer_result, dict):
             optimizers = optimizer_result.get("optimizers")
             if optimizers is None:

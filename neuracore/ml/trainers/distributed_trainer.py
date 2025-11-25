@@ -11,6 +11,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import Optimizer
+from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
@@ -120,7 +121,10 @@ class DistributedTrainer:
         self.global_train_step = 0
         self.global_val_step = 0
 
-        optimizer_result = model.configure_optimizers()
+        num_training_steps = self.num_epochs * len(self.train_loader)
+        optimizer_result = model.configure_optimizers(
+            num_training_steps=num_training_steps
+        )
         if isinstance(optimizer_result, dict):
             optimizers = optimizer_result.get("optimizers")
             if optimizers is None:
@@ -132,11 +136,6 @@ class DistributedTrainer:
                 "configure_optimizers must return a dictionary with keys "
                 "'optimizers' and 'schedulers'"
             )
-        if self.schedulers is not None:
-            num_training_steps = self.num_epochs * len(self.train_loader)
-            for scheduler in self.schedulers:
-                if hasattr(scheduler, "num_training_steps"):
-                    scheduler.num_training_steps = num_training_steps
         # Create checkpoint directory
         if rank == 0:
             self.checkpoint_dir = output_dir / "checkpoints"
