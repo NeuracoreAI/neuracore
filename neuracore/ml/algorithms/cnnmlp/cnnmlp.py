@@ -78,6 +78,8 @@ class CNNMLP(NeuracoreModel):
         freeze_backbone: bool = False,
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
+        joint_state_normalizer: str = "MeanStdNormalizer",
+        action_normalizer: str = "MeanStdNormalizer",
     ):
         """Initialize the CNN+MLP model.
 
@@ -92,6 +94,10 @@ class CNNMLP(NeuracoreModel):
             freeze_backbone: Whether to freeze image encoder backbone
             lr_backbone: Learning rate for CNN backbone
             weight_decay: Weight decay for optimizer
+            joint_state_normalizer: Normalizer class
+                (e.g. "MeanStdNormalizer", "MinMaxNormalizer")
+            action_normalizer: Normalizer class
+                (e.g. "MeanStdNormalizer", "MinMaxNormalizer")
         """
         super().__init__(model_init_description)
         self.image_backbone = image_backbone

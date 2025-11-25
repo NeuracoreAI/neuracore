@@ -80,6 +80,8 @@ class DiffusionPolicy(NeuracoreModel):
         prediction_type: str = "epsilon",
         lr_scheduler_type: str = "cosine",
         lr_scheduler_num_warmup_steps: int = 500,
+        joint_state_normalizer: str = "MinMaxNormalizer",
+        action_normalizer: str = "MinMaxNormalizer",
     ):
         """Initialize the Diffusion Policy model.
 
@@ -112,6 +114,10 @@ class DiffusionPolicy(NeuracoreModel):
             lr_scheduler_type: Type of the learning rate scheduler
                 ("cosine", "linear", etc.).
             lr_scheduler_num_warmup_steps: Number of warmup steps for the scheduler.
+            joint_state_normalizer: Normalizer class
+                (e.g. "MinMaxNormalizer", "MeanStdNormalizer")
+            action_normalizer: Normalizer class
+                (e.g. "MinMaxNormalizer", "MeanStdNormalizer")
         """
         super().__init__(model_init_description)
         self.use_resnet_stats = use_resnet_stats
