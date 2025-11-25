@@ -17,9 +17,9 @@ algorithm:
   beta_schedule: "squaredcos_cap_v2"
   clip_sample: true
   clip_sample_range: 1.0
-  lr: 1e-4
+  lr: 1e-4 # default value for batch size 16
   freeze_backbone: false
-  lr_backbone: 1e-4
+  lr_backbone: 1e-4 # default value for batch size 16
   weight_decay: 2e-6
   optimizer_betas: [0.95, 0.999]
   optimizer_eps: 1e-8

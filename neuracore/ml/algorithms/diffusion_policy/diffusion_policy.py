@@ -45,6 +45,7 @@ class DiffusionPolicy(NeuracoreModel):
         unet_diffusion_step_embed_dim: int = 128,
         spatial_softmax_num_keypoints: int = 32,
         unet_use_film_scale_modulation: bool = True,
+        use_pretrained_weights: bool = True,
         noise_scheduler_type: str = "DDPM",
         num_train_timesteps: int = 100,
         num_inference_steps: int = 100,
@@ -75,6 +76,7 @@ class DiffusionPolicy(NeuracoreModel):
             unet_diffusion_step_embed_dim: Dimension of diffusion step embeddings.
             spatial_softmax_num_keypoints: Number of keypoints for spatial softmax.
             unet_use_film_scale_modulation: Whether to use FiLM scale modulation.
+            use_pretrained_weights: Whether to load pretrained ResNet weights.
             noise_scheduler_type: Type of noise scheduler ("DDPM" or "DDIM").
             num_train_timesteps: Number of timesteps for training.
             num_inference_steps: Number of timesteps for inference.
@@ -116,6 +118,7 @@ class DiffusionPolicy(NeuracoreModel):
             DiffusionPolicyImageEncoder(
                 feature_dim=hidden_dim,
                 spatial_softmax_num_keypoints=spatial_softmax_num_keypoints,
+                use_pretrained_weights=use_pretrained_weights,
             )
             for _ in range(self.dataset_description.rgb_images.max_len)
         ])
