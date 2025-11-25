@@ -213,3 +213,6 @@ xyzrgb
 ylabel
 znear
 bigym
+stddev
+advs
+idxs
