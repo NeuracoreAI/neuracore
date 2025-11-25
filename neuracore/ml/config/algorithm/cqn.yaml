@@ -1,0 +1,21 @@
+# @package _global_
+algorithm:
+  _target_: neuracore.ml.algorithms.cqn.cqn.CQN
+  lr: 5e-5
+  weight_decay: 0.1
+  feature_dim: 64
+  hidden_dim: 512
+  levels: 3
+  bins: 5
+  atoms: 51
+  v_min: -2.0
+  v_max: 2.0
+  bc_lambda: 1.0
+  bc_margin: 0.01
+  critic_lambda: 0.1
+  critic_target_tau: 0.02
+  critic_target_interval: 1
+  num_exploration_steps: 0
+  update_every_steps: 1
+  stddev_schedule: 0.01
+  discount: 0.99
