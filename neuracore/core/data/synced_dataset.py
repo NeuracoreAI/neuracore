@@ -47,16 +47,14 @@ class SynchronizedDataset:
         self._synced_recording_cache: dict[int, SynchronizedRecording] = {}
 
         if prefetch_videos:
-            prefetch_needed = False
             for rec in self.dataset.recordings:
                 cache_dir = (
                     self.dataset.cache_dir / f"{rec['id']}" / f"{self.frequency}Hz"
                 )
-                if not cache_dir.exists():
-                    prefetch_needed = True
+                # Check if cache directory exists and contains any files
+                if not cache_dir.exists() or not any(cache_dir.iterdir()):
+                    self._perform_videos_prefetch(max_workers=max_workers)
                     break
-            if prefetch_needed:
-                self._perform_videos_prefetch(max_workers=max_workers)
 
     def _perform_videos_prefetch(self, max_workers: int) -> None:
         """Prefetch video data for all recordings using multiple threads.
