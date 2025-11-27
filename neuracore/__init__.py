@@ -7,4 +7,4 @@ from .api.logging import *  # noqa: F403
 from .api.training import *  # noqa: F403
 from .core.exceptions import *  # noqa: F403
 
-__version__ = "3.5.2"
+__version__ = "3.5.3"
