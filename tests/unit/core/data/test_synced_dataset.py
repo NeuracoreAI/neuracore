@@ -240,10 +240,13 @@ class TestSynchronizedDataset:
         self, dataset_mock, dataset_description, mock_auth_requests, tmp_path
     ):
         """Test that prefetch is skipped when cache exists."""
-        # Create cache directories for all recordings
+        # Create cache directories for all recordings with at least one file
+        # to indicate cache is complete (frames are cached as PNG files)
         for rec in dataset_mock.recordings:
             cache_path = dataset_mock.cache_dir / f"{rec['id']}" / "30Hz"
             cache_path.mkdir(parents=True, exist_ok=True)
+            # Create a dummy file to indicate cache exists and has content
+            (cache_path / "0.png").touch()
 
         with patch.object(
             SynchronizedDataset, "_perform_videos_prefetch"
@@ -262,11 +265,13 @@ class TestSynchronizedDataset:
         self, dataset_mock, dataset_description, mock_auth_requests, tmp_path
     ):
         """Test that prefetch runs if only some recordings are cached."""
-        # Create cache for only first recording
+        # Create cache for only first recording with at least one file
         cache_path = (
             dataset_mock.cache_dir / f"{dataset_mock.recordings[0]['id']}" / "30Hz"
         )
         cache_path.mkdir(parents=True, exist_ok=True)
+        # Create a dummy file to indicate cache exists and has content
+        (cache_path / "0.png").touch()
 
         with patch.object(
             SynchronizedDataset, "_perform_videos_prefetch"
