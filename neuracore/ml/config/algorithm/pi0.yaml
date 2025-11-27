@@ -1,0 +1,21 @@
+# @package _global_
+algorithm:
+  _target_: neuracore.ml.algorithms.pi0.pi0.Pi0
+  vlm_expert_intermediate_size: 16384
+  vlm_expert_num_heads: 8
+  vlm_expert_num_kv_heads: 1
+  vlm_expert_head_dim: 256
+  vlm_max_text_tokens: 128
+  action_expert_width: 1024
+  action_expert_intermediate_size: 4096
+  action_expert_num_heads: 8
+  action_expert_num_kv_heads: 1
+  action_expert_head_dim: 256
+  moe_depth: 18
+  num_inference_steps: 10
+  flow_sig_min: 0.001
+  flow_alpha: 1.5
+  flow_beta: 1.0
+  lr: 5e-5
+  weight_decay: 0.0
+  dtype: torch.float32
