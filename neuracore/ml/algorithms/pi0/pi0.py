@@ -27,6 +27,7 @@ from neuracore.ml import (
     BatchedTrainingSamples,
     NeuracoreModel,
 )
+from neuracore.ml.algorithm_utils.normalizer import Normalizer
 
 from .modules import ActionEncoder, GemmaMoE, MoeExpertConfig, SinusoidalPosEmb
 
@@ -71,6 +72,7 @@ class Pi0(NeuracoreModel):
         lr: float = 5e-5,
         weight_decay: float = 0.0,
         dtype: torch.dtype = torch.float32,
+        normalization_type: str = "mean_std",
     ):
         """Initialize the Pi0 model.
 
@@ -94,6 +96,7 @@ class Pi0(NeuracoreModel):
             lr: Learning rate for the model.
             weight_decay: Weight decay for the model.
             dtype: Data type for model parameters and computations.
+            normalization_type: Type of normalization ("mean_std" or "min_max")
         """
         super().__init__(model_init_description)
 
@@ -119,7 +122,7 @@ class Pi0(NeuracoreModel):
             + self.dataset_description.joint_torques.max_len
         )
         self.dtype = dtype
-
+        self.normalization_type = normalization_type
         self.vlm = PaliGemmaForConditionalGeneration.from_pretrained(
             VLM_BACKBONE, dtype=self.dtype, attn_implementation="eager"
         )
@@ -184,66 +187,34 @@ class Pi0(NeuracoreModel):
         self.image_normalizer = torch.nn.Sequential(
             T.Resize((224, 224)),
         )
+        self.normalizer = Normalizer()
+        self._setup_normalizer()
 
-        # Normalization statistics
-        self._setup_normalization_stats()
-
-    def _setup_normalization_stats(self) -> None:
+    def _setup_normalizer(self) -> None:
         """Setup normalization statistics for different data types."""
         # Joint state normalization
-        state_means = []
-        state_stds = []
+        joint_states = []
+        actions = []
 
         if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_positions.mean)
-            state_stds.extend(self.dataset_description.joint_positions.std)
+            joint_states.append(self.dataset_description.joint_positions)
         if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_velocities.mean)
-            state_stds.extend(self.dataset_description.joint_velocities.std)
+            joint_states.append(self.dataset_description.joint_velocities)
         if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_torques.mean)
-            state_stds.extend(self.dataset_description.joint_torques.std)
-
-        if state_means:
-            # Register as buffers so they move with the model
-            self.register_buffer(
-                "joint_state_mean", self._to_torch_float_tensor(state_means)
-            )
-            self.register_buffer(
-                "joint_state_std", self._to_torch_float_tensor(state_stds)
-            )
-        else:
-            self.joint_state_mean = None
-            self.joint_state_std = None
-        self.register_buffer(
-            "joint_target_mean",
-            self._to_torch_float_tensor(
-                self.dataset_description.joint_target_positions.mean
-            ),
+            joint_states.append(self.dataset_description.joint_torques)
+        if (
+            DataType.JOINT_TARGET_POSITIONS
+            in self.model_init_description.output_data_types
+        ):
+            actions.append(self.dataset_description.joint_target_positions)
+        self.normalizer.add_statistics(
+            name="joint_states",
+            stats=joint_states,
+            normalization_type=self.normalization_type,
         )
-        self.register_buffer(
-            "joint_target_std",
-            self._to_torch_float_tensor(
-                self.dataset_description.joint_target_positions.std
-            ),
+        self.normalizer.add_statistics(
+            name="actions", stats=actions, normalization_type=self.normalization_type
         )
-
-    def _to_torch_float_tensor(self, data: list[float]) -> torch.Tensor:
-        """Convert list of floats to torch tensor on the correct device."""
-        return torch.tensor(data, dtype=torch.float32, device=self.device)
-
-    def _preprocess_joint_state(
-        self,
-        joint_state: torch.Tensor,
-        joint_state_mean: torch.Tensor,
-        joint_state_std: torch.Tensor,
-    ) -> torch.Tensor:
-        """Preprocess the states."""
-        return (joint_state - joint_state_mean) / joint_state_std
-
-    def _unnormalize_actions(self, predicted_actions: torch.Tensor) -> torch.Tensor:
-        """Unnormalize the actions."""
-        return (predicted_actions * self.joint_target_std) + self.joint_target_mean
 
     def _combine_normalized_joint_states(
         self, batch: BatchedInferenceSamples
@@ -261,8 +232,8 @@ class Pi0(NeuracoreModel):
 
         if state_inputs:
             joint_states = torch.cat(state_inputs, dim=-1)
-            joint_states = self._preprocess_joint_state(
-                joint_states, self.joint_state_mean, self.joint_state_std
+            joint_states = self.normalizer.normalize(
+                name="joint_states", data=joint_states
             )
             return joint_states
         else:
@@ -636,7 +607,7 @@ class Pi0(NeuracoreModel):
             action += delta_t * action_vel
             t += delta_t
         prediction_time = time.time() - t_start
-        predictions = self._unnormalize_actions(action)
+        predictions = self.normalizer.unnormalize(name="actions", data=action)
         predictions = predictions.detach().cpu().float().numpy()
         return ModelPrediction(
             outputs={DataType.JOINT_TARGET_POSITIONS: predictions},
@@ -663,10 +634,8 @@ class Pi0(NeuracoreModel):
         proprios = self._combine_normalized_joint_states(inference_sample)
         if batch.outputs.joint_target_positions is None:
             raise ValueError("Joint target positions are required")
-        target_actions = self._preprocess_joint_state(
-            batch.outputs.joint_target_positions.data,
-            self.joint_target_mean,
-            self.joint_target_std,
+        target_actions = self.normalizer.normalize(
+            name="actions", data=batch.outputs.joint_target_positions.data
         )
         target_actions = target_actions * batch.outputs.joint_target_positions.mask
         t = self._sample_fm_time(len(batch))

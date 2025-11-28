@@ -28,6 +28,7 @@ from neuracore.ml.algorithm_utils.modules import (
     PointCloudEncoder,
     PoseEncoder,
 )
+from neuracore.ml.algorithm_utils.normalizer import Normalizer
 
 from .modules import ImageEncoder
 
@@ -54,6 +55,7 @@ class CNNMLP(NeuracoreModel):
         lr: float = 1e-4,
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
+        normalization_type: str = "mean_std",
     ):
         """Initialize the CNN+MLP model.
 
@@ -66,6 +68,7 @@ class CNNMLP(NeuracoreModel):
             lr: Learning rate for main parameters
             lr_backbone: Learning rate for CNN backbone
             weight_decay: Weight decay for optimizer
+            normalization_type: Type of normalization ("mean_std" or "min_max")
         """
         super().__init__(model_init_description)
         self.image_backbone = image_backbone
@@ -75,7 +78,7 @@ class CNNMLP(NeuracoreModel):
         self.lr = lr
         self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
-
+        self.normalization_type = normalization_type
         # Initialize encoders for each supported modality
         self.encoders = nn.ModuleDict()
         self.feature_dims = {}
@@ -188,58 +191,35 @@ class CNNMLP(NeuracoreModel):
         )
 
         # Normalization statistics
-        self._setup_normalization_stats()
+        self.normalizer = Normalizer()
+        self._setup_normalizer()
 
-    def _setup_normalization_stats(self) -> None:
+    def _setup_normalizer(self) -> None:
         """Setup normalization statistics for different data types."""
         # Joint state normalization
-        state_means = []
-        state_stds = []
+        joint_states = []
+        actions = []
 
         if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_positions.mean)
-            state_stds.extend(self.dataset_description.joint_positions.std)
+            joint_states.append(self.dataset_description.joint_positions)
         if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_velocities.mean)
-            state_stds.extend(self.dataset_description.joint_velocities.std)
+            joint_states.append(self.dataset_description.joint_velocities)
         if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
-            state_means.extend(self.dataset_description.joint_torques.mean)
-            state_stds.extend(self.dataset_description.joint_torques.std)
+            joint_states.append(self.dataset_description.joint_torques)
+        if (
+            DataType.JOINT_TARGET_POSITIONS
+            in self.model_init_description.output_data_types
+        ):
+            actions.append(self.dataset_description.joint_target_positions)
 
-        if state_means:
-            self.register_buffer(
-                "joint_state_mean", self._to_torch_float_tensor(state_means)
-            )
-            self.register_buffer(
-                "joint_state_std", self._to_torch_float_tensor(state_stds)
-            )
-        else:
-            self.joint_state_mean = None
-            self.joint_state_std = None
-
-        # Action normalization
-        action_data_item_stats = (
-            self.dataset_description.joint_target_positions
-            if self.action_data_type == DataType.JOINT_TARGET_POSITIONS
-            else self.dataset_description.joint_positions
+        self.normalizer.add_statistics(
+            name="joint_states",
+            stats=joint_states,
+            normalization_type=self.normalization_type,
         )
-        self.register_buffer(
-            "action_mean", self._to_torch_float_tensor(action_data_item_stats.mean)
+        self.normalizer.add_statistics(
+            name="actions", stats=actions, normalization_type=self.normalization_type
         )
-        self.register_buffer(
-            "action_std", self._to_torch_float_tensor(action_data_item_stats.std)
-        )
-
-    def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
-        """Convert list of floats to torch tensor on the correct device.
-
-        Args:
-            data: List of float values
-
-        Returns:
-            torch.FloatTensor: Tensor on the model's device
-        """
-        return torch.tensor(data, dtype=torch.float32, device=self.device)
 
     def _build_mlp(
         self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int
@@ -275,32 +255,6 @@ class CNNMLP(NeuracoreModel):
 
         layers.append(nn.Linear(hidden_dim, output_dim))
         return nn.Sequential(*layers)
-
-    def _preprocess_joint_state(
-        self, joint_state: torch.FloatTensor
-    ) -> torch.FloatTensor:
-        """Normalize joint state using dataset statistics.
-
-        Args:
-            joint_state: Raw joint state tensor
-
-        Returns:
-            torch.FloatTensor: Normalized joint state
-        """
-        if self.joint_state_mean is not None and self.joint_state_std is not None:
-            return (joint_state - self.joint_state_mean) / self.joint_state_std
-        return joint_state
-
-    def _preprocess_actions(self, actions: torch.FloatTensor) -> torch.FloatTensor:
-        """Normalize actions using dataset statistics.
-
-        Args:
-            actions: Raw action tensor
-
-        Returns:
-            torch.FloatTensor: Normalized actions
-        """
-        return (actions - self.action_mean) / self.action_std
 
     def _process_visual_features(
         self, batch: BatchedInferenceSamples
@@ -366,7 +320,9 @@ class CNNMLP(NeuracoreModel):
 
             if state_inputs:
                 joint_states = torch.cat(state_inputs, dim=-1)
-                joint_states = self._preprocess_joint_state(joint_states)
+                joint_states = self.normalizer.normalize(
+                    name="joint_states", data=joint_states
+                )
                 features["joints"] = self.encoders["joints"](joint_states)
 
         # End-effectors
@@ -459,7 +415,7 @@ class CNNMLP(NeuracoreModel):
         t = time.time()
         action_preds = self._predict_action(batch)
         prediction_time = time.time() - t
-        predictions = (action_preds * self.action_std) + self.action_mean
+        predictions = self.normalizer.unnormalize(name="actions", data=action_preds)
         predictions = predictions.detach().cpu().numpy()
         return ModelPrediction(
             outputs={self.action_data_type: predictions},
@@ -500,7 +456,7 @@ class CNNMLP(NeuracoreModel):
             assert batch.outputs.joint_positions is not None, "joint_positions required"
             action_data = batch.outputs.joint_positions.data
 
-        target_actions = self._preprocess_actions(action_data)
+        target_actions = self.normalizer.normalize(name="actions", data=action_data)
         action_predictions = self._predict_action(inference_sample)
 
         losses: Dict[str, Any] = {}
