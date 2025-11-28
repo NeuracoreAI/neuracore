@@ -11,7 +11,8 @@ import torch
 import torch.multiprocessing as mp
 from neuracore_types import DataType, ModelInitDescription
 from omegaconf import DictConfig, OmegaConf
-from torch.utils.data import DataLoader, DistributedSampler, random_split
+from torch import randperm
+from torch.utils.data import DataLoader, DistributedSampler, Subset
 
 import neuracore as nc
 from neuracore.ml import NeuracoreModel
@@ -100,6 +101,65 @@ def get_model_and_algorithm_config(
             "must be provided in the configuration"
         )
     return model, algorithm_config
+
+
+def split_dataset(
+    dataset: PytorchSynchronizedDataset,
+    validation_split: float,
+    generator: Optional[torch.Generator] = None,
+) -> Tuple[Subset, Subset]:
+    """Split dataset into train and validation sets on the recording level.
+
+    Args:
+        dataset: The dataset to split.
+        validation_split: The fraction of the dataset to use for validation.
+        generator: The random generator to use for the split.
+
+    Returns:
+        A tuple of two Subset objects, the train and validation subsets.
+    """
+    dataset_size = len(dataset)
+    num_recordings = dataset.num_recordings
+
+    # Split dataset into train and validation sets on the recording level
+    train_split = 1 - validation_split
+    train_recordings_size = int(train_split * num_recordings)
+    val_recordings_size = num_recordings - train_recordings_size
+    train_samples_size = int(train_split * dataset_size)
+    val_samples_size = dataset_size - train_samples_size
+
+    # Use random split with fixed seed for deterministic behavior
+    recordings_indices = randperm(num_recordings, generator=generator)
+    train_recordings_indices = recordings_indices[:train_recordings_size]
+    val_recordings_indices = recordings_indices[train_recordings_size:]
+
+    # Uniformly sample from the recordings
+    train_samples_indices = train_recordings_indices.repeat(
+        train_samples_size // train_recordings_size + 1
+    )[:train_samples_size]
+    val_samples_indices = val_recordings_indices.repeat(
+        val_samples_size // val_recordings_size + 1
+    )[:val_samples_size]
+
+    # Convert recording indices to sample indices
+    avg_len = dataset_size // num_recordings
+    train_samples_indices = train_samples_indices * avg_len
+    val_samples_indices = val_samples_indices * avg_len
+
+    # Shuffle order of samples
+    train_samples_indices = train_samples_indices[
+        randperm(train_samples_size, generator=generator).tolist()
+    ]
+    val_samples_indices = val_samples_indices[
+        randperm(val_samples_size, generator=generator).tolist()
+    ]
+
+    train_dataset = Subset(dataset, train_samples_indices.tolist())
+    val_dataset = Subset(dataset, val_samples_indices.tolist())
+    assert len(train_dataset) == train_samples_size
+    assert len(val_dataset) == val_samples_size
+
+    return train_dataset, val_dataset
 
 
 def convert_data_types(data_types_list: list[str]) -> list[DataType]:
@@ -204,16 +264,9 @@ def run_training(
         input_data_types = convert_data_types(cfg.input_data_types)
         output_data_types = convert_data_types(cfg.output_data_types)
 
-        # Split dataset
-        dataset_size = len(dataset)
-        train_split = 1 - cfg.validation_split
-        train_size = int(train_split * dataset_size)
-        val_size = dataset_size - train_size
-
-        # Use random split with fixed seed for deterministic behavior
         generator = torch.Generator().manual_seed(cfg.seed)
-        train_dataset, val_dataset = random_split(
-            dataset, [train_size, val_size], generator=generator
+        train_dataset, val_dataset = split_dataset(
+            dataset, cfg.validation_split, generator
         )
 
         if world_size > 1:
