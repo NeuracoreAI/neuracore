@@ -51,7 +51,17 @@ class BatchSizeAutotuner:
         self.model = model
 
         # create optimizers
-        self.optimizers = self.model.configure_optimizers()
+        optimizer_result = self.model.configure_optimizers()
+        if isinstance(optimizer_result, dict):
+            optimizers = optimizer_result.get("optimizers")
+            if optimizers is None:
+                raise ValueError("optimizers cannot be None")
+            self.optimizers: list = optimizers
+        else:
+            raise ValueError(
+                "configure_optimizers must return a dictionary with keys "
+                "'optimizers' and 'schedulers'"
+            )
 
         # Validate batch size ranges
         if min_batch_size > max_batch_size:

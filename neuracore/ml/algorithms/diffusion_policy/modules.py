@@ -1,5 +1,6 @@
 """Diffusion Policy model components including UNet, encoders, and utilities."""
 
+import logging
 import math
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -9,6 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
+
+logger = logging.getLogger(__name__)
 
 
 class DiffusionPolicyImageEncoder(nn.Module):
@@ -20,28 +23,40 @@ class DiffusionPolicyImageEncoder(nn.Module):
 
     def __init__(
         self,
-        spatial_softmax_num_keypoints: int = 32,
         feature_dim: int = 256,
+        spatial_softmax_num_keypoints: int = 32,
+        use_pretrained_weights: bool = True,
     ):
         """Initialize the image encoder.
 
         Args:
+            feature_dim: Feature dimension for the image encoder.
             spatial_softmax_num_keypoints: Number of keypoints for spatial softmax.
-            feature_dim: Dimension of output features.
+            use_pretrained_weights: Whether to load pretrained ResNet weights.
         """
         super().__init__()
 
         # Use pretrained ResNet but remove final layers
-        self.backbone = self._build_backbone()
+        self.backbone = self._build_backbone(
+            use_pretrained_weights=use_pretrained_weights
+        )
         # ResNet18 without avgpool and fc layers outputs (512, 7, 7) for 224x224 input
         self.pool = SpatialSoftmax((512, 7, 7), num_kp=spatial_softmax_num_keypoints)
         self.feature_dim = feature_dim
         self.out = nn.Linear(spatial_softmax_num_keypoints * 2, self.feature_dim)
         self.relu = nn.ReLU()
 
-    def _build_backbone(self) -> nn.Module:
-        """Build backbone CNN, removing avgpool and fc layers."""
-        resnet = models.get_model("resnet18", weights="DEFAULT")
+    def _build_backbone(self, use_pretrained_weights: bool = True) -> nn.Module:
+        """Build backbone CNN, removing avgpool and fc layers.
+
+        Args:
+            use_pretrained_weights: Whether to load pretrained weights.
+
+        Returns:
+            ResNet backbone without final layers.
+        """
+        weights = "DEFAULT" if use_pretrained_weights else None
+        resnet = models.get_model("resnet18", weights=weights)
         return nn.Sequential(*list(resnet.children())[:-2])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -272,7 +287,7 @@ class DiffusionConditionalUnet1d(nn.Module):
         Returns:
             (batch, horizon, input_dim) diffusion model prediction.
         """
-        # Store the original horizon for projection head
+        # Store the original horizon to ensure output matches input
         original_horizon = x.shape[1]
 
         # For 1D convolutions we'll need feature dimension first.
@@ -316,21 +331,20 @@ class DiffusionConditionalUnet1d(nn.Module):
 
         x = self.final_conv(x)
 
-        # Rearrange back to (batch, time, features) format
-        x = einops.rearrange(x, "b d t -> b t d")
-
-        # Projection head: ensure output horizon matches input horizon
-        current_horizon = x.shape[1]
+        # Ensure output horizon matches input horizon
+        current_horizon = x.shape[-1]
         if current_horizon != original_horizon:
-            # Use interpolation to resize the sequence to match original horizon
-            # Rearrange to (batch, features, time) for interpolation
-            x = einops.rearrange(x, "b t d -> b d t")
+            # Interpolate to match original horizon
             x = F.interpolate(
                 x, size=original_horizon, mode="linear", align_corners=False
             )
-            # Rearrange back to (batch, time, features)
-            x = einops.rearrange(x, "b d t -> b t d")
+            logger.warning(
+                f"Output horizon {current_horizon} does not match input horizon "
+                f"{original_horizon}. Interpolated to match input horizon."
+            )
 
+        # Rearrange back to (batch, time, features) format
+        x = einops.rearrange(x, "b d t -> b t d")
         return x
 
 

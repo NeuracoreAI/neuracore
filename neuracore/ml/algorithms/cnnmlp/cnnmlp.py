@@ -7,7 +7,7 @@ and outputs entire action sequences.
 """
 
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -517,14 +517,23 @@ class CNNMLP(NeuracoreModel):
             metrics=metrics,
         )
 
-    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
+    def configure_optimizers(
+        self,
+        num_training_steps: Optional[int] = None,
+    ) -> dict[str, Union[list[torch.optim.Optimizer], None]]:
         """Configure optimizer with different learning rates for different components.
 
         Uses separate learning rates for image encoder backbones (typically lower)
         and other model parameters.
 
+        Args:
+            num_training_steps: Total number of training steps. Optional, may be used
+                for learning rate scheduling.
+
         Returns:
-            list[torch.optim.Optimizer]: List containing the configured optimizer
+            dict: Dictionary with keys "optimizers" and "schedulers".
+                - "optimizers": List of optimizers
+                - "schedulers": List of schedulers or None
         """
         backbone_params = []
         other_params = []
@@ -539,7 +548,12 @@ class CNNMLP(NeuracoreModel):
             {"params": backbone_params, "lr": self.lr_backbone},
             {"params": other_params, "lr": self.lr},
         ]
-        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+        return {
+            "optimizers": [
+                torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)
+            ],
+            "schedulers": None,
+        }
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:

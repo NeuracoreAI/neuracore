@@ -7,7 +7,7 @@ and defines the required interface for training and inference.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import List, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -140,11 +140,20 @@ class NeuracoreModel(nn.Module, ABC):
         pass
 
     @abstractmethod
-    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
+    def configure_optimizers(
+        self,
+        num_training_steps: Optional[int] = None,
+    ) -> dict[str, Union[list[torch.optim.Optimizer], None]]:
         """Configure and return optimizers for the model.
 
+        Args:
+            num_training_steps: Total number of training steps. Optional, may be used
+                for learning rate scheduling.
+
         Returns:
-            list[torch.optim.Optimizer]: List of optimizers for model parameters
+            dict: Dictionary with keys "optimizers" and "schedulers".
+                - "optimizers": List of optimizers for model parameters
+                - "schedulers": List of schedulers or None
         """
         pass
 

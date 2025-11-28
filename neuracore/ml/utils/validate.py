@@ -351,7 +351,18 @@ def run_validation(
 
         # Check 2: Can configure optimizer
         logger.info("Configuring optimizer")
-        optimizers = model.configure_optimizers()
+        optimizer_result = model.configure_optimizers(
+            num_training_steps=len(dataloader)
+        )
+        if isinstance(optimizer_result, dict):
+            optimizers = optimizer_result.get("optimizers")
+            if optimizers is None:
+                raise ValueError("optimizers cannot be None")
+        else:
+            raise ValueError(
+                "configure_optimizers must return a dictionary with keys "
+                "'optimizers' and 'schedulers'"
+            )
         logger.info("Optimizer configured successfully")
         algo_check.successfully_configured_optimizer = True
 

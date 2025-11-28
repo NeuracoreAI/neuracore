@@ -6,7 +6,7 @@ state information to predict action sequences for robot manipulation tasks.
 """
 
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -595,14 +595,22 @@ class SimpleVLA(NeuracoreModel):
             metrics=metrics,
         )
 
-    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
+    def configure_optimizers(
+        self,
+        num_training_steps: int = 10000,
+    ) -> dict[str, Union[list[torch.optim.Optimizer], None]]:
         """Configure optimizer with different learning rates for different components.
 
         Uses separate learning rates for encoder backbones (typically lower)
         and other model parameters.
 
+        Args:
+            num_training_steps: Total number of training steps.
+
         Returns:
-            list[torch.optim.Optimizer]: List containing the configured optimizer
+            dict: Dictionary with keys "optimizers" and "schedulers".
+                - "optimizers": List of optimizers
+                - "schedulers": List of schedulers or None
         """
         # Separate parameters for backbones and other layers
         backbone_params = []
@@ -620,7 +628,12 @@ class SimpleVLA(NeuracoreModel):
             {"params": backbone_params, "lr": self.lr_backbone},
             {"params": other_params, "lr": self.lr},
         ]
-        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+        return {
+            "optimizers": [
+                torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)
+            ],
+            "schedulers": None,
+        }
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:

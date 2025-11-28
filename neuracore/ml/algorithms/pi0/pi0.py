@@ -12,7 +12,7 @@ for General Robot Control." arXiv preprint https://arxiv.org/abs/2410.24164.
 import logging
 import os
 import time
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -726,14 +726,23 @@ class Pi0(NeuracoreModel):
             + list(self.moe.get_parameters("action"))
         )
 
-    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
+    def configure_optimizers(
+        self,
+        num_training_steps: Optional[int] = None,
+    ) -> dict[str, Union[list[torch.optim.Optimizer], None]]:
         """Configure optimizer with different learning rates for different components.
 
         Uses separate learning rates for image encoder backbone (typically lower)
         and other model parameters to account for pre-trained vision components.
 
+        Args:
+            num_training_steps: Total number of training steps. Optional, may be used
+                for learning rate scheduling.
+
         Returns:
-            list[torch.optim.Optimizer]: List containing the configured optimizer
+            dict: Dictionary with keys "optimizers" and "schedulers".
+                - "optimizers": List of optimizers
+                - "schedulers": List of schedulers or None
         """
         if self.using_pretrained_paligemma:
             # Only train action expert parameters when using pretrained VLM
@@ -745,7 +754,12 @@ class Pi0(NeuracoreModel):
             {"params": trainable_params, "lr": self.lr},
         ]
 
-        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+        return {
+            "optimizers": [
+                torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)
+            ],
+            "schedulers": None,
+        }
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:

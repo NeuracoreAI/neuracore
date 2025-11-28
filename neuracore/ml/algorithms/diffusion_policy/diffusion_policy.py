@@ -36,15 +36,16 @@ class DiffusionPolicy(NeuracoreModel):
         model_init_description: ModelInitDescription,
         hidden_dim: int = 256,
         unet_down_dims: Tuple[int, ...] = (
-            256,
             512,
             1024,
+            2048,
         ),
         unet_kernel_size: int = 5,
         unet_n_groups: int = 8,
         unet_diffusion_step_embed_dim: int = 128,
         spatial_softmax_num_keypoints: int = 32,
         unet_use_film_scale_modulation: bool = True,
+        use_pretrained_weights: bool = True,
         noise_scheduler_type: str = "DDPM",
         num_train_timesteps: int = 100,
         num_inference_steps: int = 100,
@@ -56,8 +57,12 @@ class DiffusionPolicy(NeuracoreModel):
         lr: float = 1e-4,
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-6,
+        optimizer_betas: Tuple[float, float] = (0.9, 0.999),
+        optimizer_eps: float = 1e-8,
         prediction_type: str = "epsilon",
         normalization_type: str = "min_max",
+        lr_scheduler_type: str = "cosine",
+        lr_scheduler_num_warmup_steps: int = 500,
     ):
         """Initialize the Diffusion Policy model.
 
@@ -70,6 +75,7 @@ class DiffusionPolicy(NeuracoreModel):
             unet_diffusion_step_embed_dim: Dimension of diffusion step embeddings.
             spatial_softmax_num_keypoints: Number of keypoints for spatial softmax.
             unet_use_film_scale_modulation: Whether to use FiLM scale modulation.
+            use_pretrained_weights: Whether to load pretrained ResNet weights.
             noise_scheduler_type: Type of noise scheduler ("DDPM" or "DDIM").
             num_train_timesteps: Number of timesteps for training.
             num_inference_steps: Number of timesteps for inference.
@@ -81,14 +87,22 @@ class DiffusionPolicy(NeuracoreModel):
             lr: Learning rate for main parameters.
             lr_backbone: Learning rate for backbone parameters.
             weight_decay: Weight decay for optimization.
+            optimizer_betas: Betas for optimizer.
+            optimizer_eps: Epsilon for optimizer.
             prediction_type: Type of prediction ("epsilon" or "sample").
             normalization_type: Type of normalization to use ("mean_std" or "min_max").
+            lr_scheduler_type: Type of the learning rate scheduler
+                ("cosine", "linear", etc.).
+            lr_scheduler_num_warmup_steps: Number of warmup steps for the scheduler.
         """
         super().__init__(model_init_description)
         self.lr = lr
         self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
-
+        self.optimizer_betas = optimizer_betas
+        self.optimizer_eps = optimizer_eps
+        self.lr_scheduler_type = lr_scheduler_type
+        self.lr_scheduler_num_warmup_steps = lr_scheduler_num_warmup_steps
         # Validate normalization type
         if normalization_type not in ("mean_std", "min_max"):
             raise ValueError(
@@ -99,8 +113,9 @@ class DiffusionPolicy(NeuracoreModel):
         # Vision components
         self.image_encoders = nn.ModuleList([
             DiffusionPolicyImageEncoder(
-                spatial_softmax_num_keypoints=spatial_softmax_num_keypoints,
                 feature_dim=hidden_dim,
+                spatial_softmax_num_keypoints=spatial_softmax_num_keypoints,
+                use_pretrained_weights=use_pretrained_weights,
             )
             for _ in range(self.dataset_description.rgb_images.max_len)
         ])
@@ -167,6 +182,7 @@ class DiffusionPolicy(NeuracoreModel):
                 state_means.extend(self.dataset_description.joint_torques.mean)
                 state_stds.extend(self.dataset_description.joint_torques.std)
             if state_means:
+                # Register as buffers so they move with the model
                 self.register_buffer(
                     "joint_state_mean", self._to_torch_float_tensor(state_means)
                 )
@@ -177,20 +193,22 @@ class DiffusionPolicy(NeuracoreModel):
                 self.joint_state_mean = None
                 self.joint_state_std = None
 
-            # Always register target stats for mean/std normalization
-            self.register_buffer(
-                "joint_target_mean",
-                self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.mean
-                ),
-            )
-            self.register_buffer(
-                "joint_target_std",
-                self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.std
-                ),
-            )
-
+            if (
+                DataType.JOINT_TARGET_POSITIONS
+                in self.model_init_description.output_data_types
+            ):
+                self.register_buffer(
+                    "joint_target_mean",
+                    self._to_torch_float_tensor(
+                        self.dataset_description.joint_target_positions.mean
+                    ),
+                )
+                self.register_buffer(
+                    "joint_target_std",
+                    self._to_torch_float_tensor(
+                        self.dataset_description.joint_target_positions.std
+                    ),
+                )
         elif self.normalization_type == "min_max":
             state_min = []
             state_max = []
@@ -216,19 +234,23 @@ class DiffusionPolicy(NeuracoreModel):
             else:
                 self.joint_state_min = None
                 self.joint_state_max = None
-            # Always register target stats for min/max normalization
-            self.register_buffer(
-                "joint_target_min",
-                self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.min
-                ),
-            )
-            self.register_buffer(
-                "joint_target_max",
-                self._to_torch_float_tensor(
-                    self.dataset_description.joint_target_positions.max
-                ),
-            )
+
+            if (
+                DataType.JOINT_TARGET_POSITIONS
+                in self.model_init_description.output_data_types
+            ):
+                self.register_buffer(
+                    "joint_target_min",
+                    self._to_torch_float_tensor(
+                        self.dataset_description.joint_target_positions.min
+                    ),
+                )
+                self.register_buffer(
+                    "joint_target_max",
+                    self._to_torch_float_tensor(
+                        self.dataset_description.joint_target_positions.max
+                    ),
+                )
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
         """Convert list of floats to torch tensor on the correct device."""
@@ -496,7 +518,6 @@ class DiffusionPolicy(NeuracoreModel):
             joint_velocities=batch.inputs.joint_velocities,
             joint_torques=batch.inputs.joint_torques,
             rgb_images=batch.inputs.rgb_images,
-            joint_target_positions=batch.outputs.joint_target_positions,
         )
         if batch.inputs.rgb_images is None:
             raise ValueError("Failed to find rgb_images")
@@ -563,15 +584,30 @@ class DiffusionPolicy(NeuracoreModel):
             metrics=metrics,
         )
 
-    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
-        """Configure optimizer with different learning rates for different components.
+    def configure_optimizers(
+        self,
+        num_training_steps: Optional[int] = None,
+    ) -> dict[str, Union[list[torch.optim.Optimizer], None]]:
+        """Configure optimizer and scheduler with different learning rates.
 
         Uses separate learning rates for image encoder backbone (typically lower)
         and other model parameters to account for pre-trained vision components.
 
+        If lr_backbone is 0, backbone parameters are frozen (requires_grad=False)
+        and excluded from the optimizer to save memory and computation.
+
+        Args:
+            num_training_steps: Total number of training steps. Optional, may be used
+                for learning rate scheduling.
+
         Returns:
-            list[torch.optim.Optimizer]: List containing the configured optimizer
+            dict: Dictionary with keys "optimizers" and "schedulers".
+                - "optimizers": List of optimizers
+                - "schedulers": List of schedulers or None
+            List containing [optimizer, scheduler] where scheduler is from diffusers.
         """
+        from diffusers.optimization import get_scheduler
+
         backbone_params = []
         other_params = []
 
@@ -581,12 +617,50 @@ class DiffusionPolicy(NeuracoreModel):
             else:
                 other_params.append(param)
 
-        param_groups = [
-            {"params": backbone_params, "lr": self.lr_backbone},
-            {"params": other_params, "lr": self.lr},
-        ]
+        # Build parameter groups, filtering out empty ones
+        param_groups = []
 
-        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+        # If lr_backbone is 0, freeze backbone parameters and exclude from optimizer
+        if self.lr_backbone == 0:
+            for param in backbone_params:
+                param.requires_grad = False
+        elif (
+            self.lr_backbone > 0 and backbone_params
+        ):  # Only add backbone group if it has parameters
+            param_groups.append({"params": backbone_params, "lr": self.lr_backbone})
+
+        # Add other_params group if it has parameters
+        if other_params:
+            param_groups.append({"params": other_params, "lr": self.lr})
+
+        if not param_groups:
+            raise ValueError(
+                "No trainable parameters found. Check that the model has parameters."
+            )
+
+        optimizer = torch.optim.AdamW(
+            param_groups,
+            weight_decay=self.weight_decay,
+            betas=self.optimizer_betas,
+            eps=self.optimizer_eps,
+        )
+        if num_training_steps is not None:
+            # Create a scheduler for the optimizer
+            scheduler = get_scheduler(
+                name=self.lr_scheduler_type,
+                optimizer=optimizer,
+                num_warmup_steps=self.lr_scheduler_num_warmup_steps,
+                num_training_steps=num_training_steps,
+            )
+        else:
+            raise ValueError(
+                "num_training_steps is required for learning rate scheduling"
+            )
+
+        return {
+            "optimizers": [optimizer],
+            "schedulers": [scheduler],
+        }
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:

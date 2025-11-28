@@ -11,6 +11,7 @@ with low-cost hardware." arXiv preprint arXiv:2304.13705 (2023).
 
 import logging
 import time
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -574,14 +575,23 @@ class ACT(NeuracoreModel):
             metrics=metrics,
         )
 
-    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
+    def configure_optimizers(
+        self,
+        num_training_steps: Optional[int] = None,
+    ) -> dict[str, Union[list[torch.optim.Optimizer], None]]:
         """Configure optimizer with different learning rates for different components.
 
         Uses separate learning rates for image encoder backbone (typically lower)
         and other model parameters to account for pre-trained vision components.
 
+        Args:
+            num_training_steps: Total number of training steps. Optional, may be used
+                for learning rate scheduling.
+
         Returns:
-            list[torch.optim.Optimizer]: List containing the configured optimizer
+            dict: Dictionary with keys "optimizers" and "schedulers".
+                - "optimizers": List of optimizers
+                - "schedulers": List of schedulers or None
         """
         backbone_params = []
         other_params = []
@@ -597,7 +607,12 @@ class ACT(NeuracoreModel):
             {"params": other_params, "lr": self.lr},
         ]
 
-        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+        return {
+            "optimizers": [
+                torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)
+            ],
+            "schedulers": None,
+        }
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:
