@@ -4,18 +4,20 @@ This metaclass ensures that only one instance of a class can be created.
 """
 
 from abc import ABCMeta
-from typing import Any
+from typing import Any, Generic, TypeVar
+
+T = TypeVar("T")
 
 
-class SingletonMetaclass(ABCMeta):
+class SingletonMetaclass(ABCMeta, Generic[T]):
     """Metaclass for creating singleton classes.
 
     This metaclass ensures that only one instance of a class can be created.
     """
 
-    _instances: dict[type, object] = {}
+    _instances: dict[type, Any] = {}
 
-    def __call__(cls, *args: Any, **kwargs: Any) -> object:
+    def __call__(cls, *args: Any, **kwargs: Any) -> T:
         """Called when a new instance of the class is requested.
 
         If an instance of the class does not already exist, it creates one and

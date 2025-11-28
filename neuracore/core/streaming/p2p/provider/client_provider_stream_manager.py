@@ -30,7 +30,7 @@ from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.provider.json_source import JSONSource
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
 
-from .global_live_data_enabled import global_provide_live_data_manager
+from .global_live_data_enabled import get_provide_live_data_enabled_manager
 from .provider_connection import PierToPierProviderConnection
 from .video_source import DepthVideoSource, VideoSource
 
@@ -76,9 +76,9 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         self.background_tracker = BackgroundCoroutineTracker(loop=self.loop)
 
         self.streaming = EnabledManager.derived_manger(
-            global_provide_live_data_manager, loop=loop
+            get_provide_live_data_enabled_manager(), loop=loop
         )
-        global_provide_live_data_manager.add_listener(
+        get_provide_live_data_enabled_manager().add_listener(
             EnabledManager.DISABLED, self._on_close
         )
         self.streaming.add_listener(EnabledManager.DISABLED, self._on_close)

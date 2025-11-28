@@ -27,8 +27,8 @@ from neuracore.core.streaming.p2p.provider.client_provider_stream_manager import
     ClientProviderStreamManager,
 )
 from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
-    global_consume_live_data_manager,
-    global_provide_live_data_manager,
+    get_consume_live_data_enabled_manager,
+    get_provide_live_data_enabled_manager,
 )
 from neuracore.core.streaming.p2p.signalling_events_consumer import (
     SignallingEventsConsumer,
@@ -88,7 +88,8 @@ class StreamManagerOrchestrator(
             auth=self.auth,
             client_session=self.client_session,
             enabled_manager=EnabledManager.any_enabled(
-                global_provide_live_data_manager, global_consume_live_data_manager
+                get_provide_live_data_enabled_manager(),
+                get_consume_live_data_enabled_manager(),
             ),
         )
 

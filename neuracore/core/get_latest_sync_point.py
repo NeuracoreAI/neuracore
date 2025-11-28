@@ -20,7 +20,7 @@ from neuracore.core.streaming.p2p.consumer.org_nodes_manager import (
 )
 from neuracore.core.streaming.p2p.consumer.sync_point_parser import merge_sync_points
 from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
-    global_consume_live_data_manager,
+    get_consume_live_data_enabled_manager,
 )
 from neuracore.core.utils.depth_utils import depth_to_rgb
 
@@ -66,7 +66,7 @@ def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
     Raises:
         RobotError: If the robot is not initialized.
     """
-    if global_consume_live_data_manager.is_disabled():
+    if get_consume_live_data_enabled_manager().is_disabled():
         return False
 
     if robot.id is None:
@@ -145,7 +145,7 @@ def get_latest_sync_point(
                 f"Support for stream {stream_name} is not implemented yet"
             )
 
-    if not include_remote or global_consume_live_data_manager.is_disabled():
+    if not include_remote or get_consume_live_data_enabled_manager().is_disabled():
         return sync_point
 
     if robot.id is None:
