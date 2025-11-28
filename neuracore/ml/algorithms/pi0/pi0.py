@@ -19,6 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
 from neuracore_types import DataType, ModelInitDescription, ModelPrediction
+from torch.optim.lr_scheduler import LambdaLR
 from transformers import AutoProcessor, AutoTokenizer, PaliGemmaForConditionalGeneration
 
 from neuracore.ml import (
@@ -68,8 +69,15 @@ class Pi0(NeuracoreModel):
         flow_sig_min: float = 0.001,
         flow_alpha: float = 1.5,
         flow_beta: float = 1.0,
-        lr: float = 5e-5,
-        weight_decay: float = 0.0,
+        optimizer_lr: float = 2.5e-5,
+        optimizer_weight_decay: float = 0.01,
+        optimizer_betas: tuple[float, float] = (0.9, 0.95),
+        optimizer_eps: float = 1e-8,
+        optimizer_grad_clip_norm: float = 1.0,
+        num_warmup_steps: int = 1000,
+        num_decay_steps: int = 30000,
+        peak_lr: float = 2.5e-5,
+        decay_lr: float = 2.5e-6,
         dtype: torch.dtype = torch.float32,
     ):
         """Initialize the Pi0 model.
@@ -91,8 +99,15 @@ class Pi0(NeuracoreModel):
             flow_sig_min: Minimum value for the flow sigma.
             flow_alpha: Alpha parameter for the flow beta distribution.
             flow_beta: Beta parameter for the flow beta distribution.
-            lr: Learning rate for the model.
-            weight_decay: Weight decay for the model.
+            optimizer_lr: Learning rate for the optimizer.
+            optimizer_weight_decay: Weight decay for the optimizer.
+            optimizer_betas: Beta coefficients for the Adam optimizer.
+            optimizer_eps: Epsilon value for the optimizer.
+            optimizer_grad_clip_norm: Gradient clipping norm value.
+            num_warmup_steps: Number of warmup steps for learning rate schedule.
+            num_decay_steps: Number of decay steps for learning rate schedule.
+            peak_lr: Peak learning rate value.
+            decay_lr: Final learning rate after decay.
             dtype: Data type for model parameters and computations.
         """
         super().__init__(model_init_description)
@@ -111,8 +126,15 @@ class Pi0(NeuracoreModel):
         self.num_inference_steps = num_inference_steps
         self.flow_sig_min = flow_sig_min
         self.flow_beta_dist = torch.distributions.Beta(flow_alpha, flow_beta)
-        self.lr = lr
-        self.weight_decay = weight_decay
+        self.optimizer_lr = optimizer_lr
+        self.optimizer_weight_decay = optimizer_weight_decay
+        self.optimizer_betas = optimizer_betas
+        self.optimizer_eps = optimizer_eps
+        self.optimizer_grad_clip_norm = optimizer_grad_clip_norm
+        self.num_warmup_steps = num_warmup_steps
+        self.num_decay_steps = num_decay_steps
+        self.decay_lr = decay_lr
+        self.peak_lr = peak_lr
         proprio_dim = (
             self.dataset_description.joint_positions.max_len
             + self.dataset_description.joint_velocities.max_len
@@ -746,14 +768,46 @@ class Pi0(NeuracoreModel):
             # Train all parameters when not using pretrained weights
             trainable_params = [p for p in self.parameters() if p.requires_grad]
         param_groups = [
-            {"params": trainable_params, "lr": self.lr},
+            {"params": trainable_params, "lr": self.optimizer_lr},
         ]
 
+        def build_scheduler(optimizer: torch.optim.Optimizer) -> LambdaLR:
+            import math
+
+            def lr_lambda(current_step: int) -> float:
+                def linear_warmup_schedule(current_step: int) -> float:
+                    if current_step <= 0:
+                        return 1 / (self.num_warmup_steps + 1)
+                    frac = 1 - current_step / self.num_warmup_steps
+                    return (1 / (self.num_warmup_steps + 1) - 1) * frac + 1
+
+                def cosine_decay_schedule(current_step: int) -> float:
+                    step = min(current_step, self.num_decay_steps)
+                    cosine_decay = 0.5 * (
+                        1 + math.cos(math.pi * step / self.num_decay_steps)
+                    )
+                    alpha = self.decay_lr / self.peak_lr
+                    decayed = (1 - alpha) * cosine_decay + alpha
+                    return decayed
+
+                if current_step < self.num_warmup_steps:
+                    return linear_warmup_schedule(current_step)
+
+                return cosine_decay_schedule(current_step)
+
+            return LambdaLR(optimizer, lr_lambda, -1)
+
+        optimizer = torch.optim.AdamW(
+            param_groups,
+            weight_decay=self.optimizer_weight_decay,
+            betas=self.optimizer_betas,
+            eps=self.optimizer_eps,
+            max_grad_norm=self.optimizer_grad_clip_norm,
+        )
+
         return {
-            "optimizers": [
-                torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)
-            ],
-            "schedulers": None,
+            "optimizers": [optimizer],
+            "schedulers": [build_scheduler(optimizer)],
         }
 
     @staticmethod
