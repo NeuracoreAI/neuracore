@@ -545,6 +545,8 @@ def init(
     Returns:
         The initialized Robot instance.
     """
+    if not robot_name:
+        raise ValueError("Robot name cannot be empty")
     robot = Robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     robot.init()
     if not robot.id:
