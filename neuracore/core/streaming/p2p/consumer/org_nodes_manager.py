@@ -72,8 +72,8 @@ class OrgNodesManager(BaseSSEConsumer):
         """Initialize the organization node manager.
 
         Args:
-            org_id: the organization to receive streaming information from. If n
-                ot provided defaults to the current org.
+            org_id: the organization to receive streaming information from. If not
+                provided defaults to the current org.
             loop: the event loop to run on. Defaults to the running loop if not
                 provided.
             enabled_manager: The enabled manager for whether this should be

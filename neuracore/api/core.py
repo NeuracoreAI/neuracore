@@ -14,7 +14,7 @@ from warnings import warn
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.organizations import list_my_orgs
 from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
-    global_provide_live_data_manager,
+    get_provide_live_data_enabled_manager,
 )
 from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
@@ -264,7 +264,7 @@ def stop_live_data(robot_name: Optional[str] = None, instance: int = 0) -> None:
 
     """
     if not robot_name:
-        global_provide_live_data_manager.disable()
+        get_provide_live_data_enabled_manager().disable()
         return
 
     robot = _get_robot(robot_name, instance)
