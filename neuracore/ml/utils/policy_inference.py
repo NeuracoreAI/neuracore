@@ -217,9 +217,9 @@ class PolicyInference:
         Returns:
             MaskableData containing batched image tensors and attention masks.
         """
-        channels = 1 if is_depth else 3
-        values = np.zeros((1, max_len, channels, 224, 224))
-        mask = np.zeros((1, max_len))
+        # Use lists to collect images - no need to know size upfront
+        image_list = []
+        mask_list = []
 
         for j, (camera_name, camera_data) in enumerate(image_data.items()):
             if j >= max_len:
@@ -240,21 +240,20 @@ class PolicyInference:
                     image = np.stack([image] * 3, axis=2)  # Convert grayscale to RGB
                 image = np.transpose(image, (2, 0, 1))  # HWC to CHW
 
-            # Resize and normalize
             image = Image.fromarray(
                 image.transpose(1, 2, 0) if not is_depth else image[0]
             )
-            transform = T.Compose([
-                T.Resize((224, 224)),
-                T.ToTensor(),
-            ])
-            values[0, j] = transform(image).numpy()
-            mask[0, j] = 1.0
+            transform = T.Compose([T.ToTensor()])
 
-        return MaskableData(
-            torch.tensor(values, dtype=torch.float32),
-            torch.tensor(mask, dtype=torch.float32),
-        )
+            image_list.append(transform(image))
+            mask_list.append(1.0)
+
+        if image_list:
+            # Stack images: (num_cams, C, H, W) -> (1, num_cams, C, H, W)
+            values = torch.stack(image_list).unsqueeze(0)
+            mask = torch.tensor([mask_list], dtype=torch.float32)
+
+        return MaskableData(values, mask)
 
     def _process_end_effector_data(
         self, end_effector_data: EndEffectorData, max_len: int
