@@ -653,9 +653,8 @@ class DiffusionPolicy(NeuracoreModel):
                 num_training_steps=num_training_steps,
             )
         else:
-            raise ValueError(
-                "num_training_steps is required for learning rate scheduling"
-            )
+            logging.warning("num_training_steps is not provided, not using scheduler")
+            scheduler = None
 
         return {
             "optimizers": [optimizer],
