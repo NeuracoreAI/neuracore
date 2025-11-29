@@ -10,7 +10,6 @@ for General Robot Control." arXiv preprint https://arxiv.org/abs/2410.24164.
 """
 
 import logging
-import math
 import os
 import time
 from typing import Optional, Union
@@ -20,7 +19,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
 from neuracore_types import DataType, ModelInitDescription, ModelPrediction
-from torch.optim.lr_scheduler import LambdaLR
 from transformers import AutoProcessor, AutoTokenizer, PaliGemmaForConditionalGeneration
 
 from neuracore.ml import (
@@ -751,10 +749,7 @@ class Pi0(NeuracoreModel):
 
     def configure_optimizers(
         self,
-<<<<<<< HEAD
-=======
         num_training_steps: Optional[int] = None,
->>>>>>> 7f6e325 (add scheduler and improve diffusion policy)
     ) -> dict[str, Union[list[torch.optim.Optimizer], None]]:
         """Configure optimizer with different learning rates for different components.
 
@@ -777,75 +772,13 @@ class Pi0(NeuracoreModel):
             {"params": trainable_params, "lr": self.optimizer_lr},
         ]
 
-        if num_training_steps is None:
-            raise ValueError(
-                "num_training_steps is required for learning rate scheduling"
-            )
-
-<<<<<<< HEAD
-        def build_scheduler(optimizer: torch.optim.Optimizer) -> LambdaLR:
-            # Auto-scale scheduler parameters if training steps are shorter than
-            # configured decay steps
-            actual_warmup_steps = self.num_warmup_steps
-            actual_decay_steps = self.num_decay_steps
-
-            if num_training_steps < self.num_decay_steps:
-                # Calculate scaling factor to fit the schedule into the available
-                # training steps
-                scale_factor = num_training_steps / self.num_decay_steps
-                actual_warmup_steps = int(self.num_warmup_steps * scale_factor)
-                actual_decay_steps = num_training_steps
-
-                logging.info(
-                    f"Auto-scaling LR scheduler: "
-                    f"num_training_steps ({num_training_steps}) < "
-                    f"num_decay_steps ({self.num_decay_steps}). "
-                    f"Scaling warmup: {self.num_warmup_steps} → {actual_warmup_steps}, "
-                    f"decay: {self.num_decay_steps} → {actual_decay_steps} "
-                    f"(scale factor: {scale_factor:.3f})"
-                )
-
-            def lr_lambda(current_step: int) -> float:
-                def linear_warmup_schedule(current_step: int) -> float:
-                    if current_step <= 0:
-                        return 1 / (actual_warmup_steps + 1)
-                    frac = 1 - current_step / actual_warmup_steps
-                    return (1 / (actual_warmup_steps + 1) - 1) * frac + 1
-
-                def cosine_decay_schedule(current_step: int) -> float:
-                    step = min(current_step, actual_decay_steps)
-                    cosine_decay = 0.5 * (
-                        1 + math.cos(math.pi * step / actual_decay_steps)
-                    )
-                    alpha = self.decay_lr / self.peak_lr
-                    decayed = (1 - alpha) * cosine_decay + alpha
-                    return decayed
-
-                if current_step < actual_warmup_steps:
-                    return linear_warmup_schedule(current_step)
-
-                return cosine_decay_schedule(current_step)
-
-            return LambdaLR(optimizer, lr_lambda, -1)
-
-        optimizer = torch.optim.AdamW(
-            param_groups,
-            weight_decay=self.optimizer_weight_decay,
-            betas=self.optimizer_betas,
-            eps=self.optimizer_eps,
-            max_grad_norm=self.optimizer_grad_clip_norm,
-        )
-
-        return {
-            "optimizers": [optimizer],
-            "schedulers": [build_scheduler(optimizer)],
-=======
         return {
             "optimizers": [
-                torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)
+                torch.optim.AdamW(
+                    param_groups, weight_decay=self.optimizer_weight_decay
+                )
             ],
             "schedulers": None,
->>>>>>> 7f6e325 (add scheduler and improve diffusion policy)
         }
 
     @staticmethod
