@@ -9,42 +9,37 @@ import base64
 import hashlib
 
 import requests
-from neuracore_types import DataType
+from neuracore_types import DataType, RecordingDataStream
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 
 
-# TODO: Receive num active stream updates from the server with the recording
-# state rather than polling
-def get_num_active_streams(recording_id: str) -> int:
-    """Get the number of active streams for a recording.
-
-    Queries the backend to determine how many data streams are currently
-    active for a specific recording. This is used to monitor upload progress
-    and determine when all streams have completed processing.
+def get_active_data_streams(recording_id: str) -> list[RecordingDataStream]:
+    """Get all active data streams for a recording.
 
     Args:
         recording_id: Unique identifier for the recording to check.
 
     Returns:
-        The number of streams currently active for the recording.
+        A list of `RecordingDataStream` instances representing the active
+        streams for the recording. Returns an empty list if no active
+        streams are found.
 
     Raises:
         requests.HTTPError: If the API request fails.
-        ValueError: If the response indicates an error or has an unexpected format.
-        ConfigError: If there is an error trying to get the current org
+        ValueError: If the response has an unexpected format.
+        ConfigError: If there is an error trying to get the current org.
     """
     org_id = get_current_org()
     response = requests.get(
-        f"{API_URL}/org/{org_id}/recording/{recording_id}/get_num_active_streams",
+        f"{API_URL}/org/{org_id}/recording/{recording_id}/streams/active",
         headers=get_auth().get_headers(),
     )
     response.raise_for_status()
-    if response.status_code != 200:
-        raise ValueError("Failed to update number of active streams")
-    return int(response.json()["num_active_streams"])
+    data = response.json() or []
+    return [RecordingDataStream.model_validate(item) for item in data]
 
 
 def synced_dataset_key(sync_freq: int, data_types: list[DataType]) -> str:

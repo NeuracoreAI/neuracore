@@ -8,11 +8,28 @@ import threading
 from abc import ABC, abstractmethod
 
 import requests
+from neuracore_types import DataType, RecordingDataStreamStatus
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
+
+_FOLDER_TO_DATA_TYPE: dict[str, DataType] = {
+    "joint_positions": DataType.JOINT_POSITIONS,
+    "joint_velocities": DataType.JOINT_VELOCITIES,
+    "joint_torques": DataType.JOINT_TORQUES,
+    "joint_target_positions": DataType.JOINT_TARGET_POSITIONS,
+    "end_effector_poses": DataType.END_EFFECTOR_POSES,
+    "parallel_gripper_open_amounts": DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+    "gripper_open_amounts": DataType.END_EFFECTORS,
+    "rgbs": DataType.RGB_IMAGE,
+    "depths": DataType.DEPTH_IMAGE,
+    "point_clouds": DataType.POINT_CLOUD,
+    "poses": DataType.POSES,
+    "language_annotations.json": DataType.LANGUAGE,
+    "custom": DataType.CUSTOM,
+}
 
 
 class BucketUploader(ABC):
@@ -36,30 +53,57 @@ class BucketUploader(ABC):
         self.recording_id = recording_id
         self._recording_manager = get_recording_state_manager()
 
-    def _update_num_active_streams(self, delta: int) -> None:
-        """Update the number of active streams for this recording.
+    def _get_data_type_from_path(self, path: str) -> DataType:
+        """Returns DataType from a recording-relative path."""
+        if not path:
+            return None
 
-        Makes an API call to increment or decrement the active stream count
-        for the recording. This is used to track how many streams are currently
-        being processed or uploaded.
+        if path in _FOLDER_TO_DATA_TYPE:
+            return _FOLDER_TO_DATA_TYPE[path]
 
-        Args:
-            delta: Change in stream count. Must be 1 (increment) or -1 (decrement).
+        data_type_key = path.split("/", 1)[0]
+        return _FOLDER_TO_DATA_TYPE.get(data_type_key)
 
-        Raises:
-            AssertionError: If delta is not 1 or -1.
-            requests.HTTPError: If the API request fails.
-            ValueError: If the response status code is not 200.
+    def _register_data_stream(self, data_type: DataType) -> str:
+        """Register a backend DataStream for this recording.
+
+        Returns:
+            The stream id from the backend
         """
-        assert delta in (1, -1), "Value must be 1 or -1"
+        if data_type is None:
+            raise ValueError("data_type cannot be None")
+
+        if self._recording_manager.is_recording_expired(self.recording_id):
+            raise ValueError(f"Recording {self.recording_id} is expired")
+
         org_id = get_current_org()
+        try:
+            response = requests.post(
+                f"{API_URL}/org/{org_id}/recording/{self.recording_id}/streams",
+                json={"data_type": data_type.value},
+                headers=get_auth().get_headers(),
+            )
+            response.raise_for_status()
+            body = response.json()
+            return body.get("id")
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError("Failed to register data stream: ", e)
+
+    def _mark_data_stream_complete(self, stream_id: str) -> None:
+        """Mark a DataStream as fully uploaded."""
+        if not stream_id:
+            return
+
         if self._recording_manager.is_recording_expired(self.recording_id):
             return
+
+        org_id = get_current_org()
         try:
             requests.put(
-                f"{API_URL}/org/{org_id}/recording/{self.recording_id}/update_num_active_streams",
-                params={
-                    "delta": delta,
+                f"{API_URL}/org/{org_id}/recording/{self.recording_id}/streams/{stream_id}",
+                json={
+                    "status": RecordingDataStreamStatus.UPLOAD_COMPLETE,
+                    "upload_progress": 100,
                 },
                 headers=get_auth().get_headers(),
             )

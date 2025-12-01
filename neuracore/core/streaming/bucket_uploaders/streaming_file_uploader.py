@@ -12,6 +12,8 @@ import queue
 import threading
 from typing import Any, Dict, List
 
+from neuracore_types import DataType
+
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 
 from .bucket_uploader import BucketUploader
@@ -59,8 +61,8 @@ class StreamingJsonUploader(BucketUploader):
         # Thread will continue, even if main thread exits
         self._upload_thread = threading.Thread(target=self._upload_loop, daemon=False)
         self._recording_manager = get_recording_state_manager()
+        self.data_type: DataType = self._get_data_type_from_path(self.filepath)
         self._upload_thread.start()
-        self._update_num_active_streams(1)
 
     def _thread_setup(self) -> None:
         """Setup thread-local resources for the upload loop.
@@ -69,6 +71,8 @@ class StreamingJsonUploader(BucketUploader):
         creates in-memory buffers, and sets up tracking variables for the JSON
         streaming process.
         """
+        self._stream_id = self._register_data_stream(self.data_type)
+
         # Ensure chunk_size is a multiple of 256 KiB
         if self.chunk_size % CHUNK_MULTIPLE != 0:
             self.chunk_size = ((self.chunk_size // CHUNK_MULTIPLE) + 1) * CHUNK_MULTIPLE
@@ -160,7 +164,7 @@ class StreamingJsonUploader(BucketUploader):
             "JSON streaming and upload complete: "
             f"{self.uploader.total_bytes_uploaded} bytes"
         )
-        self._update_num_active_streams(-1)
+        self._mark_data_stream_complete(self._stream_id)
 
     def add_frame(self, data_entry: Dict[str, Any]) -> None:
         """Add a JSON data entry to the streaming queue.
