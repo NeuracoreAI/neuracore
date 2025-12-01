@@ -55,16 +55,21 @@ class BucketUploader(ABC):
         org_id = get_current_org()
         if self._recording_manager.is_recording_expired(self.recording_id):
             return
-        try:
-            requests.put(
-                f"{API_URL}/org/{org_id}/recording/{self.recording_id}/update_num_active_streams",
-                params={
-                    "delta": delta,
-                },
-                headers=get_auth().get_headers(),
-            )
-        except requests.exceptions.RequestException:
-            pass
+
+        def _make_request() -> None:
+            try:
+                requests.put(
+                    f"{API_URL}/org/{org_id}/recording/{self.recording_id}/update_num_active_streams",
+                    params={
+                        "delta": delta,
+                    },
+                    headers=get_auth().get_headers(),
+                )
+            except requests.exceptions.RequestException:
+                pass
+
+        thread = threading.Thread(target=_make_request, daemon=True)
+        thread.start()
 
     @abstractmethod
     def finish(self) -> threading.Thread:
