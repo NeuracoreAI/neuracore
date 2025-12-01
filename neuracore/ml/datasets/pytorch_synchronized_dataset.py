@@ -77,8 +77,25 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             max_ram_utilization=0.8, max_gpu_utilization=1.0, gpu_id=None
         )
         self._mem_check_counter = 0
-        self._num_samples = self.synchronized_dataset.num_transitions
+        self._num_samples_excluding_last = (
+            self.synchronized_dataset.num_transitions - len(self.synchronized_dataset)
+        )
+        self.episode_indices = self._get_episode_indices()
         self._logged_in = False
+
+    def _get_episode_indices(self) -> list[int]:
+        """Return a list mapping each sample index to its episode (recording) index.
+
+        Omit the last frame of each episode because it is not used for training.
+
+        Returns:
+            A list mapping each sample index to its episode (recording) index.
+        """
+        episode_indices = []
+        for recording_idx, recording in enumerate(self.synchronized_dataset):
+            episode_indices.extend([recording_idx] * (len(recording) - 1))
+
+        return episode_indices
 
     @staticmethod
     def _get_timestep(episode_length: int) -> int:
@@ -764,5 +781,47 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         return MaskableData(stacked_maskable_data, stacked_maskable_mask)
 
     def __len__(self) -> int:
-        """Return the number of samples in the dataset."""
-        return self._num_samples
+        """Return the number of samples in the dataset.
+
+        Omit the last frame of each episode because it is not used for training.
+
+        Returns:
+            The number of samples in the dataset.
+        """
+        return self._num_samples_excluding_last
+
+    def __getitem__(self, idx: int) -> TrainingSample:
+        """Get a training sample by index with error handling.
+
+        Implements the PyTorch Dataset interface with robust error handling
+        to manage data loading failures gracefully during training.
+
+        Args:
+            idx: Index of the sample to retrieve.
+
+        Returns:
+            A TrainingSample containing the requested data.
+
+        Raises:
+            Exception: If sample loading fails after exhausting retry attempts.
+        """
+        if idx < 0:
+            # Handle negative indices by wrapping around
+            idx += len(self)
+        if idx < 0 or idx >= len(self):
+            raise IndexError(
+                f"Index {idx} out of bounds for dataset of size {len(self)}"
+            )
+        while self._error_count < self._max_error_count:
+            try:
+                episode_idx = self.episode_indices[idx]
+                timestep = idx - self.episode_indices.index(episode_idx)
+                return self.load_sample(episode_idx, timestep)
+            except Exception:
+                self._error_count += 1
+                logger.error(f"Error loading item {idx}.", exc_info=True)
+                if self._error_count >= self._max_error_count:
+                    raise
+        raise Exception(
+            f"Maximum error count ({self._max_error_count}) already reached"
+        )

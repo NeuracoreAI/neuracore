@@ -164,6 +164,7 @@ def mock_synchronized_dataset(mock_synced_recording, sample_dataset_description)
         def __init__(self):
             self.dataset_description = sample_dataset_description
             self._recordings = [mock_synced_recording] * 5  # 5 episodes
+            self._recording_idx = 0
 
         @property
         def num_transitions(self):
@@ -174,6 +175,13 @@ def mock_synchronized_dataset(mock_synced_recording, sample_dataset_description)
 
         def __getitem__(self, idx):
             return self._recordings[idx]
+
+        def __next__(self):
+            if self._recording_idx >= len(self._recordings):
+                raise StopIteration
+            recording = self._recordings[self._recording_idx]
+            self._recording_idx += 1
+            return recording
 
     return MockSynchronizedDataset()
 
@@ -197,7 +205,9 @@ class TestPytorchSynchronizedDatasetInitialization:
         ]
         assert dataset.output_data_types == [DataType.JOINT_TARGET_POSITIONS]
         assert dataset.output_prediction_horizon == 5
-        assert len(dataset) == 50  # num_transitions
+        # num_transitions without the last frame of each episode
+        assert len(dataset) == 45
+        assert len(dataset.episode_indices) == 45
 
     def test_initialization_with_all_data_types(
         self, mock_synchronized_dataset, mock_tokenizer
@@ -866,7 +876,9 @@ class TestDatasetIntegration:
             output_prediction_horizon=3,
         )
 
-        assert len(dataset) == 50  # num_transitions from mock
+        # num_transitions without the last frame of each episode
+        assert len(dataset) == 45
+        assert len(dataset.episode_indices) == 45
 
     @patch("neuracore.login")
     def test_error_handling_in_getitem(self, mock_login, mock_synchronized_dataset):

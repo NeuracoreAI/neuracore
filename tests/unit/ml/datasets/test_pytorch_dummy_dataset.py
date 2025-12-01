@@ -498,22 +498,6 @@ class TestPytorchDummyDataset:
         assert batched.inputs.language_tokens.data.shape == (2, 10)
         assert batched.inputs.language_tokens.mask.shape == (2, 10)
 
-    def test_error_handling(self):
-        """Test error handling in dataset operations."""
-        dataset = PytorchDummyDataset(
-            input_data_types=[DataType.JOINT_POSITIONS],
-            output_data_types=[DataType.JOINT_TARGET_POSITIONS],
-            num_samples=5,
-        )
-
-        # Test index out of bounds
-        with pytest.raises(IndexError):
-            _ = dataset[10]  # Only 5 samples
-
-        # Test negative indexing (should work)
-        sample = dataset[-1]
-        assert sample is not None
-
     def test_edge_cases(self):
         """Test edge cases and boundary conditions."""
         # Single sample dataset

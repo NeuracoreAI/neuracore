@@ -41,6 +41,10 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
         """Return the number of samples in the dataset this dataset is mimicking."""
         return self._num_recordings
 
+    def __getitem__(self, idx: int) -> BatchedTrainingSamples:
+        """Get a training sample."""
+        return self.load_sample(idx)
+
     def load_sample(
         self, episode_idx: int, timestep: Optional[int] = None
     ) -> BatchedTrainingSamples:
