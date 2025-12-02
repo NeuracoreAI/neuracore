@@ -157,9 +157,6 @@ def determine_optimal_batch_size(
         min_batch_size=min_batch_size,
         max_batch_size=max_batch_size,
         dataloader_kwargs={
-            "num_workers": num_workers,
-            "pin_memory": True,
-            "persistent_workers": True,
             "collate_fn": dataset.collate_fn,
         },
     )
@@ -436,7 +433,7 @@ def main(cfg: DictConfig) -> None:
 
     # Handle batch size configuration
     if isinstance(batch_size, str) and batch_size.lower() == "auto":
-        sample = pytorch_dataset.load_sample(0)
+        sample = pytorch_dataset.load_sample(0).to(device)
         single_sample_dataset = SingleSampleDataset(
             sample=sample,
             input_data_types=input_data_types,

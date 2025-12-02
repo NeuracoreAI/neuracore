@@ -1,6 +1,5 @@
 """Auto-tuner for finding the optimal batch size for model training."""
 
-import gc
 import logging
 import time
 from typing import Any, Dict, Optional
@@ -95,10 +94,6 @@ class BatchSizeAutotuner:
                 # This batch size failed, try a smaller one
                 high = mid - 1
 
-            # Clean up memory
-            torch.cuda.empty_cache()
-            gc.collect()
-
         # Reduce by 15% to be safe
         reduced_batch_size = int(optimal_batch_size * 0.70)
         logger.info(
@@ -129,6 +124,7 @@ class BatchSizeAutotuner:
 
             # Get a batch that we can reuse
             batch: BatchedTrainingSamples = next(iter(data_loader))
+            batch = batch.to(self.device)
 
             for i in range(self.num_iterations):
 
@@ -137,9 +133,6 @@ class BatchSizeAutotuner:
                 if len(batch) < batch_size:
                     logger.info(f"Skipping batch size {batch_size} - not enough data")
                     return False
-
-                # Convert batch to device
-                batch = batch.to(self.device)
 
                 # Forward pass
                 self.model.train()
@@ -169,9 +162,6 @@ class BatchSizeAutotuner:
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
                 logger.info(f"Batch size {batch_size} failed due to OOM error ✗")
-                # Clean up memory after OOM
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
                 return False
             else:
                 # Re-raise if it's not an OOM error
@@ -179,15 +169,12 @@ class BatchSizeAutotuner:
 
         except OutOfMemoryError:
             logger.info(f"Batch size {batch_size} failed due to RAM OOM error ✗")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
             return False
 
         finally:
             # Clean up
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            gc.collect()
 
 
 def find_optimal_batch_size(
