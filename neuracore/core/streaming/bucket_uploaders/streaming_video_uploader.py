@@ -17,7 +17,7 @@ from typing import Callable, Optional
 import av
 import numpy as np
 import requests
-from neuracore_types import CameraData
+from neuracore_types import CameraData, DataType
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -98,8 +98,8 @@ class StreamingVideoUploader(BucketUploader):
         # Thread will continue, even if main thread exits
         self._upload_thread = threading.Thread(target=self._upload_loop, daemon=False)
         self._recording_manager = get_recording_state_manager()
+        self.data_type: DataType = self._get_data_type_from_path(self.path)
         self._upload_thread.start()
-        self._update_num_active_streams(1)
 
     def _thread_setup(self) -> None:
         """Setup thread-local resources for the video encoding and upload loop.
@@ -108,6 +108,8 @@ class StreamingVideoUploader(BucketUploader):
         the MP4 container with fragmented headers for streaming, and sets up
         tracking variables for timestamp management and buffer handling.
         """
+        self._stream_id = self._register_data_stream(self.data_type)
+
         # Ensure chunk_size is a multiple of 256 KiB
         if self.chunk_size % CHUNK_MULTIPLE != 0:
             self.chunk_size = ((self.chunk_size // CHUNK_MULTIPLE) + 1) * CHUNK_MULTIPLE
@@ -230,7 +232,7 @@ class StreamingVideoUploader(BucketUploader):
             f"{self.uploader.total_bytes_uploaded} bytes"
         )
         self._upload_json_data()
-        self._update_num_active_streams(-1)
+        self._mark_data_stream_complete(self._stream_id)
 
     def add_frame(self, frame_data: np.ndarray, metadata: CameraData) -> None:
         """Add a video frame to the encoding queue.

@@ -247,8 +247,11 @@ def stop_recording(
         raise ValueError("Recording_id is None, no current recording")
     robot.stop_recording(recording_id)
     if wait:
-        while backend_utils.get_num_active_streams(recording_id) > 0:
-            time.sleep(2.0)
+        while True:
+            active_streams = backend_utils.get_active_data_streams(recording_id)
+            if len(active_streams) == 0:
+                break
+        time.sleep(2.0)
 
 
 def stop_live_data(robot_name: Optional[str] = None, instance: int = 0) -> None:
