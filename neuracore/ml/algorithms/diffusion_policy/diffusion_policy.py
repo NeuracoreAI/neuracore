@@ -633,6 +633,14 @@ class DiffusionPolicy(NeuracoreModel):
         """Configure scheduler for optimizers.
 
         Uses diffusers scheduler with warmup steps.
+
+        Args:
+            optimizers: List of optimizers for model parameters
+            num_training_steps: Number of training steps
+
+        Returns:
+            list[torch.optim.lr_scheduler._LRScheduler]: List of schedulers for
+                optimizers
         """
         from diffusers.optimization import get_scheduler
 
