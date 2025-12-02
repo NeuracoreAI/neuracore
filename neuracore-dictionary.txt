@@ -145,6 +145,7 @@ PJRT
 pointcloud
 preds
 preexec
+pretrained
 proprio
 proprios
 PSNR

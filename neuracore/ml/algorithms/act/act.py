@@ -57,6 +57,7 @@ class ACT(NeuracoreModel):
         dim_feedforward: int = 3200,
         dropout: float = 0.1,
         lr: float = 1e-4,
+        freeze_backbone: bool = False,
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
         kl_weight: float = 10.0,
@@ -73,6 +74,7 @@ class ACT(NeuracoreModel):
             dim_feedforward: Feedforward network dimension
             dropout: Dropout probability
             lr: Learning rate for main parameters
+            freeze_backbone: Whether to freeze image encoder backbone
             lr_backbone: Learning rate for image encoder backbone
             weight_decay: Weight decay for optimizer
             kl_weight: Weight for KL divergence loss
@@ -80,6 +82,7 @@ class ACT(NeuracoreModel):
         """
         super().__init__(model_init_description)
         self.hidden_dim = hidden_dim
+        self.freeze_backbone = freeze_backbone
         self.lr = lr
         self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
@@ -161,6 +164,8 @@ class ACT(NeuracoreModel):
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         )
 
+        # Setup parameter groups
+        self._setup_optimizer_param_groups()
         # Normalization statistics
         self._setup_normalization_stats()
 
@@ -202,6 +207,25 @@ class ACT(NeuracoreModel):
                 self.dataset_description.joint_target_positions.std
             ),
         )
+
+    def _setup_optimizer_param_groups(self) -> None:
+        """Setup parameter groups for optimizer."""
+        backbone_params, other_params = [], []
+        for name, param in self.named_parameters():
+            if "image_encoders" in name:
+                backbone_params.append(param)
+            else:
+                other_params.append(param)
+
+        if self.freeze_backbone:
+            for param in backbone_params:
+                param.requires_grad = False
+            self.param_groups = [{"params": other_params, "lr": self.lr}]
+        else:
+            self.param_groups = [
+                {"params": backbone_params, "lr": self.lr_backbone},
+                {"params": other_params, "lr": self.lr},
+            ]
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
         """Convert list of floats to torch tensor on the correct device.
@@ -574,30 +598,18 @@ class ACT(NeuracoreModel):
             metrics=metrics,
         )
 
-    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
-        """Configure optimizer with different learning rates for different components.
+    def configure_optimizers(
+        self,
+    ) -> list[torch.optim.Optimizer]:
+        """Configure optimizer with different learning rates.
 
-        Uses separate learning rates for image encoder backbone (typically lower)
-        and other model parameters to account for pre-trained vision components.
+        Uses separate learning rates for image encoder backbone and other
+        model parameters.
 
         Returns:
-            list[torch.optim.Optimizer]: List containing the configured optimizer
+            list[torch.optim.Optimizer]: List of optimizers for model parameters
         """
-        backbone_params = []
-        other_params = []
-
-        for name, param in self.named_parameters():
-            if "image_encoders" in name:
-                backbone_params.append(param)
-            else:
-                other_params.append(param)
-
-        param_groups = [
-            {"params": backbone_params, "lr": self.lr_backbone},
-            {"params": other_params, "lr": self.lr},
-        ]
-
-        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+        return [torch.optim.AdamW(self.param_groups, weight_decay=self.weight_decay)]
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:

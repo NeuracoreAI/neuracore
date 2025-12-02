@@ -52,6 +52,7 @@ class CNNMLP(NeuracoreModel):
         cnn_output_dim: int = 512,
         num_layers: int = 3,
         lr: float = 1e-4,
+        freeze_backbone: bool = False,
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
     ):
@@ -64,6 +65,7 @@ class CNNMLP(NeuracoreModel):
             cnn_output_dim: Output dimension for CNN encoders
             num_layers: Number of MLP layers
             lr: Learning rate for main parameters
+            freeze_backbone: Whether to freeze image encoder backbone
             lr_backbone: Learning rate for CNN backbone
             weight_decay: Weight decay for optimizer
         """
@@ -73,6 +75,7 @@ class CNNMLP(NeuracoreModel):
         self.cnn_output_dim = cnn_output_dim
         self.num_layers = num_layers
         self.lr = lr
+        self.freeze_backbone = freeze_backbone
         self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
 
@@ -187,6 +190,8 @@ class CNNMLP(NeuracoreModel):
             T.Normalize(mean=[0.5], std=[0.5]),  # Simple normalization for depth
         )
 
+        # Setup parameter groups
+        self._setup_optimizer_param_groups()
         # Normalization statistics
         self._setup_normalization_stats()
 
@@ -229,6 +234,25 @@ class CNNMLP(NeuracoreModel):
         self.register_buffer(
             "action_std", self._to_torch_float_tensor(action_data_item_stats.std)
         )
+
+    def _setup_optimizer_param_groups(self) -> None:
+        """Setup parameter groups for optimizer."""
+        backbone_params, other_params = [], []
+        for name, param in self.named_parameters():
+            if "image_encoders" in name:
+                backbone_params.append(param)
+            else:
+                other_params.append(param)
+
+        if self.freeze_backbone:
+            for param in backbone_params:
+                param.requires_grad = False
+            self.param_groups = [{"params": other_params, "lr": self.lr}]
+        else:
+            self.param_groups = [
+                {"params": backbone_params, "lr": self.lr_backbone},
+                {"params": other_params, "lr": self.lr},
+            ]
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
         """Convert list of floats to torch tensor on the correct device.
@@ -517,29 +541,18 @@ class CNNMLP(NeuracoreModel):
             metrics=metrics,
         )
 
-    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
-        """Configure optimizer with different learning rates for different components.
+    def configure_optimizers(
+        self,
+    ) -> list[torch.optim.Optimizer]:
+        """Configure optimizer with different learning rates.
 
-        Uses separate learning rates for image encoder backbones (typically lower)
-        and other model parameters.
+        Uses separate learning rates for image encoder backbone and other
+        model parameters.
 
         Returns:
-            list[torch.optim.Optimizer]: List containing the configured optimizer
+            list[torch.optim.Optimizer]: List of optimizers for model parameters
         """
-        backbone_params = []
-        other_params = []
-
-        for name, param in self.named_parameters():
-            if any(backbone in name for backbone in ["rgb", "depth"]):
-                backbone_params.append(param)
-            else:
-                other_params.append(param)
-
-        param_groups = [
-            {"params": backbone_params, "lr": self.lr_backbone},
-            {"params": other_params, "lr": self.lr},
-        ]
-        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+        return [torch.optim.AdamW(self.param_groups, weight_decay=self.weight_decay)]
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:

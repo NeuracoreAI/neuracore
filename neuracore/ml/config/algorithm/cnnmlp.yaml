@@ -6,5 +6,6 @@ algorithm:
   cnn_output_dim: 512
   num_layers: 3
   lr: 1e-4
+  freeze_backbone: false
   lr_backbone: 1e-5
   weight_decay: 1e-4

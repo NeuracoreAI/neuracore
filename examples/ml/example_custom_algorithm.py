@@ -217,6 +217,7 @@ class SimpleVLA(NeuracoreModel):
         fusion_output_dim: int = 128,
         num_layers: int = 3,
         lr: float = 1e-4,
+        freeze_backbone: bool = False,
         lr_backbone: float = 1e-5,
         weight_decay: float = 1e-4,
     ):
@@ -230,6 +231,7 @@ class SimpleVLA(NeuracoreModel):
             fusion_output_dim: Output dimension for multimodal fusion
             num_layers: Number of MLP layers
             lr: Learning rate for main parameters
+            freeze_backbone: Whether to freeze image encoder backbone
             lr_backbone: Learning rate for encoder backbones
             weight_decay: Weight decay for optimizer
         """
@@ -240,6 +242,7 @@ class SimpleVLA(NeuracoreModel):
         self.fusion_output_dim = fusion_output_dim
         self.num_layers = num_layers
         self.lr = lr
+        self.freeze_backbone = freeze_backbone
         self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
 
@@ -300,6 +303,8 @@ class SimpleVLA(NeuracoreModel):
 
         # Normalization statistics
         self._setup_normalization_stats()
+        # Setup parameter groups
+        self._setup_optimizer_param_groups()
 
     def _setup_normalization_stats(self) -> None:
         """Setup normalization statistics for different data types."""
@@ -339,6 +344,25 @@ class SimpleVLA(NeuracoreModel):
                 self.dataset_description.joint_target_positions.std
             ),
         )
+
+    def _setup_optimizer_param_groups(self) -> None:
+        """Setup parameter groups for optimizer."""
+        backbone_params, other_params = [], []
+        for name, param in self.named_parameters():
+            if "image_encoders" in name or "language_encoder" in name:
+                backbone_params.append(param)
+            else:
+                other_params.append(param)
+
+        if self.freeze_backbone:
+            for param in backbone_params:
+                param.requires_grad = False
+            self.param_groups = [{"params": other_params, "lr": self.lr}]
+        else:
+            self.param_groups = [
+                {"params": backbone_params, "lr": self.lr_backbone},
+                {"params": other_params, "lr": self.lr},
+            ]
 
     def _to_torch_float_tensor(self, data: list[float]) -> torch.FloatTensor:
         """Convert list of floats to torch tensor on the correct device.
@@ -595,32 +619,18 @@ class SimpleVLA(NeuracoreModel):
             metrics=metrics,
         )
 
-    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
-        """Configure optimizer with different learning rates for different components.
+    def configure_optimizers(
+        self,
+    ) -> list[torch.optim.Optimizer]:
+        """Configure optimizer with different learning rates.
 
-        Uses separate learning rates for encoder backbones (typically lower)
-        and other model parameters.
+        Uses separate learning rates for image encoder backbone and other
+        model parameters.
 
         Returns:
-            list[torch.optim.Optimizer]: List containing the configured optimizer
+            list[torch.optim.Optimizer]: List of optimizers for model parameters
         """
-        # Separate parameters for backbones and other layers
-        backbone_params = []
-        other_params = []
-
-        for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-            if "image_encoders" in name or "language_encoder" in name:
-                backbone_params.append(param)
-            else:
-                other_params.append(param)
-
-        param_groups = [
-            {"params": backbone_params, "lr": self.lr_backbone},
-            {"params": other_params, "lr": self.lr},
-        ]
-        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+        return [torch.optim.AdamW(self.param_groups, weight_decay=self.weight_decay)]
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:

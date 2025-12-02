@@ -8,6 +8,7 @@ algorithm:
   dim_feedforward: 3200
   dropout: 0.1
   lr: 1e-4
+  freeze_backbone: false
   lr_backbone: 1e-5
   weight_decay: 1e-4
   kl_weight: 10.0

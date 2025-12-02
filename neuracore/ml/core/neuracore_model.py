@@ -148,6 +148,22 @@ class NeuracoreModel(nn.Module, ABC):
         """
         pass
 
+    def configure_schedulers(
+        self,
+        optimizers: list[torch.optim.Optimizer],
+        num_training_steps: int,
+    ) -> list[torch.optim.lr_scheduler._LRScheduler]:
+        """Configure and return schedulers for the model.
+
+        Args:
+            optimizers: List of optimizers for model parameters
+            num_training_steps: Number of training steps
+
+        Returns:
+            list[torch.optim.lr_scheduler._LRScheduler]: List of schedulers
+        """
+        return []
+
     @staticmethod
     def tokenize_text(text: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Tokenize text input for language processing.

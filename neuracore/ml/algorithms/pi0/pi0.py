@@ -726,14 +726,16 @@ class Pi0(NeuracoreModel):
             + list(self.moe.get_parameters("action"))
         )
 
-    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
-        """Configure optimizer with different learning rates for different components.
+    def configure_optimizers(
+        self,
+    ) -> list[torch.optim.Optimizer]:
+        """Configure optimizer with different learning rates.
 
-        Uses separate learning rates for image encoder backbone (typically lower)
-        and other model parameters to account for pre-trained vision components.
+        Uses separate learning rates for image encoder backbone and other
+        model parameters.
 
         Returns:
-            list[torch.optim.Optimizer]: List containing the configured optimizer
+            list[torch.optim.Optimizer]: List of optimizers for model parameters
         """
         if self.using_pretrained_paligemma:
             # Only train action expert parameters when using pretrained VLM
