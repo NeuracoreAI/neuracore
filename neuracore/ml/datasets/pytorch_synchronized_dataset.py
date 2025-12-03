@@ -525,7 +525,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
     ) -> MaskableData:
         """Create MaskableData for parallel gripper open amounts input."""
         parallel_gripper_open_amounts_tensor = torch.tensor(
-            list(parallel_gripper_open_amounts.values()), dtype=torch.float32
+            list(parallel_gripper_open_amounts.open_amounts.values()),
+            dtype=torch.float32,
         )
         max_len = self.dataset_description.parallel_gripper_open_amounts.max_len
         num_existing = parallel_gripper_open_amounts_tensor.shape[0]
