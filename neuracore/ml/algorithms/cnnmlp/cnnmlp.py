@@ -239,11 +239,10 @@ class CNNMLP(NeuracoreModel):
         """Setup parameter groups for optimizer."""
         backbone_params, other_params = [], []
         for name, param in self.named_parameters():
-            if "image_encoders" in name:
+            if any(backbone in name for backbone in ["rgb", "depth", "point_cloud"]):
                 backbone_params.append(param)
             else:
                 other_params.append(param)
-
         if self.freeze_backbone:
             for param in backbone_params:
                 param.requires_grad = False
