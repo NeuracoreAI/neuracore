@@ -212,7 +212,7 @@ class ACT(NeuracoreModel):
         """Setup parameter groups for optimizer."""
         backbone_params, other_params = [], []
         for name, param in self.named_parameters():
-            if "image_encoders" in name:
+            if any(backbone in name for backbone in ["image_encoders"]):
                 backbone_params.append(param)
             else:
                 other_params.append(param)
