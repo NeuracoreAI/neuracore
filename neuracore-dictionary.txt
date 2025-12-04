@@ -172,10 +172,10 @@ sdpa
 setsid
 shadowsize
 siglip
+softmax
 solimp
 solref
 squaredcos
-softmax
 staticmethod
 targetbody
 teleop
@@ -196,6 +196,7 @@ unnormalization
 UNITREE
 unitreeh1
 URDF
+usefixtures
 Vaswani
 vertadr
 vertnum

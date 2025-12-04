@@ -49,9 +49,7 @@ def algorithm_list_response():
 
 
 def test_start_training_run(
-    temp_config_dir,
     mock_auth_requests,
-    reset_neuracore,
     training_job_response,
     algorithm_list_response,
     mocked_org_id,
@@ -61,7 +59,7 @@ def test_start_training_run(
     nc.login("test_api_key")
 
     dataset_response = {
-        "id": "dataset_123",
+        "id": "dataset123",
         "name": "test_dataset",
         "size_bytes": 1024,
         "tags": ["test"],
@@ -85,6 +83,11 @@ def test_start_training_run(
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response['id']}/recordings",
         json={"recordings": []},
+        status_code=200,
+    )
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/dataset123",
+        json={"data": [], "total": 10, "limit": 1, "start_after": None},
         status_code=200,
     )
 

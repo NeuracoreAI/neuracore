@@ -3,6 +3,7 @@
 import re
 
 import pytest
+import requests_mock
 
 from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
@@ -14,12 +15,14 @@ from neuracore.core.exceptions import DatasetError
 class TestDatasetInitialization:
     """Tests for Dataset initialization."""
 
-    def test_init_with_dict(self, dataset_dict, mock_auth_requests):
+    def test_init_with_dict(self, dataset_dict, mock_login, mock_auth_requests):
         """Test initializing a Dataset with a dictionary."""
+        # Mock the recordings endpoint for num_recordings initialization
+
         dataset = Dataset(**dataset_dict)
 
-        assert dataset.id == "dataset123"
-        assert dataset.name == "test_dataset"
+        assert dataset.id == dataset_dict["id"]
+        assert dataset.name == dataset_dict["name"]
         assert dataset.size_bytes == 1024
         assert dataset.tags == ["test", "robotics"]
         assert dataset.is_shared is False
@@ -37,55 +40,47 @@ class TestDatasetInitialization:
         assert dataset.recordings[1]["id"] == "rec2"
 
     def test_init_without_recordings_fetches_from_api(
-        self, mock_auth_requests, dataset_dict, recordings_list, mocked_org_id
-    ):
-        """Test that initializing without recordings fetches them from API."""
-
-        # Mock recordings endpoint
-        mock_auth_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_dict['id']}/recordings",
-            json={"recordings": recordings_list},
-            status_code=200,
-        )
-
-        dataset = Dataset(**dataset_dict)
-
-        assert len(dataset.recordings) == 2
-        assert dataset.recordings[0]["id"] == "rec1"
-
-
-class TestDatasetRetrieval:
-    """Tests for retrieving existing datasets."""
-
-    def test_get_by_name(
         self,
-        temp_config_dir,
-        reset_neuracore,
+        mock_login,
         mock_auth_requests,
         dataset_dict,
         recordings_list,
         mocked_org_id,
     ):
+        """Test that initializing without recordings fetches them from API."""
+        mock_auth_requests.post(
+            f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/{dataset_dict['id']}",
+            # First call: get total count
+            [{
+                "json": {
+                    "data": recordings_list[0],
+                    "total": 2,
+                    "limit": 1,
+                    "start_after": None,
+                },
+                "status_code": 200,
+            }],
+        )
+
+        dataset = Dataset(**dataset_dict)
+
+        # At this point, recordings are NOT loaded yet, but num_recordings is
+        assert dataset.num_recordings == 2
+        assert len(dataset.recordings) == 0  # Lazy loaded
+
+
+class TestDatasetRetrieval:
+    """Tests for retrieving existing datasets."""
+
+    def test_get_by_name(mock_auth_requests, mock_login):
         """Test getting an existing dataset by name."""
-
-        # Mock datasets endpoint
-        mock_auth_requests.get(
-            re.compile(f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name"),
-            json=dataset_dict,
-            status_code=200,
-        )
-
-        # Mock recordings endpoint
-        mock_auth_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_dict['id']}/recordings",
-            json={"recordings": recordings_list},
-            status_code=200,
-        )
-
+        mock_login
+        mock_auth_requests
         dataset = Dataset.get_by_name("test_dataset")
 
         assert dataset.id == "dataset123"
         assert dataset.name == "test_dataset"
+        assert dataset.num_recordings == 0
 
     def test_get_by_name_not_found(self, mock_auth_requests, mocked_org_id):
         """Test getting a non-existent dataset by name raises an error."""
@@ -122,17 +117,11 @@ class TestDatasetRetrieval:
             status_code=200,
         )
 
-        # Mock recordings endpoint
-        mock_auth_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_dict['id']}/recordings",
-            json={"recordings": recordings_list},
-            status_code=200,
-        )
-
         dataset = Dataset.get_by_id("dataset123")
 
         assert dataset.id == "dataset123"
         assert dataset.name == "test_dataset"
+        assert dataset.num_recordings == 0
 
     def test_get_by_id_not_found(self, mock_auth_requests, mocked_org_id):
         """Test getting a non-existent dataset by ID raises an error."""
@@ -166,11 +155,8 @@ class TestDatasetCreation:
 
     def test_create_dataset(
         self,
-        temp_config_dir,
-        reset_neuracore,
         mock_auth_requests,
         dataset_dict,
-        recordings_list,
         mocked_org_id,
     ):
         """Test creating a new dataset."""
@@ -189,10 +175,10 @@ class TestDatasetCreation:
             status_code=200,
         )
 
-        # Mock recordings endpoint
+        # Mock recordings endpoint for num_recordings initialization
         mock_auth_requests.get(
             f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_dict['id']}/recordings",
-            json={"recordings": recordings_list},
+            json={"data": [], "total": 0, "limit": 1, "start_after": None},
             status_code=200,
         )
 
@@ -215,10 +201,15 @@ class TestDatasetCreation:
             status_code=200,
         )
 
-        # Mock recordings endpoint
+        # Mock recordings endpoint for num_recordings initialization
         mock_auth_requests.get(
             f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_dict['id']}/recordings",
-            json={"recordings": recordings_list},
+            json={
+                "data": recordings_list[:1],
+                "total": 2,
+                "limit": 1,
+                "start_after": None,
+            },
             status_code=200,
         )
 
@@ -248,10 +239,10 @@ class TestDatasetCreation:
             status_code=200,
         )
 
-        # Mock recordings endpoint
+        # Mock recordings endpoint for num_recordings initialization
         mock_auth_requests.get(
             f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_dict['id']}/recordings",
-            json={"recordings": recordings_list},
+            json={"data": [], "total": 0, "limit": 1, "start_after": None},
             status_code=200,
         )
 
@@ -259,21 +250,15 @@ class TestDatasetCreation:
 
         assert dataset.is_shared is True
 
-    def test_create_with_special_characters_in_name(
-        self, mock_auth_requests, mocked_org_id
-    ):
+    def test_create_with_special_characters_in_name(self, mock_login):
         """Test creating a dataset with special characters in name."""
+        mock_login
 
         special_name = "ghjdidnia-dd/X0551-Ker-Pieb87-846483-CNNMLPP"
+        mocked_org_id = "test-org-id"
 
-        # Mock check if exists
-        mock_auth_requests.get(
-            re.compile(f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name"),
-            json={},
-            status_code=404,
-        )
-
-        dataset_dict = {
+        # Special dataset we want returned
+        dataset_dict_special = {
             "id": "special123",
             "org_id": mocked_org_id,
             "name": special_name,
@@ -282,23 +267,40 @@ class TestDatasetCreation:
             "is_shared": False,
         }
 
-        # Mock creation endpoint
-        mock_auth_requests.post(
-            f"{API_URL}/org/{mocked_org_id}/datasets",
-            json=dataset_dict,
-            status_code=200,
-        )
+        # Fully self-contained mocking
+        with requests_mock.Mocker() as m:
+            # Mock org list call (needed by get_current_org)
+            m.get(
+                f"{API_URL}/org-management/my-orgs",
+                json=[{"org": {"id": mocked_org_id, "name": "test organization"}}],
+            )
 
-        # Mock recordings endpoint
-        mock_auth_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/datasets/special123/recordings",
-            json={"recordings": []},
-            status_code=200,
-        )
+            # Mock GET dataset by name (called inside Dataset.create → get_by_name)
+            m.get(
+                f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+                json={},  # empty so Dataset.create proceeds to create
+                status_code=404,
+            )
 
-        dataset = Dataset.create(special_name)
+            # Mock POST create dataset
+            m.post(
+                f"{API_URL}/org/{mocked_org_id}/datasets",
+                json=dataset_dict_special,
+                status_code=201,
+            )
 
+            # Mock recordings fetch endpoint
+            m.post(
+                f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/special123",
+                json={"data": [], "total": 0, "start_after": None},
+            )
+
+            # Now call Dataset.create
+            dataset = Dataset.create(special_name)
+
+        # Assert it returned exactly the special dataset
         assert dataset.name == special_name
+        assert dataset.id == "special123"
 
 
 class TestDatasetIndexingAndSlicing:
@@ -309,7 +311,9 @@ class TestDatasetIndexingAndSlicing:
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
         assert len(dataset) == 2
 
-    def test_getitem_single_index(self, dataset_dict, recordings_list):
+    def test_getitem_single_index(
+        self, dataset_dict, recordings_list, mock_auth_requests, mocked_org_id
+    ):
         """Test accessing a single recording by index."""
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
 
@@ -341,8 +345,9 @@ class TestDatasetIndexingAndSlicing:
         result = dataset[0:1]
 
         assert isinstance(result, Dataset)
+        assert isinstance(result[0], Recording)
         assert len(result) == 1
-        assert result.recordings[0]["id"] == "rec1"
+        assert result[0].id == "rec1"
 
     def test_getitem_slice_full(self, dataset_dict, recordings_list):
         """Test slicing entire dataset."""
@@ -351,6 +356,7 @@ class TestDatasetIndexingAndSlicing:
         result = dataset[:]
 
         assert isinstance(result, Dataset)
+        assert isinstance(result[0], Recording)
         assert len(result) == 2
 
     def test_getitem_slice_with_step(self, dataset_dict):
@@ -372,18 +378,60 @@ class TestDatasetIndexingAndSlicing:
         result = dataset[0:5:2]
 
         assert len(result) == 3
-        assert result.recordings[0]["id"] == "rec0"
-        assert result.recordings[1]["id"] == "rec2"
-        assert result.recordings[2]["id"] == "rec4"
+        assert result[0].id == "rec0"
+        assert result[1].id == "rec2"
+        assert result[2].id == "rec4"
 
     def test_getitem_invalid_type(self, dataset_dict, recordings_list):
         """Test that non-integer/slice index raises TypeError."""
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
 
-        with pytest.raises(
-            TypeError, match="Dataset indices must be integers or slices"
-        ):
+        with pytest.raises(TypeError, match="Dataset indices must be int or slice"):
             _ = dataset["invalid"]
+
+    def test_lazy_loading_on_index(
+        self, dataset_dict, recordings_list, mock_auth_requests, mocked_org_id
+    ):
+        """Test that indexing triggers lazy loading of recordings."""
+        # Mock initial total count fetch
+        mock_auth_requests.post(
+            f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/{dataset_dict['id']}",
+            [
+                # First call: get total count
+                {
+                    "json": {
+                        "data": recordings_list[0],
+                        "total": 2,
+                        "limit": 1,
+                        "start_after": None,
+                    },
+                    "status_code": 200,
+                },
+                # Second call: get all recordings when accessing index
+                {
+                    "json": {
+                        "data": recordings_list,
+                        "total": 2,
+                        "limit": 100,
+                        "start_after": None,
+                    },
+                    "status_code": 200,
+                },
+            ],
+        )
+
+        dataset = Dataset(**dataset_dict)
+
+        # Initially, recordings should not be loaded
+        assert dataset.num_recordings == 2
+        assert len(dataset.recordings) == 0
+
+        # Accessing an index should trigger loading
+        recording = dataset[0]
+
+        assert isinstance(recording, Recording)
+        assert recording.id == "rec1"
+        assert len(dataset) == 2  # Now loaded
 
 
 class TestDatasetIteration:
@@ -433,6 +481,49 @@ class TestDatasetIteration:
         with pytest.raises(StopIteration):
             next(dataset)
 
+    def test_lazy_loading_on_iteration(
+        self, dataset_dict, recordings_list, mock_auth_requests, mocked_org_id
+    ):
+        """Test that iteration triggers lazy loading of recordings."""
+        # Mock API calls
+        mock_auth_requests.post(
+            f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/dataset123?limit=30&is_shared=False",
+            [
+                # First call: get total count
+                {
+                    "json": {
+                        "data": recordings_list[:1],
+                        "total": len(recordings_list),
+                        "limit": 1,
+                        "start_after": None,
+                    },
+                    "status_code": 200,
+                },
+                # Second call: get all recordings when iterating
+                {
+                    "json": {
+                        "data": recordings_list,
+                        "total": len(recordings_list),
+                        "limit": 100,
+                        "start_after": None,
+                    },
+                    "status_code": 200,
+                },
+            ],
+        )
+
+        dataset = Dataset(**dataset_dict, recordings=recordings_list)
+
+        # Initially, recordings should not be loaded
+        assert dataset.num_recordings == len(recordings_list)
+        assert len(dataset.recordings) == len(recordings_list)
+
+        # Iterating should trigger loading
+        recordings = list(dataset)
+
+        assert len(recordings) == 2
+        assert len(dataset.recordings) == 2  # Now loaded
+
 
 class TestDatasetSynchronization:
     """Tests for dataset synchronization."""
@@ -450,12 +541,15 @@ class TestDatasetSynchronization:
         assert synced.frequency == 30
 
     def test_synchronize_with_data_types(
-        self, mock_auth_requests, dataset_dict, recordings_list, mocked_org_id
+        self, mock_auth_requests, dataset_dict, recordings_list
     ):
         """Test synchronizing with specific data types."""
 
         from neuracore_types import DataType
 
+        import neuracore as nc
+
+        nc.login()
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
 
         data_types = [DataType.RGB_IMAGE, DataType.DEPTH_IMAGE]
