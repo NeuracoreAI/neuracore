@@ -26,16 +26,16 @@ class TestRecording:
         return Recording(
             dataset=dataset_mock,
             recording_id="rec1",
-            size_bytes=512,
+            total_bytes=512,
             robot_id="robot1",
             instance=1,
         )
 
-    def test_init(self, recording, dataset_mock):
+    def test_init(self, recording: Recording, dataset_mock):
         """Test Recording initialization."""
         assert recording.dataset == dataset_mock
         assert recording.id == "rec1"
-        assert recording.size_bytes == 512
+        assert recording.total_bytes == 512
         assert recording.robot_id == "robot1"
         assert recording.instance == 1
 

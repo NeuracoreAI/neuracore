@@ -23,7 +23,7 @@ class Recording:
         self,
         dataset: "Dataset",
         recording_id: str,
-        size_bytes: int,
+        total_bytes: int,
         robot_id: str,
         instance: int,
     ):
@@ -32,15 +32,28 @@ class Recording:
         Args:
             dataset: Parent Dataset instance.
             recording_id: Unique identifier for the recording episode.
-            size_bytes: Size of the recording episode in bytes.
+            total_bytes: Size of the recording episode in bytes.
             robot_id: The robot that created this recording.
             instance: The instance of the robot that created this recording.
         """
         self.dataset = dataset
         self.id = recording_id
-        self.size_bytes = size_bytes
+        self.total_bytes = total_bytes
         self.robot_id = robot_id
         self.instance = instance
+        self._raw = {
+            "id": recording_id,
+            "total_bytes": total_bytes,
+            "robot_id": robot_id,
+            "instance": instance,
+        }
+
+    def __getitem__(self, key: str) -> object:
+        """Support old dict-style access dynamically."""
+        try:
+            return self._raw[key]
+        except KeyError:
+            raise KeyError(f"Recording has no key '{key}'")
 
     def synchronize(
         self,
