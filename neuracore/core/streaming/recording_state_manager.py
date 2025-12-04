@@ -280,10 +280,7 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         if message.type == RecordingNotificationType.SAVED:
             self.cancel_expiry_timer(recording_id=message.payload.recording_id)
             self.emit(self.RECORDING_SAVED, **message.payload.model_dump())
-        elif message.type in (
-            RecordingNotificationType.START,
-            RecordingNotificationType.REQUESTED,
-        ):
+        elif message.type in (RecordingNotificationType.START,):
             self.updated_recording_state(is_recording=True, details=message.payload)
         elif message.type in (
             RecordingNotificationType.STOP,
