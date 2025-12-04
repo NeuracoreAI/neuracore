@@ -18,6 +18,9 @@ batch_size: "auto"
 num_train_workers: 2
 num_val_workers: 1
 
+# Maximum number of workers to use for prefetching recordings
+max_prefetch_workers: 4
+
 # Dataset synchronization
 dataset_name: null
 dataset_id: null

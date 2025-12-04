@@ -270,6 +270,7 @@ class Dataset:
         frequency: int = 0,
         data_types: Optional[list[DataType]] = None,
         prefetch_videos: bool = False,
+        max_prefetch_workers: int = 4,
     ) -> SynchronizedDataset:
         """Synchronize the dataset with specified frequency and data types.
 
@@ -279,6 +280,7 @@ class Dataset:
             data_types: List of DataType to include in synchronization.
                 If None, uses the default data types from the dataset.
             prefetch_videos: Whether to prefetch video data for the synchronized data.
+            max_prefetch_workers: Number of threads to use for prefetching videos.
 
         Returns:
             SynchronizedDataset instance containing synchronized data.
@@ -312,6 +314,7 @@ class Dataset:
             data_types=data_types,
             dataset_description=synced_dataset.dataset_description,
             prefetch_videos=prefetch_videos,
+            max_prefetch_workers=max_prefetch_workers,
         )
 
     def __iter__(self) -> "Dataset":
