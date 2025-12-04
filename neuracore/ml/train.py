@@ -396,7 +396,10 @@ def main(cfg: DictConfig) -> None:
         dataset = nc.get_dataset(name=cfg.dataset_name)
 
     synchronized_dataset = dataset.synchronize(
-        frequency=cfg.frequency, data_types=data_types_to_sync, prefetch_videos=True
+        frequency=cfg.frequency,
+        data_types=data_types_to_sync,
+        prefetch_videos=True,
+        max_prefetch_workers=cfg.max_prefetch_workers,
     )
 
     # Setup logging for main process

@@ -32,7 +32,7 @@ def get_dataset(name: Optional[str] = None, id: Optional[str] = None) -> Dataset
     elif name is not None:
         _active_dataset = Dataset.get_by_name(name)
     if _active_dataset is None:
-        raise ValueError("No active dataset: _active_dataset is None")
+        raise ValueError(f"No Dataset found with the given name: {name} or ID: {id}")
     GlobalSingleton()._active_dataset_id = _active_dataset.id
     return _active_dataset
 
