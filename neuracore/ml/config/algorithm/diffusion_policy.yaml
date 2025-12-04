@@ -24,6 +24,3 @@ algorithm:
   optimizer_betas: [0.95, 0.999]
   optimizer_eps: 1e-8
   prediction_type: "epsilon"
-  normalization_type: "min_max"
-  lr_scheduler_type: "cosine"
-  lr_scheduler_num_warmup_steps: 500
