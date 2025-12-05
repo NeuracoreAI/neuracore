@@ -1,5 +1,4 @@
 import numpy as np
-import time
 from bigym.envs.reach_target import ReachTarget
 from bigym.action_modes import JointPositionActionMode
 from bigym.utils.observation_config import ObservationConfig, CameraConfig

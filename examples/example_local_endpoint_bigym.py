@@ -1,6 +1,6 @@
 import argparse
 import time
-from typing import Any, List, Tuple, Dict
+from typing import Any
 
 import numpy as np
 import neuracore as nc
@@ -45,7 +45,7 @@ def run_rollout(
     obs, info = env.reset()
 
     horizon = 1
-    actions: List[np.ndarray] = []
+    actions: list[np.ndarray] = []
 
     for step_idx in range(num_steps):
         # Log joint states
