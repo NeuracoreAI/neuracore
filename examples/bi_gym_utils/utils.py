@@ -3,6 +3,7 @@ import time
 from bigym.envs.reach_target import ReachTarget
 from bigym.action_modes import JointPositionActionMode
 from bigym.utils.observation_config import ObservationConfig, CameraConfig
+
 FREQUENCY = 20
 TRAINING_JOB_NAME = "MyTrainingJob"
 
@@ -73,6 +74,7 @@ def make_env() -> ReachTarget:
         render_mode="human",
     )
 
+
 def obs_to_joint_dict(
     obs: dict[str, np.ndarray],
     joint_names: list[str],
@@ -103,6 +105,7 @@ def obs_to_imgs(
         "rgb_left_wrist": obs["rgb_left_wrist"].transpose(1, 2, 0),
         "rgb_right_wrist": obs["rgb_right_wrist"].transpose(1, 2, 0),
     }
+
 
 def action_to_joint_action_dict(
     action,

@@ -63,7 +63,9 @@ def run_episode(
         # ------------------------------------------------------------------- #
         for step in demo._steps:
             # Apply demo action
-            obs, reward, terminated, truncated, info = env.step(step.info["demo_action"])
+            obs, reward, terminated, truncated, info = env.step(
+                step.info["demo_action"]
+            )
             print(
                 f"Reward={reward}, terminated={terminated}, "
                 f"truncated={truncated}, info={info}"
@@ -85,7 +87,9 @@ def run_episode(
             # nc.log_rgb("rgb_right_wrist", images["rgb_right_wrist"], timestamp=t
 
             # Log joint targets
-            joint_action = action_to_joint_action_dict(step.info["demo_action"], JOINT_ACTUATORS)
+            joint_action = action_to_joint_action_dict(
+                step.info["demo_action"], JOINT_ACTUATORS
+            )
             nc.log_joint_target_positions(joint_action)
 
             # Check outcome
@@ -166,9 +170,18 @@ def main(num_episodes: int, record: bool, recording_name: str) -> None:
 #   CLI ENTRYPOINT
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run ReachTarget demo logging into neuracore.")
-    parser.add_argument("--num_episodes", type=int, default=50, help="Number of episodes to run.")
-    parser.add_argument("--record", action="store_true", default=False, help="Enable neuracore recording.")
+    parser = argparse.ArgumentParser(
+        description="Run ReachTarget demo logging into neuracore."
+    )
+    parser.add_argument(
+        "--num_episodes", type=int, default=50, help="Number of episodes to run."
+    )
+    parser.add_argument(
+        "--record",
+        action="store_true",
+        default=False,
+        help="Enable neuracore recording.",
+    )
     parser.add_argument(
         "--recording_name",
         type=str,

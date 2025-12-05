@@ -16,6 +16,7 @@ from bi_gym_utils.utils import (
 
 TRAINING_JOB_NAME = "MyTrainingJob"
 
+
 def run_rollout(
     env: Any,
     policy: Any,
@@ -106,11 +107,13 @@ def main(
     )
 
     # If you have a train run name, you can use it to connect to a local. E.g.:
-    policy = nc.policy(
-        train_run_name=TRAINING_JOB_NAME,
-    )
+    # policy = nc.policy(
+    #     train_run_name=TRAINING_JOB_NAME,
+    # )
     # If you know the path to the local model.nc.zip file, you can use it directly as:
-    # policy = nc.policy(model_file=PATH/TO/MODEL.nc.zip)
+    policy = nc.policy(
+        model_file="/home/sdas/.neuracore/training/runs/2025-12-05_14-37-33/artifacts/model.nc.zip"
+    )
 
     # Alternatively, you can connect to a local endpoint that has been started
     # policy = nc.policy_local_server(train_run_name=TRAINING_JOB_NAME)
