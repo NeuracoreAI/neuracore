@@ -274,8 +274,6 @@ class CNNMLP(NeuracoreModel):
         layers.append(nn.Linear(hidden_dim, output_dim))
         return nn.Sequential(*layers)
 
-<<<<<<< Updated upstream
-=======
     def _preprocess_joint_state(
         self, joint_state: torch.FloatTensor
     ) -> torch.FloatTensor:
@@ -304,7 +302,6 @@ class CNNMLP(NeuracoreModel):
         self.action_std = torch.clamp(self.action_std, min=1e-6)
         return (actions - self.action_mean) / self.action_std
 
->>>>>>> Stashed changes
     def _process_visual_features(
         self, batch: BatchedInferenceSamples
     ) -> Dict[str, torch.Tensor]:
