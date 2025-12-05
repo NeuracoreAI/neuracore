@@ -1,6 +1,8 @@
 import numpy as np
 import time
-
+from bigym.envs.reach_target import ReachTarget
+from bigym.action_modes import JointPositionActionMode
+from bigym.utils.observation_config import ObservationConfig, CameraConfig
 FREQUENCY = 20
 TRAINING_JOB_NAME = "MyTrainingJob"
 
@@ -82,13 +84,6 @@ def obs_to_joint_dict(
         obs["proprioception"] = [qpos..., qvel...] concatenated.
     """
     obs_proprioception = obs["proprioception"].astype(float)
-    n = len(joint_names)
-
-    if len(obs_proprioception) != 2 * n:
-        raise ValueError(
-            f"Expected proprioception length {2 * n} "
-            f"for {n} joints, got {len(obs_proprioception)}."
-        )
 
     mid = len(obs_proprioception) // 2
     robot_qpos = obs_proprioception[:mid]
@@ -111,8 +106,8 @@ def obs_to_imgs(
 
 def action_to_joint_action_dict(
     action,
-    joint_names: List[str],
-) -> Dict[str, float]:
+    joint_names: list[str],
+) -> dict[str, float]:
     """Convert action array to joint position dict."""
-    joint_action: Dict[str, float] = dict(zip(joint_names, action))
+    joint_action: dict[str, float] = dict(zip(joint_names, action))
     return joint_action
