@@ -1,5 +1,5 @@
 # Neuracore ML
 
 ```bash
-python cli/train.py algorithm=cnnmlp
+python train.py algorithm=cnnmlp
 ```
