@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 from neuracore_types import DatasetDescription, DataType
 
+import neuracore as nc
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
 
@@ -122,8 +123,9 @@ class TestSynchronizedDataset:
         with pytest.raises(IndexError, match="Dataset index out of range"):
             _ = synced_dataset[-10]
 
-    def test_getitem_invalid_type(self, synced_dataset):
+    def test_getitem_invalid_type(self, mock_auth_requests, synced_dataset):
         """Test that non-integer/slice index raises TypeError."""
+        nc.login()
         with pytest.raises(
             TypeError, match="Dataset indices must be integers or slices"
         ):
@@ -131,6 +133,7 @@ class TestSynchronizedDataset:
 
     def test_getitem_slice(self, synced_dataset, mock_auth_requests):
         """Test slicing synchronized dataset."""
+        nc.login()
         sliced = synced_dataset[0:1]
 
         assert isinstance(sliced, SynchronizedDataset)
@@ -138,6 +141,7 @@ class TestSynchronizedDataset:
 
     def test_getitem_slice_full(self, synced_dataset, mock_auth_requests):
         """Test slicing entire dataset."""
+
         sliced = synced_dataset[0:2]
 
         assert isinstance(sliced, SynchronizedDataset)
@@ -254,8 +258,8 @@ class TestSynchronizedDataset:
         """Test that prefetch is skipped when cache exists."""
         # Create cache directories for all recordings with at least one file
         # to indicate cache is complete (frames are cached as PNG files)
-        for rec in dataset_mock.recordings:
-            cache_path = dataset_mock.cache_dir / f"{rec['id']}" / "30Hz"
+        for rec in dataset_mock:
+            cache_path = dataset_mock.cache_dir / f"{rec.id}" / "30Hz"
             cache_path.mkdir(parents=True, exist_ok=True)
             # Create a dummy file to indicate cache exists and has content
             (cache_path / "0.png").touch()
