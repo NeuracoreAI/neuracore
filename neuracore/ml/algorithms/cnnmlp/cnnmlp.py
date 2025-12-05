@@ -274,6 +274,37 @@ class CNNMLP(NeuracoreModel):
         layers.append(nn.Linear(hidden_dim, output_dim))
         return nn.Sequential(*layers)
 
+<<<<<<< Updated upstream
+=======
+    def _preprocess_joint_state(
+        self, joint_state: torch.FloatTensor
+    ) -> torch.FloatTensor:
+        """Normalize joint state using dataset statistics.
+
+        Args:
+            joint_state: Raw joint state tensor
+
+        Returns:
+            torch.FloatTensor: Normalized joint state
+        """
+        self.joint_state_std = torch.clamp(self.joint_state_std, min=1e-6)
+        if self.joint_state_mean is not None and self.joint_state_std is not None:
+            return (joint_state - self.joint_state_mean) / self.joint_state_std
+        return joint_state
+
+    def _preprocess_actions(self, actions: torch.FloatTensor) -> torch.FloatTensor:
+        """Normalize actions using dataset statistics.
+
+        Args:
+            actions: Raw action tensor
+
+        Returns:
+            torch.FloatTensor: Normalized actions
+        """
+        self.action_std = torch.clamp(self.action_std, min=1e-6)
+        return (actions - self.action_mean) / self.action_std
+
+>>>>>>> Stashed changes
     def _process_visual_features(
         self, batch: BatchedInferenceSamples
     ) -> Dict[str, torch.Tensor]:
