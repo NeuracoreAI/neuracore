@@ -141,7 +141,6 @@ class Robot:
                 json={
                     "name": self.name,
                     "instance": self.instance,
-                    "overwrite": self.overwrite,
                 },  # TODO: Add camera support
                 headers=self._auth.get_headers(),
             )
@@ -151,7 +150,7 @@ class Robot:
             self.archived = response_body.get("archived")
             has_urdf = response_body["has_urdf"]
             # Upload URDF and meshes if provided
-            if self.urdf_path and not has_urdf:
+            if self.urdf_path and (not has_urdf or self.overwrite):
                 self._upload_urdf_and_meshes()
                 if self._temp_dir:
                     self._temp_dir.cleanup()
