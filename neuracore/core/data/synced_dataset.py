@@ -26,7 +26,7 @@ class SynchronizedDataset:
         data_types: Optional[list[DataType]],
         dataset_description: DatasetDescription,
         prefetch_videos: bool = False,
-        max_prefetch_workers: int = 4,
+        max_prefetch_workers: int = 1,
     ):
         """Initialize a dataset from server response data.
 
@@ -66,7 +66,10 @@ class SynchronizedDataset:
         desc = "Prefetching synced data"
         if self._prefetch_videos_needed:
             desc += " and videos"
-        logger.info(f"Prefetching synced data with {max_prefetch_workers} workers")
+        desc += (
+            f" with {max_prefetch_workers}"
+            f"{' workers' if max_prefetch_workers > 1 else ' worker'}"
+        )
         with ThreadPoolExecutor(max_workers=max_prefetch_workers) as executor:
             list(
                 tqdm(

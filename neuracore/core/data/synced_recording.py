@@ -119,6 +119,52 @@ class SynchronizedRecording:
         response.raise_for_status()
         return response.json()["url"]
 
+    def _decode_video(self, video_location: Path, video_frame_cache_path: Path) -> None:
+        """Extract frames from video and cache them to disk.
+
+        Args:
+            video_location: Path to the video file.
+            video_frame_cache_path: Path to the directory where video frames are cached.
+        """
+        # Use ffmpeg to extract all frames at once
+        output_pattern = str(video_frame_cache_path / "%d.png")
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-i",
+                    str(video_location),
+                    "-vsync",
+                    "0",  # Don't duplicate frames
+                    "-q:v",
+                    "1",  # High quality (1-31, lower is better)
+                    "-start_number",
+                    "0",  # Start frame numbering at 0
+                    output_pattern,
+                    "-y",  # Overwrite existing files
+                    "-loglevel",
+                    "error",  # Suppress ffmpeg output
+                ],
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as e:
+            logger.error(f"ERROR while extracting video frames with ffmpeg: {e}")
+            if e.stderr:
+                logger.error(f"ffmpeg stderr: {e.stderr.decode()}")
+            raise e
+        except FileNotFoundError:
+            logger.warning(
+                "ffmpeg not found. Please install ffmpeg. Continuing with PyAV."
+            )
+            import av
+
+            with av.open(str(video_location)) as container:
+                for i, frame in enumerate(container.decode(video=0)):
+                    frame_image = Image.fromarray(frame.to_rgb().to_ndarray())
+                    frame_file = video_frame_cache_path / f"{i}.png"
+                    frame_image.save(frame_file)
+
     def _download_video_and_cache_frames_to_disk(
         self, camera_type: str, camera_id: str, video_frame_cache_path: Path
     ) -> None:
@@ -131,52 +177,17 @@ class SynchronizedRecording:
         """
         # Create a temporary video file path
         self.cache_manager.ensure_space_available()
+
         with tempfile.TemporaryDirectory() as temp_dir:
+            # Download video to temporary directory
             video_location = Path(temp_dir) / f"{camera_id}{camera_type}.mp4"
-            logger.info(
-                f"Downloading video for {camera_id} from recording {self.id}..."
-            )
             wget.download(
                 self._get_video_url(camera_type, camera_id),
                 str(video_location),
                 bar=None if self._suppress_wget_progress else wget.bar_thermometer,
             )
-
-            logger.info(
-                f"Extracting frames for {camera_id} from recording {self.id}..."
-            )
-            # Use ffmpeg to extract all frames at once - much faster than PyAV loop
-            video_frame_cache_path.mkdir(parents=True, exist_ok=True)
-            output_pattern = str(video_frame_cache_path / "%d.png")
-            try:
-                subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-i",
-                        str(video_location),
-                        "-vsync",
-                        "0",  # Don't duplicate frames
-                        "-q:v",
-                        "1",  # High quality (1-31, lower is better)
-                        "-start_number",
-                        "0",  # Start frame numbering at 0
-                        output_pattern,
-                        "-y",  # Overwrite existing files
-                        "-loglevel",
-                        "error",  # Suppress ffmpeg output
-                    ],
-                    check=True,
-                    capture_output=True,
-                )
-            except subprocess.CalledProcessError as e:
-                logger.error(f"ERROR while extracting video frames with ffmpeg!!!: {e}")
-                logger.error(
-                    f"ffmpeg stderr: {e.stderr.decode() if e.stderr else 'No stderr'}"
-                )
-                raise e
-            except FileNotFoundError:
-                logger.error("ffmpeg not found. Please install ffmpeg.")
-                raise RuntimeError("ffmpeg is required but not found in PATH")
+            # Decode video to frames and cache them to disk
+            self._decode_video(video_location, video_frame_cache_path)
 
     def _get_frame_from_disk_cache(
         self,
@@ -196,16 +207,7 @@ class SynchronizedRecording:
             Dictionary of CameraData with populated frames.
         """
         for cam_id, cam_data in camera_data.items():
-            cam_id_rgb_root = (
-                self.cache_dir
-                / f"{self.id}"
-                / f"{self.frequency}Hz"
-                / camera_type
-                / cam_id
-            )
-            frame_file = cam_id_rgb_root / f"{cam_data.frame_idx}.png"
-            # TODO: make sure to check that all frames have been cashed in the directory
-            # not just that the directory exists
+            cam_id_rgb_root = self.cache_dir / f"{self.id}" / camera_type / cam_id
             if not cam_id_rgb_root.exists():
                 # Not in cache, download video and cache frames to disk
                 cam_id_rgb_root.mkdir(parents=True, exist_ok=True)
@@ -216,6 +218,7 @@ class SynchronizedRecording:
             # Check if frame is cached
             last_num_frames = -1
             attempts_left = MAX_DECODING_ATTEMPTS
+            frame_file = cam_id_rgb_root / f"{cam_data.frame_idx}.png"
             while True:
                 try:
                     # Make sure the frame is successfully cached and decoded
