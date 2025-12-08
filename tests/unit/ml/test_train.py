@@ -277,6 +277,7 @@ def mock_cfg_batch_size(temp_output_dir):
         "max_batch_size": 32,
         "min_batch_size": 2,
         "batch_size_autotuning_num_workers": 0,
+        "max_prefetch_workers": 4,
     })
 
 
@@ -297,6 +298,7 @@ def mock_cfg_training(temp_output_dir):
         "keep_last_n_checkpoints": 3,
         "training_id": None,
         "resume_checkpoint_path": None,
+        "max_prefetch_workers": 4,
     })
 
 
@@ -1161,6 +1163,7 @@ class TestMain:
             "output_data_types": ["JOINT_TARGET_POSITIONS"],
             "output_prediction_horizon": 5,
             "frequency": 30,
+            "max_prefetch_workers": 4,
         }
         base_cfg.update(cfg_updates)
         cfg = OmegaConf.create(base_cfg)
@@ -1186,6 +1189,7 @@ class TestMain:
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
+            "max_prefetch_workers": 4,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1212,6 +1216,7 @@ class TestMain:
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
+            "max_prefetch_workers": 4,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1240,6 +1245,7 @@ class TestMain:
             "output_data_types": ["JOINT_TARGET_POSITIONS"],
             "output_prediction_horizon": 5,
             "frequency": 30,
+            "max_prefetch_workers": 4,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1265,6 +1271,7 @@ class TestMain:
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
+            "max_prefetch_workers": 4,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1291,6 +1298,7 @@ class TestMain:
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
+            "max_prefetch_workers": 4,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1319,6 +1327,7 @@ class TestMain:
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
+            "max_prefetch_workers": 4,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1345,6 +1354,7 @@ class TestMain:
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
+            "max_prefetch_workers": 4,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1377,6 +1387,7 @@ class TestMain:
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
+            "max_prefetch_workers": 4,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1402,6 +1413,7 @@ class TestMain:
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
+            "max_prefetch_workers": 4,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1435,6 +1447,7 @@ class TestMain:
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
+            "max_prefetch_workers": 4,
         })
 
         setup = MainTestSetup(monkeypatch, cuda_device_count=world_size)
@@ -1475,6 +1488,7 @@ class TestMain:
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
+            "max_prefetch_workers": 4,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1503,6 +1517,7 @@ class TestMain:
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
+            "max_prefetch_workers": 4,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1542,6 +1557,7 @@ class TestMain:
             "max_batch_size": 32,
             "min_batch_size": 2,
             "batch_size_autotuning_num_workers": 0,
+            "max_prefetch_workers": 4,
         })
 
         setup = MainTestSetup(monkeypatch)

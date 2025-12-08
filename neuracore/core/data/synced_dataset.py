@@ -26,7 +26,7 @@ class SynchronizedDataset:
         data_types: Optional[list[DataType]],
         dataset_description: DatasetDescription,
         prefetch_videos: bool = False,
-        max_workers: int = 4,
+        max_prefetch_workers: int = 1,
     ):
         """Initialize a dataset from server response data.
 
@@ -36,7 +36,7 @@ class SynchronizedDataset:
             data_types: List of data types to include in the dataset.
             dataset_description: Description of the dataset.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
-            max_workers: Number of threads to use for prefetching videos.
+            max_prefetch_workers: Number of threads to use for prefetching videos.
         """
         self.dataset = dataset
         self.frequency = frequency
@@ -55,18 +55,22 @@ class SynchronizedDataset:
                 if not cache_dir.exists() or not any(cache_dir.iterdir()):
                     self._prefetch_videos_needed = True
                     break
-        self._perform_synced_data_prefetch(max_workers=max_workers)
+        self._perform_synced_data_prefetch(max_prefetch_workers=max_prefetch_workers)
 
-    def _perform_synced_data_prefetch(self, max_workers: int) -> None:
+    def _perform_synced_data_prefetch(self, max_prefetch_workers: int) -> None:
         """Prefetch synced data for all recordings using multiple threads.
 
         Args:
-            max_workers: Number of threads to use for prefetching synced data.
+            max_prefetch_workers: Number of threads to use for prefetching synced data.
         """
         desc = "Prefetching synced data"
         if self._prefetch_videos_needed:
             desc += " and videos"
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        desc += (
+            f" with {max_prefetch_workers}"
+            f"{' workers' if max_prefetch_workers > 1 else ' worker'}"
+        )
+        with ThreadPoolExecutor(max_workers=max_prefetch_workers) as executor:
             list(
                 tqdm(
                     executor.map(
