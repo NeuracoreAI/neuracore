@@ -311,10 +311,10 @@ class TestSynchronizedDataset:
                 data_types=None,
                 dataset_description=dataset_description,
                 prefetch_videos=True,
-                max_workers=8,
+                max_prefetch_workers=8,
             )
 
-            mock_prefetch.assert_called_once_with(max_workers=8)
+            mock_prefetch.assert_called_once_with(max_prefetch_workers=8)
         assert synced_dataset._prefetch_videos_needed is True
 
     def test_slice_does_not_prefetch(self, synced_dataset, mock_auth_requests):

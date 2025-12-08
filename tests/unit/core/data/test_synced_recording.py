@@ -196,11 +196,7 @@ class TestSynchronizedRecording:
         synced_recording[0]
 
         # Check that cache directory was created
-        cache_path = (
-            synced_recording.cache_dir
-            / f"{synced_recording.id}"
-            / f"{synced_recording.frequency}Hz"
-        )
+        cache_path = synced_recording.cache_dir / f"{synced_recording.id}"
         assert cache_path.exists()
 
     def test_video_cache_reuse(
@@ -208,7 +204,7 @@ class TestSynchronizedRecording:
     ):
         """Test that cached videos are reused on subsequent access."""
         # Create cache directory and add a fake cached frame
-        cache_path = dataset_mock.cache_dir / "rec1" / "30Hz" / "rgbs" / "cam1"
+        cache_path = dataset_mock.cache_dir / "rec1" / "rgbs" / "cam1"
         cache_path.mkdir(parents=True, exist_ok=True)
 
         # Create a fake cached image
@@ -245,7 +241,7 @@ class TestSynchronizedRecording:
         )
 
         # Cache directory should exist after prefetch
-        cache_path = synced.cache_dir / f"{synced.id}" / f"{synced.frequency}Hz"
+        cache_path = synced.cache_dir / f"{synced.id}"
         assert cache_path.exists()
 
         # Mock wget to track if it's called
@@ -322,8 +318,8 @@ class TestSynchronizedRecording:
         _ = synced_30[0]
         _ = synced_60[0]
 
-        cache_30 = dataset_mock.cache_dir / "rec1" / "30Hz"
-        cache_60 = dataset_mock.cache_dir / "rec1" / "60Hz"
+        cache_30 = dataset_mock.cache_dir / "rec1"
+        cache_60 = dataset_mock.cache_dir / "rec1"
 
         assert cache_30.exists()
         assert cache_60.exists()

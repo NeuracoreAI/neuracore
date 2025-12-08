@@ -172,10 +172,10 @@ sdpa
 setsid
 shadowsize
 siglip
+softmax
 solimp
 solref
 squaredcos
-softmax
 staticmethod
 targetbody
 teleop
@@ -200,6 +200,7 @@ Vaswani
 vertadr
 vertnum
 VIPERX
+vsync
 worldbody
 XARM
 xdata
