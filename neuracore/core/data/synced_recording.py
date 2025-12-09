@@ -177,14 +177,7 @@ class SynchronizedRecording:
             video_frame_cache_path: Path to the directory where video frames are cached.
         """
         lock_file = video_frame_cache_path / ".decoding.lock"
-        lock_acquired = False
-        try:
-            lock_file.touch(exist_ok=False)
-            lock_acquired = True
-        except FileExistsError:
-            raise RuntimeError(
-                f"Another process is already decoding video for camera {camera_id}"
-            )
+        lock_acquired = self._create_decoding_lock(lock_file, camera_id)
 
         try:
             # Create a temporary video file path
@@ -202,7 +195,21 @@ class SynchronizedRecording:
                 self._decode_video(video_location, video_frame_cache_path)
         finally:
             if lock_acquired:
-                lock_file.unlink(missing_ok=True)
+                self._delete_decoding_lock(lock_file)
+
+    def _create_decoding_lock(self, lock_file: Path, camera_id: str) -> bool:
+        """Create an exclusive lock file for decoding."""
+        try:
+            lock_file.touch(exist_ok=False)
+        except FileExistsError as exc:
+            raise RuntimeError(
+                f"Another process is already decoding video for camera {camera_id}"
+            ) from exc
+        return True
+
+    def _delete_decoding_lock(self, lock_file: Path) -> None:
+        """Remove the decoding lock file if present."""
+        lock_file.unlink(missing_ok=True)
 
     def _get_frame_from_disk_cache(
         self,
