@@ -2,6 +2,7 @@
 
 import copy
 import logging
+import shutil
 import subprocess
 import tempfile
 import time
@@ -175,19 +176,33 @@ class SynchronizedRecording:
             camera_id: Unique identifier for the camera.
             video_frame_cache_path: Path to the directory where video frames are cached.
         """
-        # Create a temporary video file path
-        self.cache_manager.ensure_space_available()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Download video to temporary directory
-            video_location = Path(temp_dir) / f"{camera_id}{camera_type}.mp4"
-            wget.download(
-                self._get_video_url(camera_type, camera_id),
-                str(video_location),
-                bar=None if self._suppress_wget_progress else wget.bar_thermometer,
+        lock_file = video_frame_cache_path / ".decoding.lock"
+        lock_acquired = False
+        try:
+            lock_file.touch(exist_ok=False)
+            lock_acquired = True
+        except FileExistsError:
+            raise RuntimeError(
+                f"Another process is already decoding video for camera {camera_id}"
             )
-            # Decode video to frames and cache them to disk
-            self._decode_video(video_location, video_frame_cache_path)
+
+        try:
+            # Create a temporary video file path
+            self.cache_manager.ensure_space_available()
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Download video to temporary directory
+                video_location = Path(temp_dir) / f"{camera_id}{camera_type}.mp4"
+                wget.download(
+                    self._get_video_url(camera_type, camera_id),
+                    str(video_location),
+                    bar=None if self._suppress_wget_progress else wget.bar_thermometer,
+                )
+                # Decode video to frames and cache them to disk
+                self._decode_video(video_location, video_frame_cache_path)
+        finally:
+            if lock_acquired:
+                lock_file.unlink(missing_ok=True)
 
     def _get_frame_from_disk_cache(
         self,
@@ -208,6 +223,9 @@ class SynchronizedRecording:
         """
         for cam_id, cam_data in camera_data.items():
             cam_id_rgb_root = self.cache_dir / f"{self.id}" / camera_type / cam_id
+            lock_file = cam_id_rgb_root / ".decoding.lock"
+            if lock_file.exists():
+                shutil.rmtree(cam_id_rgb_root, ignore_errors=True)
             if not cam_id_rgb_root.exists():
                 # Not in cache, download video and cache frames to disk
                 cam_id_rgb_root.mkdir(parents=True, exist_ok=True)
@@ -220,11 +238,17 @@ class SynchronizedRecording:
             attempts_left = MAX_DECODING_ATTEMPTS
             frame_file = cam_id_rgb_root / f"{cam_data.frame_idx}.png"
             while True:
+                if lock_file.exists() and not frame_file.exists():
+                    time.sleep(1)
+                    continue
                 try:
                     # Make sure the frame is successfully cached and decoded
                     frame = Image.open(frame_file)
                     break
                 except Exception:
+                    if lock_file.exists():
+                        time.sleep(1)
+                        continue
                     # Check if decoding is progressing
                     current_num_frames = len(
                         [1 for i in cam_id_rgb_root.iterdir() if i.suffix == ".png"]
