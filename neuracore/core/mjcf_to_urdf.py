@@ -154,7 +154,8 @@ def _create_joint(
         jnt_element, "origin", {"xyz": _array2str(pos), "rpy": _array2str(rpy)}
     )
 
-    assert axis is not None
+    if axis is None:
+        axis = [0, 0, 0]
 
     # Only non-floating / non-fixed joints get axis and limits
     if jnt_type in ("revolute", "continuous", "prismatic"):
