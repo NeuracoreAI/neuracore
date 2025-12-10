@@ -1,11 +1,12 @@
 """Tests for SynchronizedRecording class."""
 
 import re
+from typing import cast
 from unittest.mock import patch
 
 import numpy as np
 import pytest
-from neuracore_types import SyncPoint
+from neuracore_types import CameraData, DataType, JointData, SynchronizedPoint
 from PIL import Image
 
 from neuracore.core.const import API_URL
@@ -39,49 +40,62 @@ class TestSynchronizedRecording:
         yield mock_auth_requests
 
     @pytest.fixture
-    def synced_recording(self, dataset_mock, mock_auth_requests):
+    def synced_recording(
+        self, dataset_mock, mock_auth_requests
+    ) -> SynchronizedRecording:
         """Create a SynchronizedRecording instance for testing."""
         return SynchronizedRecording(
             dataset=dataset_mock,
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
+            start_time=0.0,
+            end_time=2.0,
             frequency=30,
-            data_types=None,
+            robot_data_spec=None,
         )
 
-    def test_init(self, synced_recording, dataset_mock):
+    def test_init(self, synced_recording: SynchronizedRecording, dataset_mock):
         """Test SynchronizedRecording initialization."""
         assert synced_recording.dataset == dataset_mock
         assert synced_recording.id == "rec1"
         assert synced_recording.frequency == 30
         assert synced_recording.robot_id == "robot1"
         assert synced_recording.instance == 1
-        assert synced_recording.data_types == []
+        assert synced_recording.robot_data_spec is None
         assert synced_recording._iter_idx == 0
 
     def test_init_with_data_types(self, dataset_mock, mock_auth_requests):
         """Test initialization with specific data types."""
         from neuracore_types import DataType
 
-        data_types = [DataType.RGB_IMAGE, DataType.DEPTH_IMAGE]
+        robot_data_spec = {
+            "robot1": {
+                DataType.RGB_IMAGES: [],
+                DataType.DEPTH_IMAGES: [],
+            }
+        }
         synced = SynchronizedRecording(
             dataset=dataset_mock,
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
+            start_time=0.0,
+            end_time=2.0,
             frequency=30,
-            data_types=data_types,
+            robot_data_spec=robot_data_spec,
         )
 
-        assert synced.data_types == data_types
+        assert synced.robot_data_spec == robot_data_spec
 
-    def test_get_synced_data(self, synced_recording, synced_data):
+    def test_get_synced_data(
+        self, synced_recording: SynchronizedRecording, synced_data
+    ):
         """Test that _get_synced_data correctly retrieves synchronized data."""
-        result = synced_recording._recording_synced
+        result = synced_recording._episode_synced
 
         assert result.robot_id == synced_data.robot_id
-        assert len(result.frames) == len(synced_data.frames)
+        assert len(result.observations) == len(synced_data.observations)
         assert result.start_time == synced_data.start_time
         assert result.end_time == synced_data.end_time
 
@@ -97,19 +111,27 @@ class TestSynchronizedRecording:
         assert result is synced_recording
         assert synced_recording._iter_idx == 0
 
-    def test_getitem_single_index(self, synced_recording, mock_wget_download):
+    def test_getitem_single_index(
+        self, synced_recording: SynchronizedRecording, mock_wget_download
+    ):
         """Test accessing a single frame by index."""
         sync_point = synced_recording[0]
 
-        assert isinstance(sync_point, SyncPoint)
+        assert isinstance(sync_point, SynchronizedPoint)
+        assert DataType.JOINT_POSITIONS in sync_point.data
         assert sync_point.timestamp == 0.0
-        assert sync_point.joint_positions.values["joint1"] == 0.5
+        joint_data = cast(
+            JointData, list(sync_point[DataType.JOINT_POSITIONS].values())[0]
+        )
+        assert joint_data.value == 0.5
 
-    def test_getitem_negative_index(self, synced_recording, mock_wget_download):
+    def test_getitem_negative_index(
+        self, synced_recording: SynchronizedRecording, mock_wget_download
+    ):
         """Test accessing frames with negative indices."""
         sync_point = synced_recording[-1]
 
-        assert isinstance(sync_point, SyncPoint)
+        assert isinstance(sync_point, SynchronizedPoint)
         assert sync_point.timestamp == 1.0
 
     def test_getitem_out_of_range(self, synced_recording):
@@ -122,13 +144,15 @@ class TestSynchronizedRecording:
         with pytest.raises(IndexError, match="Index out of range"):
             _ = synced_recording[-10]
 
-    def test_getitem_slice(self, synced_recording, mock_wget_download):
+    def test_getitem_slice(
+        self, synced_recording: SynchronizedRecording, mock_wget_download
+    ):
         """Test slicing synchronized recording."""
         frames = synced_recording[0:2]
 
         assert isinstance(frames, list)
         assert len(frames) == 2
-        assert all(isinstance(f, SyncPoint) for f in frames)
+        assert all(isinstance(f, SynchronizedPoint) for f in frames)
 
     def test_getitem_slice_with_step(
         self,
@@ -152,8 +176,10 @@ class TestSynchronizedRecording:
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
+            start_time=0.0,
+            end_time=2.0,
             frequency=30,
-            data_types=None,
+            robot_data_spec=None,
         )
 
         frames = synced[0:5:2]
@@ -163,16 +189,20 @@ class TestSynchronizedRecording:
         assert frames[1].timestamp == 2.0
         assert frames[2].timestamp == 4.0
 
-    def test_iteration(self, synced_recording, mock_wget_download):
+    def test_iteration(
+        self, synced_recording: SynchronizedRecording, mock_wget_download
+    ):
         """Test iterating through synchronized recording."""
         frames = list(synced_recording)
 
         assert len(frames) == 2
-        assert all(isinstance(f, SyncPoint) for f in frames)
+        assert all(isinstance(f, SynchronizedPoint) for f in frames)
         assert frames[0].timestamp == 0.0
         assert frames[1].timestamp == 1.0
 
-    def test_iteration_multiple_times(self, synced_recording, mock_wget_download):
+    def test_iteration_multiple_times(
+        self, synced_recording: SynchronizedRecording, mock_wget_download
+    ):
         """Test that the recording can be iterated multiple times."""
         frames1 = list(synced_recording)
         frames2 = list(synced_recording)
@@ -185,12 +215,14 @@ class TestSynchronizedRecording:
         iter(synced_recording)
 
         # Exhaust the iterator
-        synced_recording._iter_idx = len(synced_recording._recording_synced.frames)
+        synced_recording._iter_idx = len(synced_recording._episode_synced.observations)
 
         with pytest.raises(StopIteration):
             next(synced_recording)
 
-    def test_video_caching(self, synced_recording, mock_wget_download, tmp_path):
+    def test_video_caching(
+        self, synced_recording: SynchronizedRecording, mock_wget_download, tmp_path
+    ):
         """Test that videos are cached correctly."""
         # First access should download and cache
         synced_recording[0]
@@ -204,7 +236,13 @@ class TestSynchronizedRecording:
     ):
         """Test that cached videos are reused on subsequent access."""
         # Create cache directory and add a fake cached frame
-        cache_path = dataset_mock.cache_dir / "rec1" / "rgbs" / "cam1"
+        cache_path = (
+            dataset_mock.cache_dir
+            / "rec1"
+            / "30Hz"
+            / DataType.RGB_IMAGES.value
+            / "cam1"
+        )
         cache_path.mkdir(parents=True, exist_ok=True)
 
         # Create a fake cached image
@@ -216,15 +254,17 @@ class TestSynchronizedRecording:
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
+            start_time=0.0,
+            end_time=2.0,
             frequency=30,
-            data_types=None,
+            robot_data_spec=None,
         )
 
-        sync_point = synced[0]
+        sync_point = cast(SynchronizedPoint, synced[0])
 
         # Should have loaded from cache
-        assert sync_point.rgb_images is not None
-        assert "cam1" in sync_point.rgb_images
+        assert DataType.RGB_IMAGES in sync_point.data
+        assert "cam1" in sync_point[DataType.RGB_IMAGES]
 
     def test_prefetch_videos_skip_if_cached(
         self, dataset_mock, mock_auth_requests, mock_wget_download
@@ -235,8 +275,10 @@ class TestSynchronizedRecording:
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
+            start_time=0.0,
+            end_time=2.0,
             frequency=30,
-            data_types=None,
+            robot_data_spec=None,
             prefetch_videos=True,
         )
 
@@ -251,37 +293,44 @@ class TestSynchronizedRecording:
                 recording_id="rec1",
                 robot_id="robot1",
                 instance=1,
+                start_time=0.0,
+                end_time=2.0,
                 frequency=30,
-                data_types=None,
+                robot_data_spec=None,
                 prefetch_videos=True,
             )
 
             # wget.download should not be called since cache exists
             mock_download.assert_not_called()
 
-    def test_depth_image_processing(self, synced_recording, mock_wget_download):
+    def test_depth_image_processing(
+        self, synced_recording: SynchronizedRecording, mock_wget_download
+    ):
         """Test that depth images are processed correctly."""
-        sync_point = synced_recording[0]
+        sync_point = cast(SynchronizedPoint, synced_recording[0])
 
-        if sync_point.depth_images is not None:
-            for cam_id, cam_data in sync_point.depth_images.items():
-                assert cam_data.frame is not None
-                assert isinstance(cam_data.frame, Image.Image)
+        for cam_id, cam_data in sync_point[DataType.DEPTH_IMAGES].items():
+            cam_data = cast(CameraData, cam_data)
+            assert cam_data.frame is not None
+            assert isinstance(cam_data.frame, Image.Image)
 
-    def test_camera_data_copy_independence(self, synced_recording, mock_wget_download):
+    def test_camera_data_copy_independence(
+        self, synced_recording: SynchronizedRecording, mock_wget_download
+    ):
         """Test that returned sync points are independent copies."""
-        sync_point1 = synced_recording[0]
-        sync_point2 = synced_recording[0]
+        sync_point1 = cast(SynchronizedPoint, synced_recording[0])
+        sync_point2 = cast(SynchronizedPoint, synced_recording[0])
 
         # Should be different objects
         assert sync_point1 is not sync_point2
 
         # Modifying one shouldn't affect the other
-        if sync_point1.joint_positions:
-            original_value = sync_point1.joint_positions.values["joint1"]
-            sync_point1.joint_positions.values["joint1"] = 999.0
+        jp1 = cast(JointData, list(sync_point1[DataType.JOINT_POSITIONS].values())[0])
+        original_value = jp1.value
+        jp1.value = 999.0
 
-            assert sync_point2.joint_positions.values["joint1"] == original_value
+        jp2 = cast(JointData, list(sync_point2[DataType.JOINT_POSITIONS].values())[0])
+        assert jp2.value == original_value
 
     def test_cache_manager_initialization(self, synced_recording):
         """Test that cache manager is initialized correctly."""
@@ -301,8 +350,10 @@ class TestSynchronizedRecording:
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
+            start_time=0.0,
+            end_time=2.0,
             frequency=30,
-            data_types=None,
+            robot_data_spec=None,
         )
 
         synced_60 = SynchronizedRecording(
@@ -310,8 +361,10 @@ class TestSynchronizedRecording:
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
+            start_time=0.0,
+            end_time=2.0,
             frequency=60,
-            data_types=None,
+            robot_data_spec=None,
         )
 
         # Trigger cache creation

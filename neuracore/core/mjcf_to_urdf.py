@@ -7,7 +7,7 @@ geometries while creating appropriate STL files for visual elements.
 """
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 from xml.dom import minidom
 from xml.etree import ElementTree as ET
 
@@ -107,8 +107,8 @@ def _create_joint(
     child: str,
     pos: list,
     rpy: list,
-    axis: Optional[List] = None,
-    jnt_range: Optional[List] = None,
+    axis: Optional[list] = None,
+    jnt_range: Optional[list] = None,
     jnt_type: str = "fixed",
 ) -> ET.Element:
     """Create a URDF joint element connecting two links.

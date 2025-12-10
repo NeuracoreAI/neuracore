@@ -47,16 +47,16 @@ class MyCustomAlgorithm(NeuracoreModel):
         # Initialize your model architecture here
         # For example, if processing joint positions and RGB images:
         if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-            joint_dim = self.dataset_description.joint_positions.max_len
+            joint_dim = self.dataset_statistics.joint_positions.max_len
             self.joint_encoder = nn.Linear(joint_dim, hidden_dim)
             
-        if DataType.RGB_IMAGE in self.model_init_description.input_data_types:
+        if DataType.RGB_IMAGES in self.model_init_description.input_data_types:
             # Initialize image processing components
             self.image_encoder = self._build_image_encoder()
             
         # Initialize output layers based on what the model predicts
         if DataType.JOINT_TARGET_POSITIONS in self.model_init_description.output_data_types:
-            output_dim = self.dataset_description.joint_target_positions.max_len * self.output_prediction_horizon
+            output_dim = self.dataset_statistics.joint_target_positions.max_len * self.output_prediction_horizon
             self.output_layer = nn.Linear(hidden_dim, output_dim)
     
     def _build_image_encoder(self):
@@ -107,7 +107,6 @@ class MyCustomAlgorithm(NeuracoreModel):
         loss = nn.functional.mse_loss(predictions.outputs[DataType.JOINT_TARGET_POSITIONS], targets)
         
         return BatchedTrainingOutputs(
-            output_predictions=predictions.outputs[DataType.JOINT_TARGET_POSITIONS],
             losses={"mse_loss": loss},
             metrics={},  # You can add custom metrics here
         )
@@ -122,7 +121,7 @@ class MyCustomAlgorithm(NeuracoreModel):
         return [
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
-            DataType.RGB_IMAGE,
+            DataType.RGB_IMAGES,
             # Add other supported input types
         ]
 
@@ -131,11 +130,6 @@ class MyCustomAlgorithm(NeuracoreModel):
         """Return the data types supported by the model."""
         return [DataType.JOINT_TARGET_POSITIONS]
         
-    @staticmethod
-    def tokenize_text(text: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Optional: Implement if your model processes language data."""
-        # If your model doesn't use language, you can just raise NotImplementedError
-        raise NotImplementedError("This model does not support language input")
 ```
 
 ### Step 2: Required Methods
@@ -148,7 +142,6 @@ Your model must implement these methods:
 4. **`configure_optimizers`**: Define what optimizers to use for training
 5. **`get_supported_input_data_types`**: Declare what input data types your model supports
 6. **`get_supported_output_data_types`**: Declare what output data types your model can produce
-7. **`tokenize_text`**: Only needed if your model processes language data
 
 ### Step 3: File Organization
 

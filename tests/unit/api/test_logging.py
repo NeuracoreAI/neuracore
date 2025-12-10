@@ -1,6 +1,5 @@
 import numpy as np
 import pytest
-from neuracore_types import CameraData, EndEffectorData, JointData, SyncPoint
 
 import neuracore as nc
 from neuracore.core.const import API_URL
@@ -29,20 +28,17 @@ def test_log_joints_and_cams(
     # Connect robot
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
-    # Test logging functions
-    try:
-        nc.log_joint_positions({"vx300s_left/waist": 0.5, "vx300s_right/waist": -0.3})
+    nc.log_joint_positions(
+        positions={"vx300s_left/waist": 0.5, "vx300s_right/waist": -0.3},
+    )
 
-        # Uint8 image
-        rgb_uint8 = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
-        nc.log_rgb("front_camera", rgb_uint8)
+    # Uint8 image
+    rgb_uint8 = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+    nc.log_rgb("front_camera", rgb_uint8)
 
-        # Test depth logging
-        depth = np.ones((100, 100), dtype=np.float32) * 1.0  # meters
-        nc.log_depth("depth_camera", depth)
-
-    except Exception as e:
-        pytest.fail(f"Logging functions raised unexpected exception: {e}")
+    # Test depth logging
+    depth = np.ones((100, 100), dtype=np.float32) * 1.0  # meters
+    nc.log_depth("depth_camera", depth)
 
 
 def test_log_with_extrinsics_intrinsics(
@@ -84,8 +80,9 @@ def test_log_gripper_data(
     )
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
-    # Log gripper data
-    nc.log_gripper_data({"gripper1": 0.5, "gripper2": 0.7})
+    nc.log_parallel_gripper_open_amount(name="gripper1", value=0.5)
+    nc.log_parallel_gripper_open_amount(name="gripper2", value=0.7)
+    nc.log_parallel_gripper_open_amounts({"gripper1": 0.5, "gripper2": 0.7})
 
 
 def test_log_joint_velocities_and_torques(
@@ -101,11 +98,10 @@ def test_log_joint_velocities_and_torques(
     )
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
-    # Log joint velocities
     nc.log_joint_velocities({"joint1": 0.5, "joint2": -0.3})
-
-    # Log joint torques
     nc.log_joint_torques({"joint1": 1.5, "joint2": 2.3})
+    nc.log_joint_velocity(name="joint1", velocity=0.5)
+    nc.log_joint_torque(name="joint2", torque=2.3)
 
 
 def test_log_language(
@@ -121,8 +117,8 @@ def test_log_language(
     )
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
-    # Log language
-    nc.log_language("Pick up the red cube")
+    nc.log_language(name="instruction", language="Pick up the red cube")
+    nc.log_language(name="sub_task", language="Move to the table")
 
 
 def test_log_custom_data(
@@ -137,15 +133,7 @@ def test_log_custom_data(
         status_code=200,
     )
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
-
-    # Log custom data
-    custom_data = {
-        "object_detections": [
-            {"label": "cube", "confidence": 0.95, "bbox": [10, 20, 50, 60]},
-            {"label": "sphere", "confidence": 0.82, "bbox": [100, 120, 150, 180]},
-        ]
-    }
-    nc.log_custom_data("vision_detections", custom_data)
+    nc.log_custom_1d("vision_detections", np.array([10, 20, 50, 60]))
 
 
 def test_log_point_cloud(
@@ -161,7 +149,6 @@ def test_log_point_cloud(
     )
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
-    # Create a small point cloud (1000 points x 3 dimensions)
     points = np.random.rand(1000, 3).astype(np.float16)
 
     # Optional RGB data for each point
@@ -169,54 +156,6 @@ def test_log_point_cloud(
 
     # Log point cloud
     nc.log_point_cloud("lidar", points, rgb_points=rgb_points)
-
-
-def test_log_synced_data(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
-):
-    """Test logging synchronized data from multiple sensors."""
-    # Ensure login and robot connection
-    nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
-
-    nc.connect_robot(robot_name="test_robot", instance=0, urdf_path=mock_urdf)
-
-    # Prepare test data
-    joint_positions = {"joint1": 0.5, "joint2": -0.3}
-    joint_velocities = {"joint1": 0.1, "joint2": -0.2}
-    joint_torques = {"joint1": 1.0, "joint2": 2.0}
-    gripper_open_amounts = {"gripper1": 0.5}
-
-    # RGB images
-    rgb_data = {
-        "cam1": CameraData(
-            frame=np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
-        )
-    }
-
-    # Depth images
-    depth_data = {"cam1": CameraData(frame=np.ones((100, 100), dtype=np.float32) * 0.5)}
-
-    # Point clouds (empty for this test)
-    point_cloud_data = {}
-
-    # Log synced data
-    nc.log_sync_point(
-        SyncPoint(
-            joint_positions=JointData(values=joint_positions),
-            joint_velocities=JointData(values=joint_velocities),
-            joint_torques=JointData(values=joint_torques),
-            joint_target_positions=JointData(values=joint_positions),
-            end_effectors=EndEffectorData(open_amounts=gripper_open_amounts),
-            rgb_images=rgb_data,
-            depth_images=depth_data,
-            point_clouds=point_cloud_data,
-        )
-    )
 
 
 def test_log_with_no_robot(temp_config_dir, mock_auth_requests, reset_neuracore):
@@ -263,73 +202,45 @@ def test_log_invalid_data_format(
             "camera", np.ones((100, 100), dtype=np.float32) * 1000
         )  # Too large
 
-    # Test invalid end effector poses format (not a dictionary)
-    with pytest.raises(
-        ValueError,
-        match="End effector poses must be a dictionary "
-        "mapping end effector names to poses."
-        "",
-    ):
-        nc.log_end_effector_poses("not_a_dictionary")
+    with pytest.raises(ValueError, match="End effector pose must be a list"):
+        nc.log_end_effector_pose(name="right_ee", pose="not_a_list")
 
-    # Test invalid end effector pose name (not a string)
-    with pytest.raises(ValueError, match="End effector names must be strings."):
-        nc.log_end_effector_poses({
-            123: [0.6, 0.4, 0.3, 0.0, 0.7071, 0.0, 0.7071],
-        })
+    with pytest.raises(ValueError, match="End effector names must be strings"):
+        nc.log_end_effector_pose(
+            name=123, pose=np.array([0.6, 0.4, 0.3, 0.0, 0.7071, 0.0, 0.7071])
+        )
 
     # Test invalid end effector pose quaternions
     with pytest.raises(
-        ValueError, match="End effector pose must be a valid unit quaternion."
+        ValueError, match="End effector pose must be a valid unit quaternion"
     ):
-        nc.log_end_effector_poses({
-            "right_ee": [0.6, 0.4, 0.3, 0.0, 1.0, 0.0, 1.0],
-        })
-
-    # Test invalid end effector pose format (not a list)
-    with pytest.raises(ValueError, match="End effector pose must be a list"):
-        nc.log_end_effector_poses({
-            "left_ee": "not_a_list",
-        })
+        nc.log_end_effector_pose(
+            name="right_ee", pose=np.array([0.6, 0.4, 0.3, 0.0, 1.0, 0.0, 1.0])
+        )
 
     # Test invalid end effector pose length (not 7 elements)
     with pytest.raises(ValueError, match="End effector pose must be a 7-element list"):
-        nc.log_end_effector_poses({"left_ee": [0.5, 0.3, 0.2, 0.5, 0.5, 0.5]})
+        nc.log_end_effector_pose(
+            name="left_ee", pose=np.array([0.5, 0.3, 0.2, 0.5, 0.5, 0.5])
+        )
 
-    # Test invalid parallel gripper open amounts format (not a dictionary)
     with pytest.raises(
-        ValueError,
-        match="Parallel gripper open amounts must be a dictionary "
-        "mapping gripper names to open amounts.",
+        ValueError, match="Parallel gripper open amounts must be floats"
     ):
-        nc.log_parallel_gripper_open_amounts("not_a_dictionary")
+        nc.log_parallel_gripper_open_amount(name="gripper1", value="not_a_float")
 
-    # Test invalid parallel gripper open amount value (not a float)
     with pytest.raises(
-        ValueError, match="Parallel gripper open amounts must be floats."
+        ValueError, match="Parallel gripper open amounts must be between 0.0 and 1.0"
     ):
-        nc.log_parallel_gripper_open_amounts({
-            "gripper1": "not_a_float",
-            "gripper2": [0.5],
-            "gripper3": (0.5),
-            "gripper4": {0.5},
-        })
+        nc.log_parallel_gripper_open_amount(name="gripper1", value=-0.5)
 
-    # Test invalid parallel gripper open amounts value (not between 0.0 and 1.0)
     with pytest.raises(
-        ValueError, match="Parallel gripper open amounts must be between 0.0 and 1.0."
+        ValueError, match="Parallel gripper open amounts must be between 0.0 and 1.0"
     ):
-        nc.log_parallel_gripper_open_amounts({
-            "gripper1": -0.5,
-            "gripper2": 1.5,
-        })
+        nc.log_parallel_gripper_open_amount(name="gripper2", value=1.5)
 
-    # Test invalid parallel gripper name (not a string)
-    with pytest.raises(ValueError, match="Parallel gripper names must be strings."):
-        nc.log_parallel_gripper_open_amounts({
-            123: 0.5,
-            100.0: 0.5,
-        })
+    with pytest.raises(ValueError, match="Parallel gripper names must be strings"):
+        nc.log_parallel_gripper_open_amount(name=123, value=0.5)
 
 
 def test_log_end_effector_poses(
@@ -344,11 +255,10 @@ def test_log_end_effector_poses(
     )
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
-    # Log end effector poses
-    nc.log_end_effector_poses({
-        "left_ee": [0.5, 0.3, 0.2, 0.5, 0.5, 0.5, 0.5],
-        "right_ee": [0.6, 0.4, 0.3, 0.0, 0.7071, 0.0, 0.7071],
-    })
+    nc.log_end_effector_pose(
+        name="left_ee",
+        pose=np.array([0.5, 0.3, 0.2, 0.5, 0.5, 0.5, 0.5]),
+    )
 
 
 def test_log_parallel_gripper_open_amounts(
@@ -362,7 +272,12 @@ def test_log_parallel_gripper_open_amounts(
         status_code=200,
     )
     nc.connect_robot("test_robot", urdf_path=mock_urdf)
-    nc.log_parallel_gripper_open_amounts({
-        "gripper1": 0.5,
-        "gripper2": 0.7,
-    })
+
+    nc.log_parallel_gripper_open_amount(
+        name="gripper1",
+        value=0.5,
+    )
+    nc.log_parallel_gripper_open_amount(
+        name="gripper2",
+        value=0.7,
+    )

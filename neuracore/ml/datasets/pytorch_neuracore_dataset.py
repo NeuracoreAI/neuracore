@@ -7,15 +7,14 @@ poses, end-effectors, and language instructions.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Callable, Optional, Set, cast
+from typing import Optional
 
 import torch
-import torchvision.transforms as T
-from neuracore_types import DataType
+from neuracore_types import BatchedNCData, DataType, NCDataStats, RobotDataSpec
 from torch.utils.data import Dataset
 
-from neuracore.ml import BatchedTrainingSamples, MaskableData
-from neuracore.ml.core.ml_types import BatchedData
+from neuracore.ml import BatchedTrainingSamples
+from neuracore.ml.utils.robot_data_spec_utils import merge_robot_data_spec
 
 logger = logging.getLogger(__name__)
 
@@ -35,45 +34,34 @@ class PytorchNeuracoreDataset(Dataset, ABC):
     def __init__(
         self,
         num_recordings: int,
-        input_data_types: list[DataType],
-        output_data_types: list[DataType],
+        input_robot_data_spec: RobotDataSpec,
+        output_robot_data_spec: RobotDataSpec,
         output_prediction_horizon: int = 5,
-        tokenize_text: Optional[
-            Callable[[list[str]], tuple[torch.Tensor, torch.Tensor]]
-        ] = None,
     ):
         """Initialize the dataset with data type specifications and preprocessing.
 
         Args:
-            input_data_types: List of data types to include as model inputs
+            input_robot_data_spec: List of data types to include as model inputs
                 (e.g., RGB images, joint positions).
-            output_data_types: List of data types to include as model outputs
+            output_robot_data_spec: List of data types to include as model outputs
                 (e.g., joint target positions, actions).
             output_prediction_horizon: Number of future timesteps to predict
                 for sequential output tasks.
-            tokenize_text: Function to convert text strings to tokenized tensors.
-                Required if DataType.LANGUAGE is in the data types. Should return
-                (input_ids, attention_mask) tuple.
 
         Raises:
             ValueError: If language data is requested but no tokenizer is provided.
         """
-        if len(input_data_types) == 0 and len(output_data_types) == 0:
+        if len(input_robot_data_spec) == 0 and len(output_robot_data_spec) == 0:
             raise ValueError(
                 "Must supply both input and output data types for the dataset"
             )
         self.num_recordings = num_recordings
-        self.input_data_types = input_data_types
-        self.output_data_types = output_data_types
+        self.input_robot_data_spec = input_robot_data_spec
+        self.output_robot_data_spec = output_robot_data_spec
         self.output_prediction_horizon = output_prediction_horizon
-
-        self.data_types = set(input_data_types + output_data_types)
-
-        # Setup camera transform to match EpisodicDataset
-        self.camera_transform = T.Compose([T.ToTensor()])
-
-        # Create tokenizer if language data is used
-        self.tokenize_text = tokenize_text
+        self.robot_data_spec = merge_robot_data_spec(
+            self.input_robot_data_spec, self.output_robot_data_spec
+        )
 
     @abstractmethod
     def load_sample(
@@ -119,10 +107,29 @@ class PytorchNeuracoreDataset(Dataset, ABC):
         """
         pass
 
-    def _collate_fn(
-        self, samples: list[BatchedData], data_types: list[DataType]
-    ) -> BatchedData:
+    def _collate_input_outputs(
+        self,
+        samples: list[dict[DataType, list[BatchedNCData]]],
+    ) -> dict[DataType, list[BatchedNCData]]:
         """Collate individual data samples into a batched format.
+
+        Example samples looks like:
+        [
+            {
+                DataType.JOINT_POSITIONS: [BatchedJointData, BatchedJointData, ...],
+                DataType.RGB_IMAGES: [BatchedCameraData, ...],
+                ...
+            },
+            ...
+        ]
+
+        Example output looks like:
+        {
+            DataType.JOINT_POSITIONS: [BatchedJointData, ...],
+            DataType.RGB_IMAGES: [BatchedCameraData, ...],
+            ...
+        }
+
 
         Combines multiple samples into batched tensors with appropriate stacking
         for different data modalities. Handles masking for variable-length data.
@@ -134,216 +141,61 @@ class PytorchNeuracoreDataset(Dataset, ABC):
         Returns:
             A single BatchedData object containing the stacked samples.
         """
-        bd = BatchedData()
+        batched_data: dict[DataType, list[BatchedNCData]] = {}
 
-        # Joint state data
-        if DataType.JOINT_POSITIONS in data_types:
-            if any(s.joint_positions is None for s in samples):
-                raise ValueError(
-                    "All samples must have joint_positions when "
-                    "JOINT_POSITIONS data type is requested"
-                )
-            bd.joint_positions = MaskableData(
-                torch.stack(
-                    [cast(MaskableData, s.joint_positions).data for s in samples]
-                ),
-                torch.stack(
-                    [cast(MaskableData, s.joint_positions).mask for s in samples]
-                ),
-            )
+        for data_type in samples[0].keys():
+            # Get the number of items for this data type (e.g., number of joints)
+            num_items = len(samples[0][data_type])
+            batched_data[data_type] = []
 
-        if DataType.JOINT_VELOCITIES in data_types:
-            if any(s.joint_velocities is None for s in samples):
-                raise ValueError(
-                    "All samples must have joint_velocities when "
-                    "JOINT_VELOCITIES data type is requested"
-                )
-            bd.joint_velocities = MaskableData(
-                torch.stack(
-                    [cast(MaskableData, s.joint_velocities).data for s in samples]
-                ),
-                torch.stack(
-                    [cast(MaskableData, s.joint_velocities).mask for s in samples]
-                ),
-            )
+            # Process each item index (e.g., joint_0, joint_1, camera_0, etc.)
+            for item_idx in range(num_items):
+                # Collect all samples for this specific item across the batch
+                items_to_batch = [sample[data_type][item_idx] for sample in samples]
 
-        if DataType.JOINT_TORQUES in data_types:
-            if any(s.joint_torques is None for s in samples):
-                raise ValueError(
-                    "All samples must have joint_torques when "
-                    "JOINT_TORQUES data type is requested"
-                )
-            bd.joint_torques = MaskableData(
-                torch.stack(
-                    [cast(MaskableData, s.joint_torques).data for s in samples]
-                ),
-                torch.stack(
-                    [cast(MaskableData, s.joint_torques).mask for s in samples]
-                ),
-            )
+                # Get attribute names from the first item
+                attrib_names_of_tensors = [
+                    attr_name
+                    for attr_name in vars(items_to_batch[0])
+                    if isinstance(getattr(items_to_batch[0], attr_name), torch.Tensor)
+                ]
 
-        if DataType.JOINT_TARGET_POSITIONS in data_types:
-            if any(s.joint_target_positions is None for s in samples):
-                raise ValueError(
-                    "All samples must have joint_target_positions when "
-                    "JOINT_TARGET_POSITIONS data type is requested"
-                )
-            bd.joint_target_positions = MaskableData(
-                torch.stack(
-                    [cast(MaskableData, s.joint_target_positions).data for s in samples]
-                ),
-                torch.stack(
-                    [cast(MaskableData, s.joint_target_positions).mask for s in samples]
-                ),
-            )
+                # Stack each attribute across samples
+                batched_attributes = {}
+                for attr_name in attrib_names_of_tensors:
+                    attr_values = [getattr(item, attr_name) for item in items_to_batch]
 
-        # End-effector data
-        if DataType.END_EFFECTORS in data_types:
-            if any(s.end_effectors is None for s in samples):
-                raise ValueError(
-                    "All samples must have end_effectors when "
-                    "END_EFFECTORS data type is requested"
-                )
-            bd.end_effectors = MaskableData(
-                torch.stack(
-                    [cast(MaskableData, s.end_effectors).data for s in samples]
-                ),
-                torch.stack(
-                    [cast(MaskableData, s.end_effectors).mask for s in samples]
-                ),
-            )
-
-        # End Effector Poses
-        if DataType.END_EFFECTOR_POSES in data_types:
-            if any(s.end_effector_poses is None for s in samples):
-                raise ValueError(
-                    "All samples must have end_effector_poses when "
-                    "END_EFFECTOR_POSES data type is requested"
-                )
-            bd.end_effector_poses = MaskableData(
-                torch.stack(
-                    [cast(MaskableData, s.end_effector_poses).data for s in samples]
-                ),
-                torch.stack(
-                    [cast(MaskableData, s.end_effector_poses).mask for s in samples]
-                ),
-            )
-
-        # Parallel Gripper Open Amount Data
-        if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in data_types:
-            if any(s.parallel_gripper_open_amounts is None for s in samples):
-                raise ValueError(
-                    "All samples must have parallel_gripper_open_amounts when "
-                    "GRIPPER_OPEN_AMOUNTS data type is requested"
-                )
-            bd.parallel_gripper_open_amounts = MaskableData(
-                torch.stack([
-                    cast(MaskableData, s.parallel_gripper_open_amounts).data
-                    for s in samples
-                ]),
-                torch.stack([
-                    cast(MaskableData, s.parallel_gripper_open_amounts).mask
-                    for s in samples
-                ]),
-            )
-
-        # Pose data
-        if DataType.POSES in data_types:
-            if any(s.poses is None for s in samples):
-                raise ValueError(
-                    "All samples must have poses when " "POSES data type is requested"
-                )
-            bd.poses = MaskableData(
-                torch.stack([cast(MaskableData, s.poses).data for s in samples]),
-                torch.stack([cast(MaskableData, s.poses).mask for s in samples]),
-            )
-
-        # Visual data
-        if DataType.RGB_IMAGE in data_types:
-            if any(s.rgb_images is None for s in samples):
-                raise ValueError(
-                    "All samples must have rgb_images when "
-                    "RGB_IMAGE data type is requested"
-                )
-            bd.rgb_images = MaskableData(
-                torch.stack([cast(MaskableData, s.rgb_images).data for s in samples]),
-                torch.stack([cast(MaskableData, s.rgb_images).mask for s in samples]),
-            )
-
-        if DataType.DEPTH_IMAGE in data_types:
-            if any(s.depth_images is None for s in samples):
-                raise ValueError(
-                    "All samples must have depth_images when "
-                    "DEPTH_IMAGE data type is requested"
-                )
-            bd.depth_images = MaskableData(
-                torch.stack([cast(MaskableData, s.depth_images).data for s in samples]),
-                torch.stack([cast(MaskableData, s.depth_images).mask for s in samples]),
-            )
-
-        if DataType.POINT_CLOUD in data_types:
-            if any(s.point_clouds is None for s in samples):
-                raise ValueError(
-                    "All samples must have point_clouds when "
-                    "POINT_CLOUD data type is requested"
-                )
-            bd.point_clouds = MaskableData(
-                torch.stack([cast(MaskableData, s.point_clouds).data for s in samples]),
-                torch.stack([cast(MaskableData, s.point_clouds).mask for s in samples]),
-            )
-
-        # Language data
-        if DataType.LANGUAGE in data_types:
-            if any(s.language_tokens is None for s in samples):
-                raise ValueError(
-                    "All samples must have language_tokens when "
-                    "LANGUAGE data type is requested"
-                )
-            bd.language_tokens = MaskableData(
-                torch.cat(
-                    [cast(MaskableData, s.language_tokens).data for s in samples]
-                ),
-                torch.cat(
-                    [cast(MaskableData, s.language_tokens).mask for s in samples]
-                ),
-            )
-
-        # Custom data
-        if DataType.CUSTOM in data_types:
-            # Collect all custom data keys from all samples
-            all_custom_keys: Set[str] = set()
-            for sample in samples:
-                if sample.custom_data:
-                    all_custom_keys.update(sample.custom_data.keys())
-
-            bd.custom_data = {}
-            for key in all_custom_keys:
-                # Check if all samples have this custom data key
-                custom_data_list = []
-                custom_mask_list = []
-                for sample in samples:
-                    if sample.custom_data and key in sample.custom_data:
-                        custom_data_list.append(sample.custom_data[key].data)
-                        custom_mask_list.append(sample.custom_data[key].mask)
+                    # Stack tensors along batch dimension
+                    if attr_values[0] is not None:
+                        batched_attributes[attr_name] = torch.cat(attr_values, dim=0)
                     else:
-                        # Create zero tensors for missing data
-                        if custom_data_list:
-                            # Use the shape of the first sample for consistency
-                            zero_data = torch.zeros_like(custom_data_list[0])
-                            zero_mask = torch.zeros_like(custom_mask_list[0])
-                        else:
-                            # If this is the first sample and it's missing, skip
-                            continue
-                        custom_data_list.append(zero_data)
-                        custom_mask_list.append(zero_mask)
+                        batched_attributes[attr_name] = None
 
-                if custom_data_list:
-                    bd.custom_data[key] = MaskableData(
-                        torch.stack(custom_data_list),
-                        torch.stack(custom_mask_list),
-                    )
+                # Create new batched object of the same type
+                batched_item = type(items_to_batch[0])(**batched_attributes)
+                batched_data[data_type].append(batched_item)
 
-        return bd
+        return batched_data
+
+    def _collate_masks(
+        self,
+        samples: list[dict[DataType, torch.Tensor]],
+    ) -> dict[DataType, torch.Tensor]:
+        """Collate individual data masks into a batched format.
+
+        Args:
+            samples: List of mask dictionaries to combine.
+
+        Returns:
+            A single dictionary containing the stacked masks.
+        """
+        batched_masks: dict[DataType, torch.Tensor] = {}
+
+        for data_type in samples[0].keys():
+            masks_to_batch = [sample[data_type] for sample in samples]
+            batched_masks[data_type] = torch.stack(masks_to_batch, dim=0)
+
+        return batched_masks
 
     def collate_fn(self, samples: list[TrainingSample]) -> BatchedTrainingSamples:
         """Collate training samples into a complete batch for model training.
@@ -360,11 +212,21 @@ class PytorchNeuracoreDataset(Dataset, ABC):
             and prediction masks ready for model training.
         """
         return BatchedTrainingSamples(
-            inputs=self._collate_fn([s.inputs for s in samples], self.input_data_types),
-            outputs=self._collate_fn(
-                [s.outputs for s in samples], self.output_data_types
+            inputs=self._collate_input_outputs([sample.inputs for sample in samples]),
+            inputs_mask=self._collate_masks([sample.inputs_mask for sample in samples]),
+            outputs=self._collate_input_outputs([sample.outputs for sample in samples]),
+            outputs_mask=self._collate_masks(
+                [sample.outputs_mask for sample in samples]
             ),
-            output_prediction_mask=torch.stack(
-                [sample.output_prediction_mask for sample in samples]
-            ),
+            batch_size=len(samples),
         )
+
+    @property
+    @abstractmethod
+    def dataset_statistics(self) -> dict[DataType, list[NCDataStats]]:
+        """Return the dataset description.
+
+        Returns:
+            DatasetStatistics object describing the dataset.
+        """
+        pass

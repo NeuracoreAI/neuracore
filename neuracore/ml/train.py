@@ -4,12 +4,13 @@ import gc
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import hydra
 import torch
 import torch.multiprocessing as mp
-from neuracore_types import DataType, ModelInitDescription
+from neuracore_types import ModelInitDescription
+from neuracore_types.nc_data import DataType
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler, random_split
 
@@ -30,6 +31,11 @@ from neuracore.ml.trainers.distributed_trainer import (
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
 from neuracore.ml.utils.device_utils import get_default_device
+from neuracore.ml.utils.robot_data_spec_utils import (
+    convert_str_to_robot_data_spec,
+    extract_data_types,
+    merge_robot_data_spec,
+)
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
 # Environment setup
@@ -64,9 +70,9 @@ def setup_logging(output_dir: str, rank: int = 0) -> None:
 def get_model_and_algorithm_config(
     cfg: DictConfig,
     model_init_description: ModelInitDescription,
-) -> Tuple[NeuracoreModel, Dict[str, Any]]:
+) -> tuple[NeuracoreModel, dict[str, Any]]:
     """Get model and algorithm configuration."""
-    algorithm_config: Dict[str, Any] = {}
+    algorithm_config: dict[str, Any] = {}
     if "algorithm" in cfg:
         algorithm_config = OmegaConf.to_container(cfg.algorithm, resolve=True)
         algorithm_config.pop("_target_", None)
@@ -102,13 +108,10 @@ def get_model_and_algorithm_config(
     return model, algorithm_config
 
 
-def convert_data_types(data_types_list: list[str]) -> list[DataType]:
-    """Convert string data types to DataType enums."""
-    return [DataType(dt) for dt in data_types_list]
-
-
 def determine_optimal_batch_size(
     cfg: DictConfig,
+    input_robot_data_spec: dict[str, dict[DataType, list[str]]],
+    output_robot_data_spec: dict[str, dict[DataType, list[str]]],
     dataset: SingleSampleDataset,
     device: Optional[torch.device] = None,
 ) -> int:
@@ -123,13 +126,10 @@ def determine_optimal_batch_size(
 
     logger.info(f"Starting batch size autotuning on {device}...")
 
-    input_data_types = convert_data_types(cfg.input_data_types)
-    output_data_types = convert_data_types(cfg.output_data_types)
-
     model_init_description = ModelInitDescription(
-        dataset_description=dataset.dataset_description,
-        input_data_types=input_data_types,
-        output_data_types=output_data_types,
+        dataset_statistics=dataset.dataset_statistics,
+        input_data_types=extract_data_types(input_robot_data_spec),
+        output_data_types=extract_data_types(output_robot_data_spec),
         output_prediction_horizon=cfg.output_prediction_horizon,
     )
 
@@ -179,6 +179,8 @@ def run_training(
     world_size: int,
     cfg: DictConfig,
     batch_size: int,
+    input_robot_data_spec: dict[str, dict[DataType, list[str]]],
+    output_robot_data_spec: dict[str, dict[DataType, list[str]]],
     dataset: PytorchSynchronizedDataset,
     device: Optional[torch.device] = None,
 ) -> None:
@@ -198,8 +200,8 @@ def run_training(
     try:
         logger.info(f"Using batch size: {batch_size}")
 
-        input_data_types = convert_data_types(cfg.input_data_types)
-        output_data_types = convert_data_types(cfg.output_data_types)
+        # Merge data_types for synchronization
+        merge_robot_data_spec(input_robot_data_spec, output_robot_data_spec)
 
         # Split dataset
         dataset_size = len(dataset)
@@ -276,8 +278,11 @@ def run_training(
             f"and {len(val_loader.dataset)} validation samples"
         )
 
+        # Model doesn't need to know about ids or names, just data types
+        input_data_types = extract_data_types(input_robot_data_spec)
+        output_data_types = extract_data_types(output_robot_data_spec)
         model_init_description = ModelInitDescription(
-            dataset_description=dataset.dataset_description,
+            dataset_statistics=dataset.dataset_statistics,
             input_data_types=input_data_types,
             output_data_types=output_data_types,
             output_prediction_horizon=cfg.output_prediction_horizon,
@@ -292,9 +297,6 @@ def run_training(
             training_job_id=cfg.training_id,
             algorithm_config=algorithm_config,
         )
-
-        # TODO: Find a better way to handle text tokenization
-        dataset.tokenize_text = model.tokenize_text
 
         logger.info(
             f"Created model with "
@@ -382,13 +384,6 @@ def main(cfg: DictConfig) -> None:
             "Please specify only one."
         )
 
-    batch_size = cfg.batch_size
-
-    # Prepare data types for synchronization
-    data_types_to_sync = convert_data_types(
-        cfg.input_data_types + cfg.output_data_types
-    )
-
     # Login and get dataset
     nc.login()
     if cfg.org_id is not None:
@@ -398,10 +393,51 @@ def main(cfg: DictConfig) -> None:
         dataset = nc.get_dataset(id=cfg.dataset_id)
     elif cfg.dataset_name is not None:
         dataset = nc.get_dataset(name=cfg.dataset_name)
+    else:
+        raise ValueError("Either 'dataset_id' or 'dataset_name' must be provided.")
+
+    # Sort out data specs
+    if cfg.input_robot_data_spec is not None:
+        if not isinstance(cfg.input_robot_data_spec, DictConfig):
+            raise ValueError(
+                "'input_robot_data_spec' must either be None or a dictionary "
+                "mapping robot IDs to dictions of data types to lists of data names."
+            )
+        input_robot_data_spec = convert_str_to_robot_data_spec(
+            cfg.input_robot_data_spec
+        )
+    else:
+        input_data_types = [DataType(dt) for dt in cfg.input_data_types]
+        input_robot_data_spec = {
+            robot_id: {dt: [] for dt in input_data_types}
+            for robot_id in dataset.robot_ids
+        }
+    if cfg.output_robot_data_spec is not None:
+        if not isinstance(cfg.output_robot_data_spec, DictConfig):
+            raise ValueError(
+                "'output_robot_data_spec' must either be None or a dictionary "
+                "mapping robot IDs to dictions of data types to lists of data names."
+            )
+        output_robot_data_spec = convert_str_to_robot_data_spec(
+            cfg.output_robot_data_spec
+        )
+    else:
+        output_data_types = [DataType(dt) for dt in cfg.output_data_types]
+        output_robot_data_spec = {
+            robot_id: {dt: [] for dt in output_data_types}
+            for robot_id in dataset.robot_ids
+        }
+
+    batch_size = cfg.batch_size
+
+    # Prepare data types for synchronization
+    robot_data_spec = merge_robot_data_spec(
+        input_robot_data_spec, output_robot_data_spec
+    )
 
     synchronized_dataset = dataset.synchronize(
         frequency=cfg.frequency,
-        data_types=data_types_to_sync,
+        robot_data_spec=robot_data_spec,
         prefetch_videos=True,
         max_prefetch_workers=cfg.max_prefetch_workers,
     )
@@ -429,12 +465,10 @@ def main(cfg: DictConfig) -> None:
     # Create a pytorch synchronized dataset
     # NOTE: we are creating it here, and not in training to access the first sample
     # for batch size autotuning, if used.
-    input_data_types = convert_data_types(cfg.input_data_types)
-    output_data_types = convert_data_types(cfg.output_data_types)
     pytorch_dataset = PytorchSynchronizedDataset(
         synchronized_dataset=synchronized_dataset,
-        input_data_types=input_data_types,
-        output_data_types=output_data_types,
+        input_robot_data_spec=input_robot_data_spec,
+        output_robot_data_spec=output_robot_data_spec,
         output_prediction_horizon=cfg.output_prediction_horizon,
     )
 
@@ -443,15 +477,19 @@ def main(cfg: DictConfig) -> None:
         sample = pytorch_dataset.load_sample(0).to(device)
         single_sample_dataset = SingleSampleDataset(
             sample=sample,
-            input_data_types=input_data_types,
-            output_data_types=output_data_types,
+            input_robot_data_spec=input_robot_data_spec,
+            output_robot_data_spec=output_robot_data_spec,
             output_prediction_horizon=cfg.output_prediction_horizon,
-            dataset_description=pytorch_dataset.dataset_description,
+            dataset_statistics=pytorch_dataset.dataset_statistics,
             num_recordings=len(pytorch_dataset),
         )
 
         optimal_batch_size = determine_optimal_batch_size(
-            cfg, single_sample_dataset, device=device
+            cfg=cfg,
+            input_robot_data_spec=input_robot_data_spec,
+            output_robot_data_spec=output_robot_data_spec,
+            dataset=single_sample_dataset,
+            device=device,
         )
         batch_size = optimal_batch_size
 
@@ -462,13 +500,30 @@ def main(cfg: DictConfig) -> None:
         # Use multiprocessing to launch multiple processes
         mp.spawn(
             run_training,
-            args=(world_size, cfg, batch_size, pytorch_dataset, device),
+            args=(
+                world_size,
+                cfg,
+                batch_size,
+                input_robot_data_spec,
+                output_robot_data_spec,
+                pytorch_dataset,
+                device,
+            ),
             nprocs=world_size,
             join=True,
         )
     else:
         # Single GPU or CPU training
-        run_training(0, 1, cfg, batch_size, pytorch_dataset, device)
+        run_training(
+            0,
+            1,
+            cfg,
+            batch_size,
+            input_robot_data_spec,
+            output_robot_data_spec,
+            pytorch_dataset,
+            device,
+        )
 
 
 if __name__ == "__main__":

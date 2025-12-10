@@ -171,7 +171,7 @@ def load_model_from_nc_archive(
         if "model_init_description" not in extracted_files:
             raise FileNotFoundError("model_init_description.json not found in archive")
 
-        with open(extracted_files["model_init_description"], "r") as f:
+        with open(extracted_files["model_init_description"]) as f:
             model_init_description = json.load(f)
         model_init_description = ModelInitDescription.model_validate(
             model_init_description
@@ -180,7 +180,7 @@ def load_model_from_nc_archive(
         # Load algorithm config if present
         algorithm_config = {}
         if "algorithm_config" in extracted_files:
-            with open(extracted_files["algorithm_config"], "r") as f:
+            with open(extracted_files["algorithm_config"]) as f:
                 algorithm_config = json.load(f)
 
         # Find the algorithm directory

@@ -7,7 +7,8 @@ buffered IO reader to provide seamless streaming capabilities with PyAV.
 
 import io
 import logging
-from typing import Any, Iterator, Optional
+from collections.abc import Iterator
+from typing import Any, Optional
 
 import av
 import numpy as np

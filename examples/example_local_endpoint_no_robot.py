@@ -1,50 +1,67 @@
-import sys
 from typing import cast
 
 import matplotlib.pyplot as plt
 import torch
 from common.base_env import BimanualViperXTask
-from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
+from common.transfer_cube import BOX_POSE, make_sim_env
 from neuracore_types import (
     BatchedJointData,
     BatchedNCData,
     BatchedParallelGripperOpenAmountData,
+    DataSpec,
     DataType,
+    JointData,
+    RGBCameraData,
+    SynchronizedPoint,
 )
 
 import neuracore as nc
-from neuracore import EndpointError
 
-ENDPOINT_NAME = "MyExampleEndpoint"
+TRAINING_JOB_NAME = "MyTrainingJob"
+ROBOT_NAME = "Mujoco VX300s"
 CAMERA_NAMES = ["angle"]
+
+# Specification of the order that will be fed into the model
+MODEL_INPUT_ORDER: DataSpec = {
+    DataType.JOINT_POSITIONS: BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+    + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES,
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
+    DataType.RGB_IMAGES: CAMERA_NAMES,
+}
+
+MODEL_OUTPUT_ORDER: DataSpec = {
+    DataType.JOINT_TARGET_POSITIONS: (
+        BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+        + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+    ),
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
+}
 
 
 def main():
-
-    nc.login()
-    nc.connect_robot(
-        robot_name="Mujoco VX300s",
-        urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
-        overwrite=False,
+    # If you know the path to the local model.nc.zip file
+    # you can use it directly without connecting to a robot
+    policy = nc.policy(
+        model_file="PATH/TO/MODEL.nc.zip",
+        model_input_order=MODEL_INPUT_ORDER,
+        model_output_order=MODEL_OUTPUT_ORDER,
     )
 
-    try:
-        policy = nc.policy_remote_server(ENDPOINT_NAME)
-    except EndpointError:
-        print(f"Please ensure that the endpoint '{ENDPOINT_NAME}' is running.")
-        print(
-            "Once you have trained a model, endpoints can be started at https://neuracore.app/dashboard/endpoints"
-        )
-        sys.exit(1)
+    # Optional. Set the checkpoint to the last epoch.
+    # Note by default, model is loaded from the last epoch.
+    # policy.set_checkpoint(epoch=-1)
 
     onscreen_render = True
-    render_cam_name = "angle"
+    render_cam_name = CAMERA_NAMES[0]
+    num_rollouts = 10
 
-    for episode_idx in range(10):
+    for episode_idx in range(num_rollouts):
         print(f"{episode_idx=}")
 
         # Setup the environment
         env = make_sim_env()
+        # resample the initial cube pose
+        BOX_POSE[0] = env.sample_box_pose()
         obs = env.reset()
 
         # Setup plotting
@@ -54,27 +71,21 @@ def main():
             plt.ion()
 
         horizon = 1
-
         # Run episode
         for i in range(400):
-
-            arm_joint_positions = {
-                jname: obs.qpos[jname]
-                for jname in BimanualViperXTask.LEFT_ARM_JOINT_NAMES
-                + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
-            }
-            left_arm_gripper_open = obs.qpos[BimanualViperXTask.LEFT_GRIPPER_OPEN]
-            right_arm_gripper_open = obs.qpos[BimanualViperXTask.RIGHT_GRIPPER_OPEN]
-
-            nc.log_joint_positions(positions=arm_joint_positions)
-
-            nc.log_parallel_gripper_open_amounts(
-                {"left_arm": left_arm_gripper_open, "right_arm": right_arm_gripper_open}
+            # Create a sync point manually without logging data to the robot
+            SynchronizedPoint(
+                data={
+                    DataType.JOINT_POSITIONS: {
+                        k: JointData(value=v) for k, v in obs.qpos.items()
+                    },
+                    DataType.RGB_IMAGES: {
+                        render_cam_name: RGBCameraData(
+                            frame=obs.cameras[render_cam_name].rgb
+                        ),
+                    },
+                }
             )
-
-            for key, value in obs.cameras.items():
-                if key in CAMERA_NAMES:
-                    nc.log_rgb(key, value.rgb)
 
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
@@ -115,7 +126,8 @@ def main():
                 mj_action = batched_action[0]  # Get the first (and only) in the batch
                 horizon = len(mj_action)
 
-            obs, reward, done = env.step(mj_action[idx_in_horizon])
+            a = mj_action[idx_in_horizon]
+            obs, reward, done = env.step(a)
 
             if onscreen_render:
                 plt_img.set_data(obs.cameras[render_cam_name].rgb)

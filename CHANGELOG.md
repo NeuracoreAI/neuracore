@@ -75,7 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Policy predictions now return a list of SyncPoint's, rather than a ModelPrediction object.
+- Policy predictions now return a list of SynchronizedPoint's, rather than a ModelPrediction object.
 - `NEURACORE_LIVE_DATA_ENABLED` has been split into two new environment variables `NEURACORE_PROVIDE_LIVE_DATA` and `NEURACORE_CONSUME_LIVE_DATA`
 
 ### Removed

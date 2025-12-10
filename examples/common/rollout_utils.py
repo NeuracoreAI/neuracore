@@ -1,7 +1,5 @@
 """Utilities for rolling out policies and collecting trajectories."""
 
-from typing import Dict, List
-
 from .base_env import BimanualViperXTask
 from .scripted_policy import PickAndTransferPolicy
 from .transfer_cube import BOX_POSE, make_ee_sim_env
@@ -11,7 +9,7 @@ def rollout_policy(
     inject_noise: bool = False,
     onscreen_render: bool = False,
     render_cam_name: str = "angle",
-) -> List[Dict[str, float]]:
+) -> list[dict[str, float]]:
     """Roll out the pick and transfer policy and return action trajectory.
 
     Args:
@@ -73,7 +71,7 @@ def rollout_policy(
     return action_traj
 
 
-def _extract_joint_action(obs) -> Dict[str, float]:
+def _extract_joint_action(obs) -> dict[str, float]:
     """Extract joint action dictionary from observation.
 
     Args:

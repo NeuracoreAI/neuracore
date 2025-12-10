@@ -10,7 +10,6 @@ import os
 from typing import Optional
 
 import requests
-from neuracore_types import __version__ as nc_types_version
 
 from neuracore.api.orgs_fetch import fetch_org_ids
 from neuracore.core.config.config_manager import get_config_manager
@@ -97,10 +96,10 @@ class Auth(metaclass=SingletonMetaclass):
             config_manager.save_config()
 
         except requests.exceptions.ConnectionError:
-            raise AuthenticationError((
+            raise AuthenticationError(
                 "Failed to connect to neuracore server, "
                 "please check your internet connection and try again."
-            ))
+            )
         except requests.exceptions.RequestException:
             raise AuthenticationError(
                 "Could not verify API key. Please check your key and try again."
@@ -133,6 +132,7 @@ class Auth(metaclass=SingletonMetaclass):
                 incompatible versions or server communication issues.
         """
         # Placeholder for version validation logic
+        from neuracore_types import __version__ as nc_types_version
 
         response = requests.get(
             f"{API_URL}/auth/verify-version",

@@ -4,9 +4,12 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional, Union, cast
 
-from neuracore_types import DatasetDescription, DataType
+import requests
+from neuracore_types import RobotDataSpec, SynchronizedDatasetStatistics
 from tqdm import tqdm
 
+from neuracore.core.auth import get_auth
+from neuracore.core.const import API_URL
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_recording import SynchronizedRecording
 
@@ -22,27 +25,28 @@ class SynchronizedDataset:
 
     def __init__(
         self,
+        id: str,
         dataset: "Dataset",
         frequency: int,
-        data_types: Optional[list[DataType]],
-        dataset_description: DatasetDescription,
+        robot_data_spec: Optional[RobotDataSpec],
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 1,
     ):
         """Initialize a dataset from server response data.
 
         Args:
+            id: Identifier for the synchronized dataset.
             dataset: Dataset object containing recordings.
             frequency: Frequency of the dataset in Hz.
-            data_types: List of data types to include in the dataset.
-            dataset_description: Description of the dataset.
+            robot_data_spec: Robot data specification for synchronization.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
             max_prefetch_workers: Number of threads to use for prefetching videos.
         """
+        self.id = id
         self.dataset = dataset
         self.frequency = frequency
-        self.data_types = data_types or []
-        self.dataset_description = dataset_description
+        self.robot_data_spec = robot_data_spec
+        self._prefetch_videos = prefetch_videos
         self._recording_idx = 0
         self._synced_recording_cache: dict[int, SynchronizedRecording] = {}
 
@@ -72,19 +76,12 @@ class SynchronizedDataset:
         with ThreadPoolExecutor(max_workers=max_prefetch_workers) as executor:
             list(
                 tqdm(
-                    executor.map(
-                        lambda idx: self[idx], range(len(self.dataset.recordings))
-                    ),
-                    total=len(self.dataset.recordings),
+                    executor.map(lambda idx: self[idx], range(len(self.dataset))),
+                    total=len(self.dataset),
                     desc=desc,
                     unit="Recording",
                 )
             )
-
-    @property
-    def num_transitions(self) -> int:
-        """Get the number of transitions in the dataset."""
-        return self.dataset_description.total_num_transitions
 
     def __iter__(self) -> "SynchronizedDataset":
         """Initialize iterator over episodes in the dataset.
@@ -123,10 +120,10 @@ class SynchronizedDataset:
             # Handle slice
             dataset = self.dataset[idx.start : idx.stop : idx.step]
             return SynchronizedDataset(
+                id=self.id,
                 dataset=cast("Dataset", dataset),
                 frequency=self.frequency,
-                data_types=self.data_types,
-                dataset_description=self.dataset_description,
+                robot_data_spec=self.robot_data_spec,
                 prefetch_videos=False,  # Avoid prefetching again
             )
         else:
@@ -137,14 +134,17 @@ class SynchronizedDataset:
                 if not 0 <= idx < len(self.dataset):
                     raise IndexError("Dataset index out of range")
                 if idx not in self._synced_recording_cache:
+                    rec = cast(Recording, self.dataset[idx])
                     synced_recording = SynchronizedRecording(
-                        recording_id=cast(Recording, self.dataset[idx]).id,
+                        recording_id=rec.id,
                         dataset=self.dataset,
-                        robot_id=cast(Recording, self.dataset[idx]).robot_id,
-                        instance=cast(Recording, self.dataset[idx]).instance,
+                        robot_id=rec.robot_id,
+                        instance=rec.instance,
+                        start_time=rec.start_time,
+                        end_time=rec.end_time,
                         frequency=self.frequency,
-                        data_types=self.data_types,
-                        prefetch_videos=self._prefetch_videos_needed,
+                        robot_data_spec=self.robot_data_spec,
+                        prefetch_videos=self._prefetch_videos,
                     )
                     self._synced_recording_cache[idx] = synced_recording
                 return self._synced_recording_cache[idx]
@@ -161,7 +161,7 @@ class SynchronizedDataset:
         Raises:
             StopIteration: When all episodes have been processed.
         """
-        if self._recording_idx >= self.dataset.num_recordings:
+        if self._recording_idx >= len(self.dataset):
             raise StopIteration
 
         if self._recording_idx not in self._synced_recording_cache:
@@ -172,12 +172,37 @@ class SynchronizedDataset:
                     dataset=self.dataset,
                     robot_id=recording.robot_id,
                     instance=recording.instance,
+                    start_time=recording.start_time,
+                    end_time=recording.end_time,
                     frequency=self.frequency,
-                    data_types=self.data_types,
-                    prefetch_videos=self._prefetch_videos_needed,
+                    robot_data_spec=self.robot_data_spec,
+                    prefetch_videos=self._prefetch_videos,
                 )
                 self._synced_recording_cache[self._recording_idx] = s
 
         to_return = self._synced_recording_cache[self._recording_idx]
         self._recording_idx += 1
         return to_return
+
+    def calculate_statistics(
+        self, robot_data_spec: RobotDataSpec
+    ) -> SynchronizedDatasetStatistics:
+        """Calculate statistics for each data type in the synchronized dataset.
+
+        Args:
+            robot_data_spec: Configuration dict specifying
+                the order of data types for each robot ID.
+
+        Returns:
+            SynchronizedDatasetStatistics containing the calculated statistics.
+        """
+        response = requests.post(
+            f"{API_URL}/org/{self.dataset.org_id}/synchronized-dataset/calculate-dataset-statistics",
+            json=SynchronizedDatasetStatistics(
+                synchronized_dataset_id=self.id,
+                robot_data_spec=robot_data_spec,
+            ).model_dump(mode="json"),
+            headers=get_auth().get_headers(),
+        )
+        response.raise_for_status()
+        return SynchronizedDatasetStatistics.model_validate(response.json())

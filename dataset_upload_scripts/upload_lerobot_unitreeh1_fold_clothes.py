@@ -64,7 +64,9 @@ def _record_step(frame_data, timestamp: float, ds_meta) -> None:
             ROBOT.joint_names
         ), f"State len {len(state)} != joint names len {len(ROBOT.joint_names)}"
         joint_positions_dict = dict(zip(ROBOT.joint_names[: len(state)], state))
-        nc.log_joint_positions(positions=joint_positions_dict, timestamp=timestamp)
+        nc.log_joint_positions(
+            name="arm", positions=joint_positions_dict, timestamp=timestamp
+        )
 
     # Log actions if available
     if "action" in frame_data:
@@ -73,7 +75,9 @@ def _record_step(frame_data, timestamp: float, ds_meta) -> None:
 
     # Log language instruction if available
     if frame_data["task"] and len(frame_data["task"]) > 0:
-        nc.log_language(language=frame_data["task"], timestamp=timestamp)
+        nc.log_language(
+            name="instruction", language=frame_data["task"], timestamp=timestamp
+        )
 
 
 def _process_episode_chunks(start_idx: int, end_idx: int) -> None:

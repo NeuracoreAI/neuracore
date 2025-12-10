@@ -1,5 +1,6 @@
 """Shared test fixtures and utilities for dataset tests."""
 
+import copy
 import io
 import re
 from fractions import Fraction
@@ -7,7 +8,17 @@ from fractions import Fraction
 import av
 import numpy as np
 import pytest
-from neuracore_types import CameraData, DataType, JointData, SyncedData, SyncPoint
+from neuracore_types import (
+    Dataset,
+    DataType,
+    JointData,
+    Recording,
+    RGBCameraData,
+    SynchronizationProgress,
+    SynchronizedDataset,
+    SynchronizedEpisode,
+    SynchronizedPoint,
+)
 
 import neuracore as nc
 from neuracore.core.const import API_URL
@@ -103,6 +114,22 @@ def mock_wget_download(monkeypatch, create_test_video_fn):
 
 
 @pytest.fixture
+def dataset_model(mocked_org_id):
+    """Basic dataset dictionary for testing."""
+    return Dataset(
+        id="dataset123",
+        name="test_dataset",
+        created_at=0.0,
+        modified_at=0.0,
+        description="A test dataset",
+        size_bytes=1024,
+        tags=["test", "robotics"],
+        is_shared=False,
+        num_demonstrations=20,
+    )
+
+
+@pytest.fixture
 def dataset_dict(mocked_org_id):
     """Basic dataset dictionary for testing."""
     return {
@@ -112,7 +139,7 @@ def dataset_dict(mocked_org_id):
         "size_bytes": 1024,
         "tags": ["test", "robotics"],
         "is_shared": False,
-        "data_types": [DataType.RGB_IMAGE, DataType.JOINT_POSITIONS],
+        "data_types": {DataType.RGB_IMAGES: 1, DataType.JOINT_POSITIONS: 1},
     }
 
 
@@ -120,22 +147,28 @@ def dataset_dict(mocked_org_id):
 def recordings_list():
     """List of recording dictionaries for testing."""
     return [
-        {
-            "id": "rec1",
-            "name": "recording1",
-            "robot_id": "robot1",
-            "instance": 1,
-            "total_bytes": 512,
-            "created_at": "2023-01-01T00:00:00Z",
-        },
-        {
-            "id": "rec2",
-            "robot_id": "robot2",
-            "instance": 1,
-            "name": "recording2",
-            "total_bytes": 512,
-            "created_at": "2023-01-02T00:00:00Z",
-        },
+        Recording(
+            id="rec1",
+            name="recording1",
+            robot_id="robot1",
+            instance=1,
+            org_id="test-org-id",
+            start_time=0.0,
+            end_time=10.0,
+            total_bytes=512,
+            created_at="2023-01-01T00:00:00Z",
+        ).model_dump(mode="json"),
+        Recording(
+            id="rec2",
+            name="recording2",
+            robot_id="robot2",
+            instance=1,
+            org_id="test-org-id",
+            start_time=0.0,
+            end_time=8.0,
+            total_bytes=512,
+            created_at="2023-01-02T00:00:00Z",
+        ).model_dump(mode="json"),
     ]
 
 
@@ -143,39 +176,52 @@ def recordings_list():
 def synced_data():
     """Create synced data fixture."""
     # Create camera data with frame indices
-    camera1 = CameraData(
+    camera1 = RGBCameraData(
         timestamp=1000.0,
         frame_idx=0,
-        extrinsics=[[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
-        intrinsics=[[500, 0, 112], [0, 500, 112], [0, 0, 1]],
+        extrinsics=np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]),
+        intrinsics=np.array([[500, 0, 112], [0, 500, 112], [0, 0, 1]]),
     )
 
-    camera2 = CameraData(
+    camera2 = RGBCameraData(
         timestamp=1000.0,
         frame_idx=0,
-        extrinsics=[[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
-        intrinsics=[[500, 0, 112], [0, 500, 112], [0, 0, 1]],
+        extrinsics=np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]),
+        intrinsics=np.array([[500, 0, 112], [0, 500, 112], [0, 0, 1]]),
     )
 
     # Create sync points
-    frame1 = SyncPoint(
+    frame1 = SynchronizedPoint(
         timestamp=0.0,
-        joint_positions=JointData(timestamp=0.0, values={"joint1": 0.5}),
-        joint_target_positions=JointData(timestamp=1000.0, values={"joint1": 1.0}),
-        rgb_images={"cam1": camera1},
-        depth_images={"cam2": camera2},
+        data={
+            DataType.JOINT_POSITIONS: {"joint1": JointData(timestamp=0.0, value=0.5)},
+            DataType.JOINT_TARGET_POSITIONS: {
+                "joint1": JointData(timestamp=1000.0, value=1.0)
+            },
+            DataType.RGB_IMAGES: {"cam1": camera1},
+            DataType.DEPTH_IMAGES: {"cam2": camera2},
+        },
     )
 
-    frame2 = SyncPoint(
+    camera1 = copy.deepcopy(camera1)
+    camera2 = copy.deepcopy(camera2)
+    camera1.frame_idx = 1
+    camera2.frame_idx = 1
+
+    frame2 = SynchronizedPoint(
         timestamp=1.0,
-        joint_positions=JointData(timestamp=1.0, values={"joint1": 0.7}),
-        joint_target_positions=JointData(timestamp=1.0, values={"joint1": 1.2}),
-        rgb_images={"cam1": CameraData(timestamp=1.0, frame_idx=1)},
-        depth_images={"cam2": CameraData(timestamp=1.0, frame_idx=1)},
+        data={
+            DataType.JOINT_POSITIONS: {"joint1": JointData(timestamp=0.0, value=0.5)},
+            DataType.JOINT_TARGET_POSITIONS: {
+                "joint1": JointData(timestamp=1000.0, value=1.0)
+            },
+            DataType.RGB_IMAGES: {"cam1": camera1},
+            DataType.DEPTH_IMAGES: {"cam2": camera2},
+        },
     )
 
-    return SyncedData(
-        frames=[frame1, frame2], start_time=0.0, end_time=1.0, robot_id="robot1"
+    return SynchronizedEpisode(
+        observations=[frame1, frame2], start_time=0.0, end_time=1.0, robot_id="robot1"
     )
 
 
@@ -184,33 +230,38 @@ def synced_data_multiple_frames():
     """Create synced data fixture with more frames for testing."""
     frames = []
     for i in range(5):
-        camera = CameraData(
+        camera = RGBCameraData(
             timestamp=float(i),
             frame_idx=i,
-            extrinsics=[[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
-            intrinsics=[[500, 0, 112], [0, 500, 112], [0, 0, 1]],
+            extrinsics=np.array(
+                [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+            ),
+            intrinsics=np.array([[500, 0, 112], [0, 500, 112], [0, 0, 1]]),
         )
 
-        frame = SyncPoint(
+        frame = SynchronizedPoint(
             timestamp=float(i),
-            joint_positions=JointData(
-                timestamp=float(i), values={"joint1": 0.5 + i * 0.1}
-            ),
-            joint_target_positions=JointData(
-                timestamp=float(i), values={"joint1": 1.0 + i * 0.1}
-            ),
-            rgb_images={"cam1": camera},
-            depth_images=None,
+            data={
+                DataType.JOINT_POSITIONS: {
+                    "joint1": JointData(timestamp=0.0, value=0.5 + i * 0.1)
+                },
+                DataType.JOINT_TARGET_POSITIONS: {
+                    "joint1": JointData(timestamp=1000.0, value=1.0 + i * 0.1)
+                },
+                DataType.RGB_IMAGES: {"cam1": camera},
+            },
         )
         frames.append(frame)
 
-    return SyncedData(frames=frames, start_time=0.0, end_time=4.0, robot_id="robot1")
+    return SynchronizedEpisode(
+        observations=frames, start_time=0.0, end_time=4.0, robot_id="robot1"
+    )
 
 
 @pytest.fixture
 def mock_auth_requests(
     mock_auth_requests,
-    dataset_dict,
+    dataset_model,
     recordings_list,
     synced_data,
     mocked_org_id,
@@ -221,17 +272,9 @@ def mock_auth_requests(
 
     # Mock datasets endpoint
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets", json=[dataset_dict], status_code=200
-    )
-
-    # Mock synchronize endpoint dynamically
-    mock_auth_requests.post(
-        re.compile(f"{API_URL}/org/{mocked_org_id}/synchronize/synchronize-dataset"),
-        json={
-            "dataset_id": dataset_dict["id"],
-            "frequency": 50,
-            "data_types": dataset_dict["data_types"],
-        },
+        f"{API_URL}/org/{mocked_org_id}/datasets",
+        json=[dataset_model.model_dump(mode="json")],
+        status_code=200,
     )
 
     # Mock shared datasets endpoint
@@ -241,22 +284,24 @@ def mock_auth_requests(
 
     mock_auth_requests.get(
         re.compile(f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name"),
-        json=dataset_dict,
+        json=dataset_model.model_dump(mode="json"),
         status_code=200,
     )
     mock_auth_requests.get(
         re.compile(f"{API_URL}/org/{mocked_org_id}/datasets/dataset123"),
-        json=dataset_dict,
+        json=dataset_model.model_dump(mode="json"),
         status_code=200,
     )
 
     # Mock dataset creation endpoint
     mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/datasets", json=dataset_dict, status_code=200
+        f"{API_URL}/org/{mocked_org_id}/datasets",
+        json=dataset_model.model_dump(mode="json"),
+        status_code=200,
     )
 
     mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/{dataset_dict['id']}",
+        f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/{dataset_model.id}",
         additional_matcher=lambda request: request.text in (None, ""),
         json={"data": recordings_list, "total": len(recordings_list)},
         status_code=200,
@@ -268,20 +313,39 @@ def mock_auth_requests(
         json=synced_data.model_dump(mode="json"),
         status_code=200,
     )
+    mock_auth_requests.get(
+        re.compile(
+            f"{API_URL}/org/{mocked_org_id}/synchronize/synchronization-progress/synced_dataset_123"
+        ),
+        json=SynchronizationProgress(
+            synchronized_dataset_id="synced_dataset_123",
+            num_synchronized_demonstrations=len(recordings_list),
+        ).model_dump(mode="json"),
+        status_code=200,
+    )
+
+    synced_dataset = SynchronizedDataset(
+        id="synced_dataset_123",
+        parent_id=dataset_model.id,
+        name="synced_test_dataset",
+        created_at=0.0,
+        modified_at=0.0,
+        description="",
+        num_demonstrations=len(recordings_list),
+        total_duration_seconds=0.0,
+        is_shared=False,
+        metadata={},
+        all_data_types={},
+        common_data_types={},
+        frequency=30.0,
+        max_delay_s=0.1,
+        allow_duplicates=True,
+    )
 
     # Mock sync dataset
     mock_auth_requests.post(
         re.compile(f"{API_URL}/org/{mocked_org_id}/synchronize/synchronize-dataset"),
-        json={
-            "id": "synced_dataset_123",
-            "parent_id": dataset_dict["id"],
-            "freq": 30,
-            "name": "synced_test_dataset",
-            "created_at": 0.0,
-            "modified_at": 0.0,
-            "num_demonstrations": len(recordings_list),
-            "num_processed_demonstrations": len(recordings_list),
-        },
+        json=synced_dataset.model_dump(),
         status_code=200,
     )
 

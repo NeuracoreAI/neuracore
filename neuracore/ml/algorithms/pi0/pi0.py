@@ -11,18 +11,29 @@ for General Robot Control." arXiv preprint https://arxiv.org/abs/2410.24164.
 
 import logging
 import os
-import time
-from typing import Optional
+from typing import Optional, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
-from neuracore_types import DataType, ModelInitDescription, ModelPrediction
-from transformers import AutoProcessor, AutoTokenizer, PaliGemmaForConditionalGeneration
+from neuracore_types import (
+    BatchedJointData,
+    BatchedLanguageData,
+    BatchedNCData,
+    BatchedParallelGripperOpenAmountData,
+    BatchedRGBData,
+    CameraDataStats,
+    DataItemStats,
+    DataType,
+    JointDataStats,
+    ModelInitDescription,
+    ParallelGripperOpenAmountDataStats,
+)
+from transformers import AutoProcessor, PaliGemmaForConditionalGeneration
 
 from neuracore.ml import (
-    BatchedInferenceSamples,
+    BatchedInferenceInputs,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     NeuracoreModel,
@@ -35,11 +46,8 @@ logging.getLogger("transformers").setLevel(logging.CRITICAL)
 
 logger = logging.getLogger(__name__)
 
-JOINT_STATE_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
+PROPRIO_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
 ACTION_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
-# Global tokenizer for static method
-_tokenizer = None
-LANGUAGE_MODEL_NAME = "google/paligemma-3b-pt-224"
 
 VLM_BACKBONE = "google/paligemma-3b-pt-224"
 VLM_EXPERT_WIDTH = 2048  # Width of the VLM expert, matches PaliGemma's hidden size
@@ -106,22 +114,95 @@ class Pi0(NeuracoreModel):
                 "Please set the HF_TOKEN environment variable."
             )
 
-        self.action_dim = self.dataset_description.joint_target_positions.max_len
-        self.action_horizon = self.output_prediction_horizon
         self.vlm_max_text_tokens = vlm_max_text_tokens
-        num_rgbs = model_init_description.dataset_description.rgb_images.max_len
-        self.vlm_max_tokens = num_rgbs * 256 + self.vlm_max_text_tokens
         self.num_inference_steps = num_inference_steps
         self.flow_sig_min = flow_sig_min
         self.flow_beta_dist = torch.distributions.Beta(flow_alpha, flow_beta)
         self.lr = lr
         self.weight_decay = weight_decay
-        proprio_dim = (
-            self.dataset_description.joint_positions.max_len
-            + self.dataset_description.joint_velocities.max_len
-            + self.dataset_description.joint_torques.max_len
-        )
         self.dtype = dtype
+
+        data_stats: dict[DataType, DataItemStats] = {}
+
+        # Setup proprioceptive data
+        self.proprio_dims: dict[DataType, tuple[int, int]] = {}
+        proprio_stats = []
+        current_dim = 0
+
+        for dt in [
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+        ]:
+            if dt in self.data_types:
+                stats = cast(list[JointDataStats], self.dataset_statistics[dt])
+                combined_stats = DataItemStats()
+                for stat in stats:
+                    combined_stats = combined_stats.concatenate(stat.value)
+                data_stats[dt] = combined_stats
+
+                if dt in self.input_data_types:
+                    proprio_stats.append(combined_stats)
+                    dim = len(combined_stats.mean)
+                    self.proprio_dims[dt] = (current_dim, current_dim + dim)
+                    current_dim += dim
+
+        proprio_dim = current_dim
+
+        # Setup output data
+        self.max_output_size = 0
+        output_stats = []
+        self.output_dims: dict[DataType, tuple[int, int]] = {}
+        current_output_dim = 0
+
+        for dt in self.output_data_types:
+            if dt in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+                stats = cast(list[JointDataStats], self.dataset_statistics[dt])
+                combined_stats = DataItemStats()
+                for stat in stats:
+                    combined_stats = combined_stats.concatenate(stat.value)
+                data_stats[dt] = combined_stats
+                output_stats.append(combined_stats)
+                dim = len(combined_stats.mean)
+                self.output_dims[dt] = (current_output_dim, current_output_dim + dim)
+                current_output_dim += dim
+                self.max_output_size += dim
+            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                stats = cast(
+                    list[ParallelGripperOpenAmountDataStats],
+                    self.dataset_statistics[dt],
+                )
+                combined_stats = DataItemStats()
+                for stat in stats:
+                    combined_stats = combined_stats.concatenate(stat.open_amount)
+                data_stats[dt] = combined_stats
+                output_stats.append(combined_stats)
+                dim = len(combined_stats.mean)
+                self.output_dims[dt] = (current_output_dim, current_output_dim + dim)
+                current_output_dim += dim
+                self.max_output_size += dim
+
+        self.action_dim = self.max_output_size
+        self.action_horizon = self.output_prediction_horizon
+
+        # Setup normalizers
+        self.proprio_normalizer = PROPRIO_NORMALIZER(
+            name="proprioception", statistics=proprio_stats
+        )
+        self.action_normalizer = ACTION_NORMALIZER(
+            name="actions", statistics=output_stats
+        )
+
+        # Setup RGB cameras
+        num_rgbs = 0
+        if DataType.RGB_IMAGES in self.input_data_types:
+            stats = cast(
+                list[CameraDataStats], self.dataset_statistics[DataType.RGB_IMAGES]
+            )
+            num_rgbs = len(stats)
+
+        self.vlm_max_tokens = num_rgbs * 256 + self.vlm_max_text_tokens
+
         self.vlm = PaliGemmaForConditionalGeneration.from_pretrained(
             VLM_BACKBONE, dtype=self.dtype, attn_implementation="eager"
         )
@@ -130,9 +211,11 @@ class Pi0(NeuracoreModel):
         )
         self.vlm_embedding_module = self.vlm.get_input_embeddings()
         assert self.vlm_processor.tokenizer.padding_side == "right"
+
         # Disable finetuning of the VLM
         for param in self.vlm.parameters():
             param.requires_grad = False
+
         # Create a mixture of experts (MoE) model consisting of 2 experts:
         # 1. VLM expert
         # 2. Action expert
@@ -166,6 +249,7 @@ class Pi0(NeuracoreModel):
             gemma_config.intermediate_size == vlm_expert_intermediate_size
             and gemma_config.hidden_size == VLM_EXPERT_WIDTH
         )
+
         # Load PaliGemma weights into VLM expert
         if self.using_pretrained_paligemma:
             self._load_pretrained_vlm_weights()
@@ -186,54 +270,49 @@ class Pi0(NeuracoreModel):
         self.image_normalizer = torch.nn.Sequential(
             T.Resize((224, 224)),
         )
-        # Setup Normalizer
-        self._setup_normalizer()
 
-    def _setup_normalizer(self) -> None:
-        """Setup normalization statistics for different data types."""
-        # Joint state normalization
-        joint_states = []
-        actions = []
+    def _combine_proprio(self, batch: BatchedInferenceInputs) -> torch.FloatTensor:
+        """Combine different types of joint state data.
 
-        if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-            joint_states.append(self.dataset_description.joint_positions)
-        if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
-            joint_states.append(self.dataset_description.joint_velocities)
-        if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
-            joint_states.append(self.dataset_description.joint_torques)
-        if (
-            DataType.JOINT_TARGET_POSITIONS
-            in self.model_init_description.output_data_types
-        ):
-            actions.append(self.dataset_description.joint_target_positions)
-        self.joint_state_normalizer = JOINT_STATE_NORMALIZER(
-            name="joint_states", statistics=joint_states
-        )
-        self.action_normalizer = ACTION_NORMALIZER(name="actions", statistics=actions)
+        Args:
+            batch: Input batch containing joint state data
 
-    def _combine_normalized_joint_states(
-        self, batch: BatchedInferenceSamples
-    ) -> torch.Tensor:
-        """Combine joint states."""
-        state_inputs = []
-        if batch.joint_positions:
-            state_inputs.append(batch.joint_positions.data * batch.joint_positions.mask)
-        if batch.joint_velocities:
-            state_inputs.append(
-                batch.joint_velocities.data * batch.joint_velocities.mask
-            )
-        if batch.joint_torques:
-            state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
+        Returns:
+            torch.FloatTensor: Combined and normalized joint state features
+        """
+        proprio_list = []
+        for data_type in [
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+        ]:
+            if data_type not in batch.inputs:
+                continue
 
-        if state_inputs:
-            joint_states = torch.cat(state_inputs, dim=-1)
-            joint_states = self.joint_state_normalizer.normalize(data=joint_states)
-            return joint_states
-        else:
-            # Return zero tensor if no joint states available
+            batched_nc_data = batch.inputs[data_type]
+            mask = batch.inputs_mask[data_type]
+
+            batched_joint_data = cast(list[BatchedJointData], batched_nc_data)
+            proprio_data = torch.cat([bjd.value for bjd in batched_joint_data], dim=-1)
+
+            last_proprio = proprio_data[:, -1, :]  # (B, num_features)
+            masked_proprio = last_proprio * mask
+            proprio_list.append(masked_proprio)
+
+        if not proprio_list:
             raise ValueError("No joint states available")
 
-    def _prepare_rgb_images(self, batch: BatchedInferenceSamples) -> torch.Tensor:
+        # Concatenate all proprio together: (B, total_proprio_dim)
+        all_proprio = torch.cat(proprio_list, dim=-1)
+
+        # Normalize once on all proprio
+        normalized_proprio = self.proprio_normalizer.normalize(all_proprio)
+
+        return normalized_proprio
+
+    def _prepare_rgb_images(
+        self, batch: BatchedInferenceInputs
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Prepare the RGB images and masks.
 
         First resize to 224x224 and then normalize values to [-1,1]. And transform
@@ -245,35 +324,39 @@ class Pi0(NeuracoreModel):
         Returns:
             tuple[list[torch.Tensor], list[torch.Tensor]]: List of images and masks.
         """
-        if batch.rgb_images is None:
+        if DataType.RGB_IMAGES not in batch.inputs:
             raise ValueError("RGB images are required but not provided")
+
+        batched_rgb_data = cast(list[BatchedRGBData], batch.inputs[DataType.RGB_IMAGES])
+        camera_mask = batch.inputs_mask[DataType.RGB_IMAGES]
+
         images = []
         image_masks = []
-        for cam_id in range(self.dataset_description.rgb_images.max_len):
-            image = self.image_normalizer(batch.rgb_images.data[:, cam_id])
+        for cam_id, input_rgb in enumerate(batched_rgb_data):
+            last_frame = input_rgb.frame[:, -1, :, :, :]  # (B, 3, H, W)
+            image = self.image_normalizer(last_frame)
             # Normalize from range [0,1] to [-1,1] as expected by siglip
             image = image * 2.0 - 1.0
             images.append(image)
-            image_masks.append(batch.rgb_images.mask[:, cam_id])
+            image_masks.append(camera_mask[:, cam_id])
+
         return images, image_masks
 
     def _process_language_tokens(
         self,
-        batch: BatchedInferenceSamples,
+        batch: BatchedInferenceInputs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Process the language tokens.
 
         Args:
-            batch_size: Size of the batch.
-            language_tokens: Language tokens tensor.
-            language_mask: Language mask tensor.
+            batch: Batch of inference samples.
 
         Returns:
             torch.Tensor: Language tokens tensor.
             torch.Tensor: Language mask tensor.
         """
         batch_size = len(batch)
-        if batch.language_tokens is None:
+        if DataType.LANGUAGE not in batch.inputs:
             # Return zero tensor with appropriate dimensions if no language input
             # Use torch.long for token IDs (embedding layer expects integer indices)
             language_tokens = torch.zeros(
@@ -286,8 +369,14 @@ class Pi0(NeuracoreModel):
                 batch_size, self.vlm_max_text_tokens, device=self.device
             )
         else:
-            language_tokens = batch.language_tokens.data
-            language_mask = batch.language_tokens.mask
+            batched_language_data = cast(
+                list[BatchedLanguageData], batch.inputs[DataType.LANGUAGE]
+            )
+            # Grab the last language group and last timestep
+            language_data = batched_language_data[-1]
+            language_tokens = language_data.input_ids[:, -1, :]  # (B, L)
+            language_mask = language_data.attention_mask[:, -1, :]  # (B, L)
+
         return language_tokens, language_mask
 
     def _load_pretrained_vlm_weights(self) -> None:
@@ -452,8 +541,8 @@ class Pi0(NeuracoreModel):
 
     def _forward_vlm_merged_text_images(
         self,
-        images: torch.Tensor,
-        image_masks: torch.Tensor,
+        images: list[torch.Tensor],
+        image_masks: list[torch.Tensor],
         language_tokens: torch.Tensor,
         language_masks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -555,31 +644,29 @@ class Pi0(NeuracoreModel):
         action_embeds = proprio_action_embeds[:, 1:]
         return self.action_decoder(action_embeds)
 
-    def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
+    def forward(
+        self, batch: BatchedInferenceInputs
+    ) -> dict[DataType, list[BatchedNCData]]:
         """Forward pass for generating actions.
 
         Args:
             batch: Batch of inference samples.
 
         Returns:
-            torch.Tensor: Generated actions tensor.
+            dict[DataType, list[BatchedNCData]]: Model predictions with action sequences
         """
-        t_start = time.time()
         batch_size = len(batch)
-        if self.dataset_description.rgb_images.max_len > 0:
-            # (B, Predict_Horizon, VLM_EMBED_DIM)
-            if batch.rgb_images is None:
-                raise ValueError("RGB images are required")
-            images, image_masks = self._prepare_rgb_images(batch)
 
-        else:
+        if DataType.RGB_IMAGES not in batch.inputs:
             raise ValueError("No RGB images available")
+
+        images, image_masks = self._prepare_rgb_images(batch)
         language_tokens, language_masks = self._process_language_tokens(batch)
         merged_text_images, pad_masks = self._forward_vlm_merged_text_images(
             images, image_masks, language_tokens, language_masks
         )
-        proprio_states = self._combine_normalized_joint_states(batch)
-        proprio_embeds = self.proprio_encoder(proprio_states)  # (B, 1, E)
+        proprio_states = self._combine_proprio(batch)
+        proprio_embeds = self.proprio_encoder(proprio_states)  # (B, E)
 
         delta_t = 1.0 / self.num_inference_steps
         t = torch.zeros(
@@ -599,13 +686,34 @@ class Pi0(NeuracoreModel):
             )
             action += delta_t * action_vel
             t += delta_t
-        prediction_time = time.time() - t_start
-        predictions = self.action_normalizer.unnormalize(data=action)
-        predictions = predictions.detach().cpu().float().numpy()
-        return ModelPrediction(
-            outputs={DataType.JOINT_TARGET_POSITIONS: predictions},
-            prediction_time=prediction_time,
-        )
+
+        # (B, T, action_dim)
+        predictions = self.action_normalizer.unnormalize(action)
+
+        output_tensors: dict[DataType, list[BatchedNCData]] = {}
+
+        for dt in self.output_data_types:
+            start_idx, end_idx = self.output_dims[dt]
+            dt_preds = predictions[:, :, start_idx:end_idx]  # (B, T, dt_size)
+
+            if dt in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+                batched_outputs = []
+                for i in range(len(self.dataset_statistics[dt])):
+                    joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
+                    batched_outputs.append(BatchedJointData(value=joint_preds))
+                output_tensors[dt] = batched_outputs
+            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                batched_outputs = []
+                for i in range(len(self.dataset_statistics[dt])):
+                    gripper_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
+                    batched_outputs.append(
+                        BatchedParallelGripperOpenAmountData(open_amount=gripper_preds)
+                    )
+                output_tensors[dt] = batched_outputs
+            else:
+                raise ValueError(f"Unsupported output data type: {dt}")
+
+        return output_tensors
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Perform a single training step.
@@ -616,44 +724,55 @@ class Pi0(NeuracoreModel):
         Returns:
             BatchedTrainingOutputs: Training outputs with losses and metrics
         """
-        inference_sample = BatchedInferenceSamples(
-            joint_positions=batch.inputs.joint_positions,
-            joint_velocities=batch.inputs.joint_velocities,
-            joint_torques=batch.inputs.joint_torques,
-            rgb_images=batch.inputs.rgb_images,
-            language_tokens=batch.inputs.language_tokens,
-            joint_target_positions=batch.outputs.joint_target_positions,
+        inference_sample = BatchedInferenceInputs(
+            inputs=batch.inputs,
+            inputs_mask=batch.inputs_mask,
+            batch_size=batch.batch_size,
         )
-        proprios = self._combine_normalized_joint_states(inference_sample)
-        if batch.outputs.joint_target_positions is None:
-            raise ValueError("Joint target positions are required")
-        target_actions = self.action_normalizer.normalize(
-            data=batch.outputs.joint_target_positions.data
-        )
-        target_actions = target_actions * batch.outputs.joint_target_positions.mask
+
+        proprios = self._combine_proprio(inference_sample)
+
+        if set(batch.outputs.keys()) != set(self.output_data_types):
+            raise ValueError(
+                "Batch outputs do not match model output configuration."
+                f" Expected {self.output_data_types}, got {list(batch.outputs.keys())}"
+            )
+
+        # Concatenate all output actions
+        action_targets = []
+        for dt in self.output_data_types:
+            if dt in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+                batched_joints = cast(list[BatchedJointData], batch.outputs[dt])
+                action_targets.extend([bjd.value for bjd in batched_joints])
+            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                grippers = cast(
+                    list[BatchedParallelGripperOpenAmountData], batch.outputs[dt]
+                )
+                action_targets.extend([gripper.open_amount for gripper in grippers])
+            else:
+                raise ValueError(f"Unsupported output data type: {dt}")
+
+        action_data = torch.cat(action_targets, dim=-1)  # (B, T, total_action_dim)
+
+        target_actions = self.action_normalizer.normalize(action_data)
+        target_actions = target_actions
+
         t = self._sample_fm_time(len(batch))
         x0 = torch.randn_like(target_actions)
         x1 = target_actions
         # Calculate conditional flow
         _t = t.view(-1, 1, 1)
         psi_t = (1 - (1 - self.flow_sig_min) * _t) * x0 + _t * x1
-        if self.dataset_description.rgb_images.max_len > 0:
-            # (B, Predict_Horizon, VLM_EMBED_DIM)
-            if (
-                inference_sample.rgb_images is None
-                or inference_sample.language_tokens is None
-            ):
-                raise ValueError(
-                    "RGB images and language tokens are required for training"
-                )
-            images, image_masks = self._prepare_rgb_images(inference_sample)
-        else:
-            raise ValueError("No RGB images available")
+
+        if DataType.RGB_IMAGES not in batch.inputs:
+            raise ValueError("RGB images are required for training")
+
+        images, image_masks = self._prepare_rgb_images(inference_sample)
         lang_tokens, lang_masks = self._process_language_tokens(inference_sample)
         merged_text_images, pad_masks = self._forward_vlm_merged_text_images(
             images, image_masks, lang_tokens, lang_masks
         )
-        proprio_embeds = self.proprio_encoder(proprios)  # (B, 1, E)
+        proprio_embeds = self.proprio_encoder(proprios)  # (B, E)
         # Get the actual sequence length from the merged embeddings
         actual_seq_len = merged_text_images.shape[1]
         v_psi = self._predict_action(
@@ -661,8 +780,8 @@ class Pi0(NeuracoreModel):
         )
         d_psi = x1 - (1 - self.flow_sig_min) * x0
         loss = F.mse_loss(v_psi, d_psi, reduction="none")
-        mask = batch.outputs.joint_target_positions.mask
-        loss = (loss * mask).mean()
+        loss = loss.mean()
+
         losses = {
             "mse_loss": loss,
         }
@@ -670,7 +789,6 @@ class Pi0(NeuracoreModel):
             "mse_loss": loss,
         }
         return BatchedTrainingOutputs(
-            output_predictions=v_psi,
             losses=losses,
             metrics=metrics,
         )
@@ -712,57 +830,29 @@ class Pi0(NeuracoreModel):
         return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
 
     @staticmethod
-    def get_supported_input_data_types() -> list[DataType]:
+    def get_supported_input_data_types() -> set[DataType]:
         """Get the input data types supported by this model.
 
         Returns:
-            list[DataType]: List of supported input data types
+            set[DataType]: Set of supported input data types
         """
-        return [
+        return {
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
-            DataType.RGB_IMAGE,
+            DataType.RGB_IMAGES,
             DataType.LANGUAGE,
-        ]
+        }
 
     @staticmethod
-    def get_supported_output_data_types() -> list[DataType]:
+    def get_supported_output_data_types() -> set[DataType]:
         """Get the output data types supported by this model.
 
         Returns:
-            list[DataType]: List of supported output data types
+            set[DataType]: Set of supported output data types
         """
-        return [DataType.JOINT_TARGET_POSITIONS]
-
-    @staticmethod
-    def tokenize_text(text: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Tokenize text using the pretrained tokenizer.
-
-        Args:
-            text: List of text strings to tokenize
-
-        Returns:
-            tuple[torch.Tensor, torch.Tensor]: Input IDs and attention masks
-        """
-        text = [text if text.endswith("\n") else f"{text}\n" for text in text]
-
-        global _tokenizer
-        if _tokenizer is None:
-            # Only PaliGemma-3B supported for now
-            _tokenizer = AutoTokenizer.from_pretrained(LANGUAGE_MODEL_NAME)
-
-        # Tokenize the text
-        tokens = _tokenizer(
-            text,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-            max_length=128,
-        )
-
-        # Extract token ids and attention mask
-        input_ids = tokens["input_ids"]
-        attention_mask = tokens["attention_mask"]
-
-        return input_ids, attention_mask
+        return {
+            DataType.JOINT_TARGET_POSITIONS,
+            DataType.JOINT_POSITIONS,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        }

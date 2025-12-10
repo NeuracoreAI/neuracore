@@ -19,16 +19,18 @@ from pathlib import Path
 from subprocess import Popen
 from typing import Optional
 
-import numpy as np
 import requests
-from neuracore_types import DataType, SyncPoint
+from neuracore_types import (
+    DATA_TYPE_TO_BATCHED_NC_DATA_CLASS,
+    BatchedNCData,
+    DataType,
+    SynchronizedPoint,
+)
 
-from neuracore.api.globals import GlobalSingleton
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.exceptions import InsufficientSyncPointError
+from neuracore.core.exceptions import InsufficientSynchronizedPointError
 from neuracore.core.get_latest_sync_point import get_latest_sync_point
 from neuracore.core.utils.download import download_with_progress
-from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 from neuracore.core.utils.server import (
     PING_ENDPOINT,
     PREDICT_ENDPOINT,
@@ -63,8 +65,10 @@ class Policy:
             raise ValueError("Must specify either epoch or checkpoint_file.")
 
     def predict(
-        self, sync_point: Optional[SyncPoint] = None, timeout: float = 5
-    ) -> list[SyncPoint]:
+        self,
+        sync_point: Optional[SynchronizedPoint] = None,
+        timeout: float = 5,
+    ) -> dict[DataType, dict[str, BatchedNCData]]:
         """Get action predictions from the model.
 
         Sends robot sensor data to the model and receives action predictions.
@@ -78,30 +82,34 @@ class Policy:
                 sensor data. Raises error if timeout is reached without sufficient data.
 
         Returns:
-            Model predictions as a list of SyncPoint objects.
+            Model predictions as a list of SynchronizedPoint objects.
 
         Raises:
-            InsufficientSyncPointError: If the sync point doesn't contain required data.
+            InsufficientSynchronizedPointError:
+                If the sync point doesn't contain required data.
             EndpointError: If prediction request fails or response is invalid.
         """
         if timeout <= 0:
             raise ValueError("Timeout must be a positive number.")
         t = time.time()
-        sync_points = None
-        while sync_points is None:
+        prediction = None
+        while prediction is None:
             try:
-                sync_points = self._predict(sync_point)
-            except InsufficientSyncPointError as e:
+                prediction = self._predict(sync_point)
+            except InsufficientSynchronizedPointError as e:
                 if time.time() - t > timeout:
                     raise e
                 time.sleep(PREDICTION_WAIT_TIME)
-        return sync_points
+        return prediction
 
     def disconnect(self) -> None:
         """Disconnect from the policy and clean up resources."""
         pass
 
-    def _predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
+    def _predict(
+        self,
+        sync_point: Optional[SynchronizedPoint] = None,
+    ) -> dict[DataType, dict[str, BatchedNCData]]:
         """Internal get action predictions from the model.
 
         Sends robot sensor data to the model and receives action predictions.
@@ -111,9 +119,10 @@ class Policy:
         Args:
             sync_point: Synchronized sensor data to send to the model. If None,
                 creates a new sync point from the robot's current sensor data.
+            robot_name: Name of the robot to predict on. If None, uses the active robot.
 
         Returns:
-            Model predictions as a list of SyncPoint objects.
+            Model predictions as a list of SynchronizedPoint objects.
         """
         raise NotImplementedError(
             "Subclasses must implement the _predict method to run model inference."
@@ -129,10 +138,11 @@ class DirectPolicy(Policy):
 
     def __init__(
         self,
+        model_input_order: dict[DataType, list[str]],
+        model_output_order: dict[DataType, list[str]],
         model_path: Path,
         org_id: str,
         job_id: Optional[str] = None,
-        output_mapping: Optional[dict[DataType, list[str]]] = None,
         device: Optional[str] = None,
     ):
         """Initialize the direct policy with a robot instance."""
@@ -141,10 +151,11 @@ class DirectPolicy(Policy):
         from neuracore.ml.utils.policy_inference import PolicyInference
 
         self._policy = PolicyInference(
+            model_input_order=model_input_order,
+            model_output_order=model_output_order,
             org_id=org_id,
             job_id=job_id,
             model_file=model_path,
-            output_mapping=output_mapping,
             device=device,
         )
 
@@ -161,17 +172,21 @@ class DirectPolicy(Policy):
         super().set_checkpoint(epoch, checkpoint_file)
         self._policy.set_checkpoint(epoch, checkpoint_file)
 
-    def _predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
+    def _predict(
+        self,
+        sync_point: Optional[SynchronizedPoint] = None,
+    ) -> dict[DataType, dict[str, BatchedNCData]]:
         """Run direct model inference.
 
         Args:
             sync_point: Optional sync point. If None, creates from robot sensors.
 
         Returns:
-            Model predictions as a list of SyncPoint objects.
+            Model predictions as a list of SynchronizedPoint objects.
 
         Raises:
-            InsufficientSyncPointError: If the sync point doesn't contain required data.
+            InsufficientSynchronizedPointError:
+                If the sync point doesn't contain required data.
         """
         if sync_point is None:
             sync_point = get_latest_sync_point()
@@ -234,14 +249,17 @@ class ServerPolicy(Policy):
                 )
             response.raise_for_status()
         except requests.exceptions.ConnectionError:
-            raise EndpointError((
+            raise EndpointError(
                 "Failed to connect to endpoint, "
                 "please check your internet connection and try again."
-            ))
+            )
         except requests.exceptions.RequestException as e:
             raise EndpointError(f"Failed to set checkpoint: {str(e)}")
 
-    def _predict(self, sync_point: Optional[SyncPoint] = None) -> list[SyncPoint]:
+    def _predict(
+        self,
+        sync_point: Optional[SynchronizedPoint] = None,
+    ) -> dict[DataType, dict[str, BatchedNCData]]:
         """Get action predictions from the model endpoint.
 
         Sends robot sensor data to the model and receives action predictions.
@@ -256,38 +274,14 @@ class ServerPolicy(Policy):
             Model predictions including actions and any generated outputs.
 
         Raises:
-            InsufficientSyncPointError: If the sync point doesn't contain required data.
+            InsufficientSynchronizedPointError:
+                If the sync point doesn't contain required data.
             ValueError: If payload size exceeds limits for remote endpoints.
         """
         if sync_point is None:
             sync_point = get_latest_sync_point()
-
-        if sync_point.robot_id is None:
-            robot = GlobalSingleton()._active_robot
-            if robot is None:
-                raise ValueError(
-                    "No active robot found. Please connect a robot before predicting."
-                )
-            sync_point.robot_id = robot.id
-
-        # Encode images if they are numpy arrays
-        if sync_point.rgb_images:
-            for key in sync_point.rgb_images:
-                if isinstance(sync_point.rgb_images[key].frame, np.ndarray):
-                    sync_point.rgb_images[key].frame = ImageStringEncoder.encode_image(
-                        sync_point.rgb_images[key].frame
-                    )
-        if sync_point.depth_images:
-            for key in sync_point.depth_images:
-                if isinstance(sync_point.depth_images[key].frame, np.ndarray):
-                    sync_point.depth_images[key].frame = (
-                        ImageStringEncoder.encode_image(
-                            sync_point.depth_images[key].frame
-                        )
-                    )
         response = None
         try:
-            # Make prediction request
             response = requests.post(
                 f"{self._base_url}{PREDICT_ENDPOINT}",
                 headers=self._headers,
@@ -295,37 +289,26 @@ class ServerPolicy(Policy):
                 timeout=int(os.getenv("NEURACORE_ENDPOINT_TIMEOUT", 10)),
             )
             response.raise_for_status()
-
-            # Parse response
             result = response.json()
-            sync_point_preds = [SyncPoint.model_validate(res) for res in result]
-            for sync_point_pred in sync_point_preds:
-                if sync_point_pred.rgb_images:
-                    # Decode images back to numpy arrays
-                    rgb = sync_point_pred.rgb_images
-                    for cam_name, cam_data in rgb.items():
-                        if isinstance(cam_data.frame, str):
-                            cam_data.frame = ImageStringEncoder.decode_image(
-                                cam_data.frame
-                            )
-                if sync_point_pred.depth_images:
-                    # Decode depth images back to numpy arrays
-                    depth = sync_point_pred.depth_images
-                    for cam_name, cam_data in depth.items():
-                        if isinstance(cam_data.frame, str):
-                            cam_data.frame = ImageStringEncoder.decode_image(
-                                cam_data.frame
-                            )
+            sync_point_preds = {
+                DataType(data_type): {
+                    key: DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type].model_validate(
+                        value
+                    )
+                    for key, value in data_type_dict.items()
+                }
+                for data_type, data_type_dict in result.items()
+            }
             return sync_point_preds
         except requests.exceptions.ConnectionError:
-            raise EndpointError((
+            raise EndpointError(
                 "Failed to connect to endpoint, "
                 "please check your internet connection and try again."
-            ))
+            )
         except requests.exceptions.RequestException as e:
             if response is not None:
                 if response.status_code == 422:
-                    raise InsufficientSyncPointError(
+                    raise InsufficientSynchronizedPointError(
                         "Insufficient sync point data for inference."
                     )
                 raise EndpointError(
@@ -346,6 +329,8 @@ class LocalServerPolicy(ServerPolicy):
 
     def __init__(
         self,
+        model_input_order: dict[DataType, list[str]],
+        model_output_order: dict[DataType, list[str]],
         org_id: str,
         model_path: Path,
         device: Optional[str] = None,
@@ -356,7 +341,10 @@ class LocalServerPolicy(ServerPolicy):
         """Initialize the local server policy.
 
         Args:
-            robot: Robot instance for accessing sensor streams.
+            model_input_order: Specification of the order that will
+                be fed into the model
+            model_output_order: Specification of the order that will
+                be fed into the model outputs
             org_id: Organization ID
             model_path: Path to the .nc.zip model file
             device: Device model to be loaded on
@@ -365,6 +353,8 @@ class LocalServerPolicy(ServerPolicy):
             host: Host to bind to
         """
         super().__init__(f"http://{host}:{port}")
+        self.model_input_order = model_input_order
+        self.model_output_order = model_output_order
         self.org_id = org_id
         self.job_id = job_id
         self.model_path = model_path
@@ -378,11 +368,21 @@ class LocalServerPolicy(ServerPolicy):
     def _start_server(self) -> None:
         """Start the FastAPI server in a subprocess using module execution."""
         # Start the server process using module execution
+        model_input_order_str = str(
+            {k.value: v for k, v in self.model_input_order.items()}
+        ).replace("'", '"')
+        model_output_order_str = str(
+            {k.value: v for k, v in self.model_output_order.items()}
+        ).replace("'", '"')
         cmd = [
             sys.executable,
             "-m",
             "neuracore.core.utils.server",
-            "--model_file",
+            "--model-input-order",
+            f"{model_input_order_str}",
+            "--model-output-order",
+            f"{model_output_order_str}",
+            "--model-file",
             str(self.model_path),
             "--org-id",
             self.org_id,
@@ -424,6 +424,9 @@ class LocalServerPolicy(ServerPolicy):
     def _wait_for_server(self, max_attempts: int = 60) -> None:
         """Wait for the server to become available."""
         for attempt in range(max_attempts):
+            # Check if the process has terminated unexpectedly
+            if self.server_process and self.server_process.poll() is not None:
+                raise EndpointError("Local server process terminated unexpectedly.")
             try:
                 response = requests.get(
                     f"http://{self.host}:{self.port}{PING_ENDPOINT}", timeout=1
@@ -500,20 +503,23 @@ class RemoteServerPolicy(ServerPolicy):
         super().__init__(base_url, headers)
 
 
-# Main connection functions
 def policy(
+    model_input_order: dict[DataType, list[str]],
+    model_output_order: dict[DataType, list[str]],
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
-    output_mapping: Optional[dict[DataType, list[str]]] = None,
     device: Optional[str] = None,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process.
 
     Args:
+        model_input_order: Specification of the order that will
+            be fed into the model
+        model_output_order: Specification of the order that will
+            be output from the model
         train_run_name: Name of the training run to load the model from.
         robot_name: Robot identifier.
         instance: Instance number of the robot.
-        output_mapping: Optional mapping of data types to output keys.
         device: Torch device to run the model on (CPU or GPU, or MPS).
 
     Returns:
@@ -530,15 +536,18 @@ def policy(
         raise ValueError("Must specify either train_run_name or model_file")
 
     return DirectPolicy(
+        model_input_order=model_input_order,
+        model_output_order=model_output_order,
         org_id=org_id,
         job_id=job_id,
         model_path=model_path,
-        output_mapping=output_mapping,
         device=device,
     )
 
 
 def policy_local_server(
+    model_input_order: dict[DataType, list[str]],
+    model_output_order: dict[DataType, list[str]],
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
     device: Optional[str] = None,
@@ -549,6 +558,10 @@ def policy_local_server(
     """Launch a local server policy with a FastAPI server.
 
     Args:
+        model_input_order: Specification of the order that
+            will be fed into the model
+        model_output_order: Specification of the order that
+            will be output from the model
         train_run_name: Name of the training run to load the model from.
         port: Port to run the server on.
         device: Device model to be loaded on
@@ -578,6 +591,8 @@ def policy_local_server(
         raise ValueError("Must specify either train_run_name or model_file")
 
     return LocalServerPolicy(
+        model_input_order=model_input_order,
+        model_output_order=model_output_order,
         org_id=org_id,
         model_path=model_path,
         device=device,
@@ -626,10 +641,10 @@ def policy_remote_server(
             headers=auth.get_headers(),
         )
     except requests.exceptions.ConnectionError:
-        raise EndpointError((
+        raise EndpointError(
             "Failed to connect to endpoint: Connection Error. "
             "Please check your internet connection and try again."
-        ))
+        )
     except requests.exceptions.RequestException as e:
         raise EndpointError(f"Failed to connect to endpoint: {str(e)}")
 

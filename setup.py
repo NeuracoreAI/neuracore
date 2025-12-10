@@ -27,11 +27,10 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
     ],
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     install_requires=[
         "numpy>=2.0.0",
         "requests>=2.31.0",
@@ -48,7 +47,7 @@ setup(
         "uvicorn[standard]",
         "fastapi",
         "psutil",
-        "neuracore-types>=1.2.3,<2.0.0",
+        "neuracore-types>=3.0.0,<4.0.0",
     ],
     extras_require={
         "examples": [

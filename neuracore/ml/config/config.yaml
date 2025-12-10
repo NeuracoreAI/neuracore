@@ -2,6 +2,7 @@ defaults:
   - _self_
   - algorithm: null
   - override hydra/launcher: basic
+  
 
 # Core training parameters
 seed: 42
@@ -25,17 +26,25 @@ max_prefetch_workers: 4
 dataset_name: null
 dataset_id: null
 frequency: 10
+
+# You can either specify input_data_types/output_data_types or
+# input_robot_data_spec/output_robot_data_spec
 input_data_types:
   - "JOINT_POSITIONS"
-  - "RGB_IMAGE"
-output_data_types:
-  - "JOINT_POSITIONS"
+  - "RGB_IMAGES"
 
+output_data_types:
+  - "JOINT_TARGET_POSITIONS"
+
+# Dict[str, Dict[DataType, List[str]], e.g., {"robot-id-1": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...]}}
+# You can also pass in an empty dict {} to use all available data for all robots
+input_robot_data_spec: null
+output_robot_data_spec: null
 
 # Paths and IDs (for cloud vs local training)
 algorithm_id: null    # For cloud training
 training_id: null     # For cloud training
-org_id: null         # For cloud training
+org_id: null          # For cloud training
 local_output_dir: ${oc.env:HOME}/.neuracore/training/runs/${now:%Y-%m-%d_%H-%M-%S}
 
 # Custom algorithm parameters (used when algorithm_id is provided)

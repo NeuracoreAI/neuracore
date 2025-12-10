@@ -3,21 +3,38 @@ import sys
 
 import rclpy
 from cv_bridge import CvBridge
+from neuracore_types import DataSpec, DataType
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
 
-from neuracore import InsufficientSyncPointError
+import neuracore as nc
+from neuracore import InsufficientSynchronizedPointError
 
 from .const import QOS_BEST_EFFORT
 
 # ruff: noqa: E402
 sys.path.append("/ros2_ws/src/neuracore/examples")
+from common.base_env import BimanualViperXTask
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
 
-import neuracore as nc
-
 CAMERA_NAMES = ["top", "angle", "vis"]
+
+# Specification of the order that will be fed into the model
+MODEL_INPUT_ORDER: DataSpec = {
+    DataType.JOINT_POSITIONS: BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+    + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES,
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
+    DataType.RGB_IMAGES: CAMERA_NAMES,
+}
+
+MODEL_OUTPUT_ORDER: DataSpec = {
+    DataType.JOINT_TARGET_POSITIONS: (
+        BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+        + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+    ),
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
+}
 
 
 class SimulationNodePrediction(Node):
@@ -35,7 +52,11 @@ class SimulationNodePrediction(Node):
             urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
             overwrite=False,
         )
-        self.policy = nc.policy(train_run_name=self.training_run_name)
+        self.policy = nc.policy(
+            model_input_order=MODEL_INPUT_ORDER,
+            model_output_order=MODEL_OUTPUT_ORDER,
+            train_run_name=self.training_run_name,
+        )
 
         # Create publishers for different data streams
         # Joint states at 100Hz
@@ -84,7 +105,7 @@ class SimulationNodePrediction(Node):
         """Execute one simulation step, keeping GL context on the same thread"""
         try:
             predicted_syn_points = self.policy.predict(timeout=5)
-        except InsufficientSyncPointError:
+        except InsufficientSynchronizedPointError:
             self.get_logger().warn("Insufficient sync point data, skipping step.")
             return
         action = predicted_syn_points[0]

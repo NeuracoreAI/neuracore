@@ -1,7 +1,6 @@
 """Transfer cube tasks with joint and end-effector control modes."""
 
 from pathlib import Path
-from typing import List, Tuple
 
 import mujoco
 import numpy as np
@@ -9,7 +8,7 @@ import numpy as np
 from .base_env import BimanualViperXTask, Observation
 
 # Global variable for box pose coordination
-BOX_POSE: List[np.ndarray] = [None]
+BOX_POSE: list[np.ndarray] = [None]
 
 THIS_DIR = Path(__file__).parent.resolve()
 ROBOT_ASSETS = THIS_DIR / "assets" / "robots"
@@ -104,7 +103,7 @@ class TransferCubeTask(BimanualViperXTask):
         else:
             return 0
 
-    def _get_all_contact_pairs(self) -> List[Tuple[str, str]]:
+    def _get_all_contact_pairs(self) -> list[tuple[str, str]]:
         """Get all current contact pairs in simulation.
 
         Returns:
@@ -257,7 +256,7 @@ class TransferCubeEETask(BimanualViperXTask):
         else:
             return 0
 
-    def _get_all_contact_pairs(self) -> List[Tuple[str, str]]:
+    def _get_all_contact_pairs(self) -> list[tuple[str, str]]:
         """Get all current contact pairs in simulation.
 
         Returns:
