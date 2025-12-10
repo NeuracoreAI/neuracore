@@ -1,29 +1,21 @@
-"""π0: A Vision-Language-Action Flow Model for General Robot Control.
+"""π0 wrapper that delegates to the reference implementation.
 
-This module implements the π0 (Pi0) model from the Physical Intelligence
-paper. π0 is a vision-language-action model that has a VLM from the pretrained
-PaliGemma model and a flow matching action expert. The model uses a mixture
-of experts (MoE) to process the input and predict the action sequence.
-
-Reference: Black, Kevin, et al. "π0: A Vision-Language-Action Flow Model
-for General Robot Control." arXiv preprint https://arxiv.org/abs/2410.24164.
+This preserves the Neuracore-facing `Pi0` class but swaps the internal model
+for the upstream `PI0Pytorch/PI0Policy` from `modeling_pi0.py`, keeping the
+API while matching the maintained implementation.
 """
 
-# cspell:ignore adarms openpi layernorm
+from __future__ import annotations
 
 import logging
 import math
 import os
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.transforms as T
 from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 from torch.optim.lr_scheduler import LambdaLR
-from transformers import AutoProcessor, AutoTokenizer, PaliGemmaForConditionalGeneration
 
 from neuracore.ml import (
     BatchedInferenceSamples,
@@ -33,52 +25,26 @@ from neuracore.ml import (
 )
 from neuracore.ml.algorithm_utils.normalizer import MeanStdNormalizer
 
-from .modules import (
-    ActionEncoder,
-    PaliGemmaWithExpertModel,
-    SinusoidalPosEmb,
-    get_gemma_config,
-    pad_vector,
-)
-
-logging.getLogger("transformers").setLevel(logging.CRITICAL)
+from .modules import PI0Config, PI0Policy, PI0Pytorch, pad_vector, resize_with_pad_torch
 
 logger = logging.getLogger(__name__)
 
-JOINT_STATE_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
-ACTION_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
-# Global tokenizer for static method
+# Global tokenizer for the static helper
 _tokenizer = None
 LANGUAGE_MODEL_NAME = "google/paligemma-3b-pt-224"
 
-VLM_BACKBONE = "google/paligemma-3b-pt-224"
-VLM_EXPERT_WIDTH = 2048  # Width of the VLM expert, matches PaliGemma's hidden size
-PALIGEMMA_VARIANT = "gemma_2b"
-ACTION_EXPERT_VARIANT = "gemma_300m"
+# Normalizers (kept for backward compatibility with the Neuracore pipeline)
+JOINT_STATE_NORMALIZER = MeanStdNormalizer
+ACTION_NORMALIZER = MeanStdNormalizer
 
 
 class Pi0(NeuracoreModel):
-    """Implementation of Pi0 model from the Physical Intelligence paper.
-
-    Currently only supports finetuning the action expert. The model combines
-    vision-language understanding with action prediction through a mixture of
-    experts architecture.
-    """
+    """Neuracore-facing wrapper around the reference PI0 implementation."""
 
     def __init__(
         self,
         model_init_description: ModelInitDescription,
-        vlm_expert_intermediate_size: int = 16384,
-        vlm_expert_num_heads: int = 8,
-        vlm_expert_num_kv_heads: int = 1,
-        vlm_expert_head_dim: int = 256,
         vlm_max_text_tokens: int = 128,
-        action_expert_width: int = 1024,
-        action_expert_intermediate_size: int = 4096,
-        action_expert_num_heads: int = 8,
-        action_expert_num_kv_heads: int = 1,
-        action_expert_head_dim: int = 256,
-        moe_depth: int = 18,
         num_inference_steps: int = 10,
         flow_sig_min: float = 0.001,
         flow_alpha: float = 1.5,
@@ -93,177 +59,62 @@ class Pi0(NeuracoreModel):
         joint_state_normalizer: str = "MeanStdNormalizer",
         action_normalizer: str = "MeanStdNormalizer",
     ):
-        """Initialize the Pi0 model.
-
-        Args:
-            model_init_description: Model initialization configuration.
-            vlm_expert_intermediate_size: Intermediate size of the VLM expert.
-            vlm_expert_num_heads: Number of attention heads in the VLM expert.
-            vlm_expert_num_kv_heads: Number of key-value heads in the VLM expert.
-            vlm_expert_head_dim: Dimension of each attention head in the VLM expert.
-            vlm_max_text_tokens: Maximum number of text tokens for the VLM.
-            action_expert_width: Width of the action expert.
-            action_expert_intermediate_size: Intermediate size of the action expert.
-            action_expert_num_heads: Number of attention heads in the action expert.
-            action_expert_num_kv_heads: Number of key-value heads in the action expert.
-            action_expert_head_dim: Dimension of each attention head in action expert.
-            moe_depth: Depth of the mixture of experts.
-            num_inference_steps: Number of inference steps.
-            flow_sig_min: Minimum value for the flow sigma.
-            flow_alpha: Alpha parameter for the flow beta distribution.
-            flow_beta: Beta parameter for the flow beta distribution.
-            lr: Learning rate for the model.
-            weight_decay: Weight decay for the model.
-            lr_scheduler_warmup_steps: Warmup steps for the learning rate scheduler.
-            lr_scheduler_num_decay_steps: Decay steps for the learning rate scheduler.
-            lr_scheduler_decay_lr: Minimum learning rate factor for the scheduler.
-            clip_grad_norm: Gradient clipping norm.
-            dtype: Data type for model parameters and computations.
-            joint_state_normalizer: Normalizer class
-                (e.g. "MeanStdNormalizer", "MinMaxNormalizer")
-            action_normalizer: Normalizer class
-                (e.g. "MeanStdNormalizer", "MinMaxNormalizer")
-        """
+        """Initialize the Neuracore Pi0 wrapper around the reference model."""
         super().__init__(model_init_description)
 
         if not os.environ.get("HF_TOKEN"):
-            raise ValueError(
-                "Hugging Face token not found. "
-                "Please set the HF_TOKEN environment variable."
-            )
+            raise ValueError("Hugging Face token not found. Please set HF_TOKEN.")
 
         self.action_dim = self.dataset_description.joint_target_positions.max_len
-        self.max_state_dim = self.max_action_dim = (
-            32  # maximum dimension allowed by the model
-        )
+        self.max_state_dim = self.max_action_dim = 32
         self.action_horizon = self.output_prediction_horizon
         self.vlm_max_text_tokens = vlm_max_text_tokens
-        num_rgbs = model_init_description.dataset_description.rgb_images.max_len
-        self.vlm_max_tokens = num_rgbs * 256 + self.vlm_max_text_tokens
         self.num_inference_steps = num_inference_steps
         self.flow_sig_min = flow_sig_min
+        self.flow_alpha = flow_alpha
+        self.flow_beta = flow_beta
         self.flow_beta_dist = torch.distributions.Beta(flow_alpha, flow_beta)
         self.lr = lr
         self.weight_decay = weight_decay
         self.lr_scheduler_warmup_steps = lr_scheduler_warmup_steps
         self.lr_scheduler_num_decay_steps = lr_scheduler_num_decay_steps
         self.lr_scheduler_decay_lr = lr_scheduler_decay_lr
-        proprio_dim = (
-            self.dataset_description.joint_positions.max_len
-            + self.dataset_description.joint_velocities.max_len
-            + self.dataset_description.joint_torques.max_len
-        )
+        self.clip_grad_norm = clip_grad_norm
         self.dtype = dtype
-        self.vlm = PaliGemmaForConditionalGeneration.from_pretrained(
-            VLM_BACKBONE, dtype=self.dtype, attn_implementation="eager"
-        )
-        self.vlm_processor = AutoProcessor.from_pretrained(
-            VLM_BACKBONE, padding_side="right"
-        )
-        self.vlm_embedding_module = self.vlm.get_input_embeddings()
-        assert self.vlm_processor.tokenizer.padding_side == "right"
-        # Disable finetuning of the VLM
-        for param in self.vlm.parameters():
-            param.requires_grad = False
-        # Create a mixture of experts (MoE) model consisting of 2 experts:
-        # 1. VLM expert
-        # 2. Action expert
-        # expert_configs = {
-        #     "vlm": MoeExpertConfig(
-        #         hidden_size=VLM_EXPERT_WIDTH,
-        #         intermediate_size=vlm_expert_intermediate_size,
-        #         head_dim=vlm_expert_head_dim,
-        #         num_attention_heads=vlm_expert_num_heads,
-        #         num_key_value_heads=vlm_expert_num_kv_heads,
-        #     ),
-        #     "action": MoeExpertConfig(
-        #         hidden_size=action_expert_width,
-        #         intermediate_size=action_expert_intermediate_size,
-        #         head_dim=action_expert_head_dim,
-        #         num_attention_heads=action_expert_num_heads,
-        #         num_key_value_heads=action_expert_num_kv_heads,
-        #     ),
-        # }
-        paligemma_config = get_gemma_config(PALIGEMMA_VARIANT)
-        action_expert_config = get_gemma_config(ACTION_EXPERT_VARIANT)
 
-        self.paligemma_with_expert = PaliGemmaWithExpertModel(
-            paligemma_config,
-            action_expert_config,
-            use_adarms=[False, False],
-            precision=self.dtype,
-        )
-        self.gradient_checkpointing_enabled = False
-        # self.moe = GemmaMoE(moe_depth, expert_configs)
-        self.action_encoder = ActionEncoder(self.action_dim, action_expert_width)
-        self.time_embedding = SinusoidalPosEmb(action_expert_width)
-        self.proprio_encoder = nn.Linear(proprio_dim, action_expert_width)
-        self.action_decoder = nn.Linear(
-            action_expert_width,
-            self.action_dim,
+        # Build PI0 config mirroring the reference defaults
+        self.config = PI0Config(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            dtype="bfloat16" if dtype == torch.bfloat16 else "float32",
+            n_obs_steps=1,
+            chunk_size=self.action_horizon,
+            n_action_steps=self.action_horizon,
+            max_state_dim=self.max_state_dim,
+            max_action_dim=self.max_action_dim,
+            num_inference_steps=self.num_inference_steps,
+            time_sampling_beta_alpha=self.flow_alpha,
+            time_sampling_beta_beta=self.flow_beta,
+            time_sampling_offset=self.flow_sig_min,
+            scheduler_warmup_steps=lr_scheduler_warmup_steps,
+            scheduler_decay_steps=lr_scheduler_num_decay_steps,
+            scheduler_decay_lr=lr_scheduler_decay_lr,
+            device=str(self.device),
         )
 
-        # gemma_config = self.vlm.config.text_config
-        # self.using_pretrained_paligemma = (
-        #     gemma_config.intermediate_size == vlm_expert_intermediate_size
-        #     and gemma_config.hidden_size == VLM_EXPERT_WIDTH
-        # )
-        # # Load PaliGemma weights into VLM expert
-        # if self.using_pretrained_paligemma:
-        #     self._load_pretrained_vlm_weights()
-        # else:
-        #     logger.warning("Using custom VLM weights, not pretrained PaliGemma")
+        # Core model/policy from the reference implementation
+        self.policy = PI0Policy(self.config)
+        self.model: PI0Pytorch = self.policy.model
 
-        # # disable grads for VLM part of MoE if using pretrained
-        # if self.using_pretrained_paligemma:
-        #     for param in self.moe.get_parameters("vlm"):
-        #         param.requires_grad = False
+        if self.config.gradient_checkpointing:
+            self.model.gradient_checkpointing_enable()
 
-        # # Delete the language model to save memory (keep only embeddings)
-        # # Note: We delete model.language_model (the actual module), not
-        # # language_model (the property)
-        # del self.vlm.model.language_model
-
-        # Resize the images to 224x224
-        self.image_normalizer = torch.nn.Sequential(
-            T.Resize((224, 224)),
-        )
         # Setup Normalizer
         self._setup_normalizer()
 
-    def gradient_checkpointing_enable(self) -> None:
-        """Enable gradient checkpointing for memory optimization."""
-        self.gradient_checkpointing_enabled = True
-        self.paligemma_with_expert.paligemma.language_model.gradient_checkpointing = (
-            True
-        )
-        self.paligemma_with_expert.paligemma.vision_tower.gradient_checkpointing = True
-        self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = True
-        logging.info("Enabled gradient checkpointing for PI0Pytorch model")
-
-    def gradient_checkpointing_disable(self) -> None:
-        """Disable gradient checkpointing."""
-        self.gradient_checkpointing_enabled = False
-        self.paligemma_with_expert.paligemma.language_model.gradient_checkpointing = (
-            False
-        )
-        self.paligemma_with_expert.paligemma.vision_tower.gradient_checkpointing = False
-        self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = False
-        logging.info("Disabled gradient checkpointing for PI0Pytorch model")
-
-    def _apply_checkpoint(
-        self, func: Callable[..., Any], *args: Any, **kwargs: Any
-    ) -> Any:
-        """Helper method to apply gradient checkpointing if enabled."""
-        if self.gradient_checkpointing_enabled:
-            return torch.utils.checkpoint.checkpoint(
-                func, *args, use_reentrant=False, preserve_rng_state=False, **kwargs
-            )
-        return func(*args, **kwargs)
-
+    # ------------------------------------------------------------------ helpers
     def _setup_normalizer(self) -> None:
         """Setup normalization statistics for different data types."""
-        # Joint state normalization
         joint_states = []
         actions = []
 
@@ -278,15 +129,24 @@ class Pi0(NeuracoreModel):
             in self.model_init_description.output_data_types
         ):
             actions.append(self.dataset_description.joint_target_positions)
+
         self.joint_state_normalizer = JOINT_STATE_NORMALIZER(
             name="joint_states", statistics=joint_states
         )
         self.action_normalizer = ACTION_NORMALIZER(name="actions", statistics=actions)
 
+    # ------------------------------------------------------------------ helpers
+    def gradient_checkpointing_enable(self) -> None:
+        """Enable gradient checkpointing on the underlying PI0 model."""
+        self.model.gradient_checkpointing_enable()
+
+    def gradient_checkpointing_disable(self) -> None:
+        """Disable gradient checkpointing on the underlying PI0 model."""
+        self.model.gradient_checkpointing_disable()
+
     def _combine_normalized_joint_states(
         self, batch: BatchedInferenceSamples
     ) -> torch.Tensor:
-        """Combine joint states."""
         state_inputs = []
         if batch.joint_positions:
             state_inputs.append(batch.joint_positions.data * batch.joint_positions.mask)
@@ -297,59 +157,36 @@ class Pi0(NeuracoreModel):
         if batch.joint_torques:
             state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
 
-        if state_inputs:
-            joint_states = torch.cat(state_inputs, dim=-1)
-            joint_states = pad_vector(joint_states, self.max_state_dim)
-            joint_states = self.joint_state_normalizer.normalize(data=joint_states)
-            return joint_states
-        else:
-            # Return zero tensor if no joint states available
+        if not state_inputs:
             raise ValueError("No joint states available")
 
-    def _prepare_rgb_images(self, batch: BatchedInferenceSamples) -> torch.Tensor:
-        """Prepare the RGB images and masks.
+        joint_states = torch.cat(state_inputs, dim=-1)
+        joint_states = pad_vector(joint_states, self.max_state_dim)
+        joint_states = self.joint_state_normalizer.normalize(data=joint_states)
+        return joint_states.to(self.device)
 
-        First resize to 224x224 and then normalize values to [-1,1]. And transform
-        the image dimension to (num_cams, B, C, H, W).
-
-        Args:
-            batch: Batch of inference samples.
-
-        Returns:
-            tuple[list[torch.Tensor], list[torch.Tensor]]: List of images and masks.
-        """
+    def _prepare_rgb_images(
+        self, batch: BatchedInferenceSamples
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         if batch.rgb_images is None:
             raise ValueError("RGB images are required but not provided")
-        images = []
-        image_masks = []
+        images: list[torch.Tensor] = []
+        image_masks: list[torch.Tensor] = []
         for cam_id in range(self.dataset_description.rgb_images.max_len):
-            # resize images to [224, 224]
-            image = self.image_normalizer(batch.rgb_images.data[:, cam_id])
-            # Normalize from range [0,1] to [-1,1] as expected by siglip
-            image = image * 2.0 - 1.0
-            images.append(image)
-            image_masks.append(batch.rgb_images.mask[:, cam_id])
+            img = batch.rgb_images.data[:, cam_id]
+            # Resize with padding to 224x224 and normalize to [-1, 1]
+            img = resize_with_pad_torch(img, 224, 224)
+            img = img.to(torch.float32, device=self.device)
+            img = img * 2.0 - 1.0
+            images.append(img)
+            image_masks.append(batch.rgb_images.mask[:, cam_id].to(self.device))
         return images, image_masks
 
     def _process_language_tokens(
-        self,
-        batch: BatchedInferenceSamples,
+        self, batch: BatchedInferenceSamples
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Process the language tokens.
-
-        Args:
-            batch_size: Size of the batch.
-            language_tokens: Language tokens tensor.
-            language_mask: Language mask tensor.
-
-        Returns:
-            torch.Tensor: Language tokens tensor.
-            torch.Tensor: Language mask tensor.
-        """
         batch_size = len(batch)
         if batch.language_tokens is None:
-            # Return zero tensor with appropriate dimensions if no language input
-            # Use torch.long for token IDs (embedding layer expects integer indices)
             language_tokens = torch.zeros(
                 batch_size,
                 self.vlm_max_text_tokens,
@@ -360,336 +197,75 @@ class Pi0(NeuracoreModel):
                 batch_size, self.vlm_max_text_tokens, device=self.device
             )
         else:
-            language_tokens = batch.language_tokens.data
-            language_mask = batch.language_tokens.mask
+            language_tokens = batch.language_tokens.data.to(torch.long).to(self.device)
+            language_mask = batch.language_tokens.mask.to(self.device)
         return language_tokens, language_mask
 
-    def _load_pretrained_vlm_weights(self) -> None:
-        """Load pretrained PaliGemma weights into the VLM expert of the MoE."""
-        logger.info("Loading pretrained PaliGemma weights into VLM expert...")
-        vlm_state_dict = self.vlm.model.language_model.state_dict()
-        moe_state_dict = self.moe.state_dict()
-        new_state_dict = {}
-        for moe_key, moe_param in moe_state_dict.items():
-            # Check if this is a VLM expert parameter
-            if "experts.vlm" in moe_key:
-                # Convert MoE key format to PaliGemma key format
-                vlm_key = moe_key.replace("experts.vlm.", "")
+    def _build_inputs_from_inference(
+        self, batch: BatchedInferenceSamples
+    ) -> tuple[
+        list[torch.Tensor], list[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
+    ]:
+        images, image_masks = self._prepare_rgb_images(batch)
+        lang_tokens, lang_masks = self._process_language_tokens(batch)
+        state = self._combine_normalized_joint_states(batch)
+        return images, image_masks, lang_tokens, lang_masks, state
 
-                # If this key exists in the VLM state dict, copy it
-                if vlm_key not in vlm_state_dict:
-                    raise ValueError(f"VLM key not found: {vlm_key}")
-                new_state_dict[moe_key] = vlm_state_dict[vlm_key]
-            else:
-                # Keep non-VLM parameters as is
-                new_state_dict[moe_key] = moe_param
-
-        # Load the combined state dict
-        missing_keys, unexpected_keys = self.moe.load_state_dict(
-            new_state_dict, strict=True
+    # ---------------------------------------------------------------- inference
+    def predict_action_chunk(self, batch: BatchedInferenceSamples) -> torch.Tensor:
+        """Run inference to produce one chunk of actions."""
+        images, image_masks, lang_tokens, lang_masks, state = (
+            self._build_inputs_from_inference(batch)
         )
+        actions = self.model.sample_actions(
+            images, image_masks, lang_tokens, lang_masks, state
+        )
+        actions = actions[:, :, : self.action_dim]
+        return actions
 
-        # Log any mismatches for debugging
-        if missing_keys:
-            raise ValueError(f"Missing keys when loading VLM weights: {missing_keys}")
-        if unexpected_keys:
-            raise ValueError(
-                f"Unexpected keys when loading VLM weights: {unexpected_keys}"
-            )
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_init_description: ModelInitDescription,
+        pretrained_name_or_path: Optional[str] = None,
+        **kwargs: Any,
+    ) -> "Pi0":
+        """Load a pretrained PI0 model while keeping the Neuracore model interface.
 
-        logger.info("Successfully loaded pretrained PaliGemma weights into VLM expert.")
-
-    def _create_expert_attention_masks(
-        self, batch_size: int, pad_masks: torch.Tensor = None
-    ) -> dict[str, torch.Tensor]:
-        """Create attention masks for the experts.
+        By default, downloads weights from https://huggingface.co/lerobot/pi0_base
+        which contains the π₀ base model from Physical Intelligence.
 
         Args:
-            batch_size: Size of the batch.
-            pad_masks: Padding masks for the merged text and images tensor.
+            model_init_description: Neuracore model initialization config.
+            pretrained_name_or_path: HuggingFace repo id (e.g. "lerobot/pi0_base")
+                or local path. Defaults to "lerobot/pi0_base".
+            **kwargs: Additional arguments passed to PI0Policy.from_pretrained
+                (e.g. cache_dir, force_download, token, revision).
 
         Returns:
-            dict[str, torch.Tensor]: Attention masks for the experts.
+            Pi0 model with loaded pretrained weights.
         """
-        # generate 2d padding mask from 1d padding mask
-        # pad_masks has shape [batch_size, seq_len]
-        # Create attention mask: [batch_size, seq_len, seq_len]
-        vlm_mask = pad_masks.unsqueeze(1) * pad_masks.unsqueeze(2)
-        # Convert to attention mask format (0 for attended positions, -inf for masked)
-        vlm_mask = torch.where(vlm_mask == 1, 0.0, torch.finfo(self.dtype).min).to(
-            self.dtype
-        )
-        state_len = 1
-        action_len = self.action_horizon
-
-        stat_act_len = state_len + action_len  # proprio + actions
-        state_action_mask = torch.zeros(
-            (stat_act_len, stat_act_len), device=self.device, dtype=self.dtype
-        )
-
-        # Proprio can only attend to itself
-        state_action_mask[0, 0] = 1
-
-        # Each action can attend to proprio and previous actions
-        for i in range(1, stat_act_len):  # i starts at 1 (first action)
-            # Can attend to proprio
-            state_action_mask[i, 0] = 1
-            # Can attend to self and previous actions
-            state_action_mask[i, 1 : i + 1] = 1
-
-        # Convert to attention mask format (0 for attended positions, -inf for masked)
-        state_action_mask = torch.where(
-            state_action_mask == 1, 0.0, torch.finfo(self.dtype).min
-        ).to(self.dtype)
-
-        # Add head dimension: [batch_size, 1, seq_len, seq_len]
-        vlm_mask = vlm_mask.unsqueeze(1)
-        state_action_mask = (
-            state_action_mask.unsqueeze(0).unsqueeze(1).expand(batch_size, 1, -1, -1)
-        )
-
-        return {"vlm": vlm_mask, "action": state_action_mask}
-
-    def _create_pi0_mix_attention_mask(
-        self, batch_size: int, vlm_seq_len: Optional[int] = None
-    ) -> torch.Tensor:
-        """Create the mixed attention mask for the Pi0 model.
-
-        Args:
-            batch_size: Size of the batch.
-            vlm_seq_len: Actual VLM sequence length.
-
-        Returns:
-            torch.Tensor: Mixed attention mask.
-        """
-        # Calculate sequence lengths for each block
-        vlm_len = vlm_seq_len if vlm_seq_len is not None else self.vlm_max_tokens
-        state_len = 1
-        action_len = self.action_horizon
-        total_seq_len = vlm_len + state_len + action_len
-
-        # Create base mask allowing full attention within each block
-        mask = torch.zeros(
-            (total_seq_len, total_seq_len), device=self.device, dtype=self.dtype
-        )
-
-        # (VLM): Can only attend to itself
-        mask[:vlm_len, :vlm_len] = 1
-
-        # (State / Action): Can attend to VLM
-        mask[vlm_len:, :vlm_len] = 1
-
-        # Proprio can attend to itself and vl
-        mask[vlm_len : vlm_len + state_len, : vlm_len + state_len] = 1
-
-        action_start = vlm_len + state_len
-        # Actions follow causal pattern
-        for i in range(0, action_len):
-            # Can attend to proprio and previous actions
-            mask[action_start + i, : action_start + i + 1] = 1
-
-        # Add batch dimension and head dimension
-        mask = mask.unsqueeze(0).unsqueeze(1)
-        mask = mask.expand(batch_size, 1, -1, -1)
-        # Convert to attention mask format (0 for attended positions, -inf for masked)
-        attention_mask = torch.where(mask == 1, 0.0, torch.finfo(self.dtype).min).to(
-            self.dtype
-        )
-        return attention_mask
-
-    def _create_pi0_position_ids(
-        self, batch_size: int, vlm_seq_len: Optional[int] = None
-    ) -> dict[str, torch.Tensor]:
-        """Create position IDs for the Pi0 model.
-
-        Args:
-            batch_size: Size of the batch.
-            vlm_seq_len: Actual VLM sequence length.
-
-        Returns:
-            dict[str, torch.Tensor]: Position IDs for VLM and action blocks.
-        """
-        # VLM positions: Use actual sequence length
-        vlm_len = vlm_seq_len if vlm_seq_len is not None else self.vlm_max_tokens
-        vlm_pos = torch.arange(1, vlm_len + 1, device=self.device).type(self.dtype)
-        vlm_pos = vlm_pos.unsqueeze(0).expand(batch_size, -1)
-
-        # State and Action positions: Sequential positions for state and action sequence
-        state_action_pos = torch.arange(
-            1, 1 + self.action_horizon + 1, device=self.device
-        ).type(self.dtype)
-        state_action_pos = state_action_pos.unsqueeze(0).expand(batch_size, -1)
-
-        position_ids = {"vlm": vlm_pos, "action": state_action_pos}
-
-        return position_ids
-
-    def _forward_vlm_merged_text_images(
-        self,
-        images: torch.Tensor,
-        image_masks: torch.Tensor,
-        language_tokens: torch.Tensor,
-        language_masks: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass for merging text and images in the VLM.
-
-        Generates the mixed image-language embeddings and padding masks.
-
-        Args:
-            images: Input images tensor.
-            image_masks: Input image masks tensor.
-            language_tokens: Input language tokens tensor.
-            language_masks: Input language masks tensor.
-
-        Returns:
-            tuple[torch.Tensor, torch.Tensor]: Merged text and images
-                tensor, mixed padding mask.
-        """
-        embs = []
-        pad_masks = []
-
-        # iterate over num_cam images
-        for img, img_mask in zip(images, image_masks):
-            img_emb = self.vlm.model.get_image_features(img)
-            img_emb = img_emb.to(dtype=self.dtype, device=self.device)
-
-            bsize, num_img_embs = img_emb.shape[:2]
-            img_mask = (
-                img_mask[:, None].expand(bsize, num_img_embs).to(device=self.device)
-            )
-
-            embs.append(img_emb)
-            pad_masks.append(img_mask)
-
-        language_embeddings = self.vlm_embedding_module(language_tokens)
-        embs.append(language_embeddings)
-        pad_masks.append(language_masks)
-
-        embs = torch.cat(embs, dim=1)
-        pad_masks = torch.cat(pad_masks, dim=1)
-        return embs, pad_masks
-
-    def _sample_fm_time(self, batch_size: int) -> torch.Tensor:
-        """Sample flow matching timesteps.
-
-        Args:
-            batch_size: Size of the batch.
-
-        Returns:
-            torch.Tensor: Sampled timesteps.
-        """
-        z = self.flow_beta_dist.sample((batch_size,))
-        t = (1 - self.flow_sig_min) * (1 - z)
-        return t.to(self.device).to(self.dtype)
-
-    def _predict_action(
-        self,
-        merged_text_images: torch.Tensor,
-        proprio_embeds: torch.Tensor,
-        action: torch.Tensor,
-        t: torch.Tensor,
-        vlm_seq_len: Optional[int] = None,
-        pad_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Predict action sequence from observations.
-
-        Args:
-            merged_text_images: Merged text and images tensor.
-            proprio_embeds: Proprioceptive embeddings tensor.
-            action: Action tensor.
-            t: Time tensor.
-            vlm_seq_len: Actual VLM Embeddings sequence length.
-            pad_masks: Padding masks for the merged text and images tensor.
-
-        Returns:
-            torch.Tensor: Predicted action tensor.
-        """
-        batch_size = proprio_embeds.size(0)
-        time_cond = self.time_embedding(t)
-        # [B, H, E]
-        action_embeds = self.action_encoder(action, time_cond)
-        # [B, 1 + H, E]
-        proprio_embeds = proprio_embeds.unsqueeze(1)  # [B, 1, E]
-        proprio_action_tokens = torch.cat([proprio_embeds, action_embeds], dim=1)
-        # [B, 1 + H, E]
-        proprio_action_embeds = self.moe(
-            hidden_states={
-                "vlm": merged_text_images,
-                "action": proprio_action_tokens,
-            },
-            expert_attention_masks=self._create_expert_attention_masks(
-                batch_size, pad_masks
-            ),
-            mix_attention_mask=self._create_pi0_mix_attention_mask(
-                batch_size, vlm_seq_len
-            ),
-            position_ids=self._create_pi0_position_ids(batch_size, vlm_seq_len),
-        )["action"]
-        # [B, H, E]
-        action_embeds = proprio_action_embeds[:, 1:]
-        return self.action_decoder(action_embeds)
+        policy = PI0Policy.from_pretrained(pretrained_name_or_path, **kwargs)
+        obj = cls(model_init_description)
+        obj.policy = policy
+        obj.model = policy.model
+        obj.config = policy.config
+        return obj
 
     def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
-        """Forward pass for generating actions.
-
-        Args:
-            batch: Batch of inference samples.
-
-        Returns:
-            torch.Tensor: Generated actions tensor.
-        """
+        """Produce a ModelPrediction given an inference batch."""
         t_start = time.time()
-        batch_size = len(batch)
-        if self.dataset_description.rgb_images.max_len > 0:
-            # (B, Predict_Horizon, VLM_EMBED_DIM)
-            if batch.rgb_images is None:
-                raise ValueError("RGB images are required")
-            images, image_masks = self._prepare_rgb_images(batch)
-
-        else:
-            raise ValueError("No RGB images available")
-        language_tokens, language_masks = self._process_language_tokens(batch)
-        merged_text_images, pad_masks = self._forward_vlm_merged_text_images(
-            images, image_masks, language_tokens, language_masks
-        )
-        proprio_states = self._combine_normalized_joint_states(batch)
-        proprio_embeds = self.proprio_encoder(proprio_states)  # (B, 1, E)
-
-        delta_t = 1.0 / self.num_inference_steps
-        t = torch.zeros(
-            batch_size, device=self.device, dtype=proprio_embeds.dtype
-        )  # (B,)
-        action = torch.randn(
-            (batch_size, self.action_horizon, self.action_dim),
-            device=self.device,
-            dtype=proprio_embeds.dtype,
-        )  # (B, H, A)
-        # Get the actual sequence length from the merged embeddings
-        actual_seq_len = merged_text_images.shape[1]
-
-        for _ in range(self.num_inference_steps):
-            action_vel = self._predict_action(
-                merged_text_images, proprio_embeds, action, t, actual_seq_len, pad_masks
-            )
-            action += delta_t * action_vel
-            t += delta_t
-        prediction_time = time.time() - t_start
-        predictions = self.action_normalizer.unnormalize(data=action)
-        predictions = predictions.detach().cpu().float().numpy()
+        actions = self.predict_action_chunk(batch)
+        actions = self.action_normalizer.unnormalize(actions)
+        actions = actions.detach().cpu().float().numpy()
         return ModelPrediction(
-            outputs={DataType.JOINT_TARGET_POSITIONS: predictions},
-            prediction_time=prediction_time,
+            outputs={DataType.JOINT_TARGET_POSITIONS: actions},
+            prediction_time=time.time() - t_start,
         )
 
+    # ---------------------------------------------------------------- training
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
-        """Perform a single training step.
-
-        Args:
-            batch: Training batch with inputs and targets
-
-        Returns:
-            BatchedTrainingOutputs: Training outputs with losses and metrics
-        """
+        """Compute loss and metrics for one training batch."""
         inference_sample = BatchedInferenceSamples(
             joint_positions=batch.inputs.joint_positions,
             joint_velocities=batch.inputs.joint_velocities,
@@ -698,170 +274,94 @@ class Pi0(NeuracoreModel):
             language_tokens=batch.inputs.language_tokens,
             joint_target_positions=batch.outputs.joint_target_positions,
         )
-        proprios = self._combine_normalized_joint_states(inference_sample)
+
+        images, image_masks, lang_tokens, lang_masks, state = (
+            self._build_inputs_from_inference(inference_sample)
+        )
+
         if batch.outputs.joint_target_positions is None:
             raise ValueError("Joint target positions are required")
+
         target_actions = self.action_normalizer.normalize(
             data=pad_vector(
                 batch.outputs.joint_target_positions.data, self.max_action_dim
             )
-        )
-        target_actions_mask = pad_vector(
+        ).to(self.device)
+        target_mask = pad_vector(
             batch.outputs.joint_target_positions.mask, self.max_action_dim
+        ).to(self.device)
+        target_actions = target_actions * target_mask
+
+        losses = self.model.forward(
+            images, image_masks, lang_tokens, lang_masks, state, target_actions
         )
-        target_actions = target_actions * target_actions_mask
-        t = self._sample_fm_time(len(batch))
-        x0 = torch.randn_like(target_actions)
-        x1 = target_actions
-        # Calculate conditional flow
-        _t = t.view(-1, 1, 1)
-        psi_t = (1 - (1 - self.flow_sig_min) * _t) * x0 + _t * x1
-        if self.dataset_description.rgb_images.max_len > 0:
-            # (B, Predict_Horizon, VLM_EMBED_DIM)
-            if (
-                inference_sample.rgb_images is None
-                or inference_sample.language_tokens is None
-            ):
-                raise ValueError(
-                    "RGB images and language tokens are required for training"
-                )
-            images, image_masks = self._prepare_rgb_images(inference_sample)
-        else:
-            raise ValueError("No RGB images available")
-        lang_tokens, lang_masks = self._process_language_tokens(inference_sample)
-        merged_text_images, pad_masks = self._forward_vlm_merged_text_images(
-            images, image_masks, lang_tokens, lang_masks
-        )
-        proprio_embeds = self.proprio_encoder(proprios)  # (B, 1, E)
-        # Get the actual sequence length from the merged embeddings
-        actual_seq_len = merged_text_images.shape[1]
-        v_psi = self._predict_action(
-            merged_text_images, proprio_embeds, psi_t, t, actual_seq_len, pad_masks
-        )
-        d_psi = x1 - (1 - self.flow_sig_min) * x0
-        loss = F.mse_loss(v_psi, d_psi, reduction="none")
-        mask = batch.outputs.joint_target_positions.mask
-        loss = (loss * mask).mean()
-        losses = {
-            "mse_loss": loss,
-        }
-        metrics = {
-            "mse_loss": loss,
-        }
+        # Mask to the real action dims
+        losses = losses[:, :, : self.action_dim]
+        loss = (losses * target_mask[:, :, : self.action_dim]).mean()
+
+        losses_dict = {"mse_loss": loss}
+        metrics = {"mse_loss": loss.detach()}
+
         return BatchedTrainingOutputs(
-            output_predictions=v_psi,
-            losses=losses,
+            output_predictions=None,
+            losses=losses_dict,
             metrics=metrics,
         )
 
-    def _get_action_expert_parameters(self) -> list[torch.nn.Parameter]:
-        """Get parameters of the action expert.
-
-        Returns:
-            list: List of action expert parameters.
-        """
-        return (
-            list(self.action_encoder.parameters())
-            + list(self.action_decoder.parameters())
-            + list(self.proprio_encoder.parameters())
-            + list(self.moe.get_parameters("action"))
-        )
-
-    def _setup_optimizer_param_groups(self) -> None:
-        """Setup parameter groups for optimizer."""
-        if self.using_pretrained_paligemma:
-            # Only train action expert parameters when using pretrained VLM
-            trainable_params = self._get_action_expert_parameters()
-        else:
-            # Train all parameters when not using pretrained weights
-            trainable_params = [p for p in self.parameters() if p.requires_grad]
-        self.param_groups = [
-            {"params": trainable_params, "lr": self.lr},
+    # ----------------------------------------------------------- optim/schedule
+    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
+        """Create the optimizer list used during training."""
+        return [
+            torch.optim.AdamW(
+                self.model.parameters(),
+                lr=self.lr,
+                weight_decay=self.weight_decay,
+            )
         ]
 
-    def configure_optimizers(
-        self,
-    ) -> list[torch.optim.Optimizer]:
-        """Configure optimizer with different learning rates.
-
-        Uses separate learning rates for image encoder backbone and other
-        model parameters.
-
-        Returns:
-            list[torch.optim.Optimizer]: List of optimizers for model parameters
-        """
-        return [torch.optim.AdamW(self.param_groups, weight_decay=self.weight_decay)]
-
     def configure_schedulers(
-        self,
-        optimizers: list[torch.optim.Optimizer],
-        num_training_steps: int,
+        self, optimizers: list[torch.optim.Optimizer], num_training_steps: int
     ) -> list[LambdaLR]:
-        """Configure scheduler for optimizers.
-
-        Automatically scales warmup and decay steps if training is shorter than the
-        configured decay schedule.
-
-        Args:
-            optimizers: List of optimizers
-            num_training_steps: Number of training steps
-
-        Returns:
-            List of schedulers
-        """
-        # Auto-scale scheduler parameters if training steps are shorter than
-        # the configured decay steps.
+        """Configure schedulers with automatic warmup/decay scaling."""
         actual_warmup_steps = self.lr_scheduler_warmup_steps
         actual_decay_steps = self.lr_scheduler_num_decay_steps
 
         if num_training_steps < self.lr_scheduler_num_decay_steps:
-            # Fit the schedule into the available training steps.
-            scale_factor = num_training_steps / self.lr_scheduler_num_decay_steps
-            actual_warmup_steps = int(self.lr_scheduler_warmup_steps * scale_factor)
+            scale = num_training_steps / self.lr_scheduler_num_decay_steps
+            actual_warmup_steps = int(self.lr_scheduler_warmup_steps * scale)
             actual_decay_steps = num_training_steps
-
-            logging.info(
-                (
-                    "Auto-scaling LR scheduler: steps %s < decay %s. "
-                    "Warmup %s -> %s, decay %s -> %s (scale %.3f)"
-                ),
-                num_training_steps,
-                self.lr_scheduler_num_decay_steps,
+            logger.info(
+                "Auto-scaling LR scheduler: warmup %s->%s, decay %s->%s (scale %.3f)",
                 self.lr_scheduler_warmup_steps,
                 actual_warmup_steps,
                 self.lr_scheduler_num_decay_steps,
                 actual_decay_steps,
-                scale_factor,
+                scale,
             )
 
         def lr_lambda(current_step: int) -> float:
-            def linear_warmup_schedule(current_step: int) -> float:
-                if current_step <= 0:
+            def linear_warmup(step: int) -> float:
+                if step <= 0:
                     return 1 / (actual_warmup_steps + 1)
-                frac = 1 - current_step / actual_warmup_steps
+                frac = 1 - step / actual_warmup_steps
                 return (1 / (actual_warmup_steps + 1) - 1) * frac + 1
 
-            def cosine_decay_schedule(current_step: int) -> float:
-                step = min(current_step, actual_decay_steps)
-                cosine_decay = 0.5 * (1 + math.cos(math.pi * step / actual_decay_steps))
+            def cosine_decay(step: int) -> float:
+                step = min(step, actual_decay_steps)
+                cosine = 0.5 * (1 + math.cos(math.pi * step / actual_decay_steps))
                 alpha = self.lr_scheduler_decay_lr / self.lr
-                decayed = (1 - alpha) * cosine_decay + alpha
-                return decayed
+                return (1 - alpha) * cosine + alpha
 
             if current_step < actual_warmup_steps:
-                return linear_warmup_schedule(current_step)
-
-            return cosine_decay_schedule(current_step)
+                return linear_warmup(current_step)
+            return cosine_decay(current_step)
 
         return [LambdaLR(optimizer, lr_lambda, -1) for optimizer in optimizers]
 
+    # ------------------------------------------------------------------ helpers
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:
-        """Get the input data types supported by this model.
-
-        Returns:
-            list[DataType]: List of supported input data types
-        """
+        """Return supported input data types for the model."""
         return [
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
@@ -872,41 +372,5 @@ class Pi0(NeuracoreModel):
 
     @staticmethod
     def get_supported_output_data_types() -> list[DataType]:
-        """Get the output data types supported by this model.
-
-        Returns:
-            list[DataType]: List of supported output data types
-        """
+        """Return supported output data types for the model."""
         return [DataType.JOINT_TARGET_POSITIONS]
-
-    @staticmethod
-    def tokenize_text(text: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Tokenize text using the pretrained tokenizer.
-
-        Args:
-            text: List of text strings to tokenize
-
-        Returns:
-            tuple[torch.Tensor, torch.Tensor]: Input IDs and attention masks
-        """
-        text = [text if text.endswith("\n") else f"{text}\n" for text in text]
-
-        global _tokenizer
-        if _tokenizer is None:
-            # Only PaliGemma-3B supported for now
-            _tokenizer = AutoTokenizer.from_pretrained(LANGUAGE_MODEL_NAME)
-
-        # Tokenize the text
-        tokens = _tokenizer(
-            text,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-            max_length=128,
-        )
-
-        # Extract token ids and attention mask
-        input_ids = tokens["input_ids"]
-        attention_mask = tokens["attention_mask"]
-
-        return input_ids, attention_mask
