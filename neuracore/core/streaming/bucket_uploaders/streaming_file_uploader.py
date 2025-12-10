@@ -12,7 +12,7 @@ import queue
 import threading
 from typing import Any, Dict, List
 
-from neuracore_types import DataType
+from neuracore_types import DataType, RecordingDataStreamStatus
 
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 
@@ -72,7 +72,11 @@ class StreamingJsonUploader(BucketUploader):
         streaming process.
         """
         self._stream_id = self._register_data_stream(self.data_type)
-
+        self._update_data_stream(
+            self._stream_id,
+            status=RecordingDataStreamStatus.UPLOAD_STARTED,
+            upload_progress=0,
+        )
         # Ensure chunk_size is a multiple of 256 KiB
         if self.chunk_size % CHUNK_MULTIPLE != 0:
             self.chunk_size = ((self.chunk_size // CHUNK_MULTIPLE) + 1) * CHUNK_MULTIPLE
@@ -164,7 +168,11 @@ class StreamingJsonUploader(BucketUploader):
             "JSON streaming and upload complete: "
             f"{self.uploader.total_bytes_uploaded} bytes"
         )
-        self._mark_data_stream_complete(self._stream_id)
+        self._update_data_stream(
+            self._stream_id,
+            status=RecordingDataStreamStatus.UPLOAD_COMPLETE,
+            upload_progress=100,
+        )
 
     def add_frame(self, data_entry: Dict[str, Any]) -> None:
         """Add a JSON data entry to the streaming queue.
