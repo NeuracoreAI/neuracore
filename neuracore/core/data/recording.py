@@ -2,9 +2,10 @@
 
 from typing import TYPE_CHECKING, Optional
 
-from neuracore_types import DataType
+from neuracore_types import DataType, RobotDataSpec
 
 from neuracore.core.data.synced_recording import SynchronizedRecording
+from neuracore.ml.utils.robot_data_spec_utils import extract_data_types
 
 from ..exceptions import SynchronizationError
 
@@ -58,15 +59,14 @@ class Recording:
     def synchronize(
         self,
         frequency: int = 0,
-        data_types: Optional[list[DataType]] = None,
+        robot_data_spec: Optional[RobotDataSpec] = None,
     ) -> SynchronizedRecording:
         """Synchronize the episode with specified frequency and data types.
 
         Args:
             frequency: Frequency at which to synchronize the episode.
                 Use 0 for aperiodic data.
-            data_types: List of DataType to include in synchronization.
-                If None, uses the default data types from the recording.
+            robot_data_spec: Optional specification of robot data to include.
 
         Raises:
             SynchronizationError: If synchronization fails.
@@ -74,6 +74,7 @@ class Recording:
         if frequency < 0:
             raise SynchronizationError("Frequency must be >= 0")
 
+        data_types = extract_data_types(robot_data_spec) if robot_data_spec else None
         # check valid data types if provided
         if data_types is not None:
             if not all(isinstance(dt, DataType) for dt in data_types):
@@ -92,7 +93,7 @@ class Recording:
             robot_id=self.robot_id,
             instance=self.instance,
             frequency=frequency,
-            data_types=data_types or [],
+            robot_data_spec=robot_data_spec,
         )
 
     def __iter__(self) -> None:

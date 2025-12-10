@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
+from neuracore_types import DataType
 
 
 class DepthImageEncoder(nn.Module):
@@ -88,14 +89,11 @@ class PointCloudEncoder(nn.Module):
         """Forward pass through point cloud encoder.
 
         Args:
-            x: Point clouds of shape (batch, num_points, input_dim)
+            x: Point clouds of shape (batch, input_dim, num_points)
 
         Returns:
             torch.Tensor: Encoded features of shape (batch, output_dim)
         """
-        # Transpose for conv1d: (batch, input_dim, num_points)
-        x = x.transpose(2, 1)
-
         # Point-wise feature extraction
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
@@ -116,6 +114,8 @@ class PoseEncoder(nn.Module):
     appropriate handling of rotational representations for robotic tasks.
     """
 
+    POSE_DIM = 7  # 3 for position + 4 for quaternion
+
     def __init__(self, output_dim: int = 256, max_poses: int = 10):
         """Initialize the pose encoder.
 
@@ -126,12 +126,9 @@ class PoseEncoder(nn.Module):
         super().__init__()
         self.max_poses = max_poses
 
-        # Each pose is 6DOF (x, y, z, rx, ry, rz)
-        pose_dim = 6
-
         # Pose-wise encoding
         self.pose_encoder = nn.Sequential(
-            nn.Linear(pose_dim, 64),
+            nn.Linear(PoseEncoder.POSE_DIM, 64),
             nn.ReLU(),
             nn.Linear(64, 128),
             nn.ReLU(),
@@ -158,7 +155,7 @@ class PoseEncoder(nn.Module):
         batch_size = x.shape[0]
 
         # Reshape to individual poses: (batch, max_poses, 6)
-        x = x.view(batch_size, self.max_poses, 6)
+        x = x.view(batch_size, self.max_poses, PoseEncoder.POSE_DIM)
 
         # Encode each pose individually
         pose_features = []
@@ -291,7 +288,7 @@ class MultimodalFusionEncoder(nn.Module):
     for downstream robot learning tasks with attention-based fusion.
     """
 
-    def __init__(self, feature_dims: dict[str, int], output_dim: int = 512):
+    def __init__(self, feature_dims: dict[DataType, int], output_dim: int = 512):
         """Initialize the multimodal fusion encoder.
 
         Args:

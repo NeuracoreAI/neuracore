@@ -8,7 +8,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -54,7 +54,7 @@ class TensorboardTrainingLogger(TrainingLogger):
         """
         self.writer.add_scalar(name, value, step)
 
-    def log_scalars(self, scalars: Dict[str, float], step: int) -> None:
+    def log_scalars(self, scalars: dict[str, float], step: int) -> None:
         """Log multiple scalar metrics at once.
 
         Args:
@@ -126,8 +126,8 @@ class TensorboardTrainingLogger(TrainingLogger):
 
     def log_hyperparameters(
         self,
-        hparams: Dict[str, Any],
-        metrics: Optional[Dict[str, float]] = None,
+        hparams: dict[str, Any],
+        metrics: Optional[dict[str, float]] = None,
     ) -> None:
         """Log hyperparameters and optionally metrics.
 

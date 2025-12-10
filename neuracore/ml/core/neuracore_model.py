@@ -7,14 +7,13 @@ and defines the required interface for training and inference.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import List, Tuple
 
 import torch
 import torch.nn as nn
-from neuracore_types import DataType, ModelInitDescription, ModelPrediction
+from neuracore_types import BatchedNCData, DataType, ModelInitDescription
 
 from .ml_types import (
-    BatchedInferenceSamples,
+    BatchedInferenceInputs,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
 )
@@ -47,7 +46,10 @@ class NeuracoreModel(nn.Module, ABC):
         super().__init__()
         self.model_init_description = model_init_description
         self._validate_input_output_types()
-        self.dataset_description = model_init_description.dataset_description
+        self.dataset_statistics = model_init_description.dataset_statistics
+        self.input_data_types = model_init_description.input_data_types
+        self.output_data_types = model_init_description.output_data_types
+        self.data_types = self.input_data_types.union(self.output_data_types)
         self.output_prediction_horizon = (
             model_init_description.output_prediction_horizon
         )
@@ -80,9 +82,7 @@ class NeuracoreModel(nn.Module, ABC):
                 available in the dataset
         """
         req_input_data_types = set(self.model_init_description.input_data_types)
-        types_in_dataset = set(
-            self.model_init_description.dataset_description.get_data_types()
-        )
+        types_in_dataset = set(self.model_init_description.dataset_statistics.keys())
         input_types_supported_by_model = set(self.get_supported_input_data_types())
 
         # Check if the requested input data types are in the dataset description
@@ -116,7 +116,9 @@ class NeuracoreModel(nn.Module, ABC):
             )
 
     @abstractmethod
-    def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
+    def forward(
+        self, batch: BatchedInferenceInputs
+    ) -> dict[DataType, list[BatchedNCData]]:
         """Perform inference forward pass.
 
         Args:
@@ -165,36 +167,21 @@ class NeuracoreModel(nn.Module, ABC):
         return []
 
     @staticmethod
-    def tokenize_text(text: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Tokenize text input for language processing.
-
-        Args:
-            text: List of text strings to tokenize
-
-        Returns:
-            tuple[torch.Tensor, torch.Tensor]: Tokenized text and attention masks
-
-        Raises:
-            NotImplementedError: Must be implemented by subclasses that use text
-        """
-        raise NotImplementedError("User needs to implement this method")
-
-    @staticmethod
     @abstractmethod
-    def get_supported_input_data_types() -> list[DataType]:
+    def get_supported_input_data_types() -> set[DataType]:
         """Get the input data types supported by this model.
 
         Returns:
-            list[DataType]: List of supported input data types
+            Set of supported input data types
         """
         pass
 
     @staticmethod
     @abstractmethod
-    def get_supported_output_data_types() -> list[DataType]:
+    def get_supported_output_data_types() -> set[DataType]:
         """Get the output data types supported by this model.
 
         Returns:
-            list[DataType]: List of supported output data types
+            Set of supported output data types
         """
         pass

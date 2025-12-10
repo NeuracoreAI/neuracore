@@ -808,10 +808,16 @@ class TestDatasetSynchronization:
         nc.login()
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
 
-        data_types = [DataType.RGB_IMAGE, DataType.DEPTH_IMAGE]
-        synced = dataset.synchronize(frequency=30, data_types=data_types)
+        robot_data_spec = {
+            "robot_id": {
+                DataType.RGB_IMAGES: [],
+                DataType.DEPTH_IMAGES: [],
+                DataType.JOINT_POSITIONS: [],
+            }
+        }
+        synced = dataset.synchronize(frequency=30, robot_data_spec=robot_data_spec)
 
-        assert synced.data_types == data_types
+        assert synced.robot_data_spec == robot_data_spec
 
 
 class TestDatasetMixedOperations:

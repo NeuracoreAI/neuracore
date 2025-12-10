@@ -200,20 +200,17 @@ def stream_data(config):
             frame_count, config.fps, config.num_joints
         )
         with Timer():
-            nc.log_joint_positions(joint_positions, timestamp=t)
+            nc.log_joint_positions(name="arm", positions=joint_positions, timestamp=t)
 
         with Timer():
             # use the same joint positions for velocities and torques
-            nc.log_joint_velocities(joint_positions, timestamp=t)
-
+            nc.log_joint_velocities(name="arm", velocities=joint_positions, timestamp=t)
         with Timer():
             # use the same joint positions for velocities and torques
-            nc.log_joint_torques(joint_positions, timestamp=t)
+            nc.log_joint_torques(name="arm", torques=joint_positions, timestamp=t)
 
         with Timer():
-            nc.log_gripper_data(
-                {"left_gripper": 0.5, "right_gripper": 0.5}, timestamp=t
-            )
+            nc.log_parallel_gripper_open_amount(name="gripper", value=0.5, timestamp=t)
 
         points = np.zeros((1000, 3), dtype=np.float32)
         rgb_points = np.zeros((1000, 3), dtype=np.uint8)
@@ -229,7 +226,7 @@ def stream_data(config):
             )
 
         with Timer():
-            nc.log_custom_data(
+            nc.log_custom_1d(
                 "test_custom_data",
                 {"frame_num": frame_code, "time": t},
                 timestamp=t,
@@ -242,7 +239,9 @@ def stream_data(config):
                 for i in range(config.num_joints)
             }
             with Timer():
-                nc.log_joint_target_positions(action, timestamp=t)
+                nc.log_joint_target_positions(
+                    name="arm", target_positions=action, timestamp=t
+                )
 
         frame_count += 1
 
@@ -464,7 +463,7 @@ def test_stop_start_sequences():
                 segment_frames, config.fps, config.num_joints
             )
             with Timer():
-                nc.log_joint_positions(joint_positions)
+                nc.log_joint_positions(name="arm", positions=joint_positions)
 
             segment_frames += 1
             time.sleep(1 / config.fps)

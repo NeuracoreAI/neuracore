@@ -10,13 +10,13 @@ import json
 import logging
 import queue
 import threading
-from typing import Any, Dict, List
+from typing import Any
 
 from neuracore_types import DataType
 
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 
-from .bucket_uploader import BucketUploader
+from .bucket_uploader import TRACE_FILE, BucketUploader
 from .resumable_upload import ResumableUpload
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,8 @@ class StreamingJsonUploader(BucketUploader):
     def __init__(
         self,
         recording_id: str,
-        filepath: str,
+        data_type: DataType,
+        data_type_name: str,
         chunk_size: int = CHUNK_SIZE,
     ):
         """Initialize a streaming JSON uploader.
@@ -49,19 +50,20 @@ class StreamingJsonUploader(BucketUploader):
 
         Args:
             recording_id: Unique identifier for the recording session.
-            filepath: Target file path in the cloud storage bucket.
+            data_type: Type of data being recorded (e.g., JSON events).
+            data_type_name: Name of the JSON data stream.
             chunk_size: Size in bytes of each upload chunk. Will be adjusted
                 to be a multiple of 256 KiB if necessary.
         """
         super().__init__(recording_id)
-        self.filepath = filepath
         self.chunk_size = chunk_size
         self._streaming_done = False
         self._upload_queue: queue.Queue = queue.Queue()
         # Thread will continue, even if main thread exits
         self._upload_thread = threading.Thread(target=self._upload_loop, daemon=False)
         self._recording_manager = get_recording_state_manager()
-        self.data_type: DataType = self._get_data_type_from_path(self.filepath)
+        self.data_type = data_type
+        self.data_type_name = data_type_name
         self._upload_thread.start()
 
     def _thread_setup(self) -> None:
@@ -82,7 +84,9 @@ class StreamingJsonUploader(BucketUploader):
             )
 
         self.uploader = ResumableUpload(
-            self.recording_id, self.filepath, "application/json"
+            self.recording_id,
+            f"{self.data_type}/{self.data_type_name}/{TRACE_FILE}",
+            "application/json",
         )
 
         # Create in-memory buffer
@@ -96,7 +100,7 @@ class StreamingJsonUploader(BucketUploader):
         self.last_write_position = 0
 
         # Store all data entries
-        self.data_entries: List[Dict[str, Any]] = []
+        self.data_entries: list[dict[str, Any]] = []
 
         # Track if we've already started the JSON array
         self.json_array_started = False
@@ -166,7 +170,7 @@ class StreamingJsonUploader(BucketUploader):
         )
         self._mark_data_stream_complete(self._stream_id)
 
-    def add_frame(self, data_entry: Dict[str, Any]) -> None:
+    def add_frame(self, data_entry: dict[str, Any]) -> None:
         """Add a JSON data entry to the streaming queue.
 
         Queues a data entry for asynchronous processing and upload. The entry
@@ -179,7 +183,7 @@ class StreamingJsonUploader(BucketUploader):
         """
         self._upload_queue.put(data_entry)
 
-    def _add_entry(self, data_entry: Dict[str, Any]) -> None:
+    def _add_entry(self, data_entry: dict[str, Any]) -> None:
         """Add a JSON data entry to the buffer and upload if threshold is reached.
 
         Serializes the data entry to JSON, writes it to the buffer, and triggers

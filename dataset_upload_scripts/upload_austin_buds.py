@@ -66,9 +66,15 @@ def _record_step(step: dict, timestamp: float) -> None:
             v = float(lower + (upper - lower) * gripper_open_amount)
             visual_joint_positions_dict[jname] = v
 
+    joint_group_name = "arm"
     nc.log_joint_positions(
+        name=joint_group_name,
         positions=joint_positions_dict,
-        additional_urdf_positions=visual_joint_positions_dict,
+        timestamp=timestamp,
+    )
+    nc.log_joint_positions(
+        name=f"{joint_group_name}_visual",
+        positions=visual_joint_positions_dict,
         timestamp=timestamp,
     )
 
@@ -76,13 +82,14 @@ def _record_step(step: dict, timestamp: float) -> None:
         gripper_joint_names=ROBOT.joint_names[DOF : DOF + 2],
         gripper_open_width=gripper_width,
     )
-    gripper_open_amounts = {"gripper_open_amount": gripper_open_amount}
-    nc.log_gripper_data(
-        open_amounts=gripper_open_amounts,
+    nc.log_parallel_gripper_open_amount(
+        name="gripper",
+        value=gripper_open_amount,
         timestamp=timestamp,
     )
 
     nc.log_language(
+        name="instruction",
         language=step["language_instruction"].numpy().decode("utf-8"),
         timestamp=timestamp,
     )

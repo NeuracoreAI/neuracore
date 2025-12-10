@@ -16,7 +16,7 @@ import fractions
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, cast
 from uuid import uuid4
 
 import av
@@ -59,14 +59,14 @@ class VideoSource:
     _last_camera_data: Optional[CameraData] = None
     custom_data_source: Optional[JSONSource] = None
 
-    def add_frame(self, frame_data: np.ndarray, camera_data: CameraData) -> None:
+    def add_frame(self, camera_data: CameraData) -> None:
         """Add a new video frame to the source.
 
         Args:
-            frame_data: RGB video frame data as a numpy array.
-                Should be in HWC format (Height, Width, Channels).
             camera_data: Extra metadata about the frame.
         """
+        frame_data = cast(np.ndarray, camera_data.frame)
+        camera_data.frame = None  # Remove frame from metadata to avoid duplication
         self._last_frame = frame_data
         self._last_camera_data = camera_data
         if self.custom_data_source:

@@ -1,6 +1,6 @@
 """Base MuJoCo environment classes with improved organization."""
 
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import mujoco
 import numpy as np
@@ -21,16 +21,16 @@ class CameraData(BaseModel):
 class Observation(BaseModel):
     """Complete observation structure for bimanual robot tasks."""
 
-    qpos: Dict[str, float]
-    qvel: Dict[str, float]
+    qpos: dict[str, float]
+    qvel: dict[str, float]
     env_state: np.ndarray
-    cameras: Dict[str, CameraData]
+    cameras: dict[str, CameraData]
     mocap_pose_left: Optional[np.ndarray] = None
     mocap_pose_right: Optional[np.ndarray] = None
     gripper_ctrl: Optional[np.ndarray] = None
     reward: Optional[float] = None
-    end_effector_poses: Optional[Dict[str, List[float]]] = None
-    gripper_open_amounts: Optional[Dict[str, float]] = None
+    end_effector_poses: Optional[dict[str, list[float]]] = None
+    gripper_open_amounts: Optional[dict[str, float]] = None
 
     class Config:
         arbitrary_types_allowed = True
@@ -79,7 +79,7 @@ class MuJoCoEnvironment:
         self.initialize_episode()
         return self.get_observation()
 
-    def step(self, action: np.ndarray) -> Tuple[Observation, float, bool]:
+    def step(self, action: np.ndarray) -> tuple[Observation, float, bool]:
         """Execute one environment step.
 
         Args:
@@ -344,7 +344,7 @@ class BimanualViperXTask(MuJoCoEnvironment):
             + cls.GRIPPER_POSITION_CLOSE
         )
 
-    def get_qpos(self) -> Dict[str, float]:
+    def get_qpos(self) -> dict[str, float]:
         """Get joint positions as dictionary.
 
         Returns:
@@ -358,7 +358,7 @@ class BimanualViperXTask(MuJoCoEnvironment):
                 joint_dict[joint_name] = qpos_raw[i]
         return joint_dict
 
-    def get_qvel(self) -> Dict[str, float]:
+    def get_qvel(self) -> dict[str, float]:
         """Get joint velocities as dictionary.
 
         Returns:
@@ -380,7 +380,7 @@ class BimanualViperXTask(MuJoCoEnvironment):
         """
         raise NotImplementedError
 
-    def _get_end_effector_pose(self, effector_name: str) -> Optional[List[float]]:
+    def _get_end_effector_pose(self, effector_name: str) -> Optional[list[float]]:
         """Get end effector pose from MuJoCo body positions and orientations.
 
         Args:
@@ -398,7 +398,7 @@ class BimanualViperXTask(MuJoCoEnvironment):
         qw, qx, qy, qz = self.data.xquat[effector_id].copy()
         return [x, y, z, qx, qy, qz, qw]
 
-    def get_end_effector_poses(self) -> Dict[str, List[float]]:
+    def get_end_effector_poses(self) -> dict[str, list[float]]:
         """Get end effector poses from MuJoCo body positions and orientations.
 
         Returns:
@@ -430,7 +430,7 @@ class BimanualViperXTask(MuJoCoEnvironment):
         gripper_pos = qpos_dict.get(gripper_name, 0.0)
         return self.normalize_gripper_position(gripper_pos)
 
-    def get_gripper_open_amounts(self) -> Dict[str, float]:
+    def get_gripper_open_amounts(self) -> dict[str, float]:
         """Get gripper open amounts from gripper finger joint positions.
 
         Returns:

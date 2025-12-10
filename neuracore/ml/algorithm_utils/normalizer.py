@@ -5,7 +5,7 @@ mean/std and min/max normalization for multiple data types,
 with support for PyTorch's register_buffer for proper device handling.
 """
 
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -21,7 +21,7 @@ class Normalizer(nn.Module):
     def __init__(
         self,
         name: str,
-        statistics: Optional[List[Any]] = None,
+        statistics: Optional[list[Any]] = None,
     ) -> None:
         """Initialize a Normalizer with optional statistics.
 
@@ -80,7 +80,7 @@ class MeanStdNormalizer(Normalizer):
     def __init__(
         self,
         name: str,
-        statistics: Optional[List[Any]] = None,
+        statistics: Optional[list[Any]] = None,
     ) -> None:
         """Initialize a MeanStdNormalizer with optional statistics.
 
@@ -94,8 +94,8 @@ class MeanStdNormalizer(Normalizer):
         """
         super().__init__(name=name, statistics=statistics)
         if statistics:
-            combined_mean: List[float] = []
-            combined_std: List[float] = []
+            combined_mean: list[float] = []
+            combined_std: list[float] = []
             for s in statistics:
                 combined_mean.extend(s.mean)
                 combined_std.extend(s.std)
@@ -158,7 +158,7 @@ class MinMaxNormalizer(Normalizer):
     def __init__(
         self,
         name: str,
-        statistics: Optional[List[Any]] = None,
+        statistics: Optional[list[Any]] = None,
     ) -> None:
         """Initialize a MinMaxNormalizer with optional statistics.
 
@@ -172,8 +172,8 @@ class MinMaxNormalizer(Normalizer):
         """
         super().__init__(name=name, statistics=statistics)
         if statistics:
-            combined_min: List[float] = []
-            combined_max: List[float] = []
+            combined_min: list[float] = []
+            combined_max: list[float] = []
             for s in statistics:
                 combined_min.extend(s.min)
                 combined_max.extend(s.max)

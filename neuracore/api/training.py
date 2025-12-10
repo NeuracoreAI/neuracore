@@ -60,8 +60,8 @@ def start_training_run(
     gpu_type: str,
     num_gpus: int,
     frequency: int,
-    input_data_types: Optional[list[DataType]] = None,
-    output_data_types: Optional[list[DataType]] = None,
+    input_robot_data_spec: Optional[list[DataType]] = None,
+    output_robot_data_spec: Optional[list[DataType]] = None,
 ) -> dict:
     """Start a new training run.
 
@@ -73,9 +73,9 @@ def start_training_run(
         gpu_type: Type of GPU to use for training (e.g., "A100", "V100")
         num_gpus: Number of GPUs to use for training
         frequency: Frequency to sync training data to (in Hz)
-        input_data_types: Optional list of input data types. If not provided,
+        input_robot_data_spec: Optional list of input data types. If not provided,
             uses algorithm's supported input data types
-        output_data_types: Optional list of output data types. If not provided,
+        output_robot_data_spec: Optional list of output data types. If not provided,
             uses algorithm's supported output data types
 
     Returns:
@@ -96,15 +96,15 @@ def start_training_run(
     for algorithm_json in algorithm_jsons:
         if algorithm_json["name"] == algorithm_name:
             algorithm_id = algorithm_json["id"]
-            if input_data_types is None:
-                input_data_types = [
+            if input_robot_data_spec is None:
+                input_robot_data_spec = [
                     DataType(supported_input_data_type)
                     for supported_input_data_type in algorithm_json[
                         "supported_input_data_types"
                     ]
                 ]
-            if output_data_types is None:
-                output_data_types = [
+            if output_robot_data_spec is None:
+                output_robot_data_spec = [
                     DataType(supported_output_data_type)
                     for supported_output_data_type in algorithm_json[
                         "supported_output_data_types"
@@ -123,8 +123,8 @@ def start_training_run(
         "gpu_type": gpu_type,
         "num_gpus": num_gpus,
         "frequency": str(frequency),
-        "input_data_types": input_data_types,
-        "output_data_types": output_data_types,
+        "input_robot_data_spec": input_robot_data_spec,
+        "output_robot_data_spec": output_robot_data_spec,
     }
 
     auth = get_auth()

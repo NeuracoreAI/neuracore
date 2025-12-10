@@ -12,7 +12,7 @@ import logging
 import queue
 import threading
 from fractions import Fraction
-from typing import Callable, Optional
+from typing import Callable, Optional, cast
 
 import av
 import numpy as np
@@ -25,7 +25,7 @@ from neuracore.core.const import API_URL
 from neuracore.core.exceptions import EncodingError
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 
-from .bucket_uploader import BucketUploader
+from .bucket_uploader import TRACE_FILE, BucketUploader
 from .resumable_upload import ResumableUpload
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,8 @@ class StreamingVideoUploader(BucketUploader):
     def __init__(
         self,
         recording_id: str,
-        path: str,
+        data_type: DataType,
+        data_type_name: str,
         width: int,
         height: int,
         transform_frame: Optional[Callable[[np.ndarray], np.ndarray]] = None,
@@ -68,7 +69,8 @@ class StreamingVideoUploader(BucketUploader):
 
         Args:
             recording_id: Unique identifier for the recording session.
-            path: Target directory path in the cloud storage bucket.
+            data_type: Type of data being recorded (e.g., RGB video).
+            data_type_name: Name of the video stream.
             width: Frame width in pixels.
             height: Frame height in pixels.
             transform_frame: Optional function to transform frames before encoding.
@@ -82,7 +84,6 @@ class StreamingVideoUploader(BucketUploader):
                 encoding parameters.
         """
         super().__init__(recording_id)
-        self.path = path
         self.width = width
         self.height = height
         self.transform_frame = transform_frame
@@ -98,7 +99,8 @@ class StreamingVideoUploader(BucketUploader):
         # Thread will continue, even if main thread exits
         self._upload_thread = threading.Thread(target=self._upload_loop, daemon=False)
         self._recording_manager = get_recording_state_manager()
-        self.data_type: DataType = self._get_data_type_from_path(self.path)
+        self.data_type: DataType = data_type
+        self.data_type_name: str = data_type_name
         self._upload_thread.start()
 
     def _thread_setup(self) -> None:
@@ -119,7 +121,9 @@ class StreamingVideoUploader(BucketUploader):
             )
 
         self.uploader = ResumableUpload(
-            self.recording_id, f"{self.path}/{self.video_name}", "video/mp4"
+            recording_id=self.recording_id,
+            filepath=f"{self.data_type.value}/{self.data_type_name}/{self.video_name}",
+            content_type="video/mp4",
         )
 
         # Create in-memory buffer
@@ -200,10 +204,10 @@ class StreamingVideoUploader(BucketUploader):
         # If final has not been called, or we still have items in the queue
         while not self._streaming_done or self._upload_queue.qsize() > 0:
             try:
-                frame_data, json_data = self._upload_queue.get(timeout=0.1)
-                if frame_data is None:
+                frame_metadata = self._upload_queue.get(timeout=0.1)
+                if frame_metadata is None:
                     break
-                self._add_frame(frame_data, json_data)
+                self._add_frame(frame_metadata)
             except queue.Empty:
                 continue
 
@@ -234,7 +238,7 @@ class StreamingVideoUploader(BucketUploader):
         self._upload_json_data()
         self._mark_data_stream_complete(self._stream_id)
 
-    def add_frame(self, frame_data: np.ndarray, metadata: CameraData) -> None:
+    def add_frame(self, metadata: CameraData) -> None:
         """Add a video frame to the encoding queue.
 
         Queues a frame and its associated metadata for asynchronous encoding
@@ -242,14 +246,12 @@ class StreamingVideoUploader(BucketUploader):
         assigned appropriate timestamps based on the metadata.
 
         Args:
-            frame_data: RGB frame data as numpy array with shape (height, width, 3).
-                Should match the width and height specified during initialization.
             metadata: Camera data containing timestamp and other frame information
                 that will be preserved for synchronization purposes.
         """
-        self._upload_queue.put((frame_data, metadata))
+        self._upload_queue.put(metadata)
 
-    def _add_frame(self, frame_data: np.ndarray, frame_metadata: CameraData) -> None:
+    def _add_frame(self, frame_metadata: CameraData) -> None:
         """Encode a video frame and upload chunks when buffer threshold is reached.
 
         Applies frame transformations if configured, handles timestamp management
@@ -257,9 +259,10 @@ class StreamingVideoUploader(BucketUploader):
         and triggers chunk uploads when the buffer reaches the specified size.
 
         Args:
-            frame_data: RGB frame data as numpy array with shape (height, width, 3).
             frame_metadata: Camera data containing timestamp and frame information.
         """
+        frame_data = cast(np.ndarray, frame_metadata.frame)
+        frame_metadata.frame = None  # Remove frame from metadata to avoid duplication
         if self.transform_frame is not None:
             frame_data = self.transform_frame(frame_data)
 
@@ -340,7 +343,7 @@ class StreamingVideoUploader(BucketUploader):
             The upload thread that can be joined to wait for completion.
         """
         # Note we dont join on the (non-daemon) thread as we dont want to block
-        self._upload_queue.put((None, None))
+        self._upload_queue.put(None)
         self._streaming_done = True
         return self._upload_thread
 
@@ -357,7 +360,7 @@ class StreamingVideoUploader(BucketUploader):
         if self._recording_manager.is_recording_expired(self.recording_id):
             return
         params = {
-            "filepath": f"{self.path}/metadata.json",
+            "filepath": f"{self.data_type.value}/{self.data_type_name}/{TRACE_FILE}",
             "content_type": "application/json",
         }
         org_id = get_current_org()
