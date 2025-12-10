@@ -9,10 +9,9 @@ cloud upload functionality.
 import logging
 import threading
 from abc import ABC
-from typing import Any, List, Optional
+from typing import Optional
 
-import numpy as np
-from neuracore_types import CameraData, NCData
+from neuracore_types import CameraData, DataType, NCData
 
 from neuracore.core.streaming.bucket_uploaders.streaming_file_uploader import (
     StreamingJsonUploader,
@@ -24,6 +23,9 @@ from neuracore.core.streaming.bucket_uploaders.streaming_video_uploader import (
 from ..utils.depth_utils import depth_to_rgb
 
 logger = logging.getLogger(__name__)
+
+LOSSY_VIDEO_NAME = "lossy.mp4"
+LOSSLESS_VIDEO_NAME = "lossless.mp4"
 
 
 class DataStream(ABC):
@@ -57,7 +59,7 @@ class DataStream(ABC):
         self._recording = True
         self._recording_id = recording_id
 
-    def stop_recording(self) -> List[threading.Thread]:
+    def stop_recording(self) -> list[threading.Thread]:
         """Stop recording data.
 
         Returns:
@@ -80,11 +82,11 @@ class DataStream(ABC):
         """
         return self._recording
 
-    def get_latest_data(self) -> Any:
+    def get_latest_data(self) -> Optional[NCData]:
         """Get the latest data from the stream.
 
         Returns:
-            Any: The most recently logged data item
+            Optional[NCData]: The most recently logged data item
         """
         return self._latest_data
 
@@ -96,17 +98,16 @@ class JsonDataStream(DataStream):
     to cloud storage during recording sessions.
     """
 
-    def __init__(self, filepath: str):
+    def __init__(self, data_type: DataType, data_type_name: str):
         """Initialize the JSON data stream.
 
         Args:
-            filepath: Path for the JSON file. .json extension added if missing
+            data_type: Type of data being recorded (e.g., JSON events)
+            data_type_name: Name of the JSON data stream
         """
         super().__init__()
-        # add .json if missing
-        if not filepath.endswith(".json"):
-            filepath += ".json"
-        self.filepath = filepath
+        self.data_type = data_type
+        self.data_type_name = data_type_name
         self._streamer: Optional[StreamingJsonUploader] = None
 
     def start_recording(self, recording_id: str) -> None:
@@ -116,9 +117,13 @@ class JsonDataStream(DataStream):
             recording_id: Unique identifier for the recording session
         """
         super().start_recording(recording_id)
-        self._streamer = StreamingJsonUploader(recording_id, self.filepath)
+        self._streamer = StreamingJsonUploader(
+            recording_id=recording_id,
+            data_type=self.data_type,
+            data_type_name=self.data_type_name,
+        )
 
-    def stop_recording(self) -> List[threading.Thread]:
+    def stop_recording(self) -> list[threading.Thread]:
         """Stop JSON recording and finalize upload.
 
         Returns:
@@ -173,7 +178,7 @@ class VideoDataStream(DataStream):
         """
         super().start_recording(recording_id)
 
-    def stop_recording(self) -> List[threading.Thread]:
+    def stop_recording(self) -> list[threading.Thread]:
         """Stop video recording and finalize encoding.
 
         Returns:
@@ -190,22 +195,23 @@ class VideoDataStream(DataStream):
         self._lossy_encoder = None
         return [lossless_upload_thread, lossy_upload_thread]
 
-    def log(self, data: np.ndarray, metadata: CameraData) -> None:
+    def log(self, metadata: CameraData) -> None:
         """Log video frame data.
 
         Args:
-            data: Video frame as numpy array
             metadata: Camera metadata including timestamp and calibration
         """
-        self._latest_data = data
+        self._latest_data = metadata
         if (
             not self.is_recording()
             or self._lossless_encoder is None
             or self._lossy_encoder is None
         ):
             return
-        self._lossless_encoder.add_frame(data, metadata)
-        self._lossy_encoder.add_frame(data, metadata)
+        frame = metadata.frame
+        metadata.frame = None  # Remove frame from metadata to avoid duplication
+        self._lossless_encoder.add_frame(metadata, frame)
+        self._lossy_encoder.add_frame(metadata, frame)
 
 
 class DepthDataStream(VideoDataStream):
@@ -226,20 +232,23 @@ class DepthDataStream(VideoDataStream):
         """
         super().start_recording(recording_id)
         self._lossless_encoder = StreamingVideoUploader(
-            recording_id,
-            f"depths/{self.camera_id}",
-            self.width,
-            self.height,
-            depth_to_rgb,
+            recording_id=recording_id,
+            data_type=DataType.DEPTH_IMAGES,
+            data_type_name=self.camera_id,
+            width=self.width,
+            height=self.height,
+            video_name=LOSSLESS_VIDEO_NAME,
+            transform_frame=depth_to_rgb,
             codec_context_options={"qp": "0", "preset": "ultrafast"},
         )
         self._lossy_encoder = StreamingVideoUploader(
-            recording_id,
-            f"depths/{self.camera_id}/lossy",
-            self.width,
-            self.height,
-            depth_to_rgb,
-            video_name="lossy.mp4",
+            recording_id=recording_id,
+            data_type=DataType.DEPTH_IMAGES,
+            data_type_name=self.camera_id,
+            width=self.width,
+            height=self.height,
+            video_name=LOSSY_VIDEO_NAME,
+            transform_frame=depth_to_rgb,
             pixel_format="yuv420p",
             codec="libx264",
         )
@@ -264,17 +273,20 @@ class RGBDataStream(VideoDataStream):
         super().start_recording(recording_id)
         self._lossless_encoder = StreamingVideoUploader(
             recording_id=recording_id,
-            path=f"rgbs/{self.camera_id}",
+            data_type=DataType.RGB_IMAGES,
+            data_type_name=self.camera_id,
             width=self.width,
             height=self.height,
+            video_name=LOSSLESS_VIDEO_NAME,
             codec_context_options={"qp": "0", "preset": "ultrafast"},
         )
         self._lossy_encoder = StreamingVideoUploader(
             recording_id=recording_id,
-            path=f"rgbs/{self.camera_id}",
+            data_type=DataType.RGB_IMAGES,
+            data_type_name=self.camera_id,
             width=self.width,
             height=self.height,
-            video_name="lossy.mp4",
+            video_name=LOSSY_VIDEO_NAME,
             pixel_format="yuv420p",
             codec="libx264",
         )

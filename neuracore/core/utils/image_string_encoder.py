@@ -7,7 +7,7 @@ This is useful for transmitting image data over networks with other data.
 
 import base64
 from io import BytesIO
-from typing import Tuple, Union
+from typing import Union
 
 import numpy as np
 from PIL import Image
@@ -22,7 +22,7 @@ class ImageStringEncoder:
     def encode_image(
         image: Union[np.ndarray, str],
         cap_size: bool = False,
-        resize_shape: Tuple[int, int] = (224, 224),
+        resize_shape: tuple[int, int] = (224, 224),
     ) -> str:
         """Encode numpy image array to base64 string for transmission.
 
@@ -38,11 +38,7 @@ class ImageStringEncoder:
         """
         if isinstance(image, str):
             return image
-
         pil_image = Image.fromarray(image)
-        # resize the image if the video is too large
-        if cap_size and pil_image.size > resize_shape:
-            pil_image = pil_image.resize(resize_shape)
         buffer = BytesIO()
         pil_image.save(buffer, format="PNG")
         return DATA_URI_PREFIX + base64.b64encode(buffer.getvalue()).decode("utf-8")

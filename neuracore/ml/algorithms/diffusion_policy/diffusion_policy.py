@@ -1,8 +1,7 @@
 """Diffusion Policy: Visuomotor Policy Learning via Action Diffusion."""
 
 import logging
-import time
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Optional, Union, cast
 
 import torch
 import torch.nn as nn
@@ -10,10 +9,21 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-from neuracore_types import DataType, ModelInitDescription, ModelPrediction
+from neuracore_types import (
+    BatchedJointData,
+    BatchedNCData,
+    BatchedParallelGripperOpenAmountData,
+    BatchedRGBData,
+    CameraDataStats,
+    DataItemStats,
+    DataType,
+    JointDataStats,
+    ModelInitDescription,
+    ParallelGripperOpenAmountDataStats,
+)
 
 from neuracore.ml import (
-    BatchedInferenceSamples,
+    BatchedInferenceInputs,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     NeuracoreModel,
@@ -24,8 +34,10 @@ from .modules import DiffusionConditionalUnet1d, DiffusionPolicyImageEncoder
 
 logger = logging.getLogger(__name__)
 
-JOINT_STATE_NORMALIZER = MinMaxNormalizer  # or MeanStdNormalizer
+PROPRIO_NORMALIZER = MinMaxNormalizer  # or MeanStdNormalizer
 ACTION_NORMALIZER = MinMaxNormalizer  # or MeanStdNormalizer
+RESNET_MEAN = [0.485, 0.456, 0.406]
+RESNET_STD = [0.229, 0.224, 0.225]
 
 
 class DiffusionPolicy(NeuracoreModel):
@@ -39,7 +51,7 @@ class DiffusionPolicy(NeuracoreModel):
         self,
         model_init_description: ModelInitDescription,
         hidden_dim: int = 256,
-        unet_down_dims: Tuple[int, ...] = (
+        unet_down_dims: tuple[int, ...] = (
             512,
             1024,
             2048,
@@ -50,6 +62,7 @@ class DiffusionPolicy(NeuracoreModel):
         spatial_softmax_num_keypoints: int = 32,
         unet_use_film_scale_modulation: bool = True,
         use_pretrained_weights: bool = True,
+        use_resnet_stats: bool = True,
         noise_scheduler_type: str = "DDPM",
         num_train_timesteps: int = 100,
         num_inference_steps: int = 100,
@@ -62,7 +75,7 @@ class DiffusionPolicy(NeuracoreModel):
         freeze_backbone: bool = False,
         lr_backbone: float = 1e-4,
         weight_decay: float = 1e-6,
-        optimizer_betas: Tuple[float, float] = (0.9, 0.999),
+        optimizer_betas: tuple[float, float] = (0.9, 0.999),
         optimizer_eps: float = 1e-8,
         prediction_type: str = "epsilon",
         lr_scheduler_type: str = "cosine",
@@ -80,6 +93,7 @@ class DiffusionPolicy(NeuracoreModel):
             spatial_softmax_num_keypoints: Number of keypoints for spatial softmax.
             unet_use_film_scale_modulation: Whether to use FiLM scale modulation.
             use_pretrained_weights: Whether to load pretrained ResNet weights.
+            use_resnet_stats: Whether to use ResNet normalization statistics.
             noise_scheduler_type: Type of noise scheduler ("DDPM" or "DDIM").
             num_train_timesteps: Number of timesteps for training.
             num_inference_steps: Number of timesteps for inference.
@@ -100,6 +114,7 @@ class DiffusionPolicy(NeuracoreModel):
             lr_scheduler_num_warmup_steps: Number of warmup steps for the scheduler.
         """
         super().__init__(model_init_description)
+        self.use_resnet_stats = use_resnet_stats
         self.lr = lr
         self.freeze_backbone = freeze_backbone
         self.lr_backbone = lr_backbone
@@ -108,28 +123,111 @@ class DiffusionPolicy(NeuracoreModel):
         self.optimizer_eps = optimizer_eps
         self.lr_scheduler_type = lr_scheduler_type
         self.lr_scheduler_num_warmup_steps = lr_scheduler_num_warmup_steps
-        # Vision components
-        self.image_encoders = nn.ModuleList([
-            DiffusionPolicyImageEncoder(
-                feature_dim=hidden_dim,
-                spatial_softmax_num_keypoints=spatial_softmax_num_keypoints,
-                use_pretrained_weights=use_pretrained_weights,
-            )
-            for _ in range(self.dataset_description.rgb_images.max_len)
-        ])
-        global_cond_dim = (
-            self.dataset_description.joint_positions.max_len
-            + self.dataset_description.joint_velocities.max_len
-            + self.dataset_description.joint_torques.max_len
+        self.prediction_type = prediction_type
+        self.num_inference_steps = num_inference_steps
+
+        data_stats: dict[DataType, DataItemStats] = {}
+
+        # Setup proprioceptive data
+        self.proprio_dims: dict[DataType, tuple[int, int]] = {}
+        proprio_stats = []
+        current_dim = 0
+
+        for dt in [
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+        ]:
+            if dt in self.data_types:
+                stats = cast(list[JointDataStats], self.dataset_statistics[dt])
+                combined_stats = DataItemStats()
+                for stat in stats:
+                    combined_stats = combined_stats.concatenate(stat.value)
+                data_stats[dt] = combined_stats
+
+                if dt in self.input_data_types:
+                    proprio_stats.append(combined_stats)
+                    dim = len(combined_stats.mean)
+                    self.proprio_dims[dt] = (current_dim, current_dim + dim)
+                    current_dim += dim
+
+        global_cond_dim = current_dim
+
+        # Setup output data
+        self.max_output_size = 0
+        output_stats = []
+        self.output_dims: dict[DataType, tuple[int, int]] = {}
+        current_output_dim = 0
+
+        for dt in self.output_data_types:
+            if dt in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+                stats = cast(list[JointDataStats], self.dataset_statistics[dt])
+                combined_stats = DataItemStats()
+                for stat in stats:
+                    combined_stats = combined_stats.concatenate(stat.value)
+                data_stats[dt] = combined_stats
+                output_stats.append(combined_stats)
+                dim = len(combined_stats.mean)
+                self.output_dims[dt] = (current_output_dim, current_output_dim + dim)
+                current_output_dim += dim
+                self.max_output_size += dim
+            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                stats = cast(
+                    list[ParallelGripperOpenAmountDataStats],
+                    self.dataset_statistics[dt],
+                )
+                combined_stats = DataItemStats()
+                for stat in stats:
+                    combined_stats = combined_stats.concatenate(stat.open_amount)
+                data_stats[dt] = combined_stats
+                output_stats.append(combined_stats)
+                dim = len(combined_stats.mean)
+                self.output_dims[dt] = (current_output_dim, current_output_dim + dim)
+                current_output_dim += dim
+                self.max_output_size += dim
+
+        # Setup normalizers
+        self.proprio_normalizer = PROPRIO_NORMALIZER(
+            name="proprioception", statistics=proprio_stats
         )
-        if self.dataset_description.rgb_images.max_len > 0:
+        self.action_normalizer = ACTION_NORMALIZER(
+            name="actions", statistics=output_stats
+        )
+
+        # Vision components
+        if DataType.RGB_IMAGES in self.input_data_types:
+            stats = cast(
+                list[CameraDataStats], self.dataset_statistics[DataType.RGB_IMAGES]
+            )
+            max_cameras = len(stats)
+            self.image_encoders = nn.ModuleList()
+            for i in range(max_cameras):
+                if use_resnet_stats:
+                    mean, std = RESNET_MEAN, RESNET_STD
+                else:
+                    mean_c_h_w, std_c_h_w = stats[i].frame.mean, stats[i].frame.std
+                    mean = mean_c_h_w.mean(axis=(1, 2)).tolist()
+                    std = std_c_h_w.mean(axis=(1, 2)).tolist()
+
+                encoder = nn.ModuleDict({
+                    "transform": torch.nn.Sequential(
+                        T.Resize((224, 224)),
+                        T.Normalize(mean=mean, std=std),
+                    ),
+                    "encoder": DiffusionPolicyImageEncoder(
+                        feature_dim=hidden_dim,
+                        spatial_softmax_num_keypoints=spatial_softmax_num_keypoints,
+                        use_pretrained_weights=use_pretrained_weights,
+                    ),
+                })
+                self.image_encoders.append(encoder)
+
             global_cond_dim += (
-                self.image_encoders[0].feature_dim
-                * self.dataset_description.rgb_images.max_len
+                self.image_encoders[0]["encoder"].feature_dim * max_cameras
             )
 
         self.unet = DiffusionConditionalUnet1d(
-            action_dim=self.dataset_description.joint_target_positions.max_len,
+            action_dim=self.max_output_size,
             global_cond_dim=global_cond_dim,
             down_dims=unet_down_dims,
             kernel_size=unet_kernel_size,
@@ -138,7 +236,7 @@ class DiffusionPolicy(NeuracoreModel):
             use_film_scale_modulation=unet_use_film_scale_modulation,
         )
 
-        kwargs: Dict[str, Any] = {
+        kwargs: dict[str, Any] = {
             "num_train_timesteps": num_train_timesteps,
             "beta_start": beta_start,
             "beta_end": beta_end,
@@ -151,38 +249,9 @@ class DiffusionPolicy(NeuracoreModel):
         self.noise_scheduler = self._make_noise_scheduler(
             noise_scheduler_type, **kwargs
         )
-        self.prediction_type = prediction_type
-        self.num_inference_steps = num_inference_steps
-        # Normalize the images with imagenet mean and std
-        self.image_normalizer = torch.nn.Sequential(
-            T.Resize((224, 224)),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        )
 
         # Setup parameter groups
         self._setup_optimizer_param_groups()
-        # Setup Normalizer
-        self._setup_normalizer()
-
-    def _setup_normalizer(self) -> None:
-        """Setup normalization statistics for different data types."""
-        joint_states = []
-        actions = []
-        if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-            joint_states.append(self.dataset_description.joint_positions)
-        if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
-            joint_states.append(self.dataset_description.joint_velocities)
-        if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
-            joint_states.append(self.dataset_description.joint_torques)
-        if (
-            DataType.JOINT_TARGET_POSITIONS
-            in self.model_init_description.output_data_types
-        ):
-            actions.append(self.dataset_description.joint_target_positions)
-        self.joint_state_normalizer = JOINT_STATE_NORMALIZER(
-            name="joint_states", statistics=joint_states
-        )
-        self.action_normalizer = ACTION_NORMALIZER(name="actions", statistics=actions)
 
     def _setup_optimizer_param_groups(self) -> None:
         """Setup parameter groups for optimizer."""
@@ -203,27 +272,44 @@ class DiffusionPolicy(NeuracoreModel):
                 {"params": other_params, "lr": self.lr},
             ]
 
-    def _combine_joint_states(
-        self, batch: BatchedInferenceSamples
-    ) -> torch.FloatTensor:
-        """Combine joint states."""
-        state_inputs = []
-        if batch.joint_positions:
-            state_inputs.append(batch.joint_positions.data * batch.joint_positions.mask)
-        if batch.joint_velocities:
-            state_inputs.append(
-                batch.joint_velocities.data * batch.joint_velocities.mask
-            )
-        if batch.joint_torques:
-            state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
+    def _combine_proprio(self, batch: BatchedInferenceInputs) -> torch.FloatTensor:
+        """Combine different types of joint state data.
 
-        if state_inputs:
-            joint_states = torch.cat(state_inputs, dim=-1)
-            joint_states = self.joint_state_normalizer.normalize(data=joint_states)
-            return joint_states
-        else:
-            # Return zero tensor if no joint states available
+        Args:
+            batch: Input batch containing joint state data
+
+        Returns:
+            torch.FloatTensor: Combined and normalized joint state features
+        """
+        proprio_list = []
+        for data_type in [
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+        ]:
+            if data_type not in batch.inputs:
+                continue
+
+            batched_nc_data = batch.inputs[data_type]
+            mask = batch.inputs_mask[data_type]
+
+            batched_joint_data = cast(list[BatchedJointData], batched_nc_data)
+            proprio_data = torch.cat([bjd.value for bjd in batched_joint_data], dim=-1)
+
+            last_proprio = proprio_data[:, -1, :]  # (B, num_features)
+            masked_proprio = last_proprio * mask
+            proprio_list.append(masked_proprio)
+
+        if not proprio_list:
             raise ValueError("No joint states available")
+
+        # Concatenate all proprio together: (B, total_proprio_dim)
+        all_proprio = torch.cat(proprio_list, dim=-1)
+
+        # Normalize once on all proprio
+        normalized_proprio = self.proprio_normalizer.normalize(all_proprio)
+
+        return normalized_proprio
 
     def _conditional_sample(
         self,
@@ -248,7 +334,7 @@ class DiffusionPolicy(NeuracoreModel):
             size=(
                 batch_size,
                 prediction_horizon,
-                self.dataset_description.joint_target_positions.max_len,
+                self.max_output_size,
             ),
             dtype=torch.float32,
             device=self.device,
@@ -274,41 +360,46 @@ class DiffusionPolicy(NeuracoreModel):
     def _prepare_global_conditioning(
         self,
         joint_states: torch.FloatTensor,
-        camera_images: torch.FloatTensor,
+        batched_nc_data: list[BatchedNCData],
         camera_images_mask: torch.FloatTensor,
     ) -> torch.FloatTensor:
         """Encode image features and concatenate with the state vector.
 
         Args:
             joint_states: Joint state tensor.
-            camera_images: Camera image tensor.
+            batched_nc_data: List of BatchedRGBData.
             camera_images_mask: Camera image mask tensor.
 
         Returns:
             Global conditioning tensor.
         """
+        batched_rgb_data = cast(list[BatchedRGBData], batched_nc_data)
         global_cond_feats = [joint_states]
         batch_size = joint_states.shape[0]
-        if camera_images is not None:
-            # Extract image features.
-            for cam_id, encoder in enumerate(self.image_encoders):
-                features = encoder(self.image_normalizer(camera_images[:, cam_id]))
-                features = features * camera_images_mask[:, cam_id].view(batch_size, 1)
-                global_cond_feats.append(features)
+
+        # Extract image features.
+        for cam_id, (encoder_dict, input_rgb) in enumerate(
+            zip(self.image_encoders, batched_rgb_data)
+        ):
+            last_frame = input_rgb.frame[:, -1, :, :, :]  # (B, 3, H, W)
+            transformed = encoder_dict["transform"](last_frame)
+            features = encoder_dict["encoder"](transformed)
+            features = features * camera_images_mask[:, cam_id].view(batch_size, 1)
+            global_cond_feats.append(features)
 
         # Concatenate features then flatten to (B, global_cond_dim).
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
 
     @staticmethod
     def _make_noise_scheduler(
-        noise_scheduler_type: str, **kwargs: Dict[str, Any]
+        noise_scheduler_type: str, **kwargs: dict[str, Any]
     ) -> Union[DDPMScheduler, DDIMScheduler]:
         """Factory for noise scheduler instances.
 
         All kwargs are passed to the scheduler.
 
         Args:
-            name: Type of scheduler to create.
+            noise_scheduler_type: Type of scheduler to create.
             **kwargs: Additional arguments for scheduler.
 
         Returns:
@@ -323,7 +414,7 @@ class DiffusionPolicy(NeuracoreModel):
 
     def _predict_action(
         self,
-        batch: BatchedInferenceSamples,
+        batch: BatchedInferenceInputs,
         prediction_horizon: int,
     ) -> torch.Tensor:
         """Predict action sequence from observations.
@@ -338,14 +429,16 @@ class DiffusionPolicy(NeuracoreModel):
         """
         batch_size = len(batch)
         # Normalize and combine joint states
-        joint_states = self._combine_joint_states(batch)
+        joint_states = self._combine_proprio(batch)
 
         # Encode image features and concatenate them all together along
         # with the state vector.
-        if batch.rgb_images is None:
-            raise ValueError("Failed to find rgb_images")
+        if DataType.RGB_IMAGES not in batch.inputs:
+            raise ValueError("Failed to find RGB images")
         global_cond = self._prepare_global_conditioning(
-            joint_states, batch.rgb_images.data, batch.rgb_images.mask
+            joint_states,
+            batch.inputs[DataType.RGB_IMAGES],
+            batch.inputs_mask[DataType.RGB_IMAGES],
         )  # (B, global_cond_dim)
 
         # run sampling
@@ -355,26 +448,47 @@ class DiffusionPolicy(NeuracoreModel):
 
         return actions
 
-    def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
+    def forward(
+        self, batch: BatchedInferenceInputs
+    ) -> dict[DataType, list[BatchedNCData]]:
         """Forward pass for inference.
 
         Args:
             batch: Batch of inference samples.
 
         Returns:
-            Model prediction with outputs and timing information.
+            dict[DataType, list[BatchedNCData]]: Model predictions with action sequences
         """
-        t = time.time()
         prediction_horizon = self.output_prediction_horizon
         action_preds = self._predict_action(batch, prediction_horizon)
-        prediction_time = time.time() - t
-        # unnormalize the actions
-        predictions = self.action_normalizer.unnormalize(data=action_preds)
-        predictions = predictions.detach().cpu().numpy()
-        return ModelPrediction(
-            outputs={DataType.JOINT_TARGET_POSITIONS: predictions},
-            prediction_time=prediction_time,
-        )
+
+        # (B, T, action_dim)
+        predictions = self.action_normalizer.unnormalize(action_preds)
+
+        output_tensors: dict[DataType, list[BatchedNCData]] = {}
+
+        for dt in self.output_data_types:
+            start_idx, end_idx = self.output_dims[dt]
+            dt_preds = predictions[:, :, start_idx:end_idx]  # (B, T, dt_size)
+
+            if dt in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+                batched_outputs = []
+                for i in range(len(self.dataset_statistics[dt])):
+                    joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
+                    batched_outputs.append(BatchedJointData(value=joint_preds))
+                output_tensors[dt] = batched_outputs
+            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                batched_outputs = []
+                for i in range(len(self.dataset_statistics[dt])):
+                    gripper_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
+                    batched_outputs.append(
+                        BatchedParallelGripperOpenAmountData(open_amount=gripper_preds)
+                    )
+                output_tensors[dt] = batched_outputs
+            else:
+                raise ValueError(f"Unsupported output data type: {dt}")
+
+        return output_tensors
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Perform a single training step.
@@ -388,24 +502,47 @@ class DiffusionPolicy(NeuracoreModel):
         Returns:
             BatchedTrainingOutputs: Training outputs with losses and metrics
         """
-        inference_sample = BatchedInferenceSamples(
-            joint_positions=batch.inputs.joint_positions,
-            joint_velocities=batch.inputs.joint_velocities,
-            joint_torques=batch.inputs.joint_torques,
-            rgb_images=batch.inputs.rgb_images,
+        inference_sample = BatchedInferenceInputs(
+            inputs=batch.inputs,
+            inputs_mask=batch.inputs_mask,
+            batch_size=batch.batch_size,
         )
-        if batch.inputs.rgb_images is None:
-            raise ValueError("Failed to find rgb_images")
-        joint_states = self._combine_joint_states(inference_sample)
+
+        if DataType.RGB_IMAGES not in batch.inputs:
+            raise ValueError("Failed to find RGB images")
+
+        joint_states = self._combine_proprio(inference_sample)
         global_cond = self._prepare_global_conditioning(
-            joint_states, batch.inputs.rgb_images.data, batch.inputs.rgb_images.mask
+            joint_states,
+            batch.inputs[DataType.RGB_IMAGES],
+            batch.inputs_mask[DataType.RGB_IMAGES],
         )
-        if batch.outputs.joint_target_positions is None:
-            raise ValueError("Failed to find joint_target_positions")
-        target_actions = self.action_normalizer.normalize(
-            data=batch.outputs.joint_target_positions.data
-        )
-        target_actions = target_actions * batch.outputs.joint_target_positions.mask
+
+        if set(batch.outputs.keys()) != set(self.output_data_types):
+            raise ValueError(
+                "Batch outputs do not match model output configuration."
+                f" Expected {self.output_data_types}, got {list(batch.outputs.keys())}"
+            )
+
+        # Concatenate all output actions
+        action_targets = []
+        for dt in self.output_data_types:
+            if dt in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+                batched_joints = cast(list[BatchedJointData], batch.outputs[dt])
+                action_targets.extend([bjd.value for bjd in batched_joints])
+            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                grippers = cast(
+                    list[BatchedParallelGripperOpenAmountData], batch.outputs[dt]
+                )
+                action_targets.extend([gripper.open_amount for gripper in grippers])
+            else:
+                raise ValueError(f"Unsupported output data type: {dt}")
+
+        action_data = torch.cat(action_targets, dim=-1)  # (B, T, total_action_dim)
+
+        target_actions = self.action_normalizer.normalize(action_data)
+        target_actions = target_actions
+
         # Sample noise to add to the trajectory.
         eps = torch.randn(target_actions.shape, device=target_actions.device)
         # Sample a random noising timestep for each item in the batch.
@@ -435,8 +572,7 @@ class DiffusionPolicy(NeuracoreModel):
 
         loss = F.mse_loss(pred, target, reduction="none")
         # Apply mask and reduce
-        mask = batch.outputs.joint_target_positions.mask
-        loss = (loss * mask).mean()
+        loss = loss.mean()
 
         losses = {
             "mse_loss": loss,
@@ -445,7 +581,6 @@ class DiffusionPolicy(NeuracoreModel):
             "mse_loss": loss,
         }
         return BatchedTrainingOutputs(
-            output_predictions=pred,
             losses=losses,
             metrics=metrics,
         )
@@ -492,24 +627,28 @@ class DiffusionPolicy(NeuracoreModel):
         ]
 
     @staticmethod
-    def get_supported_input_data_types() -> list[DataType]:
+    def get_supported_input_data_types() -> set[DataType]:
         """Get the input data types supported by this model.
 
         Returns:
-            list[DataType]: List of supported input data types
+            set[DataType]: Set of supported input data types
         """
-        return [
+        return {
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
-            DataType.RGB_IMAGE,
-        ]
+            DataType.RGB_IMAGES,
+        }
 
     @staticmethod
-    def get_supported_output_data_types() -> list[DataType]:
+    def get_supported_output_data_types() -> set[DataType]:
         """Get the output data types supported by this model.
 
         Returns:
-            list[DataType]: List of supported output data types
+            set[DataType]: Set of supported output data types
         """
-        return [DataType.JOINT_TARGET_POSITIONS]
+        return {
+            DataType.JOINT_TARGET_POSITIONS,
+            DataType.JOINT_POSITIONS,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        }

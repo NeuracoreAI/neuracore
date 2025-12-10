@@ -14,7 +14,7 @@ import sys
 import traceback
 import types
 from pathlib import Path
-from typing import List, Optional, Type
+from typing import Optional
 
 from ..core.neuracore_model import NeuracoreModel
 
@@ -93,7 +93,7 @@ class AlgorithmLoader:
 
         # Strip out neuracore dependencies to avoid conflicts
         try:
-            with open(req_file, "r") as f:
+            with open(req_file) as f:
                 lines = f.readlines()
             purged_lines = [line for line in lines if "neuracore" not in line.lower()]
             if len(purged_lines) != len(lines):
@@ -124,7 +124,7 @@ class AlgorithmLoader:
             logger.error(error_msg)
             raise RequirementsInstallError(error_msg)
 
-    def get_all_files(self) -> List[Path]:
+    def get_all_files(self) -> list[Path]:
         """Get all Python files in the algorithm directory recursively.
 
         Scans the algorithm directory and all subdirectories for Python files,
@@ -182,7 +182,7 @@ class AlgorithmLoader:
 
     def _find_model_in_module(
         self, module: types.ModuleType, module_name: str
-    ) -> Optional[Type[NeuracoreModel]]:
+    ) -> Optional[type[NeuracoreModel]]:
         """Search for NeuracoreModel subclasses within an imported module.
 
         Inspects all attributes of a module to find classes that inherit from
@@ -220,7 +220,7 @@ class AlgorithmLoader:
             logger.warning(f"Error searching for models in {module_name}: {e}")
             return None
 
-    def _try_import_package(self, package_name: str) -> Optional[Type[NeuracoreModel]]:
+    def _try_import_package(self, package_name: str) -> Optional[type[NeuracoreModel]]:
         """Attempt to import the entire algorithm directory as a package.
 
         Tries to import the algorithm directory as a Python package and search
@@ -258,7 +258,7 @@ class AlgorithmLoader:
 
     def _try_import_module_by_path(
         self, file_path: Path, package_name: str
-    ) -> Optional[Type[NeuracoreModel]]:
+    ) -> Optional[type[NeuracoreModel]]:
         """Import a specific Python file using multiple import strategies.
 
         Attempts to import a Python file first as a package-relative module,
@@ -321,7 +321,7 @@ class AlgorithmLoader:
 
         return None
 
-    def _get_python_files(self) -> List[Path]:
+    def _get_python_files(self) -> list[Path]:
         """Get all Python files in the algorithm directory for processing.
 
         Scans the algorithm directory recursively for Python files, excluding
@@ -347,7 +347,7 @@ class AlgorithmLoader:
 
         return python_files
 
-    def load_model(self) -> Type[NeuracoreModel]:
+    def load_model(self) -> type[NeuracoreModel]:
         """Find and load the first NeuracoreModel subclass in the algorithm directory.
 
         This is the main entry point for algorithm loading. It handles the complete

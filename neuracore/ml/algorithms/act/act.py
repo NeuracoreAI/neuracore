@@ -10,16 +10,27 @@ with low-cost hardware." arXiv preprint arXiv:2304.13705 (2023).
 """
 
 import logging
-import time
+from typing import cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
-from neuracore_types import DataType, ModelInitDescription, ModelPrediction
+from neuracore_types import (
+    BatchedJointData,
+    BatchedNCData,
+    BatchedParallelGripperOpenAmountData,
+    BatchedRGBData,
+    CameraDataStats,
+    DataItemStats,
+    DataType,
+    JointDataStats,
+    ModelInitDescription,
+    ParallelGripperOpenAmountDataStats,
+)
 
 from neuracore.ml import (
-    BatchedInferenceSamples,
+    BatchedInferenceInputs,
     BatchedTrainingOutputs,
     BatchedTrainingSamples,
     NeuracoreModel,
@@ -35,8 +46,10 @@ from .modules import (
 
 logger = logging.getLogger(__name__)
 
-JOINT_STATE_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
+PROPRIO_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
 ACTION_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
+RESNET_MEAN = [0.485, 0.456, 0.406]
+RESNET_STD = [0.229, 0.224, 0.225]
 
 
 class ACT(NeuracoreModel):
@@ -60,6 +73,7 @@ class ACT(NeuracoreModel):
         nheads: int = 8,
         dim_feedforward: int = 3200,
         dropout: float = 0.1,
+        use_resnet_stats: bool = True,
         lr: float = 1e-4,
         freeze_backbone: bool = False,
         lr_backbone: float = 1e-5,
@@ -77,6 +91,7 @@ class ACT(NeuracoreModel):
             nheads: Number of attention heads
             dim_feedforward: Feedforward network dimension
             dropout: Dropout probability
+            use_resnet_stats: Whether to use ResNet normalization statistics
             lr: Learning rate for main parameters
             freeze_backbone: Whether to freeze image encoder backbone
             lr_backbone: Learning rate for image encoder backbone
@@ -86,33 +101,117 @@ class ACT(NeuracoreModel):
         """
         super().__init__(model_init_description)
         self.hidden_dim = hidden_dim
+        self.use_resnet_stats = use_resnet_stats
         self.freeze_backbone = freeze_backbone
         self.lr = lr
         self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
         self.kl_weight = kl_weight
         self.latent_dim = latent_dim
-        # Vision components
-        self.image_encoders = nn.ModuleList([
-            ACTImageEncoder(output_dim=hidden_dim)
-            for _ in range(self.dataset_description.rgb_images.max_len)
-        ])
 
-        state_input_dim = (
-            self.dataset_description.joint_positions.max_len
-            + self.dataset_description.joint_velocities.max_len
-            + self.dataset_description.joint_torques.max_len
-            + self.dataset_description.parallel_gripper_open_amounts.max_len
-        )
+        data_stats: dict[DataType, DataItemStats] = {}
+
+        # Setup proprioceptive data
+        self.proprio_dims: dict[DataType, tuple[int, int]] = {}
+        proprio_stats = []
+        current_dim = 0
+
+        for dt in [
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        ]:
+            if dt in self.data_types:
+                if dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                    stats = cast(
+                        list[ParallelGripperOpenAmountDataStats],
+                        self.dataset_statistics[dt],
+                    )
+                    combined_stats = DataItemStats()
+                    for stat in stats:
+                        combined_stats = combined_stats.concatenate(stat.open_amount)
+                    data_stats[dt] = combined_stats
+                else:
+                    stats = cast(list[JointDataStats], self.dataset_statistics[dt])
+                    combined_stats = DataItemStats()
+                    for stat in stats:
+                        combined_stats = combined_stats.concatenate(stat.value)
+                    data_stats[dt] = combined_stats
+
+                if dt in self.input_data_types:
+                    proprio_stats.append(combined_stats)
+                    dim = len(combined_stats.mean)
+                    self.proprio_dims[dt] = (current_dim, current_dim + dim)
+                    current_dim += dim
+
+        # State embedding
+        state_input_dim = current_dim
         self.state_embed = None
         if state_input_dim > 0:
             self.state_embed = nn.Linear(state_input_dim, hidden_dim)
 
-        self.action_embed = nn.Linear(
-            self.dataset_description.joint_target_positions.max_len
-            + self.dataset_description.parallel_gripper_open_amounts.max_len,
-            hidden_dim,
+        # Setup output data
+        self.max_output_size = 0
+        output_stats = []
+        for dt in self.output_data_types:
+            if dt == DataType.JOINT_TARGET_POSITIONS:
+                stats = cast(
+                    list[JointDataStats],
+                    self.dataset_statistics[dt],
+                )
+                combined_stats = DataItemStats()
+                for stat in stats:
+                    combined_stats = combined_stats.concatenate(stat.value)
+            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                stats = cast(
+                    list[ParallelGripperOpenAmountDataStats],
+                    self.dataset_statistics[dt],
+                )
+                combined_stats = DataItemStats()
+                for stat in stats:
+                    combined_stats = combined_stats.concatenate(stat.open_amount)
+            else:
+                raise ValueError(f"Unsupported output data type: {dt}")
+
+            data_stats[dt] = combined_stats
+            output_stats.append(combined_stats)
+            self.max_output_size += len(combined_stats.mean)
+
+        # Action embedding
+        self.action_embed = nn.Linear(self.max_output_size, hidden_dim)
+
+        # Setup normalizers
+        self.proprio_normalizer = PROPRIO_NORMALIZER(
+            name="proprioception", statistics=proprio_stats
         )
+        self.action_normalizer = ACTION_NORMALIZER(
+            name="actions", statistics=output_stats
+        )
+
+        # Vision components
+        if DataType.RGB_IMAGES in self.input_data_types:
+            stats = cast(
+                list[CameraDataStats], self.dataset_statistics[DataType.RGB_IMAGES]
+            )
+            max_cameras = len(stats)
+            self.image_encoders = nn.ModuleList()
+            for i in range(max_cameras):
+                if use_resnet_stats:
+                    mean, std = RESNET_MEAN, RESNET_STD
+                else:
+                    mean_c_h_w, std_c_h_w = stats[i].frame.mean, stats[i].frame.std
+                    mean = mean_c_h_w.mean(axis=(1, 2)).tolist()
+                    std = std_c_h_w.mean(axis=(1, 2)).tolist()
+
+                encoder = nn.ModuleDict({
+                    "transform": torch.nn.Sequential(
+                        T.Resize((224, 224)),
+                        T.Normalize(mean=mean, std=std),
+                    ),
+                    "encoder": ACTImageEncoder(output_dim=hidden_dim),
+                })
+                self.image_encoders.append(encoder)
 
         # CLS token embedding for latent encoder
         self.cls_embed = nn.Parameter(torch.randn(1, 1, hidden_dim))
@@ -148,11 +247,7 @@ class ACT(NeuracoreModel):
         self.pos_encoder = PositionalEncoding(hidden_dim, dropout)
 
         # Output heads
-        self.action_head = nn.Linear(
-            hidden_dim,
-            self.dataset_description.joint_target_positions.max_len
-            + self.dataset_description.parallel_gripper_open_amounts.max_len,
-        )
+        self.action_head = nn.Linear(hidden_dim, self.max_output_size)
 
         # Latent projections
         self.latent_mu = nn.Linear(hidden_dim, latent_dim)
@@ -167,49 +262,8 @@ class ACT(NeuracoreModel):
         # Additional position embeddings for proprio and latent
         self.additional_pos_embed = nn.Parameter(torch.randn(2, 1, hidden_dim))
 
-        self.transform = torch.nn.Sequential(
-            T.Resize((224, 224)),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        )
-
         # Setup parameter groups
         self._setup_optimizer_param_groups()
-        # Setup Normalizer
-        self._setup_normalizer()
-
-    def _setup_normalizer(self) -> None:
-        """Setup Normalizer for different data types."""
-        # Joint state normalization
-        joint_states = []
-        actions = []
-
-        if DataType.JOINT_POSITIONS in self.model_init_description.input_data_types:
-            joint_states.append(self.dataset_description.joint_positions)
-        if DataType.JOINT_VELOCITIES in self.model_init_description.input_data_types:
-            joint_states.append(self.dataset_description.joint_velocities)
-        if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
-            joint_states.append(self.dataset_description.joint_torques)
-        if (
-            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS
-            in self.model_init_description.input_data_types
-        ):
-            joint_states.append(self.dataset_description.parallel_gripper_open_amounts)
-
-        if (
-            DataType.JOINT_TARGET_POSITIONS
-            in self.model_init_description.output_data_types
-        ):
-            actions.append(self.dataset_description.joint_target_positions)
-        if (
-            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS
-            in self.model_init_description.output_data_types
-        ):
-            actions.append(self.dataset_description.parallel_gripper_open_amounts)
-
-        self.joint_state_normalizer = JOINT_STATE_NORMALIZER(
-            name="joint_states", statistics=joint_states
-        )
-        self.action_normalizer = ACTION_NORMALIZER(name="actions", statistics=actions)
 
     def _setup_optimizer_param_groups(self) -> None:
         """Setup parameter groups for optimizer."""
@@ -248,6 +302,59 @@ class ACT(NeuracoreModel):
             eps = torch.randn_like(std)
             return mu + eps * std
         return mu
+
+    def _combine_proprio(self, batch: BatchedInferenceInputs) -> torch.FloatTensor:
+        """Combine different types of joint state data.
+
+        Concatenates joint positions, velocities, and torques into a single
+        feature vector, applying masks and normalization.
+
+        Args:
+            batch: Input batch containing joint state data
+
+        Returns:
+            torch.FloatTensor: Combined and normalized joint state features
+        """
+        if self.state_embed is None:
+            return None
+
+        proprio_list = []
+        for data_type in [
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        ]:
+            if data_type not in batch.inputs:
+                continue
+
+            batched_nc_data = batch.inputs[data_type]
+            mask = batch.inputs_mask[data_type]
+
+            if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                batched_gripper_data = cast(
+                    list[BatchedParallelGripperOpenAmountData], batched_nc_data
+                )
+                proprio_data = torch.cat(
+                    [bgd.open_amount for bgd in batched_gripper_data], dim=-1
+                )
+            else:
+                batched_joint_data = cast(list[BatchedJointData], batched_nc_data)
+                proprio_data = torch.cat(
+                    [bjd.value for bjd in batched_joint_data], dim=-1
+                )
+
+            last_proprio = proprio_data[:, -1, :]  # (B, num_features)
+            masked_proprio = last_proprio * mask
+            proprio_list.append(masked_proprio)
+
+        # Concatenate all proprio together: (B, total_proprio_dim)
+        all_proprio = torch.cat(proprio_list, dim=-1)
+
+        # Normalize once on all proprio
+        normalized_proprio = self.proprio_normalizer.normalize(all_proprio)
+
+        return normalized_proprio
 
     def _encode_latent(
         self,
@@ -290,7 +397,7 @@ class ACT(NeuracoreModel):
         cls_token = self.cls_embed.expand(-1, batch_size, -1)  # [1, B, H]
         encoder_input = torch.cat([cls_token, state_embed, action_embed], dim=0)
 
-        # Update padding mask
+        # # Update padding mask
         if actions_sequence_mask is not None:
             cls_joint_pad = torch.zeros(
                 batch_size, 2, dtype=torch.bool, device=self.device
@@ -315,7 +422,7 @@ class ACT(NeuracoreModel):
     def _encode_visual(
         self,
         states: torch.FloatTensor,
-        camera_images: torch.FloatTensor,
+        batched_nc_data: list[BatchedNCData],
         camera_images_mask: torch.FloatTensor,
         latent: torch.FloatTensor,
     ) -> torch.FloatTensor:
@@ -326,21 +433,26 @@ class ACT(NeuracoreModel):
 
         Args:
             states: Proprioceptive state features
-            camera_images: RGB camera images [B, num_cameras, C, H, W]
+            batched_nc_data: List of BatchedRGBData
             camera_images_mask: Mask for valid camera inputs
             latent: Latent features from action encoding
 
         Returns:
             torch.FloatTensor: Encoded visual and proprioceptive memory
         """
+        batched_rgb_data = cast(list[BatchedRGBData], batched_nc_data)
         batch_size = states.shape[0]
 
         # Process images
         image_features = []
         image_pos = []
-        for cam_id, encoder in enumerate(self.image_encoders):
-            features, pos = encoder(
-                self.transform(camera_images[:, cam_id])
+        for cam_id, (encoder_dict, input_rgb) in enumerate(
+            zip(self.image_encoders, batched_rgb_data)
+        ):
+            last_frame = input_rgb.frame[:, -1, :, :, :]  # (B, 3, H, W)
+            transformed = encoder_dict["transform"](last_frame)
+            features, pos = encoder_dict["encoder"](
+                transformed
             )  # Vision backbone provides features and pos
             features *= camera_images_mask[:, cam_id].view(batch_size, 1, 1, 1)
             image_features.append(features)
@@ -423,7 +535,7 @@ class ACT(NeuracoreModel):
         self,
         mu: torch.FloatTensor,
         logvar: torch.FloatTensor,
-        batch: BatchedInferenceSamples,
+        batch: BatchedInferenceInputs,
     ) -> torch.FloatTensor:
         """Predict action sequence from latent distribution and observations.
 
@@ -441,84 +553,70 @@ class ACT(NeuracoreModel):
         # Project latent
         latent = self.latent_out_proj(latent_sample)  # [B, H]
 
-        if batch.rgb_images is not None:
-            # Encode visual features
-            memory = self._encode_visual(
-                self._combine_joint_states(batch),
-                batch.rgb_images.data,
-                batch.rgb_images.mask,
-                latent,
-            )
+        if DataType.RGB_IMAGES not in batch.inputs:
+            raise ValueError("No RGB images in batch")
 
-            # Decode actions
-            action_preds = self._decode(latent, memory)
-            return action_preds
-        raise ValueError("No batch rbg_images")
+        # Encode visual features
+        proprio_state = self._combine_proprio(batch)
+        memory = self._encode_visual(
+            proprio_state,
+            batch.inputs[DataType.RGB_IMAGES],
+            batch.inputs_mask[DataType.RGB_IMAGES],
+            latent,
+        )
 
-    def _combine_joint_states(
-        self, batch: BatchedInferenceSamples
-    ) -> torch.FloatTensor:
-        """Combine different types of joint state data.
+        # Decode actions
+        action_preds = self._decode(latent, memory)
+        return action_preds
 
-        Concatenates joint positions, velocities, and torques into a single
-        feature vector, applying masks and normalization.
-
-        Args:
-            batch: Input batch containing joint state data
-
-        Returns:
-            torch.FloatTensor: Combined and normalized joint state features
-        """
-        joint_states = None
-        if self.state_embed is not None:
-            state_inputs = []
-            if batch.joint_positions:
-                state_inputs.append(
-                    batch.joint_positions.data * batch.joint_positions.mask
-                )
-            if batch.joint_velocities:
-                state_inputs.append(
-                    batch.joint_velocities.data * batch.joint_velocities.mask
-                )
-            if batch.joint_torques:
-                state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
-            if batch.parallel_gripper_open_amounts:
-                state_inputs.append(
-                    batch.parallel_gripper_open_amounts.data
-                    * batch.parallel_gripper_open_amounts.mask
-                )
-            joint_states = torch.cat(state_inputs, dim=-1)
-            joint_states = self.joint_state_normalizer.normalize(data=joint_states)
-        return joint_states
-
-    def forward(self, batch: BatchedInferenceSamples) -> ModelPrediction:
+    def forward(
+        self, batch: BatchedInferenceInputs
+    ) -> dict[DataType, list[BatchedNCData]]:
         """Perform inference to predict action sequence.
 
         Args:
             batch: Input batch with observations
 
         Returns:
-            ModelPrediction: Model predictions with timing information
+            dict[DataType, list[BatchedNCData]]: Model predictions with action sequences
         """
-        t = time.time()
         batch_size = len(batch)
         mu = torch.zeros(batch_size, self.latent_dim, device=self.device)
         logvar = torch.zeros(batch_size, self.latent_dim, device=self.device)
         action_preds = self._predict_action(mu, logvar, batch)
-        prediction_time = time.time() - t
-        predictions = self.action_normalizer.unnormalize(data=action_preds)
-        predictions = predictions.detach().cpu().numpy()
-        return ModelPrediction(
-            outputs={
-                DataType.JOINT_TARGET_POSITIONS: predictions[
-                    :, :, : self.dataset_description.joint_target_positions.max_len
-                ],
-                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: predictions[
-                    :, :, self.dataset_description.joint_target_positions.max_len :
-                ],
-            },
-            prediction_time=prediction_time,
-        )
+
+        # (B, T, action_dim)
+        predictions = self.action_normalizer.unnormalize(action_preds)
+
+        output_tensors: dict[DataType, list[BatchedNCData]] = {}
+
+        start_slice_idx = 0
+        for dt in self.output_data_types:
+            end_slice_idx = start_slice_idx + len(self.dataset_statistics[dt])
+            dt_preds = predictions[
+                :, :, start_slice_idx:end_slice_idx
+            ]  # (B, T, dt_size)
+
+            if dt == DataType.JOINT_TARGET_POSITIONS:
+                batched_outputs = []
+                for i in range(len(self.dataset_statistics[dt])):
+                    joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
+                    batched_outputs.append(BatchedJointData(value=joint_preds))
+                output_tensors[dt] = batched_outputs
+            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                batched_outputs = []
+                for i in range(len(self.dataset_statistics[dt])):
+                    gripper_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
+                    batched_outputs.append(
+                        BatchedParallelGripperOpenAmountData(open_amount=gripper_preds)
+                    )
+                output_tensors[dt] = batched_outputs
+            else:
+                raise ValueError(f"Unsupported output data type: {dt}")
+
+            start_slice_idx = end_slice_idx
+
+        return output_tensors
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Perform a single training step.
@@ -532,48 +630,60 @@ class ACT(NeuracoreModel):
         Returns:
             BatchedTrainingOutputs: Training outputs with losses and metrics
         """
-        if batch.outputs.joint_target_positions is None:
-            raise ValueError("Batch output joint target positions is None")
-        if batch.outputs.parallel_gripper_open_amounts is None:
-            raise ValueError("Batch output parallel gripper open amounts is None")
+        if DataType.JOINT_TARGET_POSITIONS not in batch.outputs:
+            raise ValueError("Batch output joint target positions missing")
 
-        action_mask = torch.cat(
-            [
-                batch.outputs.joint_target_positions.mask,
-                batch.outputs.parallel_gripper_open_amounts.mask,
-            ],
-            dim=-1,
+        inference_sample = BatchedInferenceInputs(
+            inputs=batch.inputs,
+            inputs_mask=batch.inputs_mask,
+            batch_size=batch.batch_size,
         )
 
-        pred_sequence_mask = action_mask[:, :, 0]  # [batch_size, T]
-        max_action_mask = action_mask[:, 0, :]  # [batch_size, MaxActionSize]
-        inference_sample = BatchedInferenceSamples(
-            joint_positions=batch.inputs.joint_positions,
-            joint_velocities=batch.inputs.joint_velocities,
-            joint_torques=batch.inputs.joint_torques,
-            rgb_images=batch.inputs.rgb_images,
-            parallel_gripper_open_amounts=batch.inputs.parallel_gripper_open_amounts,
-        )
-        joint_states = self._combine_joint_states(inference_sample)
-        action_data = torch.cat(
-            [
-                batch.outputs.joint_target_positions.data,
-                batch.outputs.parallel_gripper_open_amounts.data,
-            ],
-            dim=-1,
-        )
+        # Extract target actions
+        # Extract target actions
+        action_targets = []
+        for dt in self.output_data_types:
+            if dt == DataType.JOINT_TARGET_POSITIONS:
+                batched_joints = cast(list[BatchedJointData], batch.outputs[dt])
+                action_targets.extend([bjd.value for bjd in batched_joints])
+            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                grippers = cast(
+                    list[BatchedParallelGripperOpenAmountData], batch.outputs[dt]
+                )
+                action_targets.extend([gripper.open_amount for gripper in grippers])
+            else:
+                raise ValueError(f"Unsupported output data type: {dt}")
+
+        action_data = torch.cat(action_targets, dim=-1)  # (B, T, action_dim)
+
+        # Get masks
+        pred_sequence_mask = torch.ones_like(
+            action_data[:, :, 0]
+        )  # All time steps valid
+        max_action_mask = torch.ones(
+            batch.batch_size, self.max_output_size, device=self.device
+        )  # All actions valid
+
+        proprio_state = self._combine_proprio(inference_sample)
+
+        # Normalize actions for encoding
+        normalized_actions = self.action_normalizer.normalize(action_data)
+
         mu, logvar = self._encode_latent(
-            joint_states,
-            action_data,
+            proprio_state,
+            normalized_actions,
             max_action_mask,
             pred_sequence_mask,
         )
+
         action_preds = self._predict_action(mu, logvar, inference_sample)
-        target_actions = self.action_normalizer.normalize(data=action_data)
+        target_actions = self.action_normalizer.normalize(action_data)
+
         l1_loss_all = F.l1_loss(action_preds, target_actions, reduction="none")
         l1_loss = (l1_loss_all * pred_sequence_mask.unsqueeze(-1)).mean()
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
         loss = l1_loss + self.kl_weight * kl_loss
+
         losses = {
             "l1_and_kl_loss": loss,
         }
@@ -581,8 +691,8 @@ class ACT(NeuracoreModel):
             "l1_loss": l1_loss,
             "kl_loss": kl_loss,
         }
+
         return BatchedTrainingOutputs(
-            output_predictions=action_preds,
             losses=losses,
             metrics=metrics,
         )
@@ -601,25 +711,25 @@ class ACT(NeuracoreModel):
         return [torch.optim.AdamW(self.param_groups, weight_decay=self.weight_decay)]
 
     @staticmethod
-    def get_supported_input_data_types() -> list[DataType]:
+    def get_supported_input_data_types() -> set[DataType]:
         """Get the input data types supported by this model.
 
         Returns:
-            list[DataType]: List of supported input data types
+            set[DataType]: Set of supported input data types
         """
-        return [
+        return {
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
-            DataType.RGB_IMAGE,
+            DataType.RGB_IMAGES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
-        ]
+        }
 
     @staticmethod
-    def get_supported_output_data_types() -> list[DataType]:
+    def get_supported_output_data_types() -> set[DataType]:
         """Get the output data types supported by this model.
 
         Returns:
-            list[DataType]: List of supported output data types
+            set[DataType]: Set of supported output data types
         """
-        return [DataType.JOINT_TARGET_POSITIONS, DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS]
+        return {DataType.JOINT_TARGET_POSITIONS, DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS}

@@ -49,7 +49,7 @@ class ConfigManager:
             return self._config
 
         try:
-            with open(config_file, mode="r", encoding=CONFIG_ENCODING) as f:
+            with open(config_file, encoding=CONFIG_ENCODING) as f:
                 self._config = Config.model_validate_json(f.read())
                 return self._config
         except ValidationError:

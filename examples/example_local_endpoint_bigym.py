@@ -1,8 +1,9 @@
 import argparse
 import time
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
+import torch
 from bigym_utils.utils import (
     JOINT_ACTUATORS,
     JOINT_NAMES,
@@ -10,10 +11,31 @@ from bigym_utils.utils import (
     obs_to_imgs,
     obs_to_joint_dict,
 )
+from neuracore_types import (
+    BatchedJointData,
+    BatchedNCData,
+    DataSpec,
+    DataType,
+    JointData,
+    RGBCameraData,
+    SynchronizedPoint,
+)
 
 import neuracore as nc
 
 TRAINING_JOB_NAME = "MyTrainingJob"
+ROBOT_NAME = "Mujoco UnitreeH1 Example"
+CAMERA_NAMES = ["head"]
+
+# Specification of the order that will be fed into the model
+MODEL_INPUT_ORDER: DataSpec = {
+    DataType.JOINT_POSITIONS: JOINT_NAMES,
+    DataType.RGB_IMAGES: CAMERA_NAMES,
+}
+
+MODEL_OUTPUT_ORDER: DataSpec = {
+    DataType.JOINT_TARGET_POSITIONS: JOINT_ACTUATORS,
+}
 
 
 def run_rollout(
@@ -24,7 +46,7 @@ def run_rollout(
 ) -> bool:
     """
     Run a single rollout using the provided policy in the given environment.
-    Logs joint positions and images to neuracore at each step.
+    Creates sync points manually without logging data to the robot.
     Returns True if the episode succeeded, False otherwise.
 
     Args:
@@ -39,37 +61,45 @@ def run_rollout(
     obs, info = env.reset()
 
     horizon = 1
-    actions: list[np.ndarray] = []
 
     for step_idx in range(num_steps):
-        # Log joint states
+        # Get joint states and images
         qpos, qvel = obs_to_joint_dict(obs, JOINT_NAMES)
-        nc.log_joint_positions(qpos)
-
-        # Log image(s)
         images = obs_to_imgs(obs)
-        nc.log_rgb("head", images["head"])
+
+        # Create a sync point manually without logging data to the robot
+        SynchronizedPoint(
+            data={
+                DataType.JOINT_POSITIONS: {
+                    k: JointData(value=v) for k, v in qpos.items()
+                },
+                DataType.RGB_IMAGES: {
+                    "head": RGBCameraData(frame=images["head"]),
+                },
+            }
+        )
 
         idx_in_horizon = step_idx % horizon
 
         # Re-plan at the start of each horizon
         if idx_in_horizon == 0:
             print(f"Step {step_idx} / {num_steps}")
-            predicted_sync_points = policy.predict(timeout=5)
+            predictions: dict[DataType, dict[str, BatchedNCData]] = policy.predict(
+                timeout=5
+            )
 
-            joint_target_positions = [
-                sp.joint_target_positions for sp in predicted_sync_points
-            ]
+            joint_target_positions = cast(
+                dict[str, BatchedJointData],
+                predictions[DataType.JOINT_TARGET_POSITIONS],
+            )
 
-            actions = [
-                jtp.numpy(order=JOINT_ACTUATORS)
-                for jtp in joint_target_positions
-                if jtp is not None
-            ]
+            # Concatenate joint targets in the order specified by JOINT_ACTUATORS
+            batched_action = torch.cat(
+                [joint_target_positions[name].value for name in JOINT_ACTUATORS],
+                dim=1,
+            ).numpy()
 
-            if not actions:
-                raise RuntimeError("Policy returned no valid actions.")
-
+            actions = batched_action[0]  # Get the first (and only) in the batch
             horizon = len(actions)
 
         a = actions[idx_in_horizon]
@@ -91,29 +121,17 @@ def run_rollout(
 def main(
     num_rollouts: int,
 ) -> None:
-    nc.login()
-
-    nc.connect_robot(
-        robot_name="Mujoco UnitreeH1 Example",
-        mjcf_path="bigym/bigym/envs/xmls/h1/h1.xml",  # Update path as needed
-        overwrite=False,
-    )
-
-    # If you have a train run name, you can use it to connect to a local. E.g.:
+    # If you know the path to the local model.nc.zip file
+    # you can use it directly without connecting to a robot
     policy = nc.policy(
-        train_run_name=TRAINING_JOB_NAME,
+        model_file="PATH/TO/MODEL.nc.zip",
+        model_input_order=MODEL_INPUT_ORDER,
+        model_output_order=MODEL_OUTPUT_ORDER,
     )
-    # If you know the path to the local model.nc.zip file, you can use it directly as:
-    # policy = nc.policy(model_file="")
-
-    # Alternatively, you can connect to a local endpoint that has been started
-    # policy = nc.policy_local_server(train_run_name=TRAINING_JOB_NAME)
 
     # Optional. Set the checkpoint to the last epoch.
     # Note by default, model is loaded from the last epoch.
     # policy.set_checkpoint(epoch=-1)
-
-    # Optional: policy.set_checkpoint(epoch=-1)
 
     success_count = 0
     env = make_env()
@@ -125,6 +143,7 @@ def main(
                 env=env,
                 policy=policy,
                 num_steps=100,
+                sleep_per_step=0.05,
             )
 
             if succeeded:

@@ -46,8 +46,10 @@ def remote_node_logger(robot_name: str, instance: int, ready_event: Event):
         nc_remote.log_rgb(
             "cam_from_remote", rgb_test_image, robot_name=robot_name, instance=instance
         )
-        nc_remote.log_custom_data("custom_data_from_remote", {"key": "value"})
-        nc_remote.log_gripper_data({"left_gripper": 0.5, "right_gripper": 0.5})
+        nc_remote.log_custom_1d("custom_data_from_remote", {"key": "value"})
+        nc_remote.log_parallel_gripper_open_amount(
+            {"left_gripper": 0.5, "right_gripper": 0.5}
+        )
         nc_remote.log_joint_target_positions({"joint_from_remote": 0.5})
         nc_remote.log_joint_velocities({"joint_from_remote": 0.5})
         nc_remote.log_joint_torques({"joint_from_remote": 0.5})
@@ -94,7 +96,7 @@ def test_get_latest_data_from_multiple_nodes():
     is_ready = remote_ready_event.wait(timeout=MAXIMUM_WAITING_TIME_S)
     assert is_ready, "Remote node process did not signal readiness in time."
 
-    # 4. Fetch and verify data: Call get_latest_data and check the SyncPoint.
+    # 4. Fetch and verify data: Call get_latest_data and check the SynchronizedPoint.
     try:
         start_connection_time = time.time()
         while not nc.check_remote_nodes_connected(
@@ -114,7 +116,7 @@ def test_get_latest_data_from_multiple_nodes():
 
         # 5. Assertions:
 
-        assert sync_point is not None, "SyncPoint not found"
+        assert sync_point is not None, "SynchronizedPoint not found"
 
         # --- Verify data from the main process ---
         assert (
@@ -147,14 +149,6 @@ def test_get_latest_data_from_multiple_nodes():
             sync_point.custom_data["custom_data_from_remote"].data.get("key", None)
             == "value"
         )
-
-        assert (
-            sync_point.end_effectors is not None
-        ), "Gripper data from remote process not found"
-        assert "left_gripper" in sync_point.end_effectors.open_amounts
-        assert sync_point.end_effectors.open_amounts["left_gripper"] == 0.5
-        assert "right_gripper" in sync_point.end_effectors.open_amounts
-        assert sync_point.end_effectors.open_amounts["right_gripper"] == 0.5
 
         assert (
             sync_point.joint_target_positions is not None

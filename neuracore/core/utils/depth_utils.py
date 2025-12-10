@@ -18,11 +18,13 @@ def depth_to_rgb(depth_img: np.ndarray) -> np.ndarray:
     - The resulting RGB image is uint8 with depth encoded across all channels.
 
     Args:
-        depth_img: Depth image in meters as float32
+        depth_img: Depth image in meters as float32 with shape (H, W)
 
     Returns:
         rgb_img: uint8 RGB image with depth encoded across all channels
     """
+    if len(depth_img.shape) != 2:
+        raise ValueError("depth_img must be a 2D array with shape (H, W)")
     # Clip depths to the maximum range
     clipped_depth = np.clip(depth_img, 0, MAX_DEPTH)
 

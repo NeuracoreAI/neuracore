@@ -2,6 +2,12 @@ default_install_hook_types: [pre-commit]
 default_stages: [pre-commit]
 
 repos:
+  - repo: https://github.com/asottile/pyupgrade
+    rev: v3.15.0 
+    hooks:
+      - id: pyupgrade
+        args: [--py310-plus] 
+        
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
     hooks:

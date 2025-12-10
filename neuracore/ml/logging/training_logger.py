@@ -2,7 +2,7 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -25,7 +25,7 @@ class TrainingLogger(ABC):
         pass
 
     @abstractmethod
-    def log_scalars(self, scalars: Dict[str, float], step: int) -> None:
+    def log_scalars(self, scalars: dict[str, float], step: int) -> None:
         """Log multiple scalar metrics.
 
         Args:
@@ -99,7 +99,7 @@ class TrainingLogger(ABC):
         pass
 
     @abstractmethod
-    def log_hyperparameters(self, hparams: Dict[str, Any]) -> None:
+    def log_hyperparameters(self, hparams: dict[str, Any]) -> None:
         """Log hyperparameters.
 
         Args:

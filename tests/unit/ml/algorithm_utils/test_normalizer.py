@@ -5,6 +5,7 @@ MeanStdNormalizer and MinMaxNormalizer, testing initialization,
 normalization, unnormalization, and edge cases.
 """
 
+import numpy as np
 import pytest
 import torch
 from neuracore_types import DataItemStats
@@ -44,16 +45,16 @@ class TestMeanStdNormalizer:
     def sample_stats(self):
         """Create sample DataItemStats with mean and std."""
         return DataItemStats(
-            mean=[0.0, 1.0, 2.0],
-            std=[1.0, 2.0, 3.0],
+            mean=np.array([0.0, 1.0, 2.0]),
+            std=np.array([1.0, 2.0, 3.0]),
         )
 
     @pytest.fixture
     def multiple_stats(self):
         """Create multiple DataItemStats for combined normalization."""
         return [
-            DataItemStats(mean=[0.0, 1.0], std=[1.0, 2.0]),
-            DataItemStats(mean=[2.0, 3.0], std=[3.0, 4.0]),
+            DataItemStats(mean=np.array([0.0, 1.0]), std=np.array([1.0, 2.0])),
+            DataItemStats(mean=np.array([2.0, 3.0]), std=np.array([3.0, 4.0])),
         ]
 
     def test_init_with_statistics(self, sample_stats):
@@ -98,8 +99,8 @@ class TestMeanStdNormalizer:
         """Test normalization handles small standard deviations."""
         # Modify stats to have very small std
         small_std_stats = DataItemStats(
-            mean=[0.0, 1.0, 2.0],
-            std=[1.0, 1e-10, 3.0],  # Very small std in middle
+            mean=np.array([0.0, 1.0, 2.0]),
+            std=np.array([1.0, 1e-10, 3.0]),
         )
         normalizer = MeanStdNormalizer(name="test", statistics=[small_std_stats])
         data = torch.tensor([[0.0, 1.0, 2.0]])
@@ -157,7 +158,7 @@ class TestMeanStdNormalizer:
     def test_different_dimensions(self):
         """Test normalizer with different data dimensions."""
         # 1D stats
-        stats_1d = DataItemStats(mean=[5.0], std=[2.0])
+        stats_1d = DataItemStats(mean=np.array([5.0]), std=np.array([2.0]))
         normalizer_1d = MeanStdNormalizer(name="test", statistics=[stats_1d])
         data_1d = torch.tensor([[5.0], [7.0], [3.0]])
         normalized_1d = normalizer_1d.normalize(data_1d)
@@ -165,7 +166,7 @@ class TestMeanStdNormalizer:
         assert torch.allclose(normalized_1d, torch.tensor([[0.0], [1.0], [-1.0]]))
 
         # High dimensional stats
-        stats_high = DataItemStats(mean=[0.0] * 10, std=[1.0] * 10)
+        stats_high = DataItemStats(mean=np.array([0.0] * 10), std=np.array([1.0] * 10))
         normalizer_high = MeanStdNormalizer(name="test", statistics=[stats_high])
         data_high = torch.randn(5, 10)
         normalized_high = normalizer_high.normalize(data_high)
@@ -179,16 +180,16 @@ class TestMinMaxNormalizer:
     def sample_stats(self):
         """Create sample DataItemStats with min and max."""
         return DataItemStats(
-            min=[0.0, 1.0, 2.0],
-            max=[2.0, 3.0, 4.0],
+            min=np.array([0.0, 1.0, 2.0]),
+            max=np.array([2.0, 3.0, 4.0]),
         )
 
     @pytest.fixture
     def multiple_stats(self):
         """Create multiple DataItemStats for combined normalization."""
         return [
-            DataItemStats(min=[0.0, 1.0], max=[2.0, 3.0]),
-            DataItemStats(min=[2.0, 3.0], max=[4.0, 5.0]),
+            DataItemStats(min=np.array([0.0, 1.0]), max=np.array([2.0, 3.0])),
+            DataItemStats(min=np.array([2.0, 3.0]), max=np.array([4.0, 5.0])),
         ]
 
     def test_init_with_statistics(self, sample_stats):
@@ -239,8 +240,8 @@ class TestMinMaxNormalizer:
         """Test normalization handles zero range (min == max)."""
         # Stats where min == max (zero range)
         zero_range_stats = DataItemStats(
-            min=[1.0, 2.0, 3.0],
-            max=[1.0, 2.0, 3.0],  # Same as min
+            min=np.array([1.0, 2.0, 3.0]),
+            max=np.array([1.0, 2.0, 3.0]),  # Same as min
         )
         normalizer = MinMaxNormalizer(name="test", statistics=[zero_range_stats])
         data = torch.tensor([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]])
@@ -322,7 +323,7 @@ class TestMinMaxNormalizer:
     def test_different_dimensions(self):
         """Test normalizer with different data dimensions."""
         # 1D stats
-        stats_1d = DataItemStats(min=[0.0], max=[10.0])
+        stats_1d = DataItemStats(min=np.array([0.0]), max=np.array([10.0]))
         normalizer_1d = MinMaxNormalizer(name="test", statistics=[stats_1d])
         data_1d = torch.tensor([[5.0], [0.0], [10.0]])
         normalized_1d = normalizer_1d.normalize(data_1d)
@@ -331,7 +332,7 @@ class TestMinMaxNormalizer:
         assert torch.allclose(normalized_1d, torch.tensor([[0.0], [-1.0], [1.0]]))
 
         # High dimensional stats
-        stats_high = DataItemStats(min=[0.0] * 10, max=[1.0] * 10)
+        stats_high = DataItemStats(min=np.array([0.0] * 10), max=np.array([1.0] * 10))
         normalizer_high = MinMaxNormalizer(name="test", statistics=[stats_high])
         data_high = torch.rand(5, 10)
         normalized_high = normalizer_high.normalize(data_high)
@@ -344,8 +345,12 @@ class TestNormalizerIntegration:
     def test_multiple_data_types_combined(self):
         """Test combining multiple data types in one normalizer."""
         # Simulate joint positions and velocities combined
-        joint_positions = DataItemStats(mean=[0.0, 1.0], std=[1.0, 2.0])
-        joint_velocities = DataItemStats(mean=[0.0, -1.0], std=[0.5, 1.0])
+        joint_positions = DataItemStats(
+            mean=np.array([0.0, 1.0]), std=np.array([1.0, 2.0])
+        )
+        joint_velocities = DataItemStats(
+            mean=np.array([0.0, -1.0]), std=np.array([0.5, 1.0])
+        )
 
         normalizer = MeanStdNormalizer(
             name="joint_states", statistics=[joint_positions, joint_velocities]
@@ -365,8 +370,8 @@ class TestNormalizerIntegration:
         """Test with realistic robot joint statistics."""
         # Typical robot joint positions: -π to π
         joint_positions = DataItemStats(
-            mean=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            std=[1.57, 1.57, 1.57, 1.57, 1.57, 1.57],  # ~π/2
+            mean=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            std=np.array([1.57, 1.57, 1.57, 1.57, 1.57, 1.57]),  # ~π/2
         )
 
         normalizer = MeanStdNormalizer(name="joints", statistics=[joint_positions])
@@ -384,8 +389,8 @@ class TestNormalizerIntegration:
         """Test action normalization with target positions."""
         # Actions are typically in a smaller range
         actions = DataItemStats(
-            min=[-0.1, -0.1, -0.1],
-            max=[0.1, 0.1, 0.1],
+            min=np.array([-0.1, -0.1, -0.1]),
+            max=np.array([0.1, 0.1, 0.1]),
         )
 
         normalizer = MinMaxNormalizer(name="actions", statistics=[actions])

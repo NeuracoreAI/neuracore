@@ -47,10 +47,10 @@ def list_my_orgs() -> list[Organization]:
             for orgWithMember in orgs_raw
         ]
     except requests.exceptions.ConnectionError:
-        raise OrganizationError((
+        raise OrganizationError(
             "Failed to connect to neuracore server, "
             "please check your internet connection and try again."
-        ))
+        )
     except requests.exceptions.RequestException as e:
         raise OrganizationError(f"Failed to get organizations: {e}")
     except AuthenticationError as e:

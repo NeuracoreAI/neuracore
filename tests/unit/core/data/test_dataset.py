@@ -1,9 +1,11 @@
 """Tests for Dataset class."""
 
+import copy
 import re
 
 import pytest
 import requests_mock
+from neuracore_types import Dataset as DatasetModel
 
 import neuracore as nc
 from neuracore.api.globals import GlobalSingleton
@@ -15,16 +17,19 @@ from neuracore.core.exceptions import DatasetError
 
 
 @pytest.fixture
-def dataset_response(mocked_org_id):
+def dataset_response() -> Dataset:
     """Create a mock dataset response."""
-    return {
-        "id": "dataset_123",
-        "org_id": mocked_org_id,
-        "name": "test_dataset",
-        "size_bytes": 1024,
-        "tags": ["test", "robotics"],
-        "is_shared": False,
-    }
+    return DatasetModel(
+        id="dataset_123",
+        name="test_dataset",
+        created_at=0.0,
+        modified_at=0.0,
+        description="A test dataset",
+        size_bytes=1024,
+        tags=["test", "robotics"],
+        is_shared=False,
+        num_demonstrations=20,
+    )
 
 
 def test_nc_create_dataset_basic(
@@ -41,13 +46,13 @@ def test_nc_create_dataset_basic(
     # Mock dataset creation endpoint
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=dataset_response,
+        json=dataset_response.model_dump(mode="json"),
         status_code=200,
     )
 
     # Mock recordings endpoint (Dataset will often hit this to init num_recordings)
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response['id']}/recordings",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
         json={"data": [], "total": 0, "limit": 1, "start_after": None},
         status_code=200,
     )
@@ -91,13 +96,13 @@ def test_nc_create_dataset_with_params(
     # Mock dataset creation endpoint
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=dataset_response,
+        json=dataset_response.model_dump(mode="json"),
         status_code=200,
     )
 
     # Mock recordings endpoint
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response['id']}/recordings",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
         json={"data": [], "total": 0, "limit": 1, "start_after": None},
         status_code=200,
     )
@@ -129,7 +134,7 @@ def test_nc_get_dataset_existing(
     # Mock datasets list endpoint (if nc.get_dataset uses it)
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=[dataset_response],
+        json=[dataset_response.model_dump(mode="json")],
         status_code=200,
     )
 
@@ -143,13 +148,13 @@ def test_nc_get_dataset_existing(
     # Mock search-by-name endpoint (most likely used)
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
-        json=dataset_response,
+        json=dataset_response.model_dump(mode="json"),
         status_code=200,
     )
 
     # Mock recordings endpoint
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response['id']}/recordings",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
         json={"data": [], "total": 0, "limit": 1, "start_after": None},
         status_code=200,
     )
@@ -189,19 +194,16 @@ def test_nc_get_dataset_nonexistent_raises(
 
 
 def test_nc_create_shared_dataset_sets_is_shared(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    dataset_response,
 ):
     """Test creating a shared dataset via nc.create_dataset sets is_shared=True."""
     nc.login("test_api_key")
 
-    shared_dataset_response = {
-        "id": "dataset_456",
-        "org_id": mocked_org_id,
-        "name": "shared_dataset",
-        "size_bytes": 2048,
-        "tags": ["shared", "robotics"],
-        "is_shared": True,
-    }
+    dataset_response.is_shared = True
 
     # Existence check
     mock_auth_requests.get(
@@ -213,13 +215,13 @@ def test_nc_create_shared_dataset_sets_is_shared(
     # Creation endpoint
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=shared_dataset_response,
+        json=dataset_response.model_dump(mode="json"),
         status_code=200,
     )
 
     # Recordings endpoint
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{shared_dataset_response['id']}/recordings",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
         json={"data": [], "total": 0, "limit": 1, "start_after": None},
         status_code=200,
     )
@@ -242,12 +244,12 @@ def test_nc_create_dataset_sets_global_state(
 
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=dataset_response,
+        json=dataset_response.model_dump(mode="json"),
         status_code=200,
     )
 
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response['id']}/recordings",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
         json={"data": [], "total": 0, "limit": 1, "start_after": None},
         status_code=200,
     )
@@ -314,7 +316,6 @@ class TestDatasetInitialization:
 
         dataset = Dataset(**dataset_dict)
 
-        assert dataset.num_recordings == 2
         assert len(dataset) == 2
 
 
@@ -327,7 +328,6 @@ class TestDatasetRetrieval:
 
         assert dataset.id == "dataset123"
         assert dataset.name == "test_dataset"
-        assert dataset.num_recordings == 2
 
     def test_get_by_name_not_found(self, mock_auth_requests, mocked_org_id):
         """Test getting a non-existent dataset by name raises an error."""
@@ -353,12 +353,12 @@ class TestDatasetRetrieval:
         result = Dataset.get_by_name("nonexistent", non_exist_ok=True)
         assert result is None
 
-    def test_get_by_id(self, mock_auth_requests, dataset_dict, mocked_org_id):
+    def test_get_by_id(self, mock_auth_requests, dataset_model, mocked_org_id):
         """Test getting a dataset by ID."""
 
         mock_auth_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_dict['id']}",
-            json=dataset_dict,
+            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_model.id}",
+            json=dataset_model.model_dump(mode="json"),
             status_code=200,
         )
 
@@ -366,7 +366,6 @@ class TestDatasetRetrieval:
 
         assert dataset.id == "dataset123"
         assert dataset.name == "test_dataset"
-        assert dataset.num_recordings == 2
 
     def test_get_by_id_not_found(self, mock_auth_requests, mocked_org_id):
         """Test getting a non-existent dataset by ID raises an error."""
@@ -401,7 +400,7 @@ class TestDatasetCreation:
     def test_create_dataset(
         self,
         mock_auth_requests,
-        dataset_dict,
+        dataset_model,
         mocked_org_id,
     ):
         """Test creating a new dataset."""
@@ -416,13 +415,13 @@ class TestDatasetCreation:
         # Mock creation endpoint
         mock_auth_requests.post(
             f"{API_URL}/org/{mocked_org_id}/datasets",
-            json=dataset_dict,
+            json=dataset_model.model_dump(mode="json"),
             status_code=200,
         )
 
         # Mock recordings endpoint for num_recordings initialization
         mock_auth_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_dict['id']}/recordings",
+            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_model.id}/recordings",
             json={"data": [], "total": 0, "limit": 1, "start_after": None},
             status_code=200,
         )
@@ -435,20 +434,20 @@ class TestDatasetCreation:
         assert dataset.name == "test_dataset"
 
     def test_create_dataset_already_exists(
-        self, mock_auth_requests, dataset_dict, recordings_list, mocked_org_id
+        self, mock_auth_requests, dataset_model, recordings_list, mocked_org_id
     ):
         """Test that creating a dataset that already exists returns the existing one."""
 
         # Mock that dataset already exists
         mock_auth_requests.get(
             re.compile(f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name"),
-            json=dataset_dict,
+            json=dataset_model.model_dump(mode="json"),
             status_code=200,
         )
 
         # Mock recordings endpoint for num_recordings initialization
         mock_auth_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_dict['id']}/recordings",
+            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_model.id}/recordings",
             json={
                 "data": recordings_list[:1],
                 "total": 2,
@@ -464,7 +463,7 @@ class TestDatasetCreation:
         assert dataset.name == "test_dataset"
 
     def test_create_shared_dataset(
-        self, mock_auth_requests, dataset_dict, recordings_list, mocked_org_id
+        self, mock_auth_requests, dataset_model, recordings_list, mocked_org_id
     ):
         """Test creating a shared dataset."""
 
@@ -475,18 +474,18 @@ class TestDatasetCreation:
             status_code=404,
         )
 
-        shared_dataset_dict = {**dataset_dict, "is_shared": True}
+        dataset_model.is_shared = True
 
         # Mock creation endpoint
         mock_auth_requests.post(
             f"{API_URL}/org/{mocked_org_id}/datasets",
-            json=shared_dataset_dict,
+            json=dataset_model.model_dump(mode="json"),
             status_code=200,
         )
 
         # Mock recordings endpoint for num_recordings initialization
         mock_auth_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_dict['id']}/recordings",
+            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_model.id}/recordings",
             json={"data": [], "total": 0, "limit": 1, "start_after": None},
             status_code=200,
         )
@@ -495,22 +494,14 @@ class TestDatasetCreation:
 
         assert dataset.is_shared is True
 
-    def test_create_with_special_characters_in_name(self, mock_login):
+    def test_create_with_special_characters_in_name(self, mock_login, dataset_model):
         """Test creating a dataset with special characters in name."""
         mock_login
 
         special_name = "ghjdidnia-dd/X0551-Ker-Pieb87-846483-CNNMLPP"
         mocked_org_id = "test-org-id"
 
-        # Special dataset we want returned
-        dataset_dict_special = {
-            "id": "special123",
-            "org_id": mocked_org_id,
-            "name": special_name,
-            "size_bytes": 0,
-            "tags": [],
-            "is_shared": False,
-        }
+        dataset_model.name = special_name
 
         # Fully self-contained mocking
         with requests_mock.Mocker() as m:
@@ -530,7 +521,7 @@ class TestDatasetCreation:
             # Mock POST create dataset
             m.post(
                 f"{API_URL}/org/{mocked_org_id}/datasets",
-                json=dataset_dict_special,
+                json=dataset_model.model_dump(mode="json"),
                 status_code=201,
             )
 
@@ -545,7 +536,7 @@ class TestDatasetCreation:
 
         # Assert it returned exactly the special dataset
         assert dataset.name == special_name
-        assert dataset.id == "special123"
+        assert dataset.id == dataset_model.id
 
 
 class TestDatasetIndexingAndSlicing:
@@ -604,21 +595,13 @@ class TestDatasetIndexingAndSlicing:
         assert isinstance(result[0], Recording)
         assert len(result) == 2
 
-    def test_getitem_slice_with_step(self, dataset_dict):
+    def test_getitem_slice_with_step(self, dataset_dict, recordings_list):
         """Test slicing with step parameter."""
-        # Create dataset with more recordings
-        recordings = [
-            {
-                "id": f"rec{i}",
-                "robot_id": f"robot{i}",
-                "instance": 1,
-                "total_bytes": 100,
-                "created_at": "2023-01-01T00:00:00Z",
-            }
-            for i in range(5)
-        ]
-
-        dataset = Dataset(**dataset_dict, recordings=recordings)
+        # Modify recordings_list to have more entries
+        new_recordings = [copy.deepcopy(recordings_list[0]) for i in range(5)]
+        for i in range(5):
+            new_recordings[i]["id"] = f"rec{i}"
+        dataset = Dataset(**dataset_dict, recordings=new_recordings)
 
         result = dataset[0:5:2]
 
@@ -808,10 +791,16 @@ class TestDatasetSynchronization:
         nc.login()
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
 
-        data_types = [DataType.RGB_IMAGE, DataType.DEPTH_IMAGE]
-        synced = dataset.synchronize(frequency=30, data_types=data_types)
+        robot_data_spec = {
+            "robot_id": {
+                DataType.RGB_IMAGES: [],
+                DataType.DEPTH_IMAGES: [],
+                DataType.JOINT_POSITIONS: [],
+            }
+        }
+        synced = dataset.synchronize(frequency=30, robot_data_spec=robot_data_spec)
 
-        assert synced.data_types == data_types
+        assert synced.robot_data_spec == robot_data_spec
 
 
 class TestDatasetMixedOperations:

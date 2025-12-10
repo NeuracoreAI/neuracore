@@ -1,9 +1,57 @@
+from typing import cast
+
 import numpy as np
 import pytest
-from neuracore_types import JointData, SyncPoint
+import torch
+from neuracore_types import BatchedJointData, BatchedNCData, DataType
 
 import neuracore as nc
 from neuracore.core.const import API_URL
+
+B = 1
+PREDICTION_HORIZON = 3
+FAKE_PREDICTED_DATA: dict[DataType, dict[str, BatchedNCData]] = {
+    DataType.JOINT_TARGET_POSITIONS: {
+        "joint1": BatchedJointData(value=torch.full((B, PREDICTION_HORIZON, 1), 0.1)),
+        "joint2": BatchedJointData(value=torch.full((B, PREDICTION_HORIZON, 1), 0.2)),
+        "joint3": BatchedJointData(value=torch.full((B, PREDICTION_HORIZON, 1), 0.3)),
+    }
+}
+FAKE_PREDICTED_DATA_JSON = {
+    k: {name: data.model_dump(mode="json") for name, data in v.items()}
+    for k, v in FAKE_PREDICTED_DATA.items()
+}
+
+MODEL_INPUT_ORDER: dict[DataType, list[str]] = {
+    DataType.JOINT_POSITIONS: ["joint1", "joint2", "joint3"],
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
+    DataType.RGB_IMAGES: ["top_camera"],
+}
+
+MODEL_OUTPUT_ORDER: dict[DataType, list[str]] = {
+    DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
+}
+
+
+# Mock torchserve subprocess
+def mock_subprocess_popen(*args, **kwargs):
+    class MockProcess:
+        def __init__(self):
+            self.stdout = None
+            self.stderr = None
+            self.pid = -1
+
+        def terminate(self):
+            pass
+
+        def wait(self):
+            pass
+
+        def poll(self):
+            pass
+
+    return MockProcess()
 
 
 def test_connect_endpoint(
@@ -26,35 +74,35 @@ def test_connect_endpoint(
         status_code=200,
     )
 
-    # Mock endpoint prediction
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/models/endpoints/test_endpoint_id/predict",
-        json=[
-            SyncPoint(
-                joint_target_positions=JointData(
-                    values={"joint_1": 0.1, "joint_2": 0.2, "joint_3": 0.3},
-                )
-            ).model_dump()
-            for _ in range(3)
-        ],
+        json=FAKE_PREDICTED_DATA_JSON,
         status_code=200,
     )
 
     endpoint = nc.policy_remote_server("test_endpoint")
 
-    nc.log_joint_positions({"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
+    nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
     nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
 
     # Test prediction
     preds = endpoint.predict()
-    assert isinstance(preds, list)
-    pred = preds[0]
-    assert pred.joint_target_positions is not None
-    assert pred.joint_target_positions.values == {
-        "joint_1": 0.1,
-        "joint_2": 0.2,
-        "joint_3": 0.3,
-    }
+    assert isinstance(preds, dict)
+    assert isinstance(preds, dict)
+    assert DataType.JOINT_TARGET_POSITIONS in preds
+    assert (
+        preds[DataType.JOINT_TARGET_POSITIONS].keys()
+        == FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].keys()
+    )
+    pred_values = [
+        cast(BatchedJointData, bjp).value.numpy()
+        for bjp in preds[DataType.JOINT_TARGET_POSITIONS].values()
+    ]
+    expected_values = [
+        cast(BatchedJointData, bjp).value.numpy()
+        for bjp in FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].values()
+    ]
+    assert np.array_equal(pred_values, expected_values)
 
 
 def test_connect_nonexistent_endpoint(
@@ -112,22 +160,6 @@ def test_connect_local_endpoint(
     port = np.random.randint(8000, 9000)
     localhost = f"http://127.0.0.1:{port}"
 
-    # Mock torchserve subprocess
-    def mock_subprocess_popen(*args, **kwargs):
-        class MockProcess:
-            def __init__(self):
-                self.stdout = None
-                self.stderr = None
-                self.pid = -1
-
-            def terminate(self):
-                pass
-
-            def wait(self):
-                pass
-
-        return MockProcess()
-
     mock_auth_requests.get(
         f"{localhost}/ping",
         status_code=200,
@@ -135,14 +167,7 @@ def test_connect_local_endpoint(
 
     mock_auth_requests.post(
         f"{localhost}/predict",
-        json=[
-            SyncPoint(
-                joint_positions=JointData(
-                    values={"joint_1": 0.5, "joint_2": 0.6, "joint_3": 0.7},
-                ),
-            ).model_dump()
-            for _ in range(3)
-        ],
+        json=FAKE_PREDICTED_DATA_JSON,
         status_code=200,
     )
 
@@ -157,23 +182,33 @@ def test_connect_local_endpoint(
     )
     nc.connect_robot("test_robot")
 
-    local_endpoint = nc.policy_local_server(model_file=mock_model_mar, port=port)
+    local_endpoint = nc.policy_local_server(
+        model_input_order=MODEL_INPUT_ORDER,
+        model_output_order=MODEL_OUTPUT_ORDER,
+        model_file=mock_model_mar,
+        port=port,
+    )
 
-    nc.log_joint_positions({"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
+    nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
     nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
 
-    # Test prediction
-    pred = local_endpoint.predict()
-    assert isinstance(pred, list)
-    assert len(pred) == 3
-    for p in pred:
-        assert isinstance(p, SyncPoint)
-        assert p.joint_positions is not None
-        assert p.joint_positions.values == {
-            "joint_1": 0.5,
-            "joint_2": 0.6,
-            "joint_3": 0.7,
-        }
+    preds = local_endpoint.predict()
+    assert isinstance(preds, dict)
+    assert DataType.JOINT_TARGET_POSITIONS in preds
+    assert (
+        preds[DataType.JOINT_TARGET_POSITIONS].keys()
+        == FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].keys()
+    )
+    pred_values = [
+        cast(BatchedJointData, bjp).value.numpy()
+        for bjp in preds[DataType.JOINT_TARGET_POSITIONS].values()
+    ]
+    expected_values = [
+        cast(BatchedJointData, bjp).value.numpy()
+        for bjp in FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].values()
+    ]
+    assert np.array_equal(pred_values, expected_values)
+
     local_endpoint.disconnect()
 
 
@@ -314,54 +349,41 @@ def test_connect_local_endpoint_with_train_run(
 
     mock_auth_requests.post(
         f"{localhost}/predict",
-        json=[
-            SyncPoint(
-                joint_positions=JointData(
-                    values={"joint_1": 0.5, "joint_2": 0.6, "joint_3": 0.7},
-                )
-            ).model_dump()
-            for _ in range(3)
-        ],
+        json=FAKE_PREDICTED_DATA_JSON,
         status_code=200,
     )
-
-    # Mock torchserve subprocess
-    def mock_subprocess_popen(*args, **kwargs):
-        class MockProcess:
-            def __init__(self):
-                self.stdout = None
-                self.stderr = None
-                self.pid = -1
-
-            def terminate(self):
-                pass
-
-            def wait(self):
-                pass
-
-        return MockProcess()
 
     # Apply mocks
     monkeypatch.setattr("subprocess.Popen", mock_subprocess_popen)
     monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: None)
 
     # Connect using train run name
-    local_endpoint = nc.policy_local_server(train_run_name="test_run", port=port)
-    nc.log_joint_positions({"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
+    local_endpoint = nc.policy_local_server(
+        model_input_order=MODEL_INPUT_ORDER,
+        model_output_order=MODEL_OUTPUT_ORDER,
+        train_run_name="test_run",
+        port=port,
+    )
+    nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
     nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
 
-    # Test prediction
-    pred = local_endpoint.predict()
-    assert isinstance(pred, list)
-    assert len(pred) == 3
-    for p in pred:
-        assert isinstance(p, SyncPoint)
-        assert p.joint_positions is not None
-        assert p.joint_positions.values == {
-            "joint_1": 0.5,
-            "joint_2": 0.6,
-            "joint_3": 0.7,
-        }
+    preds = local_endpoint.predict()
+    assert isinstance(preds, dict)
+    assert DataType.JOINT_TARGET_POSITIONS in preds
+    assert (
+        preds[DataType.JOINT_TARGET_POSITIONS].keys()
+        == FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].keys()
+    )
+    pred_values = [
+        cast(BatchedJointData, bjp).value.numpy()
+        for bjp in preds[DataType.JOINT_TARGET_POSITIONS].values()
+    ]
+    expected_values = [
+        cast(BatchedJointData, bjp).value.numpy()
+        for bjp in FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].values()
+    ]
+    assert np.array_equal(pred_values, expected_values)
+
     local_endpoint.disconnect()
 
 
@@ -376,10 +398,17 @@ def test_connect_local_endpoint_invalid_args(
     with pytest.raises(
         ValueError, match="Cannot specify both train_run_name and model_file"
     ):
-        nc.policy_local_server(model_file="model.nc.zip", train_run_name="test_run")
+        nc.policy_local_server(
+            model_input_order=MODEL_INPUT_ORDER,
+            model_output_order=MODEL_OUTPUT_ORDER,
+            model_file="model.nc.zip",
+            train_run_name="test_run",
+        )
 
     # Neither argument provided should raise an error
     with pytest.raises(
         ValueError, match="Must specify either train_run_name or model_file"
     ):
-        nc.policy_local_server()
+        nc.policy_local_server(
+            model_input_order=MODEL_INPUT_ORDER, model_output_order=MODEL_OUTPUT_ORDER
+        )

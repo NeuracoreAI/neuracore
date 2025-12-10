@@ -80,13 +80,21 @@ def _record_step(step: dict, timestamp: float) -> None:
         if jname in ROBOT.joint_names[DOF:]:
             visual_joints[jname] = float(lower + (upper - lower) * open_amt)
 
+    joint_group_name = "arm"
     nc.log_joint_positions(
+        name=joint_group_name,
         positions=joint_positions_dict,
-        additional_urdf_positions=visual_joints,
         timestamp=timestamp,
     )
-    nc.log_gripper_data(
-        open_amounts={"gripper_open_amount": open_amt},
+    nc.log_joint_positions(
+        name=f"{joint_group_name}_visual",
+        positions=visual_joints,
+        timestamp=timestamp,
+    )
+
+    nc.log_parallel_gripper_open_amount(
+        name="gripper",
+        value=open_amt,
         timestamp=timestamp,
     )
 
@@ -97,7 +105,7 @@ def _record_step(step: dict, timestamp: float) -> None:
     elif "structured_language_instruction" in obs:
         lang = obs["structured_language_instruction"].numpy().decode("utf-8")
     if lang:
-        nc.log_language(language=lang, timestamp=timestamp)
+        nc.log_language(name="instruction", language=lang, timestamp=timestamp)
 
 
 def _process_episode_chunks(start_idx: int, end_idx: int) -> None:

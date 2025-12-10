@@ -15,21 +15,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 
-_FOLDER_TO_DATA_TYPE: dict[str, DataType] = {
-    "joint_positions": DataType.JOINT_POSITIONS,
-    "joint_velocities": DataType.JOINT_VELOCITIES,
-    "joint_torques": DataType.JOINT_TORQUES,
-    "joint_target_positions": DataType.JOINT_TARGET_POSITIONS,
-    "end_effector_poses": DataType.END_EFFECTOR_POSES,
-    "parallel_gripper_open_amounts": DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
-    "gripper_open_amounts": DataType.END_EFFECTORS,
-    "rgbs": DataType.RGB_IMAGE,
-    "depths": DataType.DEPTH_IMAGE,
-    "point_clouds": DataType.POINT_CLOUD,
-    "poses": DataType.POSES,
-    "language_annotations.json": DataType.LANGUAGE,
-    "custom": DataType.CUSTOM,
-}
+TRACE_FILE = "trace.json"
 
 
 class BucketUploader(ABC):
@@ -52,17 +38,6 @@ class BucketUploader(ABC):
         """
         self.recording_id = recording_id
         self._recording_manager = get_recording_state_manager()
-
-    def _get_data_type_from_path(self, path: str) -> DataType:
-        """Returns DataType from a recording-relative path."""
-        if not path:
-            return None
-
-        if path in _FOLDER_TO_DATA_TYPE:
-            return _FOLDER_TO_DATA_TYPE[path]
-
-        data_type_key = path.split("/", 1)[0]
-        return _FOLDER_TO_DATA_TYPE.get(data_type_key)
 
     def _register_data_stream(self, data_type: DataType) -> str:
         """Register a backend DataStream for this recording.

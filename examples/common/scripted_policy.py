@@ -1,6 +1,6 @@
 """Scripted policies for bimanual manipulation tasks."""
 
-from typing import Dict, List, NamedTuple, Protocol
+from typing import NamedTuple, Protocol
 
 import numpy as np
 from pyquaternion import Quaternion
@@ -18,7 +18,7 @@ class Waypoint(NamedTuple):
 class TimeStep(Protocol):
     """Protocol for timestep objects."""
 
-    observation: Dict
+    observation: dict
 
 
 class BasePolicy:
@@ -32,8 +32,8 @@ class BasePolicy:
         """
         self.inject_noise = inject_noise
         self.step_count = 0
-        self.left_trajectory: List[Waypoint] = []
-        self.right_trajectory: List[Waypoint] = []
+        self.left_trajectory: list[Waypoint] = []
+        self.right_trajectory: list[Waypoint] = []
         self.curr_left_waypoint: Waypoint = None
         self.curr_right_waypoint: Waypoint = None
 

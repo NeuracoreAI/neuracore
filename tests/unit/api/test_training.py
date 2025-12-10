@@ -1,5 +1,5 @@
 import pytest
-from neuracore_types import DataType
+from neuracore_types import Dataset, DataType
 
 import neuracore as nc
 from neuracore.core.const import API_URL
@@ -29,7 +29,7 @@ def algorithm_list_response():
             "description": "CNN + MLP",
             "is_shared": True,
             "supported_input_data_types": [
-                DataType.RGB_IMAGE,
+                DataType.RGB_IMAGES,
                 DataType.JOINT_POSITIONS,
             ],
             "supported_output_data_types": [DataType.JOINT_TARGET_POSITIONS],
@@ -40,7 +40,7 @@ def algorithm_list_response():
             "description": "Action Chunking with Transformers",
             "is_shared": True,
             "supported_input_data_types": [
-                DataType.RGB_IMAGE,
+                DataType.RGB_IMAGES,
                 DataType.JOINT_POSITIONS,
             ],
             "supported_output_data_types": [DataType.JOINT_TARGET_POSITIONS],
@@ -58,30 +58,33 @@ def test_start_training_run(
     # Ensure login
     nc.login("test_api_key")
 
-    dataset_response = {
-        "id": "dataset123",
-        "name": "test_dataset",
-        "size_bytes": 1024,
-        "tags": ["test"],
-        "is_shared": False,
-        "num_demonstrations": 10,
-    }
+    dataset_response = Dataset(
+        id="dataset_123",
+        name="test_dataset",
+        created_at=0.0,
+        modified_at=0.0,
+        description="A test dataset",
+        size_bytes=2048,
+        tags=["test"],
+        is_shared=False,
+        num_demonstrations=20,
+    )
 
     # Mock datasets endpoint to return a dataset
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=[dataset_response],
+        json=[dataset_response.model_dump(mode="json")],
         status_code=200,
     )
 
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
-        json=dataset_response,
+        json=dataset_response.model_dump(mode="json"),
         status_code=200,
     )
 
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response['id']}/recordings",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
         json={"recordings": []},
         status_code=200,
     )

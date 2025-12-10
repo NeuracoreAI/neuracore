@@ -2,7 +2,7 @@
 
 import logging
 import math
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import einops
 import numpy as np
@@ -104,7 +104,7 @@ class SpatialSoftmax(nn.Module):
     """
 
     def __init__(
-        self, input_shape: Tuple[int, int, int], num_kp: Optional[int] = None
+        self, input_shape: tuple[int, int, int], num_kp: Optional[int] = None
     ) -> None:
         """Initialize SpatialSoftmax layer.
 
@@ -207,7 +207,7 @@ class DiffusionConditionalUnet1d(nn.Module):
         in_out = [(action_dim, down_dims[0])] + list(zip(down_dims[:-1], down_dims[1:]))
 
         # Unet encoder.
-        common_res_block_kwargs: Dict[str, Any] = {
+        common_res_block_kwargs: dict[str, Any] = {
             "cond_dim": cond_dim,
             "kernel_size": kernel_size,
             "n_groups": n_groups,

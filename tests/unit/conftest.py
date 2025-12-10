@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 import requests_mock
 
-import neuracore
+import neuracore as nc
 from neuracore.core.config import config_manager
 from neuracore.core.const import API_URL
 from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
@@ -88,7 +88,7 @@ def mock_auth_requests():
 @pytest.fixture
 def mock_login(mock_auth_requests):
     """Fixture to mock login."""
-    neuracore.login("test_api_key")
+    nc.login("test_api_key")
     yield
 
 
@@ -151,14 +151,14 @@ def mock_model_mar(tmp_path):
 @pytest.fixture
 def reset_neuracore():
     """Reset Neuracore global state between tests."""
-    original_auth = neuracore.core.auth._auth
+    original_auth = nc.core.auth._auth
 
-    neuracore.api._active_robot = None
-    neuracore.api._active_dataset_id = None
-    neuracore.api._active_recording_id = None
+    nc.api._active_robot = None
+    nc.api._active_dataset_id = None
+    nc.api._active_recording_id = None
 
-    neuracore.core.auth._auth = neuracore.core.auth.Auth()
+    nc.core.auth._auth = nc.core.auth.Auth()
 
     yield
 
-    neuracore.core.auth._auth = original_auth
+    nc.core.auth._auth = original_auth

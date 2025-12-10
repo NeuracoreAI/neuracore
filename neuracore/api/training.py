@@ -5,13 +5,19 @@ including algorithm discovery, dataset resolution, and job status tracking.
 """
 
 import concurrent
-import json
 from typing import Any, Optional, cast
 
 import requests
-from neuracore_types import DataType
+from neuracore_types import (
+    DataType,
+    GPUType,
+    RobotDataSpec,
+    SynchronizationDetails,
+    TrainingJobRequest,
+)
 
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.ml.utils.robot_data_spec_utils import merge_robot_data_spec
 
 from ..core.auth import get_auth
 from ..core.const import API_URL
@@ -60,8 +66,8 @@ def start_training_run(
     gpu_type: str,
     num_gpus: int,
     frequency: int,
-    input_data_types: Optional[list[DataType]] = None,
-    output_data_types: Optional[list[DataType]] = None,
+    input_robot_data_spec: Optional[RobotDataSpec] = None,
+    output_robot_data_spec: Optional[RobotDataSpec] = None,
 ) -> dict:
     """Start a new training run.
 
@@ -73,10 +79,10 @@ def start_training_run(
         gpu_type: Type of GPU to use for training (e.g., "A100", "V100")
         num_gpus: Number of GPUs to use for training
         frequency: Frequency to sync training data to (in Hz)
-        input_data_types: Optional list of input data types. If not provided,
-            uses algorithm's supported input data types
-        output_data_types: Optional list of output data types. If not provided,
-            uses algorithm's supported output data types
+        input_robot_data_spec: Optional input robot data specification.
+            If not provided, uses algorithm's supported input data types
+        output_robot_data_spec: Optional output robot data specification.
+            If not provided, uses algorithm's supported output data types
 
     Returns:
         dict: Training job data including job ID and status
@@ -93,46 +99,68 @@ def start_training_run(
     # Get algorithm id
     algorithm_jsons = _get_algorithms()
     algorithm_id = None
+    input_data_types: list[DataType] = []
+    output_data_types: list[DataType] = []
     for algorithm_json in algorithm_jsons:
         if algorithm_json["name"] == algorithm_name:
             algorithm_id = algorithm_json["id"]
-            if input_data_types is None:
-                input_data_types = [
-                    DataType(supported_input_data_type)
-                    for supported_input_data_type in algorithm_json[
-                        "supported_input_data_types"
-                    ]
+            input_data_types = [
+                DataType(supported_input_data_type)
+                for supported_input_data_type in algorithm_json[
+                    "supported_input_data_types"
                 ]
-            if output_data_types is None:
-                output_data_types = [
-                    DataType(supported_output_data_type)
-                    for supported_output_data_type in algorithm_json[
-                        "supported_output_data_types"
-                    ]
+            ]
+            output_data_types = [
+                DataType(supported_output_data_type)
+                for supported_output_data_type in algorithm_json[
+                    "supported_output_data_types"
                 ]
+            ]
             break
 
     if algorithm_id is None:
         raise ValueError(f"Algorithm {algorithm_name} not found")
 
-    data = {
-        "name": name,
-        "dataset_id": dataset_id,
-        "algorithm_id": algorithm_id,
-        "algorithm_config": algorithm_config,
-        "gpu_type": gpu_type,
-        "num_gpus": num_gpus,
-        "frequency": str(frequency),
-        "input_data_types": input_data_types,
-        "output_data_types": output_data_types,
+    robot_ids_dataset = dataset.robot_ids
+
+    input_robot_data_spec = {
+        robot_id: {
+            dt: [],
+        }
+        for dt in input_data_types
+        for robot_id in robot_ids_dataset
     }
+    output_robot_data_spec = {
+        robot_id: {
+            dt: [],
+        }
+        for dt in output_data_types
+        for robot_id in robot_ids_dataset
+    }
+
+    data = TrainingJobRequest(
+        dataset_id=dataset_id,
+        name=name,
+        algorithm_id=algorithm_id,
+        algorithm_config=algorithm_config,
+        gpu_type=GPUType(gpu_type),
+        num_gpus=num_gpus,
+        synchronization_details=SynchronizationDetails(
+            frequency=frequency,
+            robot_data_spec=merge_robot_data_spec(
+                input_robot_data_spec, output_robot_data_spec
+            ),
+        ),
+        input_robot_data_spec=input_robot_data_spec,
+        output_robot_data_spec=output_robot_data_spec,
+    )
 
     auth = get_auth()
     org_id = get_current_org()
     response = requests.post(
         f"{API_URL}/org/{org_id}/training/jobs",
         headers=auth.get_headers(),
-        data=json.dumps(data),
+        data=data.model_dump(mode="json"),
     )
     response.raise_for_status()
 

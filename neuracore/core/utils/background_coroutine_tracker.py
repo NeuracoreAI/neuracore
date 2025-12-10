@@ -2,7 +2,8 @@
 
 import asyncio
 import logging
-from typing import Coroutine, List, Optional
+from collections.abc import Coroutine
+from typing import Optional
 
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 
@@ -24,7 +25,7 @@ class BackgroundCoroutineTracker:
             loop: the event loop to run on. Defaults to the running loop if not
                     provided.
         """
-        self.background_tasks: List[asyncio.Task] = []
+        self.background_tasks: list[asyncio.Task] = []
         self.loop = loop or get_running_loop()
 
     def _task_done(self, task: asyncio.Task) -> None:

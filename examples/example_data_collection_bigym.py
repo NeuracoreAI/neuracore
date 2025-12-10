@@ -1,6 +1,7 @@
 import argparse
 import time
 
+import numpy as np
 from bigym_utils.utils import (
     FREQUENCY,
     JOINT_ACTUATORS,
@@ -42,7 +43,7 @@ def run_episode(
             nc.start_recording()
 
         # Log example custom metadata
-        nc.log_custom_data("my_custom_data", [1, 2, 3, 4, 5], timestamp=t)
+        nc.log_custom_1d("my_custom_data", np.array([1, 2, 3, 4, 5]), timestamp=t)
 
         # Initial joint + camera logging
         qpos, qvel = obs_to_joint_dict(obs, JOINT_NAMES)
@@ -53,6 +54,7 @@ def run_episode(
         nc.log_rgb("head", images["head"], timestamp=t)
 
         nc.log_language(
+            "instruction",
             "Move two plates simultaneously from one draining rack to the other.",
             timestamp=t,
         )
@@ -71,7 +73,7 @@ def run_episode(
             t += DT
 
             # Logging at each step
-            nc.log_custom_data("my_custom_data", [1, 2, 3, 4, 5], timestamp=t)
+            nc.log_custom_1d("my_custom_data", np.array([1, 2, 3, 4, 5]), timestamp=t)
 
             qpos, qvel = obs_to_joint_dict(obs, JOINT_NAMES)
             nc.log_joint_positions(qpos, timestamp=t)

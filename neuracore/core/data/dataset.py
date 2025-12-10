@@ -1,18 +1,28 @@
 """Dataset management with lazy-loading generator."""
 
 import logging
+import sys
 import time
+from collections.abc import Generator, Iterator
 from pathlib import Path
-from typing import Dict, Generator, Iterator, List, Optional, Union
+from typing import Optional, Union
 
 import requests
-from neuracore_types import DataType, SyncedDataset
+from neuracore_types import Dataset as DatasetModel
+from neuracore_types import DataType
+from neuracore_types import Recording as RecordingModel
+from neuracore_types import (
+    RobotDataSpec,
+    SynchronizationDetails,
+    SynchronizationProgress,
+    SynchronizeDatasetRequest,
+)
+from neuracore_types import SynchronizedDataset as SynchronizedDatasetModel
 from tqdm import tqdm
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
-from neuracore.utils import deprecated
 
 from ..auth import Auth, get_auth
 from ..const import API_URL
@@ -36,27 +46,27 @@ class Dataset:
         tags: list[str],
         data_types: list[DataType],
         is_shared: bool,
-        recordings: Optional[Union[List[dict], List[Recording]]] = None,
+        recordings: Optional[Union[list[dict], list[Recording]]] = None,
     ):
         """Initialize a Dataset instance.
 
         Args:
-            id (str): Unique identifier for the dataset.
-            org_id (str): Organization ID associated with the dataset.
-            name (str): Human-readable name for the dataset.
-            size_bytes (int): Total size of the dataset in bytes.
-            tags (list[str]): List of tags associated with the dataset.
-            data_types (list[DataType]): List of data types present in the dataset.
-            is_shared (bool): Whether the dataset is shared.
-            recordings (Optional[list[dict]]): List of recording dictionaries.
+            id: Unique identifier for the dataset.
+            org_id: Organization ID associated with the dataset.
+            name: Human-readable name for the dataset.
+            size_bytes: Total size of the dataset in bytes.
+            tags: List of tags associated with the dataset.
+            data_types: List of data types present in the dataset.
+            is_shared: Whether the dataset is shared.
+            recordings: List of recording dictionaries.
             If not provided, the dataset will be fetched from the Neuracore API.
 
         Attributes:
-            cache_dir (Path): Directory path for caching dataset recordings.
-            _recordings_cache (List[Recording]): Internal list of cached recordings.
-            _num_recordings (Optional[int]): Number of recordings in the dataset,
+            cache_dir: Directory path for caching dataset recordings.
+            _recordings_cache: Internal list of cached recordings.
+            _num_recordings: Number of recordings in the dataset,
             or None if not fetched from the Neuracore API.
-            _start_after (Optional[dict]): Internal dictionary for tracking
+            _start_after: Internal dictionary for tracking
             the start of the next page of recordings.
         """
         self.id = id
@@ -68,7 +78,7 @@ class Dataset:
         self.data_types = data_types or []
 
         self.cache_dir = DEFAULT_CACHE_DIR
-        self._recordings_cache: List[Recording] = (
+        self._recordings_cache: list[Recording] = (
             [
                 self._wrap_raw_recording(r) if isinstance(r, dict) else r
                 for r in recordings
@@ -78,49 +88,9 @@ class Dataset:
         )
         self._num_recordings: Optional[int] = len(recordings) if recordings else None
         self._start_after: Optional[dict] = None
+        self._robot_ids: Optional[list[str]] = None
 
-    # Backwards compatibility
-    class _RecordingsProxy:
-        """Proxy for backward-compatible recordings property."""
-
-        def __init__(self, dataset: "Dataset") -> None:
-            self._dataset = dataset
-
-        def __iter__(self) -> Iterator[Recording]:
-            return iter(self._dataset)
-
-        def __getitem__(self, index: Union[int, slice]) -> Union[Recording, "Dataset"]:
-            return self._dataset[index]
-
-        def __len__(self) -> int:
-            return len(self._dataset)
-
-    @property
-    @deprecated(
-        "This attribute is deprecated, "
-        "iterate over the dataset itself to access recordings."
-    )
-    def recordings(self) -> "Dataset._RecordingsProxy":
-        """Deprecated recordings property returning a proxy supporting len()."""
-        return self._RecordingsProxy(self)
-
-    @property
-    @deprecated("This attribute is deprecated, use len(dataset) instead.")
-    def num_recordings(self) -> int:
-        """The number of recordings in the dataset.
-
-        .. deprecated:: 0.3.0
-           Use len(dataset) instead.
-
-        Returns:
-            int: The number of recordings in the dataset.
-        """
-        if self._num_recordings is None:
-            self._initialize_num_recordings()
-        assert self._num_recordings is not None
-        return self._num_recordings
-
-    def _wrap_raw_recording(self, raw_recording: Dict) -> Recording:
+    def _wrap_raw_recording(self, raw_recording: dict) -> Recording:
         """Wrap a raw recording dict into a Recording object.
 
         Args:
@@ -129,12 +99,15 @@ class Dataset:
         Returns:
             A Recording object
         """
+        recording_model = RecordingModel.model_validate(raw_recording)
         return Recording(
             dataset=self,
-            recording_id=raw_recording["id"],
-            total_bytes=raw_recording["total_bytes"],
-            robot_id=raw_recording["robot_id"],
-            instance=raw_recording["instance"],
+            recording_id=recording_model.id,
+            total_bytes=recording_model.total_bytes,
+            robot_id=recording_model.robot_id,
+            instance=recording_model.instance,
+            start_time=recording_model.start_time,
+            end_time=recording_model.end_time,
         )
 
     def _initialize_num_recordings(self) -> None:
@@ -154,7 +127,7 @@ class Dataset:
             logger.error(f"Failed to fetch recording count for Dataset {self.id}: {e}")
             self._num_recordings = 0
 
-    def _fetch_next_page(self) -> List[Recording]:
+    def _fetch_next_page(self) -> list[Recording]:
         """Fetch the next page of recordings and append to cache (lazy)."""
         if (
             self._num_recordings is not None
@@ -263,15 +236,15 @@ class Dataset:
             if non_exist_ok:
                 return None
             raise DatasetError(f"Dataset with ID '{id}' not found.")
-        dataset_json = req.json()
+        dataset_model = DatasetModel.model_validate(req.json())
         return Dataset(
-            id=dataset_json["id"],
+            id=dataset_model.id,
             org_id=org_id,
-            name=dataset_json["name"],
-            size_bytes=dataset_json["size_bytes"],
-            tags=dataset_json["tags"],
-            is_shared=dataset_json["is_shared"],
-            data_types=list(dataset_json.get("all_data_types", {}).keys()),
+            name=dataset_model.name,
+            size_bytes=dataset_model.size_bytes,
+            tags=dataset_model.tags,
+            is_shared=dataset_model.is_shared,
+            data_types=list(dataset_model.all_data_types.keys()),
         )
 
     @staticmethod
@@ -292,24 +265,24 @@ class Dataset:
         """
         auth: Auth = get_auth()
         org_id = get_current_org()
-        req = requests.get(
+        response = requests.get(
             f"{API_URL}/org/{org_id}/datasets/search/by-name",
             params={"name": name},
             headers=auth.get_headers(),
         )
-        if req.status_code != 200:
+        if response.status_code != 200:
             if non_exist_ok:
                 return None
             raise DatasetError(f"Dataset '{name}' not found.")
-        dataset_json = req.json()
+        dataset_model = DatasetModel.model_validate(response.json())
         return Dataset(
-            id=dataset_json["id"],
+            id=dataset_model.id,
             org_id=org_id,
-            name=dataset_json["name"],
-            size_bytes=dataset_json["size_bytes"],
-            tags=dataset_json["tags"],
-            is_shared=dataset_json["is_shared"],
-            data_types=list(dataset_json.get("all_data_types", {}).keys()),
+            name=dataset_model.name,
+            size_bytes=dataset_model.size_bytes,
+            tags=dataset_model.tags,
+            is_shared=dataset_model.is_shared,
+            data_types=list(dataset_model.all_data_types.keys()),
         )
 
     @staticmethod
@@ -380,30 +353,33 @@ class Dataset:
             },
         )
         response.raise_for_status()
-        dataset_json = response.json()
+        dataset_model = DatasetModel.model_validate(response.json())
         return Dataset(
-            id=dataset_json["id"],
+            id=dataset_model.id,
             org_id=org_id,
-            name=dataset_json["name"],
-            size_bytes=dataset_json["size_bytes"],
-            tags=dataset_json["tags"],
-            is_shared=dataset_json["is_shared"],
-            data_types=list(dataset_json.get("all_data_types", {}).keys()),
+            name=dataset_model.name,
+            size_bytes=dataset_model.size_bytes,
+            tags=dataset_model.tags,
+            is_shared=dataset_model.is_shared,
+            data_types=list(dataset_model.all_data_types.keys()),
         )
 
     def _synchronize(
-        self, frequency: int = 0, data_types: Optional[list[DataType]] = None
-    ) -> SyncedDataset:
+        self,
+        frequency: int = 0,
+        robot_data_spec: Optional[RobotDataSpec] = None,
+    ) -> SynchronizedDatasetModel:
         """Synchronize the dataset with specified frequency and data types.
 
         Args:
             frequency: Frequency at which to synchronize the dataset.
                 If 0, uses the default frequency.
-            data_types: List of DataType to include in synchronization.
-                If None, uses the default data types from the dataset.
+            robot_data_spec: Dict specifying robot id to
+                data types and their names to include in synchronization.
+                If None, will use all available data types from the dataset.
 
         Returns:
-            SyncedDataset instance containing synchronized data.
+            SynchronizedDataset instance containing synchronized data.
 
         Raises:
             requests.HTTPError: If the API request fails.
@@ -412,20 +388,38 @@ class Dataset:
         response = requests.post(
             f"{API_URL}/org/{self.org_id}/synchronize/synchronize-dataset",
             headers=get_auth().get_headers(),
-            json={
-                "dataset_id": self.id,
-                "frequency": frequency,
-                "data_types": data_types,
-            },
+            json=SynchronizeDatasetRequest(
+                dataset_id=self.id,
+                synchronization_details=SynchronizationDetails(
+                    frequency=frequency,
+                    robot_data_spec=robot_data_spec,
+                    max_delay_s=sys.float_info.max,
+                    allow_duplicates=True,
+                ),
+            ).model_dump(mode="json"),
         )
         response.raise_for_status()
-        dataset_json = response.json()
-        return SyncedDataset.model_validate(dataset_json)
+        return SynchronizedDatasetModel.model_validate(response.json())
+
+    def _get_synchronization_progress(
+        self, synchronized_dataset_id: str
+    ) -> SynchronizationProgress:
+        """Get synchronization progress for this dataset.
+
+        Returns:
+            Synchronization progress for the dataset.
+        """
+        response = requests.get(
+            f"{API_URL}/org/{self.org_id}/synchronize/synchronization-progress/{synchronized_dataset_id}",
+            headers=get_auth().get_headers(),
+        )
+        response.raise_for_status()
+        return SynchronizationProgress.model_validate(response.json())
 
     def synchronize(
         self,
         frequency: int = 0,
-        data_types: Optional[list[DataType]] = None,
+        robot_data_spec: Optional[RobotDataSpec] = None,
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 4,
     ) -> SynchronizedDataset:
@@ -434,8 +428,9 @@ class Dataset:
         Args:
             frequency: Frequency at which to synchronize the dataset.
                 If 0, uses the default frequency.
-            data_types: List of DataType to include in synchronization.
-                If None, uses the default data types from the dataset.
+            robot_data_spec: Dict specifying robot id to
+                data types and their names to include in synchronization.
+                If None, will use all available data types from the dataset.
             prefetch_videos: Whether to prefetch video data for the synchronized data.
             max_prefetch_workers: Number of threads to use for prefetching videos.
 
@@ -446,19 +441,27 @@ class Dataset:
             requests.HTTPError: If the API request fails.
             DatasetError: If frequency is not greater than 0.
         """
-        synced_dataset = self._synchronize(frequency=frequency, data_types=data_types)
+        if robot_data_spec is None:
+            robot_data_spec = {}
+            for rid in self.robot_ids:
+                robot_data_spec[rid] = {dt: [] for dt in self.data_types}
+
+        synced_dataset = self._synchronize(
+            frequency=frequency, robot_data_spec=robot_data_spec
+        )
+        synchronization_progress = self._get_synchronization_progress(synced_dataset.id)
         total = synced_dataset.num_demonstrations
-        processed = synced_dataset.num_processed_demonstrations
+        processed = synchronization_progress.num_synchronized_demonstrations
         if total != processed:
             pbar = tqdm(total=total, desc="Synchronizing dataset", unit="recording")
             pbar.n = processed
             pbar.refresh()
             while processed < total:
                 time.sleep(5.0)
-                synced_dataset = self._synchronize(
-                    frequency=frequency, data_types=data_types
+                synchronization_progress = self._get_synchronization_progress(
+                    synced_dataset.id
                 )
-                new_processed = synced_dataset.num_processed_demonstrations
+                new_processed = synchronization_progress.num_synchronized_demonstrations
                 if new_processed > processed:
                     pbar.update(new_processed - processed)
                     processed = new_processed
@@ -466,13 +469,29 @@ class Dataset:
         else:
             logger.info("Dataset is already synchronized.")
         return SynchronizedDataset(
+            id=synced_dataset.id,
             dataset=self,
             frequency=frequency,
-            data_types=data_types,
-            dataset_description=synced_dataset.dataset_description,
+            robot_data_spec=robot_data_spec,
             prefetch_videos=prefetch_videos,
             max_prefetch_workers=max_prefetch_workers,
         )
+
+    @property
+    def robot_ids(self) -> list[str]:
+        """Get robot IDs present in the synchronized dataset.
+
+        Returns:
+            List of robot IDs in the synchronized dataset.
+        """
+        if self._robot_ids is None:
+            response = requests.get(
+                f"{API_URL}/org/{self.org_id}/datasets/{self.id}/robot_ids",
+                headers=get_auth().get_headers(),
+            )
+            response.raise_for_status()
+            self._robot_ids = response.json()
+        return self._robot_ids
 
     def __iter__(self) -> Iterator[Recording]:
         """Yield recordings one by one, fetching pages lazily."""

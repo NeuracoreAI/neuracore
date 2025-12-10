@@ -7,16 +7,16 @@ connection management, and automatic reconnection with exponential backoff.
 
 import asyncio
 import logging
-from typing import Dict, List, Optional
+from typing import Optional
 from uuid import uuid4
 
 from aiohttp import ClientSession
 from neuracore_types import (
+    DataType,
     HandshakeMessage,
     MessageType,
     OpenConnectionDetails,
     RobotStreamTrack,
-    TrackKind,
     VideoFormat,
 )
 
@@ -82,11 +82,11 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
             EnabledManager.DISABLED, self._on_close
         )
         self.streaming.add_listener(EnabledManager.DISABLED, self._on_close)
-        self.connections: Dict[str, PierToPierProviderConnection] = {}
+        self.connections: dict[str, PierToPierProviderConnection] = {}
 
-        self.video_tracks_cache: Dict[str, VideoSource] = {}
-        self.event_source_cache: Dict[str, JSONSource] = {}
-        self.tracks: List[VideoSource] = []
+        self.video_tracks_cache: dict[str, VideoSource] = {}
+        self.event_source_cache: dict[str, JSONSource] = {}
+        self.tracks: list[VideoSource] = []
         self.track_metadata: dict[str, RobotStreamTrack] = {}
 
     @property
@@ -99,13 +99,13 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         return self.streaming
 
     def get_video_source(
-        self, sensor_name: str, kind: TrackKind, sensor_key: str
+        self, sensor_name: str, data_type: DataType, sensor_key: str
     ) -> VideoSource:
         """Get or create a video source for streaming camera data.
 
         Args:
             sensor_name: Name of the sensor/camera
-            kind: Type of video data (TrackKind.RGB or TrackKind.DEPTH are supported)
+            data_type: Type of video data (DataType.RGB or DataType.DEPTH are supported)
             sensor_key: custom key for caching.
 
         Returns:
@@ -116,14 +116,14 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
 
         mid = str(len(self.tracks))
         self.background_tracker.submit_background_coroutine(
-            self.submit_track(mid, kind, sensor_name)
+            self.submit_track(mid, data_type, sensor_name)
         )
-        if kind == TrackKind.RGB:
+        if data_type == DataType.RGB_IMAGES:
             video_source = VideoSource(mid=mid, stream_enabled=self.streaming)
-        elif kind == TrackKind.DEPTH:
+        elif data_type == DataType.DEPTH_IMAGES:
             video_source = DepthVideoSource(mid=mid, stream_enabled=self.streaming)
         else:
-            raise ValueError(f"Unsupported video kind {kind}")
+            raise ValueError(f"Unsupported video data type {data_type}")
 
         self.video_tracks_cache[sensor_key] = video_source
         self.tracks.append(video_source)
@@ -140,13 +140,13 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         return video_source
 
     def get_json_source(
-        self, sensor_name: str, kind: TrackKind, sensor_key: str
+        self, sensor_name: str, data_type: DataType, sensor_key: str
     ) -> JSONSource:
         """Get or create a JSON source for streaming structured data.
 
         Args:
             sensor_name: Name of the sensor
-            kind: Type of data being streamed
+            data_type: Type of data being streamed
             sensor_key: custom key for caching.
 
         Returns:
@@ -158,7 +158,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         mid = uuid4().hex
 
         self.background_tracker.submit_background_coroutine(
-            self.submit_track(mid, kind, sensor_name)
+            self.submit_track(mid, data_type, sensor_name)
         )
         source = JSONSource(mid=mid, stream_enabled=self.streaming, loop=self.loop)
 
@@ -169,12 +169,12 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
 
         return source
 
-    async def submit_track(self, mid: str, kind: TrackKind, label: str) -> None:
+    async def submit_track(self, mid: str, data_type: DataType, label: str) -> None:
         """Submit a new track to the signaling server.
 
         Args:
             mid: Media ID for the track
-            kind: Type of media (e.g., "video", "audio", "application")
+            data_type: Type of media (e.g., "video", "audio", "application")
             label: Human-readable label for the track
 
         Raises:
@@ -187,7 +187,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
             robot_instance=self.robot_instance,
             stream_id=self.local_stream_id,
             mid=mid,
-            kind=kind,
+            data_type=data_type,
             label=label,
         )
         self.track_metadata[track.id] = track

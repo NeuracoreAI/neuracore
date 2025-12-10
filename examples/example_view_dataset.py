@@ -1,28 +1,53 @@
+from typing import cast
+
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import numpy as np
-from neuracore_types import DataType, JointData
+from neuracore_types import DataType, JointData, RGBCameraData, SynchronizedPoint
 
 import neuracore as nc
 
 
 def visualize_episode(
-    joint_positions: list[JointData], first_camera_images: list[np.ndarray]
+    joint_positions: list[dict[str, JointData]],
+    camera_data: list[dict[str, RGBCameraData]],
+    timestamps: list[float],
+    start_time: float = 0.0,
+    end_time: float = 0.0,
 ):
     """Visualize an episode with joint positions and camera images side by side."""
-    jps = np.array([list(joint_data.values.values()) for joint_data in joint_positions])
-    print(jps)
-    images = np.array(first_camera_images)
+    # Extract joint values from the first joint in the dict at each timestep
+    # Assumes all dicts have the same keys and we want to visualize all joints
+    joint_names = list(joint_positions[0].keys())
+    jps = np.array([
+        [joint_positions[t][name].value for name in joint_names]
+        for t in range(len(joint_positions))
+    ])
+
+    # Extract frames from the first camera in the dict at each timestep
+    # Assumes we want to visualize the first camera
+    first_camera_name = list(camera_data[0].keys())[0]
+    images = np.array(
+        [camera_data[t][first_camera_name].frame for t in range(len(camera_data))]
+    )
+
+    # Calculate relative times from timestamps
+    relative_times = np.array([t - start_time for t in timestamps])
+
+    # Add a "fake" point at the end using end_time
+    jps = np.vstack([jps, jps[-1:]])
+    images = np.vstack([images, images[-1:]])
+    relative_times = np.append(relative_times, end_time - start_time)
 
     # Create a more compact figure
     fig = plt.figure(figsize=(12, 4))
 
     # Plot joint positions
     ax1 = plt.subplot(1, 2, 1)
-    for joint_idx in range(jps.shape[1]):
-        ax1.plot(jps[:, joint_idx], label=f"Joint {joint_idx}")
+    for joint_idx, joint_name in enumerate(joint_names):
+        ax1.plot(relative_times, jps[:, joint_idx], label=joint_name)
     ax1.set_title("Joint Positions")
-    ax1.set_xlabel("Timestep")
+    ax1.set_xlabel("Time (s)")
     ax1.set_ylabel("Position")
     ax1.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
 
@@ -33,11 +58,11 @@ def visualize_episode(
     ax2.axis("off")
 
     # Time indicator and timestamp
-    time_line = ax1.axvline(x=0, color="r")
+    time_line = ax1.axvline(x=relative_times[0], color="r")
     timestamp_text = ax2.text(
         0.02,
         0.95,
-        f"Timestep: 0/{len(images)}",
+        f"Time: {relative_times[0]:.2f}s / {relative_times[-1]:.2f}s",
         transform=ax2.transAxes,
         color="white",
         bbox=dict(facecolor="black", alpha=0.7),
@@ -47,8 +72,10 @@ def visualize_episode(
 
     def update(frame):
         img_display.set_array(images[frame])
-        time_line.set_xdata([frame, frame])
-        timestamp_text.set_text(f"Timestep: {frame}/{len(images)}")
+        time_line.set_xdata([relative_times[frame], relative_times[frame]])
+        timestamp_text.set_text(
+            f"Time: {relative_times[frame]:.2f}s / {relative_times[-1]:.2f}s"
+        )
         return [img_display, time_line, timestamp_text]
 
     # Create animation
@@ -76,20 +103,31 @@ def visualize_episode(
 nc.login()
 # CMU Play Fusion is one of the many public/shared datasets you have access to
 dataset = nc.get_dataset("ASU Table Top")
+robot_ids_dataset = dataset.robot_ids
 synced_dataset = dataset.synchronize(
     frequency=1,
-    data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE],
+    robot_data_spec={
+        robot_id: {
+            DataType.JOINT_POSITIONS: [],
+            DataType.RGB_IMAGES: [],
+        }
+        for robot_id in robot_ids_dataset
+    },
 )
 print(f"Number of episodes: {len(dataset)}")
 joint_positions = []
-first_camera_images = []
+camera_data = []
+timestamps = []
 for episode in synced_dataset[:1]:
     print(f"Episode length is {len(episode)}")
     for step in episode:
-        joint_positions.append(step.joint_positions)
-        if step.rgb_images is not None:
-            for cam_id, cam_data in step.rgb_images.items():
-                first_camera_images.append(cam_data.frame)
-                break
+        step = cast(SynchronizedPoint, step)
+        joint_positions.append(step[DataType.JOINT_POSITIONS])
+        camera_data.append(step[DataType.RGB_IMAGES])
+        timestamps.append(step.timestamp)
 
-visualize_episode(joint_positions, first_camera_images)
+
+print(f"Episode length t: {episode.end_time - episode.start_time} seconds")
+visualize_episode(
+    joint_positions, camera_data, timestamps, episode.start_time, episode.end_time
+)
