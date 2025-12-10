@@ -738,33 +738,27 @@ class Pi0(NeuracoreModel):
 
         action_data = torch.cat(action_targets, dim=-1)  # (B, T, total_action_dim)
 
-        target_actions = self.action_normalizer.normalize(action_data)
-        target_actions = target_actions
-
-        t = self._sample_fm_time(len(batch))
-        x0 = torch.randn_like(target_actions)
-        x1 = target_actions
-        # Calculate conditional flow
-        _t = t.view(-1, 1, 1)
-        psi_t = (1 - (1 - self.flow_sig_min) * _t) * x0 + _t * x1
-
-        if DataType.RGB_IMAGES not in batch.inputs:
-            raise ValueError("RGB images are required for training")
-
-        images, image_masks = self._prepare_rgb_images(inference_sample)
-        lang_tokens, lang_masks = self._process_language_tokens(inference_sample)
-        merged_text_images, pad_masks = self._forward_vlm_merged_text_images(
-            images, image_masks, lang_tokens, lang_masks
+        target_actions = self.action_normalizer.normalize(
+            data=pad_vector(
+                batch.outputs.joint_target_positions.data, self.max_action_dim
+            )
         )
-        proprio_embeds = self.proprio_encoder(proprios)  # (B, E)
-        # Get the actual sequence length from the merged embeddings
-        actual_seq_len = merged_text_images.shape[1]
-        v_psi = self._predict_action(
-            merged_text_images, proprio_embeds, psi_t, t, actual_seq_len, pad_masks
+        target_actions_mask = pad_vector(
+            batch.outputs.joint_target_positions.mask, self.max_action_dim
         )
-        d_psi = x1 - (1 - self.flow_sig_min) * x0
-        loss = F.mse_loss(v_psi, d_psi, reduction="none")
-        loss = loss.mean()
+        # Pad to the max action dim after normalization to avoid padding artifacts
+        target_actions = pad_vector(target_actions, self.max_action_dim).to(self.device)
+        target_mask = pad_vector(
+            batch.outputs.joint_target_positions.mask, self.max_action_dim
+        ).to(self.device)
+        target_actions = target_actions * target_mask
+
+        losses = self.model.forward(
+            images, image_masks, lang_tokens, lang_masks, state, target_actions
+        )
+        # Mask to the real action dims
+        losses = losses[:, :, : self.action_dim]
+        loss = (losses * target_mask[:, :, : self.action_dim]).mean()
 
         losses = {
             "mse_loss": loss,
