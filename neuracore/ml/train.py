@@ -357,6 +357,9 @@ def run_training(
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg: DictConfig) -> None:
     """Main function to run the training script."""
+    # Resolve the configuration
+    cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+
     # Print configuration
     logger.info("Training configuration:")
     logger.info(OmegaConf.to_yaml(cfg, resolve=True))
