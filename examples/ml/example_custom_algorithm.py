@@ -11,7 +11,6 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
-from hydra.utils import get_class
 from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 from torchvision import models
 from transformers import AutoModel, AutoTokenizer
