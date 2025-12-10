@@ -18,6 +18,13 @@ PIX_FMT = "yuv420p"
 FREQ = 30
 PTS_FRACT = 90000  # Common timebase for h264
 
+MOCKED_ORG_ID = "test-org-id"
+
+
+@pytest.fixture
+def mocked_org_id():
+    return MOCKED_ORG_ID
+
 
 @pytest.fixture
 def create_test_video_fn():
@@ -202,7 +209,6 @@ def synced_data_multiple_frames():
 
 @pytest.fixture
 def mock_auth_requests(
-    temp_config_dir,
     mock_auth_requests,
     dataset_dict,
     recordings_list,
@@ -218,6 +224,16 @@ def mock_auth_requests(
         f"{API_URL}/org/{mocked_org_id}/datasets", json=[dataset_dict], status_code=200
     )
 
+    # Mock synchronize endpoint dynamically
+    mock_auth_requests.post(
+        re.compile(f"{API_URL}/org/{mocked_org_id}/synchronize/synchronize-dataset"),
+        json={
+            "dataset_id": dataset_dict["id"],
+            "frequency": 50,
+            "data_types": dataset_dict["data_types"],
+        },
+    )
+
     # Mock shared datasets endpoint
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets/shared", json=[], status_code=200
@@ -228,16 +244,21 @@ def mock_auth_requests(
         json=dataset_dict,
         status_code=200,
     )
+    mock_auth_requests.get(
+        re.compile(f"{API_URL}/org/{mocked_org_id}/datasets/dataset123"),
+        json=dataset_dict,
+        status_code=200,
+    )
 
     # Mock dataset creation endpoint
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/datasets", json=dataset_dict, status_code=200
     )
 
-    # Mock recordings endpoint
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_dict['id']}/recordings",
-        json={"recordings": recordings_list},
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/{dataset_dict['id']}",
+        additional_matcher=lambda request: request.text in (None, ""),
+        json={"data": recordings_list, "total": len(recordings_list)},
         status_code=200,
     )
 

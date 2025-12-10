@@ -31,7 +31,7 @@ def main():
     render_cam_name = "angle"
     obs_camera_names = ["angle"]
 
-    for episode_idx in range(1):
+    for episode_idx in range(10):
         print(f"{episode_idx=}")
 
         # Setup the environment

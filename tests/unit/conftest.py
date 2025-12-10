@@ -19,7 +19,6 @@ from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
 def temp_config_dir(monkeypatch):
     """Fixture to create a temporary config directory."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Mock home directory for testing
         tmpdir = pathlib.Path(tmpdir)
         with patch.object(config_manager, "CONFIG_DIR", tmpdir):
             yield tmpdir
@@ -54,10 +53,8 @@ def mock_auth_requests():
             status_code=200,
         )
 
-        m.get(
-            f"{API_URL}/auth/verify-version",
-            status_code=200,
-        )
+        m.get(f"{API_URL}/auth/verify-version", status_code=200)
+
         # Mock robots endpoint
         m.get(f"{API_URL}/org/{MOCKED_ORG_ID}/robots", json=[], status_code=200)
 
@@ -98,18 +95,14 @@ def mock_login(mock_auth_requests):
 @pytest.fixture
 def mock_urdf(tmp_path):
     """Create a mock URDF file for testing."""
-    # Create meshes directory
     meshes_dir = tmp_path / "meshes"
     meshes_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create dummy mesh files to satisfy URDF reference
     dummy_mesh_files = ["gripper.stl", "base.stl", "link1.stl", "link2.stl"]
-
     for mesh_file in dummy_mesh_files:
         mesh_path = meshes_dir / mesh_file
         mesh_path.write_bytes(b"Dummy mesh content")
 
-    # Updated URDF content with relative mesh paths
     urdf_content = """<?xml version="1.0"?>
     <robot name="test_robot">
         <link name="base_link">
@@ -158,18 +151,14 @@ def mock_model_mar(tmp_path):
 @pytest.fixture
 def reset_neuracore():
     """Reset Neuracore global state between tests."""
-    # Store the original authentication instance
     original_auth = neuracore.core.auth._auth
 
-    # Reset global variables in core
     neuracore.api._active_robot = None
     neuracore.api._active_dataset_id = None
     neuracore.api._active_recording_id = None
 
-    # Reset authentication
     neuracore.core.auth._auth = neuracore.core.auth.Auth()
 
     yield
 
-    # Restore the original authentication instance
     neuracore.core.auth._auth = original_auth
