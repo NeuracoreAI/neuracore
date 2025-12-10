@@ -247,8 +247,8 @@ def stop_recording(
     robot.stop_recording(recording_id)
     if wait:
         while True:
-            active_streams = backend_utils.get_active_data_streams(recording_id)
-            if len(active_streams) == 0:
+            data_traces = backend_utils.get_active_data_traces(recording_id)
+            if len(data_traces) == 0:
                 break
         time.sleep(2.0)
 
