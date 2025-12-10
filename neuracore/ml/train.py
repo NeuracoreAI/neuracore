@@ -321,6 +321,7 @@ def run_training(
             num_epochs=cfg.epochs,
             log_freq=cfg.logging_frequency,
             keep_last_n_checkpoints=cfg.keep_last_n_checkpoints,
+            clip_grad_norm=algorithm_config.get("clip_grad_norm", None),
             rank=rank,
             world_size=world_size,
             device=device,
