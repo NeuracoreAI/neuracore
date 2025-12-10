@@ -9,17 +9,20 @@ Reference: Black, Kevin, et al. "π0: A Vision-Language-Action Flow Model
 for General Robot Control." arXiv preprint https://arxiv.org/abs/2410.24164.
 """
 
+# cspell:ignore adarms openpi layernorm
+
 import logging
+import math
 import os
 import time
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
-from hydra.utils import get_class
 from neuracore_types import DataType, ModelInitDescription, ModelPrediction
+from torch.optim.lr_scheduler import LambdaLR
 from transformers import AutoProcessor, AutoTokenizer, PaliGemmaForConditionalGeneration
 
 from neuracore.ml import (
@@ -30,7 +33,13 @@ from neuracore.ml import (
 )
 from neuracore.ml.algorithm_utils.normalizer import MeanStdNormalizer
 
-from .modules import ActionEncoder, GemmaMoE, MoeExpertConfig, SinusoidalPosEmb
+from .modules import (
+    ActionEncoder,
+    PaliGemmaWithExpertModel,
+    SinusoidalPosEmb,
+    get_gemma_config,
+    pad_vector,
+)
 
 logging.getLogger("transformers").setLevel(logging.CRITICAL)
 
@@ -44,6 +53,8 @@ LANGUAGE_MODEL_NAME = "google/paligemma-3b-pt-224"
 
 VLM_BACKBONE = "google/paligemma-3b-pt-224"
 VLM_EXPERT_WIDTH = 2048  # Width of the VLM expert, matches PaliGemma's hidden size
+PALIGEMMA_VARIANT = "gemma_2b"
+ACTION_EXPERT_VARIANT = "gemma_300m"
 
 
 class Pi0(NeuracoreModel):
@@ -74,6 +85,10 @@ class Pi0(NeuracoreModel):
         flow_beta: float = 1.0,
         lr: float = 5e-5,
         weight_decay: float = 0.0,
+        lr_scheduler_warmup_steps: int = 1_000,
+        lr_scheduler_num_decay_steps: int = 30_000,
+        lr_scheduler_decay_lr: float = 2.5e-6,
+        clip_grad_norm: float = 1.0,
         dtype: torch.dtype = torch.float32,
         joint_state_normalizer: str = "MeanStdNormalizer",
         action_normalizer: str = "MeanStdNormalizer",
@@ -99,6 +114,10 @@ class Pi0(NeuracoreModel):
             flow_beta: Beta parameter for the flow beta distribution.
             lr: Learning rate for the model.
             weight_decay: Weight decay for the model.
+            lr_scheduler_warmup_steps: Warmup steps for the learning rate scheduler.
+            lr_scheduler_num_decay_steps: Decay steps for the learning rate scheduler.
+            lr_scheduler_decay_lr: Minimum learning rate factor for the scheduler.
+            clip_grad_norm: Gradient clipping norm.
             dtype: Data type for model parameters and computations.
             joint_state_normalizer: Normalizer class
                 (e.g. "MeanStdNormalizer", "MinMaxNormalizer")
@@ -114,6 +133,9 @@ class Pi0(NeuracoreModel):
             )
 
         self.action_dim = self.dataset_description.joint_target_positions.max_len
+        self.max_state_dim = self.max_action_dim = (
+            32  # maximum dimension allowed by the model
+        )
         self.action_horizon = self.output_prediction_horizon
         self.vlm_max_text_tokens = vlm_max_text_tokens
         num_rgbs = model_init_description.dataset_description.rgb_images.max_len
@@ -123,6 +145,9 @@ class Pi0(NeuracoreModel):
         self.flow_beta_dist = torch.distributions.Beta(flow_alpha, flow_beta)
         self.lr = lr
         self.weight_decay = weight_decay
+        self.lr_scheduler_warmup_steps = lr_scheduler_warmup_steps
+        self.lr_scheduler_num_decay_steps = lr_scheduler_num_decay_steps
+        self.lr_scheduler_decay_lr = lr_scheduler_decay_lr
         proprio_dim = (
             self.dataset_description.joint_positions.max_len
             + self.dataset_description.joint_velocities.max_len
@@ -143,23 +168,33 @@ class Pi0(NeuracoreModel):
         # Create a mixture of experts (MoE) model consisting of 2 experts:
         # 1. VLM expert
         # 2. Action expert
-        expert_configs = {
-            "vlm": MoeExpertConfig(
-                hidden_size=VLM_EXPERT_WIDTH,
-                intermediate_size=vlm_expert_intermediate_size,
-                head_dim=vlm_expert_head_dim,
-                num_attention_heads=vlm_expert_num_heads,
-                num_key_value_heads=vlm_expert_num_kv_heads,
-            ),
-            "action": MoeExpertConfig(
-                hidden_size=action_expert_width,
-                intermediate_size=action_expert_intermediate_size,
-                head_dim=action_expert_head_dim,
-                num_attention_heads=action_expert_num_heads,
-                num_key_value_heads=action_expert_num_kv_heads,
-            ),
-        }
-        self.moe = GemmaMoE(moe_depth, expert_configs)
+        # expert_configs = {
+        #     "vlm": MoeExpertConfig(
+        #         hidden_size=VLM_EXPERT_WIDTH,
+        #         intermediate_size=vlm_expert_intermediate_size,
+        #         head_dim=vlm_expert_head_dim,
+        #         num_attention_heads=vlm_expert_num_heads,
+        #         num_key_value_heads=vlm_expert_num_kv_heads,
+        #     ),
+        #     "action": MoeExpertConfig(
+        #         hidden_size=action_expert_width,
+        #         intermediate_size=action_expert_intermediate_size,
+        #         head_dim=action_expert_head_dim,
+        #         num_attention_heads=action_expert_num_heads,
+        #         num_key_value_heads=action_expert_num_kv_heads,
+        #     ),
+        # }
+        paligemma_config = get_gemma_config(PALIGEMMA_VARIANT)
+        action_expert_config = get_gemma_config(ACTION_EXPERT_VARIANT)
+
+        self.paligemma_with_expert = PaliGemmaWithExpertModel(
+            paligemma_config,
+            action_expert_config,
+            use_adarms=[False, False],
+            precision=self.dtype,
+        )
+        self.gradient_checkpointing_enabled = False
+        # self.moe = GemmaMoE(moe_depth, expert_configs)
         self.action_encoder = ActionEncoder(self.action_dim, action_expert_width)
         self.time_embedding = SinusoidalPosEmb(action_expert_width)
         self.proprio_encoder = nn.Linear(proprio_dim, action_expert_width)
@@ -168,26 +203,26 @@ class Pi0(NeuracoreModel):
             self.action_dim,
         )
 
-        gemma_config = self.vlm.config.text_config
-        self.using_pretrained_paligemma = (
-            gemma_config.intermediate_size == vlm_expert_intermediate_size
-            and gemma_config.hidden_size == VLM_EXPERT_WIDTH
-        )
-        # Load PaliGemma weights into VLM expert
-        if self.using_pretrained_paligemma:
-            self._load_pretrained_vlm_weights()
-        else:
-            logger.warning("Using custom VLM weights, not pretrained PaliGemma")
+        # gemma_config = self.vlm.config.text_config
+        # self.using_pretrained_paligemma = (
+        #     gemma_config.intermediate_size == vlm_expert_intermediate_size
+        #     and gemma_config.hidden_size == VLM_EXPERT_WIDTH
+        # )
+        # # Load PaliGemma weights into VLM expert
+        # if self.using_pretrained_paligemma:
+        #     self._load_pretrained_vlm_weights()
+        # else:
+        #     logger.warning("Using custom VLM weights, not pretrained PaliGemma")
 
-        # disable grads for VLM part of MoE if using pretrained
-        if self.using_pretrained_paligemma:
-            for param in self.moe.get_parameters("vlm"):
-                param.requires_grad = False
+        # # disable grads for VLM part of MoE if using pretrained
+        # if self.using_pretrained_paligemma:
+        #     for param in self.moe.get_parameters("vlm"):
+        #         param.requires_grad = False
 
-        # Delete the language model to save memory (keep only embeddings)
-        # Note: We delete model.language_model (the actual module), not
-        # language_model (the property)
-        del self.vlm.model.language_model
+        # # Delete the language model to save memory (keep only embeddings)
+        # # Note: We delete model.language_model (the actual module), not
+        # # language_model (the property)
+        # del self.vlm.model.language_model
 
         # Resize the images to 224x224
         self.image_normalizer = torch.nn.Sequential(
@@ -195,6 +230,36 @@ class Pi0(NeuracoreModel):
         )
         # Setup Normalizer
         self._setup_normalizer()
+
+    def gradient_checkpointing_enable(self) -> None:
+        """Enable gradient checkpointing for memory optimization."""
+        self.gradient_checkpointing_enabled = True
+        self.paligemma_with_expert.paligemma.language_model.gradient_checkpointing = (
+            True
+        )
+        self.paligemma_with_expert.paligemma.vision_tower.gradient_checkpointing = True
+        self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = True
+        logging.info("Enabled gradient checkpointing for PI0Pytorch model")
+
+    def gradient_checkpointing_disable(self) -> None:
+        """Disable gradient checkpointing."""
+        self.gradient_checkpointing_enabled = False
+        self.paligemma_with_expert.paligemma.language_model.gradient_checkpointing = (
+            False
+        )
+        self.paligemma_with_expert.paligemma.vision_tower.gradient_checkpointing = False
+        self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = False
+        logging.info("Disabled gradient checkpointing for PI0Pytorch model")
+
+    def _apply_checkpoint(
+        self, func: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any:
+        """Helper method to apply gradient checkpointing if enabled."""
+        if self.gradient_checkpointing_enabled:
+            return torch.utils.checkpoint.checkpoint(
+                func, *args, use_reentrant=False, preserve_rng_state=False, **kwargs
+            )
+        return func(*args, **kwargs)
 
     def _setup_normalizer(self) -> None:
         """Setup normalization statistics for different data types."""
@@ -234,6 +299,7 @@ class Pi0(NeuracoreModel):
 
         if state_inputs:
             joint_states = torch.cat(state_inputs, dim=-1)
+            joint_states = pad_vector(joint_states, self.max_state_dim)
             joint_states = self.joint_state_normalizer.normalize(data=joint_states)
             return joint_states
         else:
@@ -257,6 +323,7 @@ class Pi0(NeuracoreModel):
         images = []
         image_masks = []
         for cam_id in range(self.dataset_description.rgb_images.max_len):
+            # resize images to [224, 224]
             image = self.image_normalizer(batch.rgb_images.data[:, cam_id])
             # Normalize from range [0,1] to [-1,1] as expected by siglip
             image = image * 2.0 - 1.0
@@ -635,9 +702,14 @@ class Pi0(NeuracoreModel):
         if batch.outputs.joint_target_positions is None:
             raise ValueError("Joint target positions are required")
         target_actions = self.action_normalizer.normalize(
-            data=batch.outputs.joint_target_positions.data
+            data=pad_vector(
+                batch.outputs.joint_target_positions.data, self.max_action_dim
+            )
         )
-        target_actions = target_actions * batch.outputs.joint_target_positions.mask
+        target_actions_mask = pad_vector(
+            batch.outputs.joint_target_positions.mask, self.max_action_dim
+        )
+        target_actions = target_actions * target_actions_mask
         t = self._sample_fm_time(len(batch))
         x0 = torch.randn_like(target_actions)
         x1 = target_actions
@@ -695,6 +767,18 @@ class Pi0(NeuracoreModel):
             + list(self.moe.get_parameters("action"))
         )
 
+    def _setup_optimizer_param_groups(self) -> None:
+        """Setup parameter groups for optimizer."""
+        if self.using_pretrained_paligemma:
+            # Only train action expert parameters when using pretrained VLM
+            trainable_params = self._get_action_expert_parameters()
+        else:
+            # Train all parameters when not using pretrained weights
+            trainable_params = [p for p in self.parameters() if p.requires_grad]
+        self.param_groups = [
+            {"params": trainable_params, "lr": self.lr},
+        ]
+
     def configure_optimizers(
         self,
     ) -> list[torch.optim.Optimizer]:
@@ -706,17 +790,70 @@ class Pi0(NeuracoreModel):
         Returns:
             list[torch.optim.Optimizer]: List of optimizers for model parameters
         """
-        if self.using_pretrained_paligemma:
-            # Only train action expert parameters when using pretrained VLM
-            trainable_params = self._get_action_expert_parameters()
-        else:
-            # Train all parameters when not using pretrained weights
-            trainable_params = [p for p in self.parameters() if p.requires_grad]
-        param_groups = [
-            {"params": trainable_params, "lr": self.lr},
-        ]
+        return [torch.optim.AdamW(self.param_groups, weight_decay=self.weight_decay)]
 
-        return [torch.optim.AdamW(param_groups, weight_decay=self.weight_decay)]
+    def configure_schedulers(
+        self,
+        optimizers: list[torch.optim.Optimizer],
+        num_training_steps: int,
+    ) -> list[LambdaLR]:
+        """Configure scheduler for optimizers.
+
+        Automatically scales warmup and decay steps if training is shorter than the
+        configured decay schedule.
+
+        Args:
+            optimizers: List of optimizers
+            num_training_steps: Number of training steps
+
+        Returns:
+            List of schedulers
+        """
+        # Auto-scale scheduler parameters if training steps are shorter than
+        # the configured decay steps.
+        actual_warmup_steps = self.lr_scheduler_warmup_steps
+        actual_decay_steps = self.lr_scheduler_num_decay_steps
+
+        if num_training_steps < self.lr_scheduler_num_decay_steps:
+            # Fit the schedule into the available training steps.
+            scale_factor = num_training_steps / self.lr_scheduler_num_decay_steps
+            actual_warmup_steps = int(self.lr_scheduler_warmup_steps * scale_factor)
+            actual_decay_steps = num_training_steps
+
+            logging.info(
+                (
+                    "Auto-scaling LR scheduler: steps %s < decay %s. "
+                    "Warmup %s -> %s, decay %s -> %s (scale %.3f)"
+                ),
+                num_training_steps,
+                self.lr_scheduler_num_decay_steps,
+                self.lr_scheduler_warmup_steps,
+                actual_warmup_steps,
+                self.lr_scheduler_num_decay_steps,
+                actual_decay_steps,
+                scale_factor,
+            )
+
+        def lr_lambda(current_step: int) -> float:
+            def linear_warmup_schedule(current_step: int) -> float:
+                if current_step <= 0:
+                    return 1 / (actual_warmup_steps + 1)
+                frac = 1 - current_step / actual_warmup_steps
+                return (1 / (actual_warmup_steps + 1) - 1) * frac + 1
+
+            def cosine_decay_schedule(current_step: int) -> float:
+                step = min(current_step, actual_decay_steps)
+                cosine_decay = 0.5 * (1 + math.cos(math.pi * step / actual_decay_steps))
+                alpha = self.lr_scheduler_decay_lr / self.lr
+                decayed = (1 - alpha) * cosine_decay + alpha
+                return decayed
+
+            if current_step < actual_warmup_steps:
+                return linear_warmup_schedule(current_step)
+
+            return cosine_decay_schedule(current_step)
+
+        return [LambdaLR(optimizer, lr_lambda, -1) for optimizer in optimizers]
 
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:

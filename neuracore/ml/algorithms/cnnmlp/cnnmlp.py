@@ -204,12 +204,8 @@ class CNNMLP(NeuracoreModel):
         self._setup_optimizer_param_groups()
         # Setup Normalizer
         normalizer_path = "neuracore.ml.algorithm_utils.normalizer"
-        joint_state_normalizer_cls: type[Normalizer] = get_class(
-            f"{normalizer_path}.{joint_state_normalizer}"
-        )
-        action_normalizer_cls: type[Normalizer] = get_class(
-            f"{normalizer_path}.{action_normalizer}"
-        )
+        get_class(f"{normalizer_path}.{joint_state_normalizer}")
+        get_class(f"{normalizer_path}.{action_normalizer}")
         # Normalization statistics
         self._setup_normalizer()
 

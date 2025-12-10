@@ -10,7 +10,6 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-from hydra.utils import get_class
 from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 
 from neuracore.ml import (
@@ -481,10 +480,17 @@ class DiffusionPolicy(NeuracoreModel):
         self,
         optimizers: list[torch.optim.Optimizer],
         num_training_steps: int,
-    ) -> list[torch.optim.lr_scheduler._LRScheduler]:
+    ) -> list[torch.optim.lr_scheduler.LambdaLR]:
         """Configure scheduler for optimizers.
 
         Uses diffusers scheduler with warmup steps.
+
+        Args:
+            optimizers: List of optimizers
+            num_training_steps: Number of training steps
+
+        Returns:
+            List of schedulers
         """
         from diffusers.optimization import get_scheduler
 

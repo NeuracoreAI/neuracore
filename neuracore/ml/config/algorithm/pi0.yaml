@@ -18,4 +18,7 @@ algorithm:
   flow_beta: 1.0
   lr: 5e-5
   weight_decay: 0.0
-  dtype: torch.float32
+  lr_scheduler_warmup_steps: 1000
+  lr_scheduler_num_decay_steps: 30000
+  lr_scheduler_decay_lr: 2.5e-6
+  clip_grad_norm: 1.0
