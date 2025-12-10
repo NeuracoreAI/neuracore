@@ -1,15 +1,11 @@
-"""π0: A Vision-Language-Action Flow Model for General Robot Control.
+"""π0 wrapper that delegates to the reference implementation.
 
-This module implements the π0 (Pi0) model from the Physical Intelligence
-paper. π0 is a vision-language-action model that has a VLM from the pretrained
-PaliGemma model and a flow matching action expert. The model uses a mixture
-of experts (MoE) to process the input and predict the action sequence.
-
-Reference: Black, Kevin, et al. "π0: A Vision-Language-Action Flow Model
-for General Robot Control." arXiv preprint https://arxiv.org/abs/2410.24164.
+This preserves the Neuracore-facing `Pi0` class but swaps the internal model
+for the upstream `PI0Pytorch/PI0Policy` from `modeling_pi0.py`, keeping the
+API while matching the maintained implementation.
 """
 
-# cspell:ignore adarms openpi layernorm
+from __future__ import annotations
 
 import logging
 import math
@@ -43,49 +39,25 @@ from neuracore.ml import (
 )
 from neuracore.ml.algorithm_utils.normalizer import MeanStdNormalizer
 
-from .modules import (
-    ActionEncoder,
-    PaliGemmaWithExpertModel,
-    SinusoidalPosEmb,
-    get_gemma_config,
-    pad_vector,
-)
-
-logging.getLogger("transformers").setLevel(logging.CRITICAL)
+from .modules import PI0Config, PI0Policy, PI0Pytorch, pad_vector, resize_with_pad_torch
 
 logger = logging.getLogger(__name__)
 
 PROPRIO_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
 ACTION_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
 
-VLM_BACKBONE = "google/paligemma-3b-pt-224"
-VLM_EXPERT_WIDTH = 2048  # Width of the VLM expert, matches PaliGemma's hidden size
-PALIGEMMA_VARIANT = "gemma_2b"
-ACTION_EXPERT_VARIANT = "gemma_300m"
+# Normalizers (kept for backward compatibility with the Neuracore pipeline)
+JOINT_STATE_NORMALIZER = MeanStdNormalizer
+ACTION_NORMALIZER = MeanStdNormalizer
 
 
 class Pi0(NeuracoreModel):
-    """Implementation of Pi0 model from the Physical Intelligence paper.
-
-    Currently only supports finetuning the action expert. The model combines
-    vision-language understanding with action prediction through a mixture of
-    experts architecture.
-    """
+    """Neuracore-facing wrapper around the reference PI0 implementation."""
 
     def __init__(
         self,
         model_init_description: ModelInitDescription,
-        vlm_expert_intermediate_size: int = 16384,
-        vlm_expert_num_heads: int = 8,
-        vlm_expert_num_kv_heads: int = 1,
-        vlm_expert_head_dim: int = 256,
         vlm_max_text_tokens: int = 128,
-        action_expert_width: int = 1024,
-        action_expert_intermediate_size: int = 4096,
-        action_expert_num_heads: int = 8,
-        action_expert_num_kv_heads: int = 1,
-        action_expert_head_dim: int = 256,
-        moe_depth: int = 18,
         num_inference_steps: int = 10,
         flow_sig_min: float = 0.001,
         flow_alpha: float = 1.5,
@@ -100,48 +72,17 @@ class Pi0(NeuracoreModel):
         joint_state_normalizer: str = "MeanStdNormalizer",
         action_normalizer: str = "MeanStdNormalizer",
     ):
-        """Initialize the Pi0 model.
-
-        Args:
-            model_init_description: Model initialization configuration.
-            vlm_expert_intermediate_size: Intermediate size of the VLM expert.
-            vlm_expert_num_heads: Number of attention heads in the VLM expert.
-            vlm_expert_num_kv_heads: Number of key-value heads in the VLM expert.
-            vlm_expert_head_dim: Dimension of each attention head in the VLM expert.
-            vlm_max_text_tokens: Maximum number of text tokens for the VLM.
-            action_expert_width: Width of the action expert.
-            action_expert_intermediate_size: Intermediate size of the action expert.
-            action_expert_num_heads: Number of attention heads in the action expert.
-            action_expert_num_kv_heads: Number of key-value heads in the action expert.
-            action_expert_head_dim: Dimension of each attention head in action expert.
-            moe_depth: Depth of the mixture of experts.
-            num_inference_steps: Number of inference steps.
-            flow_sig_min: Minimum value for the flow sigma.
-            flow_alpha: Alpha parameter for the flow beta distribution.
-            flow_beta: Beta parameter for the flow beta distribution.
-            lr: Learning rate for the model.
-            weight_decay: Weight decay for the model.
-            lr_scheduler_warmup_steps: Warmup steps for the learning rate scheduler.
-            lr_scheduler_num_decay_steps: Decay steps for the learning rate scheduler.
-            lr_scheduler_decay_lr: Minimum learning rate factor for the scheduler.
-            clip_grad_norm: Gradient clipping norm.
-            dtype: Data type for model parameters and computations.
-            joint_state_normalizer: Normalizer class
-                (e.g. "MeanStdNormalizer", "MinMaxNormalizer")
-            action_normalizer: Normalizer class
-                (e.g. "MeanStdNormalizer", "MinMaxNormalizer")
-        """
+        """Initialize the Neuracore Pi0 wrapper around the reference model."""
         super().__init__(model_init_description)
 
         if not os.environ.get("HF_TOKEN"):
-            raise ValueError(
-                "Hugging Face token not found. "
-                "Please set the HF_TOKEN environment variable."
-            )
+            raise ValueError("Hugging Face token not found. Please set HF_TOKEN.")
 
         self.vlm_max_text_tokens = vlm_max_text_tokens
         self.num_inference_steps = num_inference_steps
         self.flow_sig_min = flow_sig_min
+        self.flow_alpha = flow_alpha
+        self.flow_beta = flow_beta
         self.flow_beta_dist = torch.distributions.Beta(flow_alpha, flow_beta)
         self.lr = lr
         self.weight_decay = weight_decay
@@ -535,8 +476,11 @@ class Pi0(NeuracoreModel):
         """Create the mixed attention mask for the Pi0 model.
 
         Args:
-            batch_size: Size of the batch.
-            vlm_seq_len: Actual VLM sequence length.
+            model_init_description: Neuracore model initialization config.
+            pretrained_name_or_path: HuggingFace repo id (e.g. "lerobot/pi0_base")
+                or local path. Defaults to "lerobot/pi0_base".
+            **kwargs: Additional arguments passed to PI0Policy.from_pretrained
+                (e.g. cache_dir, force_download, token, revision).
 
         Returns:
             torch.Tensor: Mixed attention mask.
@@ -779,6 +723,7 @@ class Pi0(NeuracoreModel):
 
         return output_tensors
 
+    # ---------------------------------------------------------------- training
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Perform a single training step.
 
@@ -857,107 +802,57 @@ class Pi0(NeuracoreModel):
             metrics=metrics,
         )
 
-    def _get_action_expert_parameters(self) -> list[torch.nn.Parameter]:
-        """Get parameters of the action expert.
-
-        Returns:
-            list: List of action expert parameters.
-        """
-        return (
-            list(self.action_encoder.parameters())
-            + list(self.action_decoder.parameters())
-            + list(self.proprio_encoder.parameters())
-            + list(self.moe.get_parameters("action"))
-        )
-
-    def _setup_optimizer_param_groups(self) -> None:
-        """Setup parameter groups for optimizer."""
-        if self.using_pretrained_paligemma:
-            # Only train action expert parameters when using pretrained VLM
-            trainable_params = self._get_action_expert_parameters()
-        else:
-            # Train all parameters when not using pretrained weights
-            trainable_params = [p for p in self.parameters() if p.requires_grad]
-        self.param_groups = [
-            {"params": trainable_params, "lr": self.lr},
+    # ----------------------------------------------------------- optim/schedule
+    def configure_optimizers(self) -> list[torch.optim.Optimizer]:
+        """Create the optimizer list used during training."""
+        return [
+            torch.optim.AdamW(
+                self.model.parameters(),
+                lr=self.lr,
+                weight_decay=self.weight_decay,
+            )
         ]
 
-    def configure_optimizers(
-        self,
-    ) -> list[torch.optim.Optimizer]:
-        """Configure optimizer with different learning rates.
-
-        Uses separate learning rates for image encoder backbone and other
-        model parameters.
-
-        Returns:
-            list[torch.optim.Optimizer]: List of optimizers for model parameters
-        """
-        return [torch.optim.AdamW(self.param_groups, weight_decay=self.weight_decay)]
-
     def configure_schedulers(
-        self,
-        optimizers: list[torch.optim.Optimizer],
-        num_training_steps: int,
+        self, optimizers: list[torch.optim.Optimizer], num_training_steps: int
     ) -> list[LambdaLR]:
-        """Configure scheduler for optimizers.
-
-        Automatically scales warmup and decay steps if training is shorter than the
-        configured decay schedule.
-
-        Args:
-            optimizers: List of optimizers
-            num_training_steps: Number of training steps
-
-        Returns:
-            List of schedulers
-        """
-        # Auto-scale scheduler parameters if training steps are shorter than
-        # the configured decay steps.
+        """Configure schedulers with automatic warmup/decay scaling."""
         actual_warmup_steps = self.lr_scheduler_warmup_steps
         actual_decay_steps = self.lr_scheduler_num_decay_steps
 
         if num_training_steps < self.lr_scheduler_num_decay_steps:
-            # Fit the schedule into the available training steps.
-            scale_factor = num_training_steps / self.lr_scheduler_num_decay_steps
-            actual_warmup_steps = int(self.lr_scheduler_warmup_steps * scale_factor)
+            scale = num_training_steps / self.lr_scheduler_num_decay_steps
+            actual_warmup_steps = int(self.lr_scheduler_warmup_steps * scale)
             actual_decay_steps = num_training_steps
-
-            logging.info(
-                (
-                    "Auto-scaling LR scheduler: steps %s < decay %s. "
-                    "Warmup %s -> %s, decay %s -> %s (scale %.3f)"
-                ),
-                num_training_steps,
-                self.lr_scheduler_num_decay_steps,
+            logger.info(
+                "Auto-scaling LR scheduler: warmup %s->%s, decay %s->%s (scale %.3f)",
                 self.lr_scheduler_warmup_steps,
                 actual_warmup_steps,
                 self.lr_scheduler_num_decay_steps,
                 actual_decay_steps,
-                scale_factor,
+                scale,
             )
 
         def lr_lambda(current_step: int) -> float:
-            def linear_warmup_schedule(current_step: int) -> float:
-                if current_step <= 0:
+            def linear_warmup(step: int) -> float:
+                if step <= 0:
                     return 1 / (actual_warmup_steps + 1)
-                frac = 1 - current_step / actual_warmup_steps
+                frac = 1 - step / actual_warmup_steps
                 return (1 / (actual_warmup_steps + 1) - 1) * frac + 1
 
-            def cosine_decay_schedule(current_step: int) -> float:
-                step = min(current_step, actual_decay_steps)
-                cosine_decay = 0.5 * (1 + math.cos(math.pi * step / actual_decay_steps))
+            def cosine_decay(step: int) -> float:
+                step = min(step, actual_decay_steps)
+                cosine = 0.5 * (1 + math.cos(math.pi * step / actual_decay_steps))
                 alpha = self.lr_scheduler_decay_lr / self.lr
-                decayed = (1 - alpha) * cosine_decay + alpha
-                return decayed
+                return (1 - alpha) * cosine + alpha
 
             if current_step < actual_warmup_steps:
-                return linear_warmup_schedule(current_step)
-
-            return cosine_decay_schedule(current_step)
+                return linear_warmup(current_step)
+            return cosine_decay(current_step)
 
         return [LambdaLR(optimizer, lr_lambda, -1) for optimizer in optimizers]
 
+    # ------------------------------------------------------------------ helpers
     @staticmethod
     def get_supported_input_data_types() -> set[DataType]:
         """Get the input data types supported by this model.
