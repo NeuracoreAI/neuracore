@@ -33,7 +33,7 @@ setup(
     ],
     python_requires=">=3.9",
     install_requires=[
-        "numpy",
+        "numpy>=2.2.6",
         "requests>=2.31.0",
         "pillow>=10.0.0",
         "pyyaml>=6.0.1",
