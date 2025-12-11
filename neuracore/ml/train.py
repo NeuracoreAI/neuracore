@@ -358,7 +358,7 @@ def run_training(
 def main(cfg: DictConfig) -> None:
     """Main function to run the training script."""
     # Resolve the configuration
-    cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    OmegaConf.resolve(cfg)
 
     # Print configuration
     logger.info("Training configuration:")
