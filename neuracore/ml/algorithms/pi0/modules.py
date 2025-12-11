@@ -198,6 +198,8 @@ def compute_layer_complete(
     value_states = []
     gates = []
     for i, hidden_states in enumerate(inputs_embeds):
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
         layer = models[i].layers[layer_idx]
         if adarms_cond[i] is None:
             hidden_states = layer.input_layernorm(hidden_states)  # noqa: PLW2901
@@ -1178,22 +1180,25 @@ class PI0Pytorch(nn.Module):
             self.embed_suffix(state, x_t, timestep)
         )
 
-        suffix_pad_masks.shape[1]
-        prefix_pad_masks.shape[0]
-        prefix_pad_masks.shape[1]
+        suffix_len = suffix_pad_masks.shape[1]
+        batch_size = prefix_pad_masks.shape[0]
+        prefix_len = prefix_pad_masks.shape[1]
+
+        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(
+            batch_size, suffix_len, prefix_len
+        )
+        suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
+        full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
 
         prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
         position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
 
-        # Use 1D attention mask (valid tokens) to align with HF causal masking when
-        # past_key_values are provided.
-        full_pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
-        # attention_mask = full_pad_masks.to(dtype=torch.bool)
+        full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
         gemma_config = self.paligemma_with_expert.gemma_expert.model.config
         gemma_config._attn_implementation = "eager"  # noqa: SLF001
 
         outputs_embeds, _ = self.paligemma_with_expert.forward(
-            attention_mask=full_pad_masks,
+            attention_mask=full_att_2d_masks_4d,
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=[None, suffix_embs],
