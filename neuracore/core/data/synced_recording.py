@@ -176,7 +176,7 @@ class SynchronizedRecording:
             camera_id: Unique identifier for the camera.
             video_frame_cache_path: Path to the directory where video frames are cached.
         """
-        lock_file = video_frame_cache_path / ".decoding.lock"
+        lock_file = video_frame_cache_path / ".recording.lock"
         lock_acquired = self._create_decoding_lock(lock_file, camera_id)
 
         try:
@@ -200,7 +200,9 @@ class SynchronizedRecording:
     def _create_decoding_lock(self, lock_file: Path, camera_id: str) -> bool:
         """Create an exclusive lock file for decoding."""
         try:
-            lock_file.touch(exist_ok=False)
+            timestamp = int(time.time())
+            with lock_file.open("x") as lock_handle:
+                lock_handle.write(f"{timestamp}")
         except FileExistsError as exc:
             raise RuntimeError(
                 f"Another process is already decoding video for camera {camera_id}"
@@ -210,6 +212,48 @@ class SynchronizedRecording:
     def _delete_decoding_lock(self, lock_file: Path) -> None:
         """Remove the decoding lock file if present."""
         lock_file.unlink(missing_ok=True)
+
+    def _check_stale_lock_file(self, lock_file: Path, timeout: int = 300) -> bool:
+        """Check if a lock file is stale based on a timeout.
+
+        Args:
+            lock_file: Path to the lock file.
+            timeout: Time in seconds after which the lock is considered stale.
+                    (default: 300s/5min)
+
+        Returns:
+            True if the lock file is stale, False otherwise.
+        """
+        if not lock_file.exists():
+            return False
+        lock_mtime = lock_file.stat().st_mtime
+        if (time.time() - lock_mtime) > timeout:
+            return True
+        return False
+
+    def _wait_for_lock_release(
+        self, lock_file: Path, parent_folder_path: Path, check_interval: int = 1
+    ) -> None:
+        """Wait for a lock file to be released.
+
+        Args:
+            lock_file: Path to the lock file.
+            parent_folder_path: Path to the parent folder containing the lock file.
+            check_interval: Time in seconds between checks.
+        """
+        # Check if the lock is stale
+        while lock_file.exists():
+            if self._check_stale_lock_file(lock_file):
+                logger.warning(
+                    f"Stale lock file detected at {lock_file}. Removing lock."
+                )
+                self._delete_decoding_lock(lock_file)
+                shutil.rmtree(parent_folder_path, ignore_errors=True)
+                logger.info(
+                    f"Removed stale lock and cleared cache at {parent_folder_path}."
+                )
+                break
+            time.sleep(check_interval)
 
     def _get_frame_from_disk_cache(
         self,
@@ -230,9 +274,10 @@ class SynchronizedRecording:
         """
         for cam_id, cam_data in camera_data.items():
             cam_id_rgb_root = self.cache_dir / f"{self.id}" / camera_type / cam_id
-            lock_file = cam_id_rgb_root / ".decoding.lock"
-            if lock_file.exists():
-                shutil.rmtree(cam_id_rgb_root, ignore_errors=True)
+            lock_file = cam_id_rgb_root / ".recording.lock"
+
+            self._wait_for_lock_release(lock_file, cam_id_rgb_root)
+
             if not cam_id_rgb_root.exists():
                 # Not in cache, download video and cache frames to disk
                 cam_id_rgb_root.mkdir(parents=True, exist_ok=True)
@@ -240,38 +285,8 @@ class SynchronizedRecording:
                     camera_type, cam_id, cam_id_rgb_root
                 )
 
-            # Check if frame is cached
-            last_num_frames = -1
-            attempts_left = MAX_DECODING_ATTEMPTS
             frame_file = cam_id_rgb_root / f"{cam_data.frame_idx}.png"
-            while True:
-                if lock_file.exists() and not frame_file.exists():
-                    time.sleep(1)
-                    continue
-                try:
-                    # Make sure the frame is successfully cached and decoded
-                    frame = Image.open(frame_file)
-                    break
-                except Exception:
-                    if lock_file.exists():
-                        time.sleep(1)
-                        continue
-                    # Check if decoding is progressing
-                    current_num_frames = len(
-                        [1 for i in cam_id_rgb_root.iterdir() if i.suffix == ".png"]
-                    )
-                    if current_num_frames == last_num_frames:
-                        attempts_left -= 1
-                        if attempts_left <= 0:
-                            raise RuntimeError(
-                                f"Decoding timed out for recording {self.id}"
-                            )
-                    else:
-                        last_num_frames = current_num_frames
-                        attempts_left = MAX_DECODING_ATTEMPTS
-
-                    # Wait for decoding to progress and try again
-                    time.sleep(5)
+            frame = Image.open(frame_file)
 
             if transform_fn:
                 frame = Image.fromarray(transform_fn(np.array(frame)))
