@@ -112,6 +112,19 @@ def pad_vector(vector: torch.Tensor, new_dim: int) -> torch.Tensor:
     return F.pad(vector, (0, new_dim - vector.shape[-1]))
 
 
+def _align_mask_length(mask_1d: torch.Tensor, target_len: int) -> torch.Tensor:
+    """Pad or trim a 1D mask to a target length."""
+    current_len = mask_1d.shape[0]
+    if current_len == target_len:
+        return mask_1d
+    if current_len < target_len:
+        pad = torch.zeros(
+            target_len - current_len, device=mask_1d.device, dtype=mask_1d.dtype
+        )
+        return torch.cat([mask_1d, pad], dim=0)
+    return mask_1d[:target_len]
+
+
 def resize_with_pad_torch(
     images: torch.Tensor,
     height: int,
@@ -181,9 +194,13 @@ def compute_layer_complete(
     gates = []
     for i, hidden_states in enumerate(inputs_embeds):
         layer = models[i].layers[layer_idx]
-        hidden_states, gate = layer.input_layernorm(
-            hidden_states, cond=adarms_cond[i]
-        )  # noqa: PLW2901
+        if adarms_cond[i] is None:
+            hidden_states = layer.input_layernorm(hidden_states)  # noqa: PLW2901
+            gate = None
+        else:
+            hidden_states, gate = layer.input_layernorm(
+                hidden_states, cond=adarms_cond[i]
+            )  # noqa: PLW2901
         gates.append(gate)
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
@@ -237,7 +254,11 @@ def compute_layer_complete(
             hidden_states, out_emb, gates[i]
         )  # noqa: SLF001
         after_first_residual = out_emb.clone()
-        out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
+        if adarms_cond[i] is None:
+            out_emb = layer.post_attention_layernorm(out_emb)
+            gate = None
+        else:
+            out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
         if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
             out_emb = out_emb.to(dtype=torch.bfloat16)
         out_emb = layer.mlp(out_emb)
@@ -300,12 +321,12 @@ class PaliGemmaWithExpertModel(nn.Module):
         self,
         vlm_config: GemmaConfig,
         action_expert_config: GemmaConfig,
-        use_adarms: list[bool] | None = None,
+        use_adarms: tuple[bool, bool] | None = None,
         precision: Literal["bfloat16", "float32"] = "bfloat16",
     ) -> None:
         """Initialize the joint vision-language and action expert model."""
         if use_adarms is None:
-            use_adarms = [False, False]
+            use_adarms = (False, False)
         super().__init__()
 
         paligemma_config = CONFIG_MAPPING["paligemma"]()
@@ -500,7 +521,7 @@ class PI0Pytorch(nn.Module):
         self.paligemma_with_expert = PaliGemmaWithExpertModel(
             paligemma_config,
             action_expert_config,
-            use_adarms=[False, False],
+            use_adarms=config.use_adarms,
             precision=config.dtype,
         )
 
@@ -622,12 +643,12 @@ class PI0Pytorch(nn.Module):
         att_masks += [0] * num_lang_embs
 
         embs = torch.cat(embs, dim=1)
-        pad_masks = torch.cat(pad_masks, dim=1)
-        att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
-
+        pad_masks = torch.cat(pad_masks, dim=1).to(dtype=torch.bool)
+        att_masks_t = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
+        att_masks_t = _align_mask_length(att_masks_t, pad_masks.shape[1])
         bsize = pad_masks.shape[0]
-        att_masks = att_masks[None, :].expand(bsize, len(att_masks))
-        return embs, pad_masks, att_masks
+        att_masks_t = att_masks_t[None, :].expand(bsize, att_masks_t.shape[0])
+        return embs, pad_masks, att_masks_t
 
     def embed_suffix(
         self, state: Tensor, noisy_actions: Tensor, timestep: Tensor
@@ -686,10 +707,11 @@ class PI0Pytorch(nn.Module):
 
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
-        att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
-        att_masks = att_masks[None, :].expand(bsize, len(att_masks))
+        att_masks_t = torch.tensor(att_masks, dtype=torch.bool, device=embs.device)
+        att_masks_t = _align_mask_length(att_masks_t, pad_masks.shape[1])
+        att_masks_t = att_masks_t[None, :].expand(bsize, att_masks_t.shape[0])
 
-        return embs, pad_masks, att_masks, adarms_cond
+        return embs, pad_masks, att_masks_t, adarms_cond
 
     def forward(
         self,
@@ -844,25 +866,22 @@ class PI0Pytorch(nn.Module):
             self.embed_suffix(state, x_t, timestep)
         )
 
-        suffix_len = suffix_pad_masks.shape[1]
-        batch_size = prefix_pad_masks.shape[0]
-        prefix_len = prefix_pad_masks.shape[1]
-
-        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(
-            batch_size, suffix_len, prefix_len
-        )
-        suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
-        full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+        suffix_pad_masks.shape[1]
+        prefix_pad_masks.shape[0]
+        prefix_pad_masks.shape[1]
 
         prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
         position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
 
-        full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
+        # Use 1D attention mask (valid tokens) to align with HF causal masking when
+        # past_key_values are provided.
+        full_pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
+        # attention_mask = full_pad_masks.to(dtype=torch.bool)
         gemma_config = self.paligemma_with_expert.gemma_expert.model.config
         gemma_config._attn_implementation = "eager"  # noqa: SLF001
 
         outputs_embeds, _ = self.paligemma_with_expert.forward(
-            attention_mask=full_att_2d_masks_4d,
+            attention_mask=full_pad_masks,
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=[None, suffix_embs],
@@ -884,12 +903,12 @@ class PI0Config:
     paligemma_variant: str = "gemma_2b"
     action_expert_variant: str = "gemma_300m"
     dtype: Literal["bfloat16", "float32"] = "float32"
-    n_obs_steps: int = 1
     chunk_size: int = 50
     n_action_steps: int = 50
     max_state_dim: int = 32
     max_action_dim: int = 32
     num_inference_steps: int = 10
+    use_adarms: tuple[bool, bool] = (False, False)
     time_sampling_beta_alpha: float = 1.5
     time_sampling_beta_beta: float = 1.0
     time_sampling_scale: float = 0.999
@@ -1027,7 +1046,7 @@ class PI0Policy:
         logging.warning(
             "Missing keys after tying language embeddings: %s", missing_keys
         )
-        breakpoint()
+        # breakpoint()
         logging.info(
             "Successfully loaded pretrained PI0 weights from %s",
             pretrained_name_or_path,

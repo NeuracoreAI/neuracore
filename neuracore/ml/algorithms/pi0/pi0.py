@@ -87,7 +87,6 @@ class Pi0(NeuracoreModel):
             paligemma_variant="gemma_2b",
             action_expert_variant="gemma_300m",
             dtype="bfloat16" if dtype == torch.bfloat16 else "float32",
-            n_obs_steps=1,
             chunk_size=self.action_horizon,
             n_action_steps=self.action_horizon,
             max_state_dim=self.max_state_dim,
@@ -161,8 +160,9 @@ class Pi0(NeuracoreModel):
             raise ValueError("No joint states available")
 
         joint_states = torch.cat(state_inputs, dim=-1)
-        joint_states = pad_vector(joint_states, self.max_state_dim)
         joint_states = self.joint_state_normalizer.normalize(data=joint_states)
+        # Pad to the max state dim after normalization to avoid padding artifacts
+        joint_states = pad_vector(joint_states, self.max_state_dim)
         return joint_states.to(self.device)
 
     def _prepare_rgb_images(
@@ -176,7 +176,7 @@ class Pi0(NeuracoreModel):
             img = batch.rgb_images.data[:, cam_id]
             # Resize with padding to 224x224 and normalize to [-1, 1]
             img = resize_with_pad_torch(img, 224, 224)
-            img = img.to(torch.float32, device=self.device)
+            img = img.to(device=self.device, dtype=torch.float32)
             img = img * 2.0 - 1.0
             images.append(img)
             image_masks.append(batch.rgb_images.mask[:, cam_id].to(self.device))
@@ -283,10 +283,10 @@ class Pi0(NeuracoreModel):
             raise ValueError("Joint target positions are required")
 
         target_actions = self.action_normalizer.normalize(
-            data=pad_vector(
-                batch.outputs.joint_target_positions.data, self.max_action_dim
-            )
-        ).to(self.device)
+            data=batch.outputs.joint_target_positions.data
+        )
+        # Pad to the max action dim after normalization to avoid padding artifacts
+        target_actions = pad_vector(target_actions, self.max_action_dim).to(self.device)
         target_mask = pad_vector(
             batch.outputs.joint_target_positions.mask, self.max_action_dim
         ).to(self.device)
