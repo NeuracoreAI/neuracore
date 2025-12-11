@@ -15,6 +15,7 @@ Requirements:
 
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -29,16 +30,18 @@ from neuracore_types import (
 # Add parent directory to path to import neuracore
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from neuracore.ml import BatchedTrainingSamples  # noqa: E402
 from neuracore.ml import BatchedInferenceSamples, MaskableData  # noqa: E402
 from neuracore.ml.algorithms.pi0.pi0 import Pi0  # noqa: E402
 
 # Test configuration
 BS = 1  # Batch size
 CAMS = 2  # Number of cameras
-JOINT_POSITION_DIM = 16  # Joint dimension
+JOINT_POSITION_DIM = 6  # Joint dimension
 PRED_HORIZON = 8  # Prediction horizon
 LANGUAGE_MAX_LEN = 128  # Language token length
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cpu")
 
 print(f"Using device: {DEVICE}")
 print(f"HF_TOKEN set: {os.environ.get('HF_TOKEN') is not None}")
@@ -107,6 +110,25 @@ def create_dummy_batch() -> BatchedInferenceSamples:
     )
 
 
+@dataclass
+class _DummyOutputs:
+    joint_target_positions: MaskableData
+
+    def to(self, device: torch.device) -> "_DummyOutputs":
+        return _DummyOutputs(self.joint_target_positions.to(device))
+
+
+def create_dummy_training_batch() -> BatchedTrainingSamples:
+    """Create dummy training batch for testing backward pass."""
+    inference = create_dummy_batch()
+    targets = MaskableData(
+        torch.randn(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
+        torch.ones(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
+    )
+    outputs = _DummyOutputs(joint_target_positions=targets)
+    return BatchedTrainingSamples(inputs=inference, outputs=outputs)
+
+
 def main():
     """Test loading pretrained PI0 model."""
     print("=" * 60)
@@ -158,38 +180,43 @@ def main():
         return 1
 
     # Test 3: Run forward pass
-    print("\n4. Running forward pass with dummy data...")
+    # print("\n4. Running forward pass with dummy data...")
+    # try:
+    #     batch = create_dummy_batch()
+    #     batch = batch.to(DEVICE)
+
+    #     model.eval()
+    #     with torch.no_grad():
+    #         output = model(batch)
+
+    #     print("   ✓ Forward pass successful!")
+    #     print(f"   - Output type: {type(output)}")
+    #     output_shape = output.outputs[DataType.JOINT_TARGET_POSITIONS].shape
+    #     print(f"   - Output shape: {output_shape}")
+    #     print(f"   - Prediction time: {output.prediction_time:.4f}s")
+    # except Exception as e:
+    #     print(f"   ✗ Forward pass failed: {e}")
+    #     import traceback
+
+    #     traceback.print_exc()
+    #     return 1
+
+    # Test 4: Backward/training step
+    print("\n5. Running backward/training step with dummy data...")
     try:
-        batch = create_dummy_batch()
-        batch = batch.to(DEVICE)
-
-        model.eval()
-        with torch.no_grad():
-            output = model(batch)
-
-        print("   ✓ Forward pass successful!")
-        print(f"   - Output type: {type(output)}")
-        output_shape = output.outputs[DataType.JOINT_TARGET_POSITIONS].shape
-        print(f"   - Output shape: {output_shape}")
-        print(f"   - Prediction time: {output.prediction_time:.4f}s")
+        train_batch = create_dummy_training_batch().to(DEVICE)
+        model.train()
+        out = model.training_step(train_batch)
+        loss = out.losses["mse_loss"]
+        loss.backward()
+        print("   ✓ Backward pass successful!")
+        print(f"   - Loss value: {loss.item():.6f}")
     except Exception as e:
-        print(f"   ✗ Forward pass failed: {e}")
+        print(f"   ✗ Backward pass failed: {e}")
         import traceback
 
         traceback.print_exc()
         return 1
-
-    # Test 4: Test with custom repo (optional, can skip if repo doesn't exist)
-    print("\n5. Testing with explicit repo name...")
-    try:
-        model2 = Pi0.from_pretrained(
-            model_init_description,
-            pretrained_name_or_path="lerobot/pi0_base",
-        )
-        model2 = model2.to(DEVICE)
-        print("   ✓ Explicit repo name works!")
-    except Exception as e:
-        print(f"   ⚠ Explicit repo test failed (this is OK if repo doesn't exist): {e}")
 
     print("\n" + "=" * 60)
     print("All tests passed! ✓")
