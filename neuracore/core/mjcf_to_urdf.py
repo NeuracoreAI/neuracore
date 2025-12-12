@@ -113,9 +113,8 @@ def _create_joint(
 ) -> ET.Element:
     """Create a URDF joint element connecting two links.
 
-    Creates joints of various types including fixed, revolute, and prismatic.
-    Joint parameters are automatically configured based on the provided axis
-    and range information.
+    Supports fixed, revolute, prismatic, continuous, and floating joints.
+    For floating joints, no axis or limits are added (6-DoF free joint).
 
     Args:
         xml_root: Parent XML element to attach the new joint to.
@@ -124,27 +123,42 @@ def _create_joint(
         child: Name of the child link.
         pos: Position offset from parent to child [x, y, z].
         rpy: Orientation offset in roll-pitch-yaw [r, p, y].
-        axis: Joint axis of rotation/translation [x, y, z]. None for fixed joints.
-        jnt_range: Joint limits [min, max]. None for fixed joints.
-        jnt_type: Type of joint ("fixed", "revolute", or "prismatic").
+        axis: Joint axis of rotation/translation [x, y, z].
+        jnt_range: Joint limits [min, max].
+        jnt_type: Type of joint ("fixed", "revolute", "prismatic",
+                  "continuous", or "floating").
 
     Returns:
         The created joint XML element.
     """
-    if axis is None:
-        assert jnt_range is None
-        joint_type = "fixed"
+    # Basic validation of parameters vs joint type
+    if jnt_type in ("fixed", "floating"):
+        # These joint types should not have an axis or limits
+        if axis is not None or jnt_range is not None:
+            raise ValueError(
+                f"Joint type '{jnt_type}' should not have axis or limits "
+                f"(got axis={axis}, range={jnt_range})."
+            )
+    elif jnt_type in ("revolute", "continuous", "prismatic"):
+        # These DOF joints must have an axis
+        if axis is None:
+            raise ValueError(f"Joint type '{jnt_type}' requires an axis.")
     else:
-        joint_type = jnt_type
+        raise ValueError(f"Unsupported joint type: {jnt_type}")
 
-    # create joint element connecting this to parent
-    jnt_element = ET.SubElement(xml_root, "joint", {"type": joint_type, "name": name})
+    # Create joint element
+    jnt_element = ET.SubElement(xml_root, "joint", {"type": jnt_type, "name": name})
     ET.SubElement(jnt_element, "parent", {"link": parent})
     ET.SubElement(jnt_element, "child", {"link": child})
     ET.SubElement(
         jnt_element, "origin", {"xyz": _array2str(pos), "rpy": _array2str(rpy)}
     )
-    if axis is not None:
+
+    if axis is None:
+        axis = [0, 0, 0]
+
+    # Only non-floating / non-fixed joints get axis and limits
+    if jnt_type in ("revolute", "continuous", "prismatic"):
         ET.SubElement(jnt_element, "axis", {"xyz": _array2str(axis)})
         if jnt_range is not None:
             ET.SubElement(
@@ -157,6 +171,7 @@ def _create_joint(
                     "velocity": "100",
                 },
             )
+
     return jnt_element
 
 
@@ -210,6 +225,7 @@ def convert(mjcf_file: str, urdf_file: Path, asset_file_prefix: str = "") -> Non
         # read inertial info
         mass = model.body_mass[id]
         inertia = model.body_inertia[id]
+
         childbody2childinertia_pos = model.body_ipos[id]
         childbody2childinertia_quat = model.body_iquat[id]  # [w, x, y, z]
         # change to [x, y, z, w]
@@ -234,19 +250,30 @@ def convert(mjcf_file: str, urdf_file: Path, asset_file_prefix: str = "") -> Non
             jntid = model.body_jntadr[id]
             jnt_type = model.jnt_type[jntid]
 
+            jnt_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, jntid)
+
+            if jnt_name is None:
+                jnt_name = f"{parent_name}2{child_name}_joint"
+
+            jnt_range = None
+            jnt_axis_childbody = None
+            childbody2jnt_pos = model.jnt_pos[jntid]  # [x, y, z]
+
             # Handle different joint types
             if jnt_type == mujoco.mjtJoint.mjJNT_HINGE:
                 urdf_jnt_type = "revolute"
+                jnt_range = model.jnt_range[jntid]  # [min, max]
+                jnt_axis_childbody = model.jnt_axis[jntid]  # [x, y, z]
             elif jnt_type == mujoco.mjtJoint.mjJNT_SLIDE:
                 urdf_jnt_type = "prismatic"
+                jnt_range = model.jnt_range[jntid]  # [min, max]
+                jnt_axis_childbody = model.jnt_axis[jntid]  # [x, y, z]
+            elif jnt_type == mujoco.mjtJoint.mjJNT_FREE:
+                urdf_jnt_type = "floating"
             else:
-                # only support hinge and slide joints
-                continue
+                # raise a value error for unsupported joint types
+                raise ValueError(f"unsupported joint type: {jnt_type}")
 
-            jnt_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, jntid)
-            jnt_range = model.jnt_range[jntid]  # [min, max]
-            jnt_axis_childbody = model.jnt_axis[jntid]  # [x, y, z]
-            childbody2jnt_pos = model.jnt_pos[jntid]  # [x, y, z]
             parentbody2jnt_axis = jnt_axis_childbody
         else:
             # create a fixed joint instead
@@ -282,7 +309,6 @@ def convert(mjcf_file: str, urdf_file: Path, asset_file_prefix: str = "") -> Non
             geom_quat = [geom_quat[1], geom_quat[2], geom_quat[3], geom_quat[0]]
             geom_rpy = Rotation.from_quat(geom_quat).as_euler("xyz")
             mesh_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_MESH, geom_dataid)
-
             # create visual element within body element
             visual_element = ET.SubElement(body_element, "visual", {"name": mesh_name})
             ET.SubElement(

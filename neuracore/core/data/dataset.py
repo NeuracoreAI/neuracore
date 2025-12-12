@@ -1,9 +1,9 @@
-"""Dataset management."""
+"""Dataset management with lazy-loading generator."""
 
 import logging
 import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, Generator, Iterator, List, Optional, Union
 
 import requests
 from neuracore_types import DataType, SyncedDataset
@@ -12,13 +12,14 @@ from tqdm import tqdm
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
+from neuracore.utils import deprecated
 
 from ..auth import Auth, get_auth
 from ..const import API_URL
 from ..exceptions import DatasetError
 
 DEFAULT_CACHE_DIR = Path.home() / ".neuracore" / "training" / "dataset_cache"
-
+PAGE_SIZE = 30
 
 logger = logging.getLogger(__name__)
 
@@ -33,22 +34,30 @@ class Dataset:
         name: str,
         size_bytes: int,
         tags: list[str],
-        is_shared: bool,
         data_types: list[DataType],
-        recordings: Optional[list[dict]] = None,
+        is_shared: bool,
+        recordings: Optional[Union[List[dict], List[Recording]]] = None,
     ):
-        """Initialize a dataset from server response data.
+        """Initialize a Dataset instance.
 
         Args:
-            id: Unique identifier for the dataset.
-            org_id: The id of the organization this dataset belongs to.
-            name: Name of the dataset.
-            size_bytes: Size of the dataset in bytes.
-            tags: List of tags associated with the dataset.
-            is_shared: Whether the dataset is shared/open-source.
-            recordings: Optional list of recordings in the dataset.
-                If not provided, recordings will be fetched from the server.
-            data_types: Optional list of DataType available in the dataset.
+            id (str): Unique identifier for the dataset.
+            org_id (str): Organization ID associated with the dataset.
+            name (str): Human-readable name for the dataset.
+            size_bytes (int): Total size of the dataset in bytes.
+            tags (list[str]): List of tags associated with the dataset.
+            data_types (list[DataType]): List of data types present in the dataset.
+            is_shared (bool): Whether the dataset is shared.
+            recordings (Optional[list[dict]]): List of recording dictionaries.
+            If not provided, the dataset will be fetched from the Neuracore API.
+
+        Attributes:
+            cache_dir (Path): Directory path for caching dataset recordings.
+            _recordings_cache (List[Recording]): Internal list of cached recordings.
+            _num_recordings (Optional[int]): Number of recordings in the dataset,
+            or None if not fetched from the Neuracore API.
+            _start_after (Optional[dict]): Internal dictionary for tracking
+            the start of the next page of recordings.
         """
         self.id = id
         self.org_id = org_id
@@ -56,29 +65,177 @@ class Dataset:
         self.size_bytes = size_bytes
         self.tags = tags
         self.is_shared = is_shared
-        self.recordings = recordings or self._get_recordings()
         self.data_types = data_types or []
-        self.num_recordings = len(self.recordings)
-        self._recording_idx = 0
-        self.cache_dir = DEFAULT_CACHE_DIR
 
-    def _get_recordings(self) -> list[dict]:
-        """Get the list of recordings in the dataset.
+        self.cache_dir = DEFAULT_CACHE_DIR
+        self._recordings_cache: List[Recording] = (
+            [
+                self._wrap_raw_recording(r) if isinstance(r, dict) else r
+                for r in recordings
+            ]
+            if recordings
+            else []
+        )
+        self._num_recordings: Optional[int] = len(recordings) if recordings else None
+        self._start_after: Optional[dict] = None
+
+    # Backwards compatibility
+    class _RecordingsProxy:
+        """Proxy for backward-compatible recordings property."""
+
+        def __init__(self, dataset: "Dataset") -> None:
+            self._dataset = dataset
+
+        def __iter__(self) -> Iterator[Recording]:
+            return iter(self._dataset)
+
+        def __getitem__(self, index: Union[int, slice]) -> Union[Recording, "Dataset"]:
+            return self._dataset[index]
+
+        def __len__(self) -> int:
+            return len(self._dataset)
+
+    @property
+    @deprecated(
+        "This attribute is deprecated, "
+        "iterate over the dataset itself to access recordings."
+    )
+    def recordings(self) -> "Dataset._RecordingsProxy":
+        """Deprecated recordings property returning a proxy supporting len()."""
+        return self._RecordingsProxy(self)
+
+    @property
+    @deprecated("This attribute is deprecated, use len(dataset) instead.")
+    def num_recordings(self) -> int:
+        """The number of recordings in the dataset.
+
+        .. deprecated:: 0.3.0
+           Use len(dataset) instead.
 
         Returns:
-            List of recordings in the dataset.
-
-        Raises:
-            requests.HTTPError: If the API request fails.
+            int: The number of recordings in the dataset.
         """
-        auth = get_auth()
-        response = requests.get(
-            f"{API_URL}/org/{self.org_id}/datasets/{self.id}/recordings",
-            headers=auth.get_headers(),
+        if self._num_recordings is None:
+            self._initialize_num_recordings()
+        assert self._num_recordings is not None
+        return self._num_recordings
+
+    def _wrap_raw_recording(self, raw_recording: Dict) -> Recording:
+        """Wrap a raw recording dict into a Recording object.
+
+        Args:
+            raw_recording: A dict containing the raw recording data
+
+        Returns:
+            A Recording object
+        """
+        return Recording(
+            dataset=self,
+            recording_id=raw_recording["id"],
+            total_bytes=raw_recording["total_bytes"],
+            robot_id=raw_recording["robot_id"],
+            instance=raw_recording["instance"],
+        )
+
+    def _initialize_num_recordings(self) -> None:
+        """Fetch total number of recordings without loading them."""
+        try:
+            response = requests.post(
+                f"{API_URL}/org/{self.org_id}/recording/by-dataset/{self.id}",
+                headers=get_auth().get_headers(),
+                params={"limit": 1, "is_shared": self.is_shared},
+                json=None,
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+            self._num_recordings = data.get("total", 0)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to fetch recording count for Dataset {self.id}: {e}")
+            self._num_recordings = 0
+
+    def _fetch_next_page(self) -> List[Recording]:
+        """Fetch the next page of recordings and append to cache (lazy)."""
+        if (
+            self._num_recordings is not None
+            and len(self._recordings_cache) >= self._num_recordings
+        ):
+            return []
+
+        params = {"limit": PAGE_SIZE, "is_shared": self.is_shared}
+        payload = self._start_after or None
+
+        response = requests.post(
+            f"{API_URL}/org/{self.org_id}/recording/by-dataset/{self.id}",
+            headers=get_auth().get_headers(),
+            params=params,
+            json=payload,
         )
         response.raise_for_status()
         data = response.json()
-        return data["recordings"]
+
+        batch = data.get("data", [])
+        if not batch:
+            return []
+
+        self._start_after = batch[-1]
+        self._num_recordings = data.get("total", self._num_recordings)
+
+        wrapped = [self._wrap_raw_recording(r) for r in batch]
+        self._recordings_cache.extend(wrapped)
+        return wrapped
+
+    def _recordings_generator(self) -> Generator[Recording, None, None]:
+        """A generator yielding Recordings for this dataset.
+
+        This generator handles four cases:
+        1. All recordings are pre-loaded into the cache.
+        2. Not all recordings are in the cache and no pagination state.
+        3. Partially fetched with pagination state.
+        4. Fetch remaining recordings from API.
+
+        In case 1, the generator yields all recordings from the cache.
+        In case 2, the generator resets the cache and fetches recordings from start.
+        In case 3, the generator yields the remaining recordings from the
+            cache and then fetches the next page of recordings.
+        In case 4, the generator fetches the next page of recordings
+            from API and yields them.
+        The generator stops when all recordings have been yielded or an error occurs.
+
+        Returns:
+            A generator yielding Recording objects.
+        """
+        if self._num_recordings is None:
+            self._initialize_num_recordings()
+
+        assert self._num_recordings is not None
+
+        # Case 0: Explicitly known to have zero recordings
+        if self._num_recordings == 0:
+            return
+
+        if self._recordings_cache:
+
+            # Case 1: All recordings pre-loaded, yield from cache only
+            if len(self._recordings_cache) >= self._num_recordings:
+                yield from self._recordings_cache
+                return
+
+            # Case 2: Not all recordings in cache and no pagination state
+            if self._start_after is None:
+                # Reset unreliable cache ready for fetching from API
+                self._recordings_cache = []
+
+            # Case 3: Partially fetched with pagination state
+            else:
+                yield from self._recordings_cache
+
+        # Case 4: Fetch remaining recordings from API (from beginning or next page)
+        while True:
+            recordings = self._fetch_next_page()
+            if not recordings:
+                return
+            yield from recordings
 
     @staticmethod
     def get_by_id(id: str, non_exist_ok: bool = False) -> Optional["Dataset"]:
@@ -317,86 +474,65 @@ class Dataset:
             max_prefetch_workers=max_prefetch_workers,
         )
 
-    def __iter__(self) -> "Dataset":
-        """Initialize iterator over recordings in the dataset.
+    def __iter__(self) -> Iterator[Recording]:
+        """Yield recordings one by one, fetching pages lazily."""
+        return self._recordings_generator()
 
-        Returns:
-            Self for iteration over recordings.
-        """
-        self._recording_idx = 0
-        return self
-
-    def __len__(self) -> int:
-        """Get the number of recordings in the dataset.
-
-        Returns:
-            Number of demonstration recordings in the dataset.
-        """
-        return self.num_recordings
-
-    def __getitem__(self, idx: Union[int, slice]) -> Union[Recording, "Dataset"]:
-        """Support for indexing and slicing dataset recordings.
+    def __getitem__(self, index: Union[int, slice]) -> Union[Recording, "Dataset"]:
+        """Support for indexing and slicing dataset episodes.
 
         Args:
-            idx: Integer index or slice object for accessing recordings.
+            index: Integer index or slice object for accessing episodes.
 
         Returns:
-            Recording instance for a single recording if idx is an integer,
-            or a new Dataset instance if idx is a slice.
+            Recording object for a single episode or
+            Dataset object for a slice of episodes.
 
         Raises:
             IndexError: If the index is out of range.
             TypeError: If the index is not an integer or slice.
         """
-        if isinstance(idx, slice):
-            # Handle slice
-            recordings = self.recordings[idx.start : idx.stop : idx.step]
-            return Dataset(
-                id=self.id,
-                org_id=self.org_id,
-                name=self.name,
-                size_bytes=self.size_bytes,
-                tags=self.tags,
-                is_shared=self.is_shared,
-                recordings=recordings,
-                data_types=self.data_types,
-            )
-        else:
-            # Handle single index
-            if isinstance(idx, int):
-                if idx < 0:  # Handle negative indices
-                    idx += len(self.recordings)
-                if not 0 <= idx < len(self.recordings):
+        if isinstance(index, int):
+            if index < 0:
+                index += len(self)
+            if index < 0 or index >= len(self):
+                raise IndexError("Dataset index out of range")
+
+            # Load pages until index is available in cache
+            while index >= len(self._recordings_cache):
+                if not self._fetch_next_page():
                     raise IndexError("Dataset index out of range")
-                return Recording(
-                    dataset=self,
-                    recording_id=self.recordings[idx]["id"],
-                    size_bytes=self.recordings[idx]["total_bytes"],
-                    robot_id=self.recordings[idx]["robot_id"],
-                    instance=self.recordings[idx]["instance"],
-                )
-            raise TypeError(
-                f"Dataset indices must be integers or slices, not {type(idx)}"
+            return self._recordings_cache[index]
+
+        elif isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            # Load pages until stop index is available
+            while stop > len(self._recordings_cache):
+                if not self._fetch_next_page():
+                    break
+            return Dataset(
+                org_id=self.org_id,
+                id=self.id,
+                name=self.name,
+                tags=self.tags,
+                size_bytes=self.size_bytes,
+                is_shared=self.is_shared,
+                data_types=self.data_types,
+                recordings=self._recordings_cache[start:stop:step],
             )
 
-    def __next__(self) -> Recording:
-        """Get the next recording in the dataset iteration.
+        else:
+            raise TypeError("Dataset indices must be int or slice")
+
+    def __len__(self) -> int:
+        """Return the number of recordings in the dataset.
 
         Returns:
-            Recording instance for the next recording in the dataset.
+            int: The number of recordings in the dataset.
 
         Raises:
-            StopIteration: If there are no more recordings to iterate over.
+            DatasetError: If the number of recordings is not available.
         """
-        if self._recording_idx >= len(self.recordings):
-            raise StopIteration
-
-        recording = self.recordings[self._recording_idx]
-        self._recording_idx += 1  # Increment counter
-        return Recording(
-            dataset=self,
-            recording_id=recording["id"],
-            size_bytes=recording["total_bytes"],
-            robot_id=recording["robot_id"],
-            instance=recording["instance"],
-        )
+        if self._num_recordings is None:
+            self._initialize_num_recordings()
+        return self._num_recordings or 0

@@ -196,6 +196,7 @@ unnormalization
 UNITREE
 unitreeh1
 URDF
+usefixtures
 Vaswani
 vertadr
 vertnum

@@ -18,4 +18,5 @@ algorithm:
   flow_beta: 1.0
   lr: 5e-5
   weight_decay: 0.0
+  clip_grad_norm: 1.0
   dtype: torch.float32
