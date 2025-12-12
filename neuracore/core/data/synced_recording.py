@@ -70,11 +70,10 @@ class SynchronizedRecording:
         self._suppress_wget_progress = True
 
         if prefetch_videos:
-            cache = self.dataset.cache_dir / f"{self.id}" / f"{self.frequency}Hz"
+            cache = self.dataset.cache_dir / f"{self.id}"
             # Check if cache directory exists and contains any files
-            if not cache.exists() or not any(cache.iterdir()):
-                # NOTE: this is to start video prefetching frames into cache
-                self._get_sync_point(0)
+            self._wait_for_lock_release(cache / ".recording.lock", cache)
+            self._get_sync_point(0)
 
     def _get_synced_data(self) -> SyncedData:
         """Retrieve synchronized metadata for the recording.
@@ -200,9 +199,9 @@ class SynchronizedRecording:
     def _create_decoding_lock(self, lock_file: Path, camera_id: str) -> bool:
         """Create an exclusive lock file for decoding."""
         try:
-            timestamp = int(time.time())
-            with lock_file.open("x") as lock_handle:
-                lock_handle.write(f"{timestamp}")
+            # Create the lock file exclusively
+            lock_file.parent.mkdir(parents=True, exist_ok=True)
+            lock_file.touch(exist_ok=False)
         except FileExistsError as exc:
             raise RuntimeError(
                 f"Another process is already decoding video for camera {camera_id}"
