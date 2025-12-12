@@ -10,7 +10,15 @@ import time
 from typing import Optional
 
 import numpy as np
-from neuracore_types import CameraData, DataType, JointData, LanguageData, SyncPoint
+from neuracore_types import (
+    CameraData,
+    DataType,
+    EndEffectorData,
+    JointData,
+    LanguageData,
+    ParallelGripperOpenAmountData,
+    SyncPoint,
+)
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.exceptions import RobotError
@@ -102,6 +110,7 @@ def get_latest_sync_point(
     robot = GlobalSingleton()._active_robot
     if robot is None:
         raise ValueError("No active robot found. Please initialize a robot instance.")
+
     sync_point = SyncPoint(timestamp=time.time())
     for stream_name, stream in robot.list_all_streams().items():
         # "rgb" is first 3 characters of the enum value for DataType.RGB_IMAGE
@@ -113,6 +122,7 @@ def get_latest_sync_point(
             sync_point.rgb_images[stream_name] = CameraData(
                 timestamp=time.time(), frame=stream_data
             )
+
         # "depth" is first 5 characters of the enum value for DataType.DEPTH_IMAGE
         elif DataType.DEPTH_IMAGE.value.lower()[:5] in stream_name.lower():
             stream_data = stream.get_latest_data()
@@ -123,22 +133,35 @@ def get_latest_sync_point(
                 timestamp=time.time(),
                 frame=depth_to_rgb(stream_data),
             )
+
         elif DataType.JOINT_POSITIONS.value.lower() in stream_name.lower():
             stream_data = stream.get_latest_data()
             assert isinstance(stream_data, JointData)
             sync_point.joint_positions = _maybe_add_existing_data(
                 sync_point.joint_positions, stream_data
             )
+
         elif DataType.JOINT_VELOCITIES.value.lower() in stream_name.lower():
             stream_data = stream.get_latest_data()
             assert isinstance(stream_data, JointData)
             sync_point.joint_velocities = _maybe_add_existing_data(
                 sync_point.joint_velocities, stream_data
             )
+
         elif DataType.LANGUAGE.value.lower() in stream_name.lower():
             stream_data = stream.get_latest_data()
             assert isinstance(stream_data, LanguageData)
             sync_point.language_data = stream_data
+
+        elif "gripper_data" in stream_name.lower():
+            stream_data = stream.get_latest_data()
+            assert isinstance(stream_data, EndEffectorData)
+            # convert EndEffectorData to ParallelGripperOpenAmountData
+            stream_data = ParallelGripperOpenAmountData(
+                timestamp=stream_data.timestamp, open_amounts=stream_data.open_amounts
+            )
+            sync_point.parallel_gripper_open_amounts = stream_data
+
         # TODO: Add support for other data types
         else:
             raise NotImplementedError(

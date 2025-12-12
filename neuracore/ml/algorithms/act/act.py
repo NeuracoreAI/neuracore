@@ -102,13 +102,16 @@ class ACT(NeuracoreModel):
             self.dataset_description.joint_positions.max_len
             + self.dataset_description.joint_velocities.max_len
             + self.dataset_description.joint_torques.max_len
+            + self.dataset_description.parallel_gripper_open_amounts.max_len
         )
         self.state_embed = None
         if state_input_dim > 0:
             self.state_embed = nn.Linear(state_input_dim, hidden_dim)
 
         self.action_embed = nn.Linear(
-            self.dataset_description.joint_target_positions.max_len, hidden_dim
+            self.dataset_description.joint_target_positions.max_len
+            + self.dataset_description.parallel_gripper_open_amounts.max_len,
+            hidden_dim,
         )
 
         # CLS token embedding for latent encoder
@@ -146,7 +149,9 @@ class ACT(NeuracoreModel):
 
         # Output heads
         self.action_head = nn.Linear(
-            hidden_dim, self.dataset_description.joint_target_positions.max_len
+            hidden_dim,
+            self.dataset_description.joint_target_positions.max_len
+            + self.dataset_description.parallel_gripper_open_amounts.max_len,
         )
 
         # Latent projections
@@ -184,12 +189,22 @@ class ACT(NeuracoreModel):
             joint_states.append(self.dataset_description.joint_velocities)
         if DataType.JOINT_TORQUES in self.model_init_description.input_data_types:
             joint_states.append(self.dataset_description.joint_torques)
+        if (
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS
+            in self.model_init_description.input_data_types
+        ):
+            joint_states.append(self.dataset_description.parallel_gripper_open_amounts)
 
         if (
             DataType.JOINT_TARGET_POSITIONS
             in self.model_init_description.output_data_types
         ):
             actions.append(self.dataset_description.joint_target_positions)
+        if (
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS
+            in self.model_init_description.output_data_types
+        ):
+            actions.append(self.dataset_description.parallel_gripper_open_amounts)
 
         self.joint_state_normalizer = JOINT_STATE_NORMALIZER(
             name="joint_states", statistics=joint_states
@@ -467,6 +482,11 @@ class ACT(NeuracoreModel):
                 )
             if batch.joint_torques:
                 state_inputs.append(batch.joint_torques.data * batch.joint_torques.mask)
+            if batch.parallel_gripper_open_amounts:
+                state_inputs.append(
+                    batch.parallel_gripper_open_amounts.data
+                    * batch.parallel_gripper_open_amounts.mask
+                )
             joint_states = torch.cat(state_inputs, dim=-1)
             joint_states = self.joint_state_normalizer.normalize(data=joint_states)
         return joint_states
@@ -489,7 +509,14 @@ class ACT(NeuracoreModel):
         predictions = self.action_normalizer.unnormalize(data=action_preds)
         predictions = predictions.detach().cpu().numpy()
         return ModelPrediction(
-            outputs={DataType.JOINT_TARGET_POSITIONS: predictions},
+            outputs={
+                DataType.JOINT_TARGET_POSITIONS: predictions[
+                    :, :, : self.dataset_description.joint_target_positions.max_len
+                ],
+                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: predictions[
+                    :, :, self.dataset_description.joint_target_positions.max_len :
+                ],
+            },
             prediction_time=prediction_time,
         )
 
@@ -507,31 +534,42 @@ class ACT(NeuracoreModel):
         """
         if batch.outputs.joint_target_positions is None:
             raise ValueError("Batch output joint target positions is None")
+        if batch.outputs.parallel_gripper_open_amounts is None:
+            raise ValueError("Batch output parallel gripper open amounts is None")
 
-        pred_sequence_mask = batch.outputs.joint_target_positions.mask[
-            :, :, 0
-        ]  # [batch_size, T]
-        max_action_mask = batch.outputs.joint_target_positions.mask[
-            :, 0, :
-        ]  # [batch_size, MaxActionSize]
+        action_mask = torch.cat(
+            [
+                batch.outputs.joint_target_positions.mask,
+                batch.outputs.parallel_gripper_open_amounts.mask,
+            ],
+            dim=-1,
+        )
+
+        pred_sequence_mask = action_mask[:, :, 0]  # [batch_size, T]
+        max_action_mask = action_mask[:, 0, :]  # [batch_size, MaxActionSize]
         inference_sample = BatchedInferenceSamples(
             joint_positions=batch.inputs.joint_positions,
             joint_velocities=batch.inputs.joint_velocities,
             joint_torques=batch.inputs.joint_torques,
             rgb_images=batch.inputs.rgb_images,
+            parallel_gripper_open_amounts=batch.inputs.parallel_gripper_open_amounts,
         )
         joint_states = self._combine_joint_states(inference_sample)
+        action_data = torch.cat(
+            [
+                batch.outputs.joint_target_positions.data,
+                batch.outputs.parallel_gripper_open_amounts.data,
+            ],
+            dim=-1,
+        )
         mu, logvar = self._encode_latent(
             joint_states,
-            batch.outputs.joint_target_positions.data,
+            action_data,
             max_action_mask,
             pred_sequence_mask,
         )
         action_preds = self._predict_action(mu, logvar, inference_sample)
-        target_actions = self.action_normalizer.normalize(
-            data=batch.outputs.joint_target_positions.data
-        )
-
+        target_actions = self.action_normalizer.normalize(data=action_data)
         l1_loss_all = F.l1_loss(action_preds, target_actions, reduction="none")
         l1_loss = (l1_loss_all * pred_sequence_mask.unsqueeze(-1)).mean()
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
@@ -574,6 +612,7 @@ class ACT(NeuracoreModel):
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
             DataType.RGB_IMAGE,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         ]
 
     @staticmethod
@@ -583,4 +622,4 @@ class ACT(NeuracoreModel):
         Returns:
             list[DataType]: List of supported output data types
         """
-        return [DataType.JOINT_TARGET_POSITIONS]
+        return [DataType.JOINT_TARGET_POSITIONS, DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS]
