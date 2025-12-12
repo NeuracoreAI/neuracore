@@ -321,6 +321,7 @@ def run_training(
             num_epochs=cfg.epochs,
             log_freq=cfg.logging_frequency,
             keep_last_n_checkpoints=cfg.keep_last_n_checkpoints,
+            clip_grad_norm=algorithm_config.get("clip_grad_norm", None),
             rank=rank,
             world_size=world_size,
             device=device,
@@ -356,6 +357,9 @@ def run_training(
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg: DictConfig) -> None:
     """Main function to run the training script."""
+    # Resolve the configuration
+    OmegaConf.resolve(cfg)
+
     # Print configuration
     logger.info("Training configuration:")
     logger.info(OmegaConf.to_yaml(cfg, resolve=True))
