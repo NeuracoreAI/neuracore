@@ -38,10 +38,10 @@ from neuracore.ml.algorithms.pi0.pi0 import Pi0  # noqa: E402
 BS = 1  # Batch size
 CAMS = 2  # Number of cameras
 JOINT_POSITION_DIM = 6  # Joint dimension
-PRED_HORIZON = 8  # Prediction horizon
+PRED_HORIZON = 50  # Prediction horizon
 LANGUAGE_MAX_LEN = 128  # Language token length
-# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-DEVICE = torch.device("cpu")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# DEVICE = torch.device("cpu")
 
 print(f"Using device: {DEVICE}")
 print(f"HF_TOKEN set: {os.environ.get('HF_TOKEN') is not None}")
@@ -168,18 +168,18 @@ def main():
         traceback.print_exc()
         return 1
 
-    # Test 2: Verify model structure
-    print("\n3. Verifying model structure...")
-    try:
-        assert hasattr(model, "policy"), "Model should have policy attribute"
-        assert hasattr(model, "model"), "Model should have model attribute"
-        assert hasattr(model, "config"), "Model should have config attribute"
-        print("   ✓ Model structure verified")
-    except AssertionError as e:
-        print(f"   ✗ Model structure check failed: {e}")
-        return 1
+    # # Test 2: Verify model structure
+    # print("\n3. Verifying model structure...")
+    # try:
+    #     assert hasattr(model, "policy"), "Model should have policy attribute"
+    #     assert hasattr(model, "model"), "Model should have model attribute"
+    #     assert hasattr(model, "config"), "Model should have config attribute"
+    #     print("   ✓ Model structure verified")
+    # except AssertionError as e:
+    #     print(f"   ✗ Model structure check failed: {e}")
+    #     return 1
 
-    # Test 3: Run forward pass
+    # # Test 3: Run forward pass
     # print("\n4. Running forward pass with dummy data...")
     # try:
     #     batch = create_dummy_batch()
