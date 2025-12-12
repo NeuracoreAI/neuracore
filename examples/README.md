@@ -17,6 +17,13 @@ pip install "neuracore[examples]"
 
 Make sure you have an account on [neuracore.app](https://neuracore.app).
 
+### Installing Bi Gym
+To run Bi Gym examples please install it using the following commands: 
+```bash
+git clone https://github.com/chernyadev/bigym.git
+pip install . 
+```
+
 ## Examples
 
 ### Data Collection
@@ -32,13 +39,19 @@ The data collection example demonstrates how to:
 ```bash
 python example_data_collection_vx300s.py
 ```
+
+or
+
+```bash 
+python example_data_collection_bigym.py
+```
 2. Navigate to the "Robots" tab in the Neuracore Dashboard
 3. You should see a live view of your robot running!
 
 To record demonstrations:
 1. Run with the record flag:
 ```bash
-python example_data_collection_vx300s.py --record
+python example_data_collection_XXXX.py --record
 ```
 2. The script will automatically start and stop recordings for each demonstration. You can see this process happening in the "Robots" tab in the Neuracore Dashboard
 3. Navigate to the "Data" tab in the Neuracore Dashboard to see your dataset
@@ -87,7 +100,10 @@ Run the local model:
 ```bash
 python example_local_endpoint.py
 ```
-
+or if your running the Bi Gym example:
+```bash 
+python example_local_endpoint_bigym.py
+```
 
 ### Server Model Deployment
 The server deployment example shows how to:
