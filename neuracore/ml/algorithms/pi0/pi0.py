@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from typing import cast
+from typing_extensions import Literal
 
 import torch
 import torch.nn as nn
@@ -57,36 +57,58 @@ class Pi0(NeuracoreModel):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
-        vlm_max_text_tokens: int = 128,
+        vlm_max_text_tokens: int = 48,
         num_inference_steps: int = 10,
-        flow_sig_min: float = 0.001,
-        flow_alpha: float = 1.5,
-        flow_beta: float = 1.0,
-        lr: float = 5e-5,
-        weight_decay: float = 0.0,
-        lr_scheduler_warmup_steps: int = 1_000,
-        lr_scheduler_num_decay_steps: int = 30_000,
-        lr_scheduler_decay_lr: float = 2.5e-6,
+        dtype: Literal["bfloat16", "float32"] = "float32",
+        paligemma_variant: str = "gemma_2b",
+        action_expert_variant: str = "gemma_300m",
+        use_pretrained_weights: bool = True,
+        pretrained_name_or_path: Optional[str] = "lerobot/pi0_base",
+        time_sampling_beta_alpha: float = 1.5,
+        time_sampling_beta_beta: float = 1.0,
+        time_sampling_scale: float = 0.999,
+        time_sampling_offset: float = 0.001,
+        min_period: float = 4e-3,
+        max_period: float = 4.0,
+        gradient_checkpointing: bool = False,
+        compile_model: bool = False,
+        compile_mode: str = "max-autotune",
+        optimizer_lr: float = 2.5e-5,
+        optimizer_betas: tuple[float, float] = (0.9, 0.95),
+        optimizer_eps: float = 1e-8,
+        optimizer_weight_decay: float = 0.01,
         clip_grad_norm: float = 1.0,
-        dtype: torch.dtype = torch.float32,
-        joint_state_normalizer: str = "MeanStdNormalizer",
-        action_normalizer: str = "MeanStdNormalizer",
+        lr_scheduler_warmup_steps: int = 1000,
+        lr_scheduler_num_decay_steps: int = 30000,
+        lr_scheduler_decay_lr: float = 2.5e-6,
+        finetune_action_expert_only: bool = False,
     ):
         """Initialize the Neuracore Pi0 wrapper around the reference model."""
         super().__init__(model_init_description)
 
-        if not os.environ.get("HF_TOKEN"):
-            raise ValueError("Hugging Face token not found. Please set HF_TOKEN.")
 
         self.vlm_max_text_tokens = vlm_max_text_tokens
         self.num_inference_steps = num_inference_steps
-        self.flow_sig_min = flow_sig_min
-        self.flow_alpha = flow_alpha
-        self.flow_beta = flow_beta
-        self.flow_beta_dist = torch.distributions.Beta(flow_alpha, flow_beta)
-        self.lr = lr
-        self.weight_decay = weight_decay
         self.dtype = dtype
+        self.time_sampling_beta_alpha = time_sampling_beta_alpha
+        self.time_sampling_beta_beta = time_sampling_beta_beta
+        self.time_sampling_scale = time_sampling_scale
+        self.time_sampling_offset = time_sampling_offset
+        self.min_period = min_period
+        self.max_period = max_period
+        self.gradient_checkpointing = gradient_checkpointing
+        self.compile_model = compile_model
+        self.compile_mode = compile_mode
+        self.optimizer_lr = optimizer_lr
+        self.optimizer_betas = optimizer_betas
+        self.optimizer_eps = optimizer_eps
+        self.optimizer_weight_decay = optimizer_weight_decay
+        self.lr_scheduler_warmup_steps = lr_scheduler_warmup_steps
+        self.lr_scheduler_num_decay_steps = lr_scheduler_num_decay_steps
+        self.lr_scheduler_decay_lr = lr_scheduler_decay_lr
+        self.use_pretrained_weights = use_pretrained_weights
+        self.pretrained_name_or_path = pretrained_name_or_path
+        self.finetune_action_expert_only = finetune_action_expert_only
 
         data_stats: dict[DataType, DataItemStats] = {}
 
@@ -384,96 +406,39 @@ class Pi0(NeuracoreModel):
 
         return language_tokens, language_mask
 
-    def _load_pretrained_vlm_weights(self) -> None:
-        """Load pretrained PaliGemma weights into the VLM expert of the MoE."""
-        logger.info("Loading pretrained PaliGemma weights into VLM expert...")
-        vlm_state_dict = self.vlm.model.language_model.state_dict()
-        moe_state_dict = self.moe.state_dict()
-        new_state_dict = {}
-        for moe_key, moe_param in moe_state_dict.items():
-            # Check if this is a VLM expert parameter
-            if "experts.vlm" in moe_key:
-                # Convert MoE key format to PaliGemma key format
-                vlm_key = moe_key.replace("experts.vlm.", "")
+    def _build_inputs_from_inference(
+        self, batch: BatchedInferenceSamples
+    ) -> tuple[
+        list[torch.Tensor], list[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
+    ]:
+        images, image_masks = self._prepare_rgb_images(batch)
+        lang_tokens, lang_masks = self._process_language_tokens(batch)
+        state = self._combine_normalized_joint_states(batch)
+        return images, image_masks, lang_tokens, lang_masks, state
 
-                # If this key exists in the VLM state dict, copy it
-                if vlm_key not in vlm_state_dict:
-                    raise ValueError(f"VLM key not found: {vlm_key}")
-                new_state_dict[moe_key] = vlm_state_dict[vlm_key]
-            else:
-                # Keep non-VLM parameters as is
-                new_state_dict[moe_key] = moe_param
-
-        # Load the combined state dict
-        missing_keys, unexpected_keys = self.moe.load_state_dict(
-            new_state_dict, strict=True
+    # ---------------------------------------------------------------- inference
+    def predict_action_chunk(self, batch: BatchedInferenceSamples) -> torch.Tensor:
+        """Run inference to produce one chunk of actions."""
+        images, image_masks, lang_tokens, lang_masks, state = (
+            self._build_inputs_from_inference(batch)
         )
-
-        # Log any mismatches for debugging
-        if missing_keys:
-            raise ValueError(f"Missing keys when loading VLM weights: {missing_keys}")
-        if unexpected_keys:
-            raise ValueError(
-                f"Unexpected keys when loading VLM weights: {unexpected_keys}"
-            )
-
-        logger.info("Successfully loaded pretrained PaliGemma weights into VLM expert.")
-
-    def _create_expert_attention_masks(
-        self, batch_size: int, pad_masks: torch.Tensor = None
-    ) -> dict[str, torch.Tensor]:
-        """Create attention masks for the experts.
-
-        Args:
-            batch_size: Size of the batch.
-            pad_masks: Padding masks for the merged text and images tensor.
-
-        Returns:
-            dict[str, torch.Tensor]: Attention masks for the experts.
-        """
-        # generate 2d padding mask from 1d padding mask
-        # pad_masks has shape [batch_size, seq_len]
-        # Create attention mask: [batch_size, seq_len, seq_len]
-        vlm_mask = pad_masks.unsqueeze(1) * pad_masks.unsqueeze(2)
-        # Convert to attention mask format (0 for attended positions, -inf for masked)
-        vlm_mask = torch.where(vlm_mask == 1, 0.0, torch.finfo(self.dtype).min).to(
-            self.dtype
+        actions = self.model.sample_actions(
+            images, image_masks, lang_tokens, lang_masks, state
         )
-        state_len = 1
-        action_len = self.action_horizon
+        actions = actions[:, :, : self.action_dim] # output pad to max action dim
+        return actions
 
-        stat_act_len = state_len + action_len  # proprio + actions
-        state_action_mask = torch.zeros(
-            (stat_act_len, stat_act_len), device=self.device, dtype=self.dtype
-        )
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_init_description: ModelInitDescription,
+        pretrained_name_or_path: Optional[str] = None,
+        **kwargs: Any,
+    ) -> "Pi0":
+        """Load a pretrained PI0 model while keeping the Neuracore model interface.
 
-        # Proprio can only attend to itself
-        state_action_mask[0, 0] = 1
-
-        # Each action can attend to proprio and previous actions
-        for i in range(1, stat_act_len):  # i starts at 1 (first action)
-            # Can attend to proprio
-            state_action_mask[i, 0] = 1
-            # Can attend to self and previous actions
-            state_action_mask[i, 1 : i + 1] = 1
-
-        # Convert to attention mask format (0 for attended positions, -inf for masked)
-        state_action_mask = torch.where(
-            state_action_mask == 1, 0.0, torch.finfo(self.dtype).min
-        ).to(self.dtype)
-
-        # Add head dimension: [batch_size, 1, seq_len, seq_len]
-        vlm_mask = vlm_mask.unsqueeze(1)
-        state_action_mask = (
-            state_action_mask.unsqueeze(0).unsqueeze(1).expand(batch_size, 1, -1, -1)
-        )
-
-        return {"vlm": vlm_mask, "action": state_action_mask}
-
-    def _create_pi0_mix_attention_mask(
-        self, batch_size: int, vlm_seq_len: int | None = None
-    ) -> torch.Tensor:
-        """Create the mixed attention mask for the Pi0 model.
+        By default, downloads weights from https://huggingface.co/lerobot/pi0_base
+        which contains the π₀ base model from Physical Intelligence.
 
         Args:
             model_init_description: Neuracore model initialization config.
@@ -807,9 +772,10 @@ class Pi0(NeuracoreModel):
         """Create the optimizer list used during training."""
         return [
             torch.optim.AdamW(
-                self.model.parameters(),
-                lr=self.lr,
-                weight_decay=self.weight_decay,
+                self.param_groups,
+                weight_decay=self.optimizer_weight_decay,
+                betas=self.optimizer_betas,
+                eps=self.optimizer_eps,
             )
         ]
 
@@ -852,7 +818,6 @@ class Pi0(NeuracoreModel):
 
         return [LambdaLR(optimizer, lr_lambda, -1) for optimizer in optimizers]
 
-    # ------------------------------------------------------------------ helpers
     @staticmethod
     def get_supported_input_data_types() -> set[DataType]:
         """Get the input data types supported by this model.
