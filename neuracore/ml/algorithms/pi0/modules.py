@@ -193,11 +193,9 @@ def compute_layer_complete(
     value_states = []
     gates = []
     for i, hidden_states in enumerate(inputs_embeds):
-        if isinstance(hidden_states, tuple):
-            hidden_states = hidden_states[0]
         layer = models[i].layers[layer_idx]
         if adarms_cond[i] is None:
-            hidden_states = layer.input_layernorm(hidden_states)  # noqa: PLW2901
+            hidden_states = layer.input_layernorm(hidden_states)[0]  # noqa: PLW2901
             gate = None
         else:
             hidden_states, gate = layer.input_layernorm(
@@ -257,7 +255,7 @@ def compute_layer_complete(
         )  # noqa: SLF001
         after_first_residual = out_emb.clone()
         if adarms_cond[i] is None:
-            out_emb = layer.post_attention_layernorm(out_emb)
+            out_emb = layer.post_attention_layernorm(out_emb)[0]
             gate = None
         else:
             out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
@@ -909,7 +907,6 @@ class PI0Config:
     action_expert_variant: str = "gemma_300m"
     dtype: Literal["bfloat16", "float32"] = "float32"
     chunk_size: int = 50
-    n_action_steps: int = 50
     max_state_dim: int = 32
     max_action_dim: int = 32
     num_inference_steps: int = 10
@@ -920,31 +917,27 @@ class PI0Config:
     time_sampling_offset: float = 0.001
     min_period: float = 4e-3
     max_period: float = 4.0
-    image_resolution: tuple[int, int] = (224, 224)
-    empty_cameras: int = 0
     gradient_checkpointing: bool = False
     compile_model: bool = False
     compile_mode: str = "max-autotune"
     device: str | None = None
-    optimizer_lr: float = 2.5e-5
-    optimizer_betas: tuple[float, float] = (0.9, 0.95)
-    optimizer_eps: float = 1e-8
-    optimizer_weight_decay: float = 0.01
-    optimizer_grad_clip_norm: float = 1.0
-    scheduler_warmup_steps: int = 1_000
-    scheduler_decay_steps: int = 30_000
-    scheduler_decay_lr: float = 2.5e-6
-    tokenizer_max_length: int = 48
     input_features: dict = field(default_factory=dict)
     output_features: dict = field(default_factory=dict)
     image_features: list[str] = field(default_factory=list)
 
     def validate_features(self) -> None:
         """Validate configured feature dimensions."""
-        if self.n_action_steps > self.chunk_size:
-            raise ValueError("n_action_steps cannot be greater than chunk_size")
         if self.device is None:
             self.device = "cpu"
+
+        if self.paligemma_variant not in ["gemma_300m", "gemma_2b"]:
+            raise ValueError(f"Invalid paligemma_variant: {self.paligemma_variant}")
+
+        if self.action_expert_variant not in ["gemma_300m", "gemma_2b"]:
+            raise ValueError(f"Invalid action_expert_variant: {self.action_expert_variant}")
+
+        if self.dtype not in ["bfloat16", "float32"]:
+            raise ValueError(f"Invalid dtype: {self.dtype}")
 
 
 class PI0Policy:
@@ -960,7 +953,6 @@ class PI0Policy:
         if config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
         self.model.to(config.device)
-        self._action_queue: Deque[Tensor] = deque(maxlen=self.config.n_action_steps)
 
     @classmethod
     def from_pretrained(
@@ -1022,14 +1014,14 @@ class PI0Policy:
         fixed_state_dict = model._fix_pytorch_state_dict_keys(original_state_dict)
         # # Remove 'model.' prefix if present (checkpoint may have it, but PI0Pytorch
         # # doesn't)
-        # remapped_state_dict = {}
-        # for key, value in fixed_state_dict.items():
-        #     # Remove 'model.' prefix if it exists at the start
-        #     if key.startswith("model."):
-        #         new_key = key[6:]  # Remove "model." prefix
-        #     else:
-        #         new_key = key
-        #     remapped_state_dict[new_key] = value
+        remapped_state_dict = {}
+        for key, value in fixed_state_dict.items():
+            # Remove 'model.' prefix if it exists at the start
+            if key.startswith("model."):
+                new_key = key[6:]  # Remove "model." prefix
+            else:
+                new_key = key
+            remapped_state_dict[new_key] = value
 
         missing_keys, unexpected_keys = model.load_state_dict(
             fixed_state_dict, strict=False
@@ -1051,7 +1043,6 @@ class PI0Policy:
         logging.warning(
             "Missing keys after tying language embeddings: %s", missing_keys
         )
-        # breakpoint()
         logging.info(
             "Successfully loaded pretrained PI0 weights from %s",
             pretrained_name_or_path,

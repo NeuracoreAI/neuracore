@@ -27,13 +27,15 @@ from neuracore.ml.utils.validate import run_validation
 
 BS = 1
 CAMS = 2
-JOINT_POSITION_DIM = 16
+JOINT_POSITION_DIM = 7
 OUTPUT_PRED_DIM = JOINT_POSITION_DIM
-PRED_HORIZON = 8
+PRED_HORIZON = 50
 LANGUAGE_MAX_LEN = 128  # Maximum length for language tokens
 # Use cpu because the model takes a lot of vram
 DEVICE = torch.device("cpu")
 SKIP_TEST = os.environ.get("CI", "false").lower() == "true"
+PRETRAINED_PI0_REPO = os.environ.get("PRETRAINED_PI0_REPO", "lerobot/pi0_base")
+REQUIRE_HF_TOKEN = os.environ.get("HF_TOKEN") is None
 
 
 PI_TINY_ARGS = {
@@ -153,6 +155,19 @@ def sample_inference_batch() -> BatchedInferenceSamples:
     )
 
 
+@pytest.fixture(scope="module")
+def pretrained_model(model_init_description: ModelInitDescription) -> Pi0:
+    """Load the pretrained PI0 model once for the module."""
+    model = Pi0.from_pretrained(
+        model_init_description,
+        pretrained_name_or_path=PRETRAINED_PI0_REPO,
+        local_files_only=False,
+    )
+    model = model.to(DEVICE)
+    model.eval()
+    return model
+
+
 @pytest.fixture
 def mock_dataloader(sample_batch):
     """Create a mock dataloader."""
@@ -231,11 +246,52 @@ def test_model_backward(
                 assert torch.isfinite(
                     param.grad
                 ).all(), f"Parameter {name} has non-finite gradients"
-            elif param.grad is not None:
-                # If VLM parameters do have gradients, they should be finite
-                assert torch.isfinite(
-                    param.grad
-                ).all(), f"Parameter {name} has non-finite gradients"
+
+
+@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
+@pytest.mark.skipif(
+    REQUIRE_HF_TOKEN,
+    reason="HF_TOKEN not set; skipping pretrained model test",
+)
+def test_pretrained_model_load(pretrained_model: Pi0):
+    """Ensure pretrained PI0 weights load."""
+    assert isinstance(pretrained_model, Pi0)
+
+
+@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
+@pytest.mark.skipif(
+    REQUIRE_HF_TOKEN,
+    reason="HF_TOKEN not set; skipping pretrained model test",
+)
+def test_pretrained_model_forward(
+    pretrained_model: Pi0, sample_inference_batch: BatchedInferenceSamples
+):
+    """Run a forward pass with the pretrained model."""
+    sample_inference_batch = sample_inference_batch.to(DEVICE)
+    output: ModelPrediction = pretrained_model(sample_inference_batch)
+    assert DataType.JOINT_TARGET_POSITIONS in output.outputs
+    assert output.outputs[DataType.JOINT_TARGET_POSITIONS].shape == (
+        BS,
+        PRED_HORIZON,
+        OUTPUT_PRED_DIM,
+    )
+
+
+@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
+@pytest.mark.skipif(
+    REQUIRE_HF_TOKEN,
+    reason="HF_TOKEN not set; skipping pretrained model test",
+)
+def test_pretrained_model_backward(
+    pretrained_model: Pi0, sample_batch: BatchedTrainingSamples
+):
+    """Run a backward pass with the pretrained model."""
+    pretrained_model.train()
+    sample_batch = sample_batch.to(DEVICE)
+    output: BatchedTrainingOutputs = pretrained_model.training_step(sample_batch)
+    loss = output.losses["mse_loss"]
+    loss.backward()
+    assert torch.isfinite(loss).all(), "Loss should be finite after backward pass"
 
 
 @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")

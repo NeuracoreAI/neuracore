@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import time
 from typing import Any, Optional
+from typing_extensions import Literal
 
 import torch
 from neuracore_types import DataType, ModelInitDescription, ModelPrediction
@@ -44,72 +44,101 @@ class Pi0(NeuracoreModel):
     def __init__(
         self,
         model_init_description: ModelInitDescription,
-        vlm_max_text_tokens: int = 128,
+        vlm_max_text_tokens: int = 48,
         num_inference_steps: int = 10,
-        flow_sig_min: float = 0.001,
-        flow_alpha: float = 1.5,
-        flow_beta: float = 1.0,
-        lr: float = 5e-5,
-        weight_decay: float = 0.0,
-        lr_scheduler_warmup_steps: int = 1_000,
-        lr_scheduler_num_decay_steps: int = 30_000,
-        lr_scheduler_decay_lr: float = 2.5e-6,
+        dtype: Literal["bfloat16", "float32"] = "float32",
+        paligemma_variant: str = "gemma_2b",
+        action_expert_variant: str = "gemma_300m",
+        use_pretrained_weights: bool = True,
+        pretrained_name_or_path: Optional[str] = "lerobot/pi0_base",
+        time_sampling_beta_alpha: float = 1.5,
+        time_sampling_beta_beta: float = 1.0,
+        time_sampling_scale: float = 0.999,
+        time_sampling_offset: float = 0.001,
+        min_period: float = 4e-3,
+        max_period: float = 4.0,
+        gradient_checkpointing: bool = False,
+        compile_model: bool = False,
+        compile_mode: str = "max-autotune",
+        optimizer_lr: float = 2.5e-5,
+        optimizer_betas: tuple[float, float] = (0.9, 0.95),
+        optimizer_eps: float = 1e-8,
+        optimizer_weight_decay: float = 0.01,
         clip_grad_norm: float = 1.0,
-        dtype: torch.dtype = torch.float32,
-        joint_state_normalizer: str = "MeanStdNormalizer",
-        action_normalizer: str = "MeanStdNormalizer",
+        lr_scheduler_warmup_steps: int = 1000,
+        lr_scheduler_num_decay_steps: int = 30000,
+        lr_scheduler_decay_lr: float = 2.5e-6,
+        finetune_action_expert_only: bool = False,
     ):
         """Initialize the Neuracore Pi0 wrapper around the reference model."""
         super().__init__(model_init_description)
 
-        if not os.environ.get("HF_TOKEN"):
-            raise ValueError("Hugging Face token not found. Please set HF_TOKEN.")
 
         self.action_dim = self.dataset_description.joint_target_positions.max_len
         self.max_state_dim = self.max_action_dim = 32
         self.action_horizon = self.output_prediction_horizon
         self.vlm_max_text_tokens = vlm_max_text_tokens
         self.num_inference_steps = num_inference_steps
-        self.flow_sig_min = flow_sig_min
-        self.flow_alpha = flow_alpha
-        self.flow_beta = flow_beta
-        self.flow_beta_dist = torch.distributions.Beta(flow_alpha, flow_beta)
-        self.lr = lr
-        self.weight_decay = weight_decay
+        self.dtype = dtype
+        self.time_sampling_beta_alpha = time_sampling_beta_alpha
+        self.time_sampling_beta_beta = time_sampling_beta_beta
+        self.time_sampling_scale = time_sampling_scale
+        self.time_sampling_offset = time_sampling_offset
+        self.min_period = min_period
+        self.max_period = max_period
+        self.gradient_checkpointing = gradient_checkpointing
+        self.compile_model = compile_model
+        self.compile_mode = compile_mode
+        self.optimizer_lr = optimizer_lr
+        self.optimizer_betas = optimizer_betas
+        self.optimizer_eps = optimizer_eps
+        self.optimizer_weight_decay = optimizer_weight_decay
         self.lr_scheduler_warmup_steps = lr_scheduler_warmup_steps
         self.lr_scheduler_num_decay_steps = lr_scheduler_num_decay_steps
         self.lr_scheduler_decay_lr = lr_scheduler_decay_lr
-        self.clip_grad_norm = clip_grad_norm
-        self.dtype = dtype
+        self.use_pretrained_weights = use_pretrained_weights
+        self.pretrained_name_or_path = pretrained_name_or_path
+        self.finetune_action_expert_only = finetune_action_expert_only
 
-        # Build PI0 config mirroring the reference defaults
+        # Build PI0 config 
         self.config = PI0Config(
-            paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m",
-            dtype="bfloat16" if dtype == torch.bfloat16 else "float32",
-            chunk_size=self.action_horizon,
-            n_action_steps=self.action_horizon,
+            paligemma_variant=paligemma_variant,
+            action_expert_variant=action_expert_variant,
+            dtype=dtype,
+            chunk_size=self.output_prediction_horizon,
             max_state_dim=self.max_state_dim,
             max_action_dim=self.max_action_dim,
             num_inference_steps=self.num_inference_steps,
-            time_sampling_beta_alpha=self.flow_alpha,
-            time_sampling_beta_beta=self.flow_beta,
-            time_sampling_offset=self.flow_sig_min,
-            scheduler_warmup_steps=lr_scheduler_warmup_steps,
-            scheduler_decay_steps=lr_scheduler_num_decay_steps,
-            scheduler_decay_lr=lr_scheduler_decay_lr,
-            device=str(self.device),
+            time_sampling_beta_alpha=self.time_sampling_beta_alpha,
+            time_sampling_beta_beta=self.time_sampling_beta_beta,
+            time_sampling_scale=self.time_sampling_scale,
+            time_sampling_offset=self.time_sampling_offset,
+            min_period=self.min_period,
+            max_period=self.max_period,
+            gradient_checkpointing=self.gradient_checkpointing,
+            compile_model=self.compile_model,
+            compile_mode=self.compile_mode,
+            device=self.device,
         )
 
         # Core model/policy from the reference implementation
-        self.policy = PI0Policy(self.config)
-        self.model: PI0Pytorch = self.policy.model
+        if self.use_pretrained_weights and self.pretrained_name_or_path:
+            self.policy = PI0Policy.from_pretrained(
+                self.pretrained_name_or_path,
+            )
+            self.model: PI0Pytorch = self.policy.model
+            self.config = self.policy.config
+        else:
+            self.policy = PI0Policy(self.config)
+            self.model: PI0Pytorch = self.policy.model
 
         if self.config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
         # Setup Normalizer
         self._setup_normalizer()
+
+        self._setup_optimizer_param_groups()
 
     # ------------------------------------------------------------------ helpers
     def _setup_normalizer(self) -> None:
@@ -142,6 +171,27 @@ class Pi0(NeuracoreModel):
     def gradient_checkpointing_disable(self) -> None:
         """Disable gradient checkpointing on the underlying PI0 model."""
         self.model.gradient_checkpointing_disable()
+    
+    def _setup_optimizer_param_groups(self) -> None:
+        """Setup optimizer parameter groups for the underlying PI0 model.
+        
+        The underlying PI0 model has two parameter groups: the VLM model and the action expert model.
+        We can either finetune the entire model or finetune the action expert model while freezing the VLM model.
+        """
+        if self.finetune_action_expert_only:
+            self.param_groups = [
+                {
+                    "params": self.model.paligemma_with_expert.gemma_expert.parameters(),
+                    "lr": self.optimizer_lr,
+                }
+            ]
+        else:
+            self.param_groups = [
+                {
+                    "params": self.model.parameters(),
+                    "lr": self.optimizer_lr,
+                }
+            ]
 
     def _combine_normalized_joint_states(
         self, batch: BatchedInferenceSamples
@@ -220,7 +270,7 @@ class Pi0(NeuracoreModel):
         actions = self.model.sample_actions(
             images, image_masks, lang_tokens, lang_masks, state
         )
-        actions = actions[:, :, : self.action_dim]
+        actions = actions[:, :, : self.action_dim] # output pad to max action dim
         return actions
 
     @classmethod
@@ -313,9 +363,10 @@ class Pi0(NeuracoreModel):
         """Create the optimizer list used during training."""
         return [
             torch.optim.AdamW(
-                self.model.parameters(),
-                lr=self.lr,
-                weight_decay=self.weight_decay,
+                self.param_groups,
+                weight_decay=self.optimizer_weight_decay,
+                betas=self.optimizer_betas,
+                eps=self.optimizer_eps,
             )
         ]
 
@@ -358,7 +409,6 @@ class Pi0(NeuracoreModel):
 
         return [LambdaLR(optimizer, lr_lambda, -1) for optimizer in optimizers]
 
-    # ------------------------------------------------------------------ helpers
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:
         """Return supported input data types for the model."""

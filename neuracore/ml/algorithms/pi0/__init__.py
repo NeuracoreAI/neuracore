@@ -19,9 +19,6 @@ def _patch_transformers() -> None:
 
         src = Path(__file__).parent / "transformers_replace"
         dst = Path(transformers.__file__).parent
-
-        breakpoint()
-
         if src.exists():
             for f in src.rglob("*.py"):
                 target = dst / f.relative_to(src)
