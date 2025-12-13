@@ -17,7 +17,7 @@ from typing import Callable, Optional
 import av
 import numpy as np
 import requests
-from neuracore_types import CameraData, DataType
+from neuracore_types import CameraData, DataType, RecordingDataStreamStatus
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -109,6 +109,11 @@ class StreamingVideoUploader(BucketUploader):
         tracking variables for timestamp management and buffer handling.
         """
         self._stream_id = self._register_data_stream(self.data_type)
+        self._update_data_stream(
+            self._stream_id,
+            status=RecordingDataStreamStatus.UPLOAD_STARTED,
+            upload_progress=0,
+        )
 
         # Ensure chunk_size is a multiple of 256 KiB
         if self.chunk_size % CHUNK_MULTIPLE != 0:
@@ -232,7 +237,11 @@ class StreamingVideoUploader(BucketUploader):
             f"{self.uploader.total_bytes_uploaded} bytes"
         )
         self._upload_json_data()
-        self._mark_data_stream_complete(self._stream_id)
+        self._update_data_stream(
+            self._stream_id,
+            status=RecordingDataStreamStatus.UPLOAD_COMPLETE,
+            upload_progress=100,
+        )
 
     def add_frame(self, frame_data: np.ndarray, metadata: CameraData) -> None:
         """Add a video frame to the encoding queue.

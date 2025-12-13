@@ -89,8 +89,19 @@ class BucketUploader(ABC):
         except requests.exceptions.RequestException as e:
             raise RuntimeError("Failed to register data stream: ", e)
 
-    def _mark_data_stream_complete(self, stream_id: str) -> None:
-        """Mark a DataStream as fully uploaded."""
+    def _update_data_stream(
+        self,
+        stream_id: str,
+        upload_progress: int,
+        status: RecordingDataStreamStatus,
+    ) -> None:
+        """Update the status of a backend DataStream.
+
+        Args:
+            stream_id: The id of the DataStream to update.
+            upload_progress: The upload progress of the DataStream.
+            status: The status of the DataStream.
+        """
         if not stream_id:
             return
 
@@ -101,10 +112,7 @@ class BucketUploader(ABC):
         try:
             requests.put(
                 f"{API_URL}/org/{org_id}/recording/{self.recording_id}/streams/{stream_id}",
-                json={
-                    "status": RecordingDataStreamStatus.UPLOAD_COMPLETE,
-                    "upload_progress": 100,
-                },
+                json={"status": status, "upload_progress": upload_progress},
                 headers=get_auth().get_headers(),
             )
         except requests.exceptions.RequestException:
