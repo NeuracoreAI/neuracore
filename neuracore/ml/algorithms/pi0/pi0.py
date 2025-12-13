@@ -10,12 +10,13 @@ from __future__ import annotations
 import logging
 import math
 import time
+from itertools import chain
 from typing import Any, Optional
-from typing_extensions import Literal
 
 import torch
 from neuracore_types import DataType, ModelInitDescription, ModelPrediction
 from torch.optim.lr_scheduler import LambdaLR
+from typing_extensions import Literal
 
 from neuracore.ml import (
     BatchedInferenceSamples,
@@ -73,7 +74,6 @@ class Pi0(NeuracoreModel):
         """Initialize the Neuracore Pi0 wrapper around the reference model."""
         super().__init__(model_init_description)
 
-
         self.action_dim = self.dataset_description.joint_target_positions.max_len
         self.max_state_dim = self.max_action_dim = 32
         self.action_horizon = self.output_prediction_horizon
@@ -100,7 +100,7 @@ class Pi0(NeuracoreModel):
         self.pretrained_name_or_path = pretrained_name_or_path
         self.finetune_action_expert_only = finetune_action_expert_only
 
-        # Build PI0 config 
+        # Build PI0 config
         self.config = PI0Config(
             paligemma_variant=paligemma_variant,
             action_expert_variant=action_expert_variant,
@@ -123,14 +123,11 @@ class Pi0(NeuracoreModel):
 
         # Core model/policy from the reference implementation
         if self.use_pretrained_weights and self.pretrained_name_or_path:
-            self.policy = PI0Policy.from_pretrained(
-                self.pretrained_name_or_path,
-            )
-            self.model: PI0Pytorch = self.policy.model
+            self.policy = PI0Policy.from_pretrained(self.pretrained_name_or_path)
             self.config = self.policy.config
         else:
             self.policy = PI0Policy(self.config)
-            self.model: PI0Pytorch = self.policy.model
+        self.model: PI0Pytorch = self.policy.model
 
         if self.config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
@@ -171,27 +168,33 @@ class Pi0(NeuracoreModel):
     def gradient_checkpointing_disable(self) -> None:
         """Disable gradient checkpointing on the underlying PI0 model."""
         self.model.gradient_checkpointing_disable()
-    
+
     def _setup_optimizer_param_groups(self) -> None:
         """Setup optimizer parameter groups for the underlying PI0 model.
-        
-        The underlying PI0 model has two parameter groups: the VLM model and the action expert model.
-        We can either finetune the entire model or finetune the action expert model while freezing the VLM model.
+
+        There are two logical groups: the VLM model and the action expert model.
+        You can either finetune everything or just the action expert while
+        freezing the VLM model.
         """
         if self.finetune_action_expert_only:
-            self.param_groups = [
-                {
-                    "params": self.model.paligemma_with_expert.gemma_expert.parameters(),
-                    "lr": self.optimizer_lr,
-                }
+            expert_param_iters = [
+                self.model.paligemma_with_expert.gemma_expert.parameters(),
+                self.model.action_in_proj.parameters(),
+                self.model.action_out_proj.parameters(),
+                self.model.state_proj.parameters(),
+                self.model.action_time_mlp_in.parameters(),
+                self.model.action_time_mlp_out.parameters(),
             ]
+            expert_params = list(chain.from_iterable(expert_param_iters))
+            self.param_groups = [{
+                "params": expert_params,
+                "lr": self.optimizer_lr,
+            }]
         else:
-            self.param_groups = [
-                {
-                    "params": self.model.parameters(),
-                    "lr": self.optimizer_lr,
-                }
-            ]
+            self.param_groups = [{
+                "params": list(self.model.parameters()),
+                "lr": self.optimizer_lr,
+            }]
 
     def _combine_normalized_joint_states(
         self, batch: BatchedInferenceSamples
@@ -270,7 +273,7 @@ class Pi0(NeuracoreModel):
         actions = self.model.sample_actions(
             images, image_masks, lang_tokens, lang_masks, state
         )
-        actions = actions[:, :, : self.action_dim] # output pad to max action dim
+        actions = actions[:, :, : self.action_dim]  # output pad to max action dim
         return actions
 
     @classmethod
@@ -400,7 +403,7 @@ class Pi0(NeuracoreModel):
             def cosine_decay(step: int) -> float:
                 step = min(step, actual_decay_steps)
                 cosine = 0.5 * (1 + math.cos(math.pi * step / actual_decay_steps))
-                alpha = self.lr_scheduler_decay_lr / self.lr
+                alpha = self.lr_scheduler_decay_lr / self.optimizer_lr
                 return (1 - alpha) * cosine + alpha
 
             if current_step < actual_warmup_steps:

@@ -1,4 +1,5 @@
 # @package _global_
+# cspell:ignore bfloat checkpointing finetune
 algorithm:
   _target_: neuracore.ml.algorithms.pi0.pi0.Pi0
   vlm_max_text_tokens: 48
@@ -25,4 +26,4 @@ algorithm:
   lr_scheduler_warmup_steps: 1000
   lr_scheduler_num_decay_steps: 30000
   lr_scheduler_decay_lr: 2.5e-6
-  finetune_action_expert_only: true
+  finetune_action_expert_only: True
