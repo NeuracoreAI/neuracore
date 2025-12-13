@@ -5,7 +5,7 @@ import time
 
 import matplotlib.pyplot as plt
 import pytest
-from neuracore_types import CameraData, JointData, SyncPoint
+from neuracore_types import CameraData, JointData, SynchronizedPoint
 
 import neuracore as nc
 from neuracore.core.endpoint import Policy
@@ -63,14 +63,14 @@ def eval_model(
         for i in range(EPISODE_LENGTH):
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
-                sync_point = SyncPoint(
+                sync_point = SynchronizedPoint(
                     joint_positions=JointData(values=obs.qpos),
                     rgb_images={
                         CAM_NAME: CameraData(frame=obs.cameras[CAM_NAME].rgb),
                     },
                 )
                 predicted_sync_points = policy.predict(
-                    sync_point=sync_point, timeout=10
+                    sync_point=sync_point, robot_name="Mujoco VX300s", timeout=10
                 )
                 joint_target_positions = [
                     sp.joint_target_positions for sp in predicted_sync_points
@@ -101,12 +101,12 @@ def eval_model(
 
 
 @pytest.mark.parametrize(
-    "algorithm_name, input_data_types, output_data_types, epochs, min_success_rate",
+    "algorithm_name, input_robot_data_spec, output_robot_data_spec, epochs, min_success_rate",  # noqa: E501
     [
         (
             "CNNMLP",
             [
-                nc.DataType.RGB_IMAGE,
+                nc.DataType.RGB_IMAGES,
                 nc.DataType.JOINT_POSITIONS,
             ],
             [
@@ -118,7 +118,7 @@ def eval_model(
         (
             "ACT",
             [
-                nc.DataType.RGB_IMAGE,
+                nc.DataType.RGB_IMAGES,
                 nc.DataType.JOINT_POSITIONS,
             ],
             [
@@ -135,8 +135,8 @@ class TestAlgorithm:
     def test_start_training(
         self,
         algorithm_name: str,
-        input_data_types: list,
-        output_data_types: list,
+        input_robot_data_spec: list,
+        output_robot_data_spec: list,
         epochs: int,
         min_success_rate: float,
     ) -> None:
@@ -157,8 +157,8 @@ class TestAlgorithm:
             algorithm_name=algorithm_name,
             dataset_name=DATASET_NAME,
             algorithm_config=algorithm_config,
-            input_data_types=input_data_types,
-            output_data_types=output_data_types,
+            input_robot_data_spec=input_robot_data_spec,
+            output_robot_data_spec=output_robot_data_spec,
         )
         logger.info("Training job started!")
         training_job_id = job_data["id"]

@@ -7,7 +7,7 @@ connection management, and automatic reconnection with exponential backoff.
 
 import asyncio
 import logging
-from typing import Dict, Optional
+from typing import Optional
 
 from aiohttp import ClientSession
 from neuracore_types import (
@@ -15,7 +15,7 @@ from neuracore_types import (
     HandshakeMessage,
     MessageType,
     OpenConnectionDetails,
-    SyncPoint,
+    SynchronizedPoint,
 )
 
 from neuracore.core.auth import Auth, get_auth
@@ -78,7 +78,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
             get_consume_live_data_enabled_manager(), loop=loop
         )
         self.streaming.add_listener(EnabledManager.DISABLED, self._on_close)
-        self.connections: Dict[str, PierToPierConsumerConnection] = {}
+        self.connections: dict[str, PierToPierConsumerConnection] = {}
         self.ice_config: Optional[IceConfig] = None
 
     @property
@@ -139,7 +139,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
 
         return self.ice_config
 
-    def get_latest_data(self) -> SyncPoint:
+    def get_latest_data(self) -> SynchronizedPoint:
         """Gets a sync point consisting of the latest data from all connections.
 
         Returns:

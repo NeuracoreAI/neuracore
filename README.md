@@ -77,15 +77,15 @@ nc.start_recording()
 
 # Log various data types with timestamps
 t = time.time()
-nc.log_joint_positions({'joint1': 0.5, 'joint2': -0.3}, timestamp=t)
-nc.log_joint_velocities({'joint1': 0.1, 'joint2': -0.05}, timestamp=t)
-nc.log_joint_target_positions({'joint1': 0.6, 'joint2': -0.2}, timestamp=t)
+nc.log_joint_positions("right_arm", {'joint1': 0.5, 'joint2': -0.3}, timestamp=t)
+nc.log_joint_velocities("right_arm", {'joint1': 0.1, 'joint2': -0.05}, timestamp=t)
+nc.log_joint_target_positions("right_arm", {'joint1': 0.6, 'joint2': -0.2}, timestamp=t)
 
 # Log camera data
 nc.log_rgb("top_camera", image_array, timestamp=t)
 
 # Log language instructions
-nc.log_language("Pick up the red cube", timestamp=t)
+nc.log_language("instruction", "Pick up the red cube", timestamp=t)
 
 # Log custom data
 custom_sensor_data = [1.2, 3.4, 5.6]
@@ -116,7 +116,7 @@ from neuracore_types import DataType
 
 synced_dataset = dataset.synchronize(
     frequency=10,  # Hz
-    data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGE, DataType.LANGUAGE]
+    data_types=[DataType.JOINT_POSITIONS, DataType.RGB_IMAGES, DataType.LANGUAGE]
 )
 
 print(f"Dataset has {len(synced_dataset)} episodes")
@@ -145,7 +145,7 @@ policy = nc.policy(train_run_name="MyTrainingJob")
 policy.set_checkpoint(epoch=-1)
 
 # Predict actions
-predicted_sync_points = policy.predict(timeout=5)
+predicted_sync_points = policy.predict(timeout=5, robot_name="MyRobot")
 joint_target_positions = [sp.joint_target_positions for sp in predicted_sync_points]
 actions = [jtp.numpy() for jtp in joint_target_positions if jtp is not None]
 ```
@@ -156,7 +156,7 @@ actions = [jtp.numpy() for jtp in joint_target_positions if jtp is not None]
 # Connect to a remote endpoint
 try:
     policy = nc.policy_remote_server("MyEndpointName")
-    predicted_sync_points = policy.predict(timeout=5)
+    predicted_sync_points = policy.predict(timeout=5, robot_name="MyRobot")
     # Process predictions...
 except nc.EndpointError:
     print("Endpoint not available. Please start it at neuracore.app/dashboard/endpoints")
@@ -252,7 +252,7 @@ python -m neuracore.ml.train algorithm=diffusion_policy batch_size=auto dataset_
 python -m neuracore.ml.train --multirun algorithm=cnnmlp algorithm.lr=1e-4,5e-4,1e-3 algorithm.hidden_dim=256,512,1024 dataset_name="my_dataset"
 
 # Multi-modal training with images and language
-python -m neuracore.ml.train algorithm=simple_vla dataset_name="my_multimodal_dataset" input_data_types='["JOINT_POSITIONS","RGB_IMAGE","LANGUAGE"]'
+python -m neuracore.ml.train algorithm=simple_vla dataset_name="my_multimodal_dataset" input_robot_data_spec='["JOINT_POSITIONS","RGB_IMAGE","LANGUAGE"]'
 ```
 
 ### Configuration Management
@@ -270,11 +270,11 @@ batch_size: "auto"
 seed: 42
 
 # Multi-modal data support
-input_data_types:
+input_robot_data_spec:
   - "JOINT_POSITIONS"
   - "RGB_IMAGE"
   - "LANGUAGE"
-output_data_types:
+output_robot_data_spec:
   - "JOINT_TARGET_POSITIONS"
 ```
 
@@ -316,7 +316,7 @@ class MyCustomAlgorithm(NeuracoreModel):
         
     @staticmethod
     def get_supported_input_data_types() -> list[DataType]:
-        return [DataType.JOINT_POSITIONS, DataType.RGB_IMAGE]
+        return [DataType.JOINT_POSITIONS, DataType.RGB_IMAGES]
         
     @staticmethod
     def get_supported_output_data_types() -> list[DataType]:
@@ -378,6 +378,11 @@ pip install -e .[dev,ml]
 ```bash
 export NEURACORE_API_URL=http://localhost:8000/api
 pytest tests/
+```
+
+If testing on Mac, you may need to set:
+```
+export PYTORCH_ENABLE_MPS_FALLBACK=1
 ```
 
 ## Contributing

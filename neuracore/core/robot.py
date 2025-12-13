@@ -155,10 +155,10 @@ class Robot:
                 if self._temp_dir:
                     self._temp_dir.cleanup()
         except requests.exceptions.ConnectionError:
-            raise RobotError((
+            raise RobotError(
                 "Failed to connect to neuracore server, "
                 "please check your internet connection and try again."
-            ))
+            )
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 403:
                 raise RobotError(
@@ -251,10 +251,10 @@ class Robot:
             )
             return recording_id
         except requests.exceptions.ConnectionError:
-            raise RobotError((
+            raise RobotError(
                 "Failed to connect to neuracore server, "
                 "please check your internet connection and try again."
-            ))
+            )
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to start recording: {str(e)}")
 
@@ -294,10 +294,10 @@ class Robot:
                 robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
         except requests.exceptions.ConnectionError:
-            raise RobotError((
+            raise RobotError(
                 "Failed to connect to neuracore server, "
                 "please check your internet connection and try again."
-            ))
+            )
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to stop recording: {str(e)}")
 
@@ -473,10 +473,10 @@ class Robot:
 
             logger.info(f"Successfully uploaded URDF package for robot {self.id}")
         except requests.exceptions.ConnectionError:
-            raise RobotError((
+            raise RobotError(
                 "Failed to connect to neuracore server, "
                 "please check your internet connection and try again."
-            ))
+            )
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to upload URDF package: {str(e)}")
         except Exception as e:
@@ -505,10 +505,10 @@ class Robot:
                 robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
         except requests.exceptions.ConnectionError:
-            raise RobotError((
+            raise RobotError(
                 "Failed to connect to neuracore server, "
                 "please check your internet connection and try again."
-            ))
+            )
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to cancel recording: {str(e)}")
 
@@ -575,3 +575,37 @@ def get_robot(robot_name: str, instance: int) -> Robot:
             f"Robot {robot_name}:{instance} not initialized. Call init() first."
         )
     return _robots[key]
+
+
+def list_organization_robots(
+    org_id: str, is_shared: bool = False, mode: str = "current"
+) -> list[dict]:
+    """List all robots in an organization.
+
+    Args:
+        org_id: Organization ID
+        is_shared: Whether to list shared robots
+        mode: Robot list mode ("current", "archived", or "mixed")
+    """
+    if not get_auth().is_authenticated:
+        raise RobotError("Not authenticated. Please call nc.login() first.")
+    if not org_id:
+        raise RobotError("No organization selected. Please call nc.select_org() first.")
+    if mode not in ["current", "archived", "mixed"]:
+        raise RobotError(
+            "Invalid robot list mode. Please use 'current', 'archived', or 'mixed'."
+        )
+    try:
+        response = requests.get(
+            f"{API_URL}/org/{org_id}/robots?is_shared={is_shared}&mode={mode}",
+            headers=get_auth().get_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.ConnectionError:
+        raise RobotError(
+            "Failed to connect to neuracore server, "
+            "please check your internet connection and try again."
+        )
+    except requests.exceptions.RequestException as e:
+        raise RobotError(f"Failed to list robots: {str(e)}")

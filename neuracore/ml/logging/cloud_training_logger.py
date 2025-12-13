@@ -3,7 +3,7 @@
 import logging
 import threading
 import time
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import requests
@@ -39,7 +39,7 @@ class CloudTrainingLogger(TrainingLogger):
         self._sync_thread: Optional[threading.Thread] = None
         self._last_sync_time: float = 0.0
         # Maps log name, to a dict of (step, value) pairs
-        self._store: Dict[str, Dict[int, Any]] = {}
+        self._store: dict[str, dict[int, Any]] = {}
         self._start_cloud_sync()
 
         logger.info("Cloud logger initialized.")
@@ -54,7 +54,7 @@ class CloudTrainingLogger(TrainingLogger):
         """
         self._store.setdefault(name, {})[step] = value
 
-    def log_scalars(self, scalars: Dict[str, float], step: int) -> None:
+    def log_scalars(self, scalars: dict[str, float], step: int) -> None:
         """Log multiple scalar metrics at once.
 
         Args:
@@ -126,8 +126,8 @@ class CloudTrainingLogger(TrainingLogger):
 
     def log_hyperparameters(
         self,
-        hparams: Dict[str, Any],
-        metrics: Optional[Dict[str, float]] = None,
+        hparams: dict[str, Any],
+        metrics: Optional[dict[str, float]] = None,
     ) -> None:
         """Log hyperparameters and optionally metrics.
 

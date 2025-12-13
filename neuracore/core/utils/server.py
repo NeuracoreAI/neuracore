@@ -4,20 +4,19 @@ This replaces TorchServe with a more flexible, custom solution that gives us
 full control over the inference pipeline while maintaining .nc.zip compatibility.
 """
 
+import json
 import logging
 import time
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from neuracore_types import SyncPoint
+from neuracore_types import BatchedNCDataUnion, DataType, SynchronizedPoint
 from pydantic import BaseModel
 
-from neuracore.core.exceptions import InsufficientSyncPointError
-from neuracore.core.utils.image_string_encoder import ImageStringEncoder
+from neuracore.core.exceptions import InsufficientSynchronizedPointError
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +36,8 @@ class ModelServer:
 
     def __init__(
         self,
+        model_input_order: dict[DataType, list[str]],
+        model_output_order: dict[DataType, list[str]],
         model_file: Path,
         org_id: str,
         job_id: Optional[str] = None,
@@ -45,6 +46,8 @@ class ModelServer:
         """Initialize the model server.
 
         Args:
+            model_input_order: Model input order
+            model_output_order: Model output order
             model_file: Path to the .nc.zip model archive
             org_id: Organization ID for the model
             job_id: Job ID for the model
@@ -53,15 +56,14 @@ class ModelServer:
         # Import here to avoid the need for pytorch unless the user uses this policy
         from neuracore.ml.utils.policy_inference import PolicyInference
 
-        # Only pass the device argument if it's not None, for compatibility
-        if device is not None:
-            self.policy_inference = PolicyInference(
-                org_id=org_id, job_id=job_id, model_file=model_file, device=device
-            )
-        else:
-            self.policy_inference = PolicyInference(
-                org_id=org_id, job_id=job_id, model_file=model_file
-            )
+        self.policy_inference = PolicyInference(
+            model_input_order=model_input_order,
+            model_output_order=model_output_order,
+            org_id=org_id,
+            job_id=job_id,
+            model_file=model_file,
+            device=device,
+        )
         self.app = self._create_app()
 
     def _create_app(self) -> FastAPI:
@@ -87,28 +89,21 @@ class ModelServer:
             return {"status": "healthy", "timestamp": time.time()}
 
         # Main prediction endpoint
-        @app.post(PREDICT_ENDPOINT, response_model=list[SyncPoint])
-        async def predict(sync_point: SyncPoint) -> list[SyncPoint]:
+        @app.post(
+            PREDICT_ENDPOINT,
+            response_model=dict[DataType, dict[str, BatchedNCDataUnion]],
+        )
+        async def predict(
+            sync_point: SynchronizedPoint,
+        ) -> dict[DataType, dict[str, BatchedNCDataUnion]]:
             try:
-                # Decode base64 images before inference
-                sync_point = self._decode_images(sync_point)
-
-                # Run inference
-                try:
-                    prediction = self.policy_inference(sync_point)
-                except InsufficientSyncPointError:
-                    logger.error("Insufficient sync point data.")
-                    raise HTTPException(
-                        status_code=422,
-                        detail="Insufficient sync point data for inference.",
-                    )
-
-                # Encode images in response if needed
-                return [
-                    self._encode_outputs(pred_sync_point)
-                    for pred_sync_point in prediction
-                ]
-
+                return self.policy_inference(sync_point)
+            except InsufficientSynchronizedPointError:
+                logger.error("Insufficient sync point data.")
+                raise HTTPException(
+                    status_code=422,
+                    detail="Insufficient sync point data for inference.",
+                )
             except Exception as e:
                 logger.error("Prediction error.", exc_info=True)
                 raise HTTPException(
@@ -127,86 +122,6 @@ class ModelServer:
 
         return app
 
-    def _decode_images(self, sync_point: SyncPoint) -> SyncPoint:
-        """Decode base64 images in sync point to numpy arrays.
-
-        Args:
-            sync_point: SyncPoint with potentially base64-encoded images
-
-        Returns:
-            SyncPoint with decoded numpy array images
-        """
-        # Decode RGB images
-        if sync_point.rgb_images:
-            for camera_name, camera_data in sync_point.rgb_images.items():
-                if isinstance(camera_data.frame, str):
-                    # It's a base64 string, decode it
-                    camera_data.frame = ImageStringEncoder.decode_image(
-                        camera_data.frame
-                    )
-
-        # Decode depth images
-        if sync_point.depth_images:
-            for camera_name, camera_data in sync_point.depth_images.items():
-                if isinstance(camera_data.frame, str):
-                    # It's a base64 string, decode it
-                    camera_data.frame = ImageStringEncoder.decode_image(
-                        camera_data.frame
-                    )
-
-        return sync_point
-
-    def _encode_outputs(self, prediction: SyncPoint) -> SyncPoint:
-        """Encode output images to base64 for response.
-
-        Args:
-            prediction: SyncPoint with potentially numpy array images
-
-        Returns:
-            SyncPoint with base64-encoded images
-        """
-        # Handle RGB image outputs
-        if prediction.rgb_images:
-            rgbs = prediction.rgb_images
-            for camera_name, camera_data in rgbs.items():
-                assert isinstance(camera_data.frame, np.ndarray)
-                image = camera_data.frame
-                assert len(image.shape) == 3  # [H, W, C]
-                if image.shape[0] == 3:  # CHW format
-                    image = np.transpose(image, (1, 2, 0))  # Convert to HWC
-                if image.dtype != np.uint8:
-                    image = np.clip(image, 0, 255).astype(np.uint8)
-                camera_data.frame = ImageStringEncoder.encode_image(image)
-
-        if prediction.depth_images:
-            depths = prediction.depth_images
-            for camera_name, camera_data in depths.items():
-                assert isinstance(camera_data.frame, np.ndarray)
-                depth = camera_data.frame
-                assert len(depth.shape) == 3  # [H, W, C]
-                if depth.shape[0] == 1:  # Remove channel dimension
-                    depth = depth[0]
-                # Normalize depth to 0-255 range
-                depth_norm = (
-                    (depth - depth.min()) / (depth.max() - depth.min() + 1e-8) * 255
-                )
-                depth_norm = depth_norm.astype(np.uint8)
-                camera_data.frame = ImageStringEncoder.encode_image(depth_norm)
-
-        # Convert all SyncPoint attributes to lists if they are numpy arrays
-        for attr in prediction.__dict__:
-            value = getattr(prediction, attr)
-            if isinstance(value, np.ndarray):
-                # Convert numpy array to list
-                setattr(prediction, attr, value.tolist())
-            elif isinstance(value, dict):
-                # Convert numpy arrays in dicts to lists
-                for key, item in value.items():
-                    if isinstance(item, np.ndarray):
-                        value[key] = item.tolist()
-
-        return prediction
-
     def run(
         self, host: str = "0.0.0.0", port: int = 8080, log_level: str = "info"
     ) -> None:
@@ -223,6 +138,8 @@ class ModelServer:
 
 
 def start_server(
+    model_input_order: dict[DataType, list[str]],
+    model_output_order: dict[DataType, list[str]],
     model_file: Path,
     org_id: str,
     job_id: Optional[str] = None,
@@ -245,7 +162,14 @@ def start_server(
     Returns:
         ModelServer instance
     """
-    server = ModelServer(model_file, org_id, job_id, device)
+    server = ModelServer(
+        model_input_order=model_input_order,
+        model_output_order=model_output_order,
+        model_file=model_file,
+        org_id=org_id,
+        job_id=job_id,
+        device=device,
+    )
     server.run(host, port, log_level)
     return server
 
@@ -255,7 +179,23 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Start Neuracore Model Server")
     parser.add_argument(
-        "--model_file", required=True, help="Path to .nc.zip model file"
+        "--model-input-order",
+        required=True,
+        help=(
+            "Model input order consisting of json dump of "
+            "dict mapping DataType to list of strings"
+        ),
+    )
+    parser.add_argument(
+        "--model-output-order",
+        required=True,
+        help=(
+            "Model output order consisting of json dump of "
+            "dict mapping DataType to list of strings"
+        ),
+    )
+    parser.add_argument(
+        "--model-file", required=True, help="Path to .nc.zip model file"
     )
     parser.add_argument("--org-id", required=True, help="Organization ID")
     parser.add_argument("--job-id", required=False, help="Job ID")
@@ -266,7 +206,16 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    model_input_order = {
+        DataType(k): v for k, v in json.loads(str(args.model_input_order)).items()
+    }
+    model_output_order = {
+        DataType(k): v for k, v in json.loads(str(args.model_output_order)).items()
+    }
+
     start_server(
+        model_input_order=model_input_order,
+        model_output_order=model_output_order,
         model_file=Path(args.model_file),
         org_id=args.org_id,
         job_id=args.job_id,

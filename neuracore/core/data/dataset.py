@@ -1,12 +1,20 @@
 """Dataset management with lazy-loading generator."""
 
 import logging
+import sys
 import time
+from collections.abc import Generator, Iterator
 from pathlib import Path
-from typing import Dict, Generator, Iterator, List, Optional, Union
+from typing import Optional, Union
 
 import requests
-from neuracore_types import DataType, SyncedDataset
+from neuracore_types import (
+    DataType,
+    RobotDataSpec,
+    SynchronizationDetails,
+    SynchronizeDatasetRequest,
+)
+from neuracore_types import SynchronizedDataset as SynchronizedDatasetModel
 from tqdm import tqdm
 
 from neuracore.core.config.get_current_org import get_current_org
@@ -36,7 +44,7 @@ class Dataset:
         tags: list[str],
         data_types: list[DataType],
         is_shared: bool,
-        recordings: Optional[Union[List[dict], List[Recording]]] = None,
+        recordings: Optional[Union[list[dict], list[Recording]]] = None,
     ):
         """Initialize a Dataset instance.
 
@@ -68,7 +76,7 @@ class Dataset:
         self.data_types = data_types or []
 
         self.cache_dir = DEFAULT_CACHE_DIR
-        self._recordings_cache: List[Recording] = (
+        self._recordings_cache: list[Recording] = (
             [
                 self._wrap_raw_recording(r) if isinstance(r, dict) else r
                 for r in recordings
@@ -120,7 +128,7 @@ class Dataset:
         assert self._num_recordings is not None
         return self._num_recordings
 
-    def _wrap_raw_recording(self, raw_recording: Dict) -> Recording:
+    def _wrap_raw_recording(self, raw_recording: dict) -> Recording:
         """Wrap a raw recording dict into a Recording object.
 
         Args:
@@ -154,7 +162,7 @@ class Dataset:
             logger.error(f"Failed to fetch recording count for Dataset {self.id}: {e}")
             self._num_recordings = 0
 
-    def _fetch_next_page(self) -> List[Recording]:
+    def _fetch_next_page(self) -> list[Recording]:
         """Fetch the next page of recordings and append to cache (lazy)."""
         if (
             self._num_recordings is not None
@@ -392,18 +400,21 @@ class Dataset:
         )
 
     def _synchronize(
-        self, frequency: int = 0, data_types: Optional[list[DataType]] = None
-    ) -> SyncedDataset:
+        self,
+        frequency: int = 0,
+        robot_data_spec: Optional[RobotDataSpec] = None,
+    ) -> SynchronizedDatasetModel:
         """Synchronize the dataset with specified frequency and data types.
 
         Args:
             frequency: Frequency at which to synchronize the dataset.
                 If 0, uses the default frequency.
-            data_types: List of DataType to include in synchronization.
-                If None, uses the default data types from the dataset.
+            robot_data_spec: Dict specifying robot id to
+                data types and their names to include in synchronization.
+                If None, will use all available data types from the dataset.
 
         Returns:
-            SyncedDataset instance containing synchronized data.
+            SynchronizedDataset instance containing synchronized data.
 
         Raises:
             requests.HTTPError: If the API request fails.
@@ -412,20 +423,24 @@ class Dataset:
         response = requests.post(
             f"{API_URL}/org/{self.org_id}/synchronize/synchronize-dataset",
             headers=get_auth().get_headers(),
-            json={
-                "dataset_id": self.id,
-                "frequency": frequency,
-                "data_types": data_types,
-            },
+            json=SynchronizeDatasetRequest(
+                dataset_id=self.id,
+                synchronization_details=SynchronizationDetails(
+                    frequency=frequency,
+                    robot_data_spec=robot_data_spec,
+                    max_delay_s=sys.float_info.max,
+                    allow_duplicates=True,
+                ),
+            ).model_dump_json(),
         )
         response.raise_for_status()
         dataset_json = response.json()
-        return SyncedDataset.model_validate(dataset_json)
+        return SynchronizedDatasetModel.model_validate(dataset_json)
 
     def synchronize(
         self,
         frequency: int = 0,
-        data_types: Optional[list[DataType]] = None,
+        robot_data_spec: Optional[RobotDataSpec] = None,
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 4,
     ) -> SynchronizedDataset:
@@ -446,7 +461,9 @@ class Dataset:
             requests.HTTPError: If the API request fails.
             DatasetError: If frequency is not greater than 0.
         """
-        synced_dataset = self._synchronize(frequency=frequency, data_types=data_types)
+        synced_dataset = self._synchronize(
+            frequency=frequency, robot_data_spec=robot_data_spec
+        )
         total = synced_dataset.num_demonstrations
         processed = synced_dataset.num_processed_demonstrations
         if total != processed:
@@ -456,7 +473,7 @@ class Dataset:
             while processed < total:
                 time.sleep(5.0)
                 synced_dataset = self._synchronize(
-                    frequency=frequency, data_types=data_types
+                    frequency=frequency, robot_data_spec=robot_data_spec
                 )
                 new_processed = synced_dataset.num_processed_demonstrations
                 if new_processed > processed:
@@ -468,8 +485,8 @@ class Dataset:
         return SynchronizedDataset(
             dataset=self,
             frequency=frequency,
-            data_types=data_types,
-            dataset_description=synced_dataset.dataset_description,
+            robot_data_spec=robot_data_spec,
+            total_num_transitions=synced_dataset.total_num_transitions,
             prefetch_videos=prefetch_videos,
             max_prefetch_workers=max_prefetch_workers,
         )

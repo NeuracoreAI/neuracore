@@ -65,24 +65,31 @@ def _record_step(step: dict, timestamp: float) -> None:
             visual_joint_positions_dict[jname] = v * (
                 -1 if jname in INVERTED_JOINTS else 1
             )
+    joint_group_name = "arm"
     nc.log_joint_positions(
+        name=joint_group_name,
         positions=joint_positions_dict,
-        additional_urdf_positions=visual_joint_positions_dict,
+        timestamp=timestamp,
+    )
+    nc.log_joint_positions(
+        name=f"{joint_group_name}_visual",
+        positions=visual_joint_positions_dict,
         timestamp=timestamp,
     )
 
     state_vel = observation["state_vel"].numpy().tolist()
     joint_velocities_dict = dict(zip(ROBOT.joint_names[:DOF], state_vel[:DOF]))
 
-    nc.log_joint_velocities(velocities=joint_velocities_dict, timestamp=timestamp)
-
-    gripper_open_amounts = {"gripper_open_amount": 1.0 - gripper_closed_amount}
-    nc.log_gripper_data(
-        open_amounts=gripper_open_amounts,
+    nc.log_joint_velocities(
+        name=joint_group_name, velocities=joint_velocities_dict, timestamp=timestamp
+    )
+    nc.log_parallel_gripper_open_amount(
+        name="gripper",
+        value=1.0 - gripper_closed_amount,
         timestamp=timestamp,
     )
-
     nc.log_language(
+        name="instruction",
         language=step["language_instruction"].numpy().decode("utf-8"),
         timestamp=timestamp,
     )

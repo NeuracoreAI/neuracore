@@ -4,7 +4,7 @@ import logging
 import os
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -164,8 +164,10 @@ class DistributedTrainer:
             if self.world_size > 1:
                 batch_output = self.model(batch)
             else:
-                batch_output = self.model.training_step(batch)
-            loss = sum(batch_output.losses.values()).mean()
+                batch_output = cast(NeuracoreModel, self.model).training_step(batch)
+            loss = (
+                torch.stack(list(batch_output.losses.values()), dim=0).sum(dim=0).mean()
+            )
 
             # Backward pass
             for optimizer in self.optimizers:
@@ -244,7 +246,7 @@ class DistributedTrainer:
             if self.world_size > 1:
                 batch_output = self.model(batch)
             else:
-                batch_output = self.model.training_step(batch)
+                batch_output = cast(NeuracoreModel, self.model).training_step(batch)
 
             if self.log_freq > 0 and self.global_val_step % self.log_freq == 0:
                 self._log_scalars(

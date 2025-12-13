@@ -6,7 +6,10 @@ and runs validation to ensure algorithms meet neuracore requirements.
 """
 
 import argparse
+import json
 import logging
+
+from neuracore_types import DataType
 
 import neuracore as nc
 from neuracore.core.endpoint import policy_local_server
@@ -36,6 +39,23 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--model_input_order",
+        required=True,
+        help=(
+            "Model input order consisting of json dump of "
+            "dict mapping DataType to list of strings"
+        ),
+    )
+    parser.add_argument(
+        "--model_output_order",
+        required=True,
+        help=(
+            "Model output order consisting of json dump of "
+            "dict mapping DataType to list of strings"
+        ),
+    )
+
+    parser.add_argument(
         "--job_id",
         type=str,
         help="Job ID to run",
@@ -58,9 +78,18 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    model_input_order = {
+        DataType(k): v for k, v in json.loads(args.model_input_order).items()
+    }
+    model_output_order = {
+        DataType(k): v for k, v in json.loads(args.model_output_order).items()
+    }
+
     nc.login()
     nc.set_organization(args.org_id)
     policy = policy_local_server(
+        model_input_order=model_input_order,
+        model_output_order=model_output_order,
         train_run_name="",  # Use job id instead
         port=args.port,
         host=args.host,

@@ -4,12 +4,12 @@ import gc
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import hydra
 import torch
 import torch.multiprocessing as mp
-from neuracore_types import DataType, ModelInitDescription
+from neuracore_types import ModelInitDescription
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler, random_split
 
@@ -30,6 +30,11 @@ from neuracore.ml.trainers.distributed_trainer import (
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
 from neuracore.ml.utils.device_utils import get_default_device
+from neuracore.ml.utils.robot_data_spec_utils import (
+    convert_str_to_robot_data_spec,
+    extract_data_types,
+    merge_robot_data_spec,
+)
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
 # Environment setup
@@ -64,9 +69,9 @@ def setup_logging(output_dir: str, rank: int = 0) -> None:
 def get_model_and_algorithm_config(
     cfg: DictConfig,
     model_init_description: ModelInitDescription,
-) -> Tuple[NeuracoreModel, Dict[str, Any]]:
+) -> tuple[NeuracoreModel, dict[str, Any]]:
     """Get model and algorithm configuration."""
-    algorithm_config: Dict[str, Any] = {}
+    algorithm_config: dict[str, Any] = {}
     if "algorithm" in cfg:
         algorithm_config = OmegaConf.to_container(cfg.algorithm, resolve=True)
         algorithm_config.pop("_target_", None)
@@ -102,11 +107,6 @@ def get_model_and_algorithm_config(
     return model, algorithm_config
 
 
-def convert_data_types(data_types_list: list[str]) -> list[DataType]:
-    """Convert string data types to DataType enums."""
-    return [DataType(dt) for dt in data_types_list]
-
-
 def determine_optimal_batch_size(
     cfg: DictConfig,
     dataset: SingleSampleDataset,
@@ -123,13 +123,13 @@ def determine_optimal_batch_size(
 
     logger.info(f"Starting batch size autotuning on {device}...")
 
-    input_data_types = convert_data_types(cfg.input_data_types)
-    output_data_types = convert_data_types(cfg.output_data_types)
+    input_robot_data_spec = convert_str_to_robot_data_spec(cfg.input_robot_data_spec)
+    output_robot_data_spec = convert_str_to_robot_data_spec(cfg.output_robot_data_spec)
 
     model_init_description = ModelInitDescription(
-        dataset_description=dataset.dataset_description,
-        input_data_types=input_data_types,
-        output_data_types=output_data_types,
+        dataset_statistics=dataset.dataset_statistics,
+        input_data_types=extract_data_types(input_robot_data_spec),
+        output_data_types=extract_data_types(output_robot_data_spec),
         output_prediction_horizon=cfg.output_prediction_horizon,
     )
 
@@ -198,8 +198,15 @@ def run_training(
     try:
         logger.info(f"Using batch size: {batch_size}")
 
-        input_data_types = convert_data_types(cfg.input_data_types)
-        output_data_types = convert_data_types(cfg.output_data_types)
+        input_robot_data_spec = convert_str_to_robot_data_spec(
+            cfg.input_robot_data_spec
+        )
+        output_robot_data_spec = convert_str_to_robot_data_spec(
+            cfg.output_robot_data_spec
+        )
+
+        # Merge data_types for synchronization
+        merge_robot_data_spec(input_robot_data_spec, output_robot_data_spec)
 
         # Split dataset
         dataset_size = len(dataset)
@@ -276,8 +283,11 @@ def run_training(
             f"and {len(val_loader.dataset)} validation samples"
         )
 
+        # Model doesn't need to know about ids or names, just data types
+        input_data_types = extract_data_types(input_robot_data_spec)
+        output_data_types = extract_data_types(output_robot_data_spec)
         model_init_description = ModelInitDescription(
-            dataset_description=dataset.dataset_description,
+            dataset_statistics=dataset.dataset_statistics,
             input_data_types=input_data_types,
             output_data_types=output_data_types,
             output_prediction_horizon=cfg.output_prediction_horizon,
@@ -292,9 +302,6 @@ def run_training(
             training_job_id=cfg.training_id,
             algorithm_config=algorithm_config,
         )
-
-        # TODO: Find a better way to handle text tokenization
-        dataset.tokenize_text = model.tokenize_text
 
         logger.info(
             f"Created model with "
@@ -382,11 +389,29 @@ def main(cfg: DictConfig) -> None:
             "Please specify only one."
         )
 
+    if cfg.input_robot_data_spec is None or cfg.output_robot_data_spec is None:
+        raise ValueError(
+            "Both 'input_robot_data_spec' and 'output_robot_data_spec' "
+            "must be provided in the configuration."
+        )
+    if not isinstance(cfg.input_robot_data_spec, DictConfig) or not isinstance(
+        cfg.output_robot_data_spec, DictConfig
+    ):
+        raise ValueError(
+            "'input_robot_data_spec' and 'output_robot_data_spec' "
+            "must be dictionaries mapping robot IDs to data types."
+        )
+
     batch_size = cfg.batch_size
 
+    input_robot_data_spec = convert_str_to_robot_data_spec(cfg.input_robot_data_spec)
+    output_robot_data_spec = convert_str_to_robot_data_spec(cfg.output_robot_data_spec)
+    extract_data_types(input_robot_data_spec)
+    extract_data_types(output_robot_data_spec)
+
     # Prepare data types for synchronization
-    data_types_to_sync = convert_data_types(
-        cfg.input_data_types + cfg.output_data_types
+    robot_data_spec = merge_robot_data_spec(
+        input_robot_data_spec, output_robot_data_spec
     )
 
     # Login and get dataset
@@ -398,10 +423,12 @@ def main(cfg: DictConfig) -> None:
         dataset = nc.get_dataset(id=cfg.dataset_id)
     elif cfg.dataset_name is not None:
         dataset = nc.get_dataset(name=cfg.dataset_name)
+    else:
+        raise ValueError("Either 'dataset_id' or 'dataset_name' must be provided.")
 
     synchronized_dataset = dataset.synchronize(
         frequency=cfg.frequency,
-        data_types=data_types_to_sync,
+        robot_data_spec=robot_data_spec,
         prefetch_videos=True,
         max_prefetch_workers=cfg.max_prefetch_workers,
     )
@@ -429,12 +456,10 @@ def main(cfg: DictConfig) -> None:
     # Create a pytorch synchronized dataset
     # NOTE: we are creating it here, and not in training to access the first sample
     # for batch size autotuning, if used.
-    input_data_types = convert_data_types(cfg.input_data_types)
-    output_data_types = convert_data_types(cfg.output_data_types)
     pytorch_dataset = PytorchSynchronizedDataset(
         synchronized_dataset=synchronized_dataset,
-        input_data_types=input_data_types,
-        output_data_types=output_data_types,
+        input_robot_data_spec=input_robot_data_spec,
+        output_robot_data_spec=output_robot_data_spec,
         output_prediction_horizon=cfg.output_prediction_horizon,
     )
 
@@ -443,10 +468,10 @@ def main(cfg: DictConfig) -> None:
         sample = pytorch_dataset.load_sample(0).to(device)
         single_sample_dataset = SingleSampleDataset(
             sample=sample,
-            input_data_types=input_data_types,
-            output_data_types=output_data_types,
+            input_robot_data_spec=input_robot_data_spec,
+            output_robot_data_spec=output_robot_data_spec,
             output_prediction_horizon=cfg.output_prediction_horizon,
-            dataset_description=pytorch_dataset.dataset_description,
+            dataset_statistics=pytorch_dataset.dataset_statistics,
             num_recordings=len(pytorch_dataset),
         )
 

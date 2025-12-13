@@ -10,18 +10,22 @@ import logging
 import os
 import tempfile
 from pathlib import Path
+from typing import cast
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 from neuracore_types import (
+    BatchedJointData,
+    BatchedNCData,
     DataItemStats,
-    DatasetDescription,
     DataType,
+    JointDataStats,
     ModelInitDescription,
-    ModelPrediction,
+    RobotDataSpec,
 )
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.datasets.pytorch_single_sample_dataset import SingleSampleDataset
@@ -29,15 +33,55 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
 from neuracore.ml.train import (
-    convert_data_types,
     determine_optimal_batch_size,
     get_model_and_algorithm_config,
     main,
     run_training,
     setup_logging,
 )
+from neuracore.ml.utils.robot_data_spec_utils import extract_data_types
 
-SKIP_TEST = os.environ.get("CI", "false").lower() == "true"
+SKIP_TEST = (
+    os.environ.get("CI", "false").lower() == "true" or not torch.cuda.is_available()
+)
+
+INPUT_ROBOT_DATA_SPEC = {
+    "robot-id-1": {
+        "JOINT_POSITIONS": [
+            "joint_1",
+            "joint_2",
+        ],
+        "JOINT_VELOCITIES": [
+            "joint_1_vel",
+            "joint_2_vel",
+        ],
+    },
+    "robot-id-2": {
+        "JOINT_POSITIONS": [
+            "joint_a",
+            "joint_b",
+        ],
+        "JOINT_VELOCITIES": [
+            "joint_a_vel",
+            "joint_b_vel",
+        ],
+    },
+}
+
+OUTPUT_ROBOT_DATA_SPEC = {
+    "robot-id-1": {
+        "JOINT_TARGET_POSITIONS": [
+            "joint_1",
+            "joint_2",
+        ],
+    },
+    "robot-id-2": {
+        "JOINT_TARGET_POSITIONS": [
+            "joint_a",
+            "joint_b",
+        ],
+    },
+}
 
 
 class MainTestSetup:
@@ -196,26 +240,36 @@ def temp_output_dir():
 
 
 @pytest.fixture
-def sample_dataset_description():
-    return DatasetDescription(
-        joint_positions=DataItemStats(mean=[0.0] * 6, std=[1.0] * 6, max_len=6),
-        joint_velocities=DataItemStats(mean=[0.0] * 6, std=[1.0] * 6, max_len=6),
-        joint_target_positions=DataItemStats(mean=[0.0] * 7, std=[1.0] * 7, max_len=7),
+def model_init_description() -> ModelInitDescription:
+    joint_data_item_stats = JointDataStats(
+        value=DataItemStats(
+            mean=np.array([
+                0.0,
+            ]),
+            std=np.array([
+                1.0,
+            ]),
+            count=np.array([100]),
+            min=np.array([
+                -3.0,
+            ]),
+            max=np.array([3.0]),
+        )
     )
-
-
-@pytest.fixture
-def model_init_description(sample_dataset_description):
     return ModelInitDescription(
-        dataset_description=sample_dataset_description,
-        input_data_types=[DataType.JOINT_POSITIONS, DataType.JOINT_VELOCITIES],
-        output_data_types=[DataType.JOINT_TARGET_POSITIONS],
+        input_data_types={DataType.JOINT_POSITIONS, DataType.JOINT_VELOCITIES},
+        output_data_types={DataType.JOINT_TARGET_POSITIONS},
+        dataset_statistics={
+            DataType.JOINT_POSITIONS: [joint_data_item_stats] * 2,
+            DataType.JOINT_VELOCITIES: [joint_data_item_stats] * 2,
+            DataType.JOINT_TARGET_POSITIONS: [joint_data_item_stats] * 2,
+        },
         output_prediction_horizon=5,
     )
 
 
 @pytest.fixture
-def mock_model_class():
+def mock_model_class() -> NeuracoreModel:
     class MockModel(NeuracoreModel):
         def __init__(self, model_init_description, **kwargs):
             super().__init__(model_init_description)
@@ -223,43 +277,44 @@ def mock_model_class():
             # Add a dummy parameter so optimizer can be created
             self.dummy_param = torch.nn.Parameter(torch.zeros(1))
 
-        def forward(self, batch):
-            return ModelPrediction(
-                outputs={DataType.JOINT_TARGET_POSITIONS: torch.zeros(1, 5, 7)}
+        def forward(self, batch) -> dict[DataType, list[BatchedNCData]]:
+            batched_joint_data = BatchedJointData(
+                value=torch.zeros((len(batch), 5, 1), dtype=torch.float32)
             )
+            return {
+                DataType.JOINT_TARGET_POSITIONS: [batched_joint_data for _ in range(2)]
+            }
 
         def training_step(self, batch):
             return BatchedTrainingOutputs(
-                output_predictions=torch.zeros(1, 5, 7),
                 losses={"loss": torch.tensor(0.5)},
                 metrics={},
             )
 
-        def configure_optimizers(self):
+        def configure_optimizers(self) -> list[torch.optim.Optimizer]:
             return [torch.optim.Adam(self.parameters())]
 
         @staticmethod
-        def get_supported_input_data_types():
+        def get_supported_input_data_types() -> list[DataType]:
             return [DataType.JOINT_POSITIONS, DataType.JOINT_VELOCITIES]
 
         @staticmethod
-        def get_supported_output_data_types():
+        def get_supported_output_data_types() -> list[DataType]:
             return [DataType.JOINT_TARGET_POSITIONS]
-
-        def tokenize_text(self, texts):
-            return torch.zeros(1, 10), torch.ones(1, 10)
 
     return MockModel
 
 
 @pytest.fixture
-def mock_single_sample_dataset(model_init_description):
+def mock_single_sample_dataset(
+    model_init_description: ModelInitDescription,
+) -> SingleSampleDataset:
     sample = Mock()
     sample.inputs = Mock()
     sample.outputs = Mock()
 
     dataset = Mock(spec=SingleSampleDataset)
-    dataset.dataset_description = model_init_description.dataset_description
+    dataset.dataset_statistics = model_init_description.dataset_statistics
     dataset.load_sample.return_value = sample
     dataset.__len__ = Mock(return_value=100)
     dataset.collate_fn = lambda x: x
@@ -271,8 +326,8 @@ def mock_cfg_batch_size(temp_output_dir):
     return OmegaConf.create({
         "algorithm_id": "test-algorithm-id",
         "local_output_dir": str(temp_output_dir),
-        "input_data_types": ["JOINT_POSITIONS", "JOINT_VELOCITIES"],
-        "output_data_types": ["JOINT_TARGET_POSITIONS"],
+        "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+        "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
         "output_prediction_horizon": 5,
         "max_batch_size": 32,
         "min_batch_size": 2,
@@ -282,14 +337,14 @@ def mock_cfg_batch_size(temp_output_dir):
 
 
 @pytest.fixture
-def mock_cfg_training(temp_output_dir):
+def mock_cfg_training(temp_output_dir) -> DictConfig:
     return OmegaConf.create({
         "algorithm_id": "test-algorithm-id",
         "local_output_dir": str(temp_output_dir),
         "seed": 42,
         "validation_split": 0.2,
-        "input_data_types": ["JOINT_POSITIONS"],
-        "output_data_types": ["JOINT_TARGET_POSITIONS"],
+        "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+        "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
         "output_prediction_horizon": 5,
         "num_train_workers": 0,
         "num_val_workers": 0,
@@ -303,12 +358,13 @@ def mock_cfg_training(temp_output_dir):
 
 
 @pytest.fixture
-def mock_dataset(sample_dataset_description):
+def mock_dataset(
+    model_init_description: ModelInitDescription,
+) -> PytorchSynchronizedDataset:
     dataset = Mock(spec=PytorchSynchronizedDataset)
-    dataset.dataset_description = sample_dataset_description
+    dataset.dataset_statistics = model_init_description.dataset_statistics
     dataset.collate_fn = lambda x: x
     dataset.__len__ = Mock(return_value=100)
-    dataset.tokenize_text = None
     return dataset
 
 
@@ -334,36 +390,6 @@ class TestSetupLogging:
 
         assert new_dir.exists()
         assert (new_dir / "train.log").exists()
-
-
-class TestConvertDataTypes:
-    """Tests for convert_data_types function."""
-
-    @pytest.mark.parametrize(
-        "data_types,expected_result,should_raise",
-        [
-            (
-                ["JOINT_POSITIONS", "RGB_IMAGE", "JOINT_VELOCITIES"],
-                [
-                    DataType.JOINT_POSITIONS,
-                    DataType.RGB_IMAGE,
-                    DataType.JOINT_VELOCITIES,
-                ],
-                False,
-            ),
-            ([], [], False),
-            (["INVALID_DATA_TYPE"], None, True),
-        ],
-    )
-    def test_convert_data_types_valid_and_invalid_cases(
-        self, data_types, expected_result, should_raise
-    ):
-        if should_raise:
-            with pytest.raises(ValueError):
-                convert_data_types(data_types)
-        else:
-            result = convert_data_types(data_types)
-            assert result == expected_result
 
 
 class TestGetModelAndAlgorithmConfig:
@@ -916,26 +942,6 @@ class TestRunTraining:
         assert val_loader.dataset is not None
         setup.mock_trainer.train.assert_called_once()
 
-    def test_run_training_sets_tokenize_text_on_dataset(
-        self,
-        mock_cfg_training,
-        mock_dataset,
-        model_init_description,
-        mock_model_class,
-        monkeypatch,
-    ):
-        setup = RunTrainingTestSetup(
-            monkeypatch,
-            model_init_description,
-            mock_model_class,
-        )
-        setup.setup_mocks()
-
-        setup.call_run_training(mock_cfg_training, mock_dataset)
-
-        # Verify tokenize_text was assigned
-        assert mock_dataset.tokenize_text == setup.mock_model.tokenize_text
-
     def test_run_training_creates_distributed_sampler_when_world_size_greater_than_one(
         self,
         mock_cfg_training,
@@ -1159,8 +1165,8 @@ class TestMain:
             "dataset_id": "test-dataset-id",
             "local_output_dir": "/tmp/test",
             "batch_size": 8,
-            "input_data_types": ["JOINT_POSITIONS"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "max_prefetch_workers": 4,
@@ -1184,8 +1190,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_data_types": ["JOINT_POSITIONS"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1211,8 +1217,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_data_types": ["JOINT_POSITIONS"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1241,8 +1247,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_data_types": ["JOINT_POSITIONS"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "max_prefetch_workers": 4,
@@ -1266,8 +1272,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_data_types": ["JOINT_POSITIONS"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1293,8 +1299,8 @@ class TestMain:
             "device": "cuda:1",
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_data_types": ["JOINT_POSITIONS"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1322,8 +1328,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 16,
-            "input_data_types": ["JOINT_POSITIONS"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1349,8 +1355,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_data_types": ["JOINT_POSITIONS"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1382,8 +1388,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_data_types": ["JOINT_POSITIONS"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1408,8 +1414,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": "16",
-            "input_data_types": ["JOINT_POSITIONS"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1442,8 +1448,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_data_types": ["JOINT_POSITIONS"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1483,8 +1489,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_data_types": ["JOINT_POSITIONS"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1512,8 +1518,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_data_types": ["JOINT_POSITIONS", "JOINT_VELOCITIES"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1536,7 +1542,8 @@ class TestMain:
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TARGET_POSITIONS,
         ]
-        assert set(call_kwargs["data_types"]) == set(expected_data_types)
+        data_spec = cast(RobotDataSpec, call_kwargs["robot_data_spec"])
+        assert set(extract_data_types(data_spec)) == set(expected_data_types)
 
     def test_main_uses_autotuning_when_batch_size_is_auto(
         self, monkeypatch, temp_output_dir, model_init_description, mock_model_class
@@ -1549,8 +1556,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": "auto",
-            "input_data_types": ["JOINT_POSITIONS"],
-            "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,

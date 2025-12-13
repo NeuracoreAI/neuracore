@@ -9,7 +9,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from concurrent.futures import Future
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 from aiohttp import ClientSession
 from neuracore_types import (
@@ -44,11 +44,11 @@ logger = logging.getLogger(__name__)
 
 
 # Mapping each robot instance to its nodes and a hash over it's connections
-InstanceStreamMap: TypeAlias = Dict[RobotInstanceIdentifier, Dict[str, int]]
+InstanceStreamMap: TypeAlias = dict[RobotInstanceIdentifier, dict[str, int]]
 
 # Mapping each robot to its connections to each node
-InstanceConnectionMap: TypeAlias = Dict[
-    RobotInstanceIdentifier, Dict[str, Tuple[str, int]]
+InstanceConnectionMap: TypeAlias = dict[
+    RobotInstanceIdentifier, dict[str, tuple[str, int]]
 ]
 
 
@@ -101,7 +101,7 @@ class OrgNodesManager(BaseSSEConsumer):
         self.org_id = org_id or get_current_org()
         self.auth = auth or get_auth()
 
-        self.consumers: Dict[RobotInstanceIdentifier, ClientConsumerStreamManager] = {}
+        self.consumers: dict[RobotInstanceIdentifier, ClientConsumerStreamManager] = {}
 
         self.connections: InstanceConnectionMap = defaultdict(dict)
 
@@ -398,7 +398,7 @@ class OrgNodesManager(BaseSSEConsumer):
         self.consumers.clear()
 
 
-_org_node_managers: Dict[str, Future[OrgNodesManager]] = {}
+_org_node_managers: dict[str, Future[OrgNodesManager]] = {}
 
 
 async def _create_org_nodes_manager(org_id: str) -> OrgNodesManager:

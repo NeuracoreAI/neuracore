@@ -8,7 +8,7 @@ Handles SDP negotiation, ICE candidate exchange, and connection lifecycle.
 import asyncio
 import json
 import logging
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 from aiohttp import ClientSession
 from aiortc import (
@@ -26,7 +26,7 @@ from neuracore_types import (
     MessageType,
     OpenConnectionDetails,
     RobotStreamTrack,
-    SyncPoint,
+    SynchronizedPoint,
     VideoFormat,
 )
 
@@ -58,7 +58,7 @@ class PierToPierConsumerConnection:
         remote_stream_id: str,
         ice_config: IceConfig,
         connection_details: OpenConnectionDetails,
-        expected_tracks: List[RobotStreamTrack],
+        expected_tracks: list[RobotStreamTrack],
         client_session: ClientSession = None,
         org_id: Optional[str] = None,
         enabled_manager: Optional[EnabledManager] = None,
@@ -137,7 +137,7 @@ class PierToPierConsumerConnection:
             if track is not None:
                 self._connect_data_channel(channel, track)
 
-        self.latest_data = SyncPoint()
+        self.latest_data = SynchronizedPoint()
 
     def fully_connected(self) -> bool:
         """Get whether all expected remote tracks are connected.
@@ -168,7 +168,7 @@ class PierToPierConsumerConnection:
             )
             self.connected_data_channels[track.id] = data_channel
 
-    def get_latest_data(self) -> SyncPoint:
+    def get_latest_data(self) -> SynchronizedPoint:
         """Get the latest data  provided on this connection.
 
         Each track provided by this node is agglomerated in this sync point.
@@ -177,7 +177,7 @@ class PierToPierConsumerConnection:
         whatever was logged last.
 
         Returns:
-            SyncPoint: the latest data provided on this connection.
+            SynchronizedPoint: the latest data provided on this connection.
         """
         return self.latest_data
 

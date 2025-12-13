@@ -2,7 +2,7 @@
 
 import math
 from dataclasses import asdict, dataclass
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -48,12 +48,12 @@ class CustomGemmaAttention(GemmaAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
         past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward pass for the CustomGemmaAttention module.
 
         Args:
@@ -205,13 +205,13 @@ class GemmaMoELayer(nn.Module):
 
     def forward(
         self,
-        hidden_states: Dict[str, torch.FloatTensor],
-        expert_attention_masks: Optional[Dict[str, torch.Tensor]] = None,
+        hidden_states: dict[str, torch.FloatTensor],
+        expert_attention_masks: Optional[dict[str, torch.Tensor]] = None,
         mix_attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[Dict[str, torch.LongTensor]] = None,
-        past_key_values: Optional[Dict[str, DynamicCache]] = None,
+        position_ids: Optional[dict[str, torch.LongTensor]] = None,
+        past_key_values: Optional[dict[str, DynamicCache]] = None,
         use_cache: bool = False,
-    ) -> Dict[str, torch.FloatTensor]:
+    ) -> dict[str, torch.FloatTensor]:
         """Forward pass for the GemmaMoELayer.
 
         Args:
@@ -309,7 +309,7 @@ class GemmaMoE(nn.Module):
             name for name, config in expert_configs.items() if config.use_cache
         ]
 
-    def _init_caches(self) -> Dict[str, DynamicCache]:
+    def _init_caches(self) -> dict[str, DynamicCache]:
         """Initialize caches for the experts.
 
         Returns:
@@ -318,8 +318,8 @@ class GemmaMoE(nn.Module):
         return {name: DynamicCache() for name in self.cache_names}
 
     def _normalize_inputs(
-        self, hidden_states: Dict[str, torch.FloatTensor]
-    ) -> Dict[str, torch.FloatTensor]:
+        self, hidden_states: dict[str, torch.FloatTensor]
+    ) -> dict[str, torch.FloatTensor]:
         """Normalize input hidden states.
 
         Args:
@@ -355,11 +355,11 @@ class GemmaMoE(nn.Module):
 
     def forward(
         self,
-        hidden_states: Dict[str, torch.FloatTensor],
-        expert_attention_masks: Optional[Dict[str, torch.Tensor]] = None,
+        hidden_states: dict[str, torch.FloatTensor],
+        expert_attention_masks: Optional[dict[str, torch.Tensor]] = None,
         mix_attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[Dict[str, torch.LongTensor]] = None,
-        past_key_values: Optional[Dict[str, DynamicCache]] = None,
+        position_ids: Optional[dict[str, torch.LongTensor]] = None,
+        past_key_values: Optional[dict[str, DynamicCache]] = None,
         use_cache: bool = False,
     ) -> torch.Tensor:
         """Forward pass for the GemmaMoE model.

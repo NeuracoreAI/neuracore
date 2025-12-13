@@ -1,79 +1,58 @@
 import inspect
 import random
 from pathlib import Path
+from typing import cast
 
-import numpy as np
 import pytest
 import torch
-import torch.nn as nn
-from neuracore_types import (
-    DataItemStats,
-    DatasetDescription,
-    DataType,
-    ModelInitDescription,
-    ModelPrediction,
-)
+from neuracore_types import BatchedNCData, DataType, ModelInitDescription
+from torch import nn
+from torch.utils.data import DataLoader
 
-from neuracore.ml import (
-    BatchedInferenceSamples,
-    BatchedTrainingOutputs,
-    BatchedTrainingSamples,
-    MaskableData,
-)
+from neuracore.ml import BatchedInferenceInputs, BatchedTrainingSamples
 from neuracore.ml.algorithms.diffusion_policy.diffusion_policy import DiffusionPolicy
-from neuracore.ml.core.ml_types import BatchedData
+from neuracore.ml.core.ml_types import BatchedTrainingOutputs
+from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
 from neuracore.ml.utils.device_utils import get_default_device
+from neuracore.ml.utils.robot_data_spec_utils import extract_data_types
 from neuracore.ml.utils.validate import run_validation
 
 BS = 2
-CAMS = 1
-JOINT_POSITION_DIM = 32
-OUTPUT_PRED_DIM = JOINT_POSITION_DIM
-PRED_HORIZON = 10
 DEVICE = get_default_device()
+OUTPUT_PREDICTION_HORIZON = 5
 
 
 @pytest.fixture
-def model_init_description() -> ModelInitDescription:
-    dataset_description = DatasetDescription(
-        joint_positions=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
-            min=-np.ones(JOINT_POSITION_DIM, dtype=float),
-            max=np.ones(JOINT_POSITION_DIM, dtype=float),
-        ),
-        joint_target_positions=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
-            min=-np.ones(JOINT_POSITION_DIM, dtype=float),
-            max=np.ones(JOINT_POSITION_DIM, dtype=float),
-        ),
-        joint_velocities=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
-            min=-np.ones(JOINT_POSITION_DIM, dtype=float),
-            max=np.ones(JOINT_POSITION_DIM, dtype=float),
-        ),
-        joint_torques=DataItemStats(
-            mean=np.zeros(JOINT_POSITION_DIM, dtype=float),
-            std=np.ones(JOINT_POSITION_DIM, dtype=float),
-            min=-np.ones(JOINT_POSITION_DIM, dtype=float),
-            max=np.ones(JOINT_POSITION_DIM, dtype=float),
-        ),
-        rgb_images=DataItemStats(
-            max_len=CAMS,
-        ),
+def pytorch_dummy_dataset() -> PytorchDummyDataset:
+    input_data_types = DiffusionPolicy.get_supported_input_data_types()
+    output_data_types = DiffusionPolicy.get_supported_output_data_types()
+    input_robot_data_spec = {
+        "robot_1": {data_type: [] for data_type in input_data_types}
+    }
+    output_robot_data_spec = {
+        "robot_1": {data_type: [] for data_type in output_data_types}
+    }
+
+    dataset = PytorchDummyDataset(
+        num_samples=5,
+        input_robot_data_spec=input_robot_data_spec,
+        output_robot_data_spec=output_robot_data_spec,
+        output_prediction_horizon=OUTPUT_PREDICTION_HORIZON,
     )
+    return dataset
+
+
+@pytest.fixture
+def model_init_description(
+    pytorch_dummy_dataset: PytorchDummyDataset,
+) -> ModelInitDescription:
+    input_data_types = extract_data_types(pytorch_dummy_dataset.input_robot_data_spec)
+    output_data_types = extract_data_types(pytorch_dummy_dataset.output_robot_data_spec)
     return ModelInitDescription(
-        dataset_description=dataset_description,
-        input_data_types=[
-            DataType.JOINT_POSITIONS,
-            DataType.JOINT_VELOCITIES,
-            DataType.JOINT_TORQUES,
-            DataType.RGB_IMAGE,
-        ],
-        output_data_types=[DataType.JOINT_TARGET_POSITIONS],
-        output_prediction_horizon=PRED_HORIZON,
+        input_data_types=input_data_types,
+        output_data_types=output_data_types,
+        dataset_statistics=pytorch_dummy_dataset.dataset_statistics,
+        output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
     )
 
 
@@ -83,74 +62,35 @@ def model_config() -> dict:
 
 
 @pytest.fixture
-def sample_batch() -> BatchedTrainingSamples:
-    return BatchedTrainingSamples(
-        inputs=BatchedData(
-            joint_positions=MaskableData(
-                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            ),
-            joint_velocities=MaskableData(
-                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            ),
-            joint_torques=MaskableData(
-                torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            ),
-            rgb_images=MaskableData(
-                torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
-                torch.ones(BS, CAMS, dtype=torch.float32),
-            ),
-        ),
-        outputs=BatchedData(
-            joint_target_positions=MaskableData(
-                torch.randn(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
-                torch.ones(BS, PRED_HORIZON, JOINT_POSITION_DIM, dtype=torch.float32),
-            )
-        ),
-        output_prediction_mask=torch.ones(BS, PRED_HORIZON, dtype=torch.float32),
+def sample_inference_batch(
+    pytorch_dummy_dataset: PytorchDummyDataset,
+) -> BatchedInferenceInputs:
+    dataloader = DataLoader(
+        pytorch_dummy_dataset,
+        batch_size=BS,
+        shuffle=True,
+        collate_fn=pytorch_dummy_dataset.collate_fn,
+    )
+    sample = cast(BatchedTrainingSamples, next(iter(dataloader)))
+    return BatchedInferenceInputs(
+        inputs=sample.inputs,
+        inputs_mask=sample.inputs_mask,
+        batch_size=BS,
     )
 
 
 @pytest.fixture
-def sample_inference_batch() -> BatchedInferenceSamples:
-    return BatchedInferenceSamples(
-        joint_positions=MaskableData(
-            torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-        ),
-        joint_velocities=MaskableData(
-            torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-        ),
-        joint_torques=MaskableData(
-            torch.randn(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-            torch.ones(BS, JOINT_POSITION_DIM, dtype=torch.float32),
-        ),
-        rgb_images=MaskableData(
-            torch.randn(BS, CAMS, 3, 224, 224, dtype=torch.float32),
-            torch.ones(BS, CAMS, dtype=torch.float32),
-        ),
+def sample_training_batch(
+    pytorch_dummy_dataset: PytorchDummyDataset,
+) -> BatchedTrainingSamples:
+    dataloader = DataLoader(
+        pytorch_dummy_dataset,
+        batch_size=BS,
+        shuffle=True,
+        collate_fn=pytorch_dummy_dataset.collate_fn,
     )
-
-
-@pytest.fixture
-def mock_dataloader(sample_batch):
-    """Create a mock dataloader."""
-
-    def generate_batch():
-        return sample_batch
-
-    class MockDataLoader:
-        def __iter__(self):
-            for _ in range(2):  # 2 batches per epoch
-                yield generate_batch()
-
-        def __len__(self):
-            return 2
-
-    return MockDataLoader()
+    sample = cast(BatchedTrainingSamples, next(iter(dataloader)))
+    return sample
 
 
 def test_model_construction(
@@ -164,30 +104,29 @@ def test_model_construction(
 def test_model_forward(
     model_init_description: ModelInitDescription,
     model_config: dict,
-    sample_inference_batch: BatchedInferenceSamples,
+    sample_inference_batch: BatchedInferenceInputs,
 ):
     model = DiffusionPolicy(model_init_description, **model_config)
     model = model.to(DEVICE)
     sample_inference_batch = sample_inference_batch.to(DEVICE)
-    output = model(sample_inference_batch)
-    assert isinstance(output, ModelPrediction)
-    assert DataType.JOINT_TARGET_POSITIONS in output.outputs
-    assert output.outputs[DataType.JOINT_TARGET_POSITIONS].shape == (
-        BS,
-        PRED_HORIZON,
-        OUTPUT_PRED_DIM,
-    )
+    output: dict[DataType, list[BatchedNCData]] = model(sample_inference_batch)
+    assert isinstance(output, dict)
+    for data_type, tensors in output.items():
+        assert isinstance(data_type, DataType)
+        assert isinstance(tensors, list)
+        for tensor in tensors:
+            assert isinstance(tensor, BatchedNCData)
 
 
 def test_model_backward(
     model_init_description: ModelInitDescription,
     model_config: dict,
-    sample_batch: BatchedTrainingSamples,
+    sample_training_batch: BatchedTrainingSamples,
 ):
     model = DiffusionPolicy(model_init_description, **model_config)
     model = model.to(DEVICE)
-    sample_batch = sample_batch.to(DEVICE)
-    output: BatchedTrainingOutputs = model.training_step(sample_batch)
+    sample_training_batch = sample_training_batch.to(DEVICE)
+    output: BatchedTrainingOutputs = model.training_step(sample_training_batch)
 
     # Compute loss
     loss = output.losses["mse_loss"]
@@ -198,7 +137,7 @@ def test_model_backward(
     # Check that gradients are computed
     for name, param in model.named_parameters():
         if param.requires_grad:
-            assert param.grad is not None
+            assert param.grad is not None, f"Gradient for {name} is None"
             assert torch.isfinite(param.grad).all()
 
 
@@ -217,4 +156,5 @@ def test_run_validation(tmp_path: Path, mock_login):
         },
         device=DEVICE,
     )
-    assert len(error_msg) == 0
+    if len(error_msg) > 0:
+        raise RuntimeError(error_msg)

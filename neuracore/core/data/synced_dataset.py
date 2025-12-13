@@ -4,9 +4,12 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional, Union, cast
 
-from neuracore_types import DatasetDescription, DataType
+import requests
+from neuracore_types import RobotDataSpec, SynchronizedDatasetStatistics
 from tqdm import tqdm
 
+from neuracore.core.auth import get_auth
+from neuracore.core.const import API_URL
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_recording import SynchronizedRecording
 
@@ -24,8 +27,8 @@ class SynchronizedDataset:
         self,
         dataset: "Dataset",
         frequency: int,
-        data_types: Optional[list[DataType]],
-        dataset_description: DatasetDescription,
+        robot_data_spec: Optional[RobotDataSpec],
+        total_num_transitions: int,
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 1,
     ):
@@ -34,15 +37,16 @@ class SynchronizedDataset:
         Args:
             dataset: Dataset object containing recordings.
             frequency: Frequency of the dataset in Hz.
-            data_types: List of data types to include in the dataset.
-            dataset_description: Description of the dataset.
+            robot_data_spec: Robot data specification for synchronization.
+            total_num_transitions: Total number of transitions in the dataset.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
             max_prefetch_workers: Number of threads to use for prefetching videos.
         """
         self.dataset = dataset
         self.frequency = frequency
-        self.data_types = data_types or []
-        self.dataset_description = dataset_description
+        self.robot_data_spec = robot_data_spec
+        self.total_num_transitions = total_num_transitions
+        self._prefetch_videos = prefetch_videos
         self._recording_idx = 0
         self._synced_recording_cache: dict[int, SynchronizedRecording] = {}
 
@@ -84,7 +88,7 @@ class SynchronizedDataset:
     @property
     def num_transitions(self) -> int:
         """Get the number of transitions in the dataset."""
-        return self.dataset_description.total_num_transitions
+        return self.total_num_transitions
 
     def __iter__(self) -> "SynchronizedDataset":
         """Initialize iterator over episodes in the dataset.
@@ -125,8 +129,9 @@ class SynchronizedDataset:
             return SynchronizedDataset(
                 dataset=cast("Dataset", dataset),
                 frequency=self.frequency,
-                data_types=self.data_types,
-                dataset_description=self.dataset_description,
+                # TODO: total_num_transitions needs to be adjusted for the slice
+                total_num_transitions=self.total_num_transitions,
+                robot_data_spec=self.robot_data_spec,
                 prefetch_videos=False,  # Avoid prefetching again
             )
         else:
@@ -143,8 +148,8 @@ class SynchronizedDataset:
                         robot_id=cast(Recording, self.dataset[idx]).robot_id,
                         instance=cast(Recording, self.dataset[idx]).instance,
                         frequency=self.frequency,
-                        data_types=self.data_types,
-                        prefetch_videos=self._prefetch_videos_needed,
+                        robot_data_spec=self.robot_data_spec,
+                        prefetch_videos=self._prefetch_videos,
                     )
                     self._synced_recording_cache[idx] = synced_recording
                 return self._synced_recording_cache[idx]
@@ -173,11 +178,35 @@ class SynchronizedDataset:
                     robot_id=recording.robot_id,
                     instance=recording.instance,
                     frequency=self.frequency,
-                    data_types=self.data_types,
-                    prefetch_videos=self._prefetch_videos_needed,
+                    robot_data_spec=self.robot_data_spec,
+                    prefetch_videos=self._prefetch_videos,
                 )
                 self._synced_recording_cache[self._recording_idx] = s
 
         to_return = self._synced_recording_cache[self._recording_idx]
         self._recording_idx += 1
         return to_return
+
+    def calculate_statistics(
+        self, robot_data_spec: RobotDataSpec
+    ) -> SynchronizedDatasetStatistics:
+        """Calculate statistics for each data type in the synchronized dataset.
+
+        Args:
+            robot_data_spec: Configuration dict specifying
+                the order of data types for each robot ID.
+
+        Returns:
+            SynchronizedDatasetStatistics containing the calculated statistics.
+        """
+        auth = get_auth()
+        response = requests.post(
+            f"{API_URL}/org/{self.dataset.org_id}/synchronized-dataset/calculate-dataset-statistics",
+            json=SynchronizedDatasetStatistics(
+                synchronized_dataset_id=self.dataset.id,
+                robot_data_spec=robot_data_spec,
+            ).model_dump(),
+            headers=auth.get_headers(),
+        )
+        response.raise_for_status()
+        return SynchronizedDatasetStatistics.model_validate(response.json())

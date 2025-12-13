@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from importlib import import_module
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Optional
 
 import numpy as np
 import pink
@@ -100,14 +100,14 @@ class Robot:
         return self._pinnochio_robot
 
     @property
-    def joint_names(self) -> List[str]:
+    def joint_names(self) -> list[str]:
         """Get list of joint names."""
         if self._joint_names is None:
             self._joint_names = list(self.pinnochio_robot.model.names[1:])
         return self._joint_names
 
     @property
-    def joint_limits(self) -> Dict[str, tuple[float, float]]:
+    def joint_limits(self) -> dict[str, tuple[float, float]]:
         """Get dictionary of joint limits."""
         if self._joint_limits is None:
             pm = self.pinnochio_robot.model
@@ -118,7 +118,7 @@ class Robot:
         return self._joint_limits
 
     def gripper_open_width_to_open_amount(
-        self, gripper_open_width: float, gripper_joint_names: List[str]
+        self, gripper_open_width: float, gripper_joint_names: list[str]
     ) -> float:
         """
         Convert gripper joint positions to open amount.
@@ -141,10 +141,10 @@ class Robot:
 
     def process_gripper_state(
         self,
-        gripper_joint_names: List[str],
+        gripper_joint_names: list[str],
         gripper_open_amount: Optional[float] = None,
         gripper_open_width: Optional[float] = None,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """
         Process gripper state to get joint positions.
 

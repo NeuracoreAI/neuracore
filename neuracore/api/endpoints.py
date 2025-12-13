@@ -9,7 +9,7 @@ import json
 from typing import Optional
 
 import requests
-from neuracore_types import DataType, SyncPoint
+from neuracore_types import DataType, SynchronizedPoint
 
 from neuracore.api.core import _get_robot
 from neuracore.core.auth import get_auth
@@ -28,9 +28,10 @@ from neuracore.core.get_latest_sync_point import (
 
 
 def policy(
+    model_input_order: dict[DataType, list[str]],
+    model_output_order: dict[DataType, list[str]],
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
-    output_mapping: Optional[dict[DataType, list[str]]] = None,
     device: Optional[str] = None,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process without any server.
@@ -41,7 +42,8 @@ def policy(
     Args:
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load. If provided, overrides
-        output_mapping: Optional mapping of output data types to response fields.
+        output_configuration: Model output configuration mapping
+            data types to sensor names.
         device: Torch device to run the model on (CPU or GPU, or MPS)
 
     Returns:
@@ -52,11 +54,17 @@ def policy(
         ConfigError: If there is an error trying to get the current org.
     """
     return _policy(
-        train_run_name, model_file, output_mapping=output_mapping, device=device
+        model_input_order=model_input_order,
+        model_output_order=model_output_order,
+        train_run_name=train_run_name,
+        model_file=model_file,
+        device=device,
     )
 
 
 def policy_local_server(
+    model_input_order: dict[DataType, list[str]],
+    model_output_order: dict[DataType, list[str]],
     train_run_name: Optional[str] = None,
     model_file: Optional[str] = None,
     device: Optional[str] = None,
@@ -81,7 +89,15 @@ def policy_local_server(
         EndpointError: If the server startup or model initialization fails.
         ConfigError: If there is an error trying to get the current org.
     """
-    return _policy_local_server(train_run_name, model_file, device, port, host)
+    return _policy_local_server(
+        model_input_order=model_input_order,
+        model_output_order=model_output_order,
+        train_run_name=train_run_name,
+        model_file=model_file,
+        device=device,
+        port=port,
+        host=host,
+    )
 
 
 def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:
@@ -213,7 +229,7 @@ def delete_endpoint(endpoint_id: str) -> None:
 
 def get_latest_sync_point(
     robot_name: Optional[str] = None, instance: int = 0, include_remote: bool = True
-) -> SyncPoint:
+) -> SynchronizedPoint:
     """Creates a sync point from gathering data logged by a robot.
 
     Note after instantiation it can take time before data is available from
@@ -227,7 +243,7 @@ def get_latest_sync_point(
             data. This is ignored if NEURACORE_CONSUME_LIVE_DATA is disabled.
 
     Returns:
-        The SyncPoint consisting of the latest data recorded for each of the
+        The SynchronizedPoint consisting of the latest data recorded for each of the
             sensors
 
     Raises:
