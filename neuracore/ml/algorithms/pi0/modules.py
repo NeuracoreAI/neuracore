@@ -7,24 +7,25 @@ from __future__ import annotations
 import builtins
 import logging
 import math
-<<<<<<< HEAD
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-=======
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Deque, Iterator, Literal, Optional, TypeVar
->>>>>>> 673255f (temp add)
 
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
+from neuracore.ml.algorithms.pi0.gemma_pytorch import (
+    PaliGemmaWithExpertModel,
+    get_gemma_config,
+)
+
 T = TypeVar("T")
 
 try:
-    from transformers.models.auto import CONFIG_MAPPING
     from transformers.models.gemma import modeling_gemma
     from transformers.models.gemma.modeling_gemma import GemmaForCausalLM
     from transformers.models.paligemma.modeling_paligemma import (
@@ -32,7 +33,6 @@ try:
     )
     from transformers.utils import cached_file
 except Exception:  # pragma: no cover
-    CONFIG_MAPPING = None
     modeling_gemma = None
     GemmaForCausalLM = None
     PaliGemmaForConditionalGeneration = None
@@ -43,10 +43,6 @@ try:
 except Exception:  # pragma: no cover
     load_file = None
 
-ACTION = "action"
-OBS_LANGUAGE_TOKENS = "observation.language.tokens"
-OBS_LANGUAGE_ATTENTION_MASK = "observation.language.attention_mask"
-OBS_STATE = "observation.state"
 OPENPI_ATTENTION_MASK_VALUE = -1e9
 
 logger = logging.getLogger(__name__)
@@ -517,7 +513,6 @@ class ActionEncoder(nn.Module):
         emb = self.nonlinearity(self.linear_2(emb))  # [B, H, W]
         emb = self.linear_3(emb)  # [B, H, W]
         return emb  # [B, H, W]
-=======
         key_state = (
             layer.self_attn.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         )
@@ -579,7 +574,6 @@ class ActionEncoder(nn.Module):
         outputs_embeds.append(out_emb)
         start_pos = end_pos
     return outputs_embeds
->>>>>>> 673255f (temp add)
 
 
 class GemmaConfig:
@@ -1246,7 +1240,9 @@ class PI0Config:
             raise ValueError(f"Invalid paligemma_variant: {self.paligemma_variant}")
 
         if self.action_expert_variant not in ["gemma_300m", "gemma_2b"]:
-            raise ValueError(f"Invalid action_expert_variant: {self.action_expert_variant}")
+            raise ValueError(
+                f"Invalid action_expert_variant: {self.action_expert_variant}"
+            )
 
         if self.dtype not in ["bfloat16", "float32"]:
             raise ValueError(f"Invalid dtype: {self.dtype}")

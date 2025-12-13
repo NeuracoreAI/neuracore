@@ -85,8 +85,9 @@ class Pi0(NeuracoreModel):
     ):
         """Initialize the Neuracore Pi0 wrapper around the reference model."""
         super().__init__(model_init_description)
-
-
+        self.action_dim = self.dataset_description.joint_target_positions.max_len
+        self.max_state_dim = self.max_action_dim = 32
+        self.action_horizon = self.output_prediction_horizon
         self.vlm_max_text_tokens = vlm_max_text_tokens
         self.num_inference_steps = num_inference_steps
         self.dtype = dtype
@@ -270,7 +271,11 @@ class Pi0(NeuracoreModel):
         if self.using_pretrained_paligemma:
             self._load_pretrained_vlm_weights()
         else:
-            logger.warning("Using custom VLM weights, not pretrained PaliGemma")
+            self.policy = PI0Policy(self.config)
+        self.model: PI0Pytorch = self.policy.model
+
+        if self.config.gradient_checkpointing:
+            self.model.gradient_checkpointing_enable()
 
         # # disable grads for VLM part of MoE if using pretrained
         # if self.using_pretrained_paligemma:
@@ -425,7 +430,7 @@ class Pi0(NeuracoreModel):
         actions = self.model.sample_actions(
             images, image_masks, lang_tokens, lang_masks, state
         )
-        actions = actions[:, :, : self.action_dim] # output pad to max action dim
+        actions = actions[:, :, : self.action_dim]  # output pad to max action dim
         return actions
 
     @classmethod
@@ -809,7 +814,7 @@ class Pi0(NeuracoreModel):
             def cosine_decay(step: int) -> float:
                 step = min(step, actual_decay_steps)
                 cosine = 0.5 * (1 + math.cos(math.pi * step / actual_decay_steps))
-                alpha = self.lr_scheduler_decay_lr / self.lr
+                alpha = self.lr_scheduler_decay_lr / self.optimizer_lr
                 return (1 - alpha) * cosine + alpha
 
             if current_step < actual_warmup_steps:
