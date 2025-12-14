@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import builtins
 import logging
 import math
 from collections.abc import Callable
@@ -857,6 +856,11 @@ class PI0Pytorch(nn.Module):
                 self.forward, mode=config.compile_mode
             )
 
+        if config.gradient_checkpointing:
+            self.gradient_checkpointing_enable()
+        if config.device is not None:
+            self.to(config.device)
+
     def gradient_checkpointing_enable(self) -> None:
         """Enable gradient checkpointing on all submodules."""
         self.gradient_checkpointing_enabled = True
@@ -1204,86 +1208,16 @@ class PI0Pytorch(nn.Module):
         suffix_out = suffix_out.to(dtype=torch.float32)
         return self.action_out_proj(suffix_out)
 
-
-@dataclass
-class PI0Config:
-    """Configuration for the PI0 model and training hyperparameters."""
-
-    paligemma_variant: str = "gemma_2b"
-    action_expert_variant: str = "gemma_300m"
-    dtype: Literal["bfloat16", "float32"] = "float32"
-    chunk_size: int = 50
-    max_state_dim: int = 32
-    max_action_dim: int = 32
-    num_inference_steps: int = 10
-    use_adarms: tuple[bool, bool] = (False, False)
-    time_sampling_beta_alpha: float = 1.5
-    time_sampling_beta_beta: float = 1.0
-    time_sampling_scale: float = 0.999
-    time_sampling_offset: float = 0.001
-    min_period: float = 4e-3
-    max_period: float = 4.0
-    gradient_checkpointing: bool = False
-    compile_model: bool = False
-    compile_mode: str = "max-autotune"
-    device: str | None = None
-    input_features: dict = field(default_factory=dict)
-    output_features: dict = field(default_factory=dict)
-    image_features: list[str] = field(default_factory=list)
-
-    def validate_features(self) -> None:
-        """Validate configured feature dimensions."""
-        if self.device is None:
-            self.device = "cpu"
-
-        if self.paligemma_variant not in ["gemma_300m", "gemma_2b"]:
-            raise ValueError(f"Invalid paligemma_variant: {self.paligemma_variant}")
-
-        if self.action_expert_variant not in ["gemma_300m", "gemma_2b"]:
-            raise ValueError(
-                f"Invalid action_expert_variant: {self.action_expert_variant}"
-            )
-
-        if self.dtype not in ["bfloat16", "float32"]:
-            raise ValueError(f"Invalid dtype: {self.dtype}")
-
-
-class PI0Policy:
-    """Lightweight policy wrapper without external deps."""
-
-    config_class = PI0Config
-    name = "pi0"
-
-    def __init__(self, config: PI0Config, **kwargs: Any):
-        """Construct a PI0 policy and initialize the underlying model."""
-        self.config = config
-        self.model = PI0Pytorch(config)
-        if config.gradient_checkpointing:
-            self.model.gradient_checkpointing_enable()
-        self.model.to(config.device)
-
     @classmethod
     def from_pretrained(
-        cls: builtins.type["PI0Policy"],
+        cls,
         pretrained_name_or_path: str | Path | None = None,
         *,
         config: Optional[PI0Config] = None,
         strict: bool = True,
         **kwargs: Any,
     ) -> "PI0Policy":
-        """Load a pretrained PI0 model from HuggingFace Hub or local path.
-
-        Args:
-            pretrained_name_or_path: HuggingFace repo id (e.g. "lerobot/pi0_base")
-                or local path. Defaults to "lerobot/pi0_base".
-            config: Optional PI0Config. If None, uses default config.
-            strict: Whether to strictly enforce state dict key matching.
-            **kwargs: Additional arguments passed to huggingface_hub.
-
-        Returns:
-            PI0Policy with loaded weights.
-        """
-        # Default to the official pi0_base weights from Physical Intelligence / LeRobot
+        """Load a pretrained PI0 model from HuggingFace Hub or local path."""
         if pretrained_name_or_path is None:
             pretrained_name_or_path = "lerobot/pi0_base"
             logging.warning(
@@ -1291,6 +1225,7 @@ class PI0Policy:
             )
         if config is None:
             config = PI0Config()
+
         model = cls(config, **kwargs)
 
         if cached_file is None or load_file is None:
@@ -1313,23 +1248,13 @@ class PI0Policy:
             )
             original_state_dict = load_file(resolved_file)
             logging.info("Loaded state dict from %s", resolved_file)
-        except Exception as e:
+        except Exception as exc:  # pragma: no cover
             logging.warning(
-                "Could not load state dict from %s: %s", pretrained_name_or_path, e
+                "Could not load state dict from %s: %s", pretrained_name_or_path, exc
             )
             return model
 
         fixed_state_dict = model._fix_pytorch_state_dict_keys(original_state_dict)
-        # # Remove 'model.' prefix if present (checkpoint may have it, but PI0Pytorch
-        # # doesn't)
-        remapped_state_dict = {}
-        for key, value in fixed_state_dict.items():
-            # Remove 'model.' prefix if it exists at the start
-            if key.startswith("model."):
-                new_key = key[6:]  # Remove "model." prefix
-            else:
-                new_key = key
-            remapped_state_dict[new_key] = value
 
         missing_keys, unexpected_keys = model.load_state_dict(
             fixed_state_dict, strict=False
@@ -1340,13 +1265,14 @@ class PI0Policy:
             logging.warning(
                 "Unexpected keys when loading state dict: %s", unexpected_keys
             )
+
         tie_key = (
             "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
         )
         if tie_key in missing_keys:
-            paligemma = model.model.paligemma_with_expert.paligemma
+            paligemma = model.paligemma_with_expert.paligemma
             if model._tie_or_copy_language_embeddings(paligemma):
-                print("Tied language embeddings to lm_head weight")
+                logging.info("Tied language embeddings to lm_head weight")
                 missing_keys = [key for key in missing_keys if key != tie_key]
         logging.warning(
             "Missing keys after tying language embeddings: %s", missing_keys
@@ -1396,13 +1322,11 @@ class PI0Policy:
         """Fix state dict keys to match current model architecture."""
         import re
 
-        fixed_state_dict = {}
+        fixed_state_dict: dict[str, torch.Tensor] = {}
 
         for key, value in state_dict.items():
             new_key = key
 
-            # Handle layer norm changes: .weight -> .dense.weight + .dense.bias
-            # For gemma expert layers
             if re.match(
                 (
                     r"paligemma_with_expert\.gemma_expert\.model\.layers\.\d+\."
@@ -1410,64 +1334,80 @@ class PI0Policy:
                 ),
                 key,
             ):
-                # Check if the model actually has adaRMS enabled for the expert
                 expert_uses_adarms = getattr(
-                    self.model.paligemma_with_expert.gemma_expert.config,
+                    self.paligemma_with_expert.gemma_expert.config,
                     "use_adarms",
                     False,
                 )
                 if expert_uses_adarms:
-                    logging.warning(f"Skipping layer norm key (adaRMS mismatch): {key}")
+                    logging.warning(
+                        "Skipping layer norm key (adaRMS mismatch): %s", key
+                    )
                     continue
 
             if re.match(
                 r"paligemma_with_expert\.gemma_expert\.model\.norm\.weight", key
             ):
-                # Check if the model actually has adaRMS enabled for the expert
                 expert_uses_adarms = getattr(
-                    self.model.paligemma_with_expert.gemma_expert.config,
+                    self.paligemma_with_expert.gemma_expert.config,
                     "use_adarms",
                     False,
                 )
                 if expert_uses_adarms:
-                    logging.warning(f"Skipping norm key (adaRMS mismatch): {key}")
+                    logging.warning("Skipping norm key (adaRMS mismatch): %s", key)
                     continue
 
-            # Handle MLP naming changes for pi0
-            # non-pi05 model expects action_time_mlp_*; checkpoint might use time_mlp_*
             if key.startswith("time_mlp_in."):
                 new_key = key.replace("time_mlp_in.", "action_time_mlp_in.")
             elif key.startswith("time_mlp_out."):
                 new_key = key.replace("time_mlp_out.", "action_time_mlp_out.")
 
-            # Handle vision tower embedding layer potential differences
             if "patch_embedding" in key:
-                # Some checkpoints might include this; current model expects different
-                # structure
-                logging.warning(f"Vision embedding key might need handling: {key}")
+                logging.warning("Vision embedding key might need handling: %s", key)
 
             fixed_state_dict[new_key] = value
 
         return fixed_state_dict
 
-    def to(self, device: torch.device | str) -> "PI0Policy":
-        """Move underlying model to the specified device."""
-        self.model.to(device)
-        self.config.device = device
-        return self
 
-    def load_state_dict(self, *args: Any, **kwargs: Any) -> Any:
-        """Delegate load_state_dict to the underlying torch module."""
-        return self.model.load_state_dict(*args, **kwargs)
+@dataclass
+class PI0Config:
+    """Configuration for the PI0 model and training hyperparameters."""
 
-    def parameters(self) -> Iterator[nn.Parameter]:
-        """Expose parameters of the wrapped model."""
-        return self.model.parameters()
+    paligemma_variant: str = "gemma_2b"
+    action_expert_variant: str = "gemma_300m"
+    dtype: Literal["bfloat16", "float32"] = "float32"
+    chunk_size: int = 50
+    max_state_dim: int = 32
+    max_action_dim: int = 32
+    num_inference_steps: int = 10
+    use_adarms: tuple[bool, bool] = (False, False)
+    time_sampling_beta_alpha: float = 1.5
+    time_sampling_beta_beta: float = 1.0
+    time_sampling_scale: float = 0.999
+    time_sampling_offset: float = 0.001
+    min_period: float = 4e-3
+    max_period: float = 4.0
+    gradient_checkpointing: bool = False
+    compile_model: bool = False
+    compile_mode: str = "max-autotune"
+    device: str | None = None
+    input_features: dict = field(default_factory=dict)
+    output_features: dict = field(default_factory=dict)
+    image_features: list[str] = field(default_factory=list)
 
-    def sample_actions(self, *args: Any, **kwargs: Any) -> Tensor:
-        """Sample actions via the wrapped model."""
-        return self.model.sample_actions(*args, **kwargs)
+    def validate_features(self) -> None:
+        """Validate configured feature dimensions."""
+        if self.device is None:
+            self.device = "cpu"
 
-    def forward(self, *args: Any, **kwargs: Any) -> Tensor:
-        """Forward to the wrapped model."""
-        return self.model.forward(*args, **kwargs)
+        if self.paligemma_variant not in ["gemma_300m", "gemma_2b"]:
+            raise ValueError(f"Invalid paligemma_variant: {self.paligemma_variant}")
+
+        if self.action_expert_variant not in ["gemma_300m", "gemma_2b"]:
+            raise ValueError(
+                f"Invalid action_expert_variant: {self.action_expert_variant}"
+            )
+
+        if self.dtype not in ["bfloat16", "float32"]:
+            raise ValueError(f"Invalid dtype: {self.dtype}")

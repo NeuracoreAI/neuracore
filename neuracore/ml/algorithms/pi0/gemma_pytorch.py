@@ -6,12 +6,100 @@ from typing import Literal
 import torch
 import torch.nn as nn
 from transformers.models.auto import CONFIG_MAPPING
+from transformers.models.gemma import modeling_gemma
 from transformers.models.gemma.modeling_gemma import GemmaForCausalLM
 from transformers.models.paligemma.modeling_paligemma import (
     PaliGemmaForConditionalGeneration,
 )
 
-from neuracore.ml.algorithms.pi0.modules import compute_layer_complete
+
+def compute_layer_complete(
+    layer_idx: int,
+    inputs_embeds: list[torch.Tensor],
+    attention_mask: torch.Tensor,
+    position_ids: torch.Tensor,
+    adarms_cond: list[torch.Tensor | None],
+    paligemma: PaliGemmaForConditionalGeneration,
+    gemma_expert: GemmaForCausalLM,
+) -> list[torch.Tensor]:
+    """Run a single transformer layer jointly across prefix/suffix branches."""
+    models = [paligemma.language_model, gemma_expert.model]
+    query_states = []
+    key_states = []
+    value_states = []
+    gates = []
+    for i, hidden_states in enumerate(inputs_embeds):
+        layer = models[i].layers[layer_idx]
+        if adarms_cond[i] is None:
+            hidden_states = layer.input_layernorm(hidden_states)[0]  # noqa: PLW2901
+            gate = None
+        else:
+            hidden_states, gate = layer.input_layernorm(
+                hidden_states, cond=adarms_cond[i]
+            )  # noqa: PLW2901
+        gates.append(gate)
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
+        query_state = (
+            layer.self_attn.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        )
+        key_state = (
+            layer.self_attn.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        )
+        value_state = (
+            layer.self_attn.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        )
+        query_states.append(query_state)
+        key_states.append(key_state)
+        value_states.append(value_state)
+    query_states = torch.cat(query_states, dim=2)
+    key_states = torch.cat(key_states, dim=2)
+    value_states = torch.cat(value_states, dim=2)
+    dummy_tensor = torch.zeros(
+        query_states.shape[0],
+        query_states.shape[2],
+        query_states.shape[-1],
+        device=query_states.device,
+        dtype=query_states.dtype,
+    )
+    cos, sin = paligemma.model.language_model.rotary_emb(dummy_tensor, position_ids)
+    query_states, key_states = modeling_gemma.apply_rotary_pos_emb(
+        query_states, key_states, cos, sin, unsqueeze_dim=1
+    )
+    batch_size = query_states.shape[0]
+    scaling = paligemma.language_model.layers[layer_idx].self_attn.scaling
+    att_output, _ = modeling_gemma.eager_attention_forward(
+        paligemma.language_model.layers[layer_idx].self_attn,
+        query_states,
+        key_states,
+        value_states,
+        attention_mask,
+        scaling,
+    )
+    head_dim = paligemma.language_model.layers[layer_idx].self_attn.head_dim
+    att_output = att_output.reshape(batch_size, -1, 1 * 8 * head_dim)
+    outputs_embeds = []
+    start_pos = 0
+    for i, hidden_states in enumerate(inputs_embeds):
+        layer = models[i].layers[layer_idx]
+        end_pos = start_pos + hidden_states.shape[1]
+        if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
+            att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
+        out_emb = layer.self_attn.o_proj(att_output[:, start_pos:end_pos])
+        out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])
+        after_first_residual = out_emb.clone()
+        if adarms_cond[i] is None:
+            out_emb = layer.post_attention_layernorm(out_emb)[0]
+            gate = None
+        else:
+            out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
+        if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
+            out_emb = out_emb.to(dtype=torch.bfloat16)
+        out_emb = layer.mlp(out_emb)
+        out_emb = modeling_gemma._gated_residual(after_first_residual, out_emb, gate)
+        outputs_embeds.append(out_emb)
+        start_pos = end_pos
+    return outputs_embeds
 
 
 class GemmaConfig:

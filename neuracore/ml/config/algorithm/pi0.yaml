@@ -15,7 +15,7 @@ algorithm:
   time_sampling_offset: 0.001
   min_period: 4e-3
   max_period: 4.0
-  gradient_checkpointing: False
+  gradient_checkpointing: True
   compile_model: False
   compile_mode: "max-autotune"
   optimizer_lr: 2.5e-5
@@ -26,4 +26,5 @@ algorithm:
   lr_scheduler_warmup_steps: 1000
   lr_scheduler_num_decay_steps: 30000
   lr_scheduler_decay_lr: 2.5e-6
-  finetune_action_expert_only: True
+  finetune_action_expert_only: False
+  freeze_language_model_only: True
