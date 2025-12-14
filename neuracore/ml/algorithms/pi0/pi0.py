@@ -1,8 +1,8 @@
 """π0 wrapper that delegates to the reference implementation.
 
 This preserves the Neuracore-facing `Pi0` class but swaps the internal model
-for the upstream `PI0Pytorch/PI0Policy` from `modeling_pi0.py`, keeping the
-API while matching the maintained implementation.
+for the upstream `PI0Pytorch` from `modules.py`, keeping the API while
+matching the maintained implementation.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from neuracore.ml import (
 )
 from neuracore.ml.algorithm_utils.normalizer import MeanStdNormalizer
 
-from .modules import PI0Config, PI0Policy, PI0Pytorch, pad_vector, resize_with_pad_torch
+from .modules import PI0Config, PI0Policy, pad_vector, resize_with_pad_torch
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,7 @@ class Pi0(NeuracoreModel):
         lr_scheduler_num_decay_steps: int = 30000,
         lr_scheduler_decay_lr: float = 2.5e-6,
         finetune_action_expert_only: bool = False,
+        freeze_language_model_only: bool = False,
     ):
         """Initialize the Neuracore Pi0 wrapper around the reference model."""
         super().__init__(model_init_description)
@@ -110,7 +111,6 @@ class Pi0(NeuracoreModel):
         self.use_pretrained_weights = use_pretrained_weights
         self.pretrained_name_or_path = pretrained_name_or_path
         self.finetune_action_expert_only = finetune_action_expert_only
-
         data_stats: dict[DataType, DataItemStats] = {}
 
         # Setup proprioceptive data
@@ -270,9 +270,14 @@ class Pi0(NeuracoreModel):
         # Load PaliGemma weights into VLM expert
         if self.using_pretrained_paligemma:
             self._load_pretrained_vlm_weights()
+
+        # Core model from the reference implementation
+        if self.use_pretrained_weights and self.pretrained_name_or_path:
+            self.model = PI0Policy.from_pretrained(
+                self.pretrained_name_or_path, config=self.config
+            )
         else:
-            self.policy = PI0Policy(self.config)
-        self.model: PI0Pytorch = self.policy.model
+            self.model = PI0Policy(self.config)
 
         if self.config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
