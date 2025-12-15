@@ -681,6 +681,7 @@ class DiffusionPolicy(NeuracoreModel):
             DataType.JOINT_TORQUES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.RGB_IMAGES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         }
 
     @staticmethod
