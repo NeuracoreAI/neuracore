@@ -1,7 +1,7 @@
 """Diffusion Policy: Visuomotor Policy Learning via Action Diffusion."""
 
 import logging
-from typing import Any, Optional, Union, cast
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -315,8 +315,8 @@ class DiffusionPolicy(NeuracoreModel):
         self,
         batch_size: int,
         prediction_horizon: int,
-        global_cond: Optional[torch.Tensor] = None,
-        generator: Optional[torch.Generator] = None,
+        global_cond: torch.Tensor | None = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Sample action sequence conditioned on the observations.
 
@@ -393,7 +393,7 @@ class DiffusionPolicy(NeuracoreModel):
     @staticmethod
     def _make_noise_scheduler(
         noise_scheduler_type: str, **kwargs: dict[str, Any]
-    ) -> Union[DDPMScheduler, DDIMScheduler]:
+    ) -> DDPMScheduler | DDIMScheduler:
         """Factory for noise scheduler instances.
 
         All kwargs are passed to the scheduler.

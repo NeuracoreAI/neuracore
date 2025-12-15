@@ -8,7 +8,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -25,7 +25,7 @@ class TensorboardTrainingLogger(TrainingLogger):
     def __init__(
         self,
         log_dir: Path,
-        run_name: Optional[str] = None,
+        run_name: str | None = None,
         sync_interval: int = 60,
     ):
         """Initialize TensorBoard logger.
@@ -67,7 +67,7 @@ class TensorboardTrainingLogger(TrainingLogger):
     def log_image(
         self,
         name: str,
-        image: Union[np.ndarray, torch.Tensor],
+        image: np.ndarray | torch.Tensor,
         step: int,
         dataformats: str = "CHW",
     ) -> None:
@@ -84,7 +84,7 @@ class TensorboardTrainingLogger(TrainingLogger):
     def log_images(
         self,
         name: str,
-        images: Union[np.ndarray, torch.Tensor],
+        images: np.ndarray | torch.Tensor,
         step: int,
         dataformats: str = "NCHW",
     ) -> None:
@@ -101,7 +101,7 @@ class TensorboardTrainingLogger(TrainingLogger):
     def log_histogram(
         self,
         name: str,
-        values: Union[np.ndarray, torch.Tensor],
+        values: np.ndarray | torch.Tensor,
         step: int,
     ) -> None:
         """Log a histogram of values.
@@ -127,7 +127,7 @@ class TensorboardTrainingLogger(TrainingLogger):
     def log_hyperparameters(
         self,
         hparams: dict[str, Any],
-        metrics: Optional[dict[str, float]] = None,
+        metrics: dict[str, float] | None = None,
     ) -> None:
         """Log hyperparameters and optionally metrics.
 
@@ -151,7 +151,7 @@ class TensorboardTrainingLogger(TrainingLogger):
             json.dump(hparams, f, indent=2, default=str)
 
     def log_model_graph(
-        self, model: torch.nn.Module, input_to_model: Optional[torch.Tensor] = None
+        self, model: torch.nn.Module, input_to_model: torch.Tensor | None = None
     ) -> None:
         """Log the model computational graph.
 

@@ -8,7 +8,6 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -40,8 +39,8 @@ class ModelServer:
         model_output_order: dict[DataType, list[str]],
         model_file: Path,
         org_id: str,
-        job_id: Optional[str] = None,
-        device: Optional[str] = None,
+        job_id: str | None = None,
+        device: str | None = None,
     ):
         """Initialize the model server.
 
@@ -142,11 +141,11 @@ def start_server(
     model_output_order: dict[DataType, list[str]],
     model_file: Path,
     org_id: str,
-    job_id: Optional[str] = None,
+    job_id: str | None = None,
     host: str = "0.0.0.0",
     port: int = 8080,
     log_level: str = "info",
-    device: Optional[str] = None,
+    device: str | None = None,
 ) -> ModelServer:
     """Start a model server instance.
 

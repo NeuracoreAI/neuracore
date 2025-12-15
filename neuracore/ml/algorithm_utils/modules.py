@@ -5,8 +5,6 @@ including depth images, point clouds, poses, end-effectors, and custom data type
 All encoders output features in a consistent format for multimodal fusion.
 """
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -240,7 +238,7 @@ class CustomDataEncoder(nn.Module):
         self,
         input_dim: int,
         output_dim: int = 256,
-        hidden_dims: Optional[list[int]] = None,
+        hidden_dims: list[int] | None = None,
     ):
         """Initialize the custom data encoder.
 

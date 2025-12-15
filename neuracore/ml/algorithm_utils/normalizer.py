@@ -5,7 +5,7 @@ mean/std and min/max normalization for multiple data types,
 with support for PyTorch's register_buffer for proper device handling.
 """
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -21,7 +21,7 @@ class Normalizer(nn.Module):
     def __init__(
         self,
         name: str,
-        statistics: Optional[list[Any]] = None,
+        statistics: list[Any] | None = None,
     ) -> None:
         """Initialize a Normalizer with optional statistics.
 
@@ -80,7 +80,7 @@ class MeanStdNormalizer(Normalizer):
     def __init__(
         self,
         name: str,
-        statistics: Optional[list[Any]] = None,
+        statistics: list[Any] | None = None,
     ) -> None:
         """Initialize a MeanStdNormalizer with optional statistics.
 
@@ -158,7 +158,7 @@ class MinMaxNormalizer(Normalizer):
     def __init__(
         self,
         name: str,
-        statistics: Optional[list[Any]] = None,
+        statistics: list[Any] | None = None,
     ) -> None:
         """Initialize a MinMaxNormalizer with optional statistics.
 

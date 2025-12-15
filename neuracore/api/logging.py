@@ -6,7 +6,6 @@ All logging functions support optional robot identification and timestamping.
 """
 
 import time
-from typing import Optional
 from warnings import filterwarnings, warn
 
 import numpy as np
@@ -73,7 +72,7 @@ def _log_single_joint_data(
         timestamp: Timestamp of the data
     """
     storage_name = validate_safe_name(name)
-    str_id = f"{data_type}:{name}"
+    str_id = f"{data_type.value}:{name}"
     joint_stream = robot.get_data_stream(str_id)
     if joint_stream is None:
         joint_stream = JsonDataStream(data_type=data_type, data_type_name=storage_name)
@@ -101,9 +100,9 @@ def _log_single_joint_data(
 def _log_group_of_joint_data(
     data_type: DataType,
     joint_data: dict[str, float],
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log joint data for a robot.
 
@@ -132,8 +131,8 @@ def _log_group_of_joint_data(
 
 
 def _validate_extrinsics_intrinsics(
-    extrinsics: Optional[np.ndarray], intrinsics: Optional[np.ndarray]
-) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    extrinsics: np.ndarray | None, intrinsics: np.ndarray | None
+) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Validate and convert camera extrinsics and intrinsics matrices.
 
     Args:
@@ -161,11 +160,11 @@ def _log_camera_data(
     camera_type: DataType,
     name: str,
     image: np.ndarray,
-    extrinsics: Optional[np.ndarray] = None,
-    intrinsics: Optional[np.ndarray] = None,
-    robot_name: Optional[str] = None,
+    extrinsics: np.ndarray | None = None,
+    intrinsics: np.ndarray | None = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log camera data for a robot.
 
@@ -192,7 +191,7 @@ def _log_camera_data(
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name, instance)
     storage_name = validate_safe_name(name)
-    str_id = f"{camera_type}:{name}"
+    str_id = f"{camera_type.value}:{name}"
 
     stream = robot.get_data_stream(str_id)
     if stream is None:
@@ -232,9 +231,9 @@ def _log_camera_data(
 def log_custom_1d(
     name: str,
     data: np.ndarray,
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log arbitrary data for a robot.
 
@@ -256,7 +255,7 @@ def log_custom_1d(
     timestamp = timestamp or time.time()
     robot = _get_robot(robot_name, instance)
     storage_name = validate_safe_name(name)
-    str_id = f"{DataType.CUSTOM_1D}:{name}"
+    str_id = f"{DataType.CUSTOM_1D.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(
@@ -285,9 +284,9 @@ def log_custom_1d(
 
 def log_joint_positions(
     positions: dict[str, float],
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log joint positions for a robot.
 
@@ -314,9 +313,9 @@ def log_joint_positions(
 def log_joint_position(
     name: str,
     position: float,
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log joint positions for a robot.
 
@@ -342,9 +341,9 @@ def log_joint_position(
 
 def log_joint_target_positions(
     target_positions: dict[str, float],
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log joint target positions for a robot.
 
@@ -372,9 +371,9 @@ def log_joint_target_positions(
 def log_joint_target_position(
     name: str,
     target_position: float,
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log joint target position for a robot.
 
@@ -401,9 +400,9 @@ def log_joint_target_position(
 
 def log_joint_velocities(
     velocities: dict[str, float],
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log joint velocities for a robot.
 
@@ -430,9 +429,9 @@ def log_joint_velocities(
 def log_joint_velocity(
     name: str,
     velocity: float,
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log joint velocity for a robot.
 
@@ -459,9 +458,9 @@ def log_joint_velocity(
 
 def log_joint_torques(
     torques: dict[str, float],
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log joint torques for a robot.
 
@@ -488,9 +487,9 @@ def log_joint_torques(
 def log_joint_torque(
     name: str,
     torque: float,
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log joint torque for a robot.
 
@@ -518,9 +517,9 @@ def log_joint_torque(
 def log_pose(
     name: str,
     pose: np.ndarray,
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log pose data for a robot.
 
@@ -543,7 +542,7 @@ def log_pose(
         raise ValueError(f"Poses must be lists of length 7. {name} is not length 7.")
     robot = _get_robot(robot_name, instance)
     storage_name = validate_safe_name(name)
-    str_id = f"{DataType.POSES}:{name}"
+    str_id = f"{DataType.POSES.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(data_type=DataType.POSES, data_type_name=storage_name)
@@ -570,9 +569,9 @@ def log_pose(
 def log_end_effector_pose(
     name: str,
     pose: np.ndarray,
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log end-effector pose data for a robot.
 
@@ -608,7 +607,7 @@ def log_end_effector_pose(
 
     robot = _get_robot(robot_name, instance)
     storage_name = validate_safe_name(name)
-    str_id = f"{DataType.END_EFFECTOR_POSES}:{name}"
+    str_id = f"{DataType.END_EFFECTOR_POSES.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(
@@ -635,9 +634,9 @@ def log_end_effector_pose(
 def log_parallel_gripper_open_amount(
     name: str,
     value: float,
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log parallel gripper open amount data for a robot.
 
@@ -662,7 +661,7 @@ def log_parallel_gripper_open_amount(
 
     robot = _get_robot(robot_name, instance)
     storage_name = validate_safe_name(name)
-    str_id = f"{DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS}:{name}"
+    str_id = f"{DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(
@@ -691,9 +690,9 @@ def log_parallel_gripper_open_amount(
 
 def log_parallel_gripper_open_amounts(
     values: dict[str, float],
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log parallel gripper open amount data for a robot.
 
@@ -718,9 +717,9 @@ def log_parallel_gripper_open_amounts(
 def log_language(
     name: str,
     language: str,
-    robot_name: Optional[str] = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log language annotation for a robot.
 
@@ -740,7 +739,7 @@ def log_language(
         raise ValueError("Language must be a string")
     robot = _get_robot(robot_name, instance)
     storage_name = validate_safe_name(name)
-    str_id = f"{DataType.LANGUAGE}:{name}"
+    str_id = f"{DataType.LANGUAGE.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(
@@ -768,11 +767,11 @@ def log_language(
 def log_rgb(
     name: str,
     rgb: np.ndarray,
-    extrinsics: Optional[np.ndarray] = None,
-    intrinsics: Optional[np.ndarray] = None,
-    robot_name: Optional[str] = None,
+    extrinsics: np.ndarray | None = None,
+    intrinsics: np.ndarray | None = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log RGB image from a camera.
 
@@ -808,11 +807,11 @@ def log_rgb(
 def log_depth(
     name: str,
     depth: np.ndarray,
-    extrinsics: Optional[np.ndarray] = None,
-    intrinsics: Optional[np.ndarray] = None,
-    robot_name: Optional[str] = None,
+    extrinsics: np.ndarray | None = None,
+    intrinsics: np.ndarray | None = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log depth image from a camera.
 
@@ -856,12 +855,12 @@ def log_depth(
 def log_point_cloud(
     name: str,
     points: np.ndarray,
-    rgb_points: Optional[np.ndarray] = None,
-    extrinsics: Optional[np.ndarray] = None,
-    intrinsics: Optional[np.ndarray] = None,
-    robot_name: Optional[str] = None,
+    rgb_points: np.ndarray | None = None,
+    extrinsics: np.ndarray | None = None,
+    intrinsics: np.ndarray | None = None,
+    robot_name: str | None = None,
     instance: int = 0,
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ) -> None:
     """Log point cloud data from a camera.
 
@@ -908,7 +907,7 @@ def log_point_cloud(
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name, instance)
     storage_name = validate_safe_name(name)
-    str_id = f"{DataType.POINT_CLOUDS}:{name}"
+    str_id = f"{DataType.POINT_CLOUDS.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(

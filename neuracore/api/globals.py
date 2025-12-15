@@ -5,8 +5,6 @@ the Neuracore session, including active robot connections, dataset information,
 and validation status.
 """
 
-from typing import Optional
-
 from neuracore.core.robot import Robot
 from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
 
@@ -29,5 +27,5 @@ class GlobalSingleton(metaclass=SingletonMetaclass):
     """
 
     _has_validated_version = False
-    _active_robot: Optional[Robot] = None
-    _active_dataset_id: Optional[str] = None
+    _active_robot: Robot | None = None
+    _active_dataset_id: str | None = None

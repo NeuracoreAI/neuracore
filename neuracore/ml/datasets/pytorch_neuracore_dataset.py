@@ -7,7 +7,6 @@ poses, end-effectors, and language instructions.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import torch
 from neuracore_types import BatchedNCData, DataType, NCDataStats, RobotDataSpec
@@ -65,7 +64,7 @@ class PytorchNeuracoreDataset(Dataset, ABC):
 
     @abstractmethod
     def load_sample(
-        self, episode_idx: int, timestep: Optional[int] = None
+        self, episode_idx: int, timestep: int | None = None
     ) -> TrainingSample:
         """Load a training sample from the dataset by episode index and timestep.
 

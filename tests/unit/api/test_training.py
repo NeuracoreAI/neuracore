@@ -1,5 +1,5 @@
 import pytest
-from neuracore_types import Dataset, DataType
+from neuracore_types import Dataset, DataType, GPUType
 
 import neuracore as nc
 from neuracore.core.const import API_URL
@@ -134,7 +134,7 @@ def test_start_training_run(
         dataset_name="test_dataset",
         algorithm_name="cnnmlp",
         algorithm_config=algorithm_config,
-        gpu_type="T4",
+        gpu_type=GPUType.NVIDIA_TESLA_T4,
         num_gpus=1,
         frequency=10,
     )

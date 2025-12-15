@@ -46,7 +46,7 @@ class Dataset:
         tags: list[str],
         data_types: list[DataType],
         is_shared: bool,
-        recordings: Optional[Union[list[dict], list[Recording]]] = None,
+        recordings: list[dict] | list[Recording] | None = None,
     ):
         """Initialize a Dataset instance.
 
@@ -86,9 +86,9 @@ class Dataset:
             if recordings
             else []
         )
-        self._num_recordings: Optional[int] = len(recordings) if recordings else None
-        self._start_after: Optional[dict] = None
-        self._robot_ids: Optional[list[str]] = None
+        self._num_recordings: int | None = len(recordings) if recordings else None
+        self._start_after: dict | None = None
+        self._robot_ids: list[str] | None = None
 
     def _wrap_raw_recording(self, raw_recording: dict) -> Recording:
         """Wrap a raw recording dict into a Recording object.
@@ -288,8 +288,8 @@ class Dataset:
     @staticmethod
     def create(
         name: str,
-        description: Optional[str] = None,
-        tags: Optional[list[str]] = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
         shared: bool = False,
     ) -> "Dataset":
         """Create a new dataset or return existing one with the same name.
@@ -320,8 +320,8 @@ class Dataset:
     @staticmethod
     def _create_dataset(
         name: str,
-        description: Optional[str] = None,
-        tags: Optional[list[str]] = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
         shared: bool = False,
     ) -> "Dataset":
         """Create a new dataset via API call.
@@ -367,7 +367,7 @@ class Dataset:
     def _synchronize(
         self,
         frequency: int = 0,
-        robot_data_spec: Optional[RobotDataSpec] = None,
+        robot_data_spec: RobotDataSpec | None = None,
     ) -> SynchronizedDatasetModel:
         """Synchronize the dataset with specified frequency and data types.
 
@@ -419,7 +419,7 @@ class Dataset:
     def synchronize(
         self,
         frequency: int = 0,
-        robot_data_spec: Optional[RobotDataSpec] = None,
+        robot_data_spec: RobotDataSpec | None = None,
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 4,
     ) -> SynchronizedDataset:
@@ -497,7 +497,7 @@ class Dataset:
         """Yield recordings one by one, fetching pages lazily."""
         return self._recordings_generator()
 
-    def __getitem__(self, index: Union[int, slice]) -> Union[Recording, "Dataset"]:
+    def __getitem__(self, index: int | slice) -> Union[Recording, "Dataset"]:
         """Support for indexing and slicing dataset episodes.
 
         Args:

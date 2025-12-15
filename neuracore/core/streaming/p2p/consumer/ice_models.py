@@ -4,8 +4,6 @@ This module defines Pydantic models for representing ICE server configurations,
 which are used in WebRTC to establish peer-to-peer connections.
 """
 
-from typing import Optional, Union
-
 from pydantic import AnyUrl, BaseModel, Field
 
 
@@ -18,9 +16,9 @@ class IceServer(BaseModel):
         credential: Optional credential or password for the ICE server.
     """
 
-    urls: Union[AnyUrl, list[AnyUrl]]
-    username: Optional[str] = Field(default=None)
-    credential: Optional[str] = Field(default=None)
+    urls: AnyUrl | list[AnyUrl]
+    username: str | None = Field(default=None)
+    credential: str | None = Field(default=None)
 
 
 class IceConfig(BaseModel):

@@ -14,7 +14,6 @@ import sys
 import tempfile
 import venv
 from pathlib import Path
-from typing import Optional
 
 import neuracore as nc
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
@@ -29,7 +28,7 @@ JSON_END_MARKER = "<<<NEURACORE_VALIDATION_JSON_END>>>"
 
 
 def run_in_venv(
-    algorithm_folder: Path, storage_handler: Optional[AlgorithmStorageHandler] = None
+    algorithm_folder: Path, storage_handler: AlgorithmStorageHandler | None = None
 ) -> tuple[AlgorithmCheck, str]:
     """Run algorithm validation in a temporary virtual environment.
 

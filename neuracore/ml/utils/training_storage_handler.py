@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import requests
 import torch
@@ -22,8 +22,8 @@ class TrainingStorageHandler:
 
     def __init__(
         self,
-        local_dir: Optional[str],
-        training_job_id: Optional[str] = None,
+        local_dir: str | None,
+        training_job_id: str | None = None,
         algorithm_config: dict = {},
     ) -> None:
         """Initialize the storage handler.
@@ -245,7 +245,7 @@ class TrainingStorageHandler:
                     )
 
     def update_training_metadata(
-        self, epoch: int, step: int, error: Optional[str] = None
+        self, epoch: int, step: int, error: str | None = None
     ) -> None:
         """Update training metadata in cloud storage.
 
@@ -265,9 +265,9 @@ class TrainingStorageHandler:
     def _put_request(
         self,
         url: str,
-        json: Optional[dict] = None,
-        data: Optional[Any] = None,
-        headers: Optional[dict] = None,
+        json: dict | None = None,
+        data: Any | None = None,
+        headers: dict | None = None,
     ) -> requests.Response:
         """Helper method to send a PUT request.
 
@@ -285,9 +285,7 @@ class TrainingStorageHandler:
             response = requests.put(url, headers=headers, json=json, data=data)
         return response
 
-    def _get_request(
-        self, url: str, params: Optional[dict] = None
-    ) -> requests.Response:
+    def _get_request(self, url: str, params: dict | None = None) -> requests.Response:
         """Helper method to send a GET request.
 
         Args:

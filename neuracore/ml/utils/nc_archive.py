@@ -10,7 +10,7 @@ import json
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from neuracore_types import ModelInitDescription
@@ -137,7 +137,7 @@ def extract_nc_archive(archive_file: Path, output_dir: Path) -> dict[str, Path]:
 
 
 def load_model_from_nc_archive(
-    archive_file: Path, extract_to: Optional[Path] = None, device: Optional[str] = None
+    archive_file: Path, extract_to: Path | None = None, device: str | None = None
 ) -> NeuracoreModel:
     """Load a Neuracore model from a NC.ZIP archive file.
 

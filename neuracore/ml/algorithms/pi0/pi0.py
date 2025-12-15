@@ -11,7 +11,7 @@ for General Robot Control." arXiv preprint https://arxiv.org/abs/2410.24164.
 
 import logging
 import os
-from typing import Optional, cast
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -466,7 +466,7 @@ class Pi0(NeuracoreModel):
         return {"vlm": vlm_mask, "action": state_action_mask}
 
     def _create_pi0_mix_attention_mask(
-        self, batch_size: int, vlm_seq_len: Optional[int] = None
+        self, batch_size: int, vlm_seq_len: int | None = None
     ) -> torch.Tensor:
         """Create the mixed attention mask for the Pi0 model.
 
@@ -513,7 +513,7 @@ class Pi0(NeuracoreModel):
         return attention_mask
 
     def _create_pi0_position_ids(
-        self, batch_size: int, vlm_seq_len: Optional[int] = None
+        self, batch_size: int, vlm_seq_len: int | None = None
     ) -> dict[str, torch.Tensor]:
         """Create position IDs for the Pi0 model.
 
@@ -603,8 +603,8 @@ class Pi0(NeuracoreModel):
         proprio_embeds: torch.Tensor,
         action: torch.Tensor,
         t: torch.Tensor,
-        vlm_seq_len: Optional[int] = None,
-        pad_masks: Optional[torch.Tensor] = None,
+        vlm_seq_len: int | None = None,
+        pad_masks: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Predict action sequence from observations.
 

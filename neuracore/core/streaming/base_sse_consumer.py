@@ -5,7 +5,6 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Optional
 
 from aiohttp import ClientSession, ClientTimeout
 from aiohttp.client import _RequestOptions
@@ -48,10 +47,10 @@ class BaseSSEConsumer(ABC):
 
     def __init__(
         self,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
-        enabled_manager: Optional[EnabledManager] = None,
-        background_coroutine_tracker: Optional[BackgroundCoroutineTracker] = None,
-        client_session: Optional[ClientSession] = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+        enabled_manager: EnabledManager | None = None,
+        background_coroutine_tracker: BackgroundCoroutineTracker | None = None,
+        client_session: ClientSession | None = None,
     ):
         """Initialise the server sent events consumer.
 

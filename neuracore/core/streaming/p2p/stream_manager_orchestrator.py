@@ -6,7 +6,6 @@ integrates with the signalling server to route messages.
 """
 
 import asyncio
-from typing import Optional
 
 from aiohttp import ClientSession, ClientTimeout
 from neuracore_types import RobotInstanceIdentifier
@@ -50,10 +49,10 @@ class StreamManagerOrchestrator(
 
     def __init__(
         self,
-        org_id: Optional[str] = None,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
-        client_session: Optional[ClientSession] = None,
-        auth: Optional[Auth] = None,
+        org_id: str | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+        client_session: ClientSession | None = None,
+        auth: Auth | None = None,
     ):
         """Initialize the stream manager factory.
 
@@ -117,7 +116,7 @@ class StreamManagerOrchestrator(
             raise ValueError(f"Unknown manager type: {type}")
 
     def remove_manager(
-        self, robot_id: str, robot_instance: int, type: Optional[ManagerType] = None
+        self, robot_id: str, robot_instance: int, type: ManagerType | None = None
     ) -> None:
         """Remove a manager for a specific robot instance.
 

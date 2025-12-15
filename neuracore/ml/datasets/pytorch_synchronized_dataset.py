@@ -2,7 +2,7 @@
 
 import logging
 from collections import defaultdict
-from typing import Optional, cast
+from typing import cast
 
 import numpy as np
 import torch
@@ -225,7 +225,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         return np.random.randint(0, max_start - 1)
 
     def load_sample(
-        self, episode_idx: int, timestep: Optional[int] = None
+        self, episode_idx: int, timestep: int | None = None
     ) -> TrainingSample:
         """Load sample from cache or GCS with full data type support."""
         if not self._logged_in:

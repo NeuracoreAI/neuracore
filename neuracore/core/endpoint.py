@@ -17,7 +17,6 @@ import tempfile
 import time
 from pathlib import Path
 from subprocess import Popen
-from typing import Optional
 
 import requests
 from neuracore_types import (
@@ -50,7 +49,7 @@ class Policy:
     """Base class for all policies."""
 
     def set_checkpoint(
-        self, epoch: Optional[int] = None, checkpoint_file: Optional[str] = None
+        self, epoch: int | None = None, checkpoint_file: str | None = None
     ) -> None:
         """Set the model checkpoint to use for inference.
 
@@ -66,7 +65,7 @@ class Policy:
 
     def predict(
         self,
-        sync_point: Optional[SynchronizedPoint] = None,
+        sync_point: SynchronizedPoint | None = None,
         timeout: float = 5,
     ) -> dict[DataType, dict[str, BatchedNCData]]:
         """Get action predictions from the model.
@@ -108,7 +107,7 @@ class Policy:
 
     def _predict(
         self,
-        sync_point: Optional[SynchronizedPoint] = None,
+        sync_point: SynchronizedPoint | None = None,
     ) -> dict[DataType, dict[str, BatchedNCData]]:
         """Internal get action predictions from the model.
 
@@ -142,8 +141,8 @@ class DirectPolicy(Policy):
         model_output_order: dict[DataType, list[str]],
         model_path: Path,
         org_id: str,
-        job_id: Optional[str] = None,
-        device: Optional[str] = None,
+        job_id: str | None = None,
+        device: str | None = None,
     ):
         """Initialize the direct policy with a robot instance."""
         super().__init__()
@@ -160,7 +159,7 @@ class DirectPolicy(Policy):
         )
 
     def set_checkpoint(
-        self, epoch: Optional[int] = None, checkpoint_file: Optional[str] = None
+        self, epoch: int | None = None, checkpoint_file: str | None = None
     ) -> None:
         """Set the model checkpoint to use for inference.
 
@@ -174,7 +173,7 @@ class DirectPolicy(Policy):
 
     def _predict(
         self,
-        sync_point: Optional[SynchronizedPoint] = None,
+        sync_point: SynchronizedPoint | None = None,
     ) -> dict[DataType, dict[str, BatchedNCData]]:
         """Run direct model inference.
 
@@ -203,7 +202,7 @@ class ServerPolicy(Policy):
     def __init__(
         self,
         base_url: str,
-        headers: Optional[dict[str, str]] = None,
+        headers: dict[str, str] | None = None,
     ):
         """Initialize the server policy with connection details.
 
@@ -218,7 +217,7 @@ class ServerPolicy(Policy):
         self._is_local = "localhost" in base_url or "127.0.0.1" in base_url
 
     def set_checkpoint(
-        self, epoch: Optional[int] = None, checkpoint_file: Optional[str] = None
+        self, epoch: int | None = None, checkpoint_file: str | None = None
     ) -> None:
         """Set the model checkpoint via HTTP request.
 
@@ -258,7 +257,7 @@ class ServerPolicy(Policy):
 
     def _predict(
         self,
-        sync_point: Optional[SynchronizedPoint] = None,
+        sync_point: SynchronizedPoint | None = None,
     ) -> dict[DataType, dict[str, BatchedNCData]]:
         """Get action predictions from the model endpoint.
 
@@ -333,8 +332,8 @@ class LocalServerPolicy(ServerPolicy):
         model_output_order: dict[DataType, list[str]],
         org_id: str,
         model_path: Path,
-        device: Optional[str] = None,
-        job_id: Optional[str] = None,
+        device: str | None = None,
+        job_id: str | None = None,
         port: int = 8080,
         host: str = "127.0.0.1",
     ):
@@ -361,7 +360,7 @@ class LocalServerPolicy(ServerPolicy):
         self.device = device
         self.port = port
         self.host = host
-        self.server_process: Optional[Popen] = None
+        self.server_process: Popen | None = None
         atexit.register(self.disconnect)
         self._start_server()
 
@@ -445,7 +444,7 @@ class LocalServerPolicy(ServerPolicy):
         )
 
     def set_checkpoint(
-        self, epoch: Optional[int] = None, checkpoint_file: Optional[str] = None
+        self, epoch: int | None = None, checkpoint_file: str | None = None
     ) -> None:
         """Set the model checkpoint via HTTP request to the local server.
 
@@ -506,9 +505,9 @@ class RemoteServerPolicy(ServerPolicy):
 def policy(
     model_input_order: dict[DataType, list[str]],
     model_output_order: dict[DataType, list[str]],
-    train_run_name: Optional[str] = None,
-    model_file: Optional[str] = None,
-    device: Optional[str] = None,
+    train_run_name: str | None = None,
+    model_file: str | None = None,
+    device: str | None = None,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process.
 
@@ -548,12 +547,12 @@ def policy(
 def policy_local_server(
     model_input_order: dict[DataType, list[str]],
     model_output_order: dict[DataType, list[str]],
-    train_run_name: Optional[str] = None,
-    model_file: Optional[str] = None,
-    device: Optional[str] = None,
+    train_run_name: str | None = None,
+    model_file: str | None = None,
+    device: str | None = None,
     port: int = 8080,
     host: str = "127.0.0.1",
-    job_id: Optional[str] = None,
+    job_id: str | None = None,
 ) -> LocalServerPolicy:
     """Launch a local server policy with a FastAPI server.
 

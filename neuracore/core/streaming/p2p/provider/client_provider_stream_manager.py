@@ -7,7 +7,6 @@ connection management, and automatic reconnection with exponential backoff.
 
 import asyncio
 import logging
-from typing import Optional
 from uuid import uuid4
 
 from aiohttp import ClientSession
@@ -51,8 +50,8 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         local_stream_id: str,
         client_session: ClientSession,
         loop: asyncio.AbstractEventLoop,
-        org_id: Optional[str] = None,
-        auth: Optional[Auth] = None,
+        org_id: str | None = None,
+        auth: Auth | None = None,
     ):
         """Initialize the client streaming manager.
 

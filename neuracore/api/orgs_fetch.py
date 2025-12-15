@@ -1,13 +1,11 @@
 """Helpers for fetching the current user's organization IDs from the API."""
 
-from typing import Optional
-
 import requests
 
 from neuracore.core.const import API_URL
 
 
-def fetch_org_ids(access_token: str) -> Optional[set[str]]:
+def fetch_org_ids(access_token: str) -> set[str] | None:
     """Return the set of org IDs for the authenticated user."""
     try:
         response = requests.get(

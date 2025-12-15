@@ -7,7 +7,6 @@ an access token, and creates a new API key for CLI usage.
 
 import argparse
 from getpass import getpass
-from typing import Optional  # For hidden password input
 
 import requests
 from pydantic import BaseModel, ValidationError
@@ -32,9 +31,7 @@ class Token(BaseModel):
     token_type: str
 
 
-def generate_api_key(
-    email: Optional[str] = None, password: Optional[str] = None
-) -> str:
+def generate_api_key(email: str | None = None, password: str | None = None) -> str:
     """Generate a new API key through interactive user authentication.
 
     Prompts the user for their registered email and password, authenticates

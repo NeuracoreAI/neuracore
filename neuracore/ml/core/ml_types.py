@@ -6,7 +6,6 @@ joint states, images, point clouds, poses, end-effectors, and language tokens.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Union
 
 import torch
 from neuracore_types import BatchedNCData, DataType
@@ -115,16 +114,14 @@ class BatchedInferenceInputs:
         """
         return self.batch_size
 
-    def __getitem__(self, key: Union[DataType, str]) -> list[BatchedNCData]:
+    def __getitem__(self, key: DataType | str) -> list[BatchedNCData]:
         """Get item by DataType or field name."""
         # If key is a DataType enum, access the nested data dict
         if isinstance(key, DataType):
             return self.inputs[key]
         raise KeyError(f"Key {key} not found in BatchedInferenceInputs.")
 
-    def __setitem__(
-        self, key: Union[DataType, str], value: list[BatchedNCData]
-    ) -> None:
+    def __setitem__(self, key: DataType | str, value: list[BatchedNCData]) -> None:
         """Set item by DataType or field name."""
         # Same for setting
         if isinstance(key, DataType):
@@ -142,4 +139,4 @@ class SynchronizedPointPrediction:
     """
 
     outputs: dict[DataType, dict[str, torch.Tensor]]
-    prediction_time: Optional[float] = None
+    prediction_time: float | None = None

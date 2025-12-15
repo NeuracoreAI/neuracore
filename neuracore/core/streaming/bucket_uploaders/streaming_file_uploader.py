@@ -85,7 +85,7 @@ class StreamingJsonUploader(BucketUploader):
 
         self.uploader = ResumableUpload(
             self.recording_id,
-            f"{self.data_type}/{self.data_type_name}/{TRACE_FILE}",
+            f"{self.data_type.value}/{self.data_type_name}/{TRACE_FILE}",
             "application/json",
         )
 

@@ -16,7 +16,7 @@ import fractions
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Optional, cast
+from typing import cast
 from uuid import uuid4
 
 import av
@@ -56,8 +56,8 @@ class VideoSource:
     _last_frame: np.ndarray = field(
         default_factory=lambda: np.zeros((480, 640, 3), dtype=np.uint8)
     )
-    _last_camera_data: Optional[CameraData] = None
-    custom_data_source: Optional[JSONSource] = None
+    _last_camera_data: CameraData | None = None
+    custom_data_source: JSONSource | None = None
 
     def add_frame(self, camera_data: CameraData) -> None:
         """Add a new video frame to the source.
@@ -101,7 +101,7 @@ class VideoSource:
 
     def get_neuracore_custom_track(
         self,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> JSONSource:
         """Gets a data source for the video frames encoded as dataUri's.
 
@@ -201,7 +201,7 @@ class VideoTrack(MediaStreamTrack):
         self.source = source
         self._mid = source.mid
         self._ended: bool = False
-        self._start: Optional[float] = None
+        self._start: float | None = None
         self._timestamp: int = 0
 
     @property

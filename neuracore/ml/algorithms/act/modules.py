@@ -6,7 +6,6 @@ These components are designed to work together for robot manipulation tasks.
 """
 
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -167,8 +166,8 @@ class TransformerEncoderLayer(nn.Module):
     def forward(
         self,
         src: torch.Tensor,
-        src_mask: Optional[torch.Tensor] = None,
-        src_key_padding_mask: Optional[torch.Tensor] = None,
+        src_mask: torch.Tensor | None = None,
+        src_key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass through encoder layer.
 
@@ -233,11 +232,11 @@ class TransformerDecoderLayer(nn.Module):
         self,
         tgt: torch.Tensor,
         memory: torch.Tensor,
-        tgt_mask: Optional[torch.Tensor] = None,
-        memory_mask: Optional[torch.Tensor] = None,
-        tgt_key_padding_mask: Optional[torch.Tensor] = None,
-        memory_key_padding_mask: Optional[torch.Tensor] = None,
-        query_pos: Optional[torch.Tensor] = None,
+        tgt_mask: torch.Tensor | None = None,
+        memory_mask: torch.Tensor | None = None,
+        tgt_key_padding_mask: torch.Tensor | None = None,
+        memory_key_padding_mask: torch.Tensor | None = None,
+        query_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass through decoder layer.
 
@@ -311,8 +310,8 @@ class TransformerEncoder(nn.Module):
     def forward(
         self,
         src: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        src_key_padding_mask: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
+        src_key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass through all encoder layers.
 
@@ -369,11 +368,11 @@ class TransformerDecoder(nn.Module):
         self,
         tgt: torch.Tensor,
         memory: torch.Tensor,
-        tgt_mask: Optional[torch.Tensor] = None,
-        memory_mask: Optional[torch.Tensor] = None,
-        tgt_key_padding_mask: Optional[torch.Tensor] = None,
-        memory_key_padding_mask: Optional[torch.Tensor] = None,
-        query_pos: Optional[torch.Tensor] = None,
+        tgt_mask: torch.Tensor | None = None,
+        memory_mask: torch.Tensor | None = None,
+        tgt_key_padding_mask: torch.Tensor | None = None,
+        memory_key_padding_mask: torch.Tensor | None = None,
+        query_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass through all decoder layers.
 

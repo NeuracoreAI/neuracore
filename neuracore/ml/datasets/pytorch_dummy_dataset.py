@@ -7,7 +7,6 @@ testing, and validation without requiring actual robot demonstration data.
 
 import copy
 import logging
-from typing import Optional
 
 import torch
 from neuracore_types import (
@@ -171,7 +170,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         )
 
     def load_sample(
-        self, episode_idx: int, timestep: Optional[int] = None
+        self, episode_idx: int, timestep: int | None = None
     ) -> TrainingSample:
         """Generate a random training sample with realistic data structure.
 

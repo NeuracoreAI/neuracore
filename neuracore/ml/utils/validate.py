@@ -11,7 +11,6 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
-from typing import Optional
 
 import torch
 from neuracore_types import (
@@ -77,7 +76,7 @@ def run_validation(
     port: int = 8080,
     skip_endpoint_check: bool = False,
     algorithm_config: dict = {},
-    device: Optional[torch.device] = None,
+    device: torch.device | None = None,
 ) -> tuple[AlgorithmCheck, str]:
     """Run comprehensive validation tests on a Neuracore algorithm.
 

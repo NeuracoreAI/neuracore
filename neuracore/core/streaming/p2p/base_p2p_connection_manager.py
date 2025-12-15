@@ -6,7 +6,6 @@ This module provides the basic interface for a streaming manager's functionality
 import logging
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Optional
 
 from neuracore_types import HandshakeMessage, OpenConnectionDetails
 
@@ -105,7 +104,7 @@ class BaseStreamManagerOrchestrator(ABC):
 
     @abstractmethod
     def remove_manager(
-        self, robot_id: str, robot_instance: int, type: Optional[ManagerType] = None
+        self, robot_id: str, robot_instance: int, type: ManagerType | None = None
     ) -> None:
         """Remove a manager for a specific robot instance.
 

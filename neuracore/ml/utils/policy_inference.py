@@ -4,7 +4,6 @@ import logging
 import tempfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
 
 import requests
 import torch
@@ -39,8 +38,8 @@ class PolicyInference:
         model_output_order: dict[DataType, list[str]],
         model_file: Path,
         org_id: str,
-        job_id: Optional[str] = None,
-        device: Optional[str] = None,
+        job_id: str | None = None,
+        device: str | None = None,
     ) -> None:
         """Initialize the policy inference.
 
@@ -109,7 +108,7 @@ class PolicyInference:
         ).to(self.device)
 
     def set_checkpoint(
-        self, epoch: Optional[int] = None, checkpoint_file: Optional[str] = None
+        self, epoch: int | None = None, checkpoint_file: str | None = None
     ) -> None:
         """Set the model checkpoint to use for inference.
 

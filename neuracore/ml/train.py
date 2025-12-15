@@ -4,7 +4,7 @@ import gc
 import logging
 import os
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any
 
 import hydra
 import torch
@@ -113,7 +113,7 @@ def determine_optimal_batch_size(
     input_robot_data_spec: dict[str, dict[DataType, list[str]]],
     output_robot_data_spec: dict[str, dict[DataType, list[str]]],
     dataset: SingleSampleDataset,
-    device: Optional[torch.device] = None,
+    device: torch.device | None = None,
 ) -> int:
     """Run batch size autotuning on a single GPU and return the result."""
     if not torch.cuda.is_available() or (
@@ -182,7 +182,7 @@ def run_training(
     input_robot_data_spec: dict[str, dict[DataType, list[str]]],
     output_robot_data_spec: dict[str, dict[DataType, list[str]]],
     dataset: PytorchSynchronizedDataset,
-    device: Optional[torch.device] = None,
+    device: torch.device | None = None,
 ) -> None:
     """Run the training process for a single GPU."""
     # Setup for distributed training
@@ -303,7 +303,7 @@ def run_training(
             f"{sum(p.numel() for p in model.parameters()):,} parameters"
         )
 
-        training_logger: Union[TensorboardTrainingLogger, CloudTrainingLogger]
+        training_logger: TensorboardTrainingLogger | CloudTrainingLogger
         if cfg.training_id is None:
             training_logger = TensorboardTrainingLogger(
                 log_dir=Path(cfg.local_output_dir) / "tensorboard",

@@ -5,7 +5,6 @@ connection manager.
 """
 
 import asyncio
-from typing import Optional
 from uuid import uuid4
 
 from aiohttp import ClientSession
@@ -44,12 +43,12 @@ class SignallingEventsConsumer(BaseSSEConsumer):
     def __init__(
         self,
         manager_factory: BaseStreamManagerOrchestrator,
-        org_id: Optional[str] = None,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
-        enabled_manager: Optional[EnabledManager] = None,
-        background_coroutine_tracker: Optional[BackgroundCoroutineTracker] = None,
-        client_session: Optional[ClientSession] = None,
-        auth: Optional[Auth] = None,
+        org_id: str | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+        enabled_manager: EnabledManager | None = None,
+        background_coroutine_tracker: BackgroundCoroutineTracker | None = None,
+        client_session: ClientSession | None = None,
+        auth: Auth | None = None,
     ):
         """Initialise the signalling events consumer.
 

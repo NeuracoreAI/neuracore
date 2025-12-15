@@ -7,7 +7,6 @@ connection management, and automatic reconnection with exponential backoff.
 
 import asyncio
 import logging
-from typing import Optional
 
 from aiohttp import ClientSession
 from neuracore_types import (
@@ -51,8 +50,8 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
         local_stream_id: str,
         client_session: ClientSession,
         loop: asyncio.AbstractEventLoop,
-        org_id: Optional[str] = None,
-        auth: Optional[Auth] = None,
+        org_id: str | None = None,
+        auth: Auth | None = None,
     ):
         """Initialize the client streaming manager.
 
@@ -71,7 +70,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
         self.local_stream_id = local_stream_id
         self.loop = loop
         self.client_session = client_session
-        self._current_track_information: Optional[AvailableRobotInstance] = None
+        self._current_track_information: AvailableRobotInstance | None = None
         self.org_id = org_id or get_current_org()
         self.auth = auth or get_auth()
         self.streaming = EnabledManager.derived_manger(
@@ -79,7 +78,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
         )
         self.streaming.add_listener(EnabledManager.DISABLED, self._on_close)
         self.connections: dict[str, PierToPierConsumerConnection] = {}
-        self.ice_config: Optional[IceConfig] = None
+        self.ice_config: IceConfig | None = None
 
     @property
     def enabled_manager(self) -> EnabledManager:
@@ -91,7 +90,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
         return self.streaming
 
     @property
-    def current_track_information(self) -> Optional[AvailableRobotInstance]:
+    def current_track_information(self) -> AvailableRobotInstance | None:
         """Get the current track information for this robot instance.
 
         Returns:
@@ -102,7 +101,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
 
     @current_track_information.setter
     def current_track_information(
-        self, current_track_information: Optional[AvailableRobotInstance]
+        self, current_track_information: AvailableRobotInstance | None
     ) -> None:
         """Set the current track information for this robot instance.
 

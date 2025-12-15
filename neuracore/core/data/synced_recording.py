@@ -7,8 +7,9 @@ import sys
 import tempfile
 import time
 import warnings
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional, Union, cast
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import requests
@@ -43,7 +44,7 @@ class SynchronizedRecording:
         start_time: float,
         end_time: float,
         frequency: int = 0,
-        robot_data_spec: Optional[RobotDataSpec] = None,
+        robot_data_spec: RobotDataSpec | None = None,
         prefetch_videos: bool = False,
     ):
         """Initialize episode iterator for a specific recording.
@@ -207,7 +208,7 @@ class SynchronizedRecording:
         self,
         camera_type: DataType,
         camera_data: dict[str, CameraData],
-        transform_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        transform_fn: Callable[[np.ndarray], np.ndarray] | None = None,
     ) -> dict[str, CameraData]:
         """Get video frame from disk cache for camera data.
 
@@ -318,8 +319,8 @@ class SynchronizedRecording:
         return self._episode_length
 
     def __getitem__(
-        self, idx: Union[int, slice]
-    ) -> Union[SynchronizedPoint, list[SynchronizedPoint]]:
+        self, idx: int | slice
+    ) -> SynchronizedPoint | list[SynchronizedPoint]:
         """Support for indexing episode data.
 
         Args:

@@ -3,7 +3,6 @@
 import logging
 import zipfile
 from pathlib import Path
-from typing import Optional
 
 import requests
 import wget
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 class AlgorithmStorageHandler:
     """Handles storage operations for algorithms."""
 
-    def __init__(self, algorithm_id: Optional[str] = None):
+    def __init__(self, algorithm_id: str | None = None):
         """Initialize the AlgorithmStorageHandler.
 
         Args:

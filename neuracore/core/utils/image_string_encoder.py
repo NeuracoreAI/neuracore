@@ -7,7 +7,6 @@ This is useful for transmitting image data over networks with other data.
 
 import base64
 from io import BytesIO
-from typing import Union
 
 import numpy as np
 from PIL import Image
@@ -20,7 +19,7 @@ class ImageStringEncoder:
 
     @staticmethod
     def encode_image(
-        image: Union[np.ndarray, str],
+        image: np.ndarray | str,
         cap_size: bool = False,
         resize_shape: tuple[int, int] = (224, 224),
     ) -> str:
@@ -44,7 +43,7 @@ class ImageStringEncoder:
         return DATA_URI_PREFIX + base64.b64encode(buffer.getvalue()).decode("utf-8")
 
     @staticmethod
-    def decode_image(encoded_image: Union[str, np.ndarray]) -> np.ndarray:
+    def decode_image(encoded_image: str | np.ndarray) -> np.ndarray:
         """Decode base64 data URI image string back to numpy array.
 
         Args:

@@ -3,7 +3,6 @@
 import asyncio
 import logging
 from collections.abc import Coroutine
-from typing import Optional
 
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 
@@ -18,7 +17,7 @@ class BackgroundCoroutineTracker:
     with `run_coroutine_threadsafe`
     """
 
-    def __init__(self, loop: Optional[asyncio.AbstractEventLoop]) -> None:
+    def __init__(self, loop: asyncio.AbstractEventLoop | None) -> None:
         """Initialise the background coroutine manager.
 
         Args:

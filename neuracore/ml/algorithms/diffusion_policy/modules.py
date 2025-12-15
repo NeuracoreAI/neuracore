@@ -2,7 +2,7 @@
 
 import logging
 import math
-from typing import Any, Optional, Union
+from typing import Any
 
 import einops
 import numpy as np
@@ -104,7 +104,7 @@ class SpatialSoftmax(nn.Module):
     """
 
     def __init__(
-        self, input_shape: tuple[int, int, int], num_kp: Optional[int] = None
+        self, input_shape: tuple[int, int, int], num_kp: int | None = None
     ) -> None:
         """Initialize SpatialSoftmax layer.
 
@@ -274,8 +274,8 @@ class DiffusionConditionalUnet1d(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        timestep: Union[torch.Tensor, int],
-        global_cond: Optional[torch.Tensor] = None,
+        timestep: torch.Tensor | int,
+        global_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass through the UNet.
 

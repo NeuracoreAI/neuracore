@@ -5,7 +5,7 @@ including algorithm discovery, dataset resolution, and job status tracking.
 """
 
 import concurrent
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import requests
 from neuracore_types import (
@@ -66,8 +66,8 @@ def start_training_run(
     gpu_type: str,
     num_gpus: int,
     frequency: int,
-    input_robot_data_spec: Optional[RobotDataSpec] = None,
-    output_robot_data_spec: Optional[RobotDataSpec] = None,
+    input_robot_data_spec: RobotDataSpec | None = None,
+    output_robot_data_spec: RobotDataSpec | None = None,
 ) -> dict:
     """Start a new training run.
 
