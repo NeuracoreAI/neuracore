@@ -4,7 +4,7 @@ import logging
 import os
 import traceback
 from pathlib import Path
-from typing import Optional, cast
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -63,10 +63,10 @@ class DistributedTrainer:
         save_freq: int = 1,
         save_checkpoints: bool = True,
         keep_last_n_checkpoints: int = 5,
-        clip_grad_norm: Optional[float] = None,
+        clip_grad_norm: float | None = None,
         rank: int = 0,
         world_size: int = 1,
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
     ):
         """Initialize the distributed trainer.
 

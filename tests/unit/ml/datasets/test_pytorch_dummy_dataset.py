@@ -405,7 +405,7 @@ class TestPytorchDummyDataset:
                 attr_value = getattr(joint_data, attr_name)
                 if isinstance(attr_value, torch.Tensor) and len(attr_value.shape) > 0:
                     # Time dimension should reflect prediction horizon
-                    assert attr_value.shape[0] == 20
+                    assert attr_value.shape[1] == 20
 
     @pytest.mark.parametrize("horizon", [1, 5, 10, 20])
     def test_different_prediction_horizons(self, horizon):
@@ -425,7 +425,7 @@ class TestPytorchDummyDataset:
             for attr_name in vars(joint_data):
                 attr_value = getattr(joint_data, attr_name)
                 if isinstance(attr_value, torch.Tensor) and len(attr_value.shape) > 0:
-                    assert attr_value.shape[0] == horizon
+                    assert attr_value.shape[1] == horizon
 
 
 class TestDatasetStatistics:

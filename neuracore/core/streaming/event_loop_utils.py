@@ -8,9 +8,8 @@ performed even when no event loop is currently running.
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
 
-_neuracore_async_loop: Optional[asyncio.AbstractEventLoop] = None
+_neuracore_async_loop: asyncio.AbstractEventLoop | None = None
 _loop_lock = threading.Lock()
 
 

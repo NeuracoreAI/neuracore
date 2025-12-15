@@ -4,13 +4,11 @@ This module provides functions for creating and retrieving datasets
 for robot demonstrations.
 """
 
-from typing import Optional
-
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.data.dataset import Dataset
 
 
-def get_dataset(name: Optional[str] = None, id: Optional[str] = None) -> Dataset:
+def get_dataset(name: str | None = None, id: str | None = None) -> Dataset:
     """Get a dataset by name or ID.
 
     Args:
@@ -39,8 +37,8 @@ def get_dataset(name: Optional[str] = None, id: Optional[str] = None) -> Dataset
 
 def create_dataset(
     name: str,
-    description: Optional[str] = None,
-    tags: Optional[list[str]] = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
     shared: bool = False,
 ) -> Dataset:
     """Create a new dataset for robot demonstrations.

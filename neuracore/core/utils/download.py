@@ -2,14 +2,13 @@
 
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 import requests
 from tqdm import tqdm
 
 
 def download_with_progress(
-    url: str, description: str, destination: Optional[Path] = None
+    url: str, description: str, destination: Path | None = None
 ) -> Path:
     """Download a file from a URL with a progress bar.
 

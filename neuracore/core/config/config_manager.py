@@ -5,7 +5,6 @@ to disk.
 """
 
 from pathlib import Path
-from typing import Optional
 
 from pydantic import BaseModel, ValidationError
 
@@ -19,8 +18,8 @@ CONFIG_ENCODING = "utf-8"
 class Config(BaseModel):
     """Pydantic Schema for the data stored in the config file."""
 
-    api_key: Optional[str] = None
-    current_org_id: Optional[str] = None
+    api_key: str | None = None
+    current_org_id: str | None = None
 
 
 class ConfigManager:
@@ -28,7 +27,7 @@ class ConfigManager:
 
     def __init__(self) -> None:
         """Initialise the config manager."""
-        self._config: Optional[Config] = None
+        self._config: Config | None = None
 
     @property
     def config(self) -> Config:
@@ -118,7 +117,7 @@ class ConfigManager:
             raise ConfigError("Error removing config: cannot delete file")
 
 
-_config_manager: Optional[ConfigManager] = None
+_config_manager: ConfigManager | None = None
 
 
 def get_config_manager() -> ConfigManager:

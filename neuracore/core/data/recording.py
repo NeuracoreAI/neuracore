@@ -1,6 +1,6 @@
 """Recording class for managing synchronized data streams in a dataset."""
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from neuracore_types import DataSpec, DataType, RobotDataSpec
 
@@ -65,8 +65,8 @@ class Recording:
     def synchronize(
         self,
         frequency: int = 0,
-        data_spec: Optional[DataSpec] = None,
-        robot_data_spec: Optional[RobotDataSpec] = None,
+        data_spec: DataSpec | None = None,
+        robot_data_spec: RobotDataSpec | None = None,
     ) -> SynchronizedRecording:
         """Synchronize the episode with specified frequency and data types.
 

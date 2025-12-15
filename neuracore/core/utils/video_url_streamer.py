@@ -8,7 +8,7 @@ buffered IO reader to provide seamless streaming capabilities with PyAV.
 import io
 import logging
 from collections.abc import Iterator
-from typing import Any, Optional
+from typing import Any
 
 import av
 import numpy as np
@@ -44,7 +44,7 @@ class StreamingReader(io.BufferedIOBase):
         self.eof = False
         self.leftover = None
 
-    def read(self, size: Optional[int] = -1) -> bytes:
+    def read(self, size: int | None = -1) -> bytes:
         """Read bytes from the combined buffer and streaming response.
 
         Reads data first from the buffer, then seamlessly transitions to
@@ -185,7 +185,7 @@ class VideoStreamer:
         """
         self.video_url = video_url
         self.buffer_size = buffer_size
-        self.response: Optional[requests.Response] = None
+        self.response: requests.Response | None = None
         self.container = None
         self.video_stream = None
         self.frame_count = 0

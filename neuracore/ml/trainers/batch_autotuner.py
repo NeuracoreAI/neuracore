@@ -2,7 +2,7 @@
 
 import logging
 import time
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -21,7 +21,7 @@ class BatchSizeAutotuner:
         dataset: Dataset,
         model: NeuracoreModel,
         model_kwargs: dict[str, Any],
-        dataloader_kwargs: Optional[dict[str, Any]] = None,
+        dataloader_kwargs: dict[str, Any] | None = None,
         min_batch_size: int = 8,
         max_batch_size: int = 512,
         num_iterations: int = 3,
@@ -181,7 +181,7 @@ def find_optimal_batch_size(
     dataset: Dataset,
     model: NeuracoreModel,
     model_kwargs: dict[str, Any],
-    dataloader_kwargs: Optional[dict[str, Any]] = None,
+    dataloader_kwargs: dict[str, Any] | None = None,
     min_batch_size: int = 8,
     max_batch_size: int = 512,
 ) -> int:

@@ -9,7 +9,6 @@ state and remote recording triggers.
 import asyncio
 import logging
 from concurrent.futures import Future
-from typing import Optional
 
 from aiohttp import ClientSession
 from neuracore_types import (
@@ -51,12 +50,12 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
 
     def __init__(
         self,
-        org_id: Optional[str] = None,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
-        enabled_manager: Optional[EnabledManager] = None,
-        background_coroutine_tracker: Optional[BackgroundCoroutineTracker] = None,
-        client_session: Optional[ClientSession] = None,
-        auth: Optional[Auth] = None,
+        org_id: str | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+        enabled_manager: EnabledManager | None = None,
+        background_coroutine_tracker: BackgroundCoroutineTracker | None = None,
+        client_session: ClientSession | None = None,
+        auth: Auth | None = None,
     ):
         """Initialize the recording state manager.
 
@@ -88,7 +87,7 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         self._expired_recording_ids: set[str] = set()
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
 
-    def get_current_recording_id(self, robot_id: str, instance: int) -> Optional[str]:
+    def get_current_recording_id(self, robot_id: str, instance: int) -> str | None:
         """Get the current recording ID for a robot instance.
 
         Args:
@@ -326,7 +325,7 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
                 self.updated_recording_state(is_recording=True, details=recording)
 
 
-_recording_manager: Optional[Future[RecordingStateManager]] = None
+_recording_manager: Future[RecordingStateManager] | None = None
 
 
 async def create_recording_state_manager() -> RecordingStateManager:

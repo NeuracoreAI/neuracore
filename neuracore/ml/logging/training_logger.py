@@ -2,7 +2,7 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -39,7 +39,7 @@ class TrainingLogger(ABC):
     def log_image(
         self,
         name: str,
-        image: Union[np.ndarray, torch.Tensor],
+        image: np.ndarray | torch.Tensor,
         step: int,
         dataformats: str = "CHW",
     ) -> None:
@@ -57,7 +57,7 @@ class TrainingLogger(ABC):
     def log_images(
         self,
         name: str,
-        images: Union[np.ndarray, torch.Tensor],
+        images: np.ndarray | torch.Tensor,
         step: int,
         dataformats: str = "NCHW",
     ) -> None:
@@ -75,7 +75,7 @@ class TrainingLogger(ABC):
     def log_histogram(
         self,
         name: str,
-        values: Union[np.ndarray, torch.Tensor],
+        values: np.ndarray | torch.Tensor,
         step: int,
     ) -> None:
         """Log a histogram of values.
@@ -110,7 +110,7 @@ class TrainingLogger(ABC):
 
     @abstractmethod
     def log_model_graph(
-        self, model: torch.nn.Module, input_to_model: Optional[torch.Tensor] = None
+        self, model: torch.nn.Module, input_to_model: torch.Tensor | None = None
     ) -> None:
         """Log the model computational graph.
 

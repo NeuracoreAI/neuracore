@@ -7,7 +7,6 @@ and a input to select which to use and saves to global config.
 
 import argparse
 import os
-from typing import Optional
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.config_manager import get_config_manager
@@ -17,7 +16,7 @@ from neuracore.core.organizations import Organization, list_my_orgs
 from ..const import MAX_INPUT_ATTEMPTS, REJECTION_INPUT
 
 
-def select_current_org(org_name_or_id: Optional[str] = None) -> Organization:
+def select_current_org(org_name_or_id: str | None = None) -> Organization:
     """Prompt the user to select on of their organizations.
 
     Args:

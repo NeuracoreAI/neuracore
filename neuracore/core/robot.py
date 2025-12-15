@@ -14,7 +14,6 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from threading import Lock
-from typing import Optional
 from warnings import warn
 
 import requests
@@ -46,11 +45,11 @@ class Robot:
         self,
         robot_name: str,
         instance: int,
-        urdf_path: Optional[str] = None,
-        mjcf_path: Optional[str] = None,
+        urdf_path: str | None = None,
+        mjcf_path: str | None = None,
         overwrite: bool = False,
         shared: bool = False,
-        org_id: Optional[str] = None,
+        org_id: str | None = None,
     ):
         """Initialize a Robot instance with configuration parameters.
 
@@ -79,8 +78,8 @@ class Robot:
         self.mjcf_path = mjcf_path
         self.overwrite = overwrite
         self.shared = shared
-        self.id: Optional[str] = None
-        self.archived: Optional[bool] = None
+        self.id: str | None = None
+        self.archived: bool | None = None
         self._auth: Auth = get_auth()
         self._temp_dir = None
         self._data_streams: dict[str, DataStream] = dict()
@@ -186,7 +185,7 @@ class Robot:
             raise ValueError("Stream already exists")
         self._data_streams[stream_id] = stream
 
-    def get_data_stream(self, stream_id: str) -> Optional[DataStream]:
+    def get_data_stream(self, stream_id: str) -> DataStream | None:
         """Retrieve a data stream by its identifier.
 
         Args:
@@ -333,7 +332,7 @@ class Robot:
             robot_id=self.id, instance=self.instance
         )
 
-    def get_current_recording_id(self) -> Optional[str]:
+    def get_current_recording_id(self) -> str | None:
         """Get the ID of the current active recording session.
 
         Returns:
@@ -521,8 +520,8 @@ _robot_name_id_mapping: dict[str, str] = {}
 def init(
     robot_name: str,
     instance: int,
-    urdf_path: Optional[str] = None,
-    mjcf_path: Optional[str] = None,
+    urdf_path: str | None = None,
+    mjcf_path: str | None = None,
     overwrite: bool = False,
     shared: bool = False,
 ) -> Robot:

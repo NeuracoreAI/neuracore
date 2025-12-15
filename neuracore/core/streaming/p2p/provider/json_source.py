@@ -10,7 +10,6 @@ import concurrent.futures
 import json
 import time
 from asyncio import AbstractEventLoop
-from typing import Optional
 
 from pyee.asyncio import AsyncIOEventEmitter
 
@@ -35,7 +34,7 @@ class JSONSource(AsyncIOEventEmitter):
         self,
         mid: str,
         stream_enabled: EnabledManager,
-        loop: Optional[AbstractEventLoop] = None,
+        loop: AbstractEventLoop | None = None,
     ):
         """Initialize the JSON source.
 
@@ -47,9 +46,9 @@ class JSONSource(AsyncIOEventEmitter):
         self.loop = loop or get_running_loop()
         super().__init__(self.loop)
         self.mid = mid
-        self._last_state: Optional[dict] = None
+        self._last_state: dict | None = None
         self._last_update_time: float = 0
-        self.submit_task: Optional[concurrent.futures.Future[None]] = None
+        self.submit_task: concurrent.futures.Future[None] | None = None
         self.stream_enabled = stream_enabled
 
     def publish(self, state: dict) -> None:
@@ -69,7 +68,7 @@ class JSONSource(AsyncIOEventEmitter):
                 self._submit_event(), self.loop
             )
 
-    def get_last_state(self) -> Optional[str]:
+    def get_last_state(self) -> str | None:
         """Get the last published state as a JSON string.
 
         Returns:

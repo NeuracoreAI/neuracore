@@ -9,7 +9,6 @@ cloud upload functionality.
 import logging
 import threading
 from abc import ABC
-from typing import Optional
 
 from neuracore_types import CameraData, DataType, NCData
 
@@ -41,8 +40,8 @@ class DataStream(ABC):
         This must be kept lightweight and not perform any blocking operations.
         """
         self._recording = False
-        self._recording_id: Optional[str] = None
-        self._latest_data: Optional[NCData] = None
+        self._recording_id: str | None = None
+        self._latest_data: NCData | None = None
         self.lock = threading.Lock()
 
     def start_recording(self, recording_id: str) -> None:
@@ -82,7 +81,7 @@ class DataStream(ABC):
         """
         return self._recording
 
-    def get_latest_data(self) -> Optional[NCData]:
+    def get_latest_data(self) -> NCData | None:
         """Get the latest data from the stream.
 
         Returns:
@@ -108,7 +107,7 @@ class JsonDataStream(DataStream):
         super().__init__()
         self.data_type = data_type
         self.data_type_name = data_type_name
-        self._streamer: Optional[StreamingJsonUploader] = None
+        self._streamer: StreamingJsonUploader | None = None
 
     def start_recording(self, recording_id: str) -> None:
         """Start JSON data recording.
@@ -167,8 +166,8 @@ class VideoDataStream(DataStream):
         self.camera_id = camera_id
         self.width = width
         self.height = height
-        self._lossless_encoder: Optional[StreamingVideoUploader] = None
-        self._lossy_encoder: Optional[StreamingVideoUploader] = None
+        self._lossless_encoder: StreamingVideoUploader | None = None
+        self._lossy_encoder: StreamingVideoUploader | None = None
 
     def start_recording(self, recording_id: str) -> None:
         """Start video recording.

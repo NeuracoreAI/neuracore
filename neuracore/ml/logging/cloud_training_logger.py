@@ -3,7 +3,7 @@
 import logging
 import threading
 import time
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import requests
@@ -36,7 +36,7 @@ class CloudTrainingLogger(TrainingLogger):
 
         # Cloud sync setup
         self._stop_sync = threading.Event()
-        self._sync_thread: Optional[threading.Thread] = None
+        self._sync_thread: threading.Thread | None = None
         self._last_sync_time: float = 0.0
         # Maps log name, to a dict of (step, value) pairs
         self._store: dict[str, dict[int, Any]] = {}
@@ -67,7 +67,7 @@ class CloudTrainingLogger(TrainingLogger):
     def log_image(
         self,
         name: str,
-        image: Union[np.ndarray, torch.Tensor],
+        image: np.ndarray | torch.Tensor,
         step: int,
         dataformats: str = "CHW",
     ) -> None:
@@ -84,7 +84,7 @@ class CloudTrainingLogger(TrainingLogger):
     def log_images(
         self,
         name: str,
-        images: Union[np.ndarray, torch.Tensor],
+        images: np.ndarray | torch.Tensor,
         step: int,
         dataformats: str = "NCHW",
     ) -> None:
@@ -101,7 +101,7 @@ class CloudTrainingLogger(TrainingLogger):
     def log_histogram(
         self,
         name: str,
-        values: Union[np.ndarray, torch.Tensor],
+        values: np.ndarray | torch.Tensor,
         step: int,
     ) -> None:
         """Log a histogram of values.
@@ -127,7 +127,7 @@ class CloudTrainingLogger(TrainingLogger):
     def log_hyperparameters(
         self,
         hparams: dict[str, Any],
-        metrics: Optional[dict[str, float]] = None,
+        metrics: dict[str, float] | None = None,
     ) -> None:
         """Log hyperparameters and optionally metrics.
 
@@ -138,7 +138,7 @@ class CloudTrainingLogger(TrainingLogger):
         pass  # TODO: "Not yet supported for cloud. Coming soon.
 
     def log_model_graph(
-        self, model: torch.nn.Module, input_to_model: Optional[torch.Tensor] = None
+        self, model: torch.nn.Module, input_to_model: torch.Tensor | None = None
     ) -> None:
         """Log the model computational graph.
 

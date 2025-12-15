@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from enum import Enum
 from importlib import import_module
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pink
@@ -28,8 +27,8 @@ class RobotInfo:
     """Robot information for registration with Neuracore"""
 
     name: str
-    urdf_path: Optional[str] = None
-    mjcf_path: Optional[str] = None
+    urdf_path: str | None = None
+    mjcf_path: str | None = None
     description: str = ""
 
 
@@ -142,8 +141,8 @@ class Robot:
     def process_gripper_state(
         self,
         gripper_joint_names: list[str],
-        gripper_open_amount: Optional[float] = None,
-        gripper_open_width: Optional[float] = None,
+        gripper_open_amount: float | None = None,
+        gripper_open_width: float | None = None,
     ) -> dict[str, float]:
         """
         Process gripper state to get joint positions.

@@ -2,7 +2,7 @@
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Optional, Union, cast
+from typing import TYPE_CHECKING, Union, cast
 
 import requests
 from neuracore_types import RobotDataSpec, SynchronizedDatasetStatistics
@@ -28,7 +28,7 @@ class SynchronizedDataset:
         id: str,
         dataset: "Dataset",
         frequency: int,
-        robot_data_spec: Optional[RobotDataSpec],
+        robot_data_spec: RobotDataSpec | None,
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 1,
     ):
@@ -101,7 +101,7 @@ class SynchronizedDataset:
         return len(self.dataset)
 
     def __getitem__(
-        self, idx: Union[int, slice]
+        self, idx: int | slice
     ) -> Union["SynchronizedRecording", "SynchronizedDataset"]:
         """Support for indexing and slicing dataset episodes.
 

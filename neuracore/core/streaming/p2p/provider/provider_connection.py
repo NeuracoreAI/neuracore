@@ -8,7 +8,7 @@ Handles SDP negotiation, ICE candidate exchange, and connection lifecycle.
 import asyncio
 import json
 import logging
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from aiohttp import ClientSession
 from aiortc import (
@@ -51,10 +51,10 @@ class PierToPierProviderConnection:
         remote_stream_id: str,
         connection_details: OpenConnectionDetails,
         client_session: ClientSession = None,
-        org_id: Optional[str] = None,
-        enabled_manager: Optional[EnabledManager] = None,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
-        auth: Optional[Auth] = None,
+        org_id: str | None = None,
+        enabled_manager: EnabledManager | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+        auth: Auth | None = None,
     ) -> None:
         """Initialize the connection.
 

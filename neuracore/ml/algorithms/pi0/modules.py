@@ -1,8 +1,8 @@
 """Gemma MoE model with custom attention."""
 
 import math
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -49,11 +49,11 @@ class CustomGemmaAttention(GemmaAttention):
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        past_key_value: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        attention_mask: torch.Tensor | None,
+        past_key_value: Cache | None = None,
+        cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Forward pass for the CustomGemmaAttention module.
 
         Args:
@@ -206,10 +206,10 @@ class GemmaMoELayer(nn.Module):
     def forward(
         self,
         hidden_states: dict[str, torch.FloatTensor],
-        expert_attention_masks: Optional[dict[str, torch.Tensor]] = None,
-        mix_attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[dict[str, torch.LongTensor]] = None,
-        past_key_values: Optional[dict[str, DynamicCache]] = None,
+        expert_attention_masks: dict[str, torch.Tensor] | None = None,
+        mix_attention_mask: torch.Tensor | None = None,
+        position_ids: dict[str, torch.LongTensor] | None = None,
+        past_key_values: dict[str, DynamicCache] | None = None,
         use_cache: bool = False,
     ) -> dict[str, torch.FloatTensor]:
         """Forward pass for the GemmaMoELayer.
@@ -356,10 +356,10 @@ class GemmaMoE(nn.Module):
     def forward(
         self,
         hidden_states: dict[str, torch.FloatTensor],
-        expert_attention_masks: Optional[dict[str, torch.Tensor]] = None,
-        mix_attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[dict[str, torch.LongTensor]] = None,
-        past_key_values: Optional[dict[str, DynamicCache]] = None,
+        expert_attention_masks: dict[str, torch.Tensor] | None = None,
+        mix_attention_mask: torch.Tensor | None = None,
+        position_ids: dict[str, torch.LongTensor] | None = None,
+        past_key_values: dict[str, DynamicCache] | None = None,
         use_cache: bool = False,
     ) -> torch.Tensor:
         """Forward pass for the GemmaMoE model.
@@ -452,7 +452,7 @@ class ActionEncoder(nn.Module):
         self.linear_3 = nn.Linear(width, width)
 
     def forward(
-        self, action: torch.Tensor, time_emb: Optional[torch.Tensor] = None
+        self, action: torch.Tensor, time_emb: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Forward pass for the ActionEncoder module.
 

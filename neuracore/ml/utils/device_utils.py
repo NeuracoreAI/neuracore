@@ -1,11 +1,9 @@
 """Device allocation utils."""
 
-from typing import Optional
-
 import torch
 
 
-def get_default_device(gpu_index: Optional[int] = None) -> torch.device:
+def get_default_device(gpu_index: int | None = None) -> torch.device:
     """Get the default device for PyTorch operations.
 
     Args:

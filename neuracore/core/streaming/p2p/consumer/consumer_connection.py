@@ -8,7 +8,6 @@ Handles SDP negotiation, ICE candidate exchange, and connection lifecycle.
 import asyncio
 import json
 import logging
-from typing import Optional, Union
 
 from aiohttp import ClientSession
 from aiortc import (
@@ -60,10 +59,10 @@ class PierToPierConsumerConnection:
         connection_details: OpenConnectionDetails,
         expected_tracks: list[RobotStreamTrack],
         client_session: ClientSession = None,
-        org_id: Optional[str] = None,
-        enabled_manager: Optional[EnabledManager] = None,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
-        auth: Optional[Auth] = None,
+        org_id: str | None = None,
+        enabled_manager: EnabledManager | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+        auth: Auth | None = None,
     ) -> None:
         """Initialize the connection.
 
@@ -161,7 +160,7 @@ class PierToPierConsumerConnection:
         assert data_channel.label == track.mid, "Incorrect data channel for track"
 
         @data_channel.on("message")
-        def on_message(message: Union[bytes, str]) -> None:
+        def on_message(message: bytes | str) -> None:
             assert isinstance(message, str), "Only string messages supported."
             self.latest_data = merge_sync_points(
                 self.latest_data, parse_sync_point(message, track)

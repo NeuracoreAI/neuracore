@@ -7,7 +7,6 @@ the application.
 """
 
 import os
-from typing import Optional
 
 import requests
 
@@ -33,7 +32,7 @@ class Auth(metaclass=SingletonMetaclass):
         """Initialize the Auth instance and load saved configuration."""
         self._access_token = None
 
-    def login(self, api_key: Optional[str] = None) -> None:
+    def login(self, api_key: str | None = None) -> None:
         """Authenticate with the Neuracore server using an API key.
 
         Attempts authentication using the provided API key, environment variable,
@@ -144,7 +143,7 @@ class Auth(metaclass=SingletonMetaclass):
             )
 
     @property
-    def access_token(self) -> Optional[str]:
+    def access_token(self) -> str | None:
         """Get the current access token.
 
         Returns:
@@ -186,7 +185,7 @@ class Auth(metaclass=SingletonMetaclass):
 _auth = Auth()
 
 
-def login(api_key: Optional[str] = None) -> None:
+def login(api_key: str | None = None) -> None:
     """Global convenience function for authentication.
 
     Args:

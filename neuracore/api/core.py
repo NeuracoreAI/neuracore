@@ -8,7 +8,6 @@ recording sessions.
 
 import logging
 import time
-from typing import Optional
 from warnings import warn
 
 from neuracore.core.config.config_manager import get_config_manager
@@ -31,7 +30,7 @@ from .globals import GlobalSingleton
 logger = logging.getLogger(__name__)
 
 
-def _get_robot(robot_name: Optional[str], instance: int) -> Robot:
+def _get_robot(robot_name: str | None, instance: int) -> Robot:
     """Get a robot by name and instance.
 
     Retrieves either the active robot from global state or looks up a specific
@@ -73,7 +72,7 @@ def validate_version() -> None:
         GlobalSingleton()._has_validated_version = True
 
 
-def login(api_key: Optional[str] = None) -> None:
+def login(api_key: str | None = None) -> None:
     """Authenticate with the Neuracore server.
 
     Establishes authentication using an API key from the parameter, environment
@@ -134,8 +133,8 @@ def set_organization(id_or_name: str) -> None:
 def connect_robot(
     robot_name: str,
     instance: int = 0,
-    urdf_path: Optional[str] = None,
-    mjcf_path: Optional[str] = None,
+    urdf_path: str | None = None,
+    mjcf_path: str | None = None,
     overwrite: bool = False,
     shared: bool = False,
 ) -> Robot:
@@ -178,7 +177,7 @@ def connect_robot(
     return robot
 
 
-def is_recording(robot_name: Optional[str] = None, instance: int = 0) -> bool:
+def is_recording(robot_name: str | None = None, instance: int = 0) -> bool:
     """Check if a robot is currently recording.
 
     Args:
@@ -193,7 +192,7 @@ def is_recording(robot_name: Optional[str] = None, instance: int = 0) -> bool:
     return robot.is_recording()
 
 
-def start_recording(robot_name: Optional[str] = None, instance: int = 0) -> None:
+def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
     """Start recording data for a specific robot.
 
     Begins a new recording session for the specified robot, capturing all
@@ -218,7 +217,7 @@ def start_recording(robot_name: Optional[str] = None, instance: int = 0) -> None
 
 
 def stop_recording(
-    robot_name: Optional[str] = None, instance: int = 0, wait: bool = False
+    robot_name: str | None = None, instance: int = 0, wait: bool = False
 ) -> None:
     """Stop recording data for a specific robot.
 
@@ -254,7 +253,7 @@ def stop_recording(
         time.sleep(2.0)
 
 
-def stop_live_data(robot_name: Optional[str] = None, instance: int = 0) -> None:
+def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:
     """Stop sharing live data for active monitoring from the Neuracore platform.
 
     Terminates the live data streaming connection that allows real-time
@@ -276,7 +275,7 @@ def stop_live_data(robot_name: Optional[str] = None, instance: int = 0) -> None:
     StreamManagerOrchestrator().remove_manager(robot.id, robot.instance)
 
 
-def cancel_recording(robot_name: Optional[str] = None, instance: int = 0) -> None:
+def cancel_recording(robot_name: str | None = None, instance: int = 0) -> None:
     """Cancel the current recording for a specific robot without saving any data.
 
     Args:

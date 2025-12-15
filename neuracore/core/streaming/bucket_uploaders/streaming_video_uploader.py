@@ -11,8 +11,8 @@ import json
 import logging
 import queue
 import threading
+from collections.abc import Callable
 from fractions import Fraction
-from typing import Callable, Optional
 
 import av
 import numpy as np
@@ -53,12 +53,12 @@ class StreamingVideoUploader(BucketUploader):
         data_type_name: str,
         width: int,
         height: int,
-        transform_frame: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        transform_frame: Callable[[np.ndarray], np.ndarray] | None = None,
         codec: str = "libx264",
         pixel_format: str = "yuv444p10le",
         chunk_size: int = CHUNK_SIZE,
         video_name: str = "lossless.mp4",
-        codec_context_options: Optional[dict[str, str]] = None,
+        codec_context_options: dict[str, str] | None = None,
     ):
         """Initialize a streaming video encoder.
 
@@ -148,8 +148,8 @@ class StreamingVideoUploader(BucketUploader):
         self.stream.time_base = Fraction(1, PTS_FRACT)
 
         # Keep track of timestamps
-        self.first_timestamp: Optional[float] = None
-        self.last_pts: Optional[int] = None
+        self.first_timestamp: float | None = None
+        self.last_pts: int | None = None
 
         # Track bytes and buffer positions
         self.total_bytes_written = 0

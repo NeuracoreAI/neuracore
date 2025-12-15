@@ -7,7 +7,6 @@ sources via the Neuracore platform's live data streaming capabilities.
 """
 
 import time
-from typing import Optional
 
 from neuracore_types import DataType, JointData, SynchronizedPoint
 
@@ -24,7 +23,7 @@ from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
 
 
 def _maybe_add_existing_data(
-    existing: Optional[JointData], to_add: JointData
+    existing: JointData | None, to_add: JointData
 ) -> JointData:
     """Merge joint data from multiple streams into a single data structure.
 
@@ -83,7 +82,7 @@ def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
 
 
 def get_latest_sync_point(
-    robot: Optional[Robot] = None, include_remote: bool = True
+    robot: Robot | None = None, include_remote: bool = True
 ) -> SynchronizedPoint:
     """Create a synchronized data point from current robot sensor streams.
 
@@ -97,7 +96,6 @@ def get_latest_sync_point(
     Raises:
         NotImplementedError: If an unsupported stream type is encountered.
     """
-    # TODO: [Refactor] Move away from these if statements
     robot = GlobalSingleton()._active_robot
     if robot is None:
         raise ValueError("No active robot found. Please initialize a robot instance.")
@@ -106,7 +104,7 @@ def get_latest_sync_point(
         stream_data = stream.get_latest_data()
         assert stream_data is not None
         dt_name, name_of_sensor_data = stream_name.split(":", 1)
-        dt = DataType[dt_name.upper()]
+        dt = DataType[dt_name]
         if dt not in sync_point.data:
             sync_point[dt] = {}
         sync_point[dt][name_of_sensor_data] = stream_data

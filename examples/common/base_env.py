@@ -1,7 +1,5 @@
 """Base MuJoCo environment classes with improved organization."""
 
-from typing import Optional
-
 import mujoco
 import numpy as np
 from pydantic import BaseModel
@@ -11,8 +9,8 @@ class CameraData(BaseModel):
     """Camera observation data structure."""
 
     rgb: np.ndarray
-    depth: Optional[np.ndarray] = None
-    point_cloud: Optional[np.ndarray] = None
+    depth: np.ndarray | None = None
+    point_cloud: np.ndarray | None = None
 
     class Config:
         arbitrary_types_allowed = True
@@ -25,12 +23,12 @@ class Observation(BaseModel):
     qvel: dict[str, float]
     env_state: np.ndarray
     cameras: dict[str, CameraData]
-    mocap_pose_left: Optional[np.ndarray] = None
-    mocap_pose_right: Optional[np.ndarray] = None
-    gripper_ctrl: Optional[np.ndarray] = None
-    reward: Optional[float] = None
-    end_effector_poses: Optional[dict[str, list[float]]] = None
-    gripper_open_amounts: Optional[dict[str, float]] = None
+    mocap_pose_left: np.ndarray | None = None
+    mocap_pose_right: np.ndarray | None = None
+    gripper_ctrl: np.ndarray | None = None
+    reward: float | None = None
+    end_effector_poses: dict[str, list[float]] | None = None
+    gripper_open_amounts: dict[str, float] | None = None
 
     class Config:
         arbitrary_types_allowed = True
@@ -304,7 +302,7 @@ class BimanualViperXTask(MuJoCoEnvironment):
     )
 
     def __init__(
-        self, model_path: str, random: Optional[np.random.Generator] = None
+        self, model_path: str, random: np.random.Generator | None = None
     ) -> None:
         """Initialize bimanual ViperX task.
 
@@ -380,7 +378,7 @@ class BimanualViperXTask(MuJoCoEnvironment):
         """
         raise NotImplementedError
 
-    def _get_end_effector_pose(self, effector_name: str) -> Optional[list[float]]:
+    def _get_end_effector_pose(self, effector_name: str) -> list[float] | None:
         """Get end effector pose from MuJoCo body positions and orientations.
 
         Args:

@@ -4,13 +4,11 @@ This streamlines disabling all live data producers useful during testing and
 validation.
 """
 
-from typing import Union
-
 from neuracore.core.const import CONSUME_LIVE_DATA, PROVIDE_LIVE_DATA
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 
-_global_provide_live_data_manager: Union[EnabledManager, None] = None
+_global_provide_live_data_manager: EnabledManager | None = None
 
 
 def get_provide_live_data_enabled_manager() -> EnabledManager:
@@ -27,7 +25,7 @@ def get_provide_live_data_enabled_manager() -> EnabledManager:
     return _global_provide_live_data_manager
 
 
-_global_consume_live_data_manager: Union[EnabledManager, None] = None
+_global_consume_live_data_manager: EnabledManager | None = None
 
 
 def get_consume_live_data_enabled_manager() -> EnabledManager:

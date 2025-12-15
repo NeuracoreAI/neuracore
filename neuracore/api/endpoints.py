@@ -6,7 +6,6 @@ including deployment, status monitoring, and deletion operations.
 """
 
 import json
-from typing import Optional
 
 import requests
 from neuracore_types import DataType, SynchronizedPoint
@@ -30,9 +29,9 @@ from neuracore.core.get_latest_sync_point import (
 def policy(
     model_input_order: dict[DataType, list[str]],
     model_output_order: dict[DataType, list[str]],
-    train_run_name: Optional[str] = None,
-    model_file: Optional[str] = None,
-    device: Optional[str] = None,
+    train_run_name: str | None = None,
+    model_file: str | None = None,
+    device: str | None = None,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process without any server.
 
@@ -65,9 +64,9 @@ def policy(
 def policy_local_server(
     model_input_order: dict[DataType, list[str]],
     model_output_order: dict[DataType, list[str]],
-    train_run_name: Optional[str] = None,
-    model_file: Optional[str] = None,
-    device: Optional[str] = None,
+    train_run_name: str | None = None,
+    model_file: str | None = None,
+    device: str | None = None,
     port: int = 8080,
     host: str = "127.0.0.1",
 ) -> LocalServerPolicy:
@@ -121,7 +120,7 @@ def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:
 
 
 # Deployment management functions
-def deploy_model(job_id: str, name: str, ttl: Optional[int] = None) -> dict:
+def deploy_model(job_id: str, name: str, ttl: int | None = None) -> dict:
     """Deploy a trained model to a managed endpoint.
 
     Takes a completed training job and deploys the resulting model to a managed
@@ -228,7 +227,7 @@ def delete_endpoint(endpoint_id: str) -> None:
 
 
 def get_latest_sync_point(
-    robot_name: Optional[str] = None, instance: int = 0, include_remote: bool = True
+    robot_name: str | None = None, instance: int = 0, include_remote: bool = True
 ) -> SynchronizedPoint:
     """Creates a sync point from gathering data logged by a robot.
 
@@ -255,7 +254,7 @@ def get_latest_sync_point(
 
 
 def check_remote_nodes_connected(
-    num_remote_nodes: int = 0, robot_name: Optional[str] = None, instance: int = 0
+    num_remote_nodes: int = 0, robot_name: str | None = None, instance: int = 0
 ) -> bool:
     """Checks if the required remote nodes are connected to the robot.
 

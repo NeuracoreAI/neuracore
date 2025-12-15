@@ -81,6 +81,11 @@ def mock_auth_requests():
             f"{API_URL}/org-management/my-orgs",
             json=[{"org": {"id": MOCKED_ORG_ID, "name": "test organization"}}],
         )
+        m.get(
+            f"{API_URL}/org/{MOCKED_ORG_ID}/datasets/dataset_123/robot_ids",
+            json=[],
+            status_code=200,
+        )
 
         yield m
 

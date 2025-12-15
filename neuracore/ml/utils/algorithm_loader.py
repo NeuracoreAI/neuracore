@@ -14,7 +14,6 @@ import sys
 import traceback
 import types
 from pathlib import Path
-from typing import Optional
 
 from ..core.neuracore_model import NeuracoreModel
 
@@ -182,7 +181,7 @@ class AlgorithmLoader:
 
     def _find_model_in_module(
         self, module: types.ModuleType, module_name: str
-    ) -> Optional[type[NeuracoreModel]]:
+    ) -> type[NeuracoreModel] | None:
         """Search for NeuracoreModel subclasses within an imported module.
 
         Inspects all attributes of a module to find classes that inherit from
@@ -220,7 +219,7 @@ class AlgorithmLoader:
             logger.warning(f"Error searching for models in {module_name}: {e}")
             return None
 
-    def _try_import_package(self, package_name: str) -> Optional[type[NeuracoreModel]]:
+    def _try_import_package(self, package_name: str) -> type[NeuracoreModel] | None:
         """Attempt to import the entire algorithm directory as a package.
 
         Tries to import the algorithm directory as a Python package and search
@@ -258,7 +257,7 @@ class AlgorithmLoader:
 
     def _try_import_module_by_path(
         self, file_path: Path, package_name: str
-    ) -> Optional[type[NeuracoreModel]]:
+    ) -> type[NeuracoreModel] | None:
         """Import a specific Python file using multiple import strategies.
 
         Attempts to import a Python file first as a package-relative module,

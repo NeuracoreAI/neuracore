@@ -9,7 +9,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from concurrent.futures import Future
-from typing import Optional
+from typing import TypeAlias
 
 from aiohttp import ClientSession
 from neuracore_types import (
@@ -21,7 +21,6 @@ from neuracore_types import (
     RobotInstanceIdentifier,
     VideoFormat,
 )
-from typing_extensions import TypeAlias
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -61,13 +60,13 @@ class OrgNodesManager(BaseSSEConsumer):
 
     def __init__(
         self,
-        org_id: Optional[str] = None,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
-        enabled_manager: Optional[EnabledManager] = None,
-        background_coroutine_tracker: Optional[BackgroundCoroutineTracker] = None,
-        client_session: Optional[ClientSession] = None,
-        auth: Optional[Auth] = None,
-        stream_manager_orchestrator: Optional[StreamManagerOrchestrator] = None,
+        org_id: str | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+        enabled_manager: EnabledManager | None = None,
+        background_coroutine_tracker: BackgroundCoroutineTracker | None = None,
+        client_session: ClientSession | None = None,
+        auth: Auth | None = None,
+        stream_manager_orchestrator: StreamManagerOrchestrator | None = None,
     ) -> None:
         """Initialize the organization node manager.
 
@@ -107,7 +106,7 @@ class OrgNodesManager(BaseSSEConsumer):
 
         self.last_nodes: InstanceStreamMap = defaultdict(dict)
 
-        self.last_update: Optional[AvailableRobotCapacityUpdate] = None
+        self.last_update: AvailableRobotCapacityUpdate | None = None
 
     def get_sse_client_config(self) -> EventSourceConfig:
         """Used to configure the event client to consume events from the server.
@@ -144,7 +143,7 @@ class OrgNodesManager(BaseSSEConsumer):
 
     def _get_last_robot_tracks(
         self, robot_id: str, robot_instance: int
-    ) -> Optional[AvailableRobotInstance]:
+    ) -> AvailableRobotInstance | None:
         if self.last_update is None:
             return None
 
