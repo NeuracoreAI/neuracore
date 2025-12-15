@@ -9,13 +9,9 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import cast
-from typing_extensions import Literal
+from typing import Any, Literal, cast
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.transforms as T
 from neuracore_types import (
     BatchedJointData,
     BatchedLanguageData,
@@ -29,7 +25,7 @@ from neuracore_types import (
     ModelInitDescription,
     ParallelGripperOpenAmountDataStats,
 )
-from transformers import AutoProcessor, PaliGemmaForConditionalGeneration
+from torch.optim.lr_scheduler import LambdaLR
 
 from neuracore.ml import (
     BatchedInferenceInputs,
@@ -46,10 +42,6 @@ logger = logging.getLogger(__name__)
 PROPRIO_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
 ACTION_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
 
-# Normalizers (kept for backward compatibility with the Neuracore pipeline)
-JOINT_STATE_NORMALIZER = MeanStdNormalizer
-ACTION_NORMALIZER = MeanStdNormalizer
-
 
 class Pi0(NeuracoreModel):
     """Neuracore-facing wrapper around the reference PI0 implementation."""
@@ -63,7 +55,7 @@ class Pi0(NeuracoreModel):
         paligemma_variant: str = "gemma_2b",
         action_expert_variant: str = "gemma_300m",
         use_pretrained_weights: bool = True,
-        pretrained_name_or_path: Optional[str] = "lerobot/pi0_base",
+        pretrained_name_or_path: str | None = "lerobot/pi0_base",
         time_sampling_beta_alpha: float = 1.5,
         time_sampling_beta_beta: float = 1.0,
         time_sampling_scale: float = 0.999,
@@ -86,7 +78,7 @@ class Pi0(NeuracoreModel):
     ):
         """Initialize the Neuracore Pi0 wrapper around the reference model."""
         super().__init__(model_init_description)
-        self.action_dim = self.dataset_description.joint_target_positions.max_len
+
         self.max_state_dim = self.max_action_dim = 32
         self.action_horizon = self.output_prediction_horizon
         self.vlm_max_text_tokens = vlm_max_text_tokens
@@ -148,8 +140,6 @@ class Pi0(NeuracoreModel):
                     self.proprio_dims[data_type] = (current_dim, current_dim + dim)
                     current_dim += dim
 
-        proprio_dim = current_dim
-
         # Setup output data
         self.max_output_size = 0
         output_stats = []
@@ -201,75 +191,33 @@ class Pi0(NeuracoreModel):
         )
 
         # Setup RGB cameras
-        num_rgbs = 0
         if DataType.RGB_IMAGES in self.input_data_types:
             stats = cast(
                 list[CameraDataStats], self.dataset_statistics[DataType.RGB_IMAGES]
             )
-            num_rgbs = len(stats)
+            len(stats)
 
-        self.vlm_max_tokens = num_rgbs * 256 + self.vlm_max_text_tokens
-
-        self.vlm = PaliGemmaForConditionalGeneration.from_pretrained(
-            VLM_BACKBONE, dtype=self.dtype, attn_implementation="eager"
-        )
-        self.vlm_processor = AutoProcessor.from_pretrained(
-            VLM_BACKBONE, padding_side="right"
-        )
-        self.vlm_embedding_module = self.vlm.get_input_embeddings()
-        assert self.vlm_processor.tokenizer.padding_side == "right"
-
-        # Disable finetuning of the VLM
-        for param in self.vlm.parameters():
-            param.requires_grad = False
-
-        # Create a mixture of experts (MoE) model consisting of 2 experts:
-        # 1. VLM expert
-        # 2. Action expert
-        # expert_configs = {
-        #     "vlm": MoeExpertConfig(
-        #         hidden_size=VLM_EXPERT_WIDTH,
-        #         intermediate_size=vlm_expert_intermediate_size,
-        #         head_dim=vlm_expert_head_dim,
-        #         num_attention_heads=vlm_expert_num_heads,
-        #         num_key_value_heads=vlm_expert_num_kv_heads,
-        #     ),
-        #     "action": MoeExpertConfig(
-        #         hidden_size=action_expert_width,
-        #         intermediate_size=action_expert_intermediate_size,
-        #         head_dim=action_expert_head_dim,
-        #         num_attention_heads=action_expert_num_heads,
-        #         num_key_value_heads=action_expert_num_kv_heads,
-        #     ),
-        # }
-        paligemma_config = get_gemma_config(PALIGEMMA_VARIANT)
-        action_expert_config = get_gemma_config(ACTION_EXPERT_VARIANT)
-
-        self.paligemma_with_expert = PaliGemmaWithExpertModel(
-            paligemma_config,
-            action_expert_config,
-            use_adarms=[False, False],
-            precision=self.dtype,
+        # Build PI0 config
+        self.config = PI0Config(
+            paligemma_variant=paligemma_variant,
+            action_expert_variant=action_expert_variant,
+            dtype=dtype,
+            chunk_size=self.output_prediction_horizon,
+            max_state_dim=self.max_state_dim,
+            max_action_dim=self.max_action_dim,
+            num_inference_steps=self.num_inference_steps,
+            time_sampling_beta_alpha=self.time_sampling_beta_alpha,
+            time_sampling_beta_beta=self.time_sampling_beta_beta,
+            time_sampling_scale=self.time_sampling_scale,
+            time_sampling_offset=self.time_sampling_offset,
+            min_period=self.min_period,
+            max_period=self.max_period,
+            gradient_checkpointing=self.gradient_checkpointing,
+            compile_model=self.compile_model,
+            compile_mode=self.compile_mode,
+            device=self.device,
         )
         self.gradient_checkpointing_enabled = False
-        # self.moe = GemmaMoE(moe_depth, expert_configs)
-        self.action_encoder = ActionEncoder(self.action_dim, action_expert_width)
-        self.time_embedding = SinusoidalPosEmb(action_expert_width)
-        self.proprio_encoder = nn.Linear(proprio_dim, action_expert_width)
-        self.action_decoder = nn.Linear(
-            action_expert_width,
-            self.action_dim,
-        )
-
-        gemma_config = self.vlm.config.text_config
-        self.using_pretrained_paligemma = (
-            gemma_config.intermediate_size == vlm_expert_intermediate_size
-            and gemma_config.hidden_size == VLM_EXPERT_WIDTH
-        )
-
-        # Load PaliGemma weights into VLM expert
-        if self.using_pretrained_paligemma:
-            self._load_pretrained_vlm_weights()
 
         # Core model from the reference implementation
         if self.use_pretrained_weights and self.pretrained_name_or_path:
@@ -282,20 +230,73 @@ class Pi0(NeuracoreModel):
         if self.config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        # # disable grads for VLM part of MoE if using pretrained
-        # if self.using_pretrained_paligemma:
-        #     for param in self.moe.get_parameters("vlm"):
-        #         param.requires_grad = False
+        self._setup_optimizer_param_groups()
 
-        # # Delete the language model to save memory (keep only embeddings)
-        # # Note: We delete model.language_model (the actual module), not
-        # # language_model (the property)
-        # del self.vlm.model.language_model
+        # # Resize the images to 224x224
+        # self.image_normalizer = torch.nn.Sequential(
+        #     T.Resize((224, 224)),
+        # )
 
-        # Resize the images to 224x224
-        self.image_normalizer = torch.nn.Sequential(
-            T.Resize((224, 224)),
-        )
+    def gradient_checkpointing_enable(self) -> None:
+        """Enable gradient checkpointing on the underlying PI0 model."""
+        self.model.gradient_checkpointing_enable()
+
+    def gradient_checkpointing_disable(self) -> None:
+        """Disable gradient checkpointing on the underlying PI0 model."""
+        self.model.gradient_checkpointing_disable()
+
+    def _setup_optimizer_param_groups(self) -> None:
+        """Setup optimizer parameter groups for the underlying PI0 model.
+
+        There are two logical groups: the VLM model and the action expert model.
+        You can either finetune everything or just the action expert while
+        freezing the VLM model.
+        """
+        if self.finetune_action_expert_only:
+            expert_params = []
+            for name, param in self.model.named_parameters():
+                if any(
+                    expert in name
+                    for expert in [
+                        "gemma_expert",
+                        "action_in_proj",
+                        "action_out_proj",
+                        "state_proj",
+                        "action_time_mlp_in",
+                        "action_time_mlp_out",
+                    ]
+                ):
+                    expert_params.append(param)
+            self.param_groups = [{
+                "params": expert_params,
+                "lr": self.optimizer_lr,
+            }]
+        elif self.freeze_language_model_only and not self.finetune_action_expert_only:
+            non_language_params = []
+            for name, param in self.model.named_parameters():
+                if any(
+                    non_language in name
+                    for non_language in [
+                        "gemma_expert",
+                        "vision_tower",
+                        "multi_modal",
+                        "action_in_proj",
+                        "action_out_proj",
+                        "state_proj",
+                        "action_time_mlp_in",
+                        "action_time_mlp_out",
+                    ]
+                ):
+                    non_language_params.append(param)
+            self.param_groups = [{
+                "params": non_language_params,
+                "lr": self.optimizer_lr,
+            }]
+        else:
+            self.param_groups = [{
+                "params": list(self.model.parameters()),
+                "lr": self.optimizer_lr,
+            }]
 
     def _combine_proprio(self, batch: BatchedInferenceInputs) -> torch.FloatTensor:
         """Combine different types of joint state data.
@@ -371,7 +372,7 @@ class Pi0(NeuracoreModel):
         image_masks = []
         for cam_id, input_rgb in enumerate(batched_rgb_data):
             last_frame = input_rgb.frame[:, -1, :, :, :]  # (B, 3, H, W)
-            image = self.image_normalizer(last_frame)
+            image = resize_with_pad_torch(last_frame, 224, 224)
             # Normalize from range [0,1] to [-1,1] as expected by siglip
             image = image * 2.0 - 1.0
             images.append(image)
@@ -416,24 +417,24 @@ class Pi0(NeuracoreModel):
 
         return language_tokens, language_mask
 
-    def _build_inputs_from_inference(
-        self, batch: BatchedInferenceSamples
+    def _build_inputs_from_batch(
+        self, batch: BatchedInferenceInputs
     ) -> tuple[
         list[torch.Tensor], list[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
     ]:
         images, image_masks = self._prepare_rgb_images(batch)
         lang_tokens, lang_masks = self._process_language_tokens(batch)
-        state = self._combine_normalized_joint_states(batch)
-        return images, image_masks, lang_tokens, lang_masks, state
+        proprios = self._combine_proprio(batch)
+        return images, image_masks, lang_tokens, lang_masks, proprios
 
     # ---------------------------------------------------------------- inference
-    def predict_action_chunk(self, batch: BatchedInferenceSamples) -> torch.Tensor:
+    def predict_action_chunk(self, batch: BatchedInferenceInputs) -> torch.Tensor:
         """Run inference to produce one chunk of actions."""
-        images, image_masks, lang_tokens, lang_masks, state = (
-            self._build_inputs_from_inference(batch)
+        images, image_masks, lang_tokens, lang_masks, proprios = (
+            self._build_inputs_from_batch(batch)
         )
         actions = self.model.sample_actions(
-            images, image_masks, lang_tokens, lang_masks, state
+            images, image_masks, lang_tokens, lang_masks, proprios
         )
         actions = actions[:, :, : self.action_dim]  # output pad to max action dim
         return actions
@@ -442,9 +443,9 @@ class Pi0(NeuracoreModel):
     def from_pretrained(
         cls,
         model_init_description: ModelInitDescription,
-        pretrained_name_or_path: Optional[str] = None,
+        pretrained_name_or_path: str | None = None,
         **kwargs: Any,
-    ) -> "Pi0":
+    ) -> Pi0:
         """Load a pretrained PI0 model while keeping the Neuracore model interface.
 
         By default, downloads weights from https://huggingface.co/lerobot/pi0_base
@@ -458,221 +459,20 @@ class Pi0(NeuracoreModel):
                 (e.g. cache_dir, force_download, token, revision).
 
         Returns:
-            torch.Tensor: Mixed attention mask.
+            Pi0 model with loaded pretrained weights.
         """
-        # Calculate sequence lengths for each block
-        vlm_len = vlm_seq_len if vlm_seq_len is not None else self.vlm_max_tokens
-        state_len = 1
-        action_len = self.action_horizon
-        total_seq_len = vlm_len + state_len + action_len
-
-        # Create base mask allowing full attention within each block
-        mask = torch.zeros(
-            (total_seq_len, total_seq_len), device=self.device, dtype=self.dtype
-        )
-
-        # (VLM): Can only attend to itself
-        mask[:vlm_len, :vlm_len] = 1
-
-        # (State / Action): Can attend to VLM
-        mask[vlm_len:, :vlm_len] = 1
-
-        # Proprio can attend to itself and vl
-        mask[vlm_len : vlm_len + state_len, : vlm_len + state_len] = 1
-
-        action_start = vlm_len + state_len
-        # Actions follow causal pattern
-        for i in range(0, action_len):
-            # Can attend to proprio and previous actions
-            mask[action_start + i, : action_start + i + 1] = 1
-
-        # Add batch dimension and head dimension
-        mask = mask.unsqueeze(0).unsqueeze(1)
-        mask = mask.expand(batch_size, 1, -1, -1)
-        # Convert to attention mask format (0 for attended positions, -inf for masked)
-        attention_mask = torch.where(mask == 1, 0.0, torch.finfo(self.dtype).min).to(
-            self.dtype
-        )
-        return attention_mask
-
-    def _create_pi0_position_ids(
-        self, batch_size: int, vlm_seq_len: int | None = None
-    ) -> dict[str, torch.Tensor]:
-        """Create position IDs for the Pi0 model.
-
-        Args:
-            batch_size: Size of the batch.
-            vlm_seq_len: Actual VLM sequence length.
-
-        Returns:
-            dict[str, torch.Tensor]: Position IDs for VLM and action blocks.
-        """
-        # VLM positions: Use actual sequence length
-        vlm_len = vlm_seq_len if vlm_seq_len is not None else self.vlm_max_tokens
-        vlm_pos = torch.arange(1, vlm_len + 1, device=self.device).type(self.dtype)
-        vlm_pos = vlm_pos.unsqueeze(0).expand(batch_size, -1)
-
-        # State and Action positions: Sequential positions for state and action sequence
-        state_action_pos = torch.arange(
-            1, 1 + self.action_horizon + 1, device=self.device
-        ).type(self.dtype)
-        state_action_pos = state_action_pos.unsqueeze(0).expand(batch_size, -1)
-
-        position_ids = {"vlm": vlm_pos, "action": state_action_pos}
-
-        return position_ids
-
-    def _forward_vlm_merged_text_images(
-        self,
-        images: list[torch.Tensor],
-        image_masks: list[torch.Tensor],
-        language_tokens: torch.Tensor,
-        language_masks: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass for merging text and images in the VLM.
-
-        Generates the mixed image-language embeddings and padding masks.
-
-        Args:
-            images: Input images tensor.
-            image_masks: Input image masks tensor.
-            language_tokens: Input language tokens tensor.
-            language_masks: Input language masks tensor.
-
-        Returns:
-            tuple[torch.Tensor, torch.Tensor]: Merged text and images
-                tensor, mixed padding mask.
-        """
-        embs = []
-        pad_masks = []
-
-        # iterate over num_cam images
-        for img, img_mask in zip(images, image_masks):
-            img_emb = self.vlm.model.get_image_features(img)
-            img_emb = img_emb.to(dtype=self.dtype, device=self.device)
-
-            bsize, num_img_embs = img_emb.shape[:2]
-            img_mask = (
-                img_mask[:, None].expand(bsize, num_img_embs).to(device=self.device)
-            )
-
-            embs.append(img_emb)
-            pad_masks.append(img_mask)
-
-        language_embeddings = self.vlm_embedding_module(language_tokens)
-        embs.append(language_embeddings)
-        pad_masks.append(language_masks)
-
-        embs = torch.cat(embs, dim=1)
-        pad_masks = torch.cat(pad_masks, dim=1)
-        return embs, pad_masks
-
-    def _sample_fm_time(self, batch_size: int) -> torch.Tensor:
-        """Sample flow matching timesteps.
-
-        Args:
-            batch_size: Size of the batch.
-
-        Returns:
-            torch.Tensor: Sampled timesteps.
-        """
-        z = self.flow_beta_dist.sample((batch_size,))
-        t = (1 - self.flow_sig_min) * (1 - z)
-        return t.to(self.device).to(self.dtype)
-
-    def _predict_action(
-        self,
-        merged_text_images: torch.Tensor,
-        proprio_embeds: torch.Tensor,
-        action: torch.Tensor,
-        t: torch.Tensor,
-        vlm_seq_len: int | None = None,
-        pad_masks: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Predict action sequence from observations.
-
-        Args:
-            merged_text_images: Merged text and images tensor.
-            proprio_embeds: Proprioceptive embeddings tensor.
-            action: Action tensor.
-            t: Time tensor.
-            vlm_seq_len: Actual VLM Embeddings sequence length.
-            pad_masks: Padding masks for the merged text and images tensor.
-
-        Returns:
-            torch.Tensor: Predicted action tensor.
-        """
-        batch_size = proprio_embeds.size(0)
-        time_cond = self.time_embedding(t)
-        # [B, H, E]
-        action_embeds = self.action_encoder(action, time_cond)
-        # [B, 1 + H, E]
-        proprio_embeds = proprio_embeds.unsqueeze(1)  # [B, 1, E]
-        proprio_action_tokens = torch.cat([proprio_embeds, action_embeds], dim=1)
-        # [B, 1 + H, E]
-        proprio_action_embeds = self.moe(
-            hidden_states={
-                "vlm": merged_text_images,
-                "action": proprio_action_tokens,
-            },
-            expert_attention_masks=self._create_expert_attention_masks(
-                batch_size, pad_masks
-            ),
-            mix_attention_mask=self._create_pi0_mix_attention_mask(
-                batch_size, vlm_seq_len
-            ),
-            position_ids=self._create_pi0_position_ids(batch_size, vlm_seq_len),
-        )["action"]
-        # [B, H, E]
-        action_embeds = proprio_action_embeds[:, 1:]
-        return self.action_decoder(action_embeds)
+        model = PI0Policy.from_pretrained(pretrained_name_or_path, **kwargs)
+        obj = cls(model_init_description)
+        obj.model = model
+        obj.config = model.config
+        return obj
 
     def forward(
         self, batch: BatchedInferenceInputs
     ) -> dict[DataType, list[BatchedNCData]]:
-        """Forward pass for generating actions.
-
-        Args:
-            batch: Batch of inference samples.
-
-        Returns:
-            dict[DataType, list[BatchedNCData]]: Model predictions with action sequences
-        """
-        batch_size = len(batch)
-
-        if DataType.RGB_IMAGES not in batch.inputs:
-            raise ValueError("No RGB images available")
-
-        images, image_masks = self._prepare_rgb_images(batch)
-        language_tokens, language_masks = self._process_language_tokens(batch)
-        merged_text_images, pad_masks = self._forward_vlm_merged_text_images(
-            images, image_masks, language_tokens, language_masks
-        )
-        proprio_states = self._combine_proprio(batch)
-        proprio_embeds = self.proprio_encoder(proprio_states)  # (B, E)
-
-        delta_t = 1.0 / self.num_inference_steps
-        t = torch.zeros(
-            batch_size, device=self.device, dtype=proprio_embeds.dtype
-        )  # (B,)
-        action = torch.randn(
-            (batch_size, self.action_horizon, self.action_dim),
-            device=self.device,
-            dtype=proprio_embeds.dtype,
-        )  # (B, H, A)
-        # Get the actual sequence length from the merged embeddings
-        actual_seq_len = merged_text_images.shape[1]
-
-        for _ in range(self.num_inference_steps):
-            action_vel = self._predict_action(
-                merged_text_images, proprio_embeds, action, t, actual_seq_len, pad_masks
-            )
-            action += delta_t * action_vel
-            t += delta_t
-
-        # (B, T, action_dim)
-        predictions = self.action_normalizer.unnormalize(action)
-
+        """Produce a ModelPrediction given an inference batch."""
+        actions = self.predict_action_chunk(batch)
+        predictions = self.action_normalizer.unnormalize(actions)
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
 
         for data_type in self.output_data_types:
@@ -698,7 +498,6 @@ class Pi0(NeuracoreModel):
 
         return output_tensors
 
-    # ---------------------------------------------------------------- training
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Perform a single training step.
 
@@ -714,7 +513,9 @@ class Pi0(NeuracoreModel):
             batch_size=batch.batch_size,
         )
 
-        proprios = self._combine_proprio(inference_sample)
+        images, image_masks, lang_tokens, lang_masks, proprios = (
+            self._build_inputs_from_batch(inference_sample)
+        )
 
         if set(batch.outputs.keys()) != set(self.output_data_types):
             raise ValueError(
@@ -739,22 +540,18 @@ class Pi0(NeuracoreModel):
         action_data = torch.cat(action_targets, dim=-1)  # (B, T, total_action_dim)
 
         target_actions = self.action_normalizer.normalize(
-            data=pad_vector(
-                batch.outputs.joint_target_positions.data, self.max_action_dim
-            )
+            data=pad_vector(action_data, self.action_dim)
         )
-        target_actions_mask = pad_vector(
-            batch.outputs.joint_target_positions.mask, self.max_action_dim
-        )
+        target_actions_mask = pad_vector(batch.outputs_mask, self.action_dim)
         # Pad to the max action dim after normalization to avoid padding artifacts
         target_actions = pad_vector(target_actions, self.max_action_dim).to(self.device)
-        target_mask = pad_vector(
-            batch.outputs.joint_target_positions.mask, self.max_action_dim
-        ).to(self.device)
+        target_mask = pad_vector(target_actions_mask, self.max_action_dim).to(
+            self.device
+        )
         target_actions = target_actions * target_mask
 
         losses = self.model.forward(
-            images, image_masks, lang_tokens, lang_masks, state, target_actions
+            images, image_masks, lang_tokens, lang_masks, proprios, target_actions
         )
         # Mask to the real action dims
         losses = losses[:, :, : self.action_dim]
@@ -835,6 +632,7 @@ class Pi0(NeuracoreModel):
             DataType.JOINT_TORQUES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.RGB_IMAGES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.LANGUAGE,
         }
 
