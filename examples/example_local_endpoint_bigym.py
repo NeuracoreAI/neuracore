@@ -29,7 +29,7 @@ CAMERA_NAMES = ["head"]
 
 # Specification of the order that will be fed into the model
 MODEL_INPUT_ORDER: DataSpec = {
-    DataType.JOINT_POSITIONS: JOINT_NAMES,
+    DataType.JOINT_POSITIONS: JOINT_NAMES[:-1],
     DataType.RGB_IMAGES: CAMERA_NAMES,
 }
 
@@ -68,7 +68,7 @@ def run_rollout(
         images = obs_to_imgs(obs)
 
         # Create a sync point manually without logging data to the robot
-        SynchronizedPoint(
+        sync_point = SynchronizedPoint(
             data={
                 DataType.JOINT_POSITIONS: {
                     k: JointData(value=v) for k, v in qpos.items()
@@ -85,7 +85,7 @@ def run_rollout(
         if idx_in_horizon == 0:
             print(f"Step {step_idx} / {num_steps}")
             predictions: dict[DataType, dict[str, BatchedNCData]] = policy.predict(
-                timeout=5
+                sync_point=sync_point, timeout=5
             )
 
             joint_target_positions = cast(
@@ -94,10 +94,14 @@ def run_rollout(
             )
 
             # Concatenate joint targets in the order specified by JOINT_ACTUATORS
-            batched_action = torch.cat(
-                [joint_target_positions[name].value for name in JOINT_ACTUATORS],
-                dim=1,
-            ).numpy()
+            batched_action = (
+                torch.cat(
+                    [joint_target_positions[name].value for name in JOINT_ACTUATORS],
+                    dim=1,
+                )
+                .cpu()
+                .numpy()
+            )
 
             actions = batched_action[0]  # Get the first (and only) in the batch
             horizon = len(actions)
@@ -121,6 +125,12 @@ def run_rollout(
 def main(
     num_rollouts: int,
 ) -> None:
+    nc.login()
+    nc.connect_robot(
+        robot_name="Mujoco UnitreeH1 Example",
+        mjcf_path="bigym/bigym/envs/xmls/h1/h1.xml",  # Update path as needed
+        overwrite=True,
+    )
     # If you know the path to the local model.nc.zip file
     # you can use it directly without connecting to a robot
     policy = nc.policy(
