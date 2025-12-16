@@ -5,6 +5,7 @@ including algorithm discovery, dataset resolution, and job status tracking.
 """
 
 import concurrent
+import sys
 from typing import Any, cast
 
 import requests
@@ -66,6 +67,8 @@ def start_training_run(
     gpu_type: str,
     num_gpus: int,
     frequency: int,
+    max_delay_s: float = sys.float_info.max,
+    allow_duplicates: bool = True,
     input_robot_data_spec: RobotDataSpec | None = None,
     output_robot_data_spec: RobotDataSpec | None = None,
 ) -> dict:
@@ -79,6 +82,8 @@ def start_training_run(
         gpu_type: Type of GPU to use for training (e.g., "A100", "V100")
         num_gpus: Number of GPUs to use for training
         frequency: Frequency to sync training data to (in Hz)
+        max_delay_s: Maximum allowable delay for data synchronization (in seconds)
+        allow_duplicates: Whether to allow duplicate data during synchronization
         input_robot_data_spec: Optional input robot data specification.
             If not provided, uses algorithm's supported input data types
         output_robot_data_spec: Optional output robot data specification.
@@ -147,6 +152,8 @@ def start_training_run(
         num_gpus=num_gpus,
         synchronization_details=SynchronizationDetails(
             frequency=frequency,
+            max_delay_s=max_delay_s,
+            allow_duplicates=allow_duplicates,
             robot_data_spec=merge_robot_data_spec(
                 input_robot_data_spec, output_robot_data_spec
             ),
@@ -160,8 +167,9 @@ def start_training_run(
     response = requests.post(
         f"{API_URL}/org/{org_id}/training/jobs",
         headers=auth.get_headers(),
-        data=data.model_dump(mode="json"),
+        json=data.model_dump(mode="json"),
     )
+
     response.raise_for_status()
 
     job_data = response.json()
