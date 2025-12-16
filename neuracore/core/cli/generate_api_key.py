@@ -54,32 +54,40 @@ def generate_api_key(email: str | None = None, password: str | None = None) -> s
     """
     # Prompt the user for credentials
     access_token = None
+
     for i in range(MAX_INPUT_ATTEMPTS):
         try:
             if not email:
                 email = input("Enter your registered email: ")
             if not password:
                 password = getpass("Enter your password: ")
+
             auth_response = requests.post(
                 f"{API_URL}/auth/token",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 data={"username": email, "password": password},
             )
-            if auth_response.status_code == 401 and i + 1 < MAX_INPUT_ATTEMPTS:
-                print("Incorrect email or password.")
 
+            # Handle 401 *before* raise_for_status so it doesn't become HTTPError
+            if auth_response.status_code == 401:
+                # If this was the last allowed attempt, raise "too many attempts"
+                if i + 1 >= MAX_INPUT_ATTEMPTS:
+                    print("Too many failed attempts, perhaps check your Caps Lock?")
+                    raise InputError("Out of attempts")
+
+                print("Incorrect email or password.")
                 again = get_user_confirmation("Do you wish to try again?")
                 if again:
                     email = None
                     password = None
                     continue
-                else:
-                    raise InputError("Invalid Email or Password")
+                raise InputError("Invalid Email or Password")
 
             auth_response.raise_for_status()
             token_data = Token.model_validate(auth_response.json())
             access_token = token_data.access_token
             break
+
         except KeyboardInterrupt:
             raise InputError("User cancelled the operation.")
         except ValidationError:
@@ -91,10 +99,6 @@ def generate_api_key(email: str | None = None, password: str | None = None) -> s
             )
         except requests.exceptions.RequestException as e:
             raise AuthenticationError(f"Failed to get Auth Token: {e}")
-
-    if not access_token:
-        print("Too many failed attempts, perhaps check your Caps Lock?")
-        raise InputError("Out of attempts")
 
     # Use the access token to request an API key
     try:
