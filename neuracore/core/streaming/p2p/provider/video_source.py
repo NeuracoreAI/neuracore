@@ -16,7 +16,6 @@ import fractions
 import math
 import time
 from dataclasses import dataclass, field
-from typing import cast
 from uuid import uuid4
 
 import av
@@ -59,20 +58,19 @@ class VideoSource:
     _last_camera_data: CameraData | None = None
     custom_data_source: JSONSource | None = None
 
-    def add_frame(self, camera_data: CameraData) -> None:
+    def add_frame(self, camera_data: CameraData, frame: np.ndarray) -> None:
         """Add a new video frame to the source.
 
         Args:
             camera_data: Extra metadata about the frame.
+            frame: Video frame as numpy array
         """
-        frame_data = cast(np.ndarray, camera_data.frame)
-        camera_data.frame = None  # Remove frame from metadata to avoid duplication
-        self._last_frame = frame_data
+        self._last_frame = frame
         self._last_camera_data = camera_data
         if self.custom_data_source:
             self.custom_data_source.publish({
                 **camera_data.model_dump(mode="json"),
-                "frame": ImageStringEncoder.encode_image(frame_data, cap_size=True),
+                "frame": ImageStringEncoder.encode_image(frame, cap_size=True),
             })
 
     def get_last_frame(self) -> av.VideoFrame:

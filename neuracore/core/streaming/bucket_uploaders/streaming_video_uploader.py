@@ -213,7 +213,7 @@ class StreamingVideoUploader(BucketUploader):
                 data_tuple = self._upload_queue.get(timeout=0.1)
                 if data_tuple is None:
                     break
-                frame_metadata, np_frame = self._upload_queue.get(timeout=0.1)
+                frame_metadata, np_frame = data_tuple
                 self._add_frame(frame_metadata, np_frame)
             except queue.Empty:
                 continue

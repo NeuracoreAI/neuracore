@@ -215,16 +215,19 @@ def _log_camera_data(
             f"stream dimensions {stream.width}x{stream.height}"
         )
 
+    # NOTE: we explicitly do not include the frame in the CameraData object to avoid
+    # serializing the frame to JSON or having to make two copies for streaming
+    # and bucket storage
     camera_data = CameraData(
-        timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics, frame=image
+        timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics, frame=None
     )
-    stream.log(camera_data)
+    stream.log(camera_data, frame=image)
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
     ).get_video_source(name, camera_type, f"{name}_{camera_type}").add_frame(
-        camera_data
+        camera_data, frame=image
     )
 
 

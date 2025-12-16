@@ -10,6 +10,7 @@ import logging
 import threading
 from abc import ABC
 
+import numpy as np
 from neuracore_types import CameraData, DataType, NCData
 
 from neuracore.core.streaming.bucket_uploaders.streaming_file_uploader import (
@@ -194,11 +195,12 @@ class VideoDataStream(DataStream):
         self._lossy_encoder = None
         return [lossless_upload_thread, lossy_upload_thread]
 
-    def log(self, metadata: CameraData) -> None:
+    def log(self, metadata: CameraData, frame: np.ndarray) -> None:
         """Log video frame data.
 
         Args:
             metadata: Camera metadata including timestamp and calibration
+            frame: Video frame as numpy array
         """
         self._latest_data = metadata
         if (
@@ -207,8 +209,6 @@ class VideoDataStream(DataStream):
             or self._lossy_encoder is None
         ):
             return
-        frame = metadata.frame
-        metadata.frame = None  # Remove frame from metadata to avoid duplication
         self._lossless_encoder.add_frame(metadata, frame)
         self._lossy_encoder.add_frame(metadata, frame)
 
