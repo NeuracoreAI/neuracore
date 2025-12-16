@@ -1,6 +1,16 @@
 import argparse
 
+from common.base_env import BimanualViperXTask
+from neuracore_types import DataSpec, DataType, RobotDataSpec
+
 import neuracore as nc
+
+MODEL_OUTPUT_ORDER: DataSpec = {
+    DataType.JOINT_TARGET_POSITIONS: (
+        BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+        + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+    ),
+}
 
 
 def create_parser():
@@ -40,7 +50,7 @@ def create_parser():
     parser.add_argument(
         "--dataset_name",
         type=str,
-        default="Example Dataset",
+        default="Transfer Cube VX300s Dataset",
         help="Name of the dataset to use for training.",
     )
     parser.add_argument(
@@ -52,7 +62,7 @@ def create_parser():
     parser.add_argument(
         "--epochs",
         type=int,
-        default=10,
+        default=1,
         help="Number of epochs to train for.",
     )
     parser.add_argument(
@@ -75,12 +85,26 @@ if __name__ == "__main__":
     frequency = args.frequency
     algorithm_name = args.algorithm_name
     dataset_name = args.dataset_name
+
+    dataset = nc.get_dataset(dataset_name)
+    robot_id = dataset.robot_ids[0]
+
     # Here, algorithm specific configs can be added.
     # Uses default values, if not defined.
     algorithm_config = {
         "batch_size": args.batch_size,
         "epochs": args.epochs,
         "output_prediction_horizon": args.output_prediction_horizon,
+    }
+
+    input_robot_data_spec: RobotDataSpec = {
+        robot_id: {
+            nc.DataType.RGB_IMAGES: ["angle"],
+        }
+    }
+
+    output_robot_data_spec: RobotDataSpec = {
+        robot_id: MODEL_OUTPUT_ORDER,
     }
 
     job_data = nc.start_training_run(
@@ -91,6 +115,8 @@ if __name__ == "__main__":
         algorithm_name=algorithm_name,
         dataset_name=dataset_name,
         algorithm_config=algorithm_config,
+        input_robot_data_spec=input_robot_data_spec,
+        output_robot_data_spec=output_robot_data_spec,
     )
 
     print("Training job started")
