@@ -11,13 +11,14 @@ import json
 import logging
 import queue
 import threading
+import time
 from collections.abc import Callable
 from fractions import Fraction
 
 import av
 import numpy as np
 import requests
-from neuracore_types import CameraData, DataType
+from neuracore_types import CameraData, DataType, RecordingDataTraceStatus
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -101,6 +102,7 @@ class StreamingVideoUploader(BucketUploader):
         self._recording_manager = get_recording_state_manager()
         self.data_type: DataType = data_type
         self.data_type_name: str = data_type_name
+        self._last_progress_update_timer: float = 0.0
         self._upload_thread.start()
 
     def _thread_setup(self) -> None:
@@ -110,7 +112,11 @@ class StreamingVideoUploader(BucketUploader):
         the MP4 container with fragmented headers for streaming, and sets up
         tracking variables for timestamp management and buffer handling.
         """
-        self._stream_id = self._register_data_stream(self.data_type)
+        self._trace_id = self._register_data_trace(self.data_type)
+        self._update_data_trace(
+            self._trace_id,
+            status=RecordingDataTraceStatus.UPLOAD_STARTED,
+        )
 
         # Ensure chunk_size is a multiple of 256 KiB
         if self.chunk_size % CHUNK_MULTIPLE != 0:
@@ -220,6 +226,12 @@ class StreamingVideoUploader(BucketUploader):
         self.container.close()
 
         current_pos = self.buffer.tell()
+        self._update_data_trace(
+            self._trace_id,
+            status=RecordingDataTraceStatus.UPLOAD_STARTED,
+            uploaded_bytes=self.uploader.total_bytes_uploaded,
+            total_bytes=current_pos,
+        )
         current_chunk_size = current_pos - self.last_write_position
         self.buffer.seek(self.last_write_position)
         chunk_data = self.buffer.read(current_chunk_size)
@@ -237,7 +249,12 @@ class StreamingVideoUploader(BucketUploader):
             f"{self.uploader.total_bytes_uploaded} bytes"
         )
         self._upload_json_data()
-        self._mark_data_stream_complete(self._stream_id)
+        self._update_data_trace(
+            self._trace_id,
+            status=RecordingDataTraceStatus.UPLOAD_COMPLETE,
+            uploaded_bytes=self.uploader.total_bytes_uploaded,
+            total_bytes=self.uploader.total_bytes_uploaded,
+        )
 
     def add_frame(self, metadata: CameraData, np_frame: np.ndarray) -> None:
         """Add a video frame to the encoding queue.
@@ -334,6 +351,14 @@ class StreamingVideoUploader(BucketUploader):
 
             if not success:
                 raise RuntimeError("Failed to upload chunk")
+            now = time.time()
+            if now - self._last_progress_update_timer >= 30.0:
+                self._update_data_trace(
+                    self._trace_id,
+                    status=RecordingDataTraceStatus.UPLOAD_STARTED,
+                    uploaded_bytes=self.uploader.total_bytes_uploaded,
+                )
+            self._last_progress_update_timer = now
 
     def finish(self) -> threading.Thread:
         """Complete the video encoding process and initiate final upload.

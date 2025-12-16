@@ -6,9 +6,10 @@ recording data streams and track active stream counts via API calls.
 
 import threading
 from abc import ABC, abstractmethod
+from typing import Any
 
 import requests
-from neuracore_types import DataType, RecordingDataStreamStatus
+from neuracore_types import DataType, RecordingDataTraceStatus
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -39,8 +40,8 @@ class BucketUploader(ABC):
         self.recording_id = recording_id
         self._recording_manager = get_recording_state_manager()
 
-    def _register_data_stream(self, data_type: DataType) -> str:
-        """Register a backend DataStream for this recording.
+    def _register_data_trace(self, data_type: DataType) -> str:
+        """Register a backend DataTrace for this recording.
 
         Returns:
             The stream id from the backend
@@ -54,7 +55,7 @@ class BucketUploader(ABC):
         org_id = get_current_org()
         try:
             response = requests.post(
-                f"{API_URL}/org/{org_id}/recording/{self.recording_id}/streams",
+                f"{API_URL}/org/{org_id}/recording/{self.recording_id}/traces",
                 json={"data_type": data_type.value},
                 headers=get_auth().get_headers(),
             )
@@ -64,22 +65,38 @@ class BucketUploader(ABC):
         except requests.exceptions.RequestException as e:
             raise RuntimeError("Failed to register data stream: ", e)
 
-    def _mark_data_stream_complete(self, stream_id: str) -> None:
-        """Mark a DataStream as fully uploaded."""
-        if not stream_id:
+    def _update_data_trace(
+        self,
+        trace_id: str,
+        status: RecordingDataTraceStatus,
+        uploaded_bytes: int | None = None,
+        total_bytes: int | None = None,
+    ) -> None:
+        """Update the status of a backend DataTrace.
+
+        Args:
+            trace_id: The id of the DataTrace to update.
+            status: The status of the DataTrace.
+            uploaded_bytes: The number of bytes uploaded so far.
+            total_bytes: The total number of bytes to upload.
+        """
+        if not trace_id:
             return
 
         if self._recording_manager.is_recording_expired(self.recording_id):
             return
 
+        data_trace_payload: dict[str, Any] = {"status": status}
+        if uploaded_bytes is not None:
+            data_trace_payload["uploaded_bytes"] = uploaded_bytes
+        if total_bytes is not None:
+            data_trace_payload["total_bytes"] = total_bytes
+
         org_id = get_current_org()
         try:
             requests.put(
-                f"{API_URL}/org/{org_id}/recording/{self.recording_id}/streams/{stream_id}",
-                json={
-                    "status": RecordingDataStreamStatus.UPLOAD_COMPLETE,
-                    "upload_progress": 100,
-                },
+                f"{API_URL}/org/{org_id}/recording/{self.recording_id}/traces/{trace_id}",
+                json=data_trace_payload,
                 headers=get_auth().get_headers(),
             )
         except requests.exceptions.RequestException:

@@ -9,21 +9,21 @@ import base64
 import hashlib
 
 import requests
-from neuracore_types import DataType, RecordingDataStream
+from neuracore_types import DataType, RecordingDataTrace
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 
 
-def get_active_data_streams(recording_id: str) -> list[RecordingDataStream]:
+def get_active_data_traces(recording_id: str) -> list[RecordingDataTrace]:
     """Get all active data streams for a recording.
 
     Args:
         recording_id: Unique identifier for the recording to check.
 
     Returns:
-        A list of `RecordingDataStream` instances representing the active
+        A list of `RecordingDataTrace` instances representing the active
         streams for the recording. Returns an empty list if no active
         streams are found.
 
@@ -34,12 +34,12 @@ def get_active_data_streams(recording_id: str) -> list[RecordingDataStream]:
     """
     org_id = get_current_org()
     response = requests.get(
-        f"{API_URL}/org/{org_id}/recording/{recording_id}/streams/active",
+        f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/active",
         headers=get_auth().get_headers(),
     )
     response.raise_for_status()
     data = response.json() or []
-    return [RecordingDataStream.model_validate(item) for item in data]
+    return [RecordingDataTrace.model_validate(item) for item in data]
 
 
 def synced_dataset_key(sync_freq: int, data_types: list[DataType]) -> str:
