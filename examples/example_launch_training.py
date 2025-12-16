@@ -16,7 +16,7 @@ def create_parser():
     parser.add_argument(
         "--gpu_type",
         type=str,
-        default="NVIDIA_L4",
+        default="NVIDIA_TESLA_V100",
         help="Type of GPU to use for training.",
     )
     parser.add_argument(
