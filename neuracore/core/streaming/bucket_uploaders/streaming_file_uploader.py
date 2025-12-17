@@ -76,9 +76,9 @@ class StreamingJsonUploader(BucketUploader):
         creates in-memory buffers, and sets up tracking variables for the JSON
         streaming process.
         """
-        self._stream_id = self._register_data_trace(self.data_type)
+        self._trace_id = self._register_data_trace(self.data_type)
         self._update_data_trace(
-            self._stream_id,
+            self._trace_id,
             status=RecordingDataTraceStatus.UPLOAD_STARTED,
         )
         # Ensure chunk_size is a multiple of 256 KiB
@@ -155,7 +155,7 @@ class StreamingJsonUploader(BucketUploader):
         # Get current position
         current_pos = self.buffer.tell()
         self._update_data_trace(
-            self._stream_id,
+            self._trace_id,
             status=RecordingDataTraceStatus.UPLOAD_STARTED,
             uploaded_bytes=self.uploader.total_bytes_uploaded,
             total_bytes=current_pos,
@@ -181,7 +181,7 @@ class StreamingJsonUploader(BucketUploader):
             f"{self.uploader.total_bytes_uploaded} bytes"
         )
         self._update_data_trace(
-            self._stream_id,
+            self._trace_id,
             status=RecordingDataTraceStatus.UPLOAD_COMPLETE,
             uploaded_bytes=self.uploader.total_bytes_uploaded,
             total_bytes=self.uploader.total_bytes_uploaded,
@@ -275,7 +275,7 @@ class StreamingJsonUploader(BucketUploader):
             now = time.time()
             if now - self._last_progress_update_timer >= 30.0:
                 self._update_data_trace(
-                    self._stream_id,
+                    self._trace_id,
                     status=RecordingDataTraceStatus.UPLOAD_STARTED,
                     uploaded_bytes=self.uploader.total_bytes_uploaded,
                 )
