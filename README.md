@@ -19,6 +19,8 @@ Neuracore is a powerful robotics and machine learning client library for seamles
 pip install neuracore
 ```
 
+**Note:** for faster video decoding, installing `ffmpeg` via `sudo apt-get install ffmpeg` (for Linux) is recommended. 
+
 For training and ML development:
 ```bash
 pip install neuracore[ml]
