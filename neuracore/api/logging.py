@@ -10,7 +10,6 @@ from warnings import filterwarnings, warn
 
 import numpy as np
 from neuracore_types import (
-    CameraData,
     Custom1DData,
     DataType,
     DepthCameraData,
@@ -215,16 +214,25 @@ def _log_camera_data(
             f"stream dimensions {stream.width}x{stream.height}"
         )
 
-    # NOTE: we explicitly do not include the frame in the
-    # camera_data_without_frame object to avoid serializing the frame to JSON
-    # or having to make two copies for streaming and bucket storage.
-    camera_data_copy = camera_data_without_frame.model_copy()
-    stream.log(camera_data_without_frame, frame=image)
-
-    # peer to peer (p2p) streaming
-    # NOTE: to avoid serializing the frame, we make another copy of the
-    # camera_data_without_frame object because stream.log modifies the object
-    # and adds the frame to it.
+    # Use discriminated camera subclasses so SynchronizedPoint.data validates against
+    # NCDataUnion (discriminator field `type`).
+    if camera_type == DataType.RGB_IMAGES:
+        camera_data = RGBCameraData(
+            timestamp=timestamp,
+            extrinsics=extrinsics,
+            intrinsics=intrinsics,
+            frame=image,
+        )
+    else:
+        camera_data = DepthCameraData(
+            timestamp=timestamp,
+            extrinsics=extrinsics,
+            intrinsics=intrinsics,
+            frame=image,
+        )
+    stream.log(camera_data)
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
     ).get_video_source(name, camera_type, f"{name}_{camera_type}").add_frame(

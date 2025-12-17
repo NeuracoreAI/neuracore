@@ -99,13 +99,15 @@ class Dataset:
         Returns:
             A Recording object
         """
-        # Be tolerant to enum casing coming from the API (e.g. "NORMAL"/"FLAGGED")
-        # while the client types expect "normal"/"flagged".
+        # Be tolerant to enum casing coming from the API / older clients.
+        # Some neuracore_types versions expect "NORMAL"/"FLAGGED" while others
+        # expect "normal"/"flagged".
         metadata = raw_recording.get("metadata")
         if isinstance(metadata, dict):
             status = metadata.get("status")
             if isinstance(status, str):
-                metadata["status"] = status.lower()
+                if status.lower() in ("normal", "flagged"):
+                    metadata["status"] = status.upper()
 
         recording_model = RecordingModel.model_validate(raw_recording)
         return Recording(
