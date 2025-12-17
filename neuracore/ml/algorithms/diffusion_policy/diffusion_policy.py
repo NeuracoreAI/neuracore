@@ -133,22 +133,34 @@ class DiffusionPolicy(NeuracoreModel):
         proprio_stats = []
         current_dim = 0
 
-        for dt in [
+        for data_type in [
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         ]:
-            if dt in self.data_types:
-                stats = cast(list[JointDataStats], self.dataset_statistics[dt])
-                combined_stats = DataItemStats()
-                for stat in stats:
-                    combined_stats = combined_stats.concatenate(stat.value)
-                data_stats[dt] = combined_stats
+            if data_type in self.data_types:
+                if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                    stats = cast(
+                        list[ParallelGripperOpenAmountDataStats],
+                        self.dataset_statistics[data_type],
+                    )
+                    combined_stats = DataItemStats()
+                    for stat in stats:
+                        combined_stats = combined_stats.concatenate(stat.open_amount)
+                else:
+                    stats = cast(
+                        list[JointDataStats], self.dataset_statistics[data_type]
+                    )
+                    combined_stats = DataItemStats()
+                    for stat in stats:
+                        combined_stats = combined_stats.concatenate(stat.value)
+                    data_stats[data_type] = combined_stats
 
-                if dt in self.input_data_types:
+                if data_type in self.input_data_types:
                     proprio_stats.append(combined_stats)
                     dim = len(combined_stats.mean)
-                    self.proprio_dims[dt] = (current_dim, current_dim + dim)
+                    self.proprio_dims[data_type] = (current_dim, current_dim + dim)
                     current_dim += dim
 
         global_cond_dim = current_dim
@@ -159,30 +171,36 @@ class DiffusionPolicy(NeuracoreModel):
         self.output_dims: dict[DataType, tuple[int, int]] = {}
         current_output_dim = 0
 
-        for dt in self.output_data_types:
-            if dt in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
-                stats = cast(list[JointDataStats], self.dataset_statistics[dt])
+        for data_type in self.output_data_types:
+            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+                stats = cast(list[JointDataStats], self.dataset_statistics[data_type])
                 combined_stats = DataItemStats()
                 for stat in stats:
                     combined_stats = combined_stats.concatenate(stat.value)
-                data_stats[dt] = combined_stats
+                data_stats[data_type] = combined_stats
                 output_stats.append(combined_stats)
                 dim = len(combined_stats.mean)
-                self.output_dims[dt] = (current_output_dim, current_output_dim + dim)
+                self.output_dims[data_type] = (
+                    current_output_dim,
+                    current_output_dim + dim,
+                )
                 current_output_dim += dim
                 self.max_output_size += dim
-            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
                 stats = cast(
                     list[ParallelGripperOpenAmountDataStats],
-                    self.dataset_statistics[dt],
+                    self.dataset_statistics[data_type],
                 )
                 combined_stats = DataItemStats()
                 for stat in stats:
                     combined_stats = combined_stats.concatenate(stat.open_amount)
-                data_stats[dt] = combined_stats
+                data_stats[data_type] = combined_stats
                 output_stats.append(combined_stats)
                 dim = len(combined_stats.mean)
-                self.output_dims[dt] = (current_output_dim, current_output_dim + dim)
+                self.output_dims[data_type] = (
+                    current_output_dim,
+                    current_output_dim + dim,
+                )
                 current_output_dim += dim
                 self.max_output_size += dim
 
@@ -286,6 +304,7 @@ class DiffusionPolicy(NeuracoreModel):
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         ]:
             if data_type not in batch.inputs:
                 continue
@@ -293,8 +312,18 @@ class DiffusionPolicy(NeuracoreModel):
             batched_nc_data = batch.inputs[data_type]
             mask = batch.inputs_mask[data_type]
 
-            batched_joint_data = cast(list[BatchedJointData], batched_nc_data)
-            proprio_data = torch.cat([bjd.value for bjd in batched_joint_data], dim=-1)
+            if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                batched_gripper_data = cast(
+                    list[BatchedParallelGripperOpenAmountData], batched_nc_data
+                )
+                proprio_data = torch.cat(
+                    [bgd.open_amount for bgd in batched_gripper_data], dim=-1
+                )
+            else:
+                batched_joint_data = cast(list[BatchedJointData], batched_nc_data)
+                proprio_data = torch.cat(
+                    [bjd.value for bjd in batched_joint_data], dim=-1
+                )
 
             last_proprio = proprio_data[:, -1, :]  # (B, num_features)
             masked_proprio = last_proprio * mask
@@ -467,26 +496,26 @@ class DiffusionPolicy(NeuracoreModel):
 
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
 
-        for dt in self.output_data_types:
-            start_idx, end_idx = self.output_dims[dt]
+        for data_type in self.output_data_types:
+            start_idx, end_idx = self.output_dims[data_type]
             dt_preds = predictions[:, :, start_idx:end_idx]  # (B, T, dt_size)
 
-            if dt in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 batched_outputs = []
-                for i in range(len(self.dataset_statistics[dt])):
+                for i in range(len(self.dataset_statistics[data_type])):
                     joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
                     batched_outputs.append(BatchedJointData(value=joint_preds))
-                output_tensors[dt] = batched_outputs
-            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                output_tensors[data_type] = batched_outputs
+            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
                 batched_outputs = []
-                for i in range(len(self.dataset_statistics[dt])):
+                for i in range(len(self.dataset_statistics[data_type])):
                     gripper_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
                     batched_outputs.append(
                         BatchedParallelGripperOpenAmountData(open_amount=gripper_preds)
                     )
-                output_tensors[dt] = batched_outputs
+                output_tensors[data_type] = batched_outputs
             else:
-                raise ValueError(f"Unsupported output data type: {dt}")
+                raise ValueError(f"Unsupported output data type: {data_type}")
 
         return output_tensors
 
@@ -526,17 +555,17 @@ class DiffusionPolicy(NeuracoreModel):
 
         # Concatenate all output actions
         action_targets = []
-        for dt in self.output_data_types:
-            if dt in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
-                batched_joints = cast(list[BatchedJointData], batch.outputs[dt])
+        for data_type in self.output_data_types:
+            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+                batched_joints = cast(list[BatchedJointData], batch.outputs[data_type])
                 action_targets.extend([bjd.value for bjd in batched_joints])
-            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
                 grippers = cast(
-                    list[BatchedParallelGripperOpenAmountData], batch.outputs[dt]
+                    list[BatchedParallelGripperOpenAmountData], batch.outputs[data_type]
                 )
                 action_targets.extend([gripper.open_amount for gripper in grippers])
             else:
-                raise ValueError(f"Unsupported output data type: {dt}")
+                raise ValueError(f"Unsupported output data type: {data_type}")
 
         action_data = torch.cat(action_targets, dim=-1)  # (B, T, total_action_dim)
 
@@ -637,6 +666,7 @@ class DiffusionPolicy(NeuracoreModel):
             DataType.JOINT_POSITIONS,
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TORQUES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.RGB_IMAGES,
         }
 
