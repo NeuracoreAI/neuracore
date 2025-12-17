@@ -103,6 +103,7 @@ class Pi0(NeuracoreModel):
         self.use_pretrained_weights = use_pretrained_weights
         self.pretrained_name_or_path = pretrained_name_or_path
         self.finetune_action_expert_only = finetune_action_expert_only
+        self.freeze_language_model_only = freeze_language_model_only
         data_stats: dict[DataType, DataItemStats] = {}
 
         # Setup proprioceptive data
@@ -231,11 +232,6 @@ class Pi0(NeuracoreModel):
             self.model.gradient_checkpointing_enable()
 
         self._setup_optimizer_param_groups()
-
-        # # Resize the images to 224x224
-        # self.image_normalizer = torch.nn.Sequential(
-        #     T.Resize((224, 224)),
-        # )
 
     def gradient_checkpointing_enable(self) -> None:
         """Enable gradient checkpointing on the underlying PI0 model."""
@@ -516,6 +512,7 @@ class Pi0(NeuracoreModel):
         images, image_masks, lang_tokens, lang_masks, proprios = (
             self._build_inputs_from_batch(inference_sample)
         )
+        proprios = pad_vector(proprios, self.max_state_dim).to(self.device)
 
         if set(batch.outputs.keys()) != set(self.output_data_types):
             raise ValueError(
@@ -539,23 +536,15 @@ class Pi0(NeuracoreModel):
 
         action_data = torch.cat(action_targets, dim=-1)  # (B, T, total_action_dim)
 
-        target_actions = self.action_normalizer.normalize(
-            data=pad_vector(action_data, self.action_dim)
-        )
-        target_actions_mask = pad_vector(batch.outputs_mask, self.action_dim)
+        target_actions = self.action_normalizer.normalize(data=action_data)
         # Pad to the max action dim after normalization to avoid padding artifacts
         target_actions = pad_vector(target_actions, self.max_action_dim).to(self.device)
-        target_mask = pad_vector(target_actions_mask, self.max_action_dim).to(
-            self.device
-        )
-        target_actions = target_actions * target_mask
 
-        losses = self.model.forward(
+        mse_losses = self.model.forward(
             images, image_masks, lang_tokens, lang_masks, proprios, target_actions
         )
         # Mask to the real action dims
-        losses = losses[:, :, : self.action_dim]
-        loss = (losses * target_mask[:, :, : self.action_dim]).mean()
+        loss = mse_losses[:, :, : self.action_dim].mean()
 
         losses = {
             "mse_loss": loss,
