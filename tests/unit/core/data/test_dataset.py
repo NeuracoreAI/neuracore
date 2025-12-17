@@ -840,3 +840,82 @@ class TestDatasetMixedOperations:
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
 
         assert dataset.cache_dir == DEFAULT_CACHE_DIR
+
+
+def test_log_and_retrieve_sync_point(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+):
+    """Test logging random data and retrieving via sync point."""
+    import numpy as np
+    from neuracore_types import DataType
+
+    import neuracore as nc
+
+    nc.login()
+
+    # Mock robot creation endpoint
+    mock_auth_requests.post(
+        re.compile(f"{API_URL}/org/[^/]+/robots(\\?.*)?"),
+        json={"robot_id": "mock_robot_id", "has_urdf": False, "archived": False},
+        status_code=200,
+    )
+    nc.connect_robot("test-robot")
+
+    # Generate random test data
+    random_image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+    random_joint_positions = {
+        "joint1": np.random.uniform(-3.14, 3.14),
+        "joint2": np.random.uniform(-3.14, 3.14),
+        "joint3": np.random.uniform(-3.14, 3.14),
+    }
+    random_gripper_value = np.random.uniform(0.0, 1.0)
+
+    # Log the data
+    nc.log_rgb("test_camera", random_image)
+    nc.log_joint_positions(positions=random_joint_positions)
+    nc.log_parallel_gripper_open_amount(name="test_gripper", value=random_gripper_value)
+
+    # Get the latest sync point
+    sync_point = nc.get_latest_sync_point(include_remote=False)
+
+    # Verify joint positions data
+    assert DataType.JOINT_POSITIONS in sync_point.data, "Joint datatype not found"
+    for joint_name, expected_value in random_joint_positions.items():
+        assert (
+            joint_name in sync_point[DataType.JOINT_POSITIONS]
+        ), f"Joint '{joint_name}' not found in sync point"
+        joint_data = sync_point[DataType.JOINT_POSITIONS][joint_name]
+        assert abs(joint_data.value - expected_value) < 1e-6, "Joint data mismatch"
+
+    # Verify gripper data
+    assert (
+        DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in sync_point.data
+    ), "Gripper datatype not found"
+    assert (
+        "test_gripper" in sync_point[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS]
+    ), "Gripper 'test_gripper' not found in sync point"
+    gripper_data = sync_point[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS]["test_gripper"]
+    assert (
+        abs(gripper_data.open_amount - random_gripper_value) < 1e-6
+    ), "Gripper data mismatch"
+
+    # Verify RGB image data
+    assert (
+        DataType.RGB_IMAGES in sync_point.data
+    ), "Camera datatype not found in sync point"
+    assert (
+        "test_camera" in sync_point[DataType.RGB_IMAGES]
+    ), "Camera 'test_camera' not found in sync point"
+    camera_data = sync_point[DataType.RGB_IMAGES]["test_camera"]
+    assert camera_data.frame is not None, "Camera frame is None"
+    retrieved_image = camera_data.frame
+    assert retrieved_image.shape == random_image.shape, "Image shape mismatch"
+    assert retrieved_image.dtype == random_image.dtype, "Image dtype mismatch"
+    np.testing.assert_array_equal(
+        retrieved_image, random_image, err_msg="Image mismatch"
+    )
+
+    # TODO: add more data types verification
