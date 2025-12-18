@@ -230,7 +230,7 @@ def _log_camera_data(
             intrinsics=intrinsics,
             frame=image,
         )
-    stream.log(camera_data)
+    stream.log(camera_data, frame=image)
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
     StreamManagerOrchestrator().get_provider_manager(

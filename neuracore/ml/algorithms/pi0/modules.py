@@ -17,7 +17,11 @@ from torch import Tensor, nn
 
 from neuracore.ml.algorithms.pi0.gemma_pytorch import (
     PaliGemmaWithExpertModel,
+    _align_mask_length,
+    create_sinusoidal_pos_embedding,
     get_gemma_config,
+    make_att_2d_masks,
+    sample_beta,
 )
 
 T = TypeVar("T")
@@ -43,136 +47,6 @@ except Exception:  # pragma: no cover
 OPENPI_ATTENTION_MASK_VALUE = -1e9
 
 logger = logging.getLogger(__name__)
-
-
-def get_safe_dtype(target_dtype: torch.dtype, device_type: str) -> torch.dtype:
-    """Get a safe dtype for the given device type."""
-    if device_type == "mps" and target_dtype == torch.float64:
-        return torch.float32
-    if device_type == "cpu":
-        if target_dtype == torch.bfloat16:
-            return torch.float32
-        if target_dtype == torch.float64:
-            return torch.float64
-    return target_dtype
-
-
-def create_sinusoidal_pos_embedding(
-    time: torch.Tensor,
-    dimension: int,
-    min_period: float,
-    max_period: float,
-    device: torch.device | str = "cpu",
-) -> Tensor:
-    """Computes sine-cosine positional embedding vectors for scalar positions."""
-    device = torch.device(device)
-    if dimension % 2 != 0:
-        raise ValueError(f"dimension ({dimension}) must be divisible by 2")
-    if time.ndim != 1:
-        raise ValueError("The time tensor is expected to be of shape `(batch_size, )`.")
-    dtype = get_safe_dtype(torch.float64, device.type)
-    fraction = torch.linspace(0.0, 1.0, dimension // 2, dtype=dtype, device=device)
-    period = min_period * (max_period / min_period) ** fraction
-    scaling_factor = 1.0 / period * 2 * math.pi
-    sin_input = scaling_factor[None, :] * time[:, None]
-    return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
-
-
-def sample_beta(
-    alpha: float | torch.Tensor,
-    beta: float | torch.Tensor,
-    bsize: int,
-    device: torch.device | str,
-) -> Tensor:
-    """Sample beta-distributed scalars."""
-    alpha_t = torch.as_tensor(alpha, dtype=torch.float32, device=device)
-    beta_t = torch.as_tensor(beta, dtype=torch.float32, device=device)
-    dist = torch.distributions.Beta(alpha_t, beta_t)
-    return dist.sample((bsize,))
-
-
-def make_att_2d_masks(pad_masks: torch.Tensor, att_masks: torch.Tensor) -> torch.Tensor:
-    """Convert 1D padding/attention masks into a causal 2D mask."""
-    if att_masks.ndim != 2:
-        raise ValueError(att_masks.ndim)
-    if pad_masks.ndim != 2:
-        raise ValueError(pad_masks.ndim)
-    cumsum = torch.cumsum(att_masks, dim=1)
-    att_2d_masks = cumsum[:, None, :] <= cumsum[:, :, None]
-    pad_2d_masks = pad_masks[:, None, :] * pad_masks[:, :, None]
-    return att_2d_masks & pad_2d_masks
-
-
-def pad_vector(vector: torch.Tensor, new_dim: int) -> torch.Tensor:
-    """Right-pad the last dimension of a tensor to ``new_dim``."""
-    if vector.shape[-1] >= new_dim:
-        return vector
-    return F.pad(vector, (0, new_dim - vector.shape[-1]))
-
-
-def _align_mask_length(mask_1d: torch.Tensor, target_len: int) -> torch.Tensor:
-    """Pad or trim a 1D mask to a target length."""
-    current_len = mask_1d.shape[0]
-    if current_len == target_len:
-        return mask_1d
-    if current_len < target_len:
-        pad = torch.zeros(
-            target_len - current_len, device=mask_1d.device, dtype=mask_1d.dtype
-        )
-        return torch.cat([mask_1d, pad], dim=0)
-    return mask_1d[:target_len]
-
-
-def resize_with_pad_torch(
-    images: torch.Tensor,
-    height: int,
-    width: int,
-    mode: str = "bilinear",
-) -> torch.Tensor:
-    """Resize image to target size with padding (channels-first or last)."""
-    if images.shape[-1] <= 4:  # assume channels-last
-        channels_last = True
-        if images.dim() == 3:
-            images = images.unsqueeze(0)
-        images = images.permute(0, 3, 1, 2)
-    else:
-        channels_last = False
-        if images.dim() == 3:
-            images = images.unsqueeze(0)
-
-    _, _, cur_height, cur_width = images.shape
-    ratio = max(cur_width / width, cur_height / height)
-    resized_height = int(cur_height / ratio)
-    resized_width = int(cur_width / ratio)
-
-    resized_images = F.interpolate(
-        images,
-        size=(resized_height, resized_width),
-        mode=mode,
-        align_corners=False if mode == "bilinear" else None,
-    )
-    if images.dtype == torch.uint8:
-        resized_images = torch.round(resized_images).clamp(0, 255).to(torch.uint8)
-    elif images.dtype == torch.float32:
-        resized_images = resized_images.clamp(-1.0, 1.0)
-    else:
-        raise ValueError(f"Unsupported image dtype: {images.dtype}")
-
-    pad_h0, remainder_h = divmod(height - resized_height, 2)
-    pad_h1 = pad_h0 + remainder_h
-    pad_w0, remainder_w = divmod(width - resized_width, 2)
-    pad_w1 = pad_w0 + remainder_w
-
-    constant_value = 0 if images.dtype == torch.uint8 else -1.0
-    padded_images = F.pad(
-        resized_images,
-        (pad_w0, pad_w1, pad_h0, pad_h1),
-        mode="constant",
-        value=constant_value,
-    )
-    if channels_last:
-        padded_images = padded_images.permute(0, 2, 3, 1)
-    return padded_images
 
 
 class PI0Policy(nn.Module):
@@ -210,15 +84,6 @@ class PI0Policy(nn.Module):
 
         self.gradient_checkpointing_enabled = False
 
-        if config.compile_model:
-            torch.set_float32_matmul_precision("high")
-            self.sample_actions = torch.compile(  # type: ignore[method-assign]
-                self.sample_actions, mode=config.compile_mode
-            )
-            self.forward = torch.compile(  # type: ignore[method-assign]
-                self.forward, mode=config.compile_mode
-            )
-
         if config.gradient_checkpointing:
             self.gradient_checkpointing_enable()
         if config.device is not None:
@@ -243,6 +108,17 @@ class PI0Policy(nn.Module):
         self.paligemma_with_expert.paligemma.vision_tower.gradient_checkpointing = False
         self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = False
         logging.info("Disabled gradient checkpointing for PI0Pytorch model")
+
+    def compile_model_enable(self) -> None:
+        """Enable model compilation."""
+        torch.set_float32_matmul_precision("high")
+        self.sample_actions = torch.compile(  # type: ignore[method-assign]
+            self.sample_actions, mode=self.config.compile_mode
+        )
+        self.forward = torch.compile(  # type: ignore[method-assign]
+            self.forward, mode=self.config.compile_mode
+        )
+        logging.info("Enabled model compilation for PI0Pytorch model")
 
     def _apply_checkpoint(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         """Optionally wrap a function call with PyTorch checkpointing."""

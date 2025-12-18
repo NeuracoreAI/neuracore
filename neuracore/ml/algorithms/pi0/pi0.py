@@ -35,7 +35,8 @@ from neuracore.ml import (
 )
 from neuracore.ml.algorithm_utils.normalizer import MeanStdNormalizer
 
-from .modules import PI0Config, PI0Policy, pad_vector, resize_with_pad_torch
+from .gemma_pytorch import pad_vector, resize_with_pad_torch
+from .modules import PI0Config, PI0Policy
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +342,11 @@ class Pi0(NeuracoreModel):
 
         # Normalize once on all proprio
         normalized_proprio = self.proprio_normalizer.normalize(all_proprio)
+        # Pad proprio to max state dim since PI0 expects fixed-size input.
+        # Pad after normalization to avoid padding artifacts.
+        normalized_proprio = pad_vector(normalized_proprio, self.max_state_dim).to(
+            self.device
+        )
 
         return normalized_proprio
 
@@ -429,9 +435,10 @@ class Pi0(NeuracoreModel):
         images, image_masks, lang_tokens, lang_masks, proprios = (
             self._build_inputs_from_batch(batch)
         )
-        actions = self.model.sample_actions(
-            images, image_masks, lang_tokens, lang_masks, proprios
-        )
+        with torch.no_grad():
+            actions = self.model.sample_actions(
+                images, image_masks, lang_tokens, lang_masks, proprios
+            )
         actions = actions[:, :, : self.action_dim]  # output pad to max action dim
         return actions
 
@@ -467,6 +474,10 @@ class Pi0(NeuracoreModel):
         self, batch: BatchedInferenceInputs
     ) -> dict[DataType, list[BatchedNCData]]:
         """Produce a ModelPrediction given an inference batch."""
+        self.model.eval()
+        self.model.gradient_checkpointing_disable()
+        self.model.compile_model_enable()
+
         actions = self.predict_action_chunk(batch)
         predictions = self.action_normalizer.unnormalize(actions)
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
@@ -512,7 +523,6 @@ class Pi0(NeuracoreModel):
         images, image_masks, lang_tokens, lang_masks, proprios = (
             self._build_inputs_from_batch(inference_sample)
         )
-        proprios = pad_vector(proprios, self.max_state_dim).to(self.device)
 
         if set(batch.outputs.keys()) != set(self.output_data_types):
             raise ValueError(
