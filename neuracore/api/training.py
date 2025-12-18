@@ -122,8 +122,6 @@ def start_training_run(
             ]
             break
 
-    breakpoint()
-
     # Validate input specs
     for robot_data_types in input_robot_data_spec.values():
         for data_type in robot_data_types.keys():
@@ -156,9 +154,6 @@ def start_training_run(
 
     if algorithm_id is None:
         raise ValueError(f"Algorithm {algorithm_name} not found")
-
-    # Find the union of algorithm and dataset input and output data specs
-    breakpoint()
 
     # Raise Error if the input/output data specs are not compatible with the union set
 
