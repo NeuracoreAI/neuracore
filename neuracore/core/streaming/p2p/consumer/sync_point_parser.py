@@ -1,17 +1,12 @@
 """This module provides utilities for parsing and merging SynchronizedPoint data."""
 
+from typing import cast
+
 from neuracore_types import (
-    Custom1DData,
+    DATA_TYPE_TO_NC_DATA_CLASS,
     DataType,
-    DepthCameraData,
-    EndEffectorPoseData,
-    JointData,
-    LanguageData,
+    NCData,
     NCDataUnion,
-    ParallelGripperOpenAmountData,
-    PointCloudData,
-    PoseData,
-    RGBCameraData,
     RobotStreamTrack,
     SynchronizedPoint,
 )
@@ -39,81 +34,24 @@ def parse_sync_point(
         data_type: DataType = track_details.data_type
         label: str = track_details.label
 
-        if data_type in (
-            DataType.JOINT_POSITIONS,
-            DataType.JOINT_VELOCITIES,
-            DataType.JOINT_TORQUES,
-            DataType.JOINT_TARGET_POSITIONS,
-        ):
-            joint_data = JointData.model_validate_json(message_data)
-            return SynchronizedPoint(
-                timestamp=joint_data.timestamp,
-                data={data_type: {label: joint_data}},
-            )
+        # Get the appropriate data class from the mapping
+        data_class: type[NCData] | None = DATA_TYPE_TO_NC_DATA_CLASS.get(data_type)
+        if data_class is None:
+            raise ValueError(f"Unsupported track data_type: {data_type}")
 
-        if data_type == DataType.LANGUAGE:
-            language_data = LanguageData.model_validate_json(message_data)
-            return SynchronizedPoint(
-                timestamp=language_data.timestamp,
-                data={data_type: {label: language_data}},
-            )
+        # Parse the JSON data using the appropriate class
+        data: NCData = data_class.model_validate_json(message_data)
+        data = cast(NCDataUnion, data)
 
-        if data_type == DataType.RGB_IMAGES:
-            camera_data = RGBCameraData.model_validate_json(message_data)
-            camera_data.frame = ImageStringEncoder.decode_image(camera_data.frame)
+        # Decode image data
+        if data_type in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
+            data.frame = ImageStringEncoder.decode_image(data.frame)
 
-            return SynchronizedPoint(
-                timestamp=camera_data.timestamp,
-                data={data_type: {label: camera_data}},
-            )
+        return SynchronizedPoint(
+            timestamp=data.timestamp,
+            data={data_type: {label: data}},
+        )
 
-        if data_type == DataType.DEPTH_IMAGES:
-            camera_data = DepthCameraData.model_validate_json(message_data)
-            camera_data.frame = ImageStringEncoder.decode_image(camera_data.frame)
-
-            return SynchronizedPoint(
-                timestamp=camera_data.timestamp,
-                data={data_type: {label: camera_data}},
-            )
-
-        if data_type == DataType.END_EFFECTOR_POSES:
-            end_effector_poses = EndEffectorPoseData.model_validate_json(message_data)
-            return SynchronizedPoint(
-                timestamp=end_effector_poses.timestamp,
-                data={data_type: {label: end_effector_poses}},
-            )
-
-        if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
-            parallel_gripper_open_amounts = (
-                ParallelGripperOpenAmountData.model_validate_json(message_data)
-            )
-            return SynchronizedPoint(
-                timestamp=parallel_gripper_open_amounts.timestamp,
-                data={data_type: {label: parallel_gripper_open_amounts}},
-            )
-
-        if data_type == DataType.POINT_CLOUDS:
-            point_cloud = PointCloudData.model_validate_json(message_data)
-            return SynchronizedPoint(
-                timestamp=point_cloud.timestamp,
-                data={data_type: {label: point_cloud}},
-            )
-
-        if data_type == DataType.CUSTOM_1D:
-            custom_data = Custom1DData.model_validate_json(message_data)
-            return SynchronizedPoint(
-                timestamp=custom_data.timestamp,
-                data={data_type: {label: custom_data}},
-            )
-
-        if data_type == DataType.POSES:
-            pose_data = PoseData.model_validate_json(message_data)
-            return SynchronizedPoint(
-                timestamp=pose_data.timestamp,
-                data={data_type: {label: pose_data}},
-            )
-
-        raise ValueError(f"Unsupported track data_type: {data_type}")
     except ValidationError:
         raise ValueError("Invalid or unsupported data")
 
