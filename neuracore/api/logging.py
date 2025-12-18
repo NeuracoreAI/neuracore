@@ -193,7 +193,12 @@ def _log_camera_data(
     storage_name = validate_safe_name(name)
     str_id = f"{camera_type.value}:{name}"
 
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    # data streaming for bucket storage (lossless and lossy)
     stream = robot.get_data_stream(str_id)
+    # create the stream if it doesn't exist
     if stream is None:
         if camera_type == DataType.RGB_IMAGES:
             stream = RGBDataStream(storage_name, image.shape[1], image.shape[0])
@@ -202,13 +207,11 @@ def _log_camera_data(
         else:
             raise ValueError(f"Invalid camera type: {camera_type}")
         robot.add_data_stream(str_id, stream)
-
-    start_stream(robot, stream)
-
     assert isinstance(
         stream, VideoDataStream
     ), "Expected stream as instance of VideoDataStream"
 
+    start_stream(robot, stream)
     if stream.width != image.shape[1] or stream.height != image.shape[0]:
         raise ValueError(
             f"Camera image dimensions {image.shape[1]}x{image.shape[0]} do not match "
@@ -217,17 +220,22 @@ def _log_camera_data(
 
     # NOTE: we explicitly do not include the frame in the CameraData object to avoid
     # serializing the frame to JSON or having to make two copies for streaming
-    # and bucket storage
-    camera_data = CameraData(
+    # and bucket storage.
+    camera_data_without_frame = CameraData(
         timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics, frame=None
     )
-    stream.log(camera_data, frame=image)
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
+    stream.log(camera_data_without_frame, frame=image)
+
+    # peer to peer (p2p) streaming
+    # NOTE: to avoid serializing the frame, we make another copy of the CameraData
+    # object here because stream.log modifies the object and adds the frame to it.
+    camera_data_without_frame = CameraData(
+        timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics, frame=None
+    )
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
     ).get_video_source(name, camera_type, f"{name}_{camera_type}").add_frame(
-        camera_data, frame=image
+        camera_data_without_frame, frame=image
     )
 
 
