@@ -114,3 +114,6 @@ logs/
 examples/logs/
 *.log
 *.log.gz
+
+# Videos
+examples/videos/

@@ -7,6 +7,7 @@ dependency management, and packaging of all required files for inference.
 
 import inspect
 import json
+import logging
 import tempfile
 import zipfile
 from pathlib import Path
@@ -18,6 +19,8 @@ from neuracore_types import ModelInitDescription
 from neuracore.ml.core.neuracore_model import NeuracoreModel
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.device_utils import get_default_device
+
+logger = logging.getLogger(__name__)
 
 
 def create_nc_archive(
@@ -53,6 +56,8 @@ def create_nc_archive(
 
         # Save model weights
         torch.save(model.state_dict(), temp_path / "model.pt")
+        model_size_mb = (temp_path / "model.pt").stat().st_size / (1024 * 1024)
+        logger.info("Model weights saved (%.1f MB)", model_size_mb)
 
         # Save model initialization description
         with open(temp_path / "model_init_description.json", "w") as f:
@@ -64,8 +69,9 @@ def create_nc_archive(
 
         # Create the ZIP archive
         with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            # Add model weights
-            zip_file.write(temp_path / "model.pt", "model.pt")
+            zip_file.write(
+                temp_path / "model.pt", "model.pt", compress_type=zipfile.ZIP_STORED
+            )
 
             # Add model initialization description
             zip_file.write(
@@ -85,6 +91,10 @@ def create_nc_archive(
             if requirements_file_path.exists():
                 zip_file.write(requirements_file_path, "requirements.txt")
 
+    archive_size_mb = archive_path.stat().st_size / (1024 * 1024)
+    logger.info(
+        "NC archive created successfully: %s (%.1f MB)", archive_path, archive_size_mb
+    )
     return archive_path
 
 
