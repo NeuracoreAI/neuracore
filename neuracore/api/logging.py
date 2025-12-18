@@ -210,25 +210,32 @@ def _log_camera_data(
     assert isinstance(
         stream, VideoDataStream
     ), "Expected stream as instance of VideoDataStream"
+
     start_stream(robot, stream)
     if stream.width != image.shape[1] or stream.height != image.shape[0]:
         raise ValueError(
             f"Camera image dimensions {image.shape[1]}x{image.shape[0]} do not match "
             f"stream dimensions {stream.width}x{stream.height}"
         )
+
     # NOTE: we explicitly do not include the frame in the CameraData object to avoid
     # serializing the frame to JSON or having to make two copies for streaming
-    # and bucket storage
-    camera_data = CameraData(
-        timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics, frame=image
+    # and bucket storage.
+    camera_data_without_frame = CameraData(
+        timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics, frame=None
     )
-    stream.log(camera_data, frame=image)
+    stream.log(camera_data_without_frame, frame=image)
 
-    # peer to peer streaming
+    # peer to peer (p2p) streaming
+    # NOTE: to avoid serializing the frame, we make another copy of the CameraData
+    # object here because stream.log modifies the object and adds the frame to it.
+    camera_data_without_frame = CameraData(
+        timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics, frame=None
+    )
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
     ).get_video_source(name, camera_type, f"{name}_{camera_type}").add_frame(
-        camera_data, frame=image
+        camera_data_without_frame, frame=image
     )
 
 

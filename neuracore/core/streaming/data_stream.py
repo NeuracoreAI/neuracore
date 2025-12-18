@@ -202,6 +202,7 @@ class VideoDataStream(DataStream):
             metadata: Camera metadata including timestamp and calibration
             frame: Video frame as numpy array
         """
+        metadata.frame = frame
         self._latest_data = metadata
         if (
             not self.is_recording()
