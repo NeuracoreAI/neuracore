@@ -1,11 +1,17 @@
 import argparse
 
 from common.base_env import BimanualViperXTask
-from neuracore_types import RobotDataSpec
+from neuracore_types import DataSpec, DataType, RobotDataSpec
 
 import neuracore as nc
 
-ACTION_KEYS = BimanualViperXTask.ACTION_KEYS
+MODEL_OUTPUT_ORDER: DataSpec = {
+    DataType.JOINT_TARGET_POSITIONS: (
+        BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+        + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+    ),
+    # DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
+}
 
 
 def create_parser():
@@ -89,17 +95,13 @@ if __name__ == "__main__":
     }
 
     input_robot_data_spec: RobotDataSpec = {
-        "robot_id": {
-            # nc.DataType.JOINT_POSITIONS: [],
-            # nc.DataType.JOINT_VELOCITIES: [],
+        "223185e0-5250-487a-a7e7-c6a4b1d8c4e2": {
             nc.DataType.RGB_IMAGES: ["angle"],
         }
     }
 
     output_robot_data_spec: RobotDataSpec = {
-        "robot_id": {
-            nc.DataType.JOINT_POSITIONS: ACTION_KEYS,
-        }
+        "223185e0-5250-487a-a7e7-c6a4b1d8c4e2": MODEL_OUTPUT_ORDER,
     }
 
     job_data = nc.start_training_run(

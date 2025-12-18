@@ -122,6 +122,14 @@ def start_training_run(
             ]
             break
 
+    # Validate that the robot exists in dataset
+    for robot_id in input_robot_data_spec.keys():
+        if robot_id not in dataset.robot_ids:
+            raise ValueError(
+                f"Input robot ID {robot_id} not found in dataset "
+                f"{dataset_name}. Please check the dataset contents."
+            )
+
     # Validate input specs
     for robot_data_types in input_robot_data_spec.values():
         for data_type in robot_data_types.keys():
