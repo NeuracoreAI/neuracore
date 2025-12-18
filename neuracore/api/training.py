@@ -67,10 +67,10 @@ def start_training_run(
     gpu_type: str,
     num_gpus: int,
     frequency: int,
+    input_robot_data_spec: RobotDataSpec,
+    output_robot_data_spec: RobotDataSpec,
     max_delay_s: float = sys.float_info.max,
     allow_duplicates: bool = True,
-    input_robot_data_spec: RobotDataSpec | None = None,
-    output_robot_data_spec: RobotDataSpec | None = None,
 ) -> dict:
     """Start a new training run.
 
@@ -82,12 +82,11 @@ def start_training_run(
         gpu_type: Type of GPU to use for training (e.g., "A100", "V100")
         num_gpus: Number of GPUs to use for training
         frequency: Frequency to sync training data to (in Hz)
+        input_robot_data_spec: Input robot data specification.
+        output_robot_data_spec: Output robot data specification.
         max_delay_s: Maximum allowable delay for data synchronization (in seconds)
         allow_duplicates: Whether to allow duplicate data during synchronization
-        input_robot_data_spec: Optional input robot data specification.
-            If not provided, uses algorithm's supported input data types
-        output_robot_data_spec: Optional output robot data specification.
-            If not provided, uses algorithm's supported output data types
+
 
     Returns:
         dict: Training job data including job ID and status
@@ -126,21 +125,18 @@ def start_training_run(
     if algorithm_id is None:
         raise ValueError(f"Algorithm {algorithm_name} not found")
 
+    # Find the union of algorithm and dataset input and output data specs
+    breakpoint()
+
+    # Raise Error if the input/output data specs are not compatible with the union set
+
     robot_ids_dataset = dataset.robot_ids
 
     input_robot_data_spec = {
-        robot_id: {
-            dt: [],
-        }
-        for dt in input_data_types
-        for robot_id in robot_ids_dataset
+        robot_id: {dt: [] for dt in input_data_types} for robot_id in robot_ids_dataset
     }
     output_robot_data_spec = {
-        robot_id: {
-            dt: [],
-        }
-        for dt in output_data_types
-        for robot_id in robot_ids_dataset
+        robot_id: {dt: [] for dt in output_data_types} for robot_id in robot_ids_dataset
     }
 
     data = TrainingJobRequest(

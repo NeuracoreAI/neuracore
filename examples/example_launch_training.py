@@ -40,7 +40,7 @@ def create_parser():
     parser.add_argument(
         "--dataset_name",
         type=str,
-        default="Example Dataset",
+        default="Transfer Cube VX300s Dataset",
         help="Name of the dataset to use for training.",
     )
     parser.add_argument(
@@ -52,7 +52,7 @@ def create_parser():
     parser.add_argument(
         "--epochs",
         type=int,
-        default=10,
+        default=1,
         help="Number of epochs to train for.",
     )
     parser.add_argument(
@@ -81,6 +81,21 @@ if __name__ == "__main__":
         "batch_size": args.batch_size,
         "epochs": args.epochs,
         "output_prediction_horizon": args.output_prediction_horizon,
+    }
+
+    input_robot_data_spec = {
+        "robot_id": {
+            nc.DataType.JOINT_POSITIONS: [],
+            nc.DataType.JOINT_VELOCITIES: [],
+            nc.DataType.RGB_IMAGES: ["angle"],
+        }
+    }
+
+    output_robot_data_spec = {
+        "robot_id": {
+            nc.DataType.JOINT_POSITIONS: [],
+            nc.DataType.JOINT_VELOCITIES: [],
+        }
     }
 
     job_data = nc.start_training_run(
