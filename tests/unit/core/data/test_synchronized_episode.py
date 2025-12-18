@@ -376,3 +376,30 @@ class TestSynchronizedRecording:
 
         assert cache_30.exists()
         assert cache_60.exists()
+
+    def test_create_decoding_lock_creates_file(self, synced_recording, tmp_path):
+        """_create_decoding_lock should create lock file when none exists."""
+        lock_file = tmp_path / ".decoding.lock"
+        synced_recording._create_decoding_lock(lock_file, "cam1")
+
+        assert lock_file.exists()
+
+    def test_create_decoding_lock_raises_when_exists(self, synced_recording, tmp_path):
+        """_create_decoding_lock should raise when lock file already exists."""
+        lock_file = tmp_path / ".decoding.lock"
+        lock_file.touch()
+
+        with pytest.raises(
+            RuntimeError,
+            match="Another process is already decoding video for camera cam1",
+        ):
+            synced_recording._create_decoding_lock(lock_file, "cam1")
+
+    def test_delete_decoding_lock_removes_file(self, synced_recording, tmp_path):
+        """_delete_decoding_lock should remove lock file if present."""
+        lock_file = tmp_path / ".decoding.lock"
+        lock_file.touch()
+
+        synced_recording._delete_decoding_lock(lock_file)
+
+        assert not lock_file.exists()
