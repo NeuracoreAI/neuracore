@@ -6,7 +6,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -30,6 +29,7 @@ if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset
 
 MAX_DECODING_ATTEMPTS = 3
+_FFMPEG_AVAILABLE: bool | None = None
 
 
 class SynchronizedRecording:
@@ -140,45 +140,61 @@ class SynchronizedRecording:
             video_location: Path to the video file.
             video_frame_cache_path: Path to the directory where video frames are cached.
         """
-        # Use ffmpeg to extract all frames at once
-        output_pattern = str(video_frame_cache_path / "%d.png")
-        try:
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-i",
-                    str(video_location),
-                    "-vsync",
-                    "0",  # Don't duplicate frames
-                    "-q:v",
-                    "1",  # High quality (1-31, lower is better)
-                    "-start_number",
-                    "0",  # Start frame numbering at 0
-                    output_pattern,
-                    "-y",  # Overwrite existing files
-                    "-loglevel",
-                    "error",  # Suppress ffmpeg output
-                ],
-                check=True,
-                capture_output=True,
-            )
-        except subprocess.CalledProcessError as e:
-            logger.error(f"ERROR while extracting video frames with ffmpeg: {e}")
-            if e.stderr:
-                logger.error(f"ffmpeg stderr: {e.stderr.decode()}")
-            raise e
-        except FileNotFoundError:
-            warnings.warn(
-                "ffmpeg not found. It is HIGHLY recommended to install ffmpeg. "
-                "Continuing with PyAV."
-            )
-            import av
+        """Extract frames from video and cache them to disk."""
+        global _FFMPEG_AVAILABLE
 
-            with av.open(str(video_location)) as container:
-                for i, frame in enumerate(container.decode(video=0)):
-                    frame_image = Image.fromarray(frame.to_rgb().to_ndarray())
-                    frame_file = video_frame_cache_path / f"{i}.png"
-                    frame_image.save(frame_file)
+        # Lazily determine ffmpeg availability once
+        if _FFMPEG_AVAILABLE is None:
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-version"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=True,
+                )
+                _FFMPEG_AVAILABLE = True
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                _FFMPEG_AVAILABLE = False
+                logger.warning(
+                    "ffmpeg not found. Falling back to PyAV for video decoding. "
+                    "Install ffmpeg for significantly faster decoding."
+                )
+
+        if _FFMPEG_AVAILABLE:
+            output_pattern = str(video_frame_cache_path / "%d.png")
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-i",
+                        str(video_location),
+                        "-vsync",
+                        "0",
+                        "-q:v",
+                        "1",
+                        "-start_number",
+                        "0",
+                        output_pattern,
+                        "-y",
+                        "-loglevel",
+                        "error",
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                return
+            except subprocess.CalledProcessError:
+                logger.error("ffmpeg failed during decoding, falling back to PyAV")
+                _FFMPEG_AVAILABLE = False  # Permanently disable ffmpeg for this run
+
+        # PyAV fallback (executed only once ffmpeg is known unavailable)
+        import av
+
+        with av.open(str(video_location)) as container:
+            for i, frame in enumerate(container.decode(video=0)):
+                frame_image = Image.fromarray(frame.to_rgb().to_ndarray())
+                frame_file = video_frame_cache_path / f"{i}.png"
+                frame_image.save(frame_file)
 
     def _download_video_and_cache_frames_to_disk(
         self, camera_type: DataType, camera_id: str, video_frame_cache_path: Path
