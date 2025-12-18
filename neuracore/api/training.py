@@ -122,6 +122,38 @@ def start_training_run(
             ]
             break
 
+    breakpoint()
+
+    # Validate input specs
+    for robot_data_types in input_robot_data_spec.values():
+        for data_type in robot_data_types.keys():
+            if data_type not in input_data_types:
+                raise ValueError(
+                    f"Input data type {data_type} is not supported by "
+                    f"algorithm {algorithm_name}. Please check the input "
+                    f"requirements of the training job."
+                )
+            if data_type not in dataset.data_types:
+                raise ValueError(
+                    f"Input data type {data_type} is not present in dataset "
+                    f"{dataset_name}. Please check the dataset contents."
+                )
+
+    # Validate output specs
+    for robot_data_types in output_robot_data_spec.values():
+        for data_type in robot_data_types.keys():
+            if data_type not in output_data_types:
+                raise ValueError(
+                    f"Output data type {data_type} is not supported by "
+                    f"algorithm {algorithm_name}. Please check the output "
+                    f"requirements of the training job."
+                )
+            if data_type not in dataset.data_types:
+                raise ValueError(
+                    f"Output data type {data_type} is not present in dataset "
+                    f"{dataset_name}. Please check the dataset contents."
+                )
+
     if algorithm_id is None:
         raise ValueError(f"Algorithm {algorithm_name} not found")
 
@@ -129,15 +161,6 @@ def start_training_run(
     breakpoint()
 
     # Raise Error if the input/output data specs are not compatible with the union set
-
-    robot_ids_dataset = dataset.robot_ids
-
-    input_robot_data_spec = {
-        robot_id: {dt: [] for dt in input_data_types} for robot_id in robot_ids_dataset
-    }
-    output_robot_data_spec = {
-        robot_id: {dt: [] for dt in output_data_types} for robot_id in robot_ids_dataset
-    }
 
     data = TrainingJobRequest(
         dataset_id=dataset_id,

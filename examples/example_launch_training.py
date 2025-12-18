@@ -1,6 +1,11 @@
 import argparse
 
+from common.base_env import BimanualViperXTask
+from neuracore_types import RobotDataSpec
+
 import neuracore as nc
+
+ACTION_KEYS = BimanualViperXTask.ACTION_KEYS
 
 
 def create_parser():
@@ -83,18 +88,17 @@ if __name__ == "__main__":
         "output_prediction_horizon": args.output_prediction_horizon,
     }
 
-    input_robot_data_spec = {
+    input_robot_data_spec: RobotDataSpec = {
         "robot_id": {
-            nc.DataType.JOINT_POSITIONS: [],
-            nc.DataType.JOINT_VELOCITIES: [],
+            # nc.DataType.JOINT_POSITIONS: [],
+            # nc.DataType.JOINT_VELOCITIES: [],
             nc.DataType.RGB_IMAGES: ["angle"],
         }
     }
 
-    output_robot_data_spec = {
+    output_robot_data_spec: RobotDataSpec = {
         "robot_id": {
-            nc.DataType.JOINT_POSITIONS: [],
-            nc.DataType.JOINT_VELOCITIES: [],
+            nc.DataType.JOINT_POSITIONS: ACTION_KEYS,
         }
     }
 
@@ -106,6 +110,8 @@ if __name__ == "__main__":
         algorithm_name=algorithm_name,
         dataset_name=dataset_name,
         algorithm_config=algorithm_config,
+        input_robot_data_spec=input_robot_data_spec,
+        output_robot_data_spec=output_robot_data_spec,
     )
 
     print("Training job started")
