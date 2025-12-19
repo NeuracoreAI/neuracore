@@ -6,6 +6,12 @@ import re
 import pytest
 import requests_mock
 from neuracore_types import Dataset as DatasetModel
+from neuracore_types import (
+    DepthCameraData,
+    JointData,
+    ParallelGripperOpenAmountData,
+    RGBCameraData,
+)
 
 import neuracore as nc
 from neuracore.api.globals import GlobalSingleton
@@ -840,3 +846,141 @@ class TestDatasetMixedOperations:
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
 
         assert dataset.cache_dir == DEFAULT_CACHE_DIR
+
+
+def test_log_and_retrieve_sync_point(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+):
+    """Test logging random data and retrieving via sync point."""
+    import numpy as np
+    from neuracore_types import DataType
+
+    import neuracore as nc
+
+    nc.login()
+
+    # Mock robot creation endpoint
+    mock_auth_requests.post(
+        re.compile(f"{API_URL}/org/[^/]+/robots(\\?.*)?"),
+        json={"robot_id": "mock_robot_id", "has_urdf": False, "archived": False},
+        status_code=200,
+    )
+    nc.connect_robot("test-robot")
+
+    # Generate random test data
+    random_rgb_image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+    random_depth_image = np.random.rand(100, 100).astype(np.float32)
+    random_joint_positions = {
+        "joint1": np.random.uniform(-3.14, 3.14),
+        "joint2": np.random.uniform(-3.14, 3.14),
+        "joint3": np.random.uniform(-3.14, 3.14),
+    }
+    random_gripper_value = np.random.uniform(0.0, 1.0)
+
+    # Log the data
+    nc.log_rgb("test_camera", random_rgb_image)
+    nc.log_depth("test_camera", random_depth_image)
+    nc.log_joint_positions(positions=random_joint_positions)
+    nc.log_parallel_gripper_open_amount(name="test_gripper", value=random_gripper_value)
+
+    # Get the latest sync point
+    sync_point = nc.get_latest_sync_point(include_remote=False)
+
+    # Verify joint positions data
+    assert DataType.JOINT_POSITIONS in sync_point.data, "Joint datatype not found"
+    for joint_name, expected_value in random_joint_positions.items():
+        assert (
+            joint_name in sync_point[DataType.JOINT_POSITIONS]
+        ), f"Joint '{joint_name}' not found in sync point"
+        joint_data = sync_point[DataType.JOINT_POSITIONS][joint_name]
+        assert isinstance(joint_data, JointData), (
+            f"JointData for joint '{joint_name}' in sync point should be JointData, "
+            f"not {str(type(joint_data))}"
+        )
+        assert joint_data.type == JointData.model_fields["type"].default, (
+            f"JointData for joint '{joint_name}'.type in sync point should be "
+            f"{JointData.model_fields['type'].default}, not {str(joint_data.type)}"
+        )
+        assert (
+            abs(joint_data.value - expected_value) < 1e-6
+        ), f"Joint data for joint '{joint_name}' mismatch"
+
+    # Verify gripper data
+    assert (
+        DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in sync_point.data
+    ), "Gripper datatype not found"
+    assert (
+        "test_gripper" in sync_point[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS]
+    ), "Gripper 'test_gripper' not found in sync point"
+    gripper_data = sync_point[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS]["test_gripper"]
+    assert isinstance(gripper_data, ParallelGripperOpenAmountData), (
+        f"ParallelGripperOpenAmountData for gripper 'test_gripper' in sync point "
+        f"should be ParallelGripperOpenAmountData, not {str(type(gripper_data))}"
+    )
+    assert (
+        gripper_data.type == ParallelGripperOpenAmountData.model_fields["type"].default
+    ), (
+        f"ParallelGripperOpenAmountData for gripper 'test_gripper'.type in sync point "
+        f"should be {ParallelGripperOpenAmountData.model_fields['type'].default}, "
+        f"not {str(gripper_data.type)}"
+    )
+    assert (
+        abs(gripper_data.open_amount - random_gripper_value) < 1e-6
+    ), "Gripper data mismatch"
+
+    # Verify RGB image data
+    assert (
+        DataType.RGB_IMAGES in sync_point.data
+    ), "Camera datatype not found in sync point"
+    assert (
+        "test_camera" in sync_point[DataType.RGB_IMAGES]
+    ), "Camera 'test_camera' not found in sync point"
+    camera_data = sync_point[DataType.RGB_IMAGES]["test_camera"]
+    assert isinstance(camera_data, RGBCameraData), (
+        f"RGBCameraData in sync_point should be RGBCameraData, "
+        f"not {str(type(camera_data))}"
+    )
+    assert camera_data.type == RGBCameraData.model_fields["type"].default, (
+        f"RGBCameraData.type in sync_point should be "
+        f"{RGBCameraData.model_fields['type'].default}, not {str(camera_data.type)}"
+    )
+    assert camera_data.frame is not None, "Camera frame is None"
+    retrieved_image = camera_data.frame
+    assert retrieved_image.shape == random_rgb_image.shape, "Image shape mismatch"
+    assert retrieved_image.dtype == random_rgb_image.dtype, "Image dtype mismatch"
+    np.testing.assert_array_equal(
+        retrieved_image, random_rgb_image, err_msg="Image mismatch"
+    )
+
+    # Verify depth image data
+    assert (
+        DataType.DEPTH_IMAGES in sync_point.data
+    ), "Depth image datatype not found in sync point"
+    assert (
+        "test_camera" in sync_point[DataType.DEPTH_IMAGES]
+    ), "Depth image 'test_camera' not found in sync point"
+    depth_data = sync_point[DataType.DEPTH_IMAGES]["test_camera"]
+    assert isinstance(depth_data, DepthCameraData), (
+        f"DepthCameraData in sync_point should be DepthCameraData, "
+        f"not {str(type(depth_data))}"
+    )
+    assert depth_data.type == DepthCameraData.model_fields["type"].default, (
+        f"DepthCameraData.type in sync_point should be "
+        f"{DepthCameraData.model_fields['type'].default}, not {str(depth_data.type)}"
+    )
+    assert depth_data.frame is not None, "Depth image frame is None"
+    retrieved_depth_image = depth_data.frame
+    assert (
+        retrieved_depth_image.shape == random_depth_image.shape
+    ), "Depth image shape mismatch"
+    assert (
+        retrieved_depth_image.dtype == random_depth_image.dtype
+    ), "Depth image dtype mismatch"
+    np.testing.assert_array_equal(
+        retrieved_depth_image, random_depth_image, err_msg="Depth image mismatch"
+    )
+
+    # TODO: add more data types verification

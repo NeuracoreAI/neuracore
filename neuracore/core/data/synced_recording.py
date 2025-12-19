@@ -2,11 +2,11 @@
 
 import copy
 import logging
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
-import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset
 
 MAX_DECODING_ATTEMPTS = 3
+_FFMPEG_AVAILABLE: bool | None = None
 
 
 class SynchronizedRecording:
@@ -79,11 +80,11 @@ class SynchronizedRecording:
         self._suppress_wget_progress = True
 
         if prefetch_videos:
-            cache = self.dataset.cache_dir / f"{self.id}" / f"{self.frequency}Hz"
+            cache = self.dataset.cache_dir / self.id
             # Check if cache directory exists and contains any files
-            if not cache.exists() or not any(cache.iterdir()):
-                # NOTE: this is to start video prefetching frames into cache
-                self._get_sync_point(0)
+            self._wait_for_lock_release(cache / ".recording.lock", cache)
+            # NOTE: this is to start video prefetching frames into cache
+            self._get_sync_point(0)
 
     def _get_synced_data(self) -> SynchronizedEpisodeModel:
         """Retrieve synchronized metadata for the recording.
@@ -140,45 +141,61 @@ class SynchronizedRecording:
             video_location: Path to the video file.
             video_frame_cache_path: Path to the directory where video frames are cached.
         """
-        # Use ffmpeg to extract all frames at once
-        output_pattern = str(video_frame_cache_path / "%d.png")
-        try:
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-i",
-                    str(video_location),
-                    "-vsync",
-                    "0",  # Don't duplicate frames
-                    "-q:v",
-                    "1",  # High quality (1-31, lower is better)
-                    "-start_number",
-                    "0",  # Start frame numbering at 0
-                    output_pattern,
-                    "-y",  # Overwrite existing files
-                    "-loglevel",
-                    "error",  # Suppress ffmpeg output
-                ],
-                check=True,
-                capture_output=True,
-            )
-        except subprocess.CalledProcessError as e:
-            logger.error(f"ERROR while extracting video frames with ffmpeg: {e}")
-            if e.stderr:
-                logger.error(f"ffmpeg stderr: {e.stderr.decode()}")
-            raise e
-        except FileNotFoundError:
-            warnings.warn(
-                "ffmpeg not found. It is HIGHLY recommended to install ffmpeg. "
-                "Continuing with PyAV."
-            )
-            import av
+        """Extract frames from video and cache them to disk."""
+        global _FFMPEG_AVAILABLE
 
-            with av.open(str(video_location)) as container:
-                for i, frame in enumerate(container.decode(video=0)):
-                    frame_image = Image.fromarray(frame.to_rgb().to_ndarray())
-                    frame_file = video_frame_cache_path / f"{i}.png"
-                    frame_image.save(frame_file)
+        # Lazily determine ffmpeg availability once
+        if _FFMPEG_AVAILABLE is None:
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-version"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=True,
+                )
+                _FFMPEG_AVAILABLE = True
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                _FFMPEG_AVAILABLE = False
+                logger.warning(
+                    "ffmpeg not found. Falling back to PyAV for video decoding. "
+                    "Install ffmpeg for significantly faster decoding."
+                )
+
+        if _FFMPEG_AVAILABLE:
+            output_pattern = str(video_frame_cache_path / "%d.png")
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-i",
+                        str(video_location),
+                        "-vsync",
+                        "0",
+                        "-q:v",
+                        "1",
+                        "-start_number",
+                        "0",
+                        output_pattern,
+                        "-y",
+                        "-loglevel",
+                        "error",
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                return
+            except subprocess.CalledProcessError:
+                logger.error("ffmpeg failed during decoding, falling back to PyAV")
+                _FFMPEG_AVAILABLE = False  # Permanently disable ffmpeg for this run
+
+        # PyAV fallback (executed only once ffmpeg is known unavailable)
+        import av
+
+        with av.open(str(video_location)) as container:
+            for i, frame in enumerate(container.decode(video=0)):
+                frame_image = Image.fromarray(frame.to_rgb().to_ndarray())
+                frame_file = video_frame_cache_path / f"{i}.png"
+                frame_image.save(frame_file)
 
     def _download_video_and_cache_frames_to_disk(
         self, camera_type: DataType, camera_id: str, video_frame_cache_path: Path
@@ -190,19 +207,84 @@ class SynchronizedRecording:
             camera_id: Unique identifier for the camera.
             video_frame_cache_path: Path to the directory where video frames are cached.
         """
-        # Create a temporary video file path
-        self.cache_manager.ensure_space_available()
+        lock_file = video_frame_cache_path / ".recording.lock"
+        lock_acquired = self._create_decoding_lock(lock_file, camera_id)
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Download video to temporary directory
-            video_location = Path(temp_dir) / f"{camera_id}{camera_type.value}.mp4"
-            wget.download(
-                self._get_video_url(camera_type, camera_id),
-                str(video_location),
-                bar=None if self._suppress_wget_progress else wget.bar_thermometer,
-            )
-            # Decode video to frames and cache them to disk
-            self._decode_video(video_location, video_frame_cache_path)
+        try:
+            # Create a temporary video file path
+            self.cache_manager.ensure_space_available()
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Download video to temporary directory
+                video_location = Path(temp_dir) / f"{camera_id}{camera_type.value}.mp4"
+                wget.download(
+                    self._get_video_url(camera_type, camera_id),
+                    str(video_location),
+                    bar=None if self._suppress_wget_progress else wget.bar_thermometer,
+                )
+                # Decode video to frames and cache them to disk
+                self._decode_video(video_location, video_frame_cache_path)
+        finally:
+            if lock_acquired:
+                self._delete_decoding_lock(lock_file)
+
+    def _create_decoding_lock(self, lock_file: Path, camera_id: str) -> bool:
+        """Create an exclusive lock file for decoding."""
+        try:
+            # Create the lock file exclusively
+            lock_file.parent.mkdir(parents=True, exist_ok=True)
+            lock_file.touch(exist_ok=False)
+        except FileExistsError as exc:
+            raise RuntimeError(
+                f"Another process is already decoding video for camera {camera_id}"
+            ) from exc
+        return True
+
+    def _delete_decoding_lock(self, lock_file: Path) -> None:
+        """Remove the decoding lock file if present."""
+        lock_file.unlink(missing_ok=True)
+
+    def _check_stale_lock_file(self, lock_file: Path, timeout: int = 300) -> bool:
+        """Check if a lock file is stale based on a timeout.
+
+        Args:
+            lock_file: Path to the lock file.
+            timeout: Time in seconds after which the lock is considered stale.
+                    (default: 300s/5min)
+
+        Returns:
+            True if the lock file is stale, False otherwise.
+        """
+        if not lock_file.exists():
+            return False
+        lock_mtime = lock_file.stat().st_mtime
+        if (time.time() - lock_mtime) > timeout:
+            return True
+        return False
+
+    def _wait_for_lock_release(
+        self, lock_file: Path, parent_folder_path: Path, check_interval: int = 1
+    ) -> None:
+        """Wait for a lock file to be released.
+
+        Args:
+            lock_file: Path to the lock file.
+            parent_folder_path: Path to the parent folder containing the lock file.
+            check_interval: Time in seconds between checks.
+        """
+        # Check if the lock is stale
+        while lock_file.exists():
+            if self._check_stale_lock_file(lock_file):
+                logger.warning(
+                    f"Stale lock file detected at {lock_file}. Removing lock."
+                )
+                self._delete_decoding_lock(lock_file)
+                shutil.rmtree(parent_folder_path, ignore_errors=True)
+                logger.info(
+                    f"Removed stale lock and cleared cache at {parent_folder_path}."
+                )
+                break
+            time.sleep(check_interval)
 
     def _get_frame_from_disk_cache(
         self,
@@ -223,6 +305,9 @@ class SynchronizedRecording:
         """
         for cam_id, cam_data in camera_data.items():
             cam_id_rgb_root = self.cache_dir / f"{self.id}" / camera_type.value / cam_id
+            lock_file = cam_id_rgb_root / ".recording.lock"
+            self._wait_for_lock_release(lock_file, cam_id_rgb_root)
+
             if not cam_id_rgb_root.exists():
                 # Not in cache, download video and cache frames to disk
                 cam_id_rgb_root.mkdir(parents=True, exist_ok=True)
@@ -230,32 +315,8 @@ class SynchronizedRecording:
                     camera_type, cam_id, cam_id_rgb_root
                 )
 
-            # Check if frame is cached
-            last_num_frames = -1
-            attempts_left = MAX_DECODING_ATTEMPTS
             frame_file = cam_id_rgb_root / f"{cam_data.frame_idx}.png"
-            while True:
-                try:
-                    # Make sure the frame is successfully cached and decoded
-                    frame = Image.open(frame_file)
-                    break
-                except Exception:
-                    # Check if decoding is progressing
-                    current_num_frames = len(
-                        [1 for i in cam_id_rgb_root.iterdir() if i.suffix == ".png"]
-                    )
-                    if current_num_frames == last_num_frames:
-                        attempts_left -= 1
-                        if attempts_left <= 0:
-                            raise RuntimeError(
-                                f"Decoding timed out for recording {self.id}"
-                            )
-                    else:
-                        last_num_frames = current_num_frames
-                        attempts_left = MAX_DECODING_ATTEMPTS
-
-                    # Wait for decoding to progress and try again
-                    time.sleep(5)
+            frame = Image.open(frame_file)
 
             if transform_fn:
                 frame = Image.fromarray(transform_fn(np.array(frame)))

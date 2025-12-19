@@ -258,19 +258,19 @@ class CNNMLP(NeuracoreModel):
         self.max_output_size = 0
         output_stats = []
         # Flatten norm_means into single parameters for outputs
-        for dt in self.output_data_types:
-            output_stats.append(data_stats[dt])
-            self.max_output_size += len(self.dataset_statistics[dt])
+        for data_type in self.output_data_types:
+            output_stats.append(data_stats[data_type])
+            self.max_output_size += len(self.dataset_statistics[data_type])
 
         input_stats = []
         self.proprio_dims = {}
         current_dim = 0
-        for dt in self.input_data_types:
-            if dt not in data_stats:
+        for data_type in self.input_data_types:
+            if data_type not in data_stats:
                 continue
-            input_stats.append(data_stats[dt])
-            dim = len(data_stats[dt].mean)
-            self.proprio_dims[dt] = (current_dim, current_dim + dim)
+            input_stats.append(data_stats[data_type])
+            dim = len(data_stats[data_type].mean)
+            self.proprio_dims[data_type] = (current_dim, current_dim + dim)
             current_dim += dim
 
         self.action_normalizer = ACTION_NORMALIZER(
@@ -615,27 +615,27 @@ class CNNMLP(NeuracoreModel):
 
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
         start_slice_idx = 0
-        for dt in self.output_data_types:
-            end_slice_idx = start_slice_idx + len(self.dataset_statistics[dt])
+        for data_type in self.output_data_types:
+            end_slice_idx = start_slice_idx + len(self.dataset_statistics[data_type])
             dt_preds = predictions[
                 :, :, start_slice_idx:end_slice_idx
             ]  # (B, T, dt_size)
-            if dt in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 batched_outputs = []
-                for i in range(len(self.dataset_statistics[dt])):
+                for i in range(len(self.dataset_statistics[data_type])):
                     joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
                     batched_outputs.append(BatchedJointData(value=joint_preds))
-                output_tensors[dt] = batched_outputs
-            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                output_tensors[data_type] = batched_outputs
+            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
                 batched_outputs = []
-                for i in range(len(self.dataset_statistics[dt])):
+                for i in range(len(self.dataset_statistics[data_type])):
                     gripper_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
                     batched_outputs.append(
                         BatchedParallelGripperOpenAmountData(open_amount=gripper_preds)
                     )
-                output_tensors[dt] = batched_outputs
+                output_tensors[data_type] = batched_outputs
             else:
-                raise ValueError(f"Unsupported output data type: {dt}")
+                raise ValueError(f"Unsupported output data type: {data_type}")
 
         return output_tensors
 
@@ -664,17 +664,17 @@ class CNNMLP(NeuracoreModel):
             )
 
         action_targets = []
-        for i, dt in enumerate(self.output_data_types):
-            if dt in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
-                batched_joints = cast(list[BatchedJointData], batch.outputs[dt])
+        for i, data_type in enumerate(self.output_data_types):
+            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+                batched_joints = cast(list[BatchedJointData], batch.outputs[data_type])
                 action_targets.extend([bjd.value for bjd in batched_joints])
-            elif dt == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
                 grippers = cast(
-                    list[BatchedParallelGripperOpenAmountData], batch.outputs[dt]
+                    list[BatchedParallelGripperOpenAmountData], batch.outputs[data_type]
                 )
                 action_targets.extend([gripper.open_amount for gripper in grippers])
             else:
-                raise ValueError(f"Unsupported output data type: {dt}")
+                raise ValueError(f"Unsupported output data type: {data_type}")
 
         action_data = torch.cat(action_targets, dim=-1)  # (B, 1, T * action_dim)
         action_data = action_data.view(

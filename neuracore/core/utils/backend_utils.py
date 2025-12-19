@@ -1,7 +1,7 @@
 """Backend utility functions for Neuracore recording and dataset management.
 
 This module provides utility functions for interacting with the Neuracore backend,
-including monitoring active streams and generating unique identifiers for
+including monitoring active data traces and generating unique identifiers for
 synchronized datasets.
 """
 
@@ -17,15 +17,15 @@ from neuracore.core.const import API_URL
 
 
 def get_active_data_traces(recording_id: str) -> list[RecordingDataTrace]:
-    """Get all active data streams for a recording.
+    """Get all active data traces for a recording.
 
     Args:
         recording_id: Unique identifier for the recording to check.
 
     Returns:
         A list of `RecordingDataTrace` instances representing the active
-        streams for the recording. Returns an empty list if no active
-        streams are found.
+        data traces for the recording. Returns an empty list if no active
+        traces are found.
 
     Raises:
         requests.HTTPError: If the API request fails.
