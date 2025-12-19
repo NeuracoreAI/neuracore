@@ -399,6 +399,44 @@ class TestDatasetRetrieval:
         result = Dataset.get_by_id("nonexistent", non_exist_ok=True)
         assert result is None
 
+    def test_get_full_data_spec(
+        self,
+        mock_auth_requests,
+        dataset_dict,
+        recordings_list,
+        mocked_org_id,
+    ):
+        """Test getting full data spec for a robot ID in the dataset."""
+        from neuracore_types import DataType
+
+        dataset = Dataset(**dataset_dict, recordings=recordings_list)
+        robot_id = "test-robot-id"
+
+        # Mock the API response for get_full_data_spec
+        expected_data_spec = {
+            DataType.RGB_IMAGES.value: ["camera_left", "camera_right"],
+            DataType.JOINT_POSITIONS.value: ["joint_pos_1", "joint_pos_2"],
+        }
+
+        mock_auth_requests.get(
+            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset.id}/full-data-spec/{robot_id}",
+            json=expected_data_spec,
+            status_code=200,
+        )
+
+        # Execute
+        data_spec = dataset.get_full_data_spec(robot_id)
+
+        # Verify
+        assert data_spec == expected_data_spec
+        assert DataType.RGB_IMAGES.value in data_spec
+        assert DataType.JOINT_POSITIONS.value in data_spec
+        assert data_spec[DataType.RGB_IMAGES.value] == ["camera_left", "camera_right"]
+        assert data_spec[DataType.JOINT_POSITIONS.value] == [
+            "joint_pos_1",
+            "joint_pos_2",
+        ]
+
 
 class TestDatasetCreation:
     """Tests for creating new datasets."""

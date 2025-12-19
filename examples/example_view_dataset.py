@@ -3,7 +3,13 @@ from typing import cast
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import numpy as np
-from neuracore_types import DataType, JointData, RGBCameraData, SynchronizedPoint
+from neuracore_types import (
+    DataType,
+    JointData,
+    RGBCameraData,
+    RobotDataSpec,
+    SynchronizedPoint,
+)
 
 import neuracore as nc
 
@@ -103,16 +109,20 @@ def visualize_episode(
 nc.login()
 # CMU Play Fusion is one of the many public/shared datasets you have access to
 dataset = nc.get_dataset("ASU Table Top")
+data_types_to_synchronize = [DataType.JOINT_POSITIONS, DataType.RGB_IMAGES]
+
+robot_data_spec: RobotDataSpec = {}
 robot_ids_dataset = dataset.robot_ids
+for robot_id in robot_ids_dataset:
+    data_type_to_names = dataset.get_full_data_spec(robot_id)
+    robot_data_spec[robot_id] = {
+        data_type: data_type_to_names[data_type]
+        for data_type in data_types_to_synchronize
+    }
+
 synced_dataset = dataset.synchronize(
     frequency=1,
-    robot_data_spec={
-        robot_id: {
-            DataType.JOINT_POSITIONS: [],
-            DataType.RGB_IMAGES: [],
-        }
-        for robot_id in robot_ids_dataset
-    },
+    robot_data_spec=robot_data_spec,
 )
 print(f"Number of episodes: {len(dataset)}")
 joint_positions = []

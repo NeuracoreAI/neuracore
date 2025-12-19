@@ -9,7 +9,7 @@ from typing import Optional, Union
 
 import requests
 from neuracore_types import Dataset as DatasetModel
-from neuracore_types import DataType
+from neuracore_types import DataSpec, DataType
 from neuracore_types import Recording as RecordingModel
 from neuracore_types import (
     RobotDataSpec,
@@ -476,6 +476,22 @@ class Dataset:
             prefetch_videos=prefetch_videos,
             max_prefetch_workers=max_prefetch_workers,
         )
+
+    def get_full_data_spec(self, robot_id: str) -> DataSpec:
+        """Get full data spec for a given robot ID in the dataset.
+
+        Args:
+            robot_id: The robot ID to get the data spec for.
+
+        Returns:
+            A dictionary mapping DataType to list of data names.
+        """
+        response = requests.get(
+            f"{API_URL}/org/{self.org_id}/datasets/{self.id}/full-data-spec/{robot_id}",
+            headers=get_auth().get_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
 
     @property
     def robot_ids(self) -> list[str]:
