@@ -6,7 +6,9 @@ algorithm existence, robot existence, and data spec compatibility.
 
 from __future__ import annotations
 
-from neuracore_types import Dataset, DataType, RobotDataSpec
+from neuracore_types import DataType, RobotDataSpec
+
+from neuracore.core.data.dataset import Dataset
 
 
 def validate_robot_existence(
