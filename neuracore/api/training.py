@@ -142,6 +142,7 @@ def start_training_run(
         headers=auth.get_headers(),
         json=data.model_dump(mode="json"),
     )
+
     response.raise_for_status()
 
     job_data = response.json()
