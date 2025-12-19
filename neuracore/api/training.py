@@ -10,7 +10,6 @@ from typing import Any, cast
 
 import requests
 from neuracore_types import (
-    DataType,
     GPUType,
     RobotDataSpec,
     SynchronizationDetails,
@@ -18,6 +17,7 @@ from neuracore_types import (
 )
 
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.utils.training_validation import validate_training_params
 from neuracore.ml.utils.robot_data_spec_utils import merge_robot_data_spec
 
 from ..core.auth import get_auth
@@ -103,67 +103,15 @@ def start_training_run(
     # Get algorithm id
     algorithm_jsons = _get_algorithms()
     algorithm_id = None
-    input_data_types: list[DataType] = []
-    output_data_types: list[DataType] = []
-    for algorithm_json in algorithm_jsons:
-        if algorithm_json["name"] == algorithm_name:
-            algorithm_id = algorithm_json["id"]
-            input_data_types = [
-                DataType(supported_input_data_type)
-                for supported_input_data_type in algorithm_json[
-                    "supported_input_data_types"
-                ]
-            ]
-            output_data_types = [
-                DataType(supported_output_data_type)
-                for supported_output_data_type in algorithm_json[
-                    "supported_output_data_types"
-                ]
-            ]
-            break
 
-    # Validate that the robot exists in dataset
-    for robot_id in input_robot_data_spec.keys():
-        if robot_id not in dataset.robot_ids:
-            raise ValueError(
-                f"Input robot ID {robot_id} not found in dataset "
-                f"{dataset_name}. Please check the dataset contents."
-            )
-
-    # Validate input specs
-    for robot_data_types in input_robot_data_spec.values():
-        for data_type in robot_data_types.keys():
-            if data_type not in input_data_types:
-                raise ValueError(
-                    f"Input data type {data_type} is not supported by "
-                    f"algorithm {algorithm_name}. Please check the input "
-                    f"requirements of the training job."
-                )
-            if data_type not in dataset.data_types:
-                raise ValueError(
-                    f"Input data type {data_type} is not present in dataset "
-                    f"{dataset_name}. Please check the dataset contents."
-                )
-
-    # Validate output specs
-    for robot_data_types in output_robot_data_spec.values():
-        for data_type in robot_data_types.keys():
-            if data_type not in output_data_types:
-                raise ValueError(
-                    f"Output data type {data_type} is not supported by "
-                    f"algorithm {algorithm_name}. Please check the output "
-                    f"requirements of the training job."
-                )
-            if data_type not in dataset.data_types:
-                raise ValueError(
-                    f"Output data type {data_type} is not present in dataset "
-                    f"{dataset_name}. Please check the dataset contents."
-                )
-
-    if algorithm_id is None:
-        raise ValueError(f"Algorithm {algorithm_name} not found")
-
-    # Raise Error if the input/output data specs are not compatible with the union set
+    validate_training_params(
+        dataset,
+        dataset_name,
+        algorithm_name,
+        input_robot_data_spec,
+        output_robot_data_spec,
+        algorithm_jsons,
+    )
 
     data = TrainingJobRequest(
         dataset_id=dataset_id,
