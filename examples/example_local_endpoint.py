@@ -50,10 +50,18 @@ def main():
     )
 
     # If you know the path to the local model.nc.zip file, you can use it directly as:
-    # policy = nc.policy(model_file=PATH/TO/MODEL.nc.zip)
+    # policy = nc.policy(
+    #     model_file="PATH/TO/MODEL.nc.zip",
+    #     model_input_order=MODEL_INPUT_ORDER,
+    #     model_output_order=MODEL_OUTPUT_ORDER,
+    # )
 
     # Alternatively, you can connect to a local endpoint that has been started
-    # policy = nc.policy_local_server(train_run_name=TRAINING_JOB_NAME)
+    # policy = nc.policy_local_server(
+    #     train_run_name=TRAINING_JOB_NAME,
+    #     model_input_order=MODEL_INPUT_ORDER,
+    #     model_output_order=MODEL_OUTPUT_ORDER,
+    # )
 
     # Optional. Set the checkpoint to the last epoch.
     # Note by default, model is loaded from the last epoch.
@@ -71,6 +79,12 @@ def main():
         # resample the initial cube pose
         BOX_POSE[0] = env.sample_box_pose()
         obs = env.reset()
+        (
+            arm_joint_positions,
+            arm_joint_velocities,
+            left_arm_gripper_open,
+            right_arm_gripper_open,
+        ) = env.extract_state()
 
         # Setup plotting
         if onscreen_render:
@@ -82,13 +96,12 @@ def main():
         # Run episode
         for i in range(400):
 
-            arm_joint_positions = {
-                jname: obs.qpos[jname]
-                for jname in BimanualViperXTask.LEFT_ARM_JOINT_NAMES
-                + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
-            }
-            left_arm_gripper_open = obs.qpos[BimanualViperXTask.LEFT_GRIPPER_OPEN]
-            right_arm_gripper_open = obs.qpos[BimanualViperXTask.RIGHT_GRIPPER_OPEN]
+            (
+                arm_joint_positions,
+                arm_joint_velocities,
+                left_arm_gripper_open,
+                right_arm_gripper_open,
+            ) = env.extract_state()
 
             nc.log_joint_positions(positions=arm_joint_positions)
 
@@ -118,24 +131,25 @@ def main():
                         joint_target_positions[name].value
                         for name in BimanualViperXTask.LEFT_ARM_JOINT_NAMES
                     ],
-                    dim=1,
+                    dim=2,
                 )
                 right_arm = torch.cat(
                     [
                         joint_target_positions[name].value
                         for name in BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
                     ],
-                    dim=1,
+                    dim=2,
                 )
-                left_open_amount = open_amounts[
-                    BimanualViperXTask.LEFT_GRIPPER_OPEN
-                ].open_amount
-                right_open_amount = open_amounts[
-                    BimanualViperXTask.RIGHT_GRIPPER_OPEN
-                ].open_amount
-                batched_action = torch.cat(
-                    [left_arm, left_open_amount, right_arm, right_open_amount], dim=1
-                ).numpy()
+                left_open_amount = open_amounts["left_arm"].open_amount
+                right_open_amount = open_amounts["right_arm"].open_amount
+                batched_action = (
+                    torch.cat(
+                        [left_arm, left_open_amount, right_arm, right_open_amount],
+                        dim=2,
+                    )
+                    .cpu()
+                    .numpy()
+                )
                 mj_action = batched_action[0]  # Get the first (and only) in the batch
                 horizon = len(mj_action)
 

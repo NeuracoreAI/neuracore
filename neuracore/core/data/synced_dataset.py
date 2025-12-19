@@ -53,9 +53,15 @@ class SynchronizedDataset:
         self._prefetch_videos_needed = False
         if prefetch_videos:
             for rec in self.dataset:
-                cache_dir = self.dataset.cache_dir / f"{rec.id}" / f"{self.frequency}Hz"
-                # Check if cache directory exists and contains any files
-                if not cache_dir.exists() or not any(cache_dir.iterdir()):
+                cache_dir = self.dataset.cache_dir / rec.id
+
+                lock_file = cache_dir / ".recording.lock"
+
+                # Check if cache directory exists
+                if not cache_dir.exists() or lock_file.exists():
+                    # NOTE: we check if the directly exists to avoid re downloading
+                    #  if the lock file exists it keeps a worker waiting in case the
+                    #  other download is in progress fails, we can retry
                     self._prefetch_videos_needed = True
                     break
         self._perform_synced_data_prefetch(max_prefetch_workers=max_prefetch_workers)

@@ -13,12 +13,14 @@ from neuracore_types import (
     CameraData,
     Custom1DData,
     DataType,
+    DepthCameraData,
     EndEffectorPoseData,
     JointData,
     LanguageData,
     ParallelGripperOpenAmountData,
     PointCloudData,
     PoseData,
+    RGBCameraData,
 )
 from neuracore_types.utils import validate_safe_name
 
@@ -158,25 +160,22 @@ def _validate_extrinsics_intrinsics(
 
 def _log_camera_data(
     camera_type: DataType,
-    name: str,
+    camera_data_without_frame: CameraData,
     image: np.ndarray,
-    extrinsics: np.ndarray | None = None,
-    intrinsics: np.ndarray | None = None,
+    name: str,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
 ) -> None:
     """Log camera data for a robot.
 
     Args:
         camera_type: Type of camera (e.g. DataType.RGB or DataType.DEPTH)
-        name: Unique identifier for the camera
+        camera_data_without_frame: Camera data to log without frame
+            (e.g. RGBCameraData or DepthCameraData)
         image: Image data as numpy array
-        extrinsics: Optional extrinsics matrix (4x4)
-        intrinsics: Optional intrinsics matrix (3x3)
+        name: Unique identifier for the camera
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -187,13 +186,16 @@ def _log_camera_data(
         DataType.DEPTH_IMAGES,
     ), "Unsupported camera type"
 
-    timestamp = timestamp or time.time()
-    extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name, instance)
     storage_name = validate_safe_name(name)
     str_id = f"{camera_type.value}:{name}"
 
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    # data streaming for bucket storage (lossless and lossy)
     stream = robot.get_data_stream(str_id)
+    # create the stream if it doesn't exist
     if stream is None:
         if camera_type == DataType.RGB_IMAGES:
             stream = RGBDataStream(storage_name, image.shape[1], image.shape[0])
@@ -202,32 +204,31 @@ def _log_camera_data(
         else:
             raise ValueError(f"Invalid camera type: {camera_type}")
         robot.add_data_stream(str_id, stream)
-
-    start_stream(robot, stream)
-
     assert isinstance(
         stream, VideoDataStream
     ), "Expected stream as instance of VideoDataStream"
 
+    start_stream(robot, stream)
     if stream.width != image.shape[1] or stream.height != image.shape[0]:
         raise ValueError(
             f"Camera image dimensions {image.shape[1]}x{image.shape[0]} do not match "
             f"stream dimensions {stream.width}x{stream.height}"
         )
 
-    # NOTE: we explicitly do not include the frame in the CameraData object to avoid
-    # serializing the frame to JSON or having to make two copies for streaming
-    # and bucket storage
-    camera_data = CameraData(
-        timestamp=timestamp, extrinsics=extrinsics, intrinsics=intrinsics, frame=None
-    )
-    stream.log(camera_data, frame=image)
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
+    # NOTE: we explicitly do not include the frame in the
+    # camera_data_without_frame object to avoid serializing the frame to JSON
+    # or having to make two copies for streaming and bucket storage.
+    camera_data_copy = camera_data_without_frame.model_copy()
+    stream.log(camera_data_without_frame, frame=image)
+
+    # peer to peer (p2p) streaming
+    # NOTE: to avoid serializing the frame, we make another copy of the
+    # camera_data_without_frame object because stream.log modifies the object
+    # and adds the frame to it.
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
     ).get_video_source(name, camera_type, f"{name}_{camera_type}").add_frame(
-        camera_data, frame=image
+        camera_data_copy, frame=image
     )
 
 
@@ -795,15 +796,21 @@ def log_rgb(
         raise ValueError("Image image must be a numpy array")
     if rgb.dtype != np.uint8:
         raise ValueError("Image must be uint8 with range 0-255")
+    extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
+    timestamp = timestamp or time.time()
+    rgb_camera_data = RGBCameraData(
+        timestamp=timestamp,
+        extrinsics=extrinsics,
+        intrinsics=intrinsics,
+        frame=None,
+    )
     _log_camera_data(
         DataType.RGB_IMAGES,
-        name,
+        rgb_camera_data,
         rgb,
-        extrinsics,
-        intrinsics,
+        name,
         robot_name,
         instance,
-        timestamp,
     )
 
 
@@ -843,15 +850,21 @@ def log_depth(
             f"You are attempting to log depth values > {MAX_DEPTH}. "
             "The values you are passing in are likely in millimeters."
         )
+    extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
+    timestamp = timestamp or time.time()
+    depth_camera_data = DepthCameraData(
+        timestamp=timestamp,
+        extrinsics=extrinsics,
+        intrinsics=intrinsics,
+        frame=None,
+    )
     _log_camera_data(
         DataType.DEPTH_IMAGES,
-        name,
+        depth_camera_data,
         depth,
-        extrinsics,
-        intrinsics,
+        name,
         robot_name,
         instance,
-        timestamp,
     )
 
 

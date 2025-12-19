@@ -1,7 +1,7 @@
 """Abstract base class for uploading recording data to cloud storage buckets.
 
 This module provides the foundation for implementing bucket uploaders that handle
-recording data streams and track active stream counts via API calls.
+recording data traces and track active trace counts via API calls.
 """
 
 import threading
@@ -23,7 +23,7 @@ class BucketUploader(ABC):
     """Abstract base class for uploading recording data to cloud storage buckets.
 
     This class provides common functionality for managing recording uploads,
-    including tracking the number of active streams and communicating with
+    including tracking the number of active traces and communicating with
     the recording API. Concrete implementations must define the finish method
     to handle the actual upload completion logic.
     """
@@ -44,7 +44,7 @@ class BucketUploader(ABC):
         """Register a backend DataTrace for this recording.
 
         Returns:
-            The stream id from the backend
+            The trace id from the backend
         """
         if data_type is None:
             raise ValueError("data_type cannot be None")
@@ -62,8 +62,8 @@ class BucketUploader(ABC):
             response.raise_for_status()
             body = response.json()
             return body.get("id")
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError("Failed to register data stream: ", e)
+        except requests.exceptions.RequestException:
+            raise RuntimeError("Failed to register data trace")
 
     def _update_data_trace(
         self,
