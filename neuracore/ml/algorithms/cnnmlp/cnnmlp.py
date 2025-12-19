@@ -276,8 +276,10 @@ class CNNMLP(NeuracoreModel):
         self.action_normalizer = ACTION_NORMALIZER(
             name="actions", statistics=output_stats
         )
-        self.proprio_normalizer = PROPRIO_NORMALIZER(
-            name="proprioception", statistics=input_stats
+        self.proprio_normalizer = (
+            PROPRIO_NORMALIZER(name="proprioception", statistics=input_stats)
+            if input_stats
+            else None
         )
 
         # Predict entire sequence at once
@@ -420,9 +422,16 @@ class CNNMLP(NeuracoreModel):
             proprio_list.append(masked_proprio)
 
         # Concatenate all proprio together: (B, total_proprio_dim)
+        if not proprio_list:
+            return {}
+
         all_proprio = torch.cat(proprio_list, dim=-1)
 
         # Normalize once on all proprio
+        if self.proprio_normalizer is None:
+            raise ValueError(
+                "Proprioception inputs were provided but no statistics were available."
+            )
         normalized_proprio = self.proprio_normalizer.normalize(all_proprio)
 
         # Split and encode each part
