@@ -10,7 +10,6 @@ MODEL_OUTPUT_ORDER: DataSpec = {
         BimanualViperXTask.LEFT_ARM_JOINT_NAMES
         + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
     ),
-    # DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
 }
 
 
@@ -86,6 +85,10 @@ if __name__ == "__main__":
     frequency = args.frequency
     algorithm_name = args.algorithm_name
     dataset_name = args.dataset_name
+
+    dataset = nc.get_dataset(dataset_name)
+    robot_id = dataset.robot_ids[0]
+
     # Here, algorithm specific configs can be added.
     # Uses default values, if not defined.
     algorithm_config = {
@@ -95,13 +98,13 @@ if __name__ == "__main__":
     }
 
     input_robot_data_spec: RobotDataSpec = {
-        "223185e0-5250-487a-a7e7-c6a4b1d8c4e2": {
+        robot_id: {
             nc.DataType.RGB_IMAGES: ["angle"],
         }
     }
 
     output_robot_data_spec: RobotDataSpec = {
-        "223185e0-5250-487a-a7e7-c6a4b1d8c4e2": MODEL_OUTPUT_ORDER,
+        robot_id: MODEL_OUTPUT_ORDER,
     }
 
     job_data = nc.start_training_run(
