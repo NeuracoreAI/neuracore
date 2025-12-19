@@ -17,7 +17,10 @@ from neuracore_types import (
 )
 
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.utils.training_validation import validate_training_params
+from neuracore.core.utils.training_validation import (
+    get_algorithm_id,
+    validate_training_params,
+)
 from neuracore.ml.utils.robot_data_spec_utils import merge_robot_data_spec
 
 from ..core.auth import get_auth
@@ -102,7 +105,7 @@ def start_training_run(
 
     # Get algorithm id
     algorithm_jsons = _get_algorithms()
-    algorithm_id = None
+    algorithm_id = get_algorithm_id(algorithm_name, algorithm_jsons)
 
     validate_training_params(
         dataset,
@@ -215,13 +218,13 @@ def delete_training_job(job_id: str) -> None:
         requests.exceptions.RequestException: If there is a problem with the request
         ConfigError: If there is an error trying to get the current org
     """
-    auth = get_auth()
-    org_id = get_current_org()
-    try:
-        response = requests.delete(
-            f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
-            headers=auth.get_headers(),
-        )
-        response.raise_for_status()
-    except Exception as e:
-        raise ValueError(f"Error deleting training job: {e}")
+    # auth = get_auth()
+    # org_id = get_current_org()
+    # try:
+    #     response = requests.delete(
+    #         f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
+    #         headers=auth.get_headers(),
+    #     )
+    #     response.raise_for_status()
+    # except Exception as e:
+    #     raise ValueError(f"Error deleting training job: {e}")
