@@ -10,12 +10,12 @@ from neuracore_types import BatchedNCData, DataType, ModelInitDescription
 from torch import nn
 from torch.utils.data import DataLoader
 
+from neuracore.core.utils.robot_data_spec_utils import extract_data_types
 from neuracore.ml import BatchedInferenceInputs, BatchedTrainingSamples
 from neuracore.ml.algorithms.pi0.pi0 import Pi0
 from neuracore.ml.core.ml_types import BatchedTrainingOutputs
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
 from neuracore.ml.utils.device_utils import get_default_device
-from neuracore.ml.utils.robot_data_spec_utils import extract_data_types
 from neuracore.ml.utils.validate import run_validation
 
 BS = 2
@@ -107,7 +107,7 @@ def sample_training_batch(
 
 @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
 def test_model_construction(
-    model_init_description: ModelInitDescription, model_config: dict
+    model_init_description: ModelInitDescription,
 ):
     model = Pi0(model_init_description, **PI_TINY_ARGS)
     model = model.to(DEVICE)

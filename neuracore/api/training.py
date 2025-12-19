@@ -17,11 +17,11 @@ from neuracore_types import (
 )
 
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.utils.robot_data_spec_utils import merge_robot_data_spec
 from neuracore.core.utils.training_input_args_validation import (
     get_algorithm_id,
     validate_training_params,
 )
-from neuracore.ml.utils.robot_data_spec_utils import merge_robot_data_spec
 
 from ..core.auth import get_auth
 from ..core.const import API_URL

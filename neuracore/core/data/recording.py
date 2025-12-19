@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from neuracore_types import DataSpec, DataType, RobotDataSpec
 
 from neuracore.core.data.synced_recording import SynchronizedRecording
-from neuracore.ml.utils.robot_data_spec_utils import extract_data_types
+from neuracore.core.utils.robot_data_spec_utils import extract_data_types
 
 from ..exceptions import SynchronizationError
 

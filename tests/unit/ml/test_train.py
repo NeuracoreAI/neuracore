@@ -27,6 +27,7 @@ from neuracore_types import (
 )
 from omegaconf import DictConfig, OmegaConf
 
+from neuracore.core.utils.robot_data_spec_utils import extract_data_types
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.datasets.pytorch_single_sample_dataset import SingleSampleDataset
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
@@ -39,7 +40,6 @@ from neuracore.ml.train import (
     run_training,
     setup_logging,
 )
-from neuracore.ml.utils.robot_data_spec_utils import extract_data_types
 
 SKIP_TEST = (
     os.environ.get("CI", "false").lower() == "true" or not torch.cuda.is_available()

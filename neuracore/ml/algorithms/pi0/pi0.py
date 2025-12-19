@@ -222,7 +222,7 @@ class Pi0(NeuracoreModel):
         self.vlm_max_tokens = num_rgbs * 256 + self.vlm_max_text_tokens
 
         self.vlm = PaliGemmaForConditionalGeneration.from_pretrained(
-            VLM_BACKBONE, dtype=self.dtype, attn_implementation="eager"
+            VLM_BACKBONE, torch_dtype=self.dtype, attn_implementation="eager"
         )
         self.vlm_processor = AutoProcessor.from_pretrained(
             VLM_BACKBONE, padding_side="right"
@@ -280,9 +280,7 @@ class Pi0(NeuracoreModel):
                 param.requires_grad = False
 
         # Delete the language model to save memory (keep only embeddings)
-        # Note: We delete model.language_model (the actual module), not
-        # language_model (the property)
-        del self.vlm.model.language_model
+        del self.vlm.language_model
 
         # Resize the images to 224x224
         self.image_normalizer = torch.nn.Sequential(
@@ -411,7 +409,7 @@ class Pi0(NeuracoreModel):
     def _load_pretrained_vlm_weights(self) -> None:
         """Load pretrained PaliGemma weights into the VLM expert of the MoE."""
         logger.info("Loading pretrained PaliGemma weights into VLM expert...")
-        vlm_state_dict = self.vlm.model.language_model.state_dict()
+        vlm_state_dict = self.vlm.language_model.state_dict()
         moe_state_dict = self.moe.state_dict()
         new_state_dict = {}
         for moe_key, moe_param in moe_state_dict.items():
@@ -594,7 +592,7 @@ class Pi0(NeuracoreModel):
 
         # iterate over num_cam images
         for img, img_mask in zip(images, image_masks):
-            img_emb = self.vlm.model.get_image_features(img)
+            img_emb = self.vlm.get_image_features(img)
             img_emb = img_emb.to(dtype=self.dtype, device=self.device)
 
             bsize, num_img_embs = img_emb.shape[:2]
