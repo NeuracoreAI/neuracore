@@ -57,9 +57,9 @@ def test_start_training_run(
     """Test starting a training run."""
     # Ensure login
     nc.login("test_api_key")
-
+    dataset_id = "dataset123"
     dataset_response = Dataset(
-        id="dataset_123",
+        id=dataset_id,
         name="test_dataset",
         created_at=0.0,
         modified_at=0.0,
@@ -68,6 +68,8 @@ def test_start_training_run(
         tags=["test"],
         is_shared=False,
         num_demonstrations=20,
+        all_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
+        common_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
     )
 
     # Mock datasets endpoint to return a dataset
@@ -122,11 +124,29 @@ def test_start_training_run(
         status_code=200,
     )
 
+    robot_id = "fake_robot_id"
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/robot_ids",
+        json=[robot_id],
+        status_code=200,
+    )
+
     # Start training run
     algorithm_config = {
         "hidden_dim": 512,
         "num_layers": 3,
         "cnn_output_dim": 64,
+    }
+    input_robot_data_spec = {
+        robot_id: {
+            DataType.RGB_IMAGES: ["angle"],
+        }
+    }
+
+    output_robot_data_spec = {
+        robot_id: {
+            DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
+        }
     }
 
     job = nc.start_training_run(
@@ -137,6 +157,8 @@ def test_start_training_run(
         gpu_type=GPUType.NVIDIA_TESLA_T4,
         num_gpus=1,
         frequency=10,
+        input_robot_data_spec=input_robot_data_spec,
+        output_robot_data_spec=output_robot_data_spec,
     )
 
     # Verify job was created with expected values
