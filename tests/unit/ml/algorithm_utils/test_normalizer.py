@@ -20,22 +20,24 @@ from neuracore.ml.algorithm_utils.normalizer import (
 class TestNormalizer:
     """Test suite for base Normalizer class."""
 
+    class _DummyNormalizer(Normalizer):
+        """Concrete normalizer for testing base behavior."""
+
+        def normalize(self, data: torch.Tensor) -> torch.Tensor:
+            return data
+
+        def unnormalize(self, data: torch.Tensor) -> torch.Tensor:
+            return data
+
     def test_init(self):
-        """Test Normalizer initialization."""
-        normalizer = Normalizer(name="test_normalizer")
+        """Test Normalizer initialization via a concrete subclass."""
+        normalizer = self._DummyNormalizer(name="test_normalizer")
         assert normalizer._name == "test_normalizer"
 
-    def test_normalize_not_implemented(self):
-        """Test that normalize raises NotImplementedError."""
-        normalizer = Normalizer(name="test")
-        with pytest.raises(NotImplementedError, match="Subclasses must implement"):
-            normalizer.normalize(torch.randn(5, 10))
-
-    def test_unnormalize_not_implemented(self):
-        """Test that unnormalize raises NotImplementedError."""
-        normalizer = Normalizer(name="test")
-        with pytest.raises(NotImplementedError, match="Subclasses must implement"):
-            normalizer.unnormalize(torch.randn(5, 10))
+    def test_abstract_class(self):
+        """Test that Normalizer cannot be instantiated directly."""
+        with pytest.raises(TypeError, match="abstract"):
+            Normalizer(name="test")
 
 
 class TestMeanStdNormalizer:
