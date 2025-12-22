@@ -49,8 +49,6 @@ class TestSynchronizedRecording:
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
-            start_time=0.0,
-            end_time=2.0,
             frequency=30,
             robot_data_spec=None,
         )
@@ -80,8 +78,6 @@ class TestSynchronizedRecording:
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
-            start_time=0.0,
-            end_time=2.0,
             frequency=30,
             robot_data_spec=robot_data_spec,
         )
@@ -176,8 +172,6 @@ class TestSynchronizedRecording:
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
-            start_time=0.0,
-            end_time=2.0,
             frequency=30,
             robot_data_spec=None,
         )
@@ -254,8 +248,6 @@ class TestSynchronizedRecording:
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
-            start_time=0.0,
-            end_time=2.0,
             frequency=30,
             robot_data_spec=None,
         )
@@ -275,8 +267,6 @@ class TestSynchronizedRecording:
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
-            start_time=0.0,
-            end_time=2.0,
             frequency=30,
             robot_data_spec=None,
             prefetch_videos=True,
@@ -293,8 +283,6 @@ class TestSynchronizedRecording:
                 recording_id="rec1",
                 robot_id="robot1",
                 instance=1,
-                start_time=0.0,
-                end_time=2.0,
                 frequency=30,
                 robot_data_spec=None,
                 prefetch_videos=True,
@@ -350,8 +338,6 @@ class TestSynchronizedRecording:
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
-            start_time=0.0,
-            end_time=2.0,
             frequency=30,
             robot_data_spec=None,
         )
@@ -361,8 +347,6 @@ class TestSynchronizedRecording:
             recording_id="rec1",
             robot_id="robot1",
             instance=1,
-            start_time=0.0,
-            end_time=2.0,
             frequency=60,
             robot_data_spec=None,
         )

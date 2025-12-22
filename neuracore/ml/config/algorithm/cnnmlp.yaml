@@ -2,6 +2,7 @@
 algorithm:
   _target_: neuracore.ml.algorithms.cnnmlp.cnnmlp.CNNMLP
   image_backbone: "resnet18"
+  use_resnet_stats: true
   hidden_dim: 512
   cnn_output_dim: 512
   num_layers: 3
