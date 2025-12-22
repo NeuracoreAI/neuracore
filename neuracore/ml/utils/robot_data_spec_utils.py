@@ -18,12 +18,15 @@ def convert_str_to_robot_data_spec(
 
     Returns:
         A dictionary where keys are robot IDs and values are dictionaries
-            mapping DataType enums to lists of item names.
+            mapping DataType enums to lists of item names, preserving insertion order.
     """
-    return {
-        robot_id: {DataType(dt): data_list for dt, data_list in dt_dict.items()}
-        for robot_id, dt_dict in robot_id_to_data_types.items()
-    }
+    result: dict[str, dict[DataType, list[str]]] = {}
+    for robot_id, data_type_dict in robot_id_to_data_types.items():
+        result[robot_id] = {
+            DataType(data_type): list(data_list)
+            for data_type, data_list in data_type_dict.items()
+        }
+    return result
 
 
 def merge_robot_data_spec(
@@ -32,29 +35,32 @@ def merge_robot_data_spec(
 ) -> RobotDataSpec:
     """Merge two robot ID to data types dictionaries.
 
+    Order is preserved: data_spec_1's order takes priority, then data_spec_2's
+    items are appended in their original order.
+
     Args:
-        data_spec_1: First dictionary to merge.
+        data_spec_1: First dictionary to merge (order takes priority).
         data_spec_2: Second dictionary to merge.
 
     Returns:
-        Merged dictionary.
+        Merged dictionary with preserved order.
     """
     merged_dict: RobotDataSpec = {}
 
-    all_robot_ids = set(data_spec_1.keys()).union(set(data_spec_2.keys()))
+    # dict.fromkeys() preserves order and removes duplicates
+    all_robot_ids = list(dict.fromkeys(list(data_spec_1) + list(data_spec_2)))
 
     for robot_id in all_robot_ids:
+        dt_dict1 = data_spec_1.get(robot_id, {})
+        dt_dict2 = data_spec_2.get(robot_id, {})
+        all_data_types = list(dict.fromkeys(list(dt_dict1) + list(dt_dict2)))
+
         merged_dict[robot_id] = {}
-        data_types1 = data_spec_1.get(robot_id, {})
-        data_types2 = data_spec_2.get(robot_id, {})
-
-        all_data_types = set(data_types1.keys()).union(set(data_types2.keys()))
-
         for data_type in all_data_types:
-            items1 = data_types1.get(data_type, [])
-            items2 = data_types2.get(data_type, [])
-            merged_items = list(set(items1).union(set(items2)))
-            merged_dict[robot_id][data_type] = merged_items
+            items = list(dt_dict1.get(data_type, [])) + list(
+                dt_dict2.get(data_type, [])
+            )
+            merged_dict[robot_id][data_type] = list(dict.fromkeys(items))
 
     return merged_dict
 
