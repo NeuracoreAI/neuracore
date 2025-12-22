@@ -5,13 +5,14 @@ mean/std and min/max normalization for multiple data types,
 with support for PyTorch's register_buffer for proper device handling.
 """
 
+from abc import ABC, abstractmethod
 from typing import Any
 
 import torch
 import torch.nn as nn
 
 
-class Normalizer(nn.Module):
+class Normalizer(nn.Module, ABC):
     """Base normalizer class for multiple data types.
 
     This class provides the common interface for normalization.
@@ -21,7 +22,6 @@ class Normalizer(nn.Module):
     def __init__(
         self,
         name: str,
-        statistics: list[Any] | None = None,
     ) -> None:
         """Initialize a Normalizer with optional statistics.
 
@@ -32,6 +32,7 @@ class Normalizer(nn.Module):
         super().__init__()
         self._name = name
 
+    @abstractmethod
     def normalize(self, data: torch.Tensor) -> torch.Tensor:
         """Normalize using a specific normalizer.
 
@@ -41,11 +42,9 @@ class Normalizer(nn.Module):
         Returns:
             Normalized tensor.
 
-        Raises:
-            NotImplementedError: Must be implemented by subclasses.
         """
-        raise NotImplementedError("Subclasses must implement normalize")
 
+    @abstractmethod
     def unnormalize(self, data: torch.Tensor) -> torch.Tensor:
         """Unnormalize using a specific normalizer.
 
@@ -55,10 +54,7 @@ class Normalizer(nn.Module):
         Returns:
             Unnormalized tensor.
 
-        Raises:
-            NotImplementedError: Must be implemented by subclasses.
         """
-        raise NotImplementedError("Subclasses must implement unnormalize")
 
 
 class MeanStdNormalizer(Normalizer):
@@ -80,7 +76,7 @@ class MeanStdNormalizer(Normalizer):
     def __init__(
         self,
         name: str,
-        statistics: list[Any] | None = None,
+        statistics: list[Any],
     ) -> None:
         """Initialize a MeanStdNormalizer with optional statistics.
 
@@ -92,7 +88,7 @@ class MeanStdNormalizer(Normalizer):
         Raises:
             ValueError: If statistics are not provided.
         """
-        super().__init__(name=name, statistics=statistics)
+        super().__init__(name=name)
         if statistics:
             combined_mean: list[float] = []
             combined_std: list[float] = []
@@ -158,7 +154,7 @@ class MinMaxNormalizer(Normalizer):
     def __init__(
         self,
         name: str,
-        statistics: list[Any] | None = None,
+        statistics: list[Any],
     ) -> None:
         """Initialize a MinMaxNormalizer with optional statistics.
 
@@ -170,7 +166,7 @@ class MinMaxNormalizer(Normalizer):
         Raises:
             ValueError: If statistics are not provided.
         """
-        super().__init__(name=name, statistics=statistics)
+        super().__init__(name=name)
         if statistics:
             combined_min: list[float] = []
             combined_max: list[float] = []
