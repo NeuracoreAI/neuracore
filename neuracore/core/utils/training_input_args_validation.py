@@ -11,6 +11,25 @@ from neuracore_types import DataType, RobotDataSpec
 from neuracore.core.data.dataset import Dataset
 
 
+def get_algorithm_name(algorithm_id: str, algorithm_jsons: list[dict]) -> str:
+    """Get algorithm name from its ID.
+
+    Args:
+        algorithm_id (str): The ID of the algorithm.
+        algorithm_jsons (list[dict]): List of algorithm metadata dictionaries.
+
+    Returns:
+        str: The name of the algorithm.
+
+    Raises:
+        ValueError: If the algorithm ID is not found.
+    """
+    for algorithm in algorithm_jsons:
+        if algorithm["id"] == algorithm_id:
+            return algorithm["name"]
+    raise ValueError(f"Algorithm with ID {algorithm_id} not found.")
+
+
 def validate_robot_existence(
     dataset: Dataset,
     dataset_name: str,

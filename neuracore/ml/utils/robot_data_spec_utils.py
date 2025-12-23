@@ -5,7 +5,7 @@ from neuracore_types import DataType, RobotDataSpec
 
 def convert_str_to_robot_data_spec(
     robot_id_to_data_types: dict[str, dict[str, list[str]]],
-) -> dict[str, dict[DataType, list[str]]]:
+) -> RobotDataSpec:
     """Converts string representations of data types to DataType enums.
 
     Takes a dictionary mapping robot IDs to dictionaries of
