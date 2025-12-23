@@ -406,7 +406,7 @@ def main(cfg: DictConfig) -> None:
         if not isinstance(cfg.input_robot_data_spec, DictConfig):
             raise ValueError(
                 "'input_robot_data_spec' must be a dictionary "
-                "mapping robot IDs to dictions of data types to lists of data names."
+                "mapping robot IDs to dictionary of data types to lists of data names."
             )
         input_robot_data_spec = convert_str_to_robot_data_spec(
             cfg.input_robot_data_spec
