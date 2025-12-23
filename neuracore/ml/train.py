@@ -15,6 +15,11 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 import neuracore as nc
+from neuracore.api.training import _get_algorithms
+from neuracore.core.utils.training_input_args_validation import (
+    get_algorithm_name,
+    validate_training_params,
+)
 from neuracore.ml import NeuracoreModel
 from neuracore.ml.datasets.pytorch_single_sample_dataset import SingleSampleDataset
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
@@ -400,8 +405,8 @@ def main(cfg: DictConfig) -> None:
     if cfg.input_robot_data_spec is not None:
         if not isinstance(cfg.input_robot_data_spec, DictConfig):
             raise ValueError(
-                "'input_robot_data_spec' must either be None or a dictionary "
-                "mapping robot IDs to dictions of data types to lists of data names."
+                "'input_robot_data_spec' must be a dictionary "
+                "mapping robot IDs to dictionary of data types to lists of data names."
             )
         input_robot_data_spec = convert_str_to_robot_data_spec(
             cfg.input_robot_data_spec
@@ -429,6 +434,24 @@ def main(cfg: DictConfig) -> None:
         }
 
     batch_size = cfg.batch_size
+
+    algorithms_jsons = _get_algorithms()
+    if cfg.algorithm_id is not None:
+        algorithm_name = get_algorithm_name(
+            cfg,
+            algorithms_jsons,
+        )
+    else:
+        algorithm_name = cfg.algorithm._target_.rsplit(".", 1)[-1]
+
+    validate_training_params(
+        dataset,
+        dataset_name=cfg.dataset_name if cfg.dataset_name is not None else "",
+        algorithm_name=algorithm_name,
+        input_robot_data_spec=input_robot_data_spec,
+        output_robot_data_spec=output_robot_data_spec,
+        algorithm_jsons=algorithms_jsons,
+    )
 
     # Prepare data types for synchronization
     robot_data_spec = merge_robot_data_spec(
