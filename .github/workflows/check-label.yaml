@@ -13,7 +13,7 @@ on:
 
 jobs:
   check-version-label:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     
     steps:
     - name: Check for version label
