@@ -227,7 +227,17 @@ def test_deploy_model(
     )
 
     # Deploy model
-    result = nc.deploy_model("job_123", "test_endpoint")
+    result = nc.deploy_model(
+        job_id="job_123",
+        name="test_endpoint",
+        model_input_order={
+            DataType.RGB_IMAGES: ["top_camera"],
+            DataType.JOINT_POSITIONS: ["joint1", "joint2", "joint3"],
+        },
+        model_output_order={
+            DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
+        },
+    )
 
     # Verify result
     assert result is not None
@@ -298,7 +308,17 @@ def test_deploy_model_failure(
 
     # Attempt to deploy should raise an exception
     with pytest.raises(ValueError, match="Error deploying model"):
-        nc.deploy_model("job_123", "test_endpoint")
+        nc.deploy_model(
+            job_id="job_123",
+            name="test_endpoint",
+            model_input_order={
+                DataType.RGB_IMAGES: ["top_camera"],
+                DataType.JOINT_POSITIONS: ["joint1", "joint2", "joint3"],
+            },
+            model_output_order={
+                DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
+            },
+        )
 
 
 def test_connect_local_endpoint_with_train_run(

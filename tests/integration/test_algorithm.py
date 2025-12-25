@@ -5,7 +5,7 @@ import time
 
 import matplotlib.pyplot as plt
 import pytest
-from neuracore_types import CameraData, JointData, SynchronizedPoint
+from neuracore_types import CameraData, DataSpec, DataType, JointData, SynchronizedPoint
 
 import neuracore as nc
 from neuracore.core.endpoint import Policy
@@ -13,7 +13,12 @@ from neuracore.core.endpoint import Policy
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "..", "..", "examples"))
 # ruff: noqa: E402
-from common.transfer_cube import BOX_POSE, TransferCubeTask, make_sim_env
+from common.transfer_cube import (
+    BOX_POSE,
+    BimanualViperXTask,
+    TransferCubeTask,
+    make_sim_env,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,6 +38,14 @@ OUTPUT_PREDICTION_HORIZON = 100
 NUM_ROLLOUTS = 10
 ONSCREEN_RENDER = False
 TRAINING_TIMEOUT_MINUTES = 360
+
+# TODO: Recollect integration dataset with correct joint/gripper partition
+JOINT_NAMES = (
+    BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+    + BimanualViperXTask.LEFT_GRIPPER_JOINT_NAMES
+    + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+    + BimanualViperXTask.RIGHT_GRIPPER_JOINT_NAMES
+)
 
 
 def eval_model(
@@ -101,29 +114,29 @@ def eval_model(
 
 
 @pytest.mark.parametrize(
-    "algorithm_name, input_robot_data_spec, output_robot_data_spec, epochs, min_success_rate",  # noqa: E501
+    "algorithm_name, input_data_spec, output_data_spec, epochs, min_success_rate",  # noqa: E501
     [
         (
             "CNNMLP",
-            [
-                nc.DataType.RGB_IMAGES,
-                nc.DataType.JOINT_POSITIONS,
-            ],
-            [
-                nc.DataType.JOINT_TARGET_POSITIONS,
-            ],
+            {
+                DataType.RGB_IMAGES: [CAM_NAME],
+                DataType.JOINT_POSITIONS: JOINT_NAMES,
+            },
+            {
+                DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
+            },
             50,
             0.5,
         ),
         (
             "ACT",
-            [
-                nc.DataType.RGB_IMAGES,
-                nc.DataType.JOINT_POSITIONS,
-            ],
-            [
-                nc.DataType.JOINT_TARGET_POSITIONS,
-            ],
+            {
+                DataType.RGB_IMAGES: [CAM_NAME],
+                DataType.JOINT_POSITIONS: JOINT_NAMES,
+            },
+            {
+                DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
+            },
             50,
             0.5,
         ),
@@ -135,12 +148,21 @@ class TestAlgorithm:
     def test_start_training(
         self,
         algorithm_name: str,
-        input_robot_data_spec: list,
-        output_robot_data_spec: list,
+        input_data_spec: DataSpec,
+        output_data_spec: DataSpec,
         epochs: int,
         min_success_rate: float,
     ) -> None:
         nc.login()
+
+        # Construct robot data specs
+        dataset = nc.get_dataset(DATASET_NAME)
+        robot_ids_dataset = dataset.robot_ids
+        assert len(robot_ids_dataset) == 1, "Expected only one robot in the dataset"
+        robot_id = robot_ids_dataset[0]
+        input_robot_data_spec = {robot_id: input_data_spec}
+        output_robot_data_spec = {robot_id: output_data_spec}
+
         # Timestamp used for unique naming
         timestamp = int(time.time())
         algorithm_config = {
@@ -188,6 +210,8 @@ class TestAlgorithm:
             endpoint_data = nc.deploy_model(
                 job_id=training_job_id,
                 name=endpoint_name,
+                model_input_order=input_data_spec,
+                model_output_order=output_data_spec,
                 ttl=60 * 30,  # 30 minutes
             )
             endpoint_id = endpoint_data["id"]
