@@ -108,6 +108,11 @@ class MainTestSetup:
         self.mock_storage_handler = Mock()
         self.mock_storage_handler.download_algorithm = Mock()
         self.mock_storage_handler_class = Mock(return_value=self.mock_storage_handler)
+        self.mock_get_algorithms = Mock(
+            return_value=[{"id": "test-algorithm-id", "name": "test-algorithm"}]
+        )
+        self.mock_get_algorithm_name = Mock(return_value="test-algorithm")
+        self.mock_validate_training_params = Mock()
 
     def setup_mocks(
         self,
@@ -120,6 +125,16 @@ class MainTestSetup:
         self.monkeypatch.setattr("neuracore.ml.train.logger.info", Mock())
         self.monkeypatch.setattr("neuracore.login", self.mock_login)
         self.monkeypatch.setattr("neuracore.get_dataset", self.mock_get_dataset)
+        self.monkeypatch.setattr(
+            "neuracore.ml.train._get_algorithms", self.mock_get_algorithms
+        )
+        self.monkeypatch.setattr(
+            "neuracore.ml.train.get_algorithm_name", self.mock_get_algorithm_name
+        )
+        self.monkeypatch.setattr(
+            "neuracore.ml.train.validate_training_params",
+            self.mock_validate_training_params,
+        )
         self.monkeypatch.setattr(
             "neuracore.ml.train.PytorchSynchronizedDataset",
             self.mock_pytorch_dataset_class,
