@@ -83,7 +83,7 @@ def test_connect_endpoint(
     endpoint = nc.policy_remote_server("test_endpoint")
 
     nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
-    nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
+    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
 
     # Test prediction
     preds = endpoint.predict()
@@ -190,7 +190,7 @@ def test_connect_local_endpoint(
     )
 
     nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
-    nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
+    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
 
     preds = local_endpoint.predict()
     assert isinstance(preds, dict)
@@ -385,7 +385,7 @@ def test_connect_local_endpoint_with_train_run(
         port=port,
     )
     nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
-    nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
+    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
 
     preds = local_endpoint.predict()
     assert isinstance(preds, dict)
