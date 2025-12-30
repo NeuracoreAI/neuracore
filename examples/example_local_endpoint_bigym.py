@@ -97,13 +97,14 @@ def run_rollout(
             batched_action = (
                 torch.cat(
                     [joint_target_positions[name].value for name in JOINT_ACTUATORS],
-                    dim=1,
+                    dim=2,
                 )
                 .cpu()
                 .numpy()
             )
 
-            actions = batched_action[0]  # Get the first (and only) in the batch
+            # Get first batch: (horizon, num_joints)
+            actions = batched_action[0]
             horizon = len(actions)
 
         a = actions[idx_in_horizon]

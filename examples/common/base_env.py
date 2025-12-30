@@ -475,34 +475,6 @@ class BimanualViperXTask(MuJoCoEnvironment):
             gripper_open_amounts=self.get_gripper_open_amounts(),
         )
 
-    def extract_state(self) -> tuple[dict[str, float], dict[str, float], float, float]:
-        """Return joint positions, velocities, and gripper open amounts for both arms.
-
-        Returns:
-            Tuple of joint positions and velocities, and gripper open amounts
-            for both arms.
-        """
-        obs = self.get_observation()
-        arm_joint_positions = {
-            jname: obs.qpos[jname]
-            for jname in BimanualViperXTask.LEFT_ARM_JOINT_NAMES
-            + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
-        }
-        arm_joint_velocities = {
-            jname: obs.qvel[jname]
-            for jname in BimanualViperXTask.LEFT_ARM_JOINT_NAMES
-            + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
-        }
-        gripper_open_amounts = obs.gripper_open_amounts
-        left_arm_gripper_open = gripper_open_amounts["left_gripper"]
-        right_arm_gripper_open = gripper_open_amounts["right_gripper"]
-        return (
-            arm_joint_positions,
-            arm_joint_velocities,
-            left_arm_gripper_open,
-            right_arm_gripper_open,
-        )
-
     def sample_box_pose(self) -> np.ndarray:
         """Sample random box pose within workspace.
 

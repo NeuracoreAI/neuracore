@@ -9,7 +9,6 @@ import pytest
 import torch
 from neuracore_types import (
     BatchedJointData,
-    BatchedParallelGripperOpenAmountData,
     DataSpec,
     DataType,
     JointData,
@@ -49,7 +48,7 @@ NUM_ROLLOUTS = 10
 ONSCREEN_RENDER = False
 TRAINING_TIMEOUT_MINUTES = 360
 
-# TODO: Recollect integration dataset with correct joint/gripper partition
+# Input includes finger joints (16 joints total)
 JOINT_NAMES = (
     BimanualViperXTask.LEFT_ARM_JOINT_NAMES
     + BimanualViperXTask.LEFT_GRIPPER_JOINT_NAMES
@@ -119,29 +118,23 @@ def eval_model(
                     dim=2,
                 )
 
-                # Get gripper predictions if available
-                if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in predictions:
-                    gripper_predictions = cast(
-                        dict[str, BatchedParallelGripperOpenAmountData],
-                        predictions[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS],
-                    )
-                    left_gripper = gripper_predictions["left_arm"].open_amount
-                    right_gripper = gripper_predictions["right_arm"].open_amount
+                # Get gripper from JOINT_TARGET_POSITIONS
+                left_gripper = joint_target_positions[
+                    BimanualViperXTask.LEFT_GRIPPER_OPEN
+                ].value
+                right_gripper = joint_target_positions[
+                    BimanualViperXTask.RIGHT_GRIPPER_OPEN
+                ].value
 
-                    # Concatenate: left_arm, left_gripper, right_arm, right_gripper
-                    batched_actions = (
-                        torch.cat(
-                            [left_arm, left_gripper, right_arm, right_gripper],
-                            dim=2,
-                        )
-                        .cpu()
-                        .numpy()
+                # Concatenate: left_arm, left_gripper, right_arm, right_gripper
+                batched_actions = (
+                    torch.cat(
+                        [left_arm, left_gripper, right_arm, right_gripper],
+                        dim=2,
                     )
-                else:
-                    # No grippers, just concatenate arm joints
-                    batched_actions = (
-                        torch.cat([left_arm, right_arm], dim=2).cpu().numpy()
-                    )
+                    .cpu()
+                    .numpy()
+                )
 
                 # Get first batch: (horizon, num_joints)
                 actions = batched_actions[0]

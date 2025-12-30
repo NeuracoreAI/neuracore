@@ -44,13 +44,6 @@ def main(args):
             env = make_sim_env()
             obs = env.reset()
 
-            (
-                arm_joint_positions,
-                arm_joint_velocities,
-                left_arm_gripper_open,
-                right_arm_gripper_open,
-            ) = env.extract_state()
-
             # Start recording if enabled
             if record:
                 nc.start_recording()
@@ -60,15 +53,8 @@ def main(args):
             CUSTOM_DATA = np.array([1, 2, 3, 4, 5])
             CAM_NAME = "angle"
             nc.log_custom_1d("my_custom_data", CUSTOM_DATA, timestamp=t)
-            nc.log_joint_positions(positions=arm_joint_positions, timestamp=t)
-            nc.log_joint_velocities(velocities=arm_joint_velocities, timestamp=t)
-            nc.log_parallel_gripper_open_amounts(
-                {
-                    "left_arm": left_arm_gripper_open,
-                    "right_arm": right_arm_gripper_open,
-                },
-                timestamp=t,
-            )
+            nc.log_joint_positions(positions=obs.qpos, timestamp=t)
+            nc.log_joint_velocities(velocities=obs.qvel, timestamp=t)
             nc.log_language(
                 name="instruction",
                 language="Pick up the cube and pass it to the other robot",
@@ -79,23 +65,10 @@ def main(args):
             # Execute action trajectory while logging
             for action in action_traj:
                 obs, reward, done = env.step(np.array(list(action.values())))
-                (
-                    arm_joint_positions,
-                    arm_joint_velocities,
-                    left_arm_gripper_open,
-                    right_arm_gripper_open,
-                ) = env.extract_state()
                 t += 0.02
                 nc.log_custom_1d("my_custom_data", CUSTOM_DATA, timestamp=t)
-                nc.log_joint_positions(positions=arm_joint_positions, timestamp=t)
-                nc.log_joint_velocities(velocities=arm_joint_velocities, timestamp=t)
-                nc.log_parallel_gripper_open_amounts(
-                    {
-                        "left_arm": left_arm_gripper_open,
-                        "right_arm": right_arm_gripper_open,
-                    },
-                    timestamp=t,
-                )
+                nc.log_joint_positions(positions=obs.qpos, timestamp=t)
+                nc.log_joint_velocities(velocities=obs.qvel, timestamp=t)
                 nc.log_language(
                     name="instruction",
                     language="Pick up the cube and pass it to the other robot",
