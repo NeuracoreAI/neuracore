@@ -83,7 +83,7 @@ def test_connect_endpoint(
     endpoint = nc.policy_remote_server("test_endpoint")
 
     nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
-    nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
+    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
 
     # Test prediction
     preds = endpoint.predict()
@@ -190,7 +190,7 @@ def test_connect_local_endpoint(
     )
 
     nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
-    nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
+    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
 
     preds = local_endpoint.predict()
     assert isinstance(preds, dict)
@@ -227,7 +227,17 @@ def test_deploy_model(
     )
 
     # Deploy model
-    result = nc.deploy_model("job_123", "test_endpoint")
+    result = nc.deploy_model(
+        job_id="job_123",
+        name="test_endpoint",
+        model_input_order={
+            DataType.RGB_IMAGES: ["top_camera"],
+            DataType.JOINT_POSITIONS: ["joint1", "joint2", "joint3"],
+        },
+        model_output_order={
+            DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
+        },
+    )
 
     # Verify result
     assert result is not None
@@ -298,7 +308,17 @@ def test_deploy_model_failure(
 
     # Attempt to deploy should raise an exception
     with pytest.raises(ValueError, match="Error deploying model"):
-        nc.deploy_model("job_123", "test_endpoint")
+        nc.deploy_model(
+            job_id="job_123",
+            name="test_endpoint",
+            model_input_order={
+                DataType.RGB_IMAGES: ["top_camera"],
+                DataType.JOINT_POSITIONS: ["joint1", "joint2", "joint3"],
+            },
+            model_output_order={
+                DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
+            },
+        )
 
 
 def test_connect_local_endpoint_with_train_run(
@@ -365,7 +385,7 @@ def test_connect_local_endpoint_with_train_run(
         port=port,
     )
     nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
-    nc.log_rgb("top", np.zeros((100, 100, 3), dtype=np.uint8))
+    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
 
     preds = local_endpoint.predict()
     assert isinstance(preds, dict)

@@ -81,7 +81,7 @@ class Policy:
                 sensor data. Raises error if timeout is reached without sufficient data.
 
         Returns:
-            Model predictions as a list of SynchronizedPoint objects.
+            Model predictions as dict[DataType, dict[str, BatchedNCData]].
 
         Raises:
             InsufficientSynchronizedPointError:
@@ -118,10 +118,9 @@ class Policy:
         Args:
             sync_point: Synchronized sensor data to send to the model. If None,
                 creates a new sync point from the robot's current sensor data.
-            robot_name: Name of the robot to predict on. If None, uses the active robot.
 
         Returns:
-            Model predictions as a list of SynchronizedPoint objects.
+            Model predictions as dict[DataType, dict[str, BatchedNCData]].
         """
         raise NotImplementedError(
             "Subclasses must implement the _predict method to run model inference."
@@ -181,7 +180,7 @@ class DirectPolicy(Policy):
             sync_point: Optional sync point. If None, creates from robot sensors.
 
         Returns:
-            Model predictions as a list of SynchronizedPoint objects.
+            Model predictions as dict[DataType, dict[str, BatchedNCData]].
 
         Raises:
             InsufficientSynchronizedPointError:

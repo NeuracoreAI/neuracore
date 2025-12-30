@@ -5,10 +5,8 @@ managing local model endpoints, and handling the lifecycle of model deployments
 including deployment, status monitoring, and deletion operations.
 """
 
-import json
-
 import requests
-from neuracore_types import DataType, SynchronizedPoint
+from neuracore_types import DataSpec, DataType, DeploymentRequest, SynchronizedPoint
 
 from neuracore.api.core import _get_robot
 from neuracore.core.auth import get_auth
@@ -120,7 +118,13 @@ def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:
 
 
 # Deployment management functions
-def deploy_model(job_id: str, name: str, ttl: int | None = None) -> dict:
+def deploy_model(
+    job_id: str,
+    name: str,
+    model_input_order: DataSpec,
+    model_output_order: DataSpec,
+    ttl: int | None = None,
+) -> dict:
     """Deploy a trained model to a managed endpoint.
 
     Takes a completed training job and deploys the resulting model to a managed
@@ -131,6 +135,8 @@ def deploy_model(job_id: str, name: str, ttl: int | None = None) -> dict:
         job_id: Unique identifier of the completed training job containing
             the model to deploy.
         name: Human-readable name for the endpoint that will be created.
+        model_input_order: Specification of the model input data order.
+        model_output_order: Specification of the model output data order.
         ttl: Optional time-to-live in seconds for the endpoint. If provided,
             the endpoint will be automatically deleted after this duration.
 
@@ -152,7 +158,13 @@ def deploy_model(job_id: str, name: str, ttl: int | None = None) -> dict:
         response = requests.post(
             f"{API_URL}/org/{org_id}/models/deploy",
             headers=auth.get_headers(),
-            data=json.dumps({"training_id": job_id, "name": name, "ttl": ttl}),
+            json=DeploymentRequest(
+                training_id=job_id,
+                name=name,
+                ttl=ttl,
+                model_input_order=model_input_order,
+                model_output_order=model_output_order,
+            ).model_dump(mode="json"),
         )
         response.raise_for_status()
         return response.json()
