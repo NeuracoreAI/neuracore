@@ -5,12 +5,7 @@ import matplotlib.pyplot as plt
 import torch
 from common.base_env import BimanualViperXTask
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
-from neuracore_types import (
-    BatchedJointData,
-    BatchedNCData,
-    BatchedParallelGripperOpenAmountData,
-    DataType,
-)
+from neuracore_types import BatchedJointData, BatchedNCData, DataType
 
 import neuracore as nc
 from neuracore import EndpointError
@@ -58,19 +53,7 @@ def main():
         # Run episode
         for i in range(400):
 
-            arm_joint_positions = {
-                jname: obs.qpos[jname]
-                for jname in BimanualViperXTask.LEFT_ARM_JOINT_NAMES
-                + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
-            }
-            left_arm_gripper_open = obs.qpos[BimanualViperXTask.LEFT_GRIPPER_OPEN]
-            right_arm_gripper_open = obs.qpos[BimanualViperXTask.RIGHT_GRIPPER_OPEN]
-
-            nc.log_joint_positions(positions=arm_joint_positions)
-
-            nc.log_parallel_gripper_open_amounts(
-                {"left_arm": left_arm_gripper_open, "right_arm": right_arm_gripper_open}
-            )
+            nc.log_joint_positions(positions=obs.qpos)
 
             for key, value in obs.cameras.items():
                 if key in CAMERA_NAMES:
@@ -85,34 +68,36 @@ def main():
                     dict[str, BatchedJointData],
                     predictions[DataType.JOINT_TARGET_POSITIONS],
                 )
-                open_amounts = cast(
-                    dict[str, BatchedParallelGripperOpenAmountData],
-                    predictions[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS],
-                )
                 left_arm = torch.cat(
                     [
                         joint_target_positions[name].value
                         for name in BimanualViperXTask.LEFT_ARM_JOINT_NAMES
                     ],
-                    dim=1,
+                    dim=2,
                 )
                 right_arm = torch.cat(
                     [
                         joint_target_positions[name].value
                         for name in BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
                     ],
-                    dim=1,
+                    dim=2,
                 )
-                left_open_amount = open_amounts[
+                left_open_amount = joint_target_positions[
                     BimanualViperXTask.LEFT_GRIPPER_OPEN
-                ].open_amount
-                right_open_amount = open_amounts[
+                ].value
+                right_open_amount = joint_target_positions[
                     BimanualViperXTask.RIGHT_GRIPPER_OPEN
-                ].open_amount
-                batched_action = torch.cat(
-                    [left_arm, left_open_amount, right_arm, right_open_amount], dim=1
-                ).numpy()
-                mj_action = batched_action[0]  # Get the first (and only) in the batch
+                ].value
+                batched_action = (
+                    torch.cat(
+                        [left_arm, left_open_amount, right_arm, right_open_amount],
+                        dim=2,
+                    )
+                    .cpu()
+                    .numpy()
+                )
+                # Get first batch: (horizon, num_joints)
+                mj_action = batched_action[0]
                 horizon = len(mj_action)
 
             obs, reward, done = env.step(mj_action[idx_in_horizon])
