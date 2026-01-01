@@ -33,9 +33,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 EPISODE_LENGTH: int = 400
-CAM_NAME = "angle"
+CAM_NAME = "rgb_angle"
 MAX_REWARD = 4.0
-
 ENDPOINT_NAME = "Integration Test Endpoint"
 TRAINING_NAME = "Integration Test"
 DATASET_NAME = "Transfer Cube VX300s Dataset"
