@@ -43,6 +43,7 @@ def main(args):
             # Setup environment for replay with neuracore logging
             env = make_sim_env()
             obs = env.reset()
+            success = False
 
             # Start recording if enabled
             if record:
@@ -65,6 +66,8 @@ def main(args):
             # Execute action trajectory while logging
             for action in action_traj:
                 obs, reward, done = env.step(np.array(list(action.values())))
+                if reward >= 4:
+                    success = True
                 t += 0.02
                 nc.log_custom_1d("my_custom_data", CUSTOM_DATA, timestamp=t)
                 nc.log_joint_positions(positions=obs.qpos, timestamp=t)
@@ -82,9 +85,13 @@ def main(args):
 
             # Stop recording if enabled
             if record:
-                print("Finishing recording...")
-                nc.stop_recording()
-                print("Finished recording!")
+                if success:
+                    print("PASS...")
+                    nc.stop_recording()
+                    print("Finished recording!")
+                else:
+                    print("FAIL...")
+                    nc.cancel_recording()
 
             print(f"Episode {episode_idx} done")
     except KeyboardInterrupt:
