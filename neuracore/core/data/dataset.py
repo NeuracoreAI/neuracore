@@ -395,6 +395,7 @@ class Dataset:
                     robot_data_spec=robot_data_spec,
                     max_delay_s=sys.float_info.max,
                     allow_duplicates=True,
+                    trim_start_end=True,
                 ),
             ).model_dump(mode="json"),
         )

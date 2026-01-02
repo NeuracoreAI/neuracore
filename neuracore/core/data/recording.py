@@ -111,8 +111,6 @@ class Recording:
             recording_id=self.id,
             robot_id=self.robot_id,
             instance=self.instance,
-            start_time=self.start_time,
-            end_time=self.end_time,
             frequency=frequency,
             robot_data_spec=robot_data_spec,
         )

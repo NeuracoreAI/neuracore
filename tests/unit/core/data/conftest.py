@@ -340,6 +340,7 @@ def mock_auth_requests(
         frequency=30.0,
         max_delay_s=0.1,
         allow_duplicates=True,
+        trim_start_end=True,
     )
 
     # Mock sync dataset
