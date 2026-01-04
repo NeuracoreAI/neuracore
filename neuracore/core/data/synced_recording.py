@@ -1,6 +1,5 @@
 """Synchronized recording iterator."""
 
-import copy
 import logging
 import shutil
 import subprocess
@@ -303,6 +302,8 @@ class SynchronizedRecording:
         Returns:
             Dictionary of CameraData with populated frames.
         """
+        # Create new dict with new CameraData instances to avoid mutating originals
+        result = {}
         for cam_id, cam_data in camera_data.items():
             cam_id_rgb_root = self.cache_dir / f"{self.id}" / camera_type.value / cam_id
             lock_file = cam_id_rgb_root / ".recording.lock"
@@ -320,8 +321,10 @@ class SynchronizedRecording:
 
             if transform_fn:
                 frame = Image.fromarray(transform_fn(np.array(frame)))
-            camera_data[cam_id].frame = frame
-        return camera_data
+
+            result[cam_id] = cam_data.model_copy(update={"frame": frame})
+
+        return result
 
     def _insert_camera_data_intro_sync_point(
         self, sync_point: SynchronizedPoint
@@ -329,20 +332,34 @@ class SynchronizedRecording:
         """Populate video frames for a given sync point.
 
         Args:
-            sync_point: SynchronizedPoint object containing camera data.
+            sync_point: SynchronizedPoint object containing
+                camera data (without frames).
 
         Returns:
-            SynchronizedPoint object with populated video frames.
+            A new SynchronizedPoint object with populated video frames.
         """
-        if DataType.RGB_IMAGES in sync_point.data:
-            sync_point.data[DataType.RGB_IMAGES] = self._get_frame_from_disk_cache(
-                DataType.RGB_IMAGES, sync_point.data[DataType.RGB_IMAGES]
-            )
-        if DataType.DEPTH_IMAGES in sync_point.data:
-            sync_point.data[DataType.DEPTH_IMAGES] = self._get_frame_from_disk_cache(
-                DataType.DEPTH_IMAGES, sync_point.data[DataType.DEPTH_IMAGES]
-            )
-        return sync_point
+        # Build new data dict with loaded frames
+        new_data = {}
+        for data_type, data_dict in sync_point.data.items():
+            if data_type == DataType.RGB_IMAGES:
+                new_data[data_type] = self._get_frame_from_disk_cache(
+                    DataType.RGB_IMAGES, data_dict
+                )
+            elif data_type == DataType.DEPTH_IMAGES:
+                new_data[data_type] = self._get_frame_from_disk_cache(
+                    DataType.DEPTH_IMAGES, data_dict
+                )
+            else:
+                # create NEW instances to avoid shared references
+                new_data[data_type] = {
+                    name: nc_data.model_copy() for name, nc_data in data_dict.items()
+                }
+
+        return SynchronizedPoint(
+            timestamp=sync_point.timestamp,
+            robot_id=sync_point.robot_id,
+            data=new_data,
+        )
 
     def _get_sync_point(self, idx: int) -> SynchronizedPoint:
         """Get synchronized data point at a specific index.
@@ -354,11 +371,7 @@ class SynchronizedRecording:
             SynchronizedPoint object containing synchronized data
                 for the specified index.
         """
-        # Copy for two reasons:
-        # 1. we dont't want self._episode_synced.observations to hold the real image
-        #    data in the ram. Because it will become large over time
-        # 2. If the user modifies the returned sync point, it won't affect the loader.
-        sync_point = copy.deepcopy(self._episode_synced.observations[idx])
+        sync_point = self._episode_synced.observations[idx]
         sync_point = self._insert_camera_data_intro_sync_point(sync_point)
         return sync_point
 

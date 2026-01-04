@@ -1,7 +1,6 @@
 """PyTorch dataset for loading synchronized robot data with filesystem caching."""
 
 import logging
-from collections import defaultdict
 from typing import cast
 
 import numpy as np
@@ -298,22 +297,10 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             outputs[data_type] = []
             # Need to add action prediction horizon for outputs
             for name in sync_point.data[data_type].keys():
-                batched_nc_data_for_data_type: dict[str, list[torch.Tensor]] = (
-                    defaultdict(list)
-                )
-                for future_sp in future_sync_points:
-                    nc_data = future_sp.data[data_type][name]
-                    batched_nc_data_at_t = batched_nc_data_class.from_nc_data(nc_data)
-                    for attr_name in vars(batched_nc_data_at_t):
-                        attr_value = getattr(batched_nc_data_at_t, attr_name)
-                        if not isinstance(attr_value, torch.Tensor):
-                            continue
-                        batched_nc_data_for_data_type[attr_name].append(attr_value)
-                # Now cat along time dimension
-                cat_kwargs: dict[str, torch.Tensor] = {}
-                for attr_name, attr_values in batched_nc_data_for_data_type.items():
-                    cat_kwargs[attr_name] = torch.cat(attr_values, dim=1)  # (B, T, ...)
-                batched_nc_data = batched_nc_data_class(**cat_kwargs)
+                nc_data_list = [
+                    future_sp.data[data_type][name] for future_sp in future_sync_points
+                ]
+                batched_nc_data = batched_nc_data_class.from_nc_data_list(nc_data_list)
                 outputs[data_type].append(batched_nc_data)
 
             # Create mask for outputs
