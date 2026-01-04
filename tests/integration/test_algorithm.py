@@ -33,7 +33,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 EPISODE_LENGTH: int = 400
-CAM_NAME = "rgb_angle"
+NC_CAM_NAME = "rgb_angle"  # name that we logged in nc as
+MJ_CAM_NAME = "angle"  # name coming from mujoco env
 MAX_REWARD = 4.0
 ENDPOINT_NAME = "Integration Test Endpoint"
 TRAINING_NAME = "Integration Test"
@@ -73,7 +74,7 @@ def eval_model(
         # Setup plotting
         if onscreen_render:
             ax = plt.subplot()
-            plt_img = ax.imshow(obs.cameras[CAM_NAME].rgb)
+            plt_img = ax.imshow(obs.cameras[MJ_CAM_NAME].rgb)
             plt.ion()
 
         episode_max = 0
@@ -92,7 +93,9 @@ def eval_model(
                             for name in JOINT_NAMES
                         },
                         DataType.RGB_IMAGES: {
-                            CAM_NAME: RGBCameraData(frame=obs.cameras[CAM_NAME].rgb),
+                            NC_CAM_NAME: RGBCameraData(
+                                frame=obs.cameras[MJ_CAM_NAME].rgb
+                            ),
                         },
                     },
                 )
@@ -144,7 +147,7 @@ def eval_model(
 
             if onscreen_render:
                 assert plt_img is not None
-                plt_img.set_data(obs.cameras[CAM_NAME].rgb)
+                plt_img.set_data(obs.cameras[MJ_CAM_NAME].rgb)
                 plt.pause(0.002)
 
         if onscreen_render:
@@ -163,7 +166,7 @@ def eval_model(
         (
             "CNNMLP",
             {
-                DataType.RGB_IMAGES: [CAM_NAME],
+                DataType.RGB_IMAGES: [NC_CAM_NAME],
                 DataType.JOINT_POSITIONS: JOINT_NAMES,
             },
             {
@@ -175,7 +178,7 @@ def eval_model(
         (
             "ACT",
             {
-                DataType.RGB_IMAGES: [CAM_NAME],
+                DataType.RGB_IMAGES: [NC_CAM_NAME],
                 DataType.JOINT_POSITIONS: JOINT_NAMES,
             },
             {
