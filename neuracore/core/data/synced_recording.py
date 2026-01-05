@@ -41,8 +41,6 @@ class SynchronizedRecording:
         recording_id: str,
         robot_id: str,
         instance: int,
-        start_time: float,
-        end_time: float,
         frequency: int = 0,
         robot_data_spec: RobotDataSpec | None = None,
         prefetch_videos: bool = False,
@@ -54,8 +52,6 @@ class SynchronizedRecording:
             recording_id: Recording ID string.
             robot_id: The robot that created this recording.
             instance: The instance of the robot that created this recording.
-            start_time: Start time of the recording.
-            end_time: End time of the recording.
             frequency: Frequency at which to synchronize the recording.
             robot_data_spec: Robot data specification for synchronization.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
@@ -67,11 +63,14 @@ class SynchronizedRecording:
         self.cache_dir: Path = dataset.cache_dir
         self.robot_id = robot_id
         self.instance = instance
-        self.start_time = start_time
-        self.end_time = end_time
 
         self._episode_synced = self._get_synced_data()
         self._episode_length = len(self._episode_synced.observations)
+
+        # Use start_time and end_time from the synchronized episode,
+        # as they reflect trim_start_end settings from synchronization
+        self.start_time = self._episode_synced.start_time
+        self.end_time = self._episode_synced.end_time
         self.cache_manager = CacheManager(
             self.cache_dir,
         )
