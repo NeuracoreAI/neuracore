@@ -493,6 +493,7 @@ def main(cfg: DictConfig) -> None:
         input_robot_data_spec=input_robot_data_spec,
         output_robot_data_spec=output_robot_data_spec,
         output_prediction_horizon=cfg.output_prediction_horizon,
+        cache_tensors_to_disk=cfg.cache_tensors_to_disk,
     )
 
     # Handle batch size configuration

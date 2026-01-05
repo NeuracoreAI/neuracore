@@ -1,6 +1,9 @@
 """PyTorch dataset for loading synchronized robot data with filesystem caching."""
 
+import atexit
 import logging
+import tempfile
+from pathlib import Path
 from typing import cast
 
 import numpy as np
@@ -41,6 +44,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         input_robot_data_spec: RobotDataSpec,
         output_robot_data_spec: RobotDataSpec,
         output_prediction_horizon: int,
+        cache_tensors_to_disk: bool = False,
     ):
         """Initialize the dataset.
 
@@ -49,7 +53,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             input_robot_data_spec: List of input data types to include in the dataset.
             output_robot_data_spec: List of output data types to include in the dataset.
             output_prediction_horizon: Number of future timesteps to predict.
-            order_configuration: Configuration for ordering data types.
+            cache_tensors_to_disk: Whether to cache converted tensors to disk for faster
+                subsequent epochs. Cache is temporary and cleared after training.
         """
         self._validate_robot_specs(
             synchronized_dataset, input_robot_data_spec, output_robot_data_spec
@@ -96,6 +101,37 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     break
 
         self._fallback_robot_data_spec: RobotDataSpec = {}
+
+        # Tensor caching for faster subsequent epochs
+        self._cache_tensors_to_disk = cache_tensors_to_disk
+        self._tensor_cache_dir = None
+        self._tensor_cache_dir_name = None
+        if self._cache_tensors_to_disk:
+            self._tensor_cache_dir = tempfile.TemporaryDirectory(
+                prefix="neuracore_tensor_cache_"
+            )
+            self._tensor_cache_dir_name = self._tensor_cache_dir.name
+
+            # Register cleanup to ensure it runs even on Ctrl-C
+            atexit.register(self._cleanup_tensor_cache)
+            logger.info(
+                "Tensor caching enabled. Cache directory: "
+                f"{self._tensor_cache_dir_name}"
+            )
+
+    def _cleanup_tensor_cache(self) -> None:
+        """Clean up temporary tensor cache directory."""
+        if hasattr(self, "_tensor_cache_dir") and self._tensor_cache_dir is not None:
+            try:
+                self._tensor_cache_dir.cleanup()
+                logger.info(f"Cleaned up tensor cache: {self._tensor_cache_dir_name}")
+            except Exception:
+                # Ignore errors during cleanup (directory might already be gone)
+                pass
+
+    def __del__(self) -> None:
+        """Clean up temporary tensor cache directory when dataset is deleted."""
+        self._cleanup_tensor_cache()
 
     def _get_num_training_observations(self) -> int:
         # The count attribute of the stats should give total number of training
@@ -312,13 +348,23 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 dtype=torch.float32,
             )
 
-        return TrainingSample(
+        sample = TrainingSample(
             inputs=inputs,
             inputs_mask=inputs_mask,
             outputs=outputs,
             outputs_mask=outputs_mask,
             batch_size=1,
         )
+
+        # Save to tensor cache if enabled
+        if self._cache_tensors_to_disk and self._tensor_cache_dir_name is not None:
+            cache_file = (
+                Path(self._tensor_cache_dir_name)
+                / f"sample_{episode_idx}_{timestep}.pt"
+            )
+            torch.save(sample, cache_file)
+
+        return sample
 
     def __len__(self) -> int:
         """Return the number of samples in the dataset.
@@ -356,6 +402,19 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             try:
                 episode_idx = self.episode_indices[idx]
                 timestep = idx - self.episode_indices.index(episode_idx)
+
+                # Check tensor cache if enabled
+                if (
+                    self._cache_tensors_to_disk
+                    and self._tensor_cache_dir_name is not None
+                ):
+                    cache_file = (
+                        Path(self._tensor_cache_dir_name)
+                        / f"sample_{episode_idx}_{timestep}.pt"
+                    )
+                    if cache_file.exists():
+                        return torch.load(cache_file, weights_only=False)
+
                 return self.load_sample(episode_idx, timestep)
             except Exception:
                 self._error_count += 1

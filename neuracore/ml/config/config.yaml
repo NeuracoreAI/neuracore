@@ -22,6 +22,11 @@ num_val_workers: 1
 # Maximum number of workers to use for prefetching recordings
 max_prefetch_workers: 4
 
+# Tensor caching for faster subsequent epochs
+# When enabled, converted tensors are cached to disk after first load
+# Cache is temporary and cleared after training completes
+cache_tensors_to_disk: true
+
 # Dataset synchronization
 dataset_name: null
 dataset_id: null

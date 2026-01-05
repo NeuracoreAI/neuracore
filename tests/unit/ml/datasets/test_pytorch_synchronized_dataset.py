@@ -729,6 +729,107 @@ class TestIntegrationWithPyTorchDataLoader:
                 assert isinstance(batch.inputs[data_type], list)
 
 
+class TestTensorCaching:
+    """Tests for tensor caching functionality."""
+
+    def test_tensor_caching_creates_cache_dir(self, mock_synchronized_dataset):
+        """Test that enabling caching creates a cache directory."""
+        input_spec: RobotDataSpec = {
+            "robot_0": {DataType.JOINT_POSITIONS: ["joint_0", "joint_1"]}
+        }
+        output_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_TARGET_POSITIONS: ["joint_target_0", "joint_target_1"]
+            }
+        }
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_robot_data_spec=input_spec,
+            output_robot_data_spec=output_spec,
+            output_prediction_horizon=10,
+            cache_tensors_to_disk=True,
+        )
+        assert dataset._cache_tensors_to_disk is True
+        assert dataset._tensor_cache_dir_name is not None
+        from pathlib import Path
+
+        assert Path(dataset._tensor_cache_dir_name).exists()
+        # Clean up
+        del dataset
+
+    def test_tensor_caching_saves_and_loads(
+        self, mock_synchronized_dataset, mock_login
+    ):
+        """Test that torch.load is called on second access, proving cache is used."""
+        from unittest.mock import patch
+
+        import torch
+
+        # Use empty lists to trigger fallback spec
+        input_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_POSITIONS: [],
+                DataType.RGB_IMAGES: [],
+            }
+        }
+        output_spec: RobotDataSpec = {"robot_0": {DataType.JOINT_TARGET_POSITIONS: []}}
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_robot_data_spec=input_spec,
+            output_robot_data_spec=output_spec,
+            output_prediction_horizon=10,
+            cache_tensors_to_disk=True,
+        )
+
+        # Patch torch.load to spy on calls
+        with patch("torch.load", wraps=torch.load) as mock_torch_load:
+            # First load should NOT call torch.load (cache miss)
+            sample1 = dataset[0]
+            assert sample1 is not None
+            assert (
+                mock_torch_load.call_count == 0
+            ), "First access should not load from cache"
+
+            # Second load should call torch.load (cache hit)
+            sample2 = dataset[0]
+            assert sample2 is not None
+            assert (
+                mock_torch_load.call_count == 1
+            ), "Second access should load from cache"
+
+        # Clean up
+        dataset._cleanup_tensor_cache()
+
+    def test_tensor_cache_cleanup(self, mock_synchronized_dataset):
+        """Test that cache directory can be cleaned up manually."""
+        from pathlib import Path
+
+        input_spec: RobotDataSpec = {
+            "robot_0": {DataType.JOINT_POSITIONS: ["joint_0", "joint_1"]}
+        }
+        output_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_TARGET_POSITIONS: ["joint_target_0", "joint_target_1"]
+            }
+        }
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_robot_data_spec=input_spec,
+            output_robot_data_spec=output_spec,
+            output_prediction_horizon=10,
+            cache_tensors_to_disk=True,
+        )
+
+        cache_dir = dataset._tensor_cache_dir_name
+        assert Path(cache_dir).exists()
+
+        # Call cleanup method
+        dataset._cleanup_tensor_cache()
+
+        # Cache directory should be cleaned up
+        assert not Path(cache_dir).exists()
+
+
 class TestDatasetStatistics:
     """Test dataset statistics functionality."""
 
