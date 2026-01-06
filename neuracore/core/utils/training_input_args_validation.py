@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from neuracore_types import DataType, RobotDataSpec
 
-from neuracore.core.data.dataset import Dataset
+from neuracore.core.data.dataset import Dataset, DataSpec
 
 
 def get_algorithm_name(algorithm_id: str, algorithm_jsons: list[dict]) -> str:
@@ -100,8 +100,9 @@ def validate_data_specs(
         ValueError: If any requested data type is unsupported by the algorithm or
             missing from the dataset.
     """
-    for robot_data_types in robot_data_spec.values():
-        for data_type in robot_data_types.keys():
+    for robot_id, robot_data in robot_data_spec.items():
+        dataset_spec: DataSpec = dataset.get_full_data_spec(robot_id)
+        for data_type, data_value in robot_data.items():
             if data_type not in supported_data_types:
                 raise ValueError(
                     f"{spec_kind} data type {data_type} is not supported by algorithm "
@@ -111,6 +112,19 @@ def validate_data_specs(
                 raise ValueError(
                     f"{spec_kind} data type {data_type} is not present in dataset "
                     f"{dataset_name}. Please check the dataset contents."
+                )
+            dataset_values = dataset_spec.get(data_type, [])
+            if isinstance(data_value, list):
+                missing_values = set(data_value) - set(dataset_values)
+                if missing_values:
+                    raise ValueError(
+                        f"{spec_kind} data values {sorted(missing_values)} for "
+                        f"{data_type} are not present in dataset {dataset_name}."
+                    )
+            elif data_value not in dataset_values:
+                raise ValueError(
+                    f"{spec_kind} data value {data_value} for {data_type} is not "
+                    f"present in dataset {dataset_name}."
                 )
 
 
