@@ -438,8 +438,8 @@ def main(cfg: DictConfig) -> None:
     algorithms_jsons = _get_algorithms()
     if cfg.algorithm_id is not None:
         algorithm_name = get_algorithm_name(
-            cfg,
-            algorithms_jsons,
+            algorithm_id=cfg.algorithm_id,
+            algorithm_jsons=algorithms_jsons,
         )
     else:
         algorithm_name = cfg.algorithm._target_.rsplit(".", 1)[-1]
