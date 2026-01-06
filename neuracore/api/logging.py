@@ -10,6 +10,7 @@ from warnings import filterwarnings, warn
 
 import numpy as np
 from neuracore_types import (
+    CameraData,
     Custom1DData,
     DataType,
     DepthCameraData,
@@ -216,6 +217,9 @@ def _log_camera_data(
 
     # Use discriminated camera subclasses so SynchronizedPoint.data validates against
     # NCDataUnion (discriminator field `type`).
+    timestamp = camera_data_without_frame.timestamp
+    extrinsics = camera_data_without_frame.extrinsics
+    intrinsics = camera_data_without_frame.intrinsics
     if camera_type == DataType.RGB_IMAGES:
         camera_data = RGBCameraData(
             timestamp=timestamp,
@@ -236,7 +240,7 @@ def _log_camera_data(
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
     ).get_video_source(name, camera_type, f"{name}_{camera_type}").add_frame(
-        camera_data_copy, frame=image
+        camera_data, frame=image
     )
 
 

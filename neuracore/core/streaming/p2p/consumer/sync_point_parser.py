@@ -1,27 +1,21 @@
 """This module provides utilities for parsing and merging SynchronizedPoint data."""
 
-<<<<<<< HEAD
 from typing import cast
 
 from neuracore_types import (
     DATA_TYPE_TO_NC_DATA_CLASS,
-    DataType,
-    NCData,
-    NCDataUnion,
-=======
-from neuracore_types import (
     Custom1DData,
     DataType,
     DepthCameraData,
     EndEffectorPoseData,
     JointData,
     LanguageData,
+    NCData,
     NCDataUnion,
     ParallelGripperOpenAmountData,
     PointCloudData,
     PoseData,
     RGBCameraData,
->>>>>>> 24731bf (get things working)
     RobotStreamTrack,
     SynchronizedPoint,
 )
@@ -46,7 +40,6 @@ def parse_sync_point(
         ValueError: If the track data_type is unsupported or data validation fails.
     """
     try:
-<<<<<<< HEAD
         data_type: DataType = track_details.data_type
         label: str = track_details.label
 
@@ -68,7 +61,6 @@ def parse_sync_point(
             data={data_type: {label: data}},
         )
 
-=======
         dt = track_details.data_type
         label = track_details.label
         if dt in (
@@ -137,7 +129,6 @@ def parse_sync_point(
                 data={dt: {label: pose_data}},
             )
         raise ValueError(f"Unsupported track data_type: {dt}")
->>>>>>> 24731bf (get things working)
     except ValidationError:
         raise ValueError("Invalid or unsupported data")
 
@@ -157,14 +148,16 @@ def merge_sync_points(*args: SynchronizedPoint) -> SynchronizedPoint:
     """
     if len(args) == 0:
         return SynchronizedPoint()
-<<<<<<< HEAD
 
     # Sort by timestamp so that later points override earlier ones.
     sorted_points = sorted(args, key=lambda x: x.timestamp)
 
     merged_synced_data: dict[DataType, dict[str, NCDataUnion]] = {}
+    merged_robot_id = None
 
     for sync_point in sorted_points:
+        if sync_point.robot_id is not None:
+            merged_robot_id = sync_point.robot_id
         for data_type, values in sync_point.data.items():
             if data_type not in merged_synced_data:
                 merged_synced_data[data_type] = {}
@@ -172,21 +165,6 @@ def merge_sync_points(*args: SynchronizedPoint) -> SynchronizedPoint:
 
     return SynchronizedPoint(
         timestamp=sorted_points[-1].timestamp,
-=======
-    # Sort by timestamp so that later points override earlier ones.
-    sorted_points = sorted(args, key=lambda x: x.timestamp)
-    merged_synced_data: dict[DataType, dict[str, NCDataUnion]] = {}
-    merged_robot_id = None
-    for sync_point in sorted_points:
-        if sync_point.robot_id is not None:
-            merged_robot_id = sync_point.robot_id
-        for dt, values in sync_point.data.items():
-            if dt not in merged_synced_data:
-                merged_synced_data[dt] = {}
-            merged_synced_data[dt].update(values)
-    return SynchronizedPoint(
-        timestamp=sorted_points[-1].timestamp,
         robot_id=merged_robot_id,
->>>>>>> 24731bf (get things working)
         data=merged_synced_data,
     )
