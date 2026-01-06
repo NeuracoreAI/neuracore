@@ -130,6 +130,14 @@ def test_start_training_run(
         json=[robot_id],
         status_code=200,
     )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-data-spec/{robot_id}",
+        json={
+            DataType.RGB_IMAGES: ["angle"],
+            DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
+        },
+        status_code=200,
+    )
 
     # Start training run
     algorithm_config = {
