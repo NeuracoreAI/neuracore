@@ -5,7 +5,8 @@
         "*.Dockerfile",
         "docker-compose.yml",
         "requirements*.txt",
-        "*.sh"
+        "*.sh",
+        "neuracore/ml/algorithms/pi0/transformers_replace/**"
     ],
     "dictionaryDefinitions": [
         {

@@ -6,13 +6,15 @@ repos:
     rev: v3.15.0 
     hooks:
       - id: pyupgrade
-        args: [--py310-plus] 
+        args: [--py310-plus]
+        exclude: "neuracore/ml/algorithms/pi0/transformers_replace/" 
         
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
     hooks:
       - id: isort
         args: ["--profile", "black", "--filter-files"]
+        exclude: "neuracore/ml/algorithms/pi0/transformers_replace/"
 
   - repo: https://github.com/psf/black
     rev: 24.1.1
@@ -20,6 +22,7 @@ repos:
       - id: black
         language_version: python3
         args: [--line-length=88, --preview]
+        exclude: "neuracore/ml/algorithms/pi0/transformers_replace/"
 
   - repo: https://github.com/charliermarsh/ruff-pre-commit
     rev: v0.0.272
@@ -27,6 +30,7 @@ repos:
       - id: ruff
         # Ignoring unused imports within __init__.py files.
         args: [--per-file-ignores, "*__init__.py:F401", --fix]
+        exclude: "neuracore/ml/algorithms/pi0/transformers_replace/"
 
   - repo: https://github.com/pycqa/pydocstyle
     rev: 6.3.0
@@ -34,6 +38,7 @@ repos:
       - id: pydocstyle
         files: neuracore/
         args: ["--convention=google"]
+        exclude: "neuracore/ml/algorithms/pi0/transformers_replace/"
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.18.2
@@ -42,6 +47,7 @@ repos:
         files: neuracore/
         args: ["--disallow-untyped-defs", "--ignore-missing-imports"]
         additional_dependencies: [types-requests]
+        exclude: "neuracore/ml/algorithms/pi0/transformers_replace/"
         
   - repo: https://github.com/streetsidesoftware/cspell-cli
     rev: v9.2.0
