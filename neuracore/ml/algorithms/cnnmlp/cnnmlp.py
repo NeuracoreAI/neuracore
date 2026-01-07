@@ -52,6 +52,17 @@ RESNET_MEAN = [0.485, 0.456, 0.406]
 RESNET_STD = [0.229, 0.224, 0.225]
 
 LANGUAGE_MODEL_NAME = os.getenv("LANGUAGE_MODEL_NAME", "distilbert-base-uncased")
+VISION_BACKBONE_DATA_TYPES = [
+    DataType.RGB_IMAGES,
+    DataType.DEPTH_IMAGES,
+    DataType.POINT_CLOUDS,
+]
+PROPRIO_DATA_TYPES = [
+    DataType.JOINT_POSITIONS,
+    DataType.JOINT_VELOCITIES,
+    DataType.JOINT_TORQUES,
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+]
 
 
 class CNNMLP(NeuracoreModel):
@@ -128,13 +139,6 @@ class CNNMLP(NeuracoreModel):
             for stat in stats:
                 combined_stats = combined_stats.concatenate(stat.value)
             data_stats[DataType.JOINT_TARGET_POSITIONS] = combined_stats
-            if DataType.JOINT_TARGET_POSITIONS in self.input_data_types:
-                self.encoder_output_dims[DataType.JOINT_TARGET_POSITIONS] = (
-                    cnn_output_dim
-                )
-                self.encoders[DataType.JOINT_TARGET_POSITIONS] = nn.Linear(
-                    len(stats), cnn_output_dim
-                )
 
         if DataType.JOINT_VELOCITIES in self.data_types:
             stats = self.dataset_statistics[DataType.JOINT_VELOCITIES]
@@ -265,7 +269,9 @@ class CNNMLP(NeuracoreModel):
         input_stats = []
         self.proprio_dims = {}
         current_dim = 0
-        for data_type in self.input_data_types:
+        for data_type in PROPRIO_DATA_TYPES:
+            if data_type not in self.input_data_types:
+                continue
             if data_type not in data_stats:
                 continue
             input_stats.append(data_stats[data_type])
@@ -296,12 +302,17 @@ class CNNMLP(NeuracoreModel):
 
     def _setup_optimizer_param_groups(self) -> None:
         """Setup parameter groups for optimizer."""
-        backbone_params, other_params = [], []
-        for name, param in self.named_parameters():
-            if any(backbone in name for backbone in ["rgb", "depth", "point_cloud"]):
-                backbone_params.append(param)
-            else:
-                other_params.append(param)
+        backbone_params = []
+        backbone_param_set = set()
+        for data_type in VISION_BACKBONE_DATA_TYPES:
+            if data_type in self.encoders:
+                for param in self.encoders[data_type].parameters():
+                    backbone_params.append(param)
+                    backbone_param_set.add(param)
+        other_params = [
+            param for param in self.parameters() if param not in backbone_param_set
+        ]
+
         if self.freeze_backbone:
             for param in backbone_params:
                 param.requires_grad = False
@@ -392,12 +403,7 @@ class CNNMLP(NeuracoreModel):
         """Encode all proprioceptive data with joint normalization."""
         # Concatenate all proprio data
         proprio_list = []
-        for data_type in [
-            DataType.JOINT_POSITIONS,
-            DataType.JOINT_VELOCITIES,
-            DataType.JOINT_TORQUES,
-            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
-        ]:
+        for data_type in PROPRIO_DATA_TYPES:
             if data_type not in batch.inputs:
                 continue
 
@@ -532,12 +538,7 @@ class CNNMLP(NeuracoreModel):
 
         for data_type, batched_nc_data in batch.inputs.items():
             # Skip proprio types since they're already handled
-            if data_type in [
-                DataType.JOINT_POSITIONS,
-                DataType.JOINT_VELOCITIES,
-                DataType.JOINT_TORQUES,
-                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
-            ]:
+            if data_type in PROPRIO_DATA_TYPES:
                 continue
 
             mask = batch.inputs_mask[data_type]
@@ -645,7 +646,7 @@ class CNNMLP(NeuracoreModel):
                 output_tensors[data_type] = batched_outputs
             else:
                 raise ValueError(f"Unsupported output data type: {data_type}")
-
+            start_slice_idx = end_slice_idx
         return output_tensors
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
