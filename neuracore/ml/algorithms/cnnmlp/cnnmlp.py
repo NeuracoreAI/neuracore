@@ -303,14 +303,17 @@ class CNNMLP(NeuracoreModel):
     def _setup_optimizer_param_groups(self) -> None:
         """Setup parameter groups for optimizer."""
         backbone_params = []
-        backbone_param_set = set()
+        backbone_param_names = []
         for data_type in VISION_BACKBONE_DATA_TYPES:
             if data_type in self.encoders:
-                for param in self.encoders[data_type].parameters():
+                for name, param in self.encoders[data_type].named_parameters():
                     backbone_params.append(param)
-                    backbone_param_set.add(param)
+                    # Example full name: "encoders.RGB_IMAGES.0.2.backbone.0.weight"
+                    backbone_param_names.append(f"encoders.{data_type.value}.{name}")
         other_params = [
-            param for param in self.parameters() if param not in backbone_param_set
+            param
+            for name, param in self.named_parameters()
+            if name not in backbone_param_names
         ]
 
         if self.freeze_backbone:
