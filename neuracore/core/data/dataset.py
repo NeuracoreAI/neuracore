@@ -78,7 +78,7 @@ class Dataset:
         self.is_shared = is_shared
         self.data_types = data_types or []
 
-        self.cache_dir = DEFAULT_RECORDING_CACHE_DIR
+        self.cache_dir = DEFAULT_CACHE_DIR
         self._recordings_cache: list[Recording] = (
             [
                 self._wrap_raw_recording(r) if isinstance(r, dict) else r
