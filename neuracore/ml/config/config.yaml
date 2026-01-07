@@ -27,19 +27,43 @@ dataset_name: null
 dataset_id: null
 frequency: 10
 
-# You can either specify input_data_types/output_data_types or
-# input_robot_data_spec/output_robot_data_spec
-input_data_types:
-  - "JOINT_POSITIONS"
-  - "RGB_IMAGES"
-
-output_data_types:
-  - "JOINT_TARGET_POSITIONS"
-
 # Dict[str, Dict[DataType, List[str]], e.g., {"robot-id-1": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...]}}
 # You can also pass in an empty dict {} to use all available data for all robots
-input_robot_data_spec: null
-output_robot_data_spec: null
+input_robot_data_spec: {"8eccb0d5-ca2d-4a30-acbf-22e6e8d70db5": {"JOINT_POSITIONS": [        
+        "vx300s_left/waist",
+        "vx300s_left/shoulder",
+        "vx300s_left/elbow",
+        "vx300s_left/forearm_roll",
+        "vx300s_left/wrist_angle",
+        "vx300s_left/wrist_rotate",
+        "vx300s_left/left_finger",
+        "vx300s_left/right_finger",
+        "vx300s_right/waist",
+        "vx300s_right/shoulder",
+        "vx300s_right/elbow",
+        "vx300s_right/forearm_roll",
+        "vx300s_right/wrist_angle",
+        "vx300s_right/wrist_rotate",
+        "vx300s_right/left_finger",
+        "vx300s_right/right_finger",
+        ], 
+        "RGB_IMAGES": ["angle"]}}
+output_robot_data_spec: {"8eccb0d5-ca2d-4a30-acbf-22e6e8d70db5": {"JOINT_TARGET_POSITIONS": [
+        "vx300s_left/waist",
+        "vx300s_left/shoulder",
+        "vx300s_left/elbow",
+        "vx300s_left/forearm_roll",
+        "vx300s_left/wrist_angle",
+        "vx300s_left/wrist_rotate",
+        "vx300s_left/gripper_open",
+        "vx300s_right/waist",
+        "vx300s_right/shoulder",
+        "vx300s_right/elbow",
+        "vx300s_right/forearm_roll",
+        "vx300s_right/wrist_angle",
+        "vx300s_right/wrist_rotate",
+        "vx300s_right/gripper_open",
+        ]}}
 
 # Paths and IDs (for cloud vs local training)
 algorithm_id: null    # For cloud training
