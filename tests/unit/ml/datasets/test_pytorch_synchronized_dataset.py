@@ -1,3 +1,5 @@
+import hashlib
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,6 +20,7 @@ from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
+from neuracore.ml.utils.robot_data_spec_utils import merge_robot_data_spec
 
 DATA_ITEMS = 3
 
@@ -125,6 +128,7 @@ def mock_synchronized_dataset(
 
     class MockSynchronizedDataset(SynchronizedDataset):
         def __init__(self):
+            self.id = "mock_dataset"
             self.dataset = MagicMock()
             self.robot_data_spec = {
                 "robot_0": {
@@ -162,6 +166,16 @@ def mock_synchronized_dataset(
             return mock_synced_recording
 
     return MockSynchronizedDataset()
+
+
+def _stats_cache_path(cache_root, sync_id, robot_data_spec):
+    if hasattr(robot_data_spec, "model_dump"):
+        spec_payload = robot_data_spec.model_dump(mode="json")
+    else:
+        spec_payload = robot_data_spec
+    spec_key = json.dumps(spec_payload, sort_keys=True, separators=(",", ":"))
+    spec_hash = hashlib.sha256(spec_key.encode("utf-8")).hexdigest()[:12]
+    return cache_root / "dataset_cache" / f"{sync_id}_statistics_{spec_hash}.json"
 
 
 def test_should_initialize_with_correct_args(
@@ -760,3 +774,96 @@ class TestDatasetStatistics:
         assert isinstance(stats, dict)
         # Should contain statistics for the data types
         assert DataType.JOINT_POSITIONS in stats or len(stats) >= 0
+
+    def test_dataset_statistics_cache_hit(
+        self, tmp_path, mock_synchronized_dataset, dataset_statistics, monkeypatch
+    ):
+        """Test cached statistics are loaded without recomputation."""
+        import neuracore.ml.datasets.pytorch_synchronized_dataset as psd
+
+        monkeypatch.setattr(psd, "DEFAULT_CACHE_DIR", tmp_path)
+        input_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_POSITIONS: [
+                    f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
+                ]
+            }
+        }
+        output_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_TARGET_POSITIONS: [
+                    f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
+                ]
+            }
+        }
+        robot_data_spec = merge_robot_data_spec(input_spec, output_spec)
+        stats = SynchronizedDatasetStatistics(
+            synchronized_dataset_id=mock_synchronized_dataset.id,
+            robot_data_spec=robot_data_spec,
+            dataset_statistics=dataset_statistics,
+        )
+        cache_path = _stats_cache_path(
+            tmp_path, mock_synchronized_dataset.id, robot_data_spec
+        )
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("w", encoding="utf-8") as handle:
+            json.dump(stats.model_dump(mode="json"), handle)
+
+        mock_synchronized_dataset.calculate_statistics = MagicMock(
+            side_effect=AssertionError("calculate_statistics should not be called")
+        )
+
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_robot_data_spec=input_spec,
+            output_robot_data_spec=output_spec,
+            output_prediction_horizon=3,
+        )
+
+        assert mock_synchronized_dataset.calculate_statistics.call_count == 0
+        assert (
+            dataset.synchronized_dataset_statistics.synchronized_dataset_id
+            == mock_synchronized_dataset.id
+        )
+
+    def test_dataset_statistics_cache_miss_writes_cache(
+        self, tmp_path, mock_synchronized_dataset, dataset_statistics, monkeypatch
+    ):
+        """Test cache miss computes stats and writes cache file."""
+        import neuracore.ml.datasets.pytorch_synchronized_dataset as psd
+
+        monkeypatch.setattr(psd, "DEFAULT_CACHE_DIR", tmp_path)
+        input_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_POSITIONS: [
+                    f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
+                ]
+            }
+        }
+        output_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_TARGET_POSITIONS: [
+                    f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
+                ]
+            }
+        }
+        robot_data_spec = merge_robot_data_spec(input_spec, output_spec)
+        stats = SynchronizedDatasetStatistics(
+            synchronized_dataset_id=mock_synchronized_dataset.id,
+            robot_data_spec=robot_data_spec,
+            dataset_statistics=dataset_statistics,
+        )
+        mock_synchronized_dataset.calculate_statistics = MagicMock(return_value=stats)
+
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_robot_data_spec=input_spec,
+            output_robot_data_spec=output_spec,
+            output_prediction_horizon=3,
+        )
+
+        assert mock_synchronized_dataset.calculate_statistics.call_count == 1
+        cache_path = _stats_cache_path(
+            tmp_path, mock_synchronized_dataset.id, dataset.robot_data_spec
+        )
+        assert cache_path.exists()

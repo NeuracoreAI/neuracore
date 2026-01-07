@@ -174,10 +174,16 @@ policy = nc.policy_local_server(train_run_name="MyTrainingJob")
 ## Command Line Tools
 
 Neuracore provides several command-line utilities:
+```bash
+neuracore --help
+```
 
 ### Authentication
 ```bash
 # Interactive login to save API key
+neuracore login
+
+# Legacy alias
 nc-login
 ```
 
@@ -186,6 +192,9 @@ Use the `--email` and `--password` option if you wish to login non-interactively
 ### Organization Management
 ```bash
 # Select your current organization
+neuracore select-org
+
+# Legacy alias
 nc-select-org
 ```
 
@@ -194,9 +203,12 @@ Use the `--org-name` option if you wish to select the org non-interactively.
 ### Server Operations
 ```bash
 # Launch local policy server for inference
-nc-launch-server --job_id <job_id> --org_id <org_id> [--host <host>] [--port <port>]
+neuracore launch-server --job_id <job_id> --org_id <org_id> [--host <host>] [--port <port>]
 
 # Example:
+neuracore launch-server --job_id my_job_123 --org_id my_org_456 --host 0.0.0.0 --port 8080
+
+# Legacy alias
 nc-launch-server --job_id my_job_123 --org_id my_org_456 --host 0.0.0.0 --port 8080
 ```
 
@@ -342,8 +354,8 @@ Configure Neuracore behavior with environment variables (case insensitive, prefi
 | `NEURACORE_PROVIDE_LIVE_DATA`                | Enable live data streaming from this node              | `true`/`false` | `true`                                                                  |
 | `NEURACORE_CONSUME_LIVE_DATA`                | Enable live data consumption for inference             | `true`/`false` | `true`                                                                  |
 | `NEURACORE_API_URL`                          | Base URL for Neuracore platform                        | URL string     | `https://api.neuracore.app/api`                                         |
-| `NEURACORE_API_KEY`                          | An override to the api-key to access the neuracore     | `nrc_XXXX`     | Configured with the [`nc-login`](#authentication) command               |
-| `NEURACORE_ORG_ID`                           | An override to select the organization to use.         | A valid UUID   | Configured with the [`nc-select-org`](#organization-management) command |
+| `NEURACORE_API_KEY`                          | An override to the api-key to access the neuracore     | `nrc_XXXX`     | Configured with the [`neuracore login`](#authentication) command        |
+| `NEURACORE_ORG_ID`                           | An override to select the organization to use.         | A valid UUID   | Configured with the [`neuracore select-org`](#organization-management) command |
 | `TMPDIR`                                     | Specifies a directory used for storing temporary files | Filepath       | An appropriate folder for your system                                   |
 
 

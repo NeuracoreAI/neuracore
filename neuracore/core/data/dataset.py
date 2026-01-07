@@ -28,7 +28,8 @@ from ..auth import Auth, get_auth
 from ..const import API_URL
 from ..exceptions import DatasetError
 
-DEFAULT_CACHE_DIR = Path.home() / ".neuracore" / "training" / "dataset_cache"
+DEFAULT_CACHE_DIR = Path.home() / ".neuracore" / "training"
+DEFAULT_RECORDING_CACHE_DIR = DEFAULT_CACHE_DIR / "recording_cache"
 PAGE_SIZE = 30
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ class Dataset:
         self.is_shared = is_shared
         self.data_types = data_types or []
 
-        self.cache_dir = DEFAULT_CACHE_DIR
+        self.cache_dir = DEFAULT_RECORDING_CACHE_DIR
         self._recordings_cache: list[Recording] = (
             [
                 self._wrap_raw_recording(r) if isinstance(r, dict) else r

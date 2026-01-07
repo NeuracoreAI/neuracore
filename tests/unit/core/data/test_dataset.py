@@ -879,11 +879,11 @@ class TestDatasetMixedOperations:
 
     def test_cache_dir_default(self, dataset_dict, recordings_list):
         """Test that cache_dir is set to default location."""
-        from neuracore.core.data.dataset import DEFAULT_CACHE_DIR
+        from neuracore.core.data.dataset import DEFAULT_RECORDING_CACHE_DIR
 
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
 
-        assert dataset.cache_dir == DEFAULT_CACHE_DIR
+        assert dataset.cache_dir == DEFAULT_RECORDING_CACHE_DIR
 
 
 def test_log_and_retrieve_sync_point(
