@@ -47,6 +47,7 @@ setup(
         "uvicorn[standard]",
         "fastapi",
         "psutil",
+        "typer>=0.20.0",
         "neuracore-types>=4.3.0,<5.0.0",
     ],
     extras_require={
@@ -81,6 +82,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
+            "neuracore = neuracore.core.cli.app:main",
             "nc-login = neuracore.core.cli.generate_api_key:main",
             "nc-select-org = neuracore.core.cli.select_current_org:main",
             "nc-launch-server = neuracore.core.cli.launch_server:main",

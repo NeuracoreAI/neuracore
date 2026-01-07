@@ -5,10 +5,10 @@ user authentication. It prompts for email and password credentials, obtains
 an access token, and creates a new API key for CLI usage.
 """
 
-import argparse
 from getpass import getpass
 
 import requests
+import typer
 from pydantic import BaseModel, ValidationError
 
 from neuracore.core.cli.get_user_confirmation import get_user_confirmation
@@ -125,36 +125,35 @@ def generate_api_key(email: str | None = None, password: str | None = None) -> s
         raise AuthenticationError(f"Failed to create API key: {e}")
 
 
-def main() -> None:
-    """Main function to run the API key generation process."""
+def run(
+    email: str | None = typer.Option(
+        None,
+        "--email",
+        "--username",
+        "-e",
+        help="The email to login with.",
+    ),
+    password: str | None = typer.Option(
+        None,
+        "--password",
+        "-p",
+        help="The password to login with.",
+    ),
+) -> None:
+    """Generate a new API key for access to the neuracore platform."""
     try:
-        parser = argparse.ArgumentParser(
-            description="Generate a new API key for access to the neuracore platform.",
-            formatter_class=argparse.RawDescriptionHelpFormatter,
-        )
-        parser.add_argument(
-            "--email",
-            "--username",
-            "-e",
-            dest="email",
-            required=False,
-            type=str,
-            help="The email to login with.",
-        )
-        parser.add_argument(
-            "--password",
-            "-p",
-            dest="password",
-            required=False,
-            type=str,
-            help="The password to login with.",
-        )
-        args = parser.parse_args()
-        generate_api_key(email=args.email, password=args.password)
+        generate_api_key(email=email, password=password)
     except AuthenticationError:
-        print("Failed to generate API key, please try again later")
+        typer.echo("Failed to generate API key, please try again later", err=True)
+        raise typer.Exit(code=1)
     except InputError:
-        print("Failed to generate API key due to incorrect input")
+        typer.echo("Failed to generate API key due to incorrect input", err=True)
+        raise typer.Exit(code=1)
+
+
+def main() -> None:
+    """CLI entrypoint for generating an API key."""
+    typer.run(run)
 
 
 if __name__ == "__main__":
