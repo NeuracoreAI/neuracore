@@ -362,6 +362,8 @@ class AlgorithmLoader:
             ModelNotFoundError: If no NeuracoreModel subclass is found after
                 trying all import strategies.
         """
+        import_errors: list[str] = []
+
         # Install requirements if they exist
         self.install_requirements()
 
@@ -369,9 +371,12 @@ class AlgorithmLoader:
         package_name = self._setup_package_environment()
 
         # Try importing the entire package first
-        found_model = self._try_import_package(package_name)
-        if found_model:
-            return found_model
+        try:
+            found_model = self._try_import_package(package_name)
+            if found_model:
+                return found_model
+        except ModuleImportError as e:
+            import_errors.append(str(e))
 
         # Get all Python files to process
         python_files = self._get_python_files()
@@ -384,11 +389,23 @@ class AlgorithmLoader:
                 found_model = self._try_import_module_by_path(file_path, package_name)
                 if found_model:
                     return found_model
-            except Exception:
+            except Exception as e:
+                import_errors.append(
+                    f"Failed to import {file_path.name}: {e}\n{traceback.format_exc()}"
+                )
                 continue
+
+        error_details = ""
+        if import_errors:
+            joined_errors = "\n- ".join(import_errors)
+            error_details = (
+                "\nImport errors encountered while scanning for models:\n- "
+                f"{joined_errors}"
+            )
 
         raise ModelNotFoundError(
             "Could not find a class that inherits from NeuracoreModel. "
             "Ensure your algorithm inherits from NeuracoreModel and "
             "is properly defined."
+            f"{error_details}"
         )

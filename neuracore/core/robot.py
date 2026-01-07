@@ -101,15 +101,30 @@ class Robot:
                 raise ValidationError(f"URDF file not found: {urdf_path}")
             if not urdf_path.lower().endswith(".urdf"):
                 raise ValidationError("URDF file must have .urdf extension.")
-        if mjcf_path:
-            if not os.path.isfile(mjcf_path):
-                raise ValidationError(f"MJCF file not found: {mjcf_path}")
-            if not mjcf_path.lower().endswith(".xml"):
-                raise ValidationError("MJCF file must have .xml extension.")
+        elif mjcf_path:
+            mjcf_abs_path = Path(mjcf_path).expanduser().resolve()
+
+            if mjcf_abs_path.suffix.lower() != ".xml":
+                raise ValidationError(
+                    "MJCF file must have a .xml extension.\n"
+                    f"Provided path: {mjcf_abs_path}"
+                )
+
+            if not mjcf_abs_path.is_file():
+                raise ValidationError(
+                    "MJCF file not found.\n"
+                    f"Expected path: {mjcf_abs_path}\n"
+                    f"Working directory: {Path.cwd()}"
+                )
+
+            # Import conversion dependency with a helpful error
             try:
                 from .mjcf_to_urdf import convert
-            except ImportError:
-                raise ImportError("MJCF to URDF conversion requires mujoco")
+            except ImportError as e:
+                raise ImportError(
+                    "MJCF to URDF conversion requires MuJoCo support.\n"
+                    "Install the required extra/dependency (e.g., 'mujoco') and retry."
+                ) from e
             self._temp_dir = tempfile.TemporaryDirectory(prefix="neuracore")
             self.urdf_path = os.path.join(self._temp_dir.name, "model.urdf")
             convert(mjcf_path, Path(self.urdf_path), asset_file_prefix="meshes/")
