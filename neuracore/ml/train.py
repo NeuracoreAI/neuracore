@@ -412,9 +412,9 @@ def main(cfg: DictConfig) -> None:
             cfg.input_robot_data_spec
         )
     else:
-        input_data_types = [DataType(dt) for dt in cfg.input_data_types]
+        input_data_types = [DataType(data_type) for data_type in cfg.input_data_types]
         input_robot_data_spec = {
-            robot_id: {dt: [] for dt in input_data_types}
+            robot_id: {data_type: [] for data_type in input_data_types}
             for robot_id in dataset.robot_ids
         }
     if cfg.output_robot_data_spec is not None:
@@ -427,9 +427,9 @@ def main(cfg: DictConfig) -> None:
             cfg.output_robot_data_spec
         )
     else:
-        output_data_types = [DataType(dt) for dt in cfg.output_data_types]
+        output_data_types = [DataType(data_type) for data_type in cfg.output_data_types]
         output_robot_data_spec = {
-            robot_id: {dt: [] for dt in output_data_types}
+            robot_id: {data_type: [] for data_type in output_data_types}
             for robot_id in dataset.robot_ids
         }
 
