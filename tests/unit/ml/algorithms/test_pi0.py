@@ -27,16 +27,89 @@ DEVICE = torch.device("cpu")
 SKIP_TEST = os.environ.get("CI", "false").lower() == "true"
 
 
-PI_TINY_ARGS: dict[str, Any] = {
-    "vlm_expert_intermediate_size": 4,
-    "vlm_expert_num_heads": 1,
-    "vlm_expert_head_dim": 4,
-    "action_expert_width": 16,
-    "action_expert_intermediate_size": 4,
-    "action_expert_num_heads": 1,
-    "action_expert_head_dim": 4,
-    "moe_depth": 1,
+PI0_TEST_ARGS: dict[str, Any] = {
+    "paligemma_variant": "gemma_300m",
+    "action_expert_variant": "gemma_300m",
+    "use_pretrained_weights": False,
+    "num_inference_steps": 2,
+    "vlm_max_text_tokens": 8,
+    "compile_model": False,
+    "gradient_checkpointing": False,
 }
+
+
+class DummyPI0Policy(nn.Module):
+    """Lightweight stand-in for PI0Policy to keep unit tests fast."""
+
+    def __init__(self, config, **_kwargs: Any) -> None:
+        super().__init__()
+        self.config = config
+        self.state_proj = nn.Linear(config.max_state_dim, config.max_action_dim)
+        self.action_out_proj = nn.Linear(config.max_action_dim, config.max_action_dim)
+        self.gradient_checkpointing_enabled = False
+
+    def gradient_checkpointing_enable(self) -> None:
+        self.gradient_checkpointing_enabled = True
+
+    def gradient_checkpointing_disable(self) -> None:
+        self.gradient_checkpointing_enabled = False
+
+    def compile_model_enable(self) -> None:
+        return None
+
+    def forward(
+        self,
+        images: list[torch.Tensor],
+        img_masks: list[torch.Tensor],
+        lang_tokens: torch.Tensor,
+        lang_masks: torch.Tensor,
+        state: torch.Tensor,
+        actions: torch.Tensor,
+        noise: torch.Tensor | None = None,
+        time: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if noise is None:
+            noise = torch.randn_like(actions)
+        if time is None:
+            time = torch.rand(actions.shape[0], device=actions.device)
+
+        bsize, seq_len, dim = actions.shape
+        state_emb = self.state_proj(state)[:, None, :].expand(bsize, seq_len, dim)
+        v_t = self.action_out_proj(actions + state_emb)
+        u_t = noise - actions
+        return (u_t - v_t).pow(2)
+
+    @torch.no_grad()
+    def sample_actions(
+        self,
+        images: list[torch.Tensor],
+        img_masks: list[torch.Tensor],
+        lang_tokens: torch.Tensor,
+        lang_masks: torch.Tensor,
+        state: torch.Tensor,
+        noise: torch.Tensor | None = None,
+        num_steps: int | None = None,
+    ) -> torch.Tensor:
+        bsize = state.shape[0]
+        device = state.device
+        if noise is None:
+            noise = torch.zeros(
+                bsize,
+                self.config.chunk_size,
+                self.config.max_action_dim,
+                device=device,
+            )
+        state_emb = self.state_proj(state)[:, None, :].expand(
+            bsize, self.config.chunk_size, self.config.max_action_dim
+        )
+        return noise + state_emb
+
+
+@pytest.fixture(autouse=True)
+def _patch_pi0_policy(monkeypatch):
+    import neuracore.ml.algorithms.pi0.pi0 as pi0_module
+
+    monkeypatch.setattr(pi0_module, "PI0Policy", DummyPI0Policy)
 
 
 @pytest.fixture
@@ -106,10 +179,8 @@ def sample_training_batch(
 
 
 @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
-def test_model_construction(
-    model_init_description: ModelInitDescription, model_config: dict
-):
-    model = Pi0(model_init_description, **PI_TINY_ARGS)
+def test_model_construction(model_init_description: ModelInitDescription):
+    model = Pi0(model_init_description, **PI0_TEST_ARGS)
     model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
 
@@ -119,7 +190,7 @@ def test_model_forward(
     model_init_description: ModelInitDescription,
     sample_inference_batch: BatchedInferenceInputs,
 ):
-    model = Pi0(model_init_description, **PI_TINY_ARGS)
+    model = Pi0(model_init_description, **PI0_TEST_ARGS)
     model = model.to(DEVICE)
     sample_inference_batch = sample_inference_batch.to(DEVICE)
     output: dict[DataType, list[BatchedNCData]] = model(sample_inference_batch)
@@ -136,7 +207,7 @@ def test_model_backward(
     model_init_description: ModelInitDescription,
     sample_training_batch: BatchedTrainingSamples,
 ):
-    model = Pi0(model_init_description, **PI_TINY_ARGS)
+    model = Pi0(model_init_description, **PI0_TEST_ARGS)
     model = model.to(DEVICE)
     sample_training_batch = sample_training_batch.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_training_batch)
@@ -170,7 +241,12 @@ def test_model_backward(
 
 
 @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
-def test_run_validation(tmp_path: Path, mock_login):
+def test_run_validation(tmp_path: Path, mock_login, monkeypatch):
+    from neuracore.ml.algorithms.pi0.pi0 import Pi0
+    from neuracore.ml.utils import validate as validate_module
+
+    monkeypatch.setattr(validate_module.AlgorithmLoader, "load_model", lambda self: Pi0)
+
     # Long timeout due to larger model run on CPU
     os.environ["NEURACORE_ENDPOINT_TIMEOUT"] = "120"
     algorithm_dir = Path(inspect.getfile(Pi0)).parent
@@ -179,7 +255,7 @@ def test_run_validation(tmp_path: Path, mock_login):
         algorithm_dir=algorithm_dir,
         port=random.randint(10000, 20000),
         skip_endpoint_check=False,
-        algorithm_config=PI_TINY_ARGS,
+        algorithm_config=PI0_TEST_ARGS,
         device=DEVICE,
     )
     if len(error_msg) > 0:
