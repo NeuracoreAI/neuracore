@@ -15,11 +15,27 @@ Neuracore is a powerful robotics and machine learning client library for seamles
 
 ## Installation
 
+### Using uv (recommended)
+
+```bash
+uv add neuracore
+```
+
+For training and ML development:
+```bash
+uv add neuracore[ml]
+```
+
+For MuJoCo MJCF support:
+```bash
+uv add neuracore[mjcf]
+```
+
+### Using pip
+
 ```bash
 pip install neuracore
 ```
-
-**Note:** for faster video decoding, installing `ffmpeg` via `sudo apt-get install ffmpeg` (for Linux) is recommended. 
 
 For training and ML development:
 ```bash
@@ -30,6 +46,8 @@ For MuJoCo MJCF support:
 ```bash
 pip install neuracore[mjcf]
 ```
+
+**Note:** for faster video decoding, installing `ffmpeg` via `sudo apt-get install ffmpeg` (for Linux) is recommended.
 
 ## Quick Start
 
@@ -384,14 +402,14 @@ Configure Neuracore behavior with environment variables (case insensitive, prefi
 ```bash
 git clone https://github.com/neuracoreai/neuracore
 cd neuracore
-pip install -e .[dev,ml]
+uv sync --extra ml  # Creates .venv and installs all dependencies
 ```
 
 ## Testing
 
 ```bash
 export NEURACORE_API_URL=http://localhost:8000/api
-pytest tests/
+uv run pytest tests/
 ```
 
 If testing on Mac, you may need to set:

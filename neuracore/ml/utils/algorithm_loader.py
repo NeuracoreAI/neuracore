@@ -9,6 +9,7 @@ to support flexible algorithm development workflows.
 import importlib.util
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import traceback
@@ -104,8 +105,15 @@ class AlgorithmLoader:
             raise RequirementsInstallError(error_msg)
 
         try:
+            # Try uv first if available, then fall back to pip
+            uv_path = shutil.which("uv")
+            if uv_path:
+                cmd = [uv_path, "pip", "install", "-r", str(req_file)]
+            else:
+                cmd = [sys.executable, "-m", "pip", "install", "-Ir", str(req_file)]
+
             subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-Ir", str(req_file)],
+                cmd,
                 capture_output=True,
                 text=True,
                 check=True,
@@ -119,7 +127,7 @@ class AlgorithmLoader:
             logger.error(error_msg)
             raise RequirementsInstallError(error_msg)
         except FileNotFoundError as e:
-            error_msg = f"pip executable not found: {e}"
+            error_msg = f"Python package installer (eg. pip, uv) not found: {e}"
             logger.error(error_msg)
             raise RequirementsInstallError(error_msg)
 
