@@ -4,7 +4,13 @@ import matplotlib.pyplot as plt
 import torch
 from common.base_env import BimanualViperXTask
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, BOX_POSE, make_sim_env
-from neuracore_types import BatchedJointData, BatchedNCData, DataSpec, DataType
+from neuracore_types import (
+    BatchedJointData,
+    BatchedNCData,
+    BatchedParallelGripperOpenAmountData,
+    DataSpec,
+    DataType,
+)
 
 import neuracore as nc
 
@@ -13,18 +19,20 @@ TRAINING_JOB_NAME = "MyTrainingJob"
 CAMERA_NAMES = ["angle"]
 
 # Specification of the order that will be fed into the model
+# Specification of the order that will be fed into the model
 MODEL_INPUT_ORDER: DataSpec = {
-    DataType.JOINT_POSITIONS: (
-        BimanualViperXTask.LEFT_ARM_JOINT_NAMES
-        + BimanualViperXTask.LEFT_GRIPPER_JOINT_NAMES
-        + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
-        + BimanualViperXTask.RIGHT_GRIPPER_JOINT_NAMES
-    ),
+    DataType.JOINT_POSITIONS: BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+    + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES,
     DataType.RGB_IMAGES: CAMERA_NAMES,
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
 }
 
 MODEL_OUTPUT_ORDER: DataSpec = {
-    DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
+    DataType.JOINT_TARGET_POSITIONS: (
+        BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+        + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+    ),
 }
 
 
@@ -36,18 +44,18 @@ def main():
         overwrite=False,
     )
     # If you have a train run name, you can use it to connect to a local. E.g.:
-    policy = nc.policy(
-        train_run_name=TRAINING_JOB_NAME,
-        model_input_order=MODEL_INPUT_ORDER,
-        model_output_order=MODEL_OUTPUT_ORDER,
-    )
-
-    # If you know the path to the local model.nc.zip file, you can use it directly as:
     # policy = nc.policy(
-    #     model_file="PATH/TO/MODEL.nc.zip",
+    #     train_run_name=TRAINING_JOB_NAME,
     #     model_input_order=MODEL_INPUT_ORDER,
     #     model_output_order=MODEL_OUTPUT_ORDER,
     # )
+
+    # If you know the path to the local model.nc.zip file, you can use it directly as:
+    policy = nc.policy(
+        model_file="/home/kewang/.neuracore/training/runs/2026-01-08_12-33-01/artifacts/model.nc.zip",
+        model_input_order=MODEL_INPUT_ORDER,
+        model_output_order=MODEL_OUTPUT_ORDER,
+    )
 
     # Alternatively, you can connect to a local endpoint that has been started
     # policy = nc.policy_local_server(
@@ -83,7 +91,17 @@ def main():
         # Run episode
         for i in range(400):
 
-            nc.log_joint_positions(positions=obs.qpos)
+            arm_joint_positions = {
+                jname: obs.qpos[jname]
+                for jname in BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+                + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+            }
+            gripper_open_amounts = {
+                "left_arm": obs.gripper_open_amounts["left_gripper"],
+                "right_arm": obs.gripper_open_amounts["right_gripper"],
+            }
+            nc.log_joint_positions(positions=arm_joint_positions)
+            nc.log_parallel_gripper_open_amounts(values=gripper_open_amounts)
 
             for key, value in obs.cameras.items():
                 if key in CAMERA_NAMES:
@@ -98,6 +116,11 @@ def main():
                     dict[str, BatchedJointData],
                     predictions[DataType.JOINT_TARGET_POSITIONS],
                 )
+                open_amounts = cast(
+                    dict[str, BatchedParallelGripperOpenAmountData],
+                    predictions[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS],
+                )
+                # breakpoint()
                 left_arm = torch.cat(
                     [
                         joint_target_positions[name].value
@@ -112,12 +135,8 @@ def main():
                     ],
                     dim=2,
                 )
-                left_open_amount = joint_target_positions[
-                    BimanualViperXTask.LEFT_GRIPPER_OPEN
-                ].value
-                right_open_amount = joint_target_positions[
-                    BimanualViperXTask.RIGHT_GRIPPER_OPEN
-                ].value
+                left_open_amount = open_amounts["left_arm"].open_amount
+                right_open_amount = open_amounts["right_arm"].open_amount
                 batched_action = (
                     torch.cat(
                         [left_arm, left_open_amount, right_arm, right_open_amount],
@@ -128,6 +147,17 @@ def main():
                 )
                 # Get first batch: (horizon, num_joints)
                 mj_action = batched_action[0]
+                # sway the last dimension of mj_action
+                # left_gripper_action = mj_action[:, 12:13].copy()
+                # Keep 2D shape (horizon, 1)
+                # right_gripper_action = mj_action[:, 13:14].copy()
+                # Keep 2D shape (horizon, 1)
+                # left_arm = mj_action[:, 0:6].copy()
+                # right_arm = mj_action[:, 6:12].copy()
+                # new_mj_action = numpy.concatenate(
+                #     [left_arm, left_gripper_action, right_arm, right_gripper_action],
+                #     axis=1,
+                # )
                 horizon = len(mj_action)
 
             obs, reward, done = env.step(mj_action[idx_in_horizon])

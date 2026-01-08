@@ -50,6 +50,16 @@ PROPRIO_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
 ACTION_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
 RESNET_MEAN = [0.485, 0.456, 0.406]
 RESNET_STD = [0.229, 0.224, 0.225]
+INPUT_PROPRIO_ORDER = [
+    DataType.JOINT_POSITIONS,
+    DataType.JOINT_VELOCITIES,
+    DataType.JOINT_TORQUES,
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+]
+OUTPUT_PROPRIO_ORDER = [
+    DataType.JOINT_TARGET_POSITIONS,
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+]
 
 
 class ACT(NeuracoreModel):
@@ -116,12 +126,7 @@ class ACT(NeuracoreModel):
         proprio_stats = []
         current_dim = 0
 
-        for data_type in [
-            DataType.JOINT_POSITIONS,
-            DataType.JOINT_VELOCITIES,
-            DataType.JOINT_TORQUES,
-            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
-        ]:
+        for data_type in INPUT_PROPRIO_ORDER:
             if data_type in self.data_types:
                 if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
                     stats = cast(
@@ -156,25 +161,26 @@ class ACT(NeuracoreModel):
         # Setup output data
         self.max_output_size = 0
         output_stats = []
-        for data_type in self.output_data_types:
-            if data_type == DataType.JOINT_TARGET_POSITIONS:
-                stats = cast(
-                    list[JointDataStats],
-                    self.dataset_statistics[data_type],
-                )
-                combined_stats = DataItemStats()
-                for stat in stats:
-                    combined_stats = combined_stats.concatenate(stat.value)
-            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
-                stats = cast(
-                    list[ParallelGripperOpenAmountDataStats],
-                    self.dataset_statistics[data_type],
-                )
-                combined_stats = DataItemStats()
-                for stat in stats:
-                    combined_stats = combined_stats.concatenate(stat.open_amount)
-            else:
-                raise ValueError(f"Unsupported output data type: {data_type}")
+        for data_type in OUTPUT_PROPRIO_ORDER:
+            if data_type in self.output_data_types:
+                if data_type == DataType.JOINT_TARGET_POSITIONS:
+                    stats = cast(
+                        list[JointDataStats],
+                        self.dataset_statistics[data_type],
+                    )
+                    combined_stats = DataItemStats()
+                    for stat in stats:
+                        combined_stats = combined_stats.concatenate(stat.value)
+                elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                    stats = cast(
+                        list[ParallelGripperOpenAmountDataStats],
+                        self.dataset_statistics[data_type],
+                    )
+                    combined_stats = DataItemStats()
+                    for stat in stats:
+                        combined_stats = combined_stats.concatenate(stat.open_amount)
+                else:
+                    raise ValueError(f"Unsupported output data type: {data_type}")
 
             data_stats[data_type] = combined_stats
             output_stats.append(combined_stats)
@@ -321,12 +327,7 @@ class ACT(NeuracoreModel):
             return None
 
         proprio_list = []
-        for data_type in [
-            DataType.JOINT_POSITIONS,
-            DataType.JOINT_VELOCITIES,
-            DataType.JOINT_TORQUES,
-            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
-        ]:
+        for data_type in INPUT_PROPRIO_ORDER:
             if data_type not in batch.inputs:
                 continue
 
@@ -593,30 +594,35 @@ class ACT(NeuracoreModel):
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
 
         start_slice_idx = 0
-        for data_type in self.output_data_types:
-            end_slice_idx = start_slice_idx + len(self.dataset_statistics[data_type])
-            dt_preds = predictions[
-                :, :, start_slice_idx:end_slice_idx
-            ]  # (B, T, dt_size)
+        for data_type in OUTPUT_PROPRIO_ORDER:
+            if data_type in self.output_data_types:
+                end_slice_idx = start_slice_idx + len(
+                    self.dataset_statistics[data_type]
+                )
+                dt_preds = predictions[
+                    :, :, start_slice_idx:end_slice_idx
+                ]  # (B, T, dt_size)
 
-            if data_type == DataType.JOINT_TARGET_POSITIONS:
-                batched_outputs = []
-                for i in range(len(self.dataset_statistics[data_type])):
-                    joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
-                    batched_outputs.append(BatchedJointData(value=joint_preds))
-                output_tensors[data_type] = batched_outputs
-            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
-                batched_outputs = []
-                for i in range(len(self.dataset_statistics[data_type])):
-                    gripper_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
-                    batched_outputs.append(
-                        BatchedParallelGripperOpenAmountData(open_amount=gripper_preds)
-                    )
-                output_tensors[data_type] = batched_outputs
-            else:
-                raise ValueError(f"Unsupported output data type: {data_type}")
+                if data_type == DataType.JOINT_TARGET_POSITIONS:
+                    batched_outputs = []
+                    for i in range(len(self.dataset_statistics[data_type])):
+                        joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
+                        batched_outputs.append(BatchedJointData(value=joint_preds))
+                    output_tensors[data_type] = batched_outputs
+                elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                    batched_outputs = []
+                    for i in range(len(self.dataset_statistics[data_type])):
+                        gripper_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
+                        batched_outputs.append(
+                            BatchedParallelGripperOpenAmountData(
+                                open_amount=gripper_preds
+                            )
+                        )
+                    output_tensors[data_type] = batched_outputs
+                else:
+                    raise ValueError(f"Unsupported output data type: {data_type}")
 
-            start_slice_idx = end_slice_idx
+                start_slice_idx = end_slice_idx
 
         return output_tensors
 
@@ -642,19 +648,22 @@ class ACT(NeuracoreModel):
         )
 
         # Extract target actions
-        # Extract target actions
         action_targets = []
-        for data_type in self.output_data_types:
-            if data_type == DataType.JOINT_TARGET_POSITIONS:
-                batched_joints = cast(list[BatchedJointData], batch.outputs[data_type])
-                action_targets.extend([bjd.value for bjd in batched_joints])
-            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
-                grippers = cast(
-                    list[BatchedParallelGripperOpenAmountData], batch.outputs[data_type]
-                )
-                action_targets.extend([gripper.open_amount for gripper in grippers])
-            else:
-                raise ValueError(f"Unsupported output data type: {data_type}")
+        for data_type in OUTPUT_PROPRIO_ORDER:
+            if data_type in self.output_data_types:
+                if data_type == DataType.JOINT_TARGET_POSITIONS:
+                    batched_joints = cast(
+                        list[BatchedJointData], batch.outputs[data_type]
+                    )
+                    action_targets.extend([bjd.value for bjd in batched_joints])
+                elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                    grippers = cast(
+                        list[BatchedParallelGripperOpenAmountData],
+                        batch.outputs[data_type],
+                    )
+                    action_targets.extend([gripper.open_amount for gripper in grippers])
+                else:
+                    raise ValueError(f"Unsupported output data type: {data_type}")
 
         action_data = torch.cat(action_targets, dim=-1)  # (B, T, action_dim)
 
