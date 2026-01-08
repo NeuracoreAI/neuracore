@@ -42,7 +42,7 @@ DATASET_NAME = "Transfer Cube VX300s Dataset"
 GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
 FREQUENCY = 50
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 OUTPUT_PREDICTION_HORIZON = 100
 NUM_ROLLOUTS = 10
 ONSCREEN_RENDER = False
@@ -206,7 +206,7 @@ def eval_model(
             },
             0.4,
             {
-                "batch_size": 64,
+                "batch_size": BATCH_SIZE,
                 "epochs": 40,
                 "output_prediction_horizon": 64,
                 "lr": 2e-4,
