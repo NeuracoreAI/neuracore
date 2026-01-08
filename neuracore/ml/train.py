@@ -9,7 +9,7 @@ from typing import Any
 import hydra
 import torch
 import torch.multiprocessing as mp
-from neuracore_types import ModelInitDescription
+from neuracore_types import BatchedNCData, ModelInitDescription
 from neuracore_types.nc_data import DataType
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler, random_split
@@ -20,7 +20,7 @@ from neuracore.core.utils.training_input_args_validation import (
     get_algorithm_name,
     validate_training_params,
 )
-from neuracore.ml import NeuracoreModel
+from neuracore.ml import BatchedTrainingSamples, NeuracoreModel
 from neuracore.ml.datasets.pytorch_single_sample_dataset import SingleSampleDataset
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
@@ -48,6 +48,61 @@ os.environ["PJRT_DEVICE"] = "GPU"
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+MAX_AUTOTUNE_SAMPLE_CANDIDATES = 1000
+
+
+def _estimate_sample_tensor_bytes(sample: BatchedTrainingSamples) -> int:
+    """Roughly estimate total tensor memory footprint (bytes) for a sample."""
+
+    def _collect(obj: Any) -> int:
+        if torch.is_tensor(obj):
+            return obj.numel() * obj.element_size()
+        if isinstance(obj, BatchedNCData):
+            return _collect(obj.model_dump())
+        if isinstance(obj, dict):
+            return sum(_collect(v) for v in obj.values())
+        if isinstance(obj, (list, tuple)):
+            return sum(_collect(v) for v in obj)
+        return 0
+
+    return _collect({
+        "inputs": sample.inputs,
+        "inputs_mask": sample.inputs_mask,
+        "outputs": sample.outputs,
+        "outputs_mask": sample.outputs_mask,
+    })
+
+
+def _select_worst_case_sample(
+    dataset: PytorchSynchronizedDataset, device: torch.device
+) -> BatchedTrainingSamples:
+    """Pick the heaviest sample (by tensor bytes) from a subset of the dataset."""
+    if len(dataset) == 0:
+        raise ValueError("Cannot autotune batch size with an empty dataset.")
+
+    search_space = range(min(MAX_AUTOTUNE_SAMPLE_CANDIDATES, len(dataset) - 1))
+    heaviest_sample: BatchedTrainingSamples | None = None
+    heaviest_bytes = -1
+    heaviest_idx = -1
+
+    for idx in search_space:
+
+        candidate = dataset[idx]
+        candidate_bytes = _estimate_sample_tensor_bytes(candidate)
+        if candidate_bytes > heaviest_bytes:
+            heaviest_bytes = candidate_bytes
+            heaviest_sample = candidate
+            heaviest_idx = idx
+
+    assert heaviest_sample is not None
+    logger.info(
+        "Selected sample %s as worst-case for autotuning (approx %.2f MB of tensors)",
+        heaviest_idx,
+        heaviest_bytes / (1024**2),
+    )
+
+    return heaviest_sample.to(device)
 
 
 def setup_logging(output_dir: str, rank: int = 0) -> None:
@@ -497,7 +552,10 @@ def main(cfg: DictConfig) -> None:
 
     # Handle batch size configuration
     if isinstance(batch_size, str) and batch_size.lower() == "auto":
-        sample = pytorch_dataset.load_sample(0).to(device)
+        sample = _select_worst_case_sample(
+            dataset=pytorch_dataset,
+            device=device,
+        )
         single_sample_dataset = SingleSampleDataset(
             sample=sample,
             input_robot_data_spec=input_robot_data_spec,
