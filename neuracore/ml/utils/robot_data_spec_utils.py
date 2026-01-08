@@ -51,14 +51,16 @@ def merge_robot_data_spec(
     all_robot_ids = list(dict.fromkeys(list(data_spec_1) + list(data_spec_2)))
 
     for robot_id in all_robot_ids:
-        dt_dict1 = data_spec_1.get(robot_id, {})
-        dt_dict2 = data_spec_2.get(robot_id, {})
-        all_data_types = list(dict.fromkeys(list(dt_dict1) + list(dt_dict2)))
+        data_type_dict1 = data_spec_1.get(robot_id, {})
+        data_type_dict2 = data_spec_2.get(robot_id, {})
+        all_data_types = list(
+            dict.fromkeys(list(data_type_dict1) + list(data_type_dict2))
+        )
 
         merged_dict[robot_id] = {}
         for data_type in all_data_types:
-            items = list(dt_dict1.get(data_type, [])) + list(
-                dt_dict2.get(data_type, [])
+            items = list(data_type_dict1.get(data_type, [])) + list(
+                data_type_dict2.get(data_type, [])
             )
             merged_dict[robot_id][data_type] = list(dict.fromkeys(items))
 

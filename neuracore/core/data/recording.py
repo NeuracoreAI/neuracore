@@ -96,7 +96,7 @@ class Recording:
         data_types = extract_data_types(robot_data_spec) if robot_data_spec else None
         # check valid data types if provided
         if data_types is not None:
-            if not all(isinstance(dt, DataType) for dt in data_types):
+            if not all(isinstance(data_type, DataType) for data_type in data_types):
                 raise ValueError(
                     "Invalid data types provided. "
                     "All items must be DataType enum values."

@@ -103,11 +103,11 @@ def get_latest_sync_point(
     for stream_name, stream in robot.list_all_streams().items():
         stream_data = stream.get_latest_data()
         assert stream_data is not None
-        dt_name, name_of_sensor_data = stream_name.split(":", 1)
-        dt = DataType[dt_name]
-        if dt not in sync_point.data:
-            sync_point[dt] = {}
-        sync_point[dt][name_of_sensor_data] = stream_data
+        data_type_name, name_of_sensor_data = stream_name.split(":", 1)
+        data_type = DataType[data_type_name]
+        if data_type not in sync_point.data:
+            sync_point[data_type] = {}
+        sync_point[data_type][name_of_sensor_data] = stream_data
 
     if not include_remote or get_consume_live_data_enabled_manager().is_disabled():
         return sync_point

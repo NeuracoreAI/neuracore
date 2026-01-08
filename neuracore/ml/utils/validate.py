@@ -144,14 +144,18 @@ def run_validation(
         # Create dummy robot data specs
         input_robot_data_spec = {
             "robot_1": {
-                dt: [f"{dt.value}_{i}" for i in range(MAX_LEN_PER_DATA_TYPE)]
-                for dt in supported_input_data_types
+                data_type: [
+                    f"{data_type.value}_{i}" for i in range(MAX_LEN_PER_DATA_TYPE)
+                ]
+                for data_type in supported_input_data_types
             }
         }
         output_robot_data_spec = {
             "robot_1": {
-                dt: [f"{dt.value}_{i}" for i in range(MAX_LEN_PER_DATA_TYPE)]
-                for dt in supported_output_data_types
+                data_type: [
+                    f"{data_type.value}_{i}" for i in range(MAX_LEN_PER_DATA_TYPE)
+                ]
+                for data_type in supported_output_data_types
             }
         }
 
@@ -257,12 +261,18 @@ def run_validation(
                 policy = None
                 try:
                     model_input_order = {
-                        dt: [f"{dt.value}_{i}" for i in range(MAX_LEN_PER_DATA_TYPE)]
-                        for dt in supported_input_data_types
+                        data_type: [
+                            f"{data_type.value}_{i}"
+                            for i in range(MAX_LEN_PER_DATA_TYPE)
+                        ]
+                        for data_type in supported_input_data_types
                     }
                     model_output_order = {
-                        dt: [f"{dt.value}_{i}" for i in range(MAX_LEN_PER_DATA_TYPE)]
-                        for dt in supported_output_data_types
+                        data_type: [
+                            f"{data_type.value}_{i}"
+                            for i in range(MAX_LEN_PER_DATA_TYPE)
+                        ]
+                        for data_type in supported_output_data_types
                     }
 
                     # Check if the exported model can be loaded

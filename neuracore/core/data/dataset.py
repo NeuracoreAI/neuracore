@@ -446,7 +446,7 @@ class Dataset:
         if robot_data_spec is None:
             robot_data_spec = {}
             for rid in self.robot_ids:
-                robot_data_spec[rid] = {dt: [] for dt in self.data_types}
+                robot_data_spec[rid] = {data_type: [] for data_type in self.data_types}
 
         synced_dataset = self._synchronize(
             frequency=frequency, robot_data_spec=robot_data_spec
