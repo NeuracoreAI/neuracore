@@ -213,7 +213,6 @@ class Pi0(NeuracoreModel):
             compile_mode=self.compile_mode,
             device=self.device,
         )
-        self.gradient_checkpointing_enabled = False
 
         # Core model from the reference implementation
         if self.use_pretrained_weights and self.pretrained_name_or_path:
@@ -243,47 +242,27 @@ class Pi0(NeuracoreModel):
         You can either finetune everything or just the action expert while
         freezing the VLM model.
         """
+        # Define parameter name patterns
+        ACTION_EXPERT_PATTERNS = [
+            "gemma_expert",
+            "action_in_proj",
+            "action_out_proj",
+            "state_proj",
+            "action_time_mlp_in",
+            "action_time_mlp_out",
+        ]
+
+        # Determine which parameters to include
         if self.finetune_action_expert_only:
-            expert_params = []
-            for name, param in self.model.named_parameters():
-                if any(
-                    expert in name
-                    for expert in [
-                        "gemma_expert",
-                        "action_in_proj",
-                        "action_out_proj",
-                        "state_proj",
-                        "action_time_mlp_in",
-                        "action_time_mlp_out",
-                    ]
-                ):
-                    expert_params.append(param)
-            self.param_groups = [{
-                "params": expert_params,
-                "lr": self.optimizer_lr,
-            }]
-        elif self.freeze_language_model_only and not self.finetune_action_expert_only:
-            non_language_params = []
-            for name, param in self.model.named_parameters():
-                if any(
-                    non_language in name
-                    for non_language in [
-                        "gemma_expert",
-                        "vision_tower",
-                        "multi_modal",
-                        "action_in_proj",
-                        "action_out_proj",
-                        "state_proj",
-                        "action_time_mlp_in",
-                        "action_time_mlp_out",
-                    ]
-                ):
-                    non_language_params.append(param)
-            self.param_groups = [{
-                "params": non_language_params,
-                "lr": self.optimizer_lr,
-            }]
+            patterns = ACTION_EXPERT_PATTERNS
+            params = [
+                param
+                for name, param in self.model.named_parameters()
+                if any(pattern in name for pattern in patterns)
+            ]
+            self.param_groups = [{"params": params, "lr": self.optimizer_lr}]
         else:
+            # Train all parameters
             self.param_groups = [{
                 "params": list(self.model.parameters()),
                 "lr": self.optimizer_lr,
@@ -423,16 +402,14 @@ class Pi0(NeuracoreModel):
         proprios = self._combine_proprio(batch)
         return images, image_masks, lang_tokens, lang_masks, proprios
 
-    # ---------------------------------------------------------------- inference
-    def predict_action_chunk(self, batch: BatchedInferenceInputs) -> torch.Tensor:
+    def _predict_action(self, batch: BatchedInferenceInputs) -> torch.Tensor:
         """Run inference to produce one chunk of actions."""
         images, image_masks, lang_tokens, lang_masks, proprios = (
             self._build_inputs_from_batch(batch)
         )
-        with torch.no_grad():
-            actions = self.model.sample_actions(
-                images, image_masks, lang_tokens, lang_masks, proprios
-            )
+        actions = self.model.sample_actions(
+            images, image_masks, lang_tokens, lang_masks, proprios
+        )
         actions = actions[:, :, : self.action_dim]  # output pad to max action dim
         return actions
 
@@ -472,7 +449,7 @@ class Pi0(NeuracoreModel):
         self.model.gradient_checkpointing_disable()
         self.model.compile_model_enable()
 
-        actions = self.predict_action_chunk(batch)
+        actions = self._predict_action(batch)
         predictions = self.action_normalizer.unnormalize(actions)
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
 
@@ -591,7 +568,6 @@ class Pi0(NeuracoreModel):
             metrics=metrics,
         )
 
-    # ----------------------------------------------------------- optim/schedule
     def configure_optimizers(self) -> list[torch.optim.Optimizer]:
         """Create the optimizer list used during training."""
         return [
