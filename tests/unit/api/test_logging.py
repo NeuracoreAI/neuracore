@@ -202,7 +202,7 @@ def test_log_invalid_data_format(
             "camera", np.ones((100, 100), dtype=np.float32) * 1000
         )  # Too large
 
-    with pytest.raises(ValueError, match="End effector pose must be a list"):
+    with pytest.raises(ValueError, match="End effector pose must be a numpy array"):
         nc.log_end_effector_pose(name="right_ee", pose="not_a_list")
 
     with pytest.raises(ValueError, match="End effector names must be strings"):
@@ -219,10 +219,24 @@ def test_log_invalid_data_format(
         )
 
     # Test invalid end effector pose length (not 7 elements)
-    with pytest.raises(ValueError, match="End effector pose must be a 7-element list"):
+    with pytest.raises(
+        ValueError, match="End effector pose must be a 7-element numpy array"
+    ):
         nc.log_end_effector_pose(
             name="left_ee", pose=np.array([0.5, 0.3, 0.2, 0.5, 0.5, 0.5])
         )
+
+    # Test invalid pose type (not numpy array)
+    with pytest.raises(ValueError, match="Pose must be a numpy array"):
+        nc.log_pose(name="object_pose", pose="not_an_array")
+
+    # Test invalid pose type (list instead of numpy array)
+    with pytest.raises(ValueError, match="Pose must be a numpy array"):
+        nc.log_pose(name="object_pose", pose=[1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0])
+
+    # Test invalid pose length (not 7 elements)
+    with pytest.raises(ValueError, match="Pose must be a numpy array of length 7"):
+        nc.log_pose(name="object_pose", pose=np.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0]))
 
     with pytest.raises(
         ValueError, match="Parallel gripper open amounts must be floats"
@@ -258,6 +272,24 @@ def test_log_end_effector_poses(
     nc.log_end_effector_pose(
         name="left_ee",
         pose=np.array([0.5, 0.3, 0.2, 0.5, 0.5, 0.5, 0.5]),
+    )
+
+
+def test_log_pose(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test logging pose data."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    nc.log_pose(
+        name="object_pose",
+        pose=np.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0]),
     )
 
 

@@ -529,7 +529,7 @@ def log_pose(
 
     Args:
         name: Name of the pose.
-        pose: 7-element lists: [x, y, z, qx, qy, qz, qw]
+        pose: 7-element numpy array: [x, y, z, qx, qy, qz, qw]
         robot_name: Optional robot name.
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
@@ -537,13 +537,18 @@ def log_pose(
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
-        ValueError: If poses is not a dictionary of 7-element lists
+        ValueError: If pose is not a 7-element numpy array
     """
     timestamp = timestamp or time.time()
     if not isinstance(pose, np.ndarray):
-        raise ValueError(f"Poses must be lists. {name} is not a list.")
+        raise ValueError(
+            f"Pose must be a numpy array, got {type(pose).__name__} for '{name}'."
+        )
     if len(pose) != 7:
-        raise ValueError(f"Poses must be lists of length 7. {name} is not length 7.")
+        raise ValueError(
+            f"Pose must be a numpy array of length 7, got length {len(pose)} for "
+            f"'{name}'."
+        )
     robot = _get_robot(robot_name, instance)
     storage_name = validate_safe_name(name)
     str_id = f"{DataType.POSES.value}:{name}"
@@ -581,7 +586,7 @@ def log_end_effector_pose(
 
     Args:
         name: Name of the end effector
-        pose: 7-element lists: [x, y, z, qx, qy, qz, qw]
+        pose: 7-element numpy array: [x, y, z, qx, qy, qz, qw]
         robot_name: Optional robot ID
         instance: Optional instance number
         timestamp: Optional timestamp
@@ -590,12 +595,12 @@ def log_end_effector_pose(
 
     if not isinstance(pose, np.ndarray):
         raise ValueError(
-            f"End effector pose must be a list. " f"{pose} is of type {type(pose)}"
+            f"End effector pose must be a numpy array, got {type(pose).__name__}."
         )
     if len(pose) != 7:
         raise ValueError(
-            f"End effector pose must be a 7-element list. "
-            f"{name} is of length {len(pose)}."
+            f"End effector pose must be a 7-element numpy array, got length "
+            f"{len(pose)} for '{name}'."
         )
     if not isinstance(name, str):
         raise ValueError(
