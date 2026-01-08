@@ -5,8 +5,9 @@ neuracore operations interactively. It provides a list of their organizations
 and a input to select which to use and saves to global config.
 """
 
-import argparse
 import os
+
+import typer
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.config_manager import get_config_manager
@@ -97,24 +98,17 @@ def select_current_org(org_name_or_id: str | None = None) -> Organization:
     raise InputError("Out of attempts.")
 
 
-def main() -> None:
-    """Main function to run the organization selection process."""
-    parser = argparse.ArgumentParser(
-        description="Select an organization to use",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
+def run(
+    org_name_or_id: str | None = typer.Option(
+        None,
         "--org-name",
         "--org-id",
         "-n",
         "-o",
-        dest="org_name_or_id",
-        required=False,
-        type=str,
         help="The name or id of the organization to select.",
     )
-    org_name_or_id = parser.parse_args().org_name_or_id
-
+) -> None:
+    """Select an organization to use."""
     auth = get_auth()
     try:
         if not auth.is_authenticated:
@@ -126,11 +120,19 @@ def main() -> None:
         config_manager.save_config()
 
     except AuthenticationError:
-        print("Failed to Authenticate, please try again")
+        typer.echo("Failed to Authenticate, please try again", err=True)
+        raise typer.Exit(code=1)
     except OrganizationError:
-        print("Failed to select organization, please try again")
+        typer.echo("Failed to select organization, please try again", err=True)
+        raise typer.Exit(code=1)
     except InputError:
-        print("No organization selected")
+        typer.echo("No organization selected", err=True)
+        raise typer.Exit(code=1)
+
+
+def main() -> None:
+    """CLI entrypoint for selecting the current organization."""
+    typer.run(run)
 
 
 if __name__ == "__main__":
