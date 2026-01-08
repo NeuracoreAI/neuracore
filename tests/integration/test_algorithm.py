@@ -161,7 +161,7 @@ def eval_model(
 
 
 @pytest.mark.parametrize(
-    "algorithm_name, input_data_spec, output_data_spec, epochs, min_success_rate",  # noqa: E501
+    "algorithm_name, input_data_spec, output_data_spec, min_success_rate, algorithm_config",  # noqa: E501
     [
         (
             "CNNMLP",
@@ -172,8 +172,12 @@ def eval_model(
             {
                 DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
             },
-            50,
             0.5,
+            {
+                "batch_size": BATCH_SIZE,
+                "epochs": 50,
+                "output_prediction_horizon": OUTPUT_PREDICTION_HORIZON,
+            },
         ),
         (
             "ACT",
@@ -184,8 +188,30 @@ def eval_model(
             {
                 DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
             },
-            50,
             0.5,
+            {
+                "batch_size": BATCH_SIZE,
+                "epochs": 50,
+                "output_prediction_horizon": OUTPUT_PREDICTION_HORIZON,
+            },
+        ),
+        (
+            "DiffusionPolicy",
+            {
+                DataType.RGB_IMAGES: [NC_CAM_NAME],
+                DataType.JOINT_POSITIONS: JOINT_NAMES,
+            },
+            {
+                DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
+            },
+            0.4,
+            {
+                "batch_size": 64,
+                "epochs": 40,
+                "output_prediction_horizon": 64,
+                "lr": 2e-4,
+                "lr_backbone": 2e-4,
+            },
         ),
     ],
 )
@@ -197,8 +223,8 @@ class TestAlgorithm:
         algorithm_name: str,
         input_data_spec: DataSpec,
         output_data_spec: DataSpec,
-        epochs: int,
         min_success_rate: float,
+        algorithm_config: dict,
     ) -> None:
         nc.login()
 
@@ -212,11 +238,6 @@ class TestAlgorithm:
 
         # Timestamp used for unique naming
         timestamp = int(time.time())
-        algorithm_config = {
-            "batch_size": BATCH_SIZE,
-            "epochs": epochs,
-            "output_prediction_horizon": OUTPUT_PREDICTION_HORIZON,
-        }
         logger.info("Starting training job...")
         job_data = nc.start_training_run(
             name=f"{TRAINING_NAME} - {algorithm_name} - {timestamp}",
