@@ -1,5 +1,7 @@
 """PyTorch dataset for loading synchronized robot data with filesystem caching."""
 
+import hashlib
+import json
 import logging
 from typing import cast
 
@@ -11,11 +13,13 @@ from neuracore_types import (
     DataType,
     NCDataStats,
     RobotDataSpec,
+    SynchronizedDatasetStatistics,
     SynchronizedPoint,
 )
 from neuracore_types.nc_data.nc_data import DataItemStats
 
 import neuracore as nc
+from neuracore.core.data.dataset import DEFAULT_CACHE_DIR
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
 from neuracore.ml import BatchedTrainingSamples
@@ -63,16 +67,57 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         )
         self.synchronized_dataset = synchronized_dataset
 
-        logger.info("Calculated dataset statistics...")
-        self.synchronized_dataset_statistics = (
-            synchronized_dataset.calculate_statistics(
-                robot_data_spec=self.robot_data_spec
-            )
+        # Try cached stats first; fall back to server computation if missing/unreadable.
+        logger.info("Loading dataset statistics...")
+        if hasattr(self.robot_data_spec, "model_dump"):
+            spec_payload = self.robot_data_spec.model_dump(mode="json")
+        else:
+            spec_payload = self.robot_data_spec
+        spec_key = json.dumps(spec_payload, sort_keys=True, separators=(",", ":"))
+        spec_hash = hashlib.sha256(spec_key.encode("utf-8")).hexdigest()[:12]
+
+        # Hash the spec so different ordering/configs don't collide on disk.
+        stats_cache_dir = DEFAULT_CACHE_DIR / "dataset_cache"
+        stats_cache_path = (
+            stats_cache_dir
+            / f"{self.synchronized_dataset.id}_statistics_{spec_hash}.json"
         )
+
+        self.synchronized_dataset_statistics = None
+        # Read cached stats if present; ignore and recompute on parse errors.
+        if stats_cache_path.exists():
+            try:
+                with stats_cache_path.open("r", encoding="utf-8") as handle:
+                    cached = json.load(handle)
+                self.synchronized_dataset_statistics = (
+                    SynchronizedDatasetStatistics.model_validate(cached)
+                )
+                logger.info("Loaded dataset statistics from cache.")
+            except (OSError, ValueError) as exc:
+                logger.warning(
+                    "Failed to read cached statistics at %s: %s",
+                    stats_cache_path,
+                    exc,
+                )
+
+        # Cache miss: compute via API, then persist for next run.
+        if self.synchronized_dataset_statistics is None:
+            logger.info("Calculating dataset statistics...")
+            self.synchronized_dataset_statistics = (
+                synchronized_dataset.calculate_statistics(
+                    robot_data_spec=self.robot_data_spec
+                )
+            )
+            stats_cache_dir.mkdir(parents=True, exist_ok=True)
+            with stats_cache_path.open("w", encoding="utf-8") as handle:
+                json.dump(
+                    self.synchronized_dataset_statistics.model_dump(mode="json"),
+                    handle,
+                )
+            logger.info("Done calculating dataset statistics.")
         self._dataset_statistics = (
             self.synchronized_dataset_statistics.dataset_statistics
         )
-        logger.info("Done calculating dataset statistics.")
 
         self._max_error_count = 100
         self._error_count = 0
