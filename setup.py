@@ -49,6 +49,7 @@ setup(
         "psutil",
         "typer>=0.20.0",
         "neuracore-types>=4.3.0,<5.0.0",
+        "ordered_set",
     ],
     extras_require={
         "examples": [
