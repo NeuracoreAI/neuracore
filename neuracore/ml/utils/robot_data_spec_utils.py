@@ -1,6 +1,7 @@
 """Utility functions for robot data specifications."""
 
 from neuracore_types import DataType, RobotDataSpec
+from ordered_set import OrderedSet
 
 
 def convert_str_to_robot_data_spec(
@@ -67,14 +68,17 @@ def merge_robot_data_spec(
     return merged_dict
 
 
-def extract_data_types(robot_id_to_data_types: RobotDataSpec) -> set[DataType]:
+def extract_data_types(robot_id_to_data_types: RobotDataSpec) -> OrderedSet[DataType]:
     """Extract unique data types from robot ID to data types dictionary.
 
     Args:
         robot_id_to_data_types: A dictionary where keys are robot IDs and
             values are dictionaries mapping DataType enums to lists of item names.
+
+    Returns:
+        OrderedSet of unique data types.
     """
-    unique_data_types = set()
+    unique_data_types = OrderedSet()
     for data_types in robot_id_to_data_types.values():
         unique_data_types.update(data_types.keys())
     return unique_data_types
