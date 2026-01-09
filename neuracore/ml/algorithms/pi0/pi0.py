@@ -35,8 +35,7 @@ from neuracore.ml import (
 )
 from neuracore.ml.algorithm_utils.normalizer import MeanStdNormalizer
 
-from .gemma_pytorch import pad_vector, resize_with_pad_torch
-from .modules import PI0Config, PI0Policy
+from .modules import PI0Config, PI0Policy, pad_vector, resize_with_pad_torch
 
 logger = logging.getLogger(__name__)
 
