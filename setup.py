@@ -86,6 +86,8 @@ setup(
             "nc-login = neuracore.core.cli.generate_api_key:main",
             "nc-select-org = neuracore.core.cli.select_current_org:main",
             "nc-launch-server = neuracore.core.cli.launch_server:main",
+            "nc-list-training-runs = neuracore.core.cli.training_runs:main_list",
+            "nc-inspect-training-run = neuracore.core.cli.training_runs:main_inspect",
         ]
     },
     keywords="robotics machine-learning ai client-library",

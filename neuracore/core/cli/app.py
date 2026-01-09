@@ -6,6 +6,9 @@ from neuracore import __version__
 from neuracore.core.cli.generate_api_key import run as login
 from neuracore.core.cli.launch_server import run as launch_server
 from neuracore.core.cli.select_current_org import run as select_org
+from neuracore.core.cli.training import training_app
+from neuracore.core.cli.training_runs import run_inspect as inspect_training
+from neuracore.core.cli.training_runs import run_list as list_training
 
 app = typer.Typer(add_completion=False, help="Neuracore command line interface.")
 
@@ -36,6 +39,9 @@ def callback(
 app.command("login")(login)
 app.command("select-org")(select_org)
 app.command("launch-server")(launch_server)
+app.command("list-training-runs")(list_training)
+app.command("inspect-training-run")(inspect_training)
+app.add_typer(training_app, name="training")
 
 
 def main() -> None:
