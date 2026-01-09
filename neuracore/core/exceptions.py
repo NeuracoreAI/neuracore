@@ -45,3 +45,9 @@ class InsufficientSynchronizedPointError(Exception):
     """Error when SynchronizedPoint contain insufficient data for inference."""
 
     pass
+
+
+class TrainingRunError(Exception):
+    """Exception raised for errors related to training runs."""
+
+    pass
