@@ -99,6 +99,14 @@ def setup_test_config():
             ),
             expected_value=lambda data: {data["name"]: {"open_amount": data["value"]}},
         ),
+        DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS: TestConfigItem(
+            data=DummyData.parallel_gripper,
+            logging_function=lambda data: nc.log_parallel_gripper_target_open_amount(
+                name=data["name"],
+                value=data["value"],
+            ),
+            expected_value=lambda data: {data["name"]: {"open_amount": data["value"]}},
+        ),
         DataType.RGB_IMAGES: TestConfigItem(
             data=DummyData.rgb_image,
             logging_function=lambda data: nc.log_rgb(

@@ -723,6 +723,100 @@ def log_parallel_gripper_open_amounts(
         )
 
 
+def log_parallel_gripper_target_open_amount(
+    name: str,
+    value: float,
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+) -> None:
+    """Log parallel gripper target open amount data for a robot.
+
+    This logs the commanded/target gripper open amount, as opposed to
+    log_parallel_gripper_open_amount which logs the actual gripper state.
+
+    Args:
+        name: Name of the parallel gripper
+        value: Target open amount (0.0 = closed, 1.0 = fully open)
+        robot_name: Optional robot ID
+        instance: Optional instance number
+        timestamp: Optional timestamp
+    """
+    timestamp = timestamp or time.time()
+    if not isinstance(name, str):
+        raise ValueError(
+            f"Parallel gripper names must be strings. " f"{name} is not a string."
+        )
+    if not isinstance(value, float):
+        raise ValueError(
+            f"Parallel gripper target open amounts must be floats. "
+            f"{value} is not a float."
+        )
+    if value < 0.0 or value > 1.0:
+        raise ValueError(
+            "Parallel gripper target open amounts must be between 0.0 and 1.0."
+        )
+
+    robot = _get_robot(robot_name, instance)
+    storage_name = validate_safe_name(name)
+    str_id = f"{DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS.value}:{name}"
+    stream = robot.get_data_stream(str_id)
+    if stream is None:
+        stream = JsonDataStream(
+            data_type=DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+            data_type_name=storage_name,
+        )
+        robot.add_data_stream(str_id, stream)
+
+    start_stream(robot, stream)
+    assert isinstance(stream, JsonDataStream)
+
+    parallel_gripper_target_open_amount_data = ParallelGripperOpenAmountData(
+        timestamp=timestamp, open_amount=value
+    )
+    stream.log(parallel_gripper_target_open_amount_data)
+
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(
+        str_id, DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS, str_id
+    ).publish(
+        parallel_gripper_target_open_amount_data.model_dump(mode="json")
+    )
+
+
+def log_parallel_gripper_target_open_amounts(
+    values: dict[str, float],
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+) -> None:
+    """Log parallel gripper target open amount data for a robot.
+
+    This logs the commanded/target gripper open amounts, as opposed to
+    log_parallel_gripper_open_amounts which logs the actual gripper states.
+
+    Args:
+        values: Dictionary mapping gripper names to target open amounts
+            (0.0 = closed, 1.0 = fully open)
+        robot_name: Optional robot ID
+        instance: Optional instance number
+        timestamp: Optional timestamp
+    """
+    timestamp = timestamp or time.time()
+    for name, value in values.items():
+        log_parallel_gripper_target_open_amount(
+            name=name,
+            value=value,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=timestamp,
+        )
+
+
 def log_language(
     name: str,
     language: str,
