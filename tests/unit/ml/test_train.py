@@ -95,6 +95,9 @@ class MainTestSetup:
         self.mock_pytorch_dataset.dataset_description = Mock()
         self.mock_pytorch_dataset.__len__ = Mock(return_value=100)
         self.mock_pytorch_dataset.load_sample = Mock(return_value=Mock())
+        self.mock_pytorch_dataset.__getitem__ = Mock(
+            side_effect=lambda idx: self.mock_pytorch_dataset.load_sample(idx)
+        )
 
         self.mock_login = Mock()
         self.mock_set_organization = Mock()

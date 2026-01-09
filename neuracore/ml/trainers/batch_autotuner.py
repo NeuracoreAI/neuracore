@@ -1,5 +1,6 @@
 """Auto-tuner for finding the optimal batch size for model training."""
 
+import gc
 import logging
 import time
 from typing import Any
@@ -44,13 +45,12 @@ class BatchSizeAutotuner:
         self.max_batch_size = max_batch_size
         self.num_iterations = num_iterations
         self.device = model.device
+        self.last_peak_memory_gb: float | None = None
+        self.last_gpu_memory_gb: float | None = None
 
         if not torch.cuda.is_available() or "cuda" not in self.device.type:
             raise ValueError("Autotuning batch size is only supported on GPUs.")
         self.model = model
-
-        # create optimizers
-        self.optimizers = self.model.configure_optimizers()
 
         # Validate batch size ranges
         if min_batch_size > max_batch_size:
@@ -94,13 +94,31 @@ class BatchSizeAutotuner:
                 # This batch size failed, try a smaller one
                 high = mid - 1
 
-        # Reduce by 15% to be safe
+        # Reduce by 30% to be safe
         reduced_batch_size = int(optimal_batch_size * 0.70)
         logger.info(
             f"Optimal batch size found {optimal_batch_size}, "
             f"Reducing it by 30% to {reduced_batch_size}"
         )
-        return reduced_batch_size
+
+        logging.info(f"Testing the selected batch size {reduced_batch_size}")
+
+        # Re-test the reduced size and, if it fails, keep shrinking until it fits.
+        candidate = reduced_batch_size
+        while candidate >= self.min_batch_size:
+            if self._test_batch_size(candidate):
+                return candidate
+            logger.info(
+                "Reduced batch size %s failed on re-test; trying %s",
+                candidate,
+                candidate - 1,
+            )
+            candidate -= 1
+
+        raise OutOfMemoryError(
+            "Unable to find a valid batch size after safety reduction.",
+            device=str(self.device),
+        )
 
     def _test_batch_size(self, batch_size: int) -> bool:
         """Test if a specific batch size works.
@@ -113,10 +131,20 @@ class BatchSizeAutotuner:
         """
         logger.info(f"Testing batch size: {batch_size}")
 
+        if not torch.cuda.is_available() or "cuda" not in self.device.type:
+            raise ValueError("Batch size testing is only supported on GPUs.")
+
+        base_state = None
         try:
             memory_monitor = MemoryMonitor(
                 max_ram_utilization=0.8, max_gpu_utilization=1.0
             )
+
+            # Snapshot model weights so optimizer steps during tuning don't
+            # leak into training.
+            base_state = {
+                k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()
+            }
 
             # Create dataloader
             dataloader_kwargs = {**self.dataloader_kwargs, "batch_size": batch_size}
@@ -126,9 +154,16 @@ class BatchSizeAutotuner:
             batch: BatchedTrainingSamples = next(iter(data_loader))
             batch = batch.to(self.device)
 
+            # Fresh optimizers each trial so optimizer state is
+            # representative but discarded.
+            optimizers = self.model.configure_optimizers()
+
+            # Track peak memory for this test.
+            torch.cuda.reset_peak_memory_stats(self.device)
+
             for i in range(self.num_iterations):
 
-                memory_monitor.check_memory()
+                memory_monitor.check_memory(log=True)
 
                 if len(batch) < batch_size:
                     logger.info(f"Skipping batch size {batch_size} - not enough data")
@@ -137,17 +172,29 @@ class BatchSizeAutotuner:
                 # Forward pass
                 self.model.train()
 
-                for optimizer in self.optimizers:
-                    optimizer.zero_grad()
+                for optimizer in optimizers:
+                    optimizer.zero_grad(set_to_none=True)
 
+                torch.cuda.synchronize(self.device)
                 start_time = time.time()
                 outputs: BatchedTrainingOutputs = self.model.training_step(batch)
+                torch.cuda.synchronize(self.device)
                 loss = sum(outputs.losses.values()).mean()
+                torch.cuda.synchronize(self.device)
 
                 # Backward pass
                 loss.backward()
-                for optimizer in self.optimizers:
+                torch.cuda.synchronize(self.device)
+
+                # Keep optimizer.step() to reflect real training peak memory,
+                # but optimizers are recreated per test and model weights
+                # restored after.
+                for optimizer in optimizers:
                     optimizer.step()
+                torch.cuda.synchronize(self.device)
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        param.grad = None
 
                 end_time = time.time()
                 logger.info(
@@ -156,25 +203,61 @@ class BatchSizeAutotuner:
                     f"Loss: {loss.item():.4f}"
                 )
 
-            logger.info(f"Batch size {batch_size} succeeded ✓")
+                # Explicitly drop graph references to avoid lingering allocations.
+                del outputs
+                del loss
+
+            torch.cuda.synchronize(self.device)
+            peak_mem_bytes = torch.cuda.max_memory_allocated(self.device)
+            self.last_peak_memory_gb = peak_mem_bytes / (1024**3)
+            self.last_gpu_memory_gb = self.last_peak_memory_gb
+            logger.info(
+                "Batch size %s succeeded ✓ (peak GPU memory: %.2f GB)",
+                batch_size,
+                self.last_peak_memory_gb,
+            )
             return True
 
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+            if (
+                isinstance(e, torch.cuda.OutOfMemoryError)
+                or "out of memory" in str(e).lower()
+            ):
+                torch.cuda.synchronize(self.device)
                 logger.info(f"Batch size {batch_size} failed due to OOM error ✗")
                 return False
-            else:
-                # Re-raise if it's not an OOM error
-                raise
+            raise
 
         except OutOfMemoryError:
             logger.info(f"Batch size {batch_size} failed due to RAM OOM error ✗")
             return False
 
         finally:
+            # Restore model weights so tuning does not alter training.
+            if base_state is not None:
+                try:
+                    self.model.load_state_dict(base_state)
+                except Exception:
+                    logger.exception(
+                        "Failed to restore model weights after tuning trial."
+                    )
+            self.model.zero_grad(set_to_none=True)
+
+            # Drop references and clean CUDA allocator to reduce
+            # fragmentation between tests.
+            try:
+                del batch
+            except Exception:
+                pass
+            try:
+                del optimizers
+            except Exception:
+                pass
+
             # Clean up
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            gc.collect()
 
 
 def find_optimal_batch_size(
