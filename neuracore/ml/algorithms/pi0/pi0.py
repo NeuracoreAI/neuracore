@@ -243,7 +243,7 @@ class Pi0(NeuracoreModel):
         freezing the VLM model.
         """
         # Define parameter name patterns
-        ACTION_EXPERT_PATTERNS = [
+        ACTION_EXPERT_PARAM_NAMES = [
             "gemma_expert",
             "action_in_proj",
             "action_out_proj",
@@ -251,14 +251,25 @@ class Pi0(NeuracoreModel):
             "action_time_mlp_in",
             "action_time_mlp_out",
         ]
+        VISION_ENCODER_PARAM_NAMES = ["vision_tower", "multi_modal"]
 
         # Determine which parameters to include
         if self.finetune_action_expert_only:
-            patterns = ACTION_EXPERT_PATTERNS
             params = [
                 param
                 for name, param in self.model.named_parameters()
-                if any(pattern in name for pattern in patterns)
+                if any(param_name in name for param_name in ACTION_EXPERT_PARAM_NAMES)
+            ]
+            self.param_groups = [{"params": params, "lr": self.optimizer_lr}]
+        elif self.freeze_language_model_only:
+            params = [
+                param
+                for name, param in self.model.named_parameters()
+                if any(
+                    param_name in name
+                    for param_name in ACTION_EXPERT_PARAM_NAMES
+                    + VISION_ENCODER_PARAM_NAMES
+                )
             ]
             self.param_groups = [{"params": params, "lr": self.optimizer_lr}]
         else:
