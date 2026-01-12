@@ -28,6 +28,7 @@ from neuracore_types import (
 from omegaconf import DictConfig, OmegaConf
 
 from neuracore.core.utils.robot_data_spec_utils import extract_data_types
+from neuracore.core.utils.robot_mapping import RobotMapping
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.datasets.pytorch_single_sample_dataset import SingleSampleDataset
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
@@ -90,6 +91,20 @@ class MainTestSetup:
         self.cuda_device_count = cuda_device_count
 
         self.mock_dataset = Mock()
+        # Provide realistic robot metadata for code paths that resolve robot keys.
+        # Many tests use robot IDs in INPUT_ROBOT_DATA_SPEC/OUTPUT_ROBOT_DATA_SPEC.
+        self.mock_dataset.robot_ids = ["robot-id-1", "robot-id-2"]
+        mapping = RobotMapping("test-org")
+        mapping._id_to_name = {
+            "robot-id-1": "Robot 1",
+            "robot-id-2": "Robot 2",
+        }
+        mapping._name_to_ids = {
+            "Robot 1": ["robot-id-1"],
+            "Robot 2": ["robot-id-2"],
+        }
+        mapping._initialized = True
+        self.mock_dataset.robot_mapping = mapping
         self.mock_synchronized_dataset = Mock()
         self.mock_pytorch_dataset = Mock(spec=PytorchSynchronizedDataset)
         self.mock_pytorch_dataset.dataset_description = Mock()

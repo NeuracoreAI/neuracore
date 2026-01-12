@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader, DistributedSampler, random_split
 import neuracore as nc
 from neuracore.api.training import _get_algorithms
 from neuracore.core.utils.robot_data_spec_utils import (
+    convert_robot_data_spec_names_to_ids,
     convert_str_to_robot_data_spec,
     extract_data_types,
     merge_robot_data_spec,
@@ -523,7 +524,8 @@ def main(cfg: DictConfig) -> None:
         if not isinstance(cfg.input_robot_data_spec, DictConfig):
             raise ValueError(
                 "'input_robot_data_spec' must be a dictionary "
-                "mapping robot IDs to dictionary of data types to lists of data names."
+                "mapping robot names to dictionary of data types to "
+                "lists of data names."
             )
         input_robot_data_spec = convert_str_to_robot_data_spec(
             cfg.input_robot_data_spec
@@ -538,7 +540,7 @@ def main(cfg: DictConfig) -> None:
         if not isinstance(cfg.output_robot_data_spec, DictConfig):
             raise ValueError(
                 "'output_robot_data_spec' must either be None or a dictionary "
-                "mapping robot IDs to dictions of data types to lists of data names."
+                "mapping robot names to dictions of data types to lists of data names."
             )
         output_robot_data_spec = convert_str_to_robot_data_spec(
             cfg.output_robot_data_spec
@@ -549,6 +551,15 @@ def main(cfg: DictConfig) -> None:
             robot_id: {data_type: [] for data_type in output_data_types}
             for robot_id in dataset.robot_ids
         }
+
+    input_robot_data_spec_with_id = convert_robot_data_spec_names_to_ids(
+        input_robot_data_spec,
+        dataset.robot_mapping,
+    )
+    output_robot_data_spec_with_id = convert_robot_data_spec_names_to_ids(
+        output_robot_data_spec,
+        dataset.robot_mapping,
+    )
 
     batch_size = cfg.batch_size
 
@@ -565,14 +576,14 @@ def main(cfg: DictConfig) -> None:
         dataset,
         dataset_name=cfg.dataset_name if cfg.dataset_name is not None else "",
         algorithm_name=algorithm_name,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_robot_data_spec=input_robot_data_spec_with_id,
+        output_robot_data_spec=output_robot_data_spec_with_id,
         algorithm_jsons=algorithms_jsons,
     )
 
     # Prepare data types for synchronization
     robot_data_spec = merge_robot_data_spec(
-        input_robot_data_spec, output_robot_data_spec
+        input_robot_data_spec_with_id, output_robot_data_spec_with_id
     )
 
     synchronized_dataset = dataset.synchronize(
@@ -607,8 +618,8 @@ def main(cfg: DictConfig) -> None:
     # for batch size autotuning, if used.
     pytorch_dataset = PytorchSynchronizedDataset(
         synchronized_dataset=synchronized_dataset,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_robot_data_spec=input_robot_data_spec_with_id,
+        output_robot_data_spec=output_robot_data_spec_with_id,
         output_prediction_horizon=cfg.output_prediction_horizon,
     )
 
@@ -620,8 +631,8 @@ def main(cfg: DictConfig) -> None:
         )
         single_sample_dataset = SingleSampleDataset(
             sample=sample,
-            input_robot_data_spec=input_robot_data_spec,
-            output_robot_data_spec=output_robot_data_spec,
+            input_robot_data_spec=input_robot_data_spec_with_id,
+            output_robot_data_spec=output_robot_data_spec_with_id,
             output_prediction_horizon=cfg.output_prediction_horizon,
             dataset_statistics=pytorch_dataset.dataset_statistics,
             num_recordings=len(pytorch_dataset),
@@ -629,8 +640,8 @@ def main(cfg: DictConfig) -> None:
 
         optimal_batch_size = determine_optimal_batch_size(
             cfg=cfg,
-            input_robot_data_spec=input_robot_data_spec,
-            output_robot_data_spec=output_robot_data_spec,
+            input_robot_data_spec=input_robot_data_spec_with_id,
+            output_robot_data_spec=output_robot_data_spec_with_id,
             dataset=single_sample_dataset,
             device=device,
         )
@@ -647,8 +658,8 @@ def main(cfg: DictConfig) -> None:
                 world_size,
                 cfg,
                 batch_size,
-                input_robot_data_spec,
-                output_robot_data_spec,
+                input_robot_data_spec_with_id,
+                output_robot_data_spec_with_id,
                 pytorch_dataset,
                 device,
             ),
@@ -662,8 +673,8 @@ def main(cfg: DictConfig) -> None:
             1,
             cfg,
             batch_size,
-            input_robot_data_spec,
-            output_robot_data_spec,
+            input_robot_data_spec_with_id,
+            output_robot_data_spec_with_id,
             pytorch_dataset,
             device,
         )

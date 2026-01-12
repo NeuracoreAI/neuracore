@@ -17,7 +17,10 @@ from neuracore_types import (
 )
 
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.utils.robot_data_spec_utils import merge_robot_data_spec
+from neuracore.core.utils.robot_data_spec_utils import (
+    convert_robot_data_spec_names_to_ids,
+    merge_robot_data_spec,
+)
 from neuracore.core.utils.training_input_args_validation import (
     get_algorithm_id,
     validate_training_params,
@@ -102,6 +105,14 @@ def start_training_run(
     """
     dataset = cast(Dataset, Dataset.get_by_name(dataset_name))
     dataset_id = dataset.id
+    input_robot_data_spec_with_ids = convert_robot_data_spec_names_to_ids(
+        input_robot_data_spec,
+        dataset.robot_mapping,
+    )
+    output_robot_data_spec_with_ids = convert_robot_data_spec_names_to_ids(
+        output_robot_data_spec,
+        dataset.robot_mapping,
+    )
 
     # Get algorithm id
     algorithm_jsons = _get_algorithms()
@@ -111,8 +122,8 @@ def start_training_run(
         dataset,
         dataset_name,
         algorithm_name,
-        input_robot_data_spec,
-        output_robot_data_spec,
+        input_robot_data_spec_with_ids,
+        output_robot_data_spec_with_ids,
         algorithm_jsons,
     )
 
@@ -128,11 +139,11 @@ def start_training_run(
             max_delay_s=max_delay_s,
             allow_duplicates=allow_duplicates,
             robot_data_spec=merge_robot_data_spec(
-                input_robot_data_spec, output_robot_data_spec
+                input_robot_data_spec_with_ids, output_robot_data_spec_with_ids
             ),
         ),
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_robot_data_spec=input_robot_data_spec_with_ids,
+        output_robot_data_spec=output_robot_data_spec_with_ids,
     )
 
     auth = get_auth()

@@ -130,6 +130,12 @@ def test_start_training_run(
         json=[robot_id],
         status_code=200,
     )
+    robot_name = "fake_robot_name"
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json=[{"id": robot_id, "name": robot_name}],
+        status_code=200,
+    )
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-data-spec/{robot_id}",
         json={
@@ -146,13 +152,13 @@ def test_start_training_run(
         "cnn_output_dim": 64,
     }
     input_robot_data_spec = {
-        robot_id: {
+        robot_name: {
             DataType.RGB_IMAGES: ["angle"],
         }
     }
 
     output_robot_data_spec = {
-        robot_id: {
+        robot_name: {
             DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
         }
     }
