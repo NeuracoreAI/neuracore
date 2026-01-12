@@ -195,6 +195,8 @@ def eval_model(
                 "batch_size": BATCH_SIZE,
                 "epochs": 50,
                 "output_prediction_horizon": OUTPUT_PREDICTION_HORIZON,
+                "lr": 1.4e-4,
+                "lr_backbone": 1.4e-5,
             },
         ),
         (
