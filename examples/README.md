@@ -15,7 +15,7 @@ conda activate neuracore_examples
 pip install "neuracore[examples]"
 ```
 
-Make sure you have an account on [neuracore.app](https://neuracore.app).
+Make sure you have an account on [neuracore.com](https://neuracore.com).
 
 ### Installing Bi Gym
 To run Bi Gym examples please install it using the following commands: 
@@ -135,4 +135,4 @@ This example shows you how to:
 python example_view_dataset.py
 ```
 
-If you want to just view your data, then the best way is via the [web interface](https://www.neuracore.app/dashboard/datasets).
+If you want to just view your data, then the best way is via the [web interface](https://www.neuracore.com/dashboard/datasets).

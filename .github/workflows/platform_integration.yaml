@@ -41,7 +41,7 @@ jobs:
 
     - name: Run Integration Test
       env:
-        NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.app/api' || 'https://api.neuracore.app/api' }}
+        NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
         NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
       run: pytest -o log_cli=true --log-cli-level=INFO tests/integration/test_consume_stream.py::test_get_latest_data_from_multiple_nodes

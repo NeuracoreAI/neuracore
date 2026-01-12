@@ -33,7 +33,7 @@ pip install neuracore[mjcf]
 
 ## Quick Start
 
-Ensure you have an account at [neuracore.app](https://www.neuracore.app/)
+Ensure you have an account at [neuracore.com](https://www.neuracore.com/)
 
 ### Authentication
 
@@ -161,7 +161,7 @@ try:
     predicted_sync_points = policy.predict(timeout=5, robot_name="MyRobot")
     # Process predictions...
 except nc.EndpointError:
-    print("Endpoint not available. Please start it at neuracore.app/dashboard/endpoints")
+    print("Endpoint not available. Please start it at neuracore.com/dashboard/endpoints")
 ```
 
 #### Local Server Deployment
@@ -340,7 +340,7 @@ class MyCustomAlgorithm(NeuracoreModel):
 ### Algorithm Upload Options
 
 1. **Open Source Contribution**: Submit a PR to the Neuracore repository
-2. **Private Upload**: Upload directly at [neuracore.app](https://neuracore.app)
+2. **Private Upload**: Upload directly at [neuracore.com](https://neuracore.com)
    - Single Python file with your `NeuracoreModel` class
    - ZIP file containing your algorithm directory with `requirements.txt`
 
@@ -353,7 +353,7 @@ Configure Neuracore behavior with environment variables (case insensitive, prefi
 | `NEURACORE_REMOTE_RECORDING_TRIGGER_ENABLED` | Allow remote recording triggers                        | `true`/`false` | `true`                                                                  |
 | `NEURACORE_PROVIDE_LIVE_DATA`                | Enable live data streaming from this node              | `true`/`false` | `true`                                                                  |
 | `NEURACORE_CONSUME_LIVE_DATA`                | Enable live data consumption for inference             | `true`/`false` | `true`                                                                  |
-| `NEURACORE_API_URL`                          | Base URL for Neuracore platform                        | URL string     | `https://api.neuracore.app/api`                                         |
+| `NEURACORE_API_URL`                          | Base URL for Neuracore platform                        | URL string     | `https://api.neuracore.com/api`                                         |
 | `NEURACORE_API_KEY`                          | An override to the api-key to access the neuracore     | `nrc_XXXX`     | Configured with the [`neuracore login`](#authentication) command        |
 | `NEURACORE_ORG_ID`                           | An override to select the organization to use.         | A valid UUID   | Configured with the [`neuracore select-org`](#organization-management) command |
 | `TMPDIR`                                     | Specifies a directory used for storing temporary files | Filepath       | An appropriate folder for your system                                   |

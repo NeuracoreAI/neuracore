@@ -28,7 +28,7 @@ def main():
     except EndpointError:
         print(f"Please ensure that the endpoint '{ENDPOINT_NAME}' is running.")
         print(
-            "Once you have trained a model, endpoints can be started at https://neuracore.app/dashboard/endpoints"
+            "Once you have trained a model, endpoints can be started at https://neuracore.com/dashboard/endpoints"
         )
         sys.exit(1)
 
