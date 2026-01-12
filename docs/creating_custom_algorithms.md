@@ -3,7 +3,7 @@
 This guide explains how to create and add your own custom machine learning algorithms to Neuracore. You have two options:
 
 1. **Open Source Contribution**: Submit a PR to add your algorithm to the Neuracore repository
-2. **Private Algorithm**: Upload your algorithm directly to your account at neuracore.app
+2. **Private Algorithm**: Upload your algorithm directly to your account at neuracore.com
 
 ## Understanding Neuracore Models
 

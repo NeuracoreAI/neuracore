@@ -3,11 +3,11 @@
 import os
 from warnings import warn
 
-API_URL = (os.getenv("NEURACORE_API_URL") or "https://api.neuracore.app/api").strip()
+API_URL = (os.getenv("NEURACORE_API_URL") or "https://api.neuracore.com/api").strip()
 
 STANDARD_API_URLS = {
-    "https://api.neuracore.app/api",
-    "https://staging.api.neuracore.app/api",
+    "https://api.neuracore.com/api",
+    "https://staging.api.neuracore.com/api",
     "http://localhost:8000/api",
 }
 
@@ -15,7 +15,7 @@ if API_URL not in STANDARD_API_URLS:
     warn(f"API Base Url {API_URL} is non-standard, are you sure it is correct?")
 
 
-API_URL = os.getenv("NEURACORE_API_URL", "https://api.neuracore.app/api")
+API_URL = os.getenv("NEURACORE_API_URL", "https://api.neuracore.com/api")
 MAX_DATA_STREAMS = 300
 MAX_INPUT_ATTEMPTS = 3
 
