@@ -182,9 +182,6 @@ neuracore --help
 ```bash
 # Interactive login to save API key
 neuracore login
-
-# Legacy alias
-nc-login
 ```
 
 Use the `--email` and `--password` option if you wish to login non-interactively.
@@ -193,9 +190,6 @@ Use the `--email` and `--password` option if you wish to login non-interactively
 ```bash
 # Select your current organization
 neuracore select-org
-
-# Legacy alias
-nc-select-org
 ```
 
 Use the `--org-name` option if you wish to select the org non-interactively.
@@ -207,9 +201,6 @@ neuracore launch-server --job_id <job_id> --org_id <org_id> [--host <host>] [--p
 
 # Example:
 neuracore launch-server --job_id my_job_123 --org_id my_org_456 --host 0.0.0.0 --port 8080
-
-# Legacy alias
-nc-launch-server --job_id my_job_123 --org_id my_org_456 --host 0.0.0.0 --port 8080
 ```
 
 **Parameters:**
