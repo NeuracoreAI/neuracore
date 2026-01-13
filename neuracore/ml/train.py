@@ -3,12 +3,15 @@
 import gc
 import logging
 import os
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import hydra
 import torch
 import torch.multiprocessing as mp
+from names_generator import generate_name
 from neuracore_types import BatchedNCData, ModelInitDescription
 from neuracore_types.nc_data import DataType
 from omegaconf import DictConfig, OmegaConf
@@ -50,6 +53,24 @@ os.environ["PJRT_DEVICE"] = "GPU"
 logger = logging.getLogger(__name__)
 
 MAX_AUTOTUNE_SAMPLE_CANDIDATES = 1000
+
+
+def _sanitize_run_name(name: str) -> str:
+    """Sanitize run name for use in file paths.
+
+    Args:
+        name: The run name to sanitize.
+
+    Returns:
+        A sanitized version of the name safe for file paths.
+    """
+    # Replace spaces, slashes, and other problematic characters with underscores
+    sanitized = re.sub(r"[^\w\-]", "_", name)
+    # Remove multiple consecutive underscores
+    sanitized = re.sub(r"_+", "_", sanitized)
+    # Remove leading/trailing underscores
+    sanitized = sanitized.strip("_")
+    return sanitized
 
 
 def _estimate_sample_tensor_bytes(sample: BatchedTrainingSamples) -> int:
@@ -421,6 +442,26 @@ def main(cfg: DictConfig) -> None:
     """Main function to run the training script."""
     # Resolve the configuration
     OmegaConf.resolve(cfg)
+
+    # Generate run name and update local_output_dir
+    if cfg.get("run_name") is not None and cfg.run_name:
+        run_name = _sanitize_run_name(str(cfg.run_name))
+    else:
+        # Generate name with hyphens instead of underscores
+        run_name = generate_name(style="underscore").replace("_", "-")
+        logger.info(f"Generated random run name: {run_name}")
+
+    # Generate timestamp
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    # Create directory name: run_name_timestamp
+    run_dir_name = f"{run_name}_{timestamp}"
+
+    # Update local_output_dir to use the new run name
+    base_dir = Path(os.environ.get("HOME", "~")) / ".neuracore" / "training" / "runs"
+    cfg.local_output_dir = str(base_dir / run_dir_name)
+
+    logger.info(f"Training run directory: {cfg.local_output_dir}")
 
     # Print configuration
     logger.info("Training configuration:")
