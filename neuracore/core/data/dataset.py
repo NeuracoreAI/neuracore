@@ -40,7 +40,7 @@ class Dataset:
 
     def __init__(
         self,
-        id: str,
+        id: str | None,
         org_id: str,
         name: str,
         size_bytes: int,
@@ -52,7 +52,7 @@ class Dataset:
         """Initialize a Dataset instance.
 
         Args:
-            id: Unique identifier for the dataset.
+            id: Unique identifier for the dataset. None if offline mode.
             org_id: Organization ID associated with the dataset.
             name: Human-readable name for the dataset.
             size_bytes: Total size of the dataset in bytes.
@@ -69,6 +69,7 @@ class Dataset:
             or None if not fetched from the Neuracore API.
             _start_after: Internal dictionary for tracking
             the start of the next page of recordings.
+            is_connected: Whether this dataset is connected to the server.
         """
         self.id = id
         self.org_id = org_id
@@ -77,6 +78,7 @@ class Dataset:
         self.tags = tags
         self.is_shared = is_shared
         self.data_types = data_types or []
+        self.is_connected: bool = id is not None
 
         self.cache_dir = DEFAULT_RECORDING_CACHE_DIR
         self._recordings_cache: list[Recording] = (
@@ -111,8 +113,26 @@ class Dataset:
             end_time=recording_model.end_time,
         )
 
+    def _check_online_required(self, operation: str) -> None:
+        """Check if dataset is connected to server, raise error if not.
+
+        Args:
+            operation: Name of the operation being attempted.
+
+        Raises:
+            DatasetError: If dataset was created in offline mode.
+        """
+        if not self.is_connected:
+            raise DatasetError(
+                f"Cannot {operation} for dataset '{self.name}' - this dataset was "
+                "created in offline mode and has not been synced to the server. "
+                "Please ensure you have an internet connection and create a new "
+                "dataset, or wait for offline data to be uploaded by the daemon."
+            )
+
     def _initialize_num_recordings(self) -> None:
         """Fetch total number of recordings without loading them."""
+        self._check_online_required("fetch recording count")
         try:
             response = requests.post(
                 f"{API_URL}/org/{self.org_id}/recording/by-dataset/{self.id}",
@@ -130,6 +150,7 @@ class Dataset:
 
     def _fetch_next_page(self) -> list[Recording]:
         """Fetch the next page of recordings and append to cache (lazy)."""
+        self._check_online_required("fetch recordings")
         if (
             self._num_recordings is not None
             and len(self._recordings_cache) >= self._num_recordings
@@ -255,36 +276,42 @@ class Dataset:
         Args:
             name: Name of the dataset to retrieve.
             non_exist_ok: If True, returns None when dataset is not found
-                instead of raising an exception.
+                or when connection fails, instead of raising an exception.
 
         Returns:
             The Dataset instance if found, or None if non_exist_ok is True
-            and the dataset doesn't exist.
+            and the dataset doesn't exist or connection failed.
 
         Raises:
-            DatasetError: If the dataset is not found and non_exist_ok is False.
+            DatasetError: If the dataset is not found and non_exist_ok is False,
+                or if connection fails and non_exist_ok is False.
         """
         auth: Auth = get_auth()
         org_id = get_current_org()
-        response = requests.get(
-            f"{API_URL}/org/{org_id}/datasets/search/by-name",
-            params={"name": name},
-            headers=auth.get_headers(),
-        )
-        if response.status_code != 200:
+        try:
+            response = requests.get(
+                f"{API_URL}/org/{org_id}/datasets/search/by-name",
+                params={"name": name},
+                headers=auth.get_headers(),
+            )
+            if response.status_code != 200:
+                if non_exist_ok:
+                    return None
+                raise DatasetError(f"Dataset '{name}' not found.")
+            dataset_model = DatasetModel.model_validate(response.json())
+            return Dataset(
+                id=dataset_model.id,
+                org_id=org_id,
+                name=dataset_model.name,
+                size_bytes=dataset_model.size_bytes,
+                tags=dataset_model.tags,
+                is_shared=dataset_model.is_shared,
+                data_types=list(dataset_model.all_data_types.keys()),
+            )
+        except requests.exceptions.ConnectionError:
             if non_exist_ok:
                 return None
-            raise DatasetError(f"Dataset '{name}' not found.")
-        dataset_model = DatasetModel.model_validate(response.json())
-        return Dataset(
-            id=dataset_model.id,
-            org_id=org_id,
-            name=dataset_model.name,
-            size_bytes=dataset_model.size_bytes,
-            tags=dataset_model.tags,
-            is_shared=dataset_model.is_shared,
-            data_types=list(dataset_model.all_data_types.keys()),
-        )
+            raise DatasetError("Failed to connect to server to retrieve dataset.")
 
     @staticmethod
     def create(
@@ -297,7 +324,8 @@ class Dataset:
 
         Creates a new dataset with the specified parameters. If a dataset
         with the same name already exists, returns the existing dataset
-        instead of creating a duplicate.
+        instead of creating a duplicate. If the server is unreachable,
+        creates an offline dataset that can be synced later.
 
         Args:
             name: Unique name for the dataset.
@@ -309,14 +337,47 @@ class Dataset:
 
         Returns:
             The newly created Dataset instance, or existing dataset if
-            name already exists.
+            name already exists, or offline dataset if server unreachable.
         """
+        org_id = get_current_org()
+
+        if not get_auth().is_authenticated:
+            logger.warning(
+                "No access token available. Creating offline dataset '%s'.", name
+            )
+            return Dataset(
+                id=None,
+                org_id=org_id,
+                name=name,
+                size_bytes=0,
+                tags=tags or [],
+                is_shared=shared,
+                data_types=[],
+            )
+
+        # Try to get existing dataset (may return None if offline)
         ds = Dataset.get_by_name(name, non_exist_ok=True)
-        if ds is None:
+        if ds is not None:
+            logger.info(f"Dataset '{name}' already exists.")
+            return ds
+
+        # Dataset doesn't exist or couldn't connect - try to create
+        try:
             ds = Dataset._create_dataset(name, description, tags, shared=shared)
-        else:
-            logger.info(f"Dataset '{name}' already exist.")
-        return ds
+            return ds
+        except requests.exceptions.ConnectionError:
+            logger.warning(
+                "Cannot connect to server. Creating offline dataset '%s'.", name
+            )
+            return Dataset(
+                id=None,
+                org_id=org_id,
+                name=name,
+                size_bytes=0,
+                tags=tags or [],
+                is_shared=shared,
+                data_types=[],
+            )
 
     @staticmethod
     def _create_dataset(
@@ -340,6 +401,7 @@ class Dataset:
 
         Raises:
             requests.HTTPError: If the API request fails.
+            requests.exceptions.ConnectionError: If cannot connect to server.
         """
         auth: Auth = get_auth()
         org_id = get_current_org()
@@ -441,8 +503,10 @@ class Dataset:
 
         Raises:
             requests.HTTPError: If the API request fails.
-            DatasetError: If frequency is not greater than 0.
+            DatasetError: If frequency is not greater than 0, or if dataset
+                was created in offline mode.
         """
+        self._check_online_required("synchronize")
         if robot_data_spec is None:
             robot_data_spec = {}
             for rid in self.robot_ids:
@@ -487,7 +551,11 @@ class Dataset:
 
         Returns:
             A dictionary mapping DataType to list of data names.
+
+        Raises:
+            DatasetError: If dataset was created in offline mode.
         """
+        self._check_online_required("get data spec")
         response = requests.get(
             f"{API_URL}/org/{self.org_id}/datasets/{self.id}/full-data-spec/{robot_id}",
             headers=get_auth().get_headers(),
@@ -501,8 +569,12 @@ class Dataset:
 
         Returns:
             List of robot IDs in the synchronized dataset.
+
+        Raises:
+            DatasetError: If dataset was created in offline mode.
         """
         if self._robot_ids is None:
+            self._check_online_required("get robot IDs")
             response = requests.get(
                 f"{API_URL}/org/{self.org_id}/datasets/{self.id}/robot_ids",
                 headers=get_auth().get_headers(),

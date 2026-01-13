@@ -87,33 +87,35 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         self._expired_recording_ids: set[str] = set()
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
 
-    def get_current_recording_id(self, robot_id: str, instance: int) -> str | None:
+    def get_current_recording_id(
+        self, robot_identifier: str, instance: int
+    ) -> str | None:
         """Get the current recording ID for a robot instance.
 
         Args:
-            robot_id: Unique identifier for the robot
+            robot_identifier: Robot ID or name as identifier
             instance: Instance number of the robot
 
         Returns:
             str: Recording ID if currently recording, None otherwise
         """
         instance_key = RobotInstanceIdentifier(
-            robot_id=robot_id, robot_instance=instance
+            robot_id=robot_identifier, robot_instance=instance
         )
         return self.recording_robot_instances.get(instance_key, None)
 
-    def is_recording(self, robot_id: str, instance: int) -> bool:
+    def is_recording(self, robot_identifier: str, instance: int) -> bool:
         """Check if a robot instance is currently recording.
 
         Args:
-            robot_id: Unique identifier for the robot
+            robot_identifier: Robot ID or name as identifier
             instance: Instance number of the robot
 
         Returns:
             bool: True if currently recording, False otherwise
         """
         instance_key = RobotInstanceIdentifier(
-            robot_id=robot_id, robot_instance=instance
+            robot_id=robot_identifier, robot_instance=instance
         )
         return instance_key in self.recording_robot_instances
 
@@ -129,7 +131,7 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         return recording_id in self._expired_recording_ids
 
     def recording_started(
-        self, robot_id: str, instance: int, recording_id: str
+        self, robot_identifier: str, instance: int, recording_id: str
     ) -> None:
         """Handle recording start for a robot instance.
 
@@ -137,38 +139,38 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         was already recording with a different ID, stops the previous recording first.
 
         Args:
-            robot_id: Unique identifier for the robot
+            robot_identifier: Robot ID or name as identifier
             instance: Instance number of the robot
             recording_id: Unique identifier for the recording session
         """
         instance_key = RobotInstanceIdentifier(
-            robot_id=robot_id, robot_instance=instance
+            robot_id=robot_identifier, robot_instance=instance
         )
         previous_recording_id = self.recording_robot_instances.get(instance_key, None)
 
         if previous_recording_id == recording_id:
             return
         if previous_recording_id is not None:
-            self.recording_stopped(robot_id, instance, previous_recording_id)
+            self.recording_stopped(robot_identifier, instance, previous_recording_id)
 
         self.recording_robot_instances[instance_key] = recording_id
 
         self._schedule_recording_timers(
-            robot_id=robot_id,
+            robot_identifier=robot_identifier,
             instance=instance,
             recording_id=recording_id,
         )
 
         self.emit(
             self.RECORDING_STARTED,
-            robot_id=robot_id,
+            robot_identifier=robot_identifier,
             instance=instance,
             recording_id=recording_id,
         )
 
     def _schedule_recording_timers(
         self,
-        robot_id: str,
+        robot_identifier: str,
         instance: int,
         recording_id: str,
     ) -> None:
@@ -177,7 +179,9 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         self._cancel_recording_timers(recording_id)
 
         def warn_if_still_active() -> None:
-            current_recording_id = self.get_current_recording_id(robot_id, instance)
+            current_recording_id = self.get_current_recording_id(
+                robot_identifier, instance
+            )
             if current_recording_id == recording_id:
                 logger.warning(
                     f"Recording {recording_id} is about to reach the 5-minute limit. "
@@ -185,14 +189,16 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
                 )
 
         def expire_if_still_active() -> None:
-            current_recording_id = self.get_current_recording_id(robot_id, instance)
+            current_recording_id = self.get_current_recording_id(
+                robot_identifier, instance
+            )
             if current_recording_id == recording_id:
                 logger.warning(
                     f"Your Recording {recording_id} "
                     "has reached the 5-minute limit and has been expired"
                 )
                 self._expired_recording_ids.add(recording_id)
-                self.recording_stopped(robot_id, instance, recording_id)
+                self.recording_stopped(robot_identifier, instance, recording_id)
 
         loop = get_running_loop()
 
@@ -221,7 +227,7 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         loop.call_soon_threadsafe(_cancel)
 
     def recording_stopped(
-        self, robot_id: str, instance: int, recording_id: str
+        self, robot_identifier: str, instance: int, recording_id: str
     ) -> None:
         """Handle recording stop for a robot instance.
 
@@ -229,12 +235,12 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         the stop if the recording ID matches the current recording.
 
         Args:
-            robot_id: Unique identifier for the robot
+            robot_identifier: Robot ID or name as identifier
             instance: Instance number of the robot
             recording_id: Unique identifier for the recording session
         """
         instance_key = RobotInstanceIdentifier(
-            robot_id=robot_id, robot_instance=instance
+            robot_id=robot_identifier, robot_instance=instance
         )
         current_recording = self.recording_robot_instances.get(instance_key, None)
         if current_recording != recording_id:
@@ -243,7 +249,7 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         self._cancel_recording_timers(recording_id)
         self.emit(
             self.RECORDING_STOPPED,
-            robot_id=robot_id,
+            robot_identifier=robot_identifier,
             instance=instance,
             recording_id=recording_id,
         )
@@ -260,28 +266,28 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
             is_recording: Whether the robot should be recording
             details: Recording details including robot ID, instance, and recording ID
         """
-        robot_id = details.robot_id
+        robot_identifier = details.robot_id
         instance = details.instance
         recording_id = details.recording_id
 
         previous_recording_id = self.recording_robot_instances.get(
-            RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance), None
+            RobotInstanceIdentifier(robot_id=robot_identifier, robot_instance=instance),
+            None,
         )
         was_recording = previous_recording_id is not None
 
         if was_recording == is_recording and previous_recording_id == recording_id:
-            # no change
             return
 
         if is_recording:
             self.recording_started(
-                robot_id=robot_id,
+                robot_identifier=robot_identifier,
                 instance=instance,
                 recording_id=recording_id,
             )
         else:
             self.recording_stopped(
-                robot_id=robot_id,
+                robot_identifier=robot_identifier,
                 instance=instance,
                 recording_id=recording_id,
             )
