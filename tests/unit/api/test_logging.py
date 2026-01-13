@@ -313,3 +313,66 @@ def test_log_parallel_gripper_open_amounts(
         name="gripper2",
         value=0.7,
     )
+
+
+def test_log_parallel_gripper_target_open_amounts(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test logging target parallel gripper open amounts."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    # Test singular function
+    nc.log_parallel_gripper_target_open_amount(
+        name="gripper1",
+        value=0.5,
+    )
+    nc.log_parallel_gripper_target_open_amount(
+        name="gripper2",
+        value=0.7,
+    )
+
+    # Test plural function with dict
+    nc.log_parallel_gripper_target_open_amounts({"gripper1": 0.5, "gripper2": 0.7})
+
+
+def test_log_parallel_gripper_target_open_amount_validation(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test validation of target parallel gripper open amount inputs."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    # Test invalid value type
+    with pytest.raises(
+        ValueError, match="Parallel gripper target open amounts must be floats"
+    ):
+        nc.log_parallel_gripper_target_open_amount(name="gripper1", value="not_a_float")
+
+    # Test value below range
+    with pytest.raises(
+        ValueError,
+        match="Parallel gripper target open amounts must be between 0.0 and 1.0",
+    ):
+        nc.log_parallel_gripper_target_open_amount(name="gripper1", value=-0.5)
+
+    # Test value above range
+    with pytest.raises(
+        ValueError,
+        match="Parallel gripper target open amounts must be between 0.0 and 1.0",
+    ):
+        nc.log_parallel_gripper_target_open_amount(name="gripper2", value=1.5)
+
+    # Test invalid name type
+    with pytest.raises(ValueError, match="Parallel gripper names must be strings"):
+        nc.log_parallel_gripper_target_open_amount(name=123, value=0.5)
