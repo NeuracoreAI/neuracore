@@ -84,9 +84,6 @@ setup(
     entry_points={
         "console_scripts": [
             "neuracore = neuracore.core.cli.app:main",
-            "nc-login = neuracore.core.cli.generate_api_key:main",
-            "nc-select-org = neuracore.core.cli.select_current_org:main",
-            "nc-launch-server = neuracore.core.cli.launch_server:main",
         ]
     },
     keywords="robotics machine-learning ai client-library",

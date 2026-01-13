@@ -146,7 +146,7 @@ class Robot:
         if not self.org_id:
             raise RobotError(
                 "Unauthorised: no organisation selected. "
-                "Run `nc-select-org` and try again."
+                "Run `neuracore select-org` and try again."
             )
 
         try:
@@ -177,7 +177,7 @@ class Robot:
             if e.response is not None and e.response.status_code == 403:
                 raise RobotError(
                     "Unauthorised: no organisation selected. "
-                    "Run `nc-select-org` and try again."
+                    "Run `neuracore select-org` and try again."
                 )
             raise RobotError(f"Failed to initialize robot: {str(e)}")
         except requests.exceptions.RequestException as e:
