@@ -1,0 +1,179 @@
+name: Publish neuracore SDK
+
+# Triggered by neuracore_releases for production releases
+on:
+  repository_dispatch:
+    types: [deploy-production]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to publish (branch, tag, or commit SHA)'
+        required: false
+        default: 'main'
+        type: string
+      confirm_emergency:
+        description: 'For manual deploys: Type "CONFIRM" to acknowledge this bypasses central state'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+run-name: "${{ github.event_name == 'repository_dispatch' && '🚀' || '🚨 EMERGENCY' }} Publish neuracore SDK"
+
+jobs:
+  validate:
+    name: "🔍 Validate"
+    runs-on: ubuntu-22.04
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+      ref: ${{ steps.check.outputs.ref }}
+      triggered_by: ${{ steps.check.outputs.triggered_by }}
+
+    steps:
+      - name: Validate and set variables
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            # Triggered by neuracore_releases - always proceed
+            echo "proceed=true" >> $GITHUB_OUTPUT
+            echo "ref=${{ github.event.client_payload.ref || 'main' }}" >> $GITHUB_OUTPUT
+            echo "triggered_by=neuracore_releases" >> $GITHUB_OUTPUT
+            echo "✅ Triggered by neuracore_releases"
+          else
+            # Manual trigger - require confirmation
+            if [[ "${{ inputs.confirm_emergency }}" != "CONFIRM" ]]; then
+              echo "::error::Manual deploy requires typing 'CONFIRM' in the confirmation field"
+              echo "proceed=false" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            echo "proceed=true" >> $GITHUB_OUTPUT
+            echo "ref=${{ inputs.ref || 'main' }}" >> $GITHUB_OUTPUT
+            echo "triggered_by=${{ github.actor }}" >> $GITHUB_OUTPUT
+            echo "::warning::🚨 EMERGENCY DEPLOY - Central state will NOT be updated"
+          fi
+
+  publish:
+    name: "📦 Publish to PyPI"
+    needs: validate
+    if: needs.validate.outputs.proceed == 'true'
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      commit_sha: ${{ steps.get_version.outputs.commit_sha }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Get version and commit info
+        id: get_version
+        run: |
+          VERSION=$(grep -m 1 '^current_version = ' .bumpversion.cfg | cut -d'=' -f2 | tr -d ' ')
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          COMMIT_SHA_FULL=$(git rev-parse HEAD)
+
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::Failed to extract version from .bumpversion.cfg"
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
+          echo "commit_sha_full=${COMMIT_SHA_FULL}" >> $GITHUB_OUTPUT
+          echo "📌 neuracore SDK version: ${VERSION} (${COMMIT_SHA})"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: |
+          pip install --upgrade pip
+          pip install build twine
+
+      - name: Build Python package
+        run: |
+          echo "::group::Building Python package"
+          python -m build
+          echo "::endgroup::"
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+        run: |
+          echo "::group::Publishing to PyPI"
+          twine upload --skip-existing dist/*
+          echo "✅ Published to PyPI"
+          echo "::endgroup::"
+
+      - name: Create deployment summary
+        run: |
+          echo "## ✅ neuracore SDK Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ steps.get_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ steps.get_version.outputs.commit_sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Git Ref:** ${{ needs.validate.outputs.ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **PyPI:** https://pypi.org/project/neuracore/${{ steps.get_version.outputs.version }}/" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by:** ${{ needs.validate.outputs.triggered_by }}" >> $GITHUB_STEP_SUMMARY
+
+  # Create GitHub Release
+  create-release:
+    name: "🏷️ Create GitHub Release"
+    needs: [validate, publish]
+    runs-on: ubuntu-22.04
+    if: needs.publish.result == 'success'
+
+    steps:
+      - name: Create GitHub Release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ needs.publish.outputs.version }}';
+
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: `v${version}`,
+              name: `Release v${version}`,
+              body: `## Release v${version}\n\n` +
+                    `Published to:\n` +
+                    `- PyPI: https://pypi.org/project/neuracore/${version}/\n\n` +
+                    `### Installation\n` +
+                    `\`\`\`bash\n` +
+                    `pip install neuracore==${version}\n` +
+                    `\`\`\``,
+              draft: false,
+              prerelease: false
+            });
+
+  # Callback to neuracore_releases with publish result
+  # Always reports back so production.yaml stays in sync (including emergency deploys)
+  callback:
+    name: "📤 Report Result"
+    needs: [validate, publish, create-release]
+    runs-on: ubuntu-22.04
+    if: always() && needs.publish.result == 'success'
+
+    steps:
+      - name: Report publish result to neuracore_releases
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.REPO_DISPATCH_TOKEN }}
+          repository: NeuracoreAI/neuracore_releases
+          event-type: deploy-complete
+          client-payload: |
+            {
+              "repo": "neuracore",
+              "environment": "production",
+              "success": true,
+              "version": "${{ needs.publish.outputs.version }}",
+              "commit_sha": "${{ needs.publish.outputs.commit_sha }}",
+              "triggered_by": "${{ needs.validate.outputs.triggered_by }}",
+              "is_emergency": "${{ github.event_name == 'workflow_dispatch' }}"
+            }

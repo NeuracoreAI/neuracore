@@ -1,0 +1,138 @@
+name: Staging Integration Tests
+
+# Triggered by nightly-staging-promote in neuracore_releases
+on:
+  repository_dispatch:
+    types: [run-integration-tests]
+
+concurrency:
+  group: staging-integration-tests
+  cancel-in-progress: true
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: develop
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - uses: pre-commit/action@v3.0.1
+
+  platform-tests:
+    needs: pre-commit
+    runs-on: ubuntu-22.04
+    outputs:
+      result: ${{ steps.test.outcome }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: develop
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install ".[dev,ml]"
+
+    - name: Run Platform Integration Test
+      id: test
+      env:
+        NEURACORE_API_URL: https://staging.api.neuracore.app/api
+        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
+      run: pytest -o log_cli=true --log-cli-level=INFO tests/integration/test_consume_stream.py::test_get_latest_data_from_multiple_nodes
+
+  ml-tests:
+    needs: pre-commit
+    runs-on: ubuntu-22.04
+    outputs:
+      result: ${{ steps.test.outcome }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: develop
+
+    - name: Pull LFS objects
+      run: git lfs pull
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install ".[dev,ml,examples]"
+
+    - name: Run ML Integration Test
+      id: test
+      env:
+        NEURACORE_API_URL: https://staging.api.neuracore.app/api
+        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
+        NEURACORE_ENDPOINT_TIMEOUT: 30
+        DISPLAY: :0
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1-mesa-glx libosmesa6-dev
+        Xvfb $DISPLAY -screen 0 1280x1024x24 &
+        pytest -o log_cli=true --log-cli-level=INFO -v -n 8 tests/integration/test_algorithm.py
+
+  # Report results back to neuracore_releases
+  report-results:
+    needs: [platform-tests, ml-tests]
+    if: always()
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Determine overall result
+        id: result
+        run: |
+          if [[ "${{ needs.platform-tests.result }}" == "success" && "${{ needs.ml-tests.result }}" == "success" ]]; then
+            echo "passed=true" >> $GITHUB_OUTPUT
+          else
+            echo "passed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Report to neuracore_releases
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.REPO_DISPATCH_TOKEN }}
+          repository: NeuracoreAI/neuracore_releases
+          event-type: integration-tests-complete
+          client-payload: |
+            {
+              "repo": "neuracore",
+              "passed": "${{ steps.result.outputs.passed }}",
+              "neuracore_version": "${{ github.event.client_payload.neuracore_version }}",
+              "neuracore_types_version": "${{ github.event.client_payload.neuracore_types_version }}",
+              "backend_version": "${{ github.event.client_payload.backend_version }}",
+              "frontend_version": "${{ github.event.client_payload.frontend_version }}",
+              "platform_tests": "${{ needs.platform-tests.result }}",
+              "ml_tests": "${{ needs.ml-tests.result }}"
+            }
+
+      - name: Create summary
+        run: |
+          echo "## Staging Integration Tests" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test Suite | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform Tests | ${{ needs.platform-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ML Tests | ${{ needs.ml-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Overall**: ${{ steps.result.outputs.passed == 'true' && 'PASSED' || 'FAILED' }}" >> $GITHUB_STEP_SUMMARY
