@@ -28,6 +28,16 @@ jobs:
       result: ${{ steps.test.outcome }}
 
     steps:
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        swap-storage: true
+
     - name: Checkout code
       uses: actions/checkout@v4
       with:
@@ -41,8 +51,8 @@ jobs:
 
     - name: Install Python dependencies
       run: |
-        python -m pip install --upgrade pip
-        pip install ".[dev,ml]"
+        python -m pip install --no-cache-dir --upgrade pip
+        pip install --no-cache-dir ".[dev,ml]"
 
     - name: Run Platform Integration Test
       id: test
@@ -59,6 +69,16 @@ jobs:
       result: ${{ steps.test.outcome }}
 
     steps:
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        swap-storage: true
+
     - name: Checkout code
       uses: actions/checkout@v4
       with:
@@ -75,8 +95,8 @@ jobs:
 
     - name: Install Python dependencies
       run: |
-        python -m pip install --upgrade pip
-        pip install ".[dev,ml,examples]"
+        python -m pip install --no-cache-dir --upgrade pip
+        pip install --no-cache-dir ".[dev,ml,examples]"
 
     - name: Run ML Integration Test
       id: test
