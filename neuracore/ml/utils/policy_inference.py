@@ -87,7 +87,7 @@ class PolicyInference:
             if max_items_for_this_data_type > max_items_trained_on:
                 raise ValueError(
                     f"Received {max_items_for_this_data_type} items for data type "
-                    f"{data_type.name}, but model was trained on maximum of "
+                    f"{data_type}, but model was trained on maximum of "
                     f"{max_items_trained_on} items."
                 )
             inputs_mask[data_type] = torch.tensor(
@@ -203,8 +203,12 @@ class PolicyInference:
         input_robot_data_spec = self.model.model_init_description.input_data_types
         missing_data_types = []
         for data_type in input_robot_data_spec:
+            # Convert string to DataType enum if needed
+            # (can happen after JSON deserialization)
+            if isinstance(data_type, str):
+                data_type = DataType(data_type)
             if data_type not in sync_point.data:
-                missing_data_types.append(f"{data_type.name}")
+                missing_data_types.append(data_type)
         if missing_data_types:
             raise ValueError(
                 "SynchronizedPoint is missing required data types: "
