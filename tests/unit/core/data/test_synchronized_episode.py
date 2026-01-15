@@ -117,7 +117,7 @@ class TestSynchronizedRecording:
         assert DataType.JOINT_POSITIONS in sync_point.data
         assert sync_point.timestamp == 0.0
         joint_data = cast(
-            JointData, list(sync_point[DataType.JOINT_POSITIONS].values())[0]
+            JointData, list(sync_point.data[DataType.JOINT_POSITIONS].values())[0]
         )
         assert joint_data.value == 0.5
 
@@ -256,7 +256,7 @@ class TestSynchronizedRecording:
 
         # Should have loaded from cache
         assert DataType.RGB_IMAGES in sync_point.data
-        assert "cam1" in sync_point[DataType.RGB_IMAGES]
+        assert "cam1" in sync_point.data[DataType.RGB_IMAGES]
 
     def test_prefetch_videos_skip_if_cached(
         self, dataset_mock, mock_auth_requests, mock_wget_download
@@ -297,7 +297,7 @@ class TestSynchronizedRecording:
         """Test that depth images are processed correctly."""
         sync_point = cast(SynchronizedPoint, synced_recording[0])
 
-        for cam_id, cam_data in sync_point[DataType.DEPTH_IMAGES].items():
+        for cam_id, cam_data in sync_point.data[DataType.DEPTH_IMAGES].items():
             cam_data = cast(CameraData, cam_data)
             assert cam_data.frame is not None
             assert isinstance(cam_data.frame, Image.Image)
@@ -313,11 +313,15 @@ class TestSynchronizedRecording:
         assert sync_point1 is not sync_point2
 
         # Modifying one shouldn't affect the other
-        jp1 = cast(JointData, list(sync_point1[DataType.JOINT_POSITIONS].values())[0])
+        jp1 = cast(
+            JointData, list(sync_point1.data[DataType.JOINT_POSITIONS].values())[0]
+        )
         original_value = jp1.value
         jp1.value = 999.0
 
-        jp2 = cast(JointData, list(sync_point2[DataType.JOINT_POSITIONS].values())[0])
+        jp2 = cast(
+            JointData, list(sync_point2.data[DataType.JOINT_POSITIONS].values())[0]
+        )
         assert jp2.value == original_value
 
     def test_cache_manager_initialization(self, synced_recording):

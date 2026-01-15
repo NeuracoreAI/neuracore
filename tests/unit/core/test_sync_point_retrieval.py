@@ -260,11 +260,13 @@ def test_log_and_retrieve_sync_point(
         expected_data_for_type = expected_data[data_type]
         for name, expected_fields in expected_data_for_type.items():
             assert (
-                name in sync_point[data_type]
+                name in sync_point.data[data_type]
             ), f"Sync point missing 'sensor label {name}' for {data_type}"
 
             expected_nc_data_class = DATA_TYPE_TO_NC_DATA_CLASS[data_type]
-            nc_data = expected_nc_data_class.model_validate(sync_point[data_type][name])
+            nc_data = expected_nc_data_class.model_validate(
+                sync_point.data[data_type][name]
+            )
 
             for field_name, expected_value in expected_fields.items():
                 assert hasattr(nc_data, field_name), (
