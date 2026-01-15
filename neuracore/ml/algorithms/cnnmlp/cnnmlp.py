@@ -181,6 +181,16 @@ class CNNMLP(NeuracoreModel):
                     len(stats), cnn_output_dim
                 )
 
+        if DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS in self.data_types:
+            stats = self.dataset_statistics[
+                DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS
+            ]
+            stats = cast(list[ParallelGripperOpenAmountDataStats], stats)
+            combined_stats = DataItemStats()
+            for stat in stats:
+                combined_stats = combined_stats.concatenate(stat.open_amount)
+            data_stats[DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS] = combined_stats
+
         if DataType.RGB_IMAGES in self.input_data_types:
             stats = cast(
                 list[CameraDataStats], self.dataset_statistics[DataType.RGB_IMAGES]
@@ -610,7 +620,7 @@ class CNNMLP(NeuracoreModel):
             DataType.JOINT_TARGET_POSITIONS: [
                 BatchedJointData,  # for each joint output
             ],
-            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: [
+            DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS: [
                 BatchedParallelGripperOpenAmountData,  # for each gripper output
             ],
             ...
@@ -639,7 +649,7 @@ class CNNMLP(NeuracoreModel):
                     joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
                     batched_outputs.append(BatchedJointData(value=joint_preds))
                 output_tensors[data_type] = batched_outputs
-            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+            elif data_type == DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
                 batched_outputs = []
                 for i in range(len(self.dataset_statistics[data_type])):
                     gripper_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
@@ -681,7 +691,7 @@ class CNNMLP(NeuracoreModel):
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 batched_joints = cast(list[BatchedJointData], batch.outputs[data_type])
                 action_targets.extend([bjd.value for bjd in batched_joints])
-            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+            elif data_type == DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
                 grippers = cast(
                     list[BatchedParallelGripperOpenAmountData], batch.outputs[data_type]
                 )
@@ -751,5 +761,5 @@ class CNNMLP(NeuracoreModel):
         return {
             DataType.JOINT_TARGET_POSITIONS,
             DataType.JOINT_POSITIONS,
-            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
         }

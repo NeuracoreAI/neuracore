@@ -241,7 +241,9 @@ class TestPytorchDummyDataset:
                 "robot_0": {DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["gripper_0"]}
             },
             output_robot_data_spec={
-                "robot_0": {DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["gripper_0"]}
+                "robot_0": {
+                    DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS: ["gripper_0"]
+                }
             },
             num_samples=3,
         )
@@ -257,9 +259,9 @@ class TestPytorchDummyDataset:
             sample.inputs_mask[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS] == 1.0
         )
 
-        # Test output parallel gripper open amounts
-        assert DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in sample.outputs
-        assert len(sample.outputs[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS]) == 1
+        # Test output parallel gripper target open amounts
+        assert DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS in sample.outputs
+        assert len(sample.outputs[DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS]) == 1
 
     def test_pose_data_generation(self):
         """Test pose data generation."""
