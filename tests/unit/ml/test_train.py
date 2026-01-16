@@ -1423,7 +1423,7 @@ class TestMain:
         setup.mock_storage_handler_class.assert_called_once_with(
             algorithm_id="test-algorithm-id"
         )
-        expected_extract_dir = Path(temp_output_dir) / "algorithm"
+        expected_extract_dir = Path(cfg.local_output_dir) / "algorithm"
         setup.mock_storage_handler.download_algorithm.assert_called_once_with(
             extract_dir=expected_extract_dir
         )

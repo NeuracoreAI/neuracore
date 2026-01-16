@@ -45,6 +45,7 @@ output_robot_data_spec: null
 algorithm_id: null    # For cloud training
 training_id: null     # For cloud training
 org_id: null          # For cloud training
+run_name: null        # Optional name for the training run. If not provided, a three-word random name will be generated.
 local_output_dir: ${oc.env:HOME}/.neuracore/training/runs/${now:%Y-%m-%d_%H-%M-%S}
 
 # Custom algorithm parameters (used when algorithm_id is provided)
