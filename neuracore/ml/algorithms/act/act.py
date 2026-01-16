@@ -157,7 +157,7 @@ class ACT(NeuracoreModel):
         self.max_output_size = 0
         output_stats = []
         for data_type in self.output_data_types:
-            if data_type == DataType.JOINT_TARGET_POSITIONS:
+            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 stats = cast(
                     list[JointDataStats],
                     self.dataset_statistics[data_type],
@@ -165,7 +165,10 @@ class ACT(NeuracoreModel):
                 combined_stats = DataItemStats()
                 for stat in stats:
                     combined_stats = combined_stats.concatenate(stat.value)
-            elif data_type == DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+            elif data_type in [
+                DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            ]:
                 stats = cast(
                     list[ParallelGripperOpenAmountDataStats],
                     self.dataset_statistics[data_type],
@@ -599,13 +602,16 @@ class ACT(NeuracoreModel):
                 :, :, start_slice_idx:end_slice_idx
             ]  # (B, T, dt_size)
 
-            if data_type == DataType.JOINT_TARGET_POSITIONS:
+            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 batched_outputs = []
                 for i in range(len(self.dataset_statistics[data_type])):
                     joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
                     batched_outputs.append(BatchedJointData(value=joint_preds))
                 output_tensors[data_type] = batched_outputs
-            elif data_type == DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+            elif data_type in [
+                DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            ]:
                 batched_outputs = []
                 for i in range(len(self.dataset_statistics[data_type])):
                     gripper_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
@@ -632,9 +638,6 @@ class ACT(NeuracoreModel):
         Returns:
             BatchedTrainingOutputs: Training outputs with losses and metrics
         """
-        if DataType.JOINT_TARGET_POSITIONS not in batch.outputs:
-            raise ValueError("Batch output joint target positions missing")
-
         inference_sample = BatchedInferenceInputs(
             inputs=batch.inputs,
             inputs_mask=batch.inputs_mask,
@@ -642,13 +645,15 @@ class ACT(NeuracoreModel):
         )
 
         # Extract target actions
-        # Extract target actions
         action_targets = []
         for data_type in self.output_data_types:
-            if data_type == DataType.JOINT_TARGET_POSITIONS:
+            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 batched_joints = cast(list[BatchedJointData], batch.outputs[data_type])
                 action_targets.extend([bjd.value for bjd in batched_joints])
-            elif data_type == DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+            elif data_type in [
+                DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            ]:
                 grippers = cast(
                     list[BatchedParallelGripperOpenAmountData], batch.outputs[data_type]
                 )
@@ -735,6 +740,8 @@ class ACT(NeuracoreModel):
             set[DataType]: Set of supported output data types
         """
         return {
+            DataType.JOINT_POSITIONS,
             DataType.JOINT_TARGET_POSITIONS,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
         }
