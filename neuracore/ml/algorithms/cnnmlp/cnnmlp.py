@@ -191,14 +191,6 @@ class CNNMLP(NeuracoreModel):
                 combined_stats = combined_stats.concatenate(stat.open_amount)
             data_stats[DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS] = combined_stats
 
-        if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.data_types:
-            stats = self.dataset_statistics[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS]
-            stats = cast(list[ParallelGripperOpenAmountDataStats], stats)
-            combined_stats = DataItemStats()
-            for stat in stats:
-                combined_stats = combined_stats.concatenate(stat.open_amount)
-            data_stats[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS] = combined_stats
-
         if DataType.RGB_IMAGES in self.input_data_types:
             stats = cast(
                 list[CameraDataStats], self.dataset_statistics[DataType.RGB_IMAGES]
