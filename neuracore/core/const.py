@@ -72,3 +72,8 @@ PROVIDE_LIVE_DATA = (
 CONSUME_LIVE_DATA = (
     os.getenv("NEURACORE_CONSUME_LIVE_DATA") or "yes"
 ).lower().strip() in CONFIRMATION_INPUT
+
+# Server endpoint paths
+PING_ENDPOINT = "/ping"
+PREDICT_ENDPOINT = "/predict"
+SET_CHECKPOINT_ENDPOINT = "/set_checkpoint"

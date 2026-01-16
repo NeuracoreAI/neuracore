@@ -16,11 +16,11 @@ from neuracore_types import (
 
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
+from neuracore.core.utils.robot_data_spec_utils import merge_robot_data_spec
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
-from neuracore.ml.utils.robot_data_spec_utils import merge_robot_data_spec
 
 DATA_ITEMS = 3
 
