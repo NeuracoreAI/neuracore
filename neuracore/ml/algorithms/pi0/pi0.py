@@ -182,7 +182,10 @@ class Pi0(NeuracoreModel):
                 )
                 current_output_dim += dim
                 self.max_output_size += dim
-            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+            elif data_type in [
+                DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            ]:
                 stats = cast(
                     list[ParallelGripperOpenAmountDataStats],
                     self.dataset_statistics[data_type],
@@ -731,7 +734,10 @@ class Pi0(NeuracoreModel):
                     joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
                     batched_outputs.append(BatchedJointData(value=joint_preds))
                 output_tensors[data_type] = batched_outputs
-            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+            elif data_type in [
+                DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            ]:
                 batched_outputs = []
                 for i in range(len(self.dataset_statistics[data_type])):
                     gripper_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
@@ -773,7 +779,10 @@ class Pi0(NeuracoreModel):
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 batched_joints = cast(list[BatchedJointData], batch.outputs[data_type])
                 action_targets.extend([bjd.value for bjd in batched_joints])
-            elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+            elif data_type in [
+                DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            ]:
                 grippers = cast(
                     list[BatchedParallelGripperOpenAmountData], batch.outputs[data_type]
                 )
@@ -882,7 +891,8 @@ class Pi0(NeuracoreModel):
             set[DataType]: Set of supported output data types
         """
         return {
-            DataType.JOINT_TARGET_POSITIONS,
             DataType.JOINT_POSITIONS,
+            DataType.JOINT_TARGET_POSITIONS,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
         }
