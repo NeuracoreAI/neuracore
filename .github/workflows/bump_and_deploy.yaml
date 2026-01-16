@@ -1,88 +1,55 @@
 name: Bump and Publish
 
+# Only triggered by centralized release system or manual emergency release
+# No longer triggers on PR merge to main
 on:
-  push:
-    branches:
-      - main
+  repository_dispatch:
+    types: [trigger-release]
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      confirm_emergency:
+        description: 'Type CONFIRM for emergency release'
+        required: true
+        type: string
 
 jobs:
 
-  check-version-bump:
+  validate:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      pull-requests: read
     outputs:
-      should_release: ${{ steps.check.outputs.should_release }}
-      bump_type: ${{ steps.check.outputs.bump_type }}
-      pr_number: ${{ steps.check.outputs.pr_number }}
-    
+      bump_type: ${{ steps.validate.outputs.bump_type }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    
-    - name: Get merged PR labels
-      id: pr_labels
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const commit = context.sha;
-          
-          // Find the PR associated with this merge commit
-          const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            commit_sha: commit
-          });
-          
-          if (prs.data.length === 0) {
-            console.log('No PR found for this commit');
-            return { bump_type: 'none' };
-          }
-
-          // Define valid version labels
-          const versionLabels = [
-            'version:major',
-            'version:minor', 
-            'version:patch',
-            'version:none'
-          ];
-          
-          const pr = prs.data[0];
-          const firstLabel = pr.labels[0]?.name;
-          let bump_type = firstLabel.split(':')[1];
-          return { bump_type, pr_number: pr.number };
-    
-    - name: Check if release needed
-      id: check
-      run: |
-        BUMP_TYPE="${{ fromJSON(steps.pr_labels.outputs.result).bump_type }}"
-        PR_NUMBER="${{ fromJSON(steps.pr_labels.outputs.result).pr_number }}"
-        
-        if [ "$BUMP_TYPE" = "none" ] || [ -z "$BUMP_TYPE" ]; then
-          echo "No version bump label found - skipping release"
-          echo "should_release=false" >> $GITHUB_OUTPUT
-          echo "bump_type=none" >> $GITHUB_OUTPUT
-        else
-          echo "Version bump type: $BUMP_TYPE"
-          echo "should_release=true" >> $GITHUB_OUTPUT
-          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
-          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
-        fi
+      - name: Validate trigger
+        id: validate
+        run: |
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "✅ Triggered by centralized release system"
+            echo "bump_type=${{ github.event.client_payload.bump_type }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ inputs.confirm_emergency }}" != "CONFIRM" ]]; then
+              echo "::error::Emergency release requires typing 'CONFIRM' in the confirmation field"
+              exit 1
+            fi
+            echo "::warning::🚨 EMERGENCY RELEASE - triggered manually"
+            echo "bump_type=${{ inputs.bump_type }}" >> $GITHUB_OUTPUT
+          fi
 
   version-bump:
-    needs: check-version-bump
+    needs: validate
     runs-on: ubuntu-latest
-    if: needs.check-version-bump.outputs.should_release == 'true'
     permissions:
       contents: write
-      pull-requests: read
     outputs:
       new_version: ${{ steps.bump.outputs.new_version }}
-    
+
     steps:
     - name: Generate GitHub App Token
       id: generate-token
@@ -90,26 +57,26 @@ jobs:
       with:
         app-id: ${{ vars.NC_VERSION_BUMPER_APP_ID }}
         private-key: ${{ secrets.NC_VERSION_BUMPER_PRIVATE_KEY }}
-    
+
     - name: Checkout code
       uses: actions/checkout@v4
       with:
         token: ${{ steps.generate-token.outputs.token }}
         fetch-depth: 0
-    
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-    
+
     - name: Install dependencies
       run: |
         pip install bump2version
-    
+
     - name: Bump version
       id: bump
       run: |
-        BUMP_TYPE="${{ needs.check-version-bump.outputs.bump_type }}"
+        BUMP_TYPE="${{ needs.validate.outputs.bump_type }}"
         
         echo "Bumping $BUMP_TYPE version"
 
@@ -162,7 +129,6 @@ jobs:
   create-release:
     needs: [version-bump, publish-python]
     runs-on: ubuntu-latest
-    if: needs.version-bump.outputs.should_release == 'true'
     permissions:
       contents: write
     
