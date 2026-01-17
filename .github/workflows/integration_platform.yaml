@@ -1,4 +1,4 @@
-name: Platform Integration Tests
+name: Integration Platform
 
 on:
   schedule:

@@ -397,3 +397,54 @@ We welcome contributions! Please see our contributing guidelines and submit pull
 - Performance improvements
 - Documentation enhancements
 - Bug fixes and feature requests
+
+## Release Process
+
+### Creating PRs
+
+All PRs must follow these conventions:
+
+1. **Version Label**: Add exactly one version label to your PR:
+   - `version:major` - Breaking changes
+   - `version:minor` - New features
+   - `version:patch` - Bug fixes
+   - `version:none` - No release (docs, chores, etc.)
+
+2. **Commit Format**: PR title and all commits must use conventional commit format:
+   ```
+   <prefix>: <description>
+   ```
+   Valid prefixes: `feat`, `fix`, `chore`, `docs`, `ci`, `test`, `refactor`, `style`, `perf`
+
+   Examples:
+   - `feat: add multi-GPU training support`
+   - `fix: resolve memory leak in streaming`
+   - `chore: update dependencies`
+
+### Pending Changelog
+
+For significant changes (`version:major` or `version:minor`), update `changelogs/pending-changelog.md`:
+
+```markdown
+## Summary
+
+This release adds support for multi-GPU training and improves streaming performance by 40%.
+```
+
+Simply append your summary to the existing content. This will appear at the top of the release notes.
+
+### Triggering a Release
+
+Releases are manual and triggered via GitHub Actions:
+
+1. Go to **Actions** → **Release Package** → **Run workflow**
+2. Optional: Check **dry_run** to preview without publishing
+3. The workflow will:
+   - Analyze all PRs since last release
+   - Determine version bump (highest priority across all PRs)
+   - Generate changelog with all PRs grouped by type
+   - Bump version and create git tag
+   - Publish to PyPI
+   - Create GitHub release
+
+**Dry run** shows what would happen without making any changes - useful for testing before a real release.

@@ -1,4 +1,4 @@
-name: Python Package CI
+name: PR Pre-commit and Test
 
 on:
   pull_request:
