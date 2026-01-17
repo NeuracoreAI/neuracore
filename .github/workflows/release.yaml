@@ -1,4 +1,5 @@
-name: Release Package
+name: Release
+run-name: ${{ inputs.dry_run && 'Release (Dry Run)' || 'Release' }}
 
 on:
   workflow_dispatch:
@@ -41,20 +42,26 @@ jobs:
         script: |
           const tag = '${{ steps.get_tag.outputs.latest_tag }}';
 
-          // Get the tag's commit date
-          const tagRef = await github.rest.git.getRef({
+          // Use compare API to get the date of the tag commit
+          const comparison = await github.rest.repos.compareCommitsWithBasehead({
             owner: context.repo.owner,
             repo: context.repo.repo,
-            ref: `tags/${tag.replace('v', '')}`
+            basehead: `${tag}...HEAD`
           });
 
-          const tagCommit = await github.rest.git.getCommit({
+          if (comparison.data.commits.length === 0) {
+            console.log('No commits since last release');
+            return [];
+          }
+
+          // Get the base commit (the tag's commit) date
+          const baseCommit = await github.rest.repos.getCommit({
             owner: context.repo.owner,
             repo: context.repo.repo,
-            commit_sha: tagRef.data.object.sha
+            ref: tag
           });
 
-          const tagDate = tagCommit.data.committer.date;
+          const tagDate = baseCommit.data.commit.committer.date;
           console.log(`Tag ${tag} was created at: ${tagDate}`);
 
           // Search for PRs merged to main after the tag date
@@ -162,7 +169,6 @@ jobs:
 
   generate-changelog:
     needs: analyze-changes
-    if: needs.analyze-changes.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     outputs:
       new_version: ${{ steps.calc_version.outputs.new_version }}
@@ -201,6 +207,10 @@ jobs:
           patch)
             PATCH=$((PATCH + 1))
             ;;
+          none)
+            echo "No version bump (type: none)"
+            # Keep current version
+            ;;
           *)
             echo "ERROR: Invalid bump type: $BUMP_TYPE"
             exit 1
@@ -209,7 +219,12 @@ jobs:
 
         NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
         echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-        echo "New version will be: $NEW_VERSION"
+
+        if [ "$BUMP_TYPE" = "none" ]; then
+          echo "Version unchanged: $NEW_VERSION"
+        else
+          echo "New version will be: $NEW_VERSION"
+        fi
 
     - name: Read pending changelog
       id: read_pending
@@ -243,10 +258,11 @@ jobs:
       uses: actions/github-script@v7
       env:
         PENDING_CONTENT: ${{ steps.read_pending.outputs.pending_content }}
+        PR_DATA: ${{ needs.analyze-changes.outputs.pr_data }}
       with:
         script: |
           const version = '${{ steps.calc_version.outputs.new_version }}';
-          const prData = JSON.parse('${{ needs.analyze-changes.outputs.pr_data }}');
+          const prData = JSON.parse(process.env.PR_DATA);
           const pendingContent = process.env.PENDING_CONTENT ? JSON.parse(process.env.PENDING_CONTENT) : '';
           const isDryRun = ${{ inputs.dry_run }};
 
@@ -331,64 +347,25 @@ jobs:
           // Output changelog content
           core.setOutput('changelog_content', changelog);
 
-          // Write to file or print based on dry run
-          if (isDryRun) {
-            console.log('\n=================================');
-            console.log('DRY RUN - Generated Changelog:');
-            console.log('=================================\n');
-            console.log(changelog);
-            console.log('\n=================================');
-            console.log('File would be written to: changelogs/' + version + '-changelog.md');
-            console.log('=================================\n');
-          } else {
-            const fs = require('fs');
-            const path = `changelogs/${version}-changelog.md`;
+          // Always write the changelog file (version-bump will commit it if not dry run)
+          const fs = require('fs');
+          const path = `changelogs/${version}-changelog.md`;
 
-            // Ensure changelogs directory exists
-            if (!fs.existsSync('changelogs')) {
-              fs.mkdirSync('changelogs', { recursive: true });
-            }
-
-            fs.writeFileSync(path, changelog);
-            console.log(`Changelog written to: ${path}`);
+          // Ensure changelogs directory exists
+          if (!fs.existsSync('changelogs')) {
+            fs.mkdirSync('changelogs', { recursive: true });
           }
+
+          fs.writeFileSync(path, changelog);
+          console.log(`Changelog written to: ${path}`);
 
           // Print summary
           console.log(`\nChangelog Summary:`);
-          console.log(`- Breaking Changes: ${groups.breaking.length}`);
-          console.log(`- Features: ${groups.features.length}`);
-          console.log(`- Bug Fixes: ${groups.fixes.length}`);
-          console.log(`- Other Changes: ${groups.other.length}`);
+          console.log(`- Major Changes: ${groups.breaking.length}`);
+          console.log(`- Minor Changes: ${groups.features.length}`);
+          console.log(`- Patch Changes: ${groups.fixes.length}`);
+          console.log(`- Misc/Chore Changes: ${groups.other.length}`);
           console.log(`- Total PRs: ${prData.length}`);
-
-  dry-run-summary:
-    needs: [analyze-changes, generate-changelog]
-    if: needs.analyze-changes.outputs.should_release == 'true' && inputs.dry_run == true
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Print dry run summary
-      run: |
-        echo "========================================"
-        echo "DRY RUN SUMMARY"
-        echo "========================================"
-        echo ""
-        echo "This is a DRY RUN - no changes will be made"
-        echo ""
-        echo "Version Bump:"
-        echo "  Type: ${{ needs.analyze-changes.outputs.bump_type }}"
-        echo "  New Version: ${{ needs.generate-changelog.outputs.new_version }}"
-        echo ""
-        echo "Actions that would be performed:"
-        echo "  ✓ Update .bumpversion.cfg and neuracore/__init__.py"
-        echo "  ✓ Create changelogs/${{ needs.generate-changelog.outputs.new_version }}-changelog.md"
-        echo "  ✓ Reset changelogs/pending-changelog.md to template"
-        echo "  ✓ Commit and push changes with tag v${{ needs.generate-changelog.outputs.new_version }}"
-        echo "  ✓ Build and publish package to PyPI"
-        echo "  ✓ Create GitHub Release"
-        echo ""
-        echo "To perform the actual release, run this workflow again without dry_run"
-        echo "========================================"
 
   version-bump:
     needs: [analyze-changes, generate-changelog]
@@ -520,10 +497,12 @@ jobs:
 
     - name: Create GitHub Release
       uses: actions/github-script@v7
+      env:
+        CHANGELOG_BODY: ${{ needs.generate-changelog.outputs.changelog_content }}
       with:
         script: |
           const version = '${{ needs.version-bump.outputs.new_version }}';
-          const changelogBody = `${{ needs.generate-changelog.outputs.changelog_content }}`;
+          const changelogBody = process.env.CHANGELOG_BODY;
 
           await github.rest.repos.createRelease({
             owner: context.repo.owner,
@@ -536,3 +515,88 @@ jobs:
           });
 
           console.log(`Created GitHub Release for v${version}`);
+
+  final-summary:
+    needs: [analyze-changes, generate-changelog, version-bump, publish-python, create-release]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Generate final summary
+      uses: actions/github-script@v7
+      env:
+        CHANGELOG_CONTENT: ${{ needs.generate-changelog.outputs.changelog_content }}
+      with:
+        script: |
+          const isDryRun = ${{ inputs.dry_run }};
+          const shouldRelease = '${{ needs.analyze-changes.outputs.should_release }}' === 'true';
+          const bumpType = '${{ needs.analyze-changes.outputs.bump_type }}';
+          const newVersion = '${{ needs.generate-changelog.outputs.new_version }}';
+          const changelogContent = process.env.CHANGELOG_CONTENT || '';
+
+          const fs = require('fs');
+          let summary = '';
+
+          // Check if trying to do a real release with only version:none PRs
+          if (!isDryRun && !shouldRelease) {
+            summary += '# ❌ Release Failed\n\n';
+            summary += '**Cannot create a release** - all PRs since the last release have `version:none` label.\n\n';
+            summary += 'See the "Release Analysis" section for details on the PRs that were analyzed.\n\n';
+            summary += '---\n\n';
+            summary += '**To create a release:** Ensure at least one merged PR has a `version:major`, `version:minor`, or `version:patch` label.\n';
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
+            core.setFailed('Cannot create release - all PRs have version:none label');
+            return;
+          }
+
+          if (isDryRun) {
+            summary += '# 🧪 Dry Run Complete\n\n';
+            summary += '**⚠️ This was a DRY RUN** - no changes were committed or published\n\n';
+          } else {
+            summary += '# ✅ Release Complete\n\n';
+          }
+
+          if (shouldRelease) {
+            summary += '## Release Information\n\n';
+            summary += `- **Version Bump:** \`${bumpType}\`\n`;
+            summary += `- **New Version:** \`${newVersion}\`\n\n`;
+
+            if (isDryRun) {
+              summary += '## What Would Happen\n\n';
+              summary += '- ✅ Version bumped in `.bumpversion.cfg` and `neuracore/__init__.py`\n';
+              summary += `- ✅ Changelog created at \`changelogs/${newVersion}-changelog.md\`\n`;
+              summary += '- ✅ Pending changelog reset to template\n';
+              summary += `- ✅ Changes committed and pushed with tag \`v${newVersion}\`\n`;
+              summary += '- ✅ Package published to PyPI\n';
+              summary += '- ✅ GitHub Release created\n\n';
+              summary += '---\n\n';
+              summary += '**To perform the actual release:** Run this workflow again **without** the `dry_run` option checked.\n\n';
+            } else {
+              summary += '## Actions Completed\n\n';
+              summary += '- ✅ Version bumped and committed\n';
+              summary += '- ✅ Package published to PyPI\n';
+              summary += '- ✅ GitHub Release created\n\n';
+              summary += '### Links\n\n';
+              summary += `- 📦 [PyPI Package](https://pypi.org/project/neuracore/${newVersion}/)\n`;
+              summary += `- 🏷️ [GitHub Release](https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/v${newVersion})\n`;
+              summary += `- 📝 [Changelog](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/changelogs/${newVersion}-changelog.md)\n\n`;
+              summary += '### Installation\n\n';
+              summary += '```bash\n';
+              summary += `pip install neuracore==${newVersion}\n`;
+              summary += '```\n\n';
+            }
+
+            summary += '---\n\n';
+            summary += '## Generated Changelog\n\n';
+            summary += changelogContent;
+          } else {
+            // This is dry run with version:none - show what we found
+            summary += '## No Release Would Be Created\n\n';
+            summary += `All PRs since the last release have \`version:none\` label.\n\n`;
+            summary += 'See the "Release Analysis" section for details on the PRs that were analyzed.\n\n';
+            summary += '---\n\n';
+            summary += '## Generated Changelog\n\n';
+            summary += changelogContent;
+          }
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
