@@ -46,7 +46,7 @@ jobs:
           // Post reminder comment
           const commentBody = `${commentIdentifier}
 
-Consider updating \`changelogs/pending-changelog.md\` with a summary of this change for the release notes. This is optional and non-blocking.`;
+Consider updating changelogs/pending-changelog.md with a summary of this change for the release notes. This is optional and non-blocking.`;
 
           await github.rest.issues.createComment({
             owner: context.repo.owner,

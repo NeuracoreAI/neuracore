@@ -81,7 +81,7 @@ jobs:
           // Build comment body with violations
           let commentBody = `${commentIdentifier}
 
-PR title and commit messages must follow conventional commit format: \`<prefix>: <description>\`. Valid prefixes: feat, fix, chore, docs, ci, test, refactor, style, perf.`;
+PR title and commit messages must follow conventional commit format: <prefix>: <description>. Valid prefixes: feat, fix, chore, docs, ci, test, refactor, style, perf.`;
 
           // Check if comment already exists
           const { data: comments } = await github.rest.issues.listComments({
