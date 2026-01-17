@@ -1,0 +1,117 @@
+name: PR Check Commit Messages
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+jobs:
+  check-format:
+    runs-on: ubuntu-latest
+
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+    - name: Check PR title and commits
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const prNumber = context.payload.pull_request.number;
+          const prTitle = context.payload.pull_request.title;
+          const commentIdentifier = '<!-- pr-commit-messages-check-bot -->';
+
+          // Valid conventional commit prefixes
+          const validPrefixes = ['feat', 'fix', 'chore', 'docs', 'ci', 'test', 'refactor', 'style', 'perf'];
+          const conventionalCommitRegex = new RegExp(`^(${validPrefixes.join('|')}):\\s.+`);
+
+          // Check PR title
+          const isTitleValid = conventionalCommitRegex.test(prTitle);
+
+          // Fetch all commits in the PR
+          const { data: commits } = await github.rest.pulls.listCommits({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: prNumber
+          });
+
+          // Check each commit message
+          const commitResults = commits.map(commit => {
+            const message = commit.commit.message.split('\n')[0]; // First line only
+            const isValid = conventionalCommitRegex.test(message);
+            return {
+              sha: commit.sha.substring(0, 7),
+              message: message,
+              isValid: isValid
+            };
+          });
+
+          const invalidCommits = commitResults.filter(c => !c.isValid);
+          const hasViolations = !isTitleValid || invalidCommits.length > 0;
+
+          // If all checks pass, delete old comment if it exists and exit
+          if (!hasViolations) {
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber
+            });
+
+            const existingComment = comments.find(comment =>
+              comment.body.includes(commentIdentifier)
+            );
+
+            if (existingComment) {
+              await github.rest.issues.deleteComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id
+              });
+              console.log('Deleted old check comment - all checks now pass');
+            }
+
+            console.log('✅ All checks passed');
+            return;
+          }
+
+          // Build comment body with violations
+          let commentBody = `${commentIdentifier}
+
+PR title and commit messages must follow conventional commit format: \`<prefix>: <description>\`. Valid prefixes: feat, fix, chore, docs, ci, test, refactor, style, perf.`;
+
+          // Check if comment already exists
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: prNumber
+          });
+
+          const existingComment = comments.find(comment =>
+            comment.body.includes(commentIdentifier)
+          );
+
+          // Create or update comment
+          if (existingComment) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: existingComment.id,
+              body: commentBody
+            });
+            console.log('Updated existing check comment');
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: commentBody
+            });
+            console.log('Posted new check comment');
+          }
+
+          // Fail the workflow
+          core.setFailed('PR title or commit messages do not follow conventional commit format');
