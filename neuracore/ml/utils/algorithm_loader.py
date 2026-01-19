@@ -72,16 +72,17 @@ class AlgorithmLoader:
         """Install Python packages from requirements.txt if present.
 
         Searches for a requirements.txt file in the algorithm directory and
-        installs the specified packages using pip. Automatically filters out
-        Neuracore dependencies to avoid version conflicts.
+        installs the specified packages. Tries uv pip first, falls back to pip
+        if uv is not available. Automatically filters out Neuracore dependencies
+        to avoid version conflicts.
 
         Returns:
             True if requirements were installed successfully or no requirements
             file was found, False otherwise.
 
         Raises:
-            RequirementsInstallError: If requirements installation fails due to
-                missing pip, invalid requirements file, or package installation errors.
+            RequirementsInstallError: If requirements installation fails with both
+                package managers.
         """
         req_file = self.algorithm_dir / "requirements.txt"
         if not req_file.exists():
@@ -103,25 +104,45 @@ class AlgorithmLoader:
             error_msg = f"Failed to process requirements.txt: {e}"
             raise RequirementsInstallError(error_msg)
 
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-Ir", str(req_file)],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            logger.info("Successfully installed requirements")
-            return True
-        except subprocess.CalledProcessError as e:
-            error_msg = "Failed to install requirements from your requirements.txt\n"
-            if e.stderr:
-                error_msg += e.stderr
-            logger.error(error_msg)
-            raise RequirementsInstallError(error_msg)
-        except FileNotFoundError as e:
-            error_msg = f"pip executable not found: {e}"
-            logger.error(error_msg)
-            raise RequirementsInstallError(error_msg)
+        # Try uv first, fall back to pip
+        install_commands = [
+            (["uv", "pip", "install", "-r", str(req_file)], "uv pip"),
+            ([sys.executable, "-m", "pip", "install", "-Ir", str(req_file)], "pip"),
+        ]
+
+        errors = []
+        for cmd, name in install_commands:
+            try:
+                logger.info(f"Attempting to install requirements using {name}")
+                subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                logger.info(f"Successfully installed requirements using {name}")
+                return True
+            except FileNotFoundError:
+                logger.debug(f"{name} not found, trying next option")
+                errors.append(f"{name} executable not found")
+                continue
+            except subprocess.CalledProcessError as e:
+                error_msg = f"Failed to install with {name}"
+                if e.stderr:
+                    error_msg += f": {e.stderr}"
+                logger.debug(error_msg)
+                errors.append(error_msg)
+                continue
+
+        # If we get here, both methods failed
+        combined_errors = "\n".join(errors)
+        error_msg = (
+            "Failed to install requirements from your requirements.txt\n"
+            f"Tried: uv pip and pip\n"
+            f"Errors:\n{combined_errors}"
+        )
+        logger.error(error_msg)
+        raise RequirementsInstallError(error_msg)
 
     def get_all_files(self) -> list[Path]:
         """Get all Python files in the algorithm directory recursively.
