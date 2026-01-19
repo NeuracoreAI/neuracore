@@ -11,7 +11,6 @@ import time
 from neuracore_types import DataType, JointData, SynchronizedPoint
 
 from neuracore.api.globals import GlobalSingleton
-from neuracore.core.exceptions import RobotError
 from neuracore.core.robot import Robot
 from neuracore.core.streaming.p2p.consumer.org_nodes_manager import (
     get_org_nodes_manager,

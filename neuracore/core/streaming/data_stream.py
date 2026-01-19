@@ -11,12 +11,12 @@ import logging
 import struct
 import threading
 from abc import ABC
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 
 import numpy as np
-from neuracore.data_daemon.communications_management.producer import Producer
 from neuracore_types import CameraData, DataType, NCData
+
+from neuracore.data_daemon.communications_management.producer import Producer
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +123,8 @@ class DataStream(ABC):
         self._producer.send_data(
             data=data,
             data_type=self._data_type,
+            robot_instance=self._context.robot_instance,
+            data_type_name=self._stream_name,
             recording_id=self._context.recording_id,
             robot_id=self._context.robot_id,
             robot_name=self._context.robot_name,

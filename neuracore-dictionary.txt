@@ -213,5 +213,13 @@ xquat
 xyzrgb
 ylabel
 znear
+addfinalizer
 bigym
+calcsize
+capsys
+EADDRINUSE
+metas
+RDEM
 secho
+wakelock
+WAKELOCK

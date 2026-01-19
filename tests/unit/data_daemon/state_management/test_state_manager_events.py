@@ -220,14 +220,12 @@ def test_upload_failed_records_error(state_manager) -> None:
         TraceErrorCode.NETWORK_ERROR,
         "lost connection",
     )
-    assert store.errors == [
-        (
-            "trace-4",
-            "lost connection",
-            TraceErrorCode.NETWORK_ERROR,
-            TraceStatus.FAILED,
-        )
-    ]
+    assert store.errors == [(
+        "trace-4",
+        "lost connection",
+        TraceErrorCode.NETWORK_ERROR,
+        TraceStatus.FAILED,
+    )]
 
 
 def test_trace_written_emits_ready_for_upload_when_connected(state_manager) -> None:
@@ -252,16 +250,14 @@ def test_trace_written_emits_ready_for_upload_when_connected(state_manager) -> N
         emitter.emit(Emitter.IS_CONNECTED, True)
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-5", "rec-5", 64)
         assert store.marked_written == [("trace-5", 64)]
-        assert received == [
-            (
-                "trace-5",
-                "rec-5",
-                "/tmp/trace-5.bin",
-                DataType.CUSTOM_1D,
-                "custom",
-                0,
-            )
-        ]
+        assert received == [(
+            "trace-5",
+            "rec-5",
+            "/tmp/trace-5.bin",
+            DataType.CUSTOM_1D,
+            "custom",
+            0,
+        )]
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, handler)
 

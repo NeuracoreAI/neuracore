@@ -298,13 +298,11 @@ class MessageEnvelope:
 
         :return: bytes object containing the serialized message envelope data
         """
-        return json.dumps(
-            {
-                "producer_id": self.producer_id,
-                "command": self.command.value,
-                "payload": self.payload,
-            }
-        ).encode("utf-8")
+        return json.dumps({
+            "producer_id": self.producer_id,
+            "command": self.command.value,
+            "payload": self.payload,
+        }).encode("utf-8")
 
 
 @dataclass
