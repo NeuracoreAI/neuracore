@@ -114,6 +114,7 @@ class Pi0(NeuracoreModel):
                 "Please set the HF_TOKEN environment variable."
             )
 
+        self.action_expert_width = action_expert_width
         self.vlm_max_text_tokens = vlm_max_text_tokens
         self.num_inference_steps = num_inference_steps
         self.flow_sig_min = flow_sig_min
@@ -207,8 +208,12 @@ class Pi0(NeuracoreModel):
         self.action_horizon = self.output_prediction_horizon
 
         # Setup normalizers
-        self.proprio_normalizer = PROPRIO_NORMALIZER(
-            name="proprioception", statistics=proprio_stats
+        # Only create proprio_normalizer if there are proprioception stats
+        # This allows the algorithm to work without proprioception (visual-only)
+        self.proprio_normalizer = (
+            PROPRIO_NORMALIZER(name="proprioception", statistics=proprio_stats)
+            if proprio_stats
+            else None
         )
         self.action_normalizer = ACTION_NORMALIZER(
             name="actions", statistics=output_stats
@@ -259,7 +264,13 @@ class Pi0(NeuracoreModel):
         self.moe = GemmaMoE(moe_depth, expert_configs)
         self.action_encoder = ActionEncoder(self.action_dim, action_expert_width)
         self.time_embedding = SinusoidalPosEmb(action_expert_width)
-        self.proprio_encoder = nn.Linear(proprio_dim, action_expert_width)
+        # Only create proprio_encoder if there's proprioception data
+        # This allows the algorithm to work without proprioception (visual-only)
+        if proprio_dim > 0:
+            self.proprio_encoder = nn.Linear(proprio_dim, action_expert_width)
+        else:
+            # Create a dummy encoder that outputs zeros (will be replaced in forward)
+            self.proprio_encoder = None
         self.action_decoder = nn.Linear(
             action_expert_width,
             self.action_dim,
@@ -331,13 +342,20 @@ class Pi0(NeuracoreModel):
             masked_proprio = last_proprio * mask
             proprio_list.append(masked_proprio)
 
+        # If no proprioception data is available, return None
+        # This allows the algorithm to work with visual-only inputs
         if not proprio_list:
-            raise ValueError("No joint states available")
+            return None
 
         # Concatenate all proprio together: (B, total_proprio_dim)
         all_proprio = torch.cat(proprio_list, dim=-1)
 
         # Normalize once on all proprio
+        # Check if normalizer exists (it should if we have proprio data)
+        if self.proprio_normalizer is None:
+            raise ValueError(
+                "Proprioception inputs were provided but no normalizer was available."
+            )
         normalized_proprio = self.proprio_normalizer.normalize(all_proprio)
 
         return normalized_proprio
@@ -698,7 +716,18 @@ class Pi0(NeuracoreModel):
             images, image_masks, language_tokens, language_masks
         )
         proprio_states = self._combine_proprio(batch)
-        proprio_embeds = self.proprio_encoder(proprio_states)  # (B, E)
+        # If no proprioception, create zero tensor with appropriate dimensions
+        # This allows the algorithm to work with visual-only inputs
+        if proprio_states is None or self.proprio_encoder is None:
+            # Create zero tensor with shape (B, action_expert_width)
+            proprio_embeds = torch.zeros(
+                batch_size,
+                self.action_expert_width,
+                device=self.device,
+                dtype=merged_text_images.dtype,
+            )
+        else:
+            proprio_embeds = self.proprio_encoder(proprio_states)  # (B, E)
 
         delta_t = 1.0 / self.num_inference_steps
         t = torch.zeros(
@@ -766,6 +795,14 @@ class Pi0(NeuracoreModel):
         )
 
         proprios = self._combine_proprio(inference_sample)
+        # If no proprioception, create zero tensor with appropriate dimensions
+        if proprios is None or self.proprio_encoder is None:
+            proprios = torch.zeros(
+                len(batch),
+                self.action_expert_width,
+                device=self.device,
+                dtype=torch.float32,
+            )
 
         if set(batch.outputs.keys()) != set(self.output_data_types):
             raise ValueError(
