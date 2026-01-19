@@ -17,7 +17,7 @@ from pathlib import Path
 from warnings import warn
 
 import requests
-from neuracore_data_daemon.communications_management.producer import (
+from neuracore.data_daemon.communications_management.producer import (
     RecordingContext as DaemonRecordingContext,
 )
 from neuracore_types import RobotInstanceIdentifier
