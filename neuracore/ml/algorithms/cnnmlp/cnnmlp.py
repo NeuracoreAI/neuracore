@@ -447,9 +447,10 @@ class CNNMLP(NeuracoreModel):
         all_proprio = torch.cat(proprio_list, dim=-1)
 
         # Normalize once on all proprio
+        # Check if normalizer exists (it should if we have proprio data)
         if self.proprio_normalizer is None:
             raise ValueError(
-                "Proprioception inputs were provided but no statistics were available."
+                "Proprioception inputs were provided but no normalizer was available."
             )
         normalized_proprio = self.proprio_normalizer.normalize(all_proprio)
 

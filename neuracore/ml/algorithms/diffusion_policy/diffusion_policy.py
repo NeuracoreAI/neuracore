@@ -208,8 +208,12 @@ class DiffusionPolicy(NeuracoreModel):
                 self.max_output_size += dim
 
         # Setup normalizers
-        self.proprio_normalizer = PROPRIO_NORMALIZER(
-            name="proprioception", statistics=proprio_stats
+        # Only create proprio_normalizer if there are proprioception stats
+        # This allows the algorithm to work without proprioception (visual-only)
+        self.proprio_normalizer = (
+            PROPRIO_NORMALIZER(name="proprioception", statistics=proprio_stats)
+            if proprio_stats
+            else None
         )
         self.action_normalizer = ACTION_NORMALIZER(
             name="actions", statistics=output_stats
@@ -332,13 +336,20 @@ class DiffusionPolicy(NeuracoreModel):
             masked_proprio = last_proprio * mask
             proprio_list.append(masked_proprio)
 
+        # If no proprioception data is available, return None
+        # This allows the algorithm to work with visual-only inputs
         if not proprio_list:
-            raise ValueError("No joint states available")
+            return None
 
         # Concatenate all proprio together: (B, total_proprio_dim)
         all_proprio = torch.cat(proprio_list, dim=-1)
 
         # Normalize once on all proprio
+        # Check if normalizer exists (it should if we have proprio data)
+        if self.proprio_normalizer is None:
+            raise ValueError(
+                "Proprioception inputs were provided but no normalizer was available."
+            )
         normalized_proprio = self.proprio_normalizer.normalize(all_proprio)
 
         return normalized_proprio
@@ -391,14 +402,14 @@ class DiffusionPolicy(NeuracoreModel):
 
     def _prepare_global_conditioning(
         self,
-        joint_states: torch.FloatTensor,
+        joint_states: torch.FloatTensor | None,
         batched_nc_data: list[BatchedNCData],
         camera_images_mask: torch.FloatTensor,
     ) -> torch.FloatTensor:
         """Encode image features and concatenate with the state vector.
 
         Args:
-            joint_states: Joint state tensor.
+            joint_states: Joint state tensor, or None if no proprioception.
             batched_nc_data: List of BatchedRGBData.
             camera_images_mask: Camera image mask tensor.
 
@@ -406,8 +417,14 @@ class DiffusionPolicy(NeuracoreModel):
             Global conditioning tensor.
         """
         batched_rgb_data = cast(list[BatchedRGBData], batched_nc_data)
-        global_cond_feats = [joint_states]
-        batch_size = joint_states.shape[0]
+        global_cond_feats = []
+        # Only include joint states if available (allows visual-only inputs)
+        if joint_states is not None:
+            global_cond_feats.append(joint_states)
+            batch_size = joint_states.shape[0]
+        else:
+            # Get batch size from image data
+            batch_size = batched_rgb_data[0].frame.shape[0]
 
         # Extract image features.
         for cam_id, (encoder_dict, input_rgb) in enumerate(
