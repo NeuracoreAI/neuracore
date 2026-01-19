@@ -5,6 +5,7 @@ autoregressively
 autouse
 avgpool
 axvline
+bibtex
 blit
 buildtool
 caplog

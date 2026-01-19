@@ -1,5 +1,4 @@
 import argparse
-import os
 import time
 
 import numpy as np
@@ -7,8 +6,6 @@ from common.rollout_utils import rollout_policy
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
 
 import neuracore as nc
-
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def main(args):
