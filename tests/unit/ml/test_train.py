@@ -6,6 +6,7 @@ autotuning, and training execution.
 """
 
 import gc
+import json
 import logging
 import os
 import tempfile
@@ -27,7 +28,6 @@ from neuracore_types import (
 )
 from omegaconf import DictConfig, OmegaConf
 
-from neuracore.core.utils.robot_data_spec_utils import extract_data_types
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.datasets.pytorch_single_sample_dataset import SingleSampleDataset
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
@@ -40,6 +40,7 @@ from neuracore.ml.train import (
     run_training,
     setup_logging,
 )
+from neuracore.ml.utils.robot_data_spec_utils import extract_data_types
 
 SKIP_TEST = (
     os.environ.get("CI", "false").lower() == "true" or not torch.cuda.is_available()
@@ -1423,7 +1424,7 @@ class TestMain:
         setup.mock_storage_handler_class.assert_called_once_with(
             algorithm_id="test-algorithm-id"
         )
-        expected_extract_dir = Path(cfg.local_output_dir) / "algorithm"
+        expected_extract_dir = Path(temp_output_dir) / "algorithm"
         setup.mock_storage_handler.download_algorithm.assert_called_once_with(
             extract_dir=expected_extract_dir
         )
@@ -1556,6 +1557,38 @@ class TestMain:
         main(cfg)
 
         mock_setup_logging.assert_called_once_with(cfg.local_output_dir)
+
+    def test_main_saves_local_metadata_for_local_runs(
+        self, monkeypatch, temp_output_dir
+    ):
+        cfg = OmegaConf.create({
+            "algorithm_id": "test-algorithm-id",
+            "dataset_id": "test-dataset-id",
+            "dataset_name": None,
+            "org_id": "test-org",
+            "device": None,
+            "local_output_dir": str(temp_output_dir),
+            "batch_size": 8,
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "output_prediction_horizon": 5,
+            "frequency": 30,
+            "algorithm_params": None,
+            "max_prefetch_workers": 4,
+        })
+
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks(include_set_organization=True)
+
+        main(cfg)
+
+        metadata_path = temp_output_dir / "training_run.json"
+        assert metadata_path.exists()
+        metadata = json.loads(metadata_path.read_text())
+        assert metadata["algorithm"] == "test-algorithm"
+        assert metadata["dataset_id"] == "test-dataset-id"
+        assert metadata["status"] == "RUNNING"
+        assert "JOINT_POSITIONS" in metadata["input_robot_data_spec"]["robot-id-1"]
 
     def test_main_calls_dataset_synchronize_with_correct_parameters(
         self, monkeypatch, temp_output_dir

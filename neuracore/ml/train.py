@@ -1,17 +1,16 @@
 """Hydra-based training script for Neuracore models."""
 
 import gc
+import json
 import logging
 import os
-import re
-from datetime import datetime
+import time
 from pathlib import Path
 from typing import Any
 
 import hydra
 import torch
 import torch.multiprocessing as mp
-from names_generator import generate_name
 from neuracore_types import BatchedNCData, ModelInitDescription
 from neuracore_types.nc_data import DataType
 from omegaconf import DictConfig, OmegaConf
@@ -19,11 +18,6 @@ from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 import neuracore as nc
 from neuracore.api.training import _get_algorithms
-from neuracore.core.utils.robot_data_spec_utils import (
-    convert_str_to_robot_data_spec,
-    extract_data_types,
-    merge_robot_data_spec,
-)
 from neuracore.core.utils.training_input_args_validation import (
     get_algorithm_name,
     validate_training_params,
@@ -44,6 +38,11 @@ from neuracore.ml.trainers.distributed_trainer import (
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
 from neuracore.ml.utils.device_utils import get_default_device
+from neuracore.ml.utils.robot_data_spec_utils import (
+    convert_str_to_robot_data_spec,
+    extract_data_types,
+    merge_robot_data_spec,
+)
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
 # Environment setup
@@ -53,24 +52,6 @@ os.environ["PJRT_DEVICE"] = "GPU"
 logger = logging.getLogger(__name__)
 
 MAX_AUTOTUNE_SAMPLE_CANDIDATES = 1000
-
-
-def _sanitize_run_name(name: str) -> str:
-    """Sanitize run name for use in file paths.
-
-    Args:
-        name: The run name to sanitize.
-
-    Returns:
-        A sanitized version of the name safe for file paths.
-    """
-    # Replace spaces, slashes, and other problematic characters with underscores
-    sanitized = re.sub(r"[^\w\-]", "_", name)
-    # Remove multiple consecutive underscores
-    sanitized = re.sub(r"_+", "_", sanitized)
-    # Remove leading/trailing underscores
-    sanitized = sanitized.strip("_")
-    return sanitized
 
 
 def _estimate_sample_tensor_bytes(sample: BatchedTrainingSamples) -> int:
@@ -124,6 +105,66 @@ def _select_worst_case_sample(
     )
 
     return heaviest_sample.to(device)
+
+
+def _serialize_robot_data_spec(
+    robot_data_spec: dict[str, dict[DataType, list[str]]],
+) -> dict[str, dict[str, list[str]]]:
+    """Convert robot data spec to JSON-serializable form."""
+    serializable: dict[str, dict[str, list[str]]] = {}
+    for robot_id, data_types in robot_data_spec.items():
+        serializable[robot_id] = {}
+        for data_type, names in data_types.items():
+            key = data_type.name if hasattr(data_type, "name") else str(data_type)
+            serializable[robot_id][key] = list(names)
+    return serializable
+
+
+def _save_local_training_metadata(
+    cfg: DictConfig,
+    algorithm_name: str,
+    input_robot_data_spec: dict[str, dict[DataType, list[str]]],
+    output_robot_data_spec: dict[str, dict[DataType, list[str]]],
+) -> None:
+    """Persist basic training run metadata locally for local runs."""
+    training_id = getattr(cfg, "training_id", None)
+    if training_id is not None:
+        # Cloud run metadata is stored remotely; skip local save.
+        return
+
+    output_dir = Path(getattr(cfg, "local_output_dir", "."))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_id = output_dir.name
+
+    metadata = {
+        "id": run_id,
+        "name": run_id,
+        "status": "RUNNING",
+        "algorithm": algorithm_name,
+        "algorithm_id": getattr(cfg, "algorithm_id", None),
+        "dataset_id": getattr(cfg, "dataset_id", None),
+        "dataset_name": getattr(cfg, "dataset_name", None),
+        "launch_time": time.time(),
+        "local_output_dir": str(output_dir),
+        "org_id": getattr(cfg, "org_id", None),
+        "input_robot_data_spec": _serialize_robot_data_spec(input_robot_data_spec),
+        "output_robot_data_spec": _serialize_robot_data_spec(output_robot_data_spec),
+        "frequency": getattr(cfg, "frequency", None),
+        "output_prediction_horizon": getattr(cfg, "output_prediction_horizon", None),
+        # Align with cloud run schema for inspect output
+        "epoch": -1,
+        "step": -1,
+        "gpu_type": None,
+        "num_gpus": None,
+        "synchronization_details": {
+            "frequency": getattr(cfg, "frequency", None),
+            "allow_duplicates": None,
+            "max_delay_s": None,
+        },
+    }
+
+    metadata_path = output_dir / "training_run.json"
+    metadata_path.write_text(json.dumps(metadata, indent=2))
 
 
 def setup_logging(output_dir: str, rank: int = 0) -> None:
@@ -443,26 +484,6 @@ def main(cfg: DictConfig) -> None:
     # Resolve the configuration
     OmegaConf.resolve(cfg)
 
-    # Generate run name and update local_output_dir
-    if cfg.get("run_name") is not None and cfg.run_name:
-        run_name = _sanitize_run_name(str(cfg.run_name))
-    else:
-        # Generate name with hyphens instead of underscores
-        run_name = generate_name(style="underscore").replace("_", "-")
-        logger.info(f"Generated random run name: {run_name}")
-
-    # Generate timestamp
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-    # Create directory name: run_name_timestamp
-    run_dir_name = f"{run_name}_{timestamp}"
-
-    # Update local_output_dir to use the new run name
-    base_dir = Path(os.environ.get("HOME", "~")) / ".neuracore" / "training" / "runs"
-    cfg.local_output_dir = str(base_dir / run_dir_name)
-
-    logger.info(f"Training run directory: {cfg.local_output_dir}")
-
     # Print configuration
     logger.info("Training configuration:")
     logger.info(OmegaConf.to_yaml(cfg, resolve=True))
@@ -509,10 +530,13 @@ def main(cfg: DictConfig) -> None:
         )
     else:
         input_data_types = [DataType(data_type) for data_type in cfg.input_data_types]
-        input_robot_data_spec = {
-            robot_id: {data_type: [] for data_type in input_data_types}
-            for robot_id in dataset.robot_ids
-        }
+        input_robot_data_spec = {}
+        for robot_id in dataset.robot_ids:
+            robot_full_spec = dataset.get_full_data_spec(robot_id)
+            input_robot_data_spec[robot_id] = {
+                data_type: list(robot_full_spec.get(data_type.value, []))
+                for data_type in input_data_types
+            }
     if cfg.output_robot_data_spec is not None:
         if not isinstance(cfg.output_robot_data_spec, DictConfig):
             raise ValueError(
@@ -524,10 +548,13 @@ def main(cfg: DictConfig) -> None:
         )
     else:
         output_data_types = [DataType(data_type) for data_type in cfg.output_data_types]
-        output_robot_data_spec = {
-            robot_id: {data_type: [] for data_type in output_data_types}
-            for robot_id in dataset.robot_ids
-        }
+        output_robot_data_spec = {}
+        for robot_id in dataset.robot_ids:
+            robot_full_spec = dataset.get_full_data_spec(robot_id)
+            output_robot_data_spec[robot_id] = {
+                data_type: list(robot_full_spec.get(data_type.value, []))
+                for data_type in output_data_types
+            }
 
     batch_size = cfg.batch_size
 
@@ -552,6 +579,14 @@ def main(cfg: DictConfig) -> None:
     # Prepare data types for synchronization
     robot_data_spec = merge_robot_data_spec(
         input_robot_data_spec, output_robot_data_spec
+    )
+
+    # Save local metadata so CLI can inspect local runs without cloud access
+    _save_local_training_metadata(
+        cfg=cfg,
+        algorithm_name=algorithm_name,
+        input_robot_data_spec=input_robot_data_spec,
+        output_robot_data_spec=output_robot_data_spec,
     )
 
     synchronized_dataset = dataset.synchronize(
