@@ -182,6 +182,15 @@ class DirectPolicy(Policy):
         """
         if sync_point is None:
             sync_point = get_latest_sync_point()
+
+        # Filter sync point to only include data types the model expects as input
+        filtered_data = {
+            data_type: sync_point.data[data_type]
+            for data_type in self._policy.model_input_order.keys()
+            if data_type in sync_point.data
+        }
+        sync_point.data = filtered_data
+
         return self._policy(sync_point)
 
 
