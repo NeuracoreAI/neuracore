@@ -1,4 +1,10 @@
-"""Utility functions for robot data specifications."""
+"""Utility functions for robot data specifications.
+
+TODO: Consider moving these functions to neuracore_types/utils/ to avoid
+duplication with neuracore_backend/utils.py which has its own copy of
+merge_robot_data_spec. Both packages depend on neuracore_types, so it
+would be the natural home for these shared utilities.
+"""
 
 from neuracore_types import DataType, RobotDataSpec
 from ordered_set import OrderedSet
@@ -38,6 +44,7 @@ def merge_robot_data_spec(
 
     Order is preserved: data_spec_1's order takes priority, then data_spec_2's
     items are appended in their original order.
+
 
     Args:
         data_spec_1: First dictionary to merge (order takes priority).

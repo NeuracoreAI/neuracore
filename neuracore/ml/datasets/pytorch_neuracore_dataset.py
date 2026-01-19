@@ -12,8 +12,8 @@ import torch
 from neuracore_types import BatchedNCData, DataType, NCDataStats, RobotDataSpec
 from torch.utils.data import Dataset
 
+from neuracore.core.utils.robot_data_spec_utils import merge_robot_data_spec
 from neuracore.ml import BatchedTrainingSamples
-from neuracore.ml.utils.robot_data_spec_utils import merge_robot_data_spec
 
 logger = logging.getLogger(__name__)
 

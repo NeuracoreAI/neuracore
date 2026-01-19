@@ -17,27 +17,21 @@ import tempfile
 import time
 from pathlib import Path
 from subprocess import Popen
+from typing import TYPE_CHECKING
 
 import requests
-from neuracore_types import (
-    DATA_TYPE_TO_BATCHED_NC_DATA_CLASS,
-    BatchedNCData,
-    DataType,
-    SynchronizedPoint,
-)
+from neuracore_types import DataType, SynchronizedPoint
+
+if TYPE_CHECKING:
+    from neuracore_types import BatchedNCData
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.exceptions import InsufficientSynchronizedPointError
 from neuracore.core.get_latest_sync_point import get_latest_sync_point
 from neuracore.core.utils.download import download_with_progress
-from neuracore.core.utils.server import (
-    PING_ENDPOINT,
-    PREDICT_ENDPOINT,
-    SET_CHECKPOINT_ENDPOINT,
-)
 
 from .auth import get_auth
-from .const import API_URL
+from .const import API_URL, PING_ENDPOINT, PREDICT_ENDPOINT, SET_CHECKPOINT_ENDPOINT
 from .exceptions import EndpointError
 
 logger = logging.getLogger(__name__)
@@ -67,7 +61,7 @@ class Policy:
         self,
         sync_point: SynchronizedPoint | None = None,
         timeout: float = 5,
-    ) -> dict[DataType, dict[str, BatchedNCData]]:
+    ) -> dict[DataType, dict[str, "BatchedNCData"]]:
         """Get action predictions from the model.
 
         Sends robot sensor data to the model and receives action predictions.
@@ -81,7 +75,7 @@ class Policy:
                 sensor data. Raises error if timeout is reached without sufficient data.
 
         Returns:
-            Model predictions as dict[DataType, dict[str, BatchedNCData]].
+            Model predictions as dict[DataType, dict[str, "BatchedNCData"]].
 
         Raises:
             InsufficientSynchronizedPointError:
@@ -108,7 +102,7 @@ class Policy:
     def _predict(
         self,
         sync_point: SynchronizedPoint | None = None,
-    ) -> dict[DataType, dict[str, BatchedNCData]]:
+    ) -> dict[DataType, dict[str, "BatchedNCData"]]:
         """Internal get action predictions from the model.
 
         Sends robot sensor data to the model and receives action predictions.
@@ -120,7 +114,7 @@ class Policy:
                 creates a new sync point from the robot's current sensor data.
 
         Returns:
-            Model predictions as dict[DataType, dict[str, BatchedNCData]].
+            Model predictions as dict[DataType, dict[str, "BatchedNCData"]].
         """
         raise NotImplementedError(
             "Subclasses must implement the _predict method to run model inference."
@@ -173,14 +167,14 @@ class DirectPolicy(Policy):
     def _predict(
         self,
         sync_point: SynchronizedPoint | None = None,
-    ) -> dict[DataType, dict[str, BatchedNCData]]:
+    ) -> dict[DataType, dict[str, "BatchedNCData"]]:
         """Run direct model inference.
 
         Args:
             sync_point: Optional sync point. If None, creates from robot sensors.
 
         Returns:
-            Model predictions as dict[DataType, dict[str, BatchedNCData]].
+            Model predictions as dict[DataType, dict[str, "BatchedNCData"]].
 
         Raises:
             InsufficientSynchronizedPointError:
@@ -257,7 +251,7 @@ class ServerPolicy(Policy):
     def _predict(
         self,
         sync_point: SynchronizedPoint | None = None,
-    ) -> dict[DataType, dict[str, BatchedNCData]]:
+    ) -> dict[DataType, dict[str, "BatchedNCData"]]:
         """Get action predictions from the model endpoint.
 
         Sends robot sensor data to the model and receives action predictions.
@@ -276,6 +270,9 @@ class ServerPolicy(Policy):
                 If the sync point doesn't contain required data.
             ValueError: If payload size exceeds limits for remote endpoints.
         """
+        # Lazy import to avoid torch dependency at module load time
+        from neuracore_types import DATA_TYPE_TO_BATCHED_NC_DATA_CLASS
+
         if sync_point is None:
             sync_point = get_latest_sync_point()
         response = None

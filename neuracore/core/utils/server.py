@@ -15,13 +15,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from neuracore_types import BatchedNCDataUnion, DataType, SynchronizedPoint
 from pydantic import BaseModel
 
+from neuracore.core.const import (
+    PING_ENDPOINT,
+    PREDICT_ENDPOINT,
+    SET_CHECKPOINT_ENDPOINT,
+)
 from neuracore.core.exceptions import InsufficientSynchronizedPointError
 
 logger = logging.getLogger(__name__)
-
-PING_ENDPOINT = "/ping"
-PREDICT_ENDPOINT = "/predict"
-SET_CHECKPOINT_ENDPOINT = "/set_checkpoint"
 
 
 class CheckpointRequest(BaseModel):
