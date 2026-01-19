@@ -15,7 +15,7 @@ try:
         scan_used_bytes,
     )
 except ImportError:  # pragma: no cover
-    from neuracore.data_daemon.recording_disk_manager.storage_budget import (  # type: ignore[assignment]
+    from neuracore.data_daemon.recording_disk_manager.storage_budget import (  # type: ignore[assignment]  # noqa: E501
         StorageBudget,
         StoragePolicy,
         get_free_bytes,

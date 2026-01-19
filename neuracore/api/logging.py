@@ -706,8 +706,10 @@ def log_parallel_gripper_open_amount(
     )
     stream.log(parallel_gripper_open_amount_data)
     _publish_json_to_p2p(
-        robot, str_id, DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
-        parallel_gripper_open_amount_data
+        robot,
+        str_id,
+        DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        parallel_gripper_open_amount_data,
     )
 
 
@@ -790,8 +792,10 @@ def log_parallel_gripper_target_open_amount(
     )
     stream.log(parallel_gripper_target_open_amount_data)
     _publish_json_to_p2p(
-        robot, str_id, DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
-        parallel_gripper_target_open_amount_data
+        robot,
+        str_id,
+        DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+        parallel_gripper_target_open_amount_data,
     )
 
 

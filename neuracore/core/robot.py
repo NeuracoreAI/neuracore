@@ -17,14 +17,14 @@ from pathlib import Path
 from warnings import warn
 
 import requests
-from neuracore.data_daemon.communications_management.producer import (
-    RecordingContext as DaemonRecordingContext,
-)
 from neuracore_types import RobotInstanceIdentifier
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
+from neuracore.data_daemon.communications_management.producer import (
+    RecordingContext as DaemonRecordingContext,
+)
 
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
@@ -506,7 +506,9 @@ class Robot:
                 response.raise_for_status()
 
                 if response.json() == "WrongUser":
-                    raise RobotError("Cannot cancel recording initiated by another user")
+                    raise RobotError(
+                        "Cannot cancel recording initiated by another user"
+                    )
             except requests.exceptions.ConnectionError:
                 logger.warning(
                     "Failed to connect to server for cancel. "
@@ -515,7 +517,8 @@ class Robot:
             except requests.exceptions.RequestException as e:
                 logger.warning(
                     "Failed to cancel recording on server: %s. "
-                    "Stopping recording locally.", e
+                    "Stopping recording locally.",
+                    e,
                 )
 
         # Stop recording via daemon (works for both online and offline)

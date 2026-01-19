@@ -13,23 +13,21 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import requests
+from neuracore_types import DataType, RobotInstanceIdentifier
 
 import neuracore as nc
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
-from neuracore.core.exceptions import DatasetError, RobotError
-from neuracore.core.robot import Robot, _robots, _robot_name_id_mapping
-from neuracore_types import RobotInstanceIdentifier
+from neuracore.core.exceptions import DatasetError
+from neuracore.core.robot import Robot, _robot_name_id_mapping, _robots
 from neuracore.core.streaming.data_stream import (
     DataRecordingContext,
+    DepthDataStream,
     JsonDataStream,
     RGBDataStream,
-    DepthDataStream,
 )
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
-from neuracore_types import DataType
-
 
 # =============================================================================
 # FIXTURES
@@ -39,9 +37,7 @@ from neuracore_types import DataType
 @pytest.fixture
 def mock_daemon_producer():
     """Mock the neuracore_data_daemon Producer."""
-    with patch(
-        "neuracore.core.streaming.data_stream.Producer"
-    ) as mock_producer_class:
+    with patch("neuracore.core.streaming.data_stream.Producer") as mock_producer_class:
         mock_producer = MagicMock()
         mock_producer_class.return_value = mock_producer
         yield mock_producer
@@ -50,9 +46,7 @@ def mock_daemon_producer():
 @pytest.fixture
 def mock_daemon_recording_context():
     """Mock the DaemonRecordingContext for stop_recording."""
-    with patch(
-        "neuracore.core.robot.DaemonRecordingContext"
-    ) as mock_context_class:
+    with patch("neuracore.core.robot.DaemonRecordingContext") as mock_context_class:
         mock_context = MagicMock()
         mock_context_class.return_value = mock_context
         yield mock_context
@@ -278,9 +272,7 @@ class TestOfflineMode:
         GlobalSingleton()._active_dataset_name = "offline_dataset"
 
         # Start recording
-        recording_id = offline_robot.start_recording(
-            dataset_id=None, dataset_name="offline_dataset"
-        )
+        offline_robot.start_recording(dataset_id=None, dataset_name="offline_dataset")
 
         # Test logging - should not raise
         nc.log_joint_positions({"joint1": 0.5})
@@ -352,7 +344,7 @@ class TestOfflineMode:
         # Should not raise, just return local data
         # Note: This will fail if there's no data, but shouldn't raise RobotError
         try:
-            sync_point = get_latest_sync_point(include_remote=True)
+            get_latest_sync_point(include_remote=True)
         except (ValueError, AssertionError):
             # Expected if no data logged yet
             pass
