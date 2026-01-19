@@ -213,3 +213,11 @@ xyzrgb
 ylabel
 znear
 bigym
+EADDRINUSE
+wakelock
+WAKELOCK
+capsys
+calcsize
+metas
+addfinalizer
+RDEM
