@@ -81,9 +81,9 @@ class NeuracoreModel(nn.Module, ABC):
             ValueError: If any requested data type is not supported or not
                 available in the dataset
         """
-        req_input_data_types = set(self.model_init_description.input_data_types)
+        req_input_data_types = self.model_init_description.input_data_types
         types_in_dataset = set(self.model_init_description.dataset_statistics.keys())
-        input_types_supported_by_model = set(self.get_supported_input_data_types())
+        input_types_supported_by_model = self.get_supported_input_data_types()
 
         # Check if the requested input data types are in the dataset description
         if not req_input_data_types.issubset(types_in_dataset):
@@ -99,8 +99,8 @@ class NeuracoreModel(nn.Module, ABC):
                 f"{req_input_data_types - input_types_supported_by_model}"
             )
 
-        req_output_data_types = set(self.model_init_description.output_data_types)
-        outut_types_supported_by_model = set(self.get_supported_output_data_types())
+        req_output_data_types = self.model_init_description.output_data_types
+        outut_types_supported_by_model = self.get_supported_output_data_types()
 
         # Check if the requested output data types are supported by the model
         if not req_output_data_types.issubset(outut_types_supported_by_model):
