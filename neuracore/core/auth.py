@@ -95,10 +95,20 @@ class Auth(metaclass=SingletonMetaclass):
             config_manager.save_config()
 
         except requests.exceptions.ConnectionError:
-            raise AuthenticationError(
-                "Failed to connect to neuracore server, "
-                "please check your internet connection and try again."
-            )
+            config_manager = get_config_manager()
+            config = config_manager.config
+            if config.api_key is None:
+                raise AuthenticationError(
+                    "No API key provided. Set NEURACORE_API_KEY environment variable "
+                    "or provide api_key parameter."
+                )
+            if config.current_org_id is None:
+                raise AuthenticationError(
+                    "No organization ID in config. Please login online first to "
+                    "set up your organization."
+                )
+            self._access_token = None
+            return
         except requests.exceptions.RequestException:
             raise AuthenticationError(
                 "Could not verify API key. Please check your key and try again."
