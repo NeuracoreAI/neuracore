@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 import numpy as np
-from neuracore_data_daemon.communications_management.producer import Producer
+from neuracore.data_daemon.communications_management.producer import Producer
 from neuracore_types import CameraData, DataType, NCData
 
 logger = logging.getLogger(__name__)

@@ -49,8 +49,11 @@ setup(
         "psutil",
         "typer>=0.20.0",
         "neuracore-types>=4.3.0,<5.0.0",
-        "neuracore-data-daemon",
         "ordered_set",
+        # Dependencies from merged data_daemon:
+        "pyzmq==27.1.0",
+        "sqlalchemy>=2.0.0",
+        "pyee==13.0.0",
     ],
     extras_require={
         "examples": [
@@ -86,6 +89,7 @@ setup(
     entry_points={
         "console_scripts": [
             "neuracore = neuracore.core.cli.app:main",
+            "nc-data-daemon = neuracore.data_daemon.main:main",
         ]
     },
     keywords="robotics machine-learning ai client-library",
