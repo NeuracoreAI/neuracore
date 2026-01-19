@@ -17,6 +17,7 @@ from neuracore_types import (
     EndEffectorPoseData,
     JointData,
     LanguageData,
+    NCData,
     ParallelGripperOpenAmountData,
     PointCloudData,
     PoseData,
@@ -25,9 +26,10 @@ from neuracore_types import (
 from neuracore_types.utils import validate_safe_name
 
 from neuracore.api.core import _get_robot
-from neuracore.core.exceptions import RobotError
+from neuracore.api.globals import GlobalSingleton
 from neuracore.core.robot import Robot
 from neuracore.core.streaming.data_stream import (
+    DataRecordingContext,
     DataStream,
     DepthDataStream,
     JsonDataStream,
@@ -38,6 +40,58 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
 from neuracore.core.utils.depth_utils import MAX_DEPTH
+
+
+def _publish_json_to_p2p(
+    robot: Robot,
+    str_id: str,
+    data_type: DataType,
+    data: NCData,
+    sensor_key: str | None = None,
+) -> None:
+    """Publish JSON data to P2P streaming if robot is connected (online mode).
+
+    Args:
+        robot: Robot instance
+        str_id: Stream identifier
+        data_type: Type of data being published
+        data: Data to publish (must have model_dump method)
+        sensor_key: Optional sensor key (defaults to str_id)
+    """
+    if not robot.is_connected or robot.id is None:
+        return
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(str_id, data_type, sensor_key=sensor_key or str_id).publish(
+        data.model_dump(mode="json")
+    )
+
+
+def _publish_video_to_p2p(
+    robot: Robot,
+    name: str,
+    camera_type: DataType,
+    camera_data: CameraData,
+    frame: np.ndarray,
+) -> None:
+    """Publish video frame to P2P streaming if robot is connected (online mode).
+
+    Args:
+        robot: Robot instance
+        name: Camera name
+        camera_type: Type of camera (RGB_IMAGES or DEPTH_IMAGES)
+        camera_data: Camera metadata (without frame)
+        frame: Video frame as numpy array
+    """
+    if not robot.is_connected or robot.id is None:
+        return
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_video_source(name, camera_type, f"{name}_{camera_type}").add_frame(
+        camera_data, frame=frame
+    )
 
 
 class ExperimentalPointCloudWarning(UserWarning):
@@ -58,7 +112,15 @@ def start_stream(robot: Robot, data_stream: DataStream) -> None:
     """
     current_recording = robot.get_current_recording_id()
     if current_recording is not None and not data_stream.is_recording():
-        data_stream.start_recording(current_recording)
+        context = DataRecordingContext(
+            recording_id=current_recording,
+            robot_id=robot.id,
+            robot_name=robot.name,
+            robot_instance=robot.instance,
+            dataset_id=GlobalSingleton()._active_dataset_id,
+            dataset_name=GlobalSingleton()._active_dataset_name,
+        )
+        data_stream.start_recording(context)
 
 
 def _log_single_joint_data(
@@ -90,13 +152,7 @@ def _log_single_joint_data(
         joint_stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
     joint_stream.log(data=data)
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
-    StreamManagerOrchestrator().get_provider_manager(
-        robot.id, robot.instance
-    ).get_json_source(str_id, data_type, sensor_key=str_id).publish(
-        data.model_dump(mode="json")
-    )
+    _publish_json_to_p2p(robot, str_id, data_type, data)
 
 
 def _log_group_of_joint_data(
@@ -190,9 +246,6 @@ def _log_camera_data(
     storage_name = validate_safe_name(name)
     str_id = f"{camera_type.value}:{name}"
 
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
-
     # data streaming for bucket storage (lossless and lossy)
     stream = robot.get_data_stream(str_id)
     # create the stream if it doesn't exist
@@ -218,18 +271,8 @@ def _log_camera_data(
     # NOTE: we explicitly do not include the frame in the
     # camera_data_without_frame object to avoid serializing the frame to JSON
     # or having to make two copies for streaming and bucket storage.
-    camera_data_copy = camera_data_without_frame.model_copy()
     stream.log(camera_data_without_frame, frame=image)
-
-    # peer to peer (p2p) streaming
-    # NOTE: to avoid serializing the frame, we make another copy of the
-    # camera_data_without_frame object because stream.log modifies the object
-    # and adds the frame to it.
-    StreamManagerOrchestrator().get_provider_manager(
-        robot.id, robot.instance
-    ).get_video_source(name, camera_type, f"{name}_{camera_type}").add_frame(
-        camera_data_copy, frame=image
-    )
+    _publish_video_to_p2p(robot, name, camera_type, camera_data_without_frame, image)
 
 
 def log_custom_1d(
@@ -275,15 +318,7 @@ def log_custom_1d(
 
     custom_data = Custom1DData(timestamp=timestamp, data=data)
     stream.log(custom_data)
-
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
-
-    StreamManagerOrchestrator().get_provider_manager(
-        robot.id, robot.instance
-    ).get_json_source(str_id, DataType.CUSTOM_1D, sensor_key=str_id).publish(
-        custom_data.model_dump(mode="json")
-    )
+    _publish_json_to_p2p(robot, str_id, DataType.CUSTOM_1D, custom_data)
 
 
 def log_joint_positions(
@@ -564,15 +599,7 @@ def log_pose(
 
     pose_data = PoseData(timestamp=timestamp, pose=pose.tolist())
     stream.log(pose_data)
-
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
-
-    StreamManagerOrchestrator().get_provider_manager(
-        robot.id, robot.instance
-    ).get_json_source(str_id, DataType.POSES, sensor_key=str_id).publish(
-        pose_data.model_dump(mode="json")
-    )
+    _publish_json_to_p2p(robot, str_id, DataType.POSES, pose_data)
 
 
 def log_end_effector_pose(
@@ -629,15 +656,7 @@ def log_end_effector_pose(
 
     ee_pose_data = EndEffectorPoseData(timestamp=timestamp, pose=pose.tolist())
     stream.log(ee_pose_data)
-
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
-
-    StreamManagerOrchestrator().get_provider_manager(
-        robot.id, robot.instance
-    ).get_json_source(str_id, DataType.END_EFFECTOR_POSES, sensor_key=str_id).publish(
-        ee_pose_data.model_dump(mode="json")
-    )
+    _publish_json_to_p2p(robot, str_id, DataType.END_EFFECTOR_POSES, ee_pose_data)
 
 
 def log_parallel_gripper_open_amount(
@@ -686,14 +705,9 @@ def log_parallel_gripper_open_amount(
         timestamp=timestamp, open_amount=value
     )
     stream.log(parallel_gripper_open_amount_data)
-
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
-
-    StreamManagerOrchestrator().get_provider_manager(
-        robot.id, robot.instance
-    ).get_json_source(str_id, DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS, str_id).publish(
-        parallel_gripper_open_amount_data.model_dump(mode="json")
+    _publish_json_to_p2p(
+        robot, str_id, DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        parallel_gripper_open_amount_data
     )
 
 
@@ -775,16 +789,9 @@ def log_parallel_gripper_target_open_amount(
         timestamp=timestamp, open_amount=value
     )
     stream.log(parallel_gripper_target_open_amount_data)
-
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
-
-    StreamManagerOrchestrator().get_provider_manager(
-        robot.id, robot.instance
-    ).get_json_source(
-        str_id, DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS, str_id
-    ).publish(
-        parallel_gripper_target_open_amount_data.model_dump(mode="json")
+    _publish_json_to_p2p(
+        robot, str_id, DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+        parallel_gripper_target_open_amount_data
     )
 
 
@@ -856,15 +863,7 @@ def log_language(
 
     data = LanguageData(timestamp=timestamp, text=language)
     stream.log(data)
-
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
-
-    StreamManagerOrchestrator().get_provider_manager(
-        robot.id, robot.instance
-    ).get_json_source(str_id, DataType.LANGUAGE, sensor_key=str_id).publish(
-        data.model_dump(mode="json")
-    )
+    _publish_json_to_p2p(robot, str_id, DataType.LANGUAGE, data)
 
 
 def log_rgb(
@@ -1041,13 +1040,4 @@ def log_point_cloud(
         intrinsics=intrinsics,
     )
     stream.log(point_data)
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
-
-    json_data = point_data.model_dump(mode="json")
-    src = (
-        StreamManagerOrchestrator()
-        .get_provider_manager(robot.id, robot.instance)
-        .get_json_source(str_id, DataType.POINT_CLOUDS, sensor_key=str_id)
-    )
-    src.publish(json_data)
+    _publish_json_to_p2p(robot, str_id, DataType.POINT_CLOUDS, point_data)

@@ -49,6 +49,7 @@ setup(
         "psutil",
         "typer>=0.20.0",
         "neuracore-types>=4.3.0,<5.0.0",
+        "neuracore-data-daemon",
         "ordered_set",
     ],
     extras_require={
