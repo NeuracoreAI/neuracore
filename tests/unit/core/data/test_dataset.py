@@ -532,6 +532,37 @@ class TestDatasetCreation:
         assert dataset.is_shared is True
 
     @pytest.mark.usefixtures("mock_login")
+    def test_create_dataset_unauthorized_error_detail(self, dataset_model):
+        """Test dataset creation errors include backend details."""
+        mocked_org_id = "test-org-id"
+        error_detail = (
+            "User is not authorized to upload shared datasets. Uploading shared "
+            "data is a privileged action. Please email contact@neuracore.com to "
+            "request access."
+        )
+
+        with requests_mock.Mocker() as m:
+            m.get(
+                f"{API_URL}/org-management/my-orgs",
+                json=[{"org": {"id": mocked_org_id, "name": "test organization"}}],
+            )
+            m.get(
+                f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+                json={},
+                status_code=404,
+            )
+            m.post(
+                f"{API_URL}/org/{mocked_org_id}/datasets",
+                json={"detail": {"error": error_detail}},
+                status_code=403,
+            )
+
+            with pytest.raises(
+                DatasetError, match=f"Failed to create dataset: {error_detail}"
+            ):
+                Dataset.create("unauthorized_shared_dataset", shared=True)
+
+    @pytest.mark.usefixtures("mock_login")
     def test_create_with_special_characters_in_name(self, dataset_model):
         """Test creating a dataset with special characters in name."""
 

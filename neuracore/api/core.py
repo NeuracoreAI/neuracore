@@ -22,7 +22,8 @@ from neuracore.core.streaming.recording_state_manager import get_recording_state
 from neuracore.core.utils import backend_utils
 
 from ..core.auth import get_auth
-from ..core.exceptions import RobotError
+from ..core.data.dataset import Dataset
+from ..core.exceptions import DatasetError, RobotError
 from ..core.robot import Robot, get_robot
 from ..core.robot import init as _init_robot
 from .globals import GlobalSingleton
@@ -213,6 +214,26 @@ def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
     active_dataset_id = GlobalSingleton()._active_dataset_id
     if active_dataset_id is None:
         raise RobotError("No active dataset. Call create_dataset() first.")
+    try:
+        active_dataset = Dataset.get_by_id(active_dataset_id)
+    except DatasetError:
+        active_dataset = None
+    if active_dataset is not None:
+        if robot.shared and not active_dataset.is_shared:
+            raise RobotError(
+                "Shared robot cannot be used with a non-shared dataset. "
+                "If you requested a shared dataset, creation may have failed "
+                "because you are not authorized to upload shared datasets or "
+                "an existing non-shared dataset with the same name was reused. "
+                f"Active dataset: '{active_dataset.name}' ({active_dataset.id})."
+            )
+        if not robot.shared and active_dataset.is_shared:
+            raise RobotError(
+                "Non-shared robot cannot be used with a shared dataset. "
+                "Shared datasets require shared robots. If you requested a "
+                "shared robot, ensure connect_robot(shared=True) succeeded. "
+                f"Active dataset: '{active_dataset.name}' ({active_dataset.id})."
+            )
     robot.start_recording(active_dataset_id)
 
 
