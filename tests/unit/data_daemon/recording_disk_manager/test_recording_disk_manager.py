@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -11,28 +12,9 @@ from typing import Any
 import pytest
 from neuracore_types import DataType
 
+from neuracore.data_daemon.event_emitter import get_emitter
+from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.models import CompleteMessage
-
-
-class FakeEmitter:
-    def __init__(self) -> None:
-        self._handlers: dict[Any, list[Callable[..., Any]]] = {}
-
-    def on(self, event: Any, fn: Callable[..., Any] | None = None):
-        if fn is None:
-
-            def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
-                self._handlers.setdefault(event, []).append(f)
-                return f
-
-            return decorator
-
-        self._handlers.setdefault(event, []).append(fn)
-        return fn
-
-    def emit(self, event: Any, *args: Any, **kwargs: Any) -> None:
-        for fn in list(self._handlers.get(event, [])):
-            fn(*args, **kwargs)
 
 
 class FakeVideoTrace:
@@ -107,34 +89,25 @@ def _wait_for(pred: Callable[[], bool], timeout: float) -> bool:
 
 
 @pytest.fixture
-def fake_emitter(monkeypatch: pytest.MonkeyPatch) -> FakeEmitter:
-    from neuracore.data_daemon import event_emitter as event_emitter_module
-    from neuracore.data_daemon.recording_encoding_disk_manager import (
-        recording_disk_manager as rdm_module,
-    )
-    from neuracore.data_daemon.recording_encoding_disk_manager.lifecycle import (
-        encoder_manager as encoder_manager_module,
-    )
-    from neuracore.data_daemon.recording_encoding_disk_manager.lifecycle import (
-        trace_controller as trace_controller_module,
-    )
-    from neuracore.data_daemon.recording_encoding_disk_manager.workers import (
-        batch_encoder_worker as batch_encoder_worker_module,
-    )
-    from neuracore.data_daemon.recording_encoding_disk_manager.workers import (
-        raw_batch_writer as raw_batch_writer_module,
-    )
+def loop_manager() -> EventLoopManager:
+    """EventLoopManager instance for tests."""
+    import neuracore.data_daemon.event_emitter as em_module
 
-    fe = FakeEmitter()
+    em_module._emitter = None
 
-    monkeypatch.setattr(event_emitter_module, "emitter", fe, raising=False)
-    monkeypatch.setattr(rdm_module, "emitter", fe, raising=False)
-    monkeypatch.setattr(raw_batch_writer_module, "emitter", fe, raising=False)
-    monkeypatch.setattr(trace_controller_module, "emitter", fe, raising=False)
-    monkeypatch.setattr(batch_encoder_worker_module, "emitter", fe, raising=False)
-    monkeypatch.setattr(encoder_manager_module, "emitter", fe, raising=False)
+    # Create and start the loop manager (this initializes the real emitter)
+    manager = EventLoopManager()
+    manager.start()
+    yield manager
 
-    return fe
+    # Cleanup
+    if manager.is_running():
+        try:
+            manager.stop()
+        except RuntimeError:
+            pass
+
+    em_module._emitter = None
 
 
 @pytest.fixture
@@ -160,27 +133,38 @@ def rdm_module(monkeypatch: pytest.MonkeyPatch):
 @pytest.fixture
 def rdm_factory(
     tmp_path: Path,
-    fake_emitter: FakeEmitter,
     rdm_module,
+    loop_manager: EventLoopManager,
     request: pytest.FixtureRequest,
 ):
+    rdm_instances = []
+
     def _make(*, storage_limit: int | None, flush_bytes: int = 1):
         recordings_root = tmp_path / "recordings"
 
         rdm = rdm_module.RecordingDiskManager(
+            loop_manager=loop_manager,
             flush_bytes=flush_bytes,
             storage_limit_bytes=storage_limit,
             recordings_root=str(recordings_root),
         )
-        request.addfinalizer(rdm.shutdown)
+        rdm_instances.append(rdm)
 
         return rdm, recordings_root
 
-    return _make
+    yield _make
+
+    for rdm in rdm_instances:
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                rdm.shutdown(), loop_manager.general_loop
+            )
+            future.result(timeout=5.0)
+        except Exception:
+            pass
 
 
 def test_rdm_stop_recording_drops_future_messages(
-    fake_emitter: FakeEmitter,
     rdm_module,
     rdm_factory,
 ) -> None:
@@ -194,7 +178,9 @@ def test_rdm_stop_recording_drops_future_messages(
     written: list[tuple[str, int]] = []
     done = threading.Event()
 
-    @fake_emitter.on(Emitter.TRACE_WRITTEN)
+    emitter = get_emitter()
+
+    @emitter.on(Emitter.TRACE_WRITTEN)
     def on_written(tid: str, rid: str, bytes_written: int) -> None:
         if tid == trace_id:
             written.append((tid, bytes_written))
@@ -213,8 +199,9 @@ def test_rdm_stop_recording_drops_future_messages(
         )
     )
 
-    rdm.trace_message_queue.join()
-    fake_emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
+    # Wait for message to be processed
+    time.sleep(0.1)
+    emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
 
     assert done.wait(timeout=10.0) is True
 
@@ -235,8 +222,7 @@ def test_rdm_stop_recording_drops_future_messages(
             final_chunk=False,
         )
     )
-    rdm.trace_message_queue.join()
-    time.sleep(0.05)
+    time.sleep(0.15)
 
     after_files = sorted(p.name for p in trace_dir.rglob("*") if p.is_file())
     assert after_files == before_files
@@ -244,7 +230,6 @@ def test_rdm_stop_recording_drops_future_messages(
 
 
 def test_rdm_delete_trace_event_deletes_trace_dir(
-    fake_emitter: FakeEmitter,
     rdm_module,
     rdm_factory,
 ) -> None:
@@ -254,6 +239,8 @@ def test_rdm_delete_trace_event_deletes_trace_dir(
 
     recording_id = str(uuid.uuid4())
     trace_id = "elbow_joint"
+
+    emitter = get_emitter()
 
     rdm.enqueue(
         CompleteMessage.from_bytes(
@@ -268,13 +255,14 @@ def test_rdm_delete_trace_event_deletes_trace_dir(
         )
     )
 
-    rdm.trace_message_queue.join()
-    fake_emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
+    # Wait for message to be processed
+    time.sleep(0.1)
+    emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
 
     trace_dir = recordings_root / recording_id / "JOINT_POSITIONS" / trace_id
     assert _wait_for(lambda: trace_dir.exists(), timeout=5.0) is True
 
-    fake_emitter.emit(
+    emitter.emit(
         Emitter.DELETE_TRACE,
         recording_id,
         trace_id,
@@ -285,7 +273,6 @@ def test_rdm_delete_trace_event_deletes_trace_dir(
 
 
 def test_rdm_storage_limit_aborts_trace_and_emits_trace_written_zero(
-    fake_emitter: FakeEmitter,
     rdm_module,
     rdm_factory,
 ) -> None:
@@ -299,7 +286,9 @@ def test_rdm_storage_limit_aborts_trace_and_emits_trace_written_zero(
     written: list[tuple[str, int]] = []
     done = threading.Event()
 
-    @fake_emitter.on(Emitter.TRACE_WRITTEN)
+    emitter = get_emitter()
+
+    @emitter.on(Emitter.TRACE_WRITTEN)
     def on_written(tid: str, rid: str, bytes_written: int) -> None:
         if tid == trace_id:
             written.append((tid, bytes_written))
@@ -318,7 +307,7 @@ def test_rdm_storage_limit_aborts_trace_and_emits_trace_written_zero(
         )
     )
 
-    rdm.trace_message_queue.join()
+    # Wait for message to be processed
     assert done.wait(timeout=5.0) is True
 
     assert written[0] == (trace_id, 0)
@@ -328,7 +317,6 @@ def test_rdm_storage_limit_aborts_trace_and_emits_trace_written_zero(
 
 
 def test_rdm_encoder_creation_failure_aborts_one_trace_but_other_completes(
-    fake_emitter: FakeEmitter,
     monkeypatch: pytest.MonkeyPatch,
     rdm_module,
     rdm_factory,
@@ -363,7 +351,9 @@ def test_rdm_encoder_creation_failure_aborts_one_trace_but_other_completes(
     written: list[tuple[str, int]] = []
     done = threading.Event()
 
-    @fake_emitter.on(Emitter.TRACE_WRITTEN)
+    emitter = get_emitter()
+
+    @emitter.on(Emitter.TRACE_WRITTEN)
     def on_written(tid: str, rid: str, bytes_written: int) -> None:
         if tid in {bad_trace_id, good_trace_id}:
             written.append((tid, bytes_written))
@@ -397,8 +387,9 @@ def test_rdm_encoder_creation_failure_aborts_one_trace_but_other_completes(
         )
     )
 
-    rdm.trace_message_queue.join()
-    fake_emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
+    # Wait for messages to be processed
+    time.sleep(0.1)
+    emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
 
     assert done.wait(timeout=10.0) is True
 
@@ -409,5 +400,3 @@ def test_rdm_encoder_creation_failure_aborts_one_trace_but_other_completes(
     assert set(by_trace) == {bad_trace_id, good_trace_id}
     assert max(by_trace[bad_trace_id]) == 0
     assert max(by_trace[good_trace_id]) > 0
-
-    rdm.shutdown()

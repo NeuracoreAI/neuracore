@@ -25,7 +25,8 @@ from neuracore.data_daemon.const import (
     HEARTBEAT_TIMEOUT_SECS,
     TRACE_ID_FIELD_SIZE,
 )
-from neuracore.data_daemon.event_emitter import Emitter, emitter
+from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.models import (
     CommandType,
     CompleteMessage,
@@ -86,6 +87,7 @@ class Daemon:
         comm_manager: CommunicationsManager | None = None,
         *,
         config_manager: ConfigManager | None = None,
+        loop_manager: EventLoopManager | None = None,
     ) -> None:
         """Initializes the daemon.
 
@@ -111,6 +113,8 @@ class Daemon:
         """
         self.comm = comm_manager or CommunicationsManager()
         self.recording_disk_manager = recording_disk_manager
+        self.loop_manager = loop_manager or EventLoopManager()
+        # self.recording_disk_manager = RecordingDiskManager()
         self.channels: dict[str, ChannelState] = {}
         self._recording_traces: dict[str, set[str]] = {}
         self._trace_recordings: dict[str, str] = {}
@@ -124,7 +128,7 @@ class Daemon:
             CommandType.RECORDING_STOPPED: self._handle_recording_stopped,
         }
 
-        emitter.on(Emitter.TRACE_WRITTEN, self.cleanup_stopped_channels)
+        self._emitter = get_emitter()
 
     def run(self) -> None:
         """Run the daemon main loop.
@@ -544,7 +548,7 @@ class Daemon:
         payload = message.payload.get("recording_stopped", {})
         recording_id = str(payload.get("recording_id"))
         self._closed_recordings.add(recording_id)
-        emitter.emit(Emitter.STOP_RECORDING, recording_id)
+        self._emitter.emit(Emitter.STOP_RECORDING, recording_id)
 
     def cleanup_stopped_channels(
         self, trace_id: str, recording_id: str, bytes_written: int

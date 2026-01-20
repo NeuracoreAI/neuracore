@@ -201,29 +201,39 @@ _auth: AuthManager | None = None
 
 
 def initialize_auth(
-    daemon_config: DaemonConfig, config_path: Path | None = None
+    daemon_config: DaemonConfig | None = None, config_path: Path | None = None
 ) -> None:
     """Initialize the global AuthManager instance.
 
-    This should be called once during daemon startup with the main DaemonConfig.
+    This is called automatically by get_auth() if not already initialized.
+    Can also be called explicitly during daemon startup.
 
     Args:
-        daemon_config: The daemon's configuration instance.
+        daemon_config: Optional daemon configuration. If not provided,
+                      a default DaemonConfig is created.
         config_path: Optional path to config.json file.
     """
     global _auth
+
+    if daemon_config is None:
+        daemon_config = DaemonConfig()
+
     _auth = AuthManager(daemon_config=daemon_config, config_path=config_path)
+    logger.info("AuthManager initialized")
 
 
 def get_auth() -> AuthManager:
     """Get the global AuthManager singleton instance.
 
+    Automatically initializes auth if not already done, loading credentials
+    from the python frontend's config file.
+
     Returns:
         The global AuthManager instance used throughout the application.
-
-    Raises:
-        RuntimeError: If auth has not been initialized.
     """
     if _auth is None:
-        raise RuntimeError("AuthManager not initialized. Call initialize_auth() first.")
+        logger.debug("AuthManager not initialized, initializing now")
+        initialize_auth()
+
+    assert _auth is not None  # For mypy
     return _auth

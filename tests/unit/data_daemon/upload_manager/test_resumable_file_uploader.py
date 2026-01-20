@@ -5,20 +5,28 @@ Tests chunked file uploads, resumable sessions, retry logic, and error handling.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
+import aiohttp
 import pytest
-import requests
+import pytest_asyncio
 
 from neuracore.data_daemon.upload_management.resumable_file_uploader import (
     ResumableFileUploader,
 )
 
 
+@pytest_asyncio.fixture
+async def client_session():
+    session = aiohttp.ClientSession()
+    yield session
+    await session.close()
+
+
 @pytest.fixture
 def test_file(tmp_path: Path) -> Path:
-    """Create a 5MB test file."""
     test_file = tmp_path / "test_video.mp4"
     test_file.write_bytes(b"X" * (5 * 1024 * 1024))
     return test_file
@@ -26,7 +34,6 @@ def test_file(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def large_test_file(tmp_path: Path) -> Path:
-    """Create a 10MB test file."""
     test_file = tmp_path / "large_file.mp4"
     test_file.write_bytes(b"X" * (10 * 1024 * 1024))
     return test_file
@@ -34,7 +41,6 @@ def large_test_file(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def very_large_test_file(tmp_path: Path) -> Path:
-    """Create a 200MB test file for multi-chunk upload testing."""
     test_file = tmp_path / "very_large_file.mp4"
     test_file.write_bytes(b"X" * (200 * 1024 * 1024))
     return test_file
@@ -42,7 +48,6 @@ def very_large_test_file(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def mock_auth():
-    """Mock authentication."""
     with patch(
         "neuracore.data_daemon.upload_management.resumable_file_uploader.get_auth"
     ) as mock_get_auth:
@@ -54,21 +59,50 @@ def mock_auth():
 
 
 @pytest.fixture
-def uploader(test_file: Path, mock_auth) -> ResumableFileUploader:
-    """Create a basic ResumableFileUploader instance."""
+def uploader(
+    test_file: Path, mock_auth, client_session: aiohttp.ClientSession
+) -> ResumableFileUploader:
     return ResumableFileUploader(
         recording_id="rec-123",
         filepath=str(test_file),
         cloud_filepath="RGB_IMAGES/camera/trace.mp4",
         content_type="video/mp4",
+        client_session=client_session,
         bytes_uploaded=0,
     )
+
+
+class _MockAioHTTPResponse:
+    def __init__(self, *, status: int, json_data=None, exc: Exception | None = None):
+        self.status = status
+        self._json_data = json_data
+        self._exc = exc
+
+    async def __aenter__(self):
+        if self._exc is not None:
+            raise self._exc
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def raise_for_status(self) -> None:
+        if self.status >= 400:
+            raise aiohttp.ClientResponseError(
+                request_info=MagicMock(),
+                history=(),
+                status=self.status,
+                message="error",
+                headers={},
+            )
+
+    async def json(self):
+        return self._json_data
 
 
 def test_uploader_initializes_correctly(
     uploader: ResumableFileUploader, test_file: Path
 ) -> None:
-    """Test ResumableFileUploader initialization."""
     assert uploader._recording_id == "rec-123"
     assert uploader._filepath == str(test_file)
     assert uploader._cloud_filepath == "RGB_IMAGES/camera/trace.mp4"
@@ -76,40 +110,49 @@ def test_uploader_initializes_correctly(
     assert uploader._bytes_uploaded == 0
 
 
-def test_uploader_gets_session_uri(uploader: ResumableFileUploader) -> None:
-    """Test obtaining upload session URI from backend."""
-    with patch("requests.get") as mock_get:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "url": "https://storage.googleapis.com/upload/session/123"
-        }
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        session_uri = uploader._get_upload_session_uri()
-
+@pytest.mark.asyncio
+async def test_uploader_gets_session_uri(uploader: ResumableFileUploader) -> None:
+    with patch.object(
+        uploader._session,
+        "get",
+        return_value=_MockAioHTTPResponse(
+            status=200,
+            json_data={"url": "https://storage.googleapis.com/upload/session/123"},
+        ),
+    ) as mock_get:
+        session_uri = await uploader._get_upload_session_uri()
         assert session_uri == "https://storage.googleapis.com/upload/session/123"
-        mock_get.assert_called_once()
+        assert mock_get.call_count == 1
 
 
-def test_uploader_handles_successful_upload(uploader: ResumableFileUploader) -> None:
-    """Test successful file upload."""
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
+@pytest.mark.asyncio
+async def test_uploader_handles_successful_upload(
+    uploader: ResumableFileUploader,
+) -> None:
+    with patch.object(
+        uploader._session,
+        "get",
+        return_value=_MockAioHTTPResponse(
+            status=200, json_data={"url": "https://upload.url"}
+        ),
+    ):
+        with patch.object(
+            uploader._session,
+            "put",
+            return_value=_MockAioHTTPResponse(status=200),
+        ):
+            success, bytes_uploaded, error_message = await uploader.upload()
 
-        mock_put.return_value.status_code = 200
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is True
-        assert bytes_uploaded == 5 * 1024 * 1024
-        assert error_message is None
+    assert success is True
+    assert bytes_uploaded == 5 * 1024 * 1024
+    assert error_message is None
 
 
-def test_uploader_tracks_progress_with_callback(test_file: Path, mock_auth) -> None:
-    """Test progress callback is called with byte deltas."""
-    progress_updates = []
+@pytest.mark.asyncio
+async def test_uploader_tracks_progress_with_callback(
+    test_file: Path, mock_auth, client_session: aiohttp.ClientSession
+) -> None:
+    progress_updates: list[int] = []
 
     def progress_callback(bytes_delta: int) -> None:
         progress_updates.append(bytes_delta)
@@ -119,199 +162,263 @@ def test_uploader_tracks_progress_with_callback(test_file: Path, mock_auth) -> N
         filepath=str(test_file),
         cloud_filepath="RGB_IMAGES/camera/trace.mp4",
         content_type="video/mp4",
+        client_session=client_session,
         progress_callback=progress_callback,
     )
 
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
+    with patch.object(
+        uploader._session,
+        "get",
+        return_value=_MockAioHTTPResponse(
+            status=200, json_data={"url": "https://upload.url"}
+        ),
+    ):
+        with patch.object(
+            uploader._session,
+            "put",
+            return_value=_MockAioHTTPResponse(status=200),
+        ):
+            await uploader.upload()
 
-        mock_put.return_value.status_code = 200
-
-        uploader.upload()
-
-        assert len(progress_updates) > 0
-        assert sum(progress_updates) == 5 * 1024 * 1024
+    assert len(progress_updates) > 0
+    assert sum(progress_updates) == 5 * 1024 * 1024
 
 
-def test_uploader_resumes_from_offset(large_test_file: Path, mock_auth) -> None:
-    """Test resuming upload from a specific offset."""
+@pytest.mark.asyncio
+async def test_uploader_resumes_from_offset(
+    large_test_file: Path, mock_auth, client_session: aiohttp.ClientSession
+) -> None:
     uploader = ResumableFileUploader(
         recording_id="rec-123",
         filepath=str(large_test_file),
         cloud_filepath="RGB_IMAGES/camera/trace.mp4",
         content_type="video/mp4",
+        client_session=client_session,
         bytes_uploaded=5 * 1024 * 1024,
     )
 
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
+    with patch.object(
+        uploader._session,
+        "get",
+        return_value=_MockAioHTTPResponse(
+            status=200, json_data={"url": "https://upload.url"}
+        ),
+    ):
+        with patch.object(
+            uploader._session,
+            "put",
+            return_value=_MockAioHTTPResponse(status=200),
+        ) as mock_put:
+            success, bytes_uploaded, error_message = await uploader.upload()
 
-        mock_put.return_value.status_code = 200
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is True
-        assert bytes_uploaded == 10 * 1024 * 1024
-
-        first_put_call = mock_put.call_args_list[0]
-        content_range = first_put_call[1]["headers"]["Content-Range"]
-        assert content_range.startswith("bytes 5242880-")
-
-
-def test_uploader_handles_session_expiration(uploader: ResumableFileUploader) -> None:
-    """Test handling of 410 Gone (session expiration)."""
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.side_effect = [
-            {"url": "https://upload.url/session1"},
-            {"url": "https://upload.url/session2"},
-        ]
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        mock_put.return_value.status_code = 410
-        mock_put.side_effect = [
-            MagicMock(status_code=410),  # Session expired
-            MagicMock(status_code=200),  # Success with new session
-        ]
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is True
-        assert mock_get.call_count == 2
+    assert success is True
+    assert bytes_uploaded == 10 * 1024 * 1024
+    first_put_call = mock_put.call_args_list[0]
+    content_range = first_put_call.kwargs["headers"]["Content-Range"]
+    assert content_range.startswith("bytes 5242880-")
 
 
-def test_uploader_handles_network_error(uploader: ResumableFileUploader) -> None:
-    """Test handling of network connection errors."""
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
+@pytest.mark.asyncio
+async def test_uploader_handles_session_expiration(
+    uploader: ResumableFileUploader,
+) -> None:
+    with patch.object(
+        uploader._session,
+        "get",
+        side_effect=[
+            _MockAioHTTPResponse(
+                status=200, json_data={"url": "https://upload.url/session1"}
+            ),
+            _MockAioHTTPResponse(
+                status=200, json_data={"url": "https://upload.url/session2"}
+            ),
+        ],
+    ) as mock_get:
+        with patch.object(
+            uploader._session,
+            "put",
+            side_effect=[
+                _MockAioHTTPResponse(status=410),
+                _MockAioHTTPResponse(status=200),
+            ],
+        ):
+            success, bytes_uploaded, error_message = await uploader.upload()
 
-        # Mock network error
-        mock_put.side_effect = requests.exceptions.ConnectionError("Network error")
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is False
-        assert "Network connection error" in error_message
+    assert success is True
+    assert mock_get.call_count == 2
 
 
-def test_uploader_handles_file_not_found(mock_auth) -> None:
-    """Test handling when file doesn't exist."""
+@pytest.mark.asyncio
+async def test_uploader_handles_network_error(uploader: ResumableFileUploader) -> None:
+    with patch.object(
+        uploader._session,
+        "get",
+        return_value=_MockAioHTTPResponse(
+            status=200, json_data={"url": "https://upload.url"}
+        ),
+    ):
+        with patch.object(
+            uploader._session,
+            "put",
+            return_value=_MockAioHTTPResponse(
+                status=0, exc=aiohttp.ClientConnectorError(MagicMock(), OSError("boom"))
+            ),
+        ):
+            success, bytes_uploaded, error_message = await uploader.upload()
+
+    assert success is False
+    assert error_message is not None
+    assert "Network connection error" in error_message
+
+
+@pytest.mark.asyncio
+async def test_uploader_handles_file_not_found(
+    mock_auth, client_session: aiohttp.ClientSession
+) -> None:
     uploader = ResumableFileUploader(
         recording_id="rec-123",
         filepath="/nonexistent/file.mp4",
         cloud_filepath="RGB_IMAGES/camera/trace.mp4",
         content_type="video/mp4",
+        client_session=client_session,
     )
 
     with pytest.raises(FileNotFoundError):
-        uploader.upload()
+        await uploader.upload()
 
 
-def test_uploader_retries_on_timeout(uploader: ResumableFileUploader) -> None:
-    """Test retry logic on timeout errors."""
-    with (
-        patch("requests.get") as mock_get,
-        patch("requests.put") as mock_put,
-        patch("time.sleep"),
+@pytest.mark.asyncio
+async def test_uploader_retries_on_timeout(uploader: ResumableFileUploader) -> None:
+    with patch.object(
+        uploader._session,
+        "get",
+        return_value=_MockAioHTTPResponse(
+            status=200, json_data={"url": "https://upload.url"}
+        ),
     ):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
+        with patch.object(
+            uploader._session,
+            "put",
+            side_effect=[
+                _MockAioHTTPResponse(status=0, exc=asyncio.TimeoutError()),
+                _MockAioHTTPResponse(status=0, exc=asyncio.TimeoutError()),
+                _MockAioHTTPResponse(status=200),
+            ],
+        ) as mock_put:
 
-        mock_put.side_effect = [
-            requests.exceptions.Timeout("Timeout"),
-            requests.exceptions.Timeout("Timeout"),
-            MagicMock(status_code=200),
-        ]
+            async def _sleep(_: float) -> None:
+                return None
 
-        success, bytes_uploaded, error_message = uploader.upload()
+            with patch("asyncio.sleep", side_effect=_sleep):
+                success, bytes_uploaded, error_message = await uploader.upload()
 
-        assert success is True
-        assert mock_put.call_count == 3
-
-
-def test_uploader_fails_after_max_retries(uploader: ResumableFileUploader) -> None:
-    """Test upload fails after MAX_RETRIES attempts."""
-    with (
-        patch("requests.get") as mock_get,
-        patch("requests.put") as mock_put,
-        patch("time.sleep"),
-    ):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        mock_put.side_effect = requests.exceptions.Timeout("Timeout")
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is False
-        assert "failed after" in error_message
-        assert mock_put.call_count == ResumableFileUploader.MAX_RETRIES
+    assert success is True
+    assert mock_put.call_count == 3
 
 
-def test_uploader_handles_http_errors(uploader: ResumableFileUploader) -> None:
-    """Test handling of HTTP error responses."""
-    with (
-        patch("requests.get") as mock_get,
-        patch("requests.put") as mock_put,
-        patch("time.sleep"),
-    ):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        mock_put.return_value.status_code = 500
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is False
-        assert "failed after" in error_message
-
-
-def test_uploader_sets_correct_content_range_headers(
+@pytest.mark.asyncio
+async def test_uploader_fails_after_max_retries(
     uploader: ResumableFileUploader,
 ) -> None:
-    """Test Content-Range headers are set correctly."""
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
+    with patch.object(
+        uploader._session,
+        "get",
+        return_value=_MockAioHTTPResponse(
+            status=200, json_data={"url": "https://upload.url"}
+        ),
+    ):
+        with patch.object(
+            uploader._session,
+            "put",
+            side_effect=[_MockAioHTTPResponse(status=0, exc=asyncio.TimeoutError())]
+            * ResumableFileUploader.MAX_RETRIES,
+        ) as mock_put:
 
-        mock_put.return_value.status_code = 200
+            async def _sleep(_: float) -> None:
+                return None
 
-        uploader.upload()
+            with patch("asyncio.sleep", side_effect=_sleep):
+                success, bytes_uploaded, error_message = await uploader.upload()
 
-        last_put_call = mock_put.call_args_list[-1]
-        headers = last_put_call[1]["headers"]
-        content_range = headers["Content-Range"]
+    assert success is False
+    assert error_message is not None
+    assert "failed after" in error_message
+    assert mock_put.call_count == ResumableFileUploader.MAX_RETRIES
 
-        assert content_range.endswith(f"/{5 * 1024 * 1024}")
+
+@pytest.mark.asyncio
+async def test_uploader_handles_http_errors(uploader: ResumableFileUploader) -> None:
+    with patch.object(
+        uploader._session,
+        "get",
+        return_value=_MockAioHTTPResponse(
+            status=200, json_data={"url": "https://upload.url"}
+        ),
+    ):
+        with patch.object(
+            uploader._session,
+            "put",
+            return_value=_MockAioHTTPResponse(status=500),
+        ):
+
+            async def _sleep(_: float) -> None:
+                return None
+
+            with patch("asyncio.sleep", side_effect=_sleep):
+                success, bytes_uploaded, error_message = await uploader.upload()
+
+    assert success is False
+    assert error_message is not None
+    assert "failed after" in error_message
 
 
-def test_uploader_handles_session_uri_fetch_failure(
+@pytest.mark.asyncio
+async def test_uploader_sets_correct_content_range_headers(
     uploader: ResumableFileUploader,
 ) -> None:
-    """Test handling when fetching session URI fails."""
-    with patch("requests.get") as mock_get:
-        # Mock session URI fetch failure
-        mock_get.side_effect = requests.exceptions.RequestException("API Error")
+    with patch.object(
+        uploader._session,
+        "get",
+        return_value=_MockAioHTTPResponse(
+            status=200, json_data={"url": "https://upload.url"}
+        ),
+    ):
+        with patch.object(
+            uploader._session,
+            "put",
+            return_value=_MockAioHTTPResponse(status=200),
+        ) as mock_put:
+            await uploader.upload()
 
-        success, bytes_uploaded, error_message = uploader.upload()
+    last_put_call = mock_put.call_args_list[-1]
+    headers = last_put_call.kwargs["headers"]
+    content_range = headers["Content-Range"]
+    assert content_range.endswith(f"/{5 * 1024 * 1024}")
 
-        assert success is False
-        assert "Failed to get upload session URI" in error_message
+
+@pytest.mark.asyncio
+async def test_uploader_handles_session_uri_fetch_failure(
+    uploader: ResumableFileUploader,
+) -> None:
+    with patch.object(
+        uploader._session,
+        "get",
+        return_value=_MockAioHTTPResponse(
+            status=0, exc=aiohttp.ClientError("API Error")
+        ),
+    ):
+        success, bytes_uploaded, error_message = await uploader.upload()
+
+    assert success is False
+    assert error_message is not None
+    assert "Failed to get upload session URI" in error_message
 
 
-def test_uploader_handles_large_file(very_large_test_file: Path, mock_auth) -> None:
-    """Test uploading large file (multiple chunks)."""
-    progress_updates = []
+@pytest.mark.asyncio
+async def test_uploader_handles_large_file(
+    very_large_test_file: Path, mock_auth, client_session: aiohttp.ClientSession
+) -> None:
+    progress_updates: list[int] = []
 
     def progress_callback(bytes_delta: int) -> None:
         progress_updates.append(bytes_delta)
@@ -321,50 +428,59 @@ def test_uploader_handles_large_file(very_large_test_file: Path, mock_auth) -> N
         filepath=str(very_large_test_file),
         cloud_filepath="RGB_IMAGES/camera/trace.mp4",
         content_type="video/mp4",
+        client_session=client_session,
         progress_callback=progress_callback,
     )
 
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        # Mock session URI
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        def mock_put_response(*args, **kwargs):
-            if mock_put.call_count < 4:
-                return MagicMock(status_code=308)
-            return MagicMock(status_code=200)
-
-        mock_put.side_effect = mock_put_response
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is True
-        assert bytes_uploaded == 200 * 1024 * 1024
-        assert len(progress_updates) == 4
-        assert sum(progress_updates) == 200 * 1024 * 1024
-
-
-def test_uploader_exponential_backoff(uploader: ResumableFileUploader) -> None:
-    """Test exponential backoff between retries."""
-    with (
-        patch("requests.get") as mock_get,
-        patch("requests.put") as mock_put,
-        patch("time.sleep") as mock_sleep,
+    with patch.object(
+        uploader._session,
+        "get",
+        return_value=_MockAioHTTPResponse(
+            status=200, json_data={"url": "https://upload.url"}
+        ),
     ):
-        # Mock session URI
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
 
-        # Mock timeouts then success
-        mock_put.side_effect = [
-            requests.exceptions.Timeout("Timeout"),
-            requests.exceptions.Timeout("Timeout"),
-            MagicMock(status_code=200),
-        ]
+        def put_side_effect(*args, **kwargs):
+            if put_side_effect.calls < 3:
+                put_side_effect.calls += 1
+                return _MockAioHTTPResponse(status=308)
+            return _MockAioHTTPResponse(status=200)
 
-        uploader.upload()
+        put_side_effect.calls = 0
 
-        sleep_calls = [call(1), call(2)]
-        mock_sleep.assert_has_calls(sleep_calls)
+        with patch.object(uploader._session, "put", side_effect=put_side_effect):
+            success, bytes_uploaded, error_message = await uploader.upload()
+
+    assert success is True
+    assert bytes_uploaded == 200 * 1024 * 1024
+    assert len(progress_updates) == 4
+    assert sum(progress_updates) == 200 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_uploader_exponential_backoff(uploader: ResumableFileUploader) -> None:
+    with patch.object(
+        uploader._session,
+        "get",
+        return_value=_MockAioHTTPResponse(
+            status=200, json_data={"url": "https://upload.url"}
+        ),
+    ):
+        with patch.object(
+            uploader._session,
+            "put",
+            side_effect=[
+                _MockAioHTTPResponse(status=0, exc=asyncio.TimeoutError()),
+                _MockAioHTTPResponse(status=0, exc=asyncio.TimeoutError()),
+                _MockAioHTTPResponse(status=200),
+            ],
+        ):
+            sleep_calls: list[float] = []
+
+            async def _sleep(t: float) -> None:
+                sleep_calls.append(t)
+
+            with patch("asyncio.sleep", side_effect=_sleep):
+                await uploader.upload()
+
+    assert sleep_calls[:2] == [1, 2]

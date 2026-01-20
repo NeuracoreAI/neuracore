@@ -4,12 +4,12 @@ This module provides a file uploader that handles chunked uploads to cloud
 storage with crash recovery and retry logic.
 """
 
+import asyncio
 import logging
-import time
 from collections.abc import Callable
 from pathlib import Path
 
-import requests
+import aiohttp
 
 from neuracore.data_daemon.auth_management.auth_manager import get_auth
 from neuracore.data_daemon.const import API_URL
@@ -34,6 +34,7 @@ class ResumableFileUploader:
         filepath: str,
         cloud_filepath: str,
         content_type: str,
+        client_session: aiohttp.ClientSession,
         bytes_uploaded: int = 0,
         progress_callback: Callable[[int], None] | None = None,
     ) -> None:
@@ -44,6 +45,7 @@ class ResumableFileUploader:
             filepath: Local filesystem path to file
             cloud_filepath: Cloud storage path
             content_type: MIME type
+            client_session: aiohttp ClientSession for HTTP requests
             bytes_uploaded: Starting offset for resume
             progress_callback: Called after each chunk to report progress
         """
@@ -51,13 +53,14 @@ class ResumableFileUploader:
         self._filepath = filepath
         self._cloud_filepath = cloud_filepath
         self._content_type = content_type
+        self._session = client_session
         self._bytes_uploaded = bytes_uploaded
         self._progress_callback = progress_callback
 
         self._session_uri: str | None = None
         self._total_bytes = 0
 
-    def _get_upload_session_uri(self) -> str:
+    async def _get_upload_session_uri(self) -> str:
         """Get a resumable upload session URI from the backend.
 
         Makes an API call to obtain a resumable upload session URL from
@@ -67,7 +70,7 @@ class ResumableFileUploader:
             The resumable upload session URI from Google Cloud Storage.
 
         Raises:
-            requests.HTTPError: If the API request fails.
+            aiohttp.ClientError: If the API request fails.
         """
         params = {
             "filepath": self._cloud_filepath,
@@ -77,17 +80,18 @@ class ResumableFileUploader:
         auth = get_auth()
         org_id = auth.get_org_id()
 
-        response = requests.get(
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with self._session.get(
             f"{API_URL}/org/{org_id}/recording/{self._recording_id}/resumable_upload_url",
             params=params,
             headers=auth.get_headers(),
-            timeout=30,
-        )
+            timeout=timeout,
+        ) as response:
+            response.raise_for_status()
+            data = await response.json()
+            return data["url"]
 
-        response.raise_for_status()
-        return response.json()["url"]
-
-    def upload(self) -> tuple[bool, int, str | None]:
+    async def upload(self) -> tuple[bool, int, str | None]:
         """Upload the file with resumable chunks.
 
         Reads the file from disk starting at the bytes_uploaded offset and
@@ -114,14 +118,14 @@ class ResumableFileUploader:
 
         # Get upload session URI
         try:
-            self._session_uri = self._get_upload_session_uri()
-        except requests.RequestException as e:
+            self._session_uri = await self._get_upload_session_uri()
+        except aiohttp.ClientError as e:
             error_msg = f"Failed to get upload session URI: {e}"
             logger.error(error_msg)
             return (False, self._bytes_uploaded, error_msg)
 
         # Upload file in chunks
-        success, error_message = self._upload_file_in_chunks()
+        success, error_message = await self._upload_file_in_chunks()
 
         if success:
             logger.info(
@@ -136,7 +140,7 @@ class ResumableFileUploader:
             )
             return (False, self._bytes_uploaded, error_message)
 
-    def _upload_file_in_chunks(self) -> tuple[bool, str | None]:
+    async def _upload_file_in_chunks(self) -> tuple[bool, str | None]:
         """Read file from disk and upload in chunks.
 
         Opens the file, seeks to the resume point, and uploads remaining
@@ -165,7 +169,7 @@ class ResumableFileUploader:
                     is_final = (chunk_end + 1) >= self._total_bytes
 
                     # Upload chunk with retry logic
-                    success, error_msg = self._upload_chunk(
+                    success, error_msg = await self._upload_chunk(
                         chunk, chunk_start, chunk_end, is_final
                     )
 
@@ -192,7 +196,7 @@ class ResumableFileUploader:
             logger.error(error_msg)
             return (False, error_msg)
 
-    def _upload_chunk(
+    async def _upload_chunk(
         self,
         data: bytes,
         chunk_start: int,
@@ -231,36 +235,35 @@ class ResumableFileUploader:
                 if self._session_uri is None:
                     return (False, "No upload session URI available")
 
-                response = requests.put(
+                timeout = aiohttp.ClientTimeout(total=300)  # 5 minutes
+                async with self._session.put(
                     self._session_uri,
                     headers=headers,
                     data=data,
-                    timeout=300,  # 5 minutes
-                )
+                    timeout=timeout,
+                ) as response:
+                    status_code = response.status
 
-                status_code = response.status_code
+                    if status_code in (200, 201, 308):
+                        return (True, None)
+                    elif status_code == 410:
+                        # Session expired - get new session
+                        logger.info("Upload session expired, obtaining new session")
+                        self._session_uri = await self._get_upload_session_uri()
+                        continue
+                    else:
+                        logger.warning(
+                            f"Upload chunk failed "
+                            f"(attempt {attempt + 1}/{self.MAX_RETRIES}): "
+                            f"HTTP {status_code}"
+                        )
 
-                if status_code in (200, 201, 308):
-                    return (True, None)
-                elif status_code == 410:
-                    # Session expired - get new session
-                    logger.info("Upload session expired, obtaining new session")
-                    self._session_uri = self._get_upload_session_uri()
-                    continue
-                else:
-                    # Other error
-                    logger.warning(
-                        f"Upload chunk failed "
-                        f"(attempt {attempt + 1}/{self.MAX_RETRIES}): "
-                        f"HTTP {status_code}"
-                    )
-
-            except requests.exceptions.ConnectionError as e:
+            except aiohttp.ClientConnectorError as e:
                 logger.warning(f"Network connection error (attempt {attempt + 1})")
                 # Network error - don't retry
                 return (False, f"Network connection error: {e}")
 
-            except requests.exceptions.Timeout:
+            except asyncio.TimeoutError:
                 logger.warning(f"Upload chunk timeout (attempt {attempt + 1})")
 
             except Exception as e:
@@ -268,7 +271,7 @@ class ResumableFileUploader:
                 return (False, f"Unexpected error: {e}")
 
             if attempt < self.MAX_RETRIES - 1:
-                time.sleep(2**attempt)
+                await asyncio.sleep(2**attempt)
 
         error_msg = f"Upload chunk failed after {self.MAX_RETRIES} attempts"
         logger.error(error_msg)

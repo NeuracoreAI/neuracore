@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 
 from neuracore.data_daemon.models import (
@@ -19,23 +20,23 @@ SECONDARY_DATA_TYPE = DATA_TYPES[1] if len(DATA_TYPES) > 1 else DATA_TYPES[0]
 ROBOT_INSTANCE = 1
 
 
-@pytest.fixture
-def store(tmp_path: Path) -> SqliteStateStore:
-    return SqliteStateStore(tmp_path / "state.db")
+@pytest_asyncio.fixture
+async def store(tmp_path: Path) -> SqliteStateStore:
+    store = SqliteStateStore(tmp_path / "state.db")
+    await store.init_async_store()
+    return store
 
 
-def _get_trace_row(store: SqliteStateStore, trace_id: str) -> dict | None:
-    with store._engine.begin() as conn:
-        row = (
-            conn.execute(select(traces).where(traces.c.trace_id == trace_id))
-            .mappings()
-            .first()
-        )
+async def _get_trace_row(store: SqliteStateStore, trace_id: str) -> dict | None:
+    async with store._engine.begin() as conn:
+        result = await conn.execute(select(traces).where(traces.c.trace_id == trace_id))
+        row = result.mappings().first()
         return dict(row) if row else None
 
 
-def test_create_trace_inserts_row(store: SqliteStateStore) -> None:
-    store.create_trace(
+@pytest.mark.asyncio
+async def test_create_trace_inserts_row(store: SqliteStateStore) -> None:
+    await store.create_trace(
         "trace-1",
         "rec-1",
         PRIMARY_DATA_TYPE,
@@ -45,7 +46,7 @@ def test_create_trace_inserts_row(store: SqliteStateStore) -> None:
         robot_instance=ROBOT_INSTANCE,
     )
 
-    row = _get_trace_row(store, "trace-1")
+    row = await _get_trace_row(store, "trace-1")
     assert row is not None
     assert row["trace_id"] == "trace-1"
     assert row["recording_id"] == "rec-1"
@@ -60,8 +61,9 @@ def test_create_trace_inserts_row(store: SqliteStateStore) -> None:
     assert row["robot_instance"] == ROBOT_INSTANCE
 
 
-def test_create_trace_updates_existing(store: SqliteStateStore) -> None:
-    store.create_trace(
+@pytest.mark.asyncio
+async def test_create_trace_updates_existing(store: SqliteStateStore) -> None:
+    await store.create_trace(
         "trace-2",
         "rec-1",
         PRIMARY_DATA_TYPE,
@@ -70,7 +72,7 @@ def test_create_trace_updates_existing(store: SqliteStateStore) -> None:
         total_bytes=10,
         robot_instance=ROBOT_INSTANCE,
     )
-    store.create_trace(
+    await store.create_trace(
         "trace-2",
         "rec-2",
         SECONDARY_DATA_TYPE,
@@ -80,7 +82,7 @@ def test_create_trace_updates_existing(store: SqliteStateStore) -> None:
         robot_instance=ROBOT_INSTANCE,
     )
 
-    row = _get_trace_row(store, "trace-2")
+    row = await _get_trace_row(store, "trace-2")
     assert row is not None
     assert row["recording_id"] == "rec-2"
     assert row["data_type"] == SECONDARY_DATA_TYPE
@@ -89,8 +91,9 @@ def test_create_trace_updates_existing(store: SqliteStateStore) -> None:
     assert row["status"] == TraceStatus.PENDING
 
 
-def test_update_bytes_uploaded_accumulates(store: SqliteStateStore) -> None:
-    store.create_trace(
+@pytest.mark.asyncio
+async def test_update_bytes_uploaded_accumulates(store: SqliteStateStore) -> None:
+    await store.create_trace(
         "trace-3",
         "rec-3",
         PRIMARY_DATA_TYPE,
@@ -99,17 +102,20 @@ def test_update_bytes_uploaded_accumulates(store: SqliteStateStore) -> None:
         robot_instance=ROBOT_INSTANCE,
     )
 
-    store.update_bytes_uploaded("trace-3", 5)
-    row = _get_trace_row(store, "trace-3")
-    assert row["bytes_uploaded"] == 5
-    store.update_bytes_uploaded("trace-3", 7)
-    row = _get_trace_row(store, "trace-3")
-    assert row["bytes_uploaded"] == 7
+    await store.update_bytes_uploaded("trace-3", 5)
+    row = await _get_trace_row(store, "trace-3")
     assert row is not None
+    assert row["bytes_uploaded"] == 5
+
+    await store.update_bytes_uploaded("trace-3", 7)
+    row = await _get_trace_row(store, "trace-3")
+    assert row is not None
+    assert row["bytes_uploaded"] == 7
 
 
-def test_update_status_sets_error(store: SqliteStateStore) -> None:
-    store.create_trace(
+@pytest.mark.asyncio
+async def test_update_status_sets_error(store: SqliteStateStore) -> None:
+    await store.create_trace(
         "trace-4",
         "rec-4",
         PRIMARY_DATA_TYPE,
@@ -118,17 +124,18 @@ def test_update_status_sets_error(store: SqliteStateStore) -> None:
         robot_instance=ROBOT_INSTANCE,
     )
 
-    store.update_status("trace-4", TraceStatus.WRITTEN)
-    store.update_status("trace-4", TraceStatus.FAILED, error_message="boom")
+    await store.update_status("trace-4", TraceStatus.WRITTEN)
+    await store.update_status("trace-4", TraceStatus.FAILED, error_message="boom")
 
-    row = _get_trace_row(store, "trace-4")
+    row = await _get_trace_row(store, "trace-4")
     assert row is not None
     assert row["status"] == TraceStatus.FAILED
     assert row["error_message"] == "boom"
 
 
-def test_record_error_sets_code_and_status(store: SqliteStateStore) -> None:
-    store.create_trace(
+@pytest.mark.asyncio
+async def test_record_error_sets_code_and_status(store: SqliteStateStore) -> None:
+    await store.create_trace(
         "trace-4b",
         "rec-4b",
         PRIMARY_DATA_TYPE,
@@ -137,21 +144,24 @@ def test_record_error_sets_code_and_status(store: SqliteStateStore) -> None:
         robot_instance=ROBOT_INSTANCE,
     )
 
-    store.record_error(
+    await store.record_error(
         "trace-4b",
         error_message="disk full",
         error_code=TraceErrorCode.DISK_FULL,
     )
 
-    row = _get_trace_row(store, "trace-4b")
+    row = await _get_trace_row(store, "trace-4b")
     assert row is not None
     assert row["status"] == TraceStatus.FAILED
     assert row["error_message"] == "disk full"
     assert row["error_code"] == TraceErrorCode.DISK_FULL.value
 
 
-def test_claim_ready_traces_filters_ready_written(store: SqliteStateStore) -> None:
-    store.create_trace(
+@pytest.mark.asyncio
+async def test_claim_ready_traces_filters_ready_written(
+    store: SqliteStateStore,
+) -> None:
+    await store.create_trace(
         "trace-5",
         "rec-5",
         PRIMARY_DATA_TYPE,
@@ -159,7 +169,7 @@ def test_claim_ready_traces_filters_ready_written(store: SqliteStateStore) -> No
         path="/tmp/trace-5.bin",
         robot_instance=ROBOT_INSTANCE,
     )
-    store.create_trace(
+    await store.create_trace(
         "trace-6",
         "rec-6",
         PRIMARY_DATA_TYPE,
@@ -167,7 +177,7 @@ def test_claim_ready_traces_filters_ready_written(store: SqliteStateStore) -> No
         path="/tmp/trace-6.bin",
         robot_instance=ROBOT_INSTANCE,
     )
-    store.create_trace(
+    await store.create_trace(
         "trace-7",
         "rec-7",
         PRIMARY_DATA_TYPE,
@@ -176,31 +186,32 @@ def test_claim_ready_traces_filters_ready_written(store: SqliteStateStore) -> No
         robot_instance=ROBOT_INSTANCE,
     )
 
-    with store._engine.begin() as conn:
-        conn.execute(
+    async with store._engine.begin() as conn:
+        await conn.execute(
             traces.update()
             .where(traces.c.trace_id == "trace-5")
             .values(status=TraceStatus.WRITTEN, ready_for_upload=1)
         )
-        conn.execute(
+        await conn.execute(
             traces.update()
             .where(traces.c.trace_id == "trace-6")
             .values(status=TraceStatus.WRITTEN, ready_for_upload=0)
         )
-        conn.execute(
+        await conn.execute(
             traces.update()
             .where(traces.c.trace_id == "trace-7")
             .values(status=TraceStatus.PENDING, ready_for_upload=1)
         )
 
-    claimed = store.claim_ready_traces(limit=10)
+    claimed = await store.claim_ready_traces(limit=10)
     assert [row["trace_id"] for row in claimed] == ["trace-5"]
 
 
-def test_mark_trace_as_written_sets_total_bytes_and_ready_flag(
+@pytest.mark.asyncio
+async def test_mark_trace_as_written_sets_total_bytes_and_ready_flag(
     store: SqliteStateStore,
 ) -> None:
-    store.create_trace(
+    await store.create_trace(
         "trace-6b",
         "rec-6b",
         PRIMARY_DATA_TYPE,
@@ -209,16 +220,16 @@ def test_mark_trace_as_written_sets_total_bytes_and_ready_flag(
         robot_instance=ROBOT_INSTANCE,
     )
 
-    with store._engine.begin() as conn:
-        conn.execute(
+    async with store._engine.begin() as conn:
+        await conn.execute(
             traces.update()
             .where(traces.c.trace_id == "trace-6b")
             .values(bytes_written=64)
         )
 
-    store.mark_trace_as_written("trace-6b", 64)
+    await store.mark_trace_as_written("trace-6b", 64)
 
-    row = _get_trace_row(store, "trace-6b")
+    row = await _get_trace_row(store, "trace-6b")
     assert row is not None
     assert row["status"] == TraceStatus.WRITTEN
     assert row["total_bytes"] == 64
@@ -226,8 +237,9 @@ def test_mark_trace_as_written_sets_total_bytes_and_ready_flag(
     assert row["progress_reported"] == 0
 
 
-def test_claim_ready_traces_marks_uploading(store: SqliteStateStore) -> None:
-    store.create_trace(
+@pytest.mark.asyncio
+async def test_claim_ready_traces_marks_uploading(store: SqliteStateStore) -> None:
+    await store.create_trace(
         "trace-7b",
         "rec-7b",
         PRIMARY_DATA_TYPE,
@@ -236,21 +248,22 @@ def test_claim_ready_traces_marks_uploading(store: SqliteStateStore) -> None:
         robot_instance=ROBOT_INSTANCE,
     )
 
-    with store._engine.begin() as conn:
-        conn.execute(
+    async with store._engine.begin() as conn:
+        await conn.execute(
             traces.update()
             .where(traces.c.trace_id == "trace-7b")
             .values(status=TraceStatus.WRITTEN, ready_for_upload=1)
         )
 
-    claimed = store.claim_ready_traces(limit=10)
+    claimed = await store.claim_ready_traces(limit=10)
     assert [row["trace_id"] for row in claimed] == ["trace-7b"]
     assert claimed[0]["status"] == TraceStatus.UPLOADING
     assert claimed[0]["ready_for_upload"] == 0
 
 
-def test_delete_trace_removes_row(store: SqliteStateStore) -> None:
-    store.create_trace(
+@pytest.mark.asyncio
+async def test_delete_trace_removes_row(store: SqliteStateStore) -> None:
+    await store.create_trace(
         "trace-7",
         "rec-7",
         PRIMARY_DATA_TYPE,
@@ -259,13 +272,14 @@ def test_delete_trace_removes_row(store: SqliteStateStore) -> None:
         robot_instance=ROBOT_INSTANCE,
     )
 
-    store.delete_trace("trace-7")
+    await store.delete_trace("trace-7")
 
-    assert _get_trace_row(store, "trace-7") is None
+    assert await _get_trace_row(store, "trace-7") is None
 
 
-def test_find_ready_traces_returns_only_ready(store: SqliteStateStore) -> None:
-    store.create_trace(
+@pytest.mark.asyncio
+async def test_find_ready_traces_returns_only_ready(store: SqliteStateStore) -> None:
+    await store.create_trace(
         "trace-8",
         "rec-8",
         PRIMARY_DATA_TYPE,
@@ -273,7 +287,7 @@ def test_find_ready_traces_returns_only_ready(store: SqliteStateStore) -> None:
         path="/tmp/trace-8.bin",
         robot_instance=ROBOT_INSTANCE,
     )
-    store.create_trace(
+    await store.create_trace(
         "trace-9",
         "rec-9",
         PRIMARY_DATA_TYPE,
@@ -282,26 +296,27 @@ def test_find_ready_traces_returns_only_ready(store: SqliteStateStore) -> None:
         robot_instance=ROBOT_INSTANCE,
     )
 
-    with store._engine.begin() as conn:
-        conn.execute(
+    async with store._engine.begin() as conn:
+        await conn.execute(
             traces.update()
             .where(traces.c.trace_id == "trace-8")
             .values(status=TraceStatus.WRITTEN, ready_for_upload=1)
         )
-        conn.execute(
+        await conn.execute(
             traces.update()
             .where(traces.c.trace_id == "trace-9")
             .values(status=TraceStatus.WRITTEN, ready_for_upload=0)
         )
 
-    ready = store.find_ready_traces()
+    ready = await store.find_ready_traces()
     assert sorted(trace.trace_id for trace in ready) == ["trace-8"]
 
 
-def test_mark_recording_reported_updates_all_traces(
+@pytest.mark.asyncio
+async def test_mark_recording_reported_updates_all_traces(
     store: SqliteStateStore,
 ) -> None:
-    store.create_trace(
+    await store.create_trace(
         "trace-10",
         "rec-10",
         PRIMARY_DATA_TYPE,
@@ -309,7 +324,7 @@ def test_mark_recording_reported_updates_all_traces(
         path="/tmp/trace-10.bin",
         robot_instance=ROBOT_INSTANCE,
     )
-    store.create_trace(
+    await store.create_trace(
         "trace-11",
         "rec-10",
         PRIMARY_DATA_TYPE,
@@ -318,18 +333,19 @@ def test_mark_recording_reported_updates_all_traces(
         robot_instance=ROBOT_INSTANCE,
     )
 
-    store.mark_recording_reported("rec-10")
+    await store.mark_recording_reported("rec-10")
 
-    row_10 = _get_trace_row(store, "trace-10")
-    row_11 = _get_trace_row(store, "trace-11")
+    row_10 = await _get_trace_row(store, "trace-10")
+    row_11 = await _get_trace_row(store, "trace-11")
     assert row_10 is not None
     assert row_11 is not None
     assert row_10["progress_reported"] == 1
     assert row_11["progress_reported"] == 1
 
 
-def test_find_unreported_traces_filters_reported(store: SqliteStateStore) -> None:
-    store.create_trace(
+@pytest.mark.asyncio
+async def test_find_unreported_traces_filters_reported(store: SqliteStateStore) -> None:
+    await store.create_trace(
         "trace-12",
         "rec-12",
         PRIMARY_DATA_TYPE,
@@ -337,7 +353,7 @@ def test_find_unreported_traces_filters_reported(store: SqliteStateStore) -> Non
         path="/tmp/trace-12.bin",
         robot_instance=ROBOT_INSTANCE,
     )
-    store.create_trace(
+    await store.create_trace(
         "trace-13",
         "rec-13",
         PRIMARY_DATA_TYPE,
@@ -346,7 +362,7 @@ def test_find_unreported_traces_filters_reported(store: SqliteStateStore) -> Non
         robot_instance=ROBOT_INSTANCE,
     )
 
-    store.mark_recording_reported("rec-13")
+    await store.mark_recording_reported("rec-13")
 
-    unreported = store.find_unreported_traces()
+    unreported = await store.find_unreported_traces()
     assert sorted(trace.trace_id for trace in unreported) == ["trace-12"]

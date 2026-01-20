@@ -12,6 +12,7 @@ from neuracore.data_daemon.communications_management.communications_manager impo
 )
 from neuracore.data_daemon.communications_management.data_bridge import Daemon
 from neuracore.data_daemon.communications_management.producer import Producer
+from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.recording_encoding_disk_manager import (
     recording_disk_manager as rdm_module,
 )
@@ -59,5 +60,23 @@ class ManagementChannel:
             return None
 
         comm = CommunicationsManager()
-        recording_disk_manager = RecordingDiskManager()
-        return Daemon(recording_disk_manager=recording_disk_manager, comm_manager=comm)
+
+        loop_manager = EventLoopManager()
+        try:
+            loop_manager.start()
+        except Exception:
+            logger.exception("Failed to start EventLoopManager")
+            return None
+
+        try:
+            recording_disk_manager = RecordingDiskManager(loop_manager=loop_manager)
+        except Exception:
+            logger.exception("Failed to initialize RecordingDiskManager")
+            loop_manager.stop()
+            return None
+
+        return Daemon(
+            recording_disk_manager=recording_disk_manager,
+            comm_manager=comm,
+            loop_manager=loop_manager,
+        )
