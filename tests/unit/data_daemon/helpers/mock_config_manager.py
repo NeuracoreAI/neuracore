@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 
@@ -14,6 +15,9 @@ class MockConfigManager:
     offline: bool | None = None
     api_key: str | None = None
     current_org_id: str | None = None
+
+    def path_to_store_record_from(self, path: Path) -> MockConfigManager:
+        return replace(self, path_to_store_record=str(path))
 
     def resolve_effective_config(self, *args: Any, **kwargs: Any) -> MockConfigManager:
         return self
