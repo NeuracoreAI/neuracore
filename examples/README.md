@@ -1,13 +1,13 @@
 # Neuracore Examples
 
-**NOTE:** You will need Git LFS to run examples.
-
-This contains examples for using Neuracore with a simulated robot environment. You'll learn how to:
+This contains examples for using Neuracore with simulated robot environments. We provide [ALOHA](https://tonyzhaozh.github.io/aloha/) simulation environment as a manipulation focused scenario and [bigym](https://chernyadev.github.io/bigym/) environment as a humanoid focused scenario. You'll learn how to:
 - Collect and record robot demonstrations
 - Deploy trained models locally
 - Visualize robot behavior
 
 ## Installation
+
+**NOTE:** You will need Git LFS to run examples.
 
 ```bash
 conda create -n neuracore_examples python=3.10
@@ -35,26 +35,20 @@ The data collection example demonstrates how to:
 
 **NOTE:** You might need to set the `MUJOCO_GL` environment to `egl` using `export MUJOCO_GL=egl` if your RGB Camera Feed visualizations are glitchy on the Robot Data Visualiser Console.
 
-1. Run the example:
+1. Run the ALOHA example and record the demos:
 ```bash
-python example_data_collection_vx300s.py
+python example_data_collection_vx300s.py --record --num_episodes=1
 ```
 
-or
+run the bigym example and record the demos:
 
 ```bash 
-python example_data_collection_bigym.py
+python example_data_collection_bigym.py --record --num_episodes=1
 ```
 2. Navigate to the "Robots" tab in the Neuracore Dashboard
 3. You should see a live view of your robot running!
-
-To record demonstrations:
-1. Run with the record flag:
-```bash
-python example_data_collection_XXXX.py --record
-```
-2. The script will automatically start and stop recordings for each demonstration. You can see this process happening in the "Robots" tab in the Neuracore Dashboard
-3. Navigate to the "Data" tab in the Neuracore Dashboard to see your dataset
+4. The script will automatically start and stop recordings for each demonstration. You can see this process happening in the "Robots" tab in the Neuracore Dashboard
+5. Navigate to the "Data" tab in the Neuracore Dashboard to see your dataset
 
 
 ### Launching Training
@@ -96,7 +90,7 @@ pip install "neuracore[ml]"
 ```
 
 
-Run the local model:
+Run the local model with ALOHA example:
 ```bash
 python example_local_endpoint.py
 ```
@@ -119,7 +113,7 @@ The server deployment example shows how to:
 - Go to the "Endpoint" tab on your Neuracore Dashboard and start an endpoint. Call it __"MyExampleEndpoint"__
 - Wait for the status to be active
 
-One you have completed the steps above:
+Once you have completed the steps above:
 ```bash
 python example_server_endpoint.py
 ```
@@ -136,3 +130,6 @@ python example_view_dataset.py
 ```
 
 If you want to just view your data, then the best way is via the [web interface](https://www.neuracore.com/dashboard/datasets).
+
+### Work with your own robot
+If you want to get your own robot working with neuracore, please refer to and also [tutorial](../docs/tutorial.md) and use the example files as a reference.
