@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
+import pytest_asyncio
 
 from neuracore.data_daemon.event_emitter import Emitter, emitter
 from neuracore.data_daemon.models import (
@@ -21,7 +23,7 @@ class FakeStateStore:
         self.stopped: list[str] = []
         self.updated_bytes: list[tuple[str, int]] = []
         self.deleted: list[str] = []
-        self.errors: list[tuple[str, int, str, TraceErrorCode | None, TraceStatus]] = []
+        self.errors: list[tuple[str, str, TraceErrorCode | None, TraceStatus]] = []
         self.marked_written: list[tuple[str, int]] = []
         self.ready_traces: list[TraceRecord] = []
         self.unreported_traces: list[TraceRecord] = []
@@ -100,8 +102,8 @@ def _cleanup_state_manager(manager: StateManager) -> None:
     emitter.remove_listener(Emitter.IS_CONNECTED, manager.handle_is_connected)
 
 
-@pytest.fixture
-def state_manager() -> tuple[StateManager, FakeStateStore]:
+@pytest_asyncio.fixture
+async def state_manager() -> tuple[StateManager, FakeStateStore]:
     store = FakeStateStore()
     manager = StateManager(store)
     try:
@@ -147,7 +149,8 @@ def _make_trace(
     )
 
 
-def test_stop_recording_emits_stop_all_and_sets_stopped(state_manager) -> None:
+@pytest.mark.asyncio
+async def test_stop_recording_emits_stop_all_and_sets_stopped(state_manager) -> None:
     manager, store = state_manager
     received: list[str] = []
 
@@ -157,13 +160,15 @@ def test_stop_recording_emits_stop_all_and_sets_stopped(state_manager) -> None:
     emitter.on(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)
     try:
         emitter.emit(Emitter.STOP_RECORDING, "rec-1")
+        await asyncio.sleep(0.2)
         assert store.stopped == ["rec-1"]
         assert received == ["rec-1"]
     finally:
         emitter.remove_listener(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)
 
 
-def test_start_trace_creates_trace(state_manager) -> None:
+@pytest.mark.asyncio
+async def test_start_trace_creates_trace(state_manager) -> None:
     _, store = state_manager
     emitter.emit(
         Emitter.START_TRACE,
@@ -178,6 +183,8 @@ def test_start_trace_creates_trace(state_manager) -> None:
         path="/tmp/trace-1.bin",
         total_bytes=128,
     )
+    await asyncio.sleep(0.2)
+
     assert len(store.created) == 1
     payload = store.created[0]
     assert payload["trace_id"] == "trace-1"
@@ -188,13 +195,17 @@ def test_start_trace_creates_trace(state_manager) -> None:
     assert payload["total_bytes"] == 128
 
 
-def test_uploaded_bytes_updates_store(state_manager) -> None:
+@pytest.mark.asyncio
+async def test_uploaded_bytes_updates_store(state_manager) -> None:
     _, store = state_manager
     emitter.emit(Emitter.UPLOADED_BYTES, "trace-2", 42)
+    await asyncio.sleep(0.2)
+
     assert store.updated_bytes == [("trace-2", 42)]
 
 
-def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
+@pytest.mark.asyncio
+async def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
     _, store = state_manager
     received: list[tuple[str, str]] = []
 
@@ -204,13 +215,16 @@ def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
     emitter.on(Emitter.DELETE_TRACE, handler)
     try:
         emitter.emit(Emitter.UPLOAD_COMPLETE, "trace-3", "/tmp/trace-3.bin")
+        await asyncio.sleep(0.2)
+
         assert store.deleted == ["trace-3"]
         assert received == [("trace-3", "/tmp/trace-3.bin")]
     finally:
         emitter.remove_listener(Emitter.DELETE_TRACE, handler)
 
 
-def test_upload_failed_records_error(state_manager) -> None:
+@pytest.mark.asyncio
+async def test_upload_failed_records_error(state_manager) -> None:
     _, store = state_manager
     emitter.emit(
         Emitter.UPLOAD_FAILED,
@@ -220,6 +234,8 @@ def test_upload_failed_records_error(state_manager) -> None:
         TraceErrorCode.NETWORK_ERROR,
         "lost connection",
     )
+    await asyncio.sleep(0.2)
+
     assert store.errors == [(
         "trace-4",
         "lost connection",
@@ -228,7 +244,10 @@ def test_upload_failed_records_error(state_manager) -> None:
     )]
 
 
-def test_trace_written_emits_ready_for_upload_when_connected(state_manager) -> None:
+@pytest.mark.asyncio
+async def test_trace_written_emits_ready_for_upload_when_connected(
+    state_manager,
+) -> None:
     manager, store = state_manager
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     last_updated = datetime(2024, 1, 2, tzinfo=timezone.utc)
@@ -248,7 +267,11 @@ def test_trace_written_emits_ready_for_upload_when_connected(state_manager) -> N
     emitter.on(Emitter.READY_FOR_UPLOAD, handler)
     try:
         emitter.emit(Emitter.IS_CONNECTED, True)
+        await asyncio.sleep(0.2)
+
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-5", "rec-5", 64)
+        await asyncio.sleep(0.2)
+
         assert store.marked_written == [("trace-5", 64)]
         assert received == [(
             "trace-5",
@@ -262,7 +285,8 @@ def test_trace_written_emits_ready_for_upload_when_connected(state_manager) -> N
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, handler)
 
 
-def test_is_connected_emits_ready_and_progress_report(state_manager) -> None:
+@pytest.mark.asyncio
+async def test_is_connected_emits_ready_and_progress_report(state_manager) -> None:
     _, store = state_manager
     t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
     t2 = datetime(2024, 1, 2, tzinfo=timezone.utc)
@@ -301,6 +325,8 @@ def test_is_connected_emits_ready_and_progress_report(state_manager) -> None:
     emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
     try:
         emitter.emit(Emitter.IS_CONNECTED, True)
+        await asyncio.sleep(0.3)
+
         assert ready_events == [
             (
                 "trace-6",

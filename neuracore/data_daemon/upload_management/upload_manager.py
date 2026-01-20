@@ -4,10 +4,11 @@ This module provides the UploadManager class that manages a thread pool
 of upload workers and handles upload lifecycle via events.
 """
 
+import asyncio
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
 
+import aiohttp
 from neuracore_types import DataType, RecordingDataTraceStatus
 
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
@@ -32,23 +33,18 @@ class UploadManager(TraceManager):
     Uploads are triggered via READY_FOR_UPLOAD events from state manager.
     """
 
-    def __init__(self, config: DaemonConfig):
+    def __init__(self, config: DaemonConfig, client_session: aiohttp.ClientSession):
         """Initialize the upload manager."""
         self._config = config
-
-        # Threading
-        self._num_threads = self._config.num_threads or 4
-        self._executor = ThreadPoolExecutor(
-            max_workers=self._num_threads,
-            thread_name_prefix="uploader",
-        )
+        self._active_uploads: set[asyncio.Task] = set()
+        super().__init__(client_session)
 
         # Subscribe to events
         emitter.on(Emitter.READY_FOR_UPLOAD, self._on_ready_for_upload)
 
-        logger.info(f"UploadManager initialized with {self._num_threads} workers")
+        logger.info("UploadManager initialized")
 
-    def shutdown(self, wait: bool = True) -> None:
+    async def shutdown(self, wait: bool = True) -> None:
         """Shutdown the upload manager gracefully.
 
         Args:
@@ -56,44 +52,58 @@ class UploadManager(TraceManager):
         """
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, self._on_ready_for_upload)
         logger.info("Shutting down UploadManager...")
-        self._executor.shutdown(wait=wait, cancel_futures=False)
+
+        if wait and self._active_uploads:
+            logger.info(
+                f"Waiting for {len(self._active_uploads)} uploads to complete..."
+            )
+            await asyncio.gather(*self._active_uploads, return_exceptions=True)
+        else:
+            # Cancel all uploads
+            for task in self._active_uploads:
+                task.cancel()
+            if self._active_uploads:
+                await asyncio.gather(*self._active_uploads, return_exceptions=True)
+
         logger.info("UploadManager shutdown complete")
 
-    def _on_ready_for_upload(
+    async def _on_ready_for_upload(
         self,
-        filepath: str,
         trace_id: str,
+        recording_id: str,
+        filepath: str,
         data_type: DataType,
         data_type_name: str,
-        recording_id: str,
         bytes_uploaded: int,
     ) -> None:
         """Handle READY_FOR_UPLOAD event from state manager.
 
-        Queues the trace for upload in the thread pool.
-
         Args:
-            filepath: local file path
             trace_id: Trace identifier
+            recording_id: Recording identifier
+            filepath: local file path
             data_type: Data type
             data_type_name: Data type name
-            recording_id: Recording identifier
             bytes_uploaded: Starting offset for resume
         """
         logger.info(f"Received READY_FOR_UPLOAD for trace {trace_id}")
 
-        # Submit to thread pool
-        self._executor.submit(
-            self._upload_single_trace,
-            filepath,
-            trace_id,
-            data_type,
-            data_type_name,
-            recording_id,
-            bytes_uploaded,
+        # Create upload task
+        task = asyncio.create_task(
+            self._upload_single_trace(
+                filepath,
+                trace_id,
+                data_type,
+                data_type_name,
+                recording_id,
+                bytes_uploaded,
+            )
         )
 
-    def _upload_single_trace(
+        self._active_uploads.add(task)
+        task.add_done_callback(self._active_uploads.discard)
+
+    async def _upload_single_trace(
         self,
         filepath: str,
         trace_id: str,
@@ -104,13 +114,11 @@ class UploadManager(TraceManager):
     ) -> bool:
         """Upload a single trace file.
 
-        Creates a ResumableFileUploader and performs the upload. Emits
-        events based on success or failure.
-
         Args:
             filepath: Local filesystem path to file
             trace_id: Trace identifier
             data_type: Data type
+            data_type_name: Data type name
             recording_id: Recording identifier
             bytes_uploaded: Starting offset for resume
 
@@ -118,7 +126,8 @@ class UploadManager(TraceManager):
             True if upload succeeded, False otherwise
         """
         logger.info(f"Starting upload for trace {trace_id}")
-        backend_trace_id = self._register_data_trace(recording_id, data_type)
+
+        backend_trace_id = await self._register_data_trace(recording_id, data_type)
         if not backend_trace_id:
             logger.error(f"Failed to register backend trace for {trace_id}")
             emitter.emit(
@@ -132,39 +141,45 @@ class UploadManager(TraceManager):
             return False
 
         try:
-            self._update_data_trace(
+            await self._update_data_trace(
                 recording_id,
                 backend_trace_id,
                 RecordingDataTraceStatus.UPLOAD_STARTED,
                 uploaded_bytes=bytes_uploaded,
             )
-            # content type from data type
+
             content_type_category = get_content_type(data_type)
             content_type = CONTENT_TYPE_MAPPING[content_type_category]
             cloud_filepath = (
                 data_type.value + "/" + data_type_name + "/" + filepath.split("/")[-1]
             )
-            # Progress callback to emit uploaded bytes
+
             cumulative_delta = [0]
             last_progress_update = [time.time()]
 
-            def progress_callback(bytes_delta: int) -> None:
-                """Called after each chunk with bytes uploaded in that chunk.
+            loop = asyncio.get_event_loop()
 
-                Emits total bytes uploaded for the trace.
-                """
+            def progress_callback(bytes_delta: int) -> None:
+                """Called after each chunk with bytes uploaded in that chunk."""
                 cumulative_delta[0] += bytes_delta
                 total_bytes_uploaded = bytes_uploaded + cumulative_delta[0]
-                emitter.emit(Emitter.UPLOADED_BYTES, trace_id, total_bytes_uploaded)
+                loop.call_soon_threadsafe(
+                    lambda: emitter.emit(
+                        Emitter.UPLOADED_BYTES, trace_id, total_bytes_uploaded
+                    )
+                )
 
                 # Update backend every 30 seconds
                 now = time.time()
                 if now - last_progress_update[0] >= 30.0:
-                    self._update_data_trace(
-                        recording_id,
-                        backend_trace_id,
-                        RecordingDataTraceStatus.UPLOAD_STARTED,
-                        uploaded_bytes=total_bytes_uploaded,
+                    asyncio.run_coroutine_threadsafe(
+                        self._update_data_trace(
+                            recording_id,
+                            backend_trace_id,
+                            RecordingDataTraceStatus.UPLOAD_STARTED,
+                            uploaded_bytes=total_bytes_uploaded,
+                        ),
+                        loop,
                     )
                     last_progress_update[0] = now
 
@@ -178,11 +193,13 @@ class UploadManager(TraceManager):
                 progress_callback=progress_callback,
             )
 
-            # Perform upload
-            success, total_bytes_uploaded, error_message = uploader.upload()
+            uploader_loop = asyncio.get_running_loop()
+            success, total_bytes_uploaded, error_message = (
+                await uploader_loop.run_in_executor(None, uploader.upload)
+            )
 
             if success:
-                self._update_data_trace(
+                await self._update_data_trace(
                     recording_id,
                     backend_trace_id,
                     RecordingDataTraceStatus.UPLOAD_COMPLETE,
@@ -193,7 +210,6 @@ class UploadManager(TraceManager):
                 logger.info(f"Upload successful for trace {trace_id}")
                 return True
             else:
-                # Upload failed - emit failure event
                 status = TraceStatus.WRITTEN
                 error_code = (
                     TraceErrorCode.NETWORK_ERROR
