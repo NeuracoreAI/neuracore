@@ -5,7 +5,6 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +12,7 @@ import pytest
 from neuracore_types import DataType
 
 from neuracore.data_daemon.models import CompleteMessage
+from tests.unit.data_daemon.helpers import MockConfigManager
 
 
 class FakeEmitter:
@@ -34,23 +34,6 @@ class FakeEmitter:
     def emit(self, event: Any, *args: Any, **kwargs: Any) -> None:
         for fn in list(self._handlers.get(event, [])):
             fn(*args, **kwargs)
-
-
-@dataclass(frozen=True)
-class _EffectiveConfig:
-    path_to_store_record: str
-    storage_limit: int | None
-
-
-class DummyConfigManager:
-    def __init__(self, recordings_root: Path, storage_limit: int | None) -> None:
-        self._cfg = _EffectiveConfig(
-            path_to_store_record=str(recordings_root),
-            storage_limit=storage_limit,
-        )
-
-    def resolve_effective_config(self, *args: Any, **kwargs: Any) -> _EffectiveConfig:
-        return self._cfg
 
 
 class FakeVideoTrace:
@@ -174,8 +157,8 @@ def rdm_factory(
 ):
     def _make(*, storage_limit: int | None, flush_bytes: int = 1):
         recordings_root = tmp_path / "recordings"
-        cfg = DummyConfigManager(
-            recordings_root=recordings_root, storage_limit=storage_limit
+        cfg = MockConfigManager(
+            path_to_store_record=str(recordings_root), storage_limit=storage_limit
         )
 
         rdm = rdm_module.RecordingDiskManager(cfg, flush_bytes=flush_bytes)
