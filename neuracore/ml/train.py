@@ -55,6 +55,41 @@ logger = logging.getLogger(__name__)
 MAX_AUTOTUNE_SAMPLE_CANDIDATES = 1000
 
 
+def _resolve_output_dir(run_name: str | None = None) -> str:
+    """Hydra resolver to generate the output directory path.
+
+    This resolver generates a unique output directory based on run_name and timestamp.
+    It's called during Hydra initialization, so the directory is available before
+    the main function runs.
+
+    Args:
+        run_name: Optional run name. If None or "null", a random name will be generated.
+
+    Returns:
+        Full path to the output directory.
+    """
+    # Handle None, empty string, or string "null"
+    if (
+        not run_name
+        or run_name == "null"
+        or (isinstance(run_name, str) and run_name.strip() == "")
+    ):
+        # Generate name with hyphens instead of underscores
+        run_name = generate_name(style="underscore").replace("_", "-")
+    else:
+        run_name = _sanitize_run_name(str(run_name))
+
+    # Generate timestamp
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    # Create directory name: run_name_timestamp
+    run_dir_name = f"{run_name}_{timestamp}"
+
+    # Build full path
+    base_dir = Path(os.environ.get("HOME", "~")) / ".neuracore" / "training" / "runs"
+    return str(base_dir / run_dir_name)
+
+
 def _sanitize_run_name(name: str) -> str:
     """Sanitize run name for use in file paths.
 
@@ -437,29 +472,15 @@ def run_training(
         logger.info(f"Process {rank} completed")
 
 
+# Register the resolver with OmegaConf
+OmegaConf.register_new_resolver("resolve_output_dir", _resolve_output_dir)
+
+
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg: DictConfig) -> None:
     """Main function to run the training script."""
     # Resolve the configuration
     OmegaConf.resolve(cfg)
-
-    # Generate run name and update local_output_dir
-    if cfg.get("run_name") is not None and cfg.run_name:
-        run_name = _sanitize_run_name(str(cfg.run_name))
-    else:
-        # Generate name with hyphens instead of underscores
-        run_name = generate_name(style="underscore").replace("_", "-")
-        logger.info(f"Generated random run name: {run_name}")
-
-    # Generate timestamp
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-    # Create directory name: run_name_timestamp
-    run_dir_name = f"{run_name}_{timestamp}"
-
-    # Update local_output_dir to use the new run name
-    base_dir = Path(os.environ.get("HOME", "~")) / ".neuracore" / "training" / "runs"
-    cfg.local_output_dir = str(base_dir / run_dir_name)
 
     logger.info(f"Training run directory: {cfg.local_output_dir}")
 

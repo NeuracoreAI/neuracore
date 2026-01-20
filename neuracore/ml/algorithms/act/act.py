@@ -187,8 +187,12 @@ class ACT(NeuracoreModel):
         self.action_embed = nn.Linear(self.max_output_size, hidden_dim)
 
         # Setup normalizers
-        self.proprio_normalizer = PROPRIO_NORMALIZER(
-            name="proprioception", statistics=proprio_stats
+        # Only create proprio_normalizer if there are proprioception stats
+        # This allows the algorithm to work without proprioception (visual-only)
+        self.proprio_normalizer = (
+            PROPRIO_NORMALIZER(name="proprioception", statistics=proprio_stats)
+            if proprio_stats
+            else None
         )
         self.action_normalizer = ACTION_NORMALIZER(
             name="actions", statistics=output_stats
@@ -353,10 +357,20 @@ class ACT(NeuracoreModel):
             masked_proprio = last_proprio * mask
             proprio_list.append(masked_proprio)
 
+        # If no proprioception data is available, return None
+        # This allows the algorithm to work with visual-only inputs
+        if not proprio_list:
+            return None
+
         # Concatenate all proprio together: (B, total_proprio_dim)
         all_proprio = torch.cat(proprio_list, dim=-1)
 
         # Normalize once on all proprio
+        # Check if normalizer exists (it should if we have proprio data)
+        if self.proprio_normalizer is None:
+            raise ValueError(
+                "Proprioception inputs were provided but no normalizer was available."
+            )
         normalized_proprio = self.proprio_normalizer.normalize(all_proprio)
 
         return normalized_proprio
@@ -472,9 +486,15 @@ class ACT(NeuracoreModel):
         pos = combined_pos.flatten(2).permute(2, 0, 1)
 
         # Process joint positions and latent
-        state_features = (
-            self.state_embed(states) if self.state_embed is not None else None
-        )  # [B, H]
+        # If no proprioception, create zero tensor with same shape as latent
+        if states is None:
+            state_features = torch.zeros_like(latent)  # [B, H]
+        else:
+            state_features = (
+                self.state_embed(states)
+                if self.state_embed is not None
+                else torch.zeros_like(latent)
+            )  # [B, H]
 
         # Stack latent and proprio features
         additional_features = torch.stack([latent, state_features], dim=0)  # [2, B, H]

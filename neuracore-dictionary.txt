@@ -5,6 +5,7 @@ autoregressively
 autouse
 avgpool
 axvline
+bibtex
 blit
 buildtool
 caplog
@@ -212,12 +213,13 @@ xquat
 xyzrgb
 ylabel
 znear
+addfinalizer
 bigym
+calcsize
+capsys
 EADDRINUSE
+metas
+RDEM
+secho
 wakelock
 WAKELOCK
-capsys
-calcsize
-metas
-addfinalizer
-RDEM

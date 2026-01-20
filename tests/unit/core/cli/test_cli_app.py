@@ -46,6 +46,7 @@ def test_neuracore_cli_help_includes_subcommands() -> None:
     assert "login" in result.output
     assert "select-org" in result.output
     assert "launch-server" in result.output
+    assert "training" in result.output
 
 
 def test_neuracore_login_help_includes_options() -> None:
