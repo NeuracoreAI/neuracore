@@ -220,7 +220,7 @@ class Daemon:
         Returns:
             None
         """
-        payload = message.payload.get(message.command)
+        payload = message.payload.get(message.command.value)
         size = 1024
         if payload:
             size = payload.get("size", 1024)
@@ -402,7 +402,7 @@ class Daemon:
                 channel.producer_id,
             )
             return
-        data_chunk_payload = message.payload.get("data_chunk", {})
+        data_chunk_payload = message.payload
 
         data_chunk = DataChunkPayload.from_dict(data_chunk_payload)
 
