@@ -160,6 +160,8 @@ class _BatchEncoderWorker:
                     continue
 
                 payload = base64.b64decode(data_base64)
+                if not payload:
+                    continue
 
                 if isinstance(encoder, VideoTrace):
                     encoder.add_payload(payload)
