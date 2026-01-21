@@ -269,6 +269,7 @@ class Daemon:
         :param final_chunk: Whether this is the final chunk for the trace.
         """
         metadata = self._trace_metadata.get(trace_id, {})
+        robot_instance = int(metadata.get("robot_instance") or 0)
         try:
             self.recording_disk_manager.enqueue(
                 CompleteMessage.from_bytes(
@@ -277,6 +278,8 @@ class Daemon:
                     recording_id=channel.recording_id or "",
                     final_chunk=final_chunk,
                     data_type=data_type,
+                    data_type_name=str(metadata.get("data_type_name") or ""),
+                    robot_instance=robot_instance,
                     data=data,
                     dataset_id=_str_or_none(metadata.get("dataset_id")),
                     dataset_name=_str_or_none(metadata.get("dataset_name")),

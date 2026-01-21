@@ -168,18 +168,11 @@ class _RawBatchWriter:
                 if is_new_trace:
                     recording_entry[trace_key.trace_id] = {}
 
-            if is_new_trace:
-                emitter.emit(
-                    Emitter.START_TRACE,
-                    trace_key.recording_id,
-                    trace_key.trace_id,
-                    trace_key.data_type,
-                )
+            trace_dir = self._filesystem.trace_dir_for(trace_key)
 
             with self._state_lock:
                 writer_state: _WriteState | None = self._writer_states.get(trace_key)
                 if writer_state is None:
-                    trace_dir = self._filesystem.trace_dir_for(trace_key)
                     trace_dir.mkdir(parents=True, exist_ok=True)
                     writer_state = _WriteState(
                         trace_key=trace_key,
@@ -189,6 +182,21 @@ class _RawBatchWriter:
                         trace_done=False,
                     )
                     self._writer_states[trace_key] = writer_state
+
+            if is_new_trace:
+                emitter.emit(
+                    Emitter.START_TRACE,
+                    trace_key.trace_id,
+                    trace_key.recording_id,
+                    trace_key.data_type,
+                    raw_message.data_type_name,
+                    raw_message.robot_instance,
+                    raw_message.dataset_id,
+                    raw_message.dataset_name,
+                    raw_message.robot_name,
+                    raw_message.robot_id,
+                    path=str(trace_dir),
+                )
 
             if writer_state is None:
                 raise RuntimeError(

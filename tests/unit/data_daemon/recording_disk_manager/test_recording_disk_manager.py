@@ -189,12 +189,23 @@ def test_rdm_emits_start_trace_once_and_trace_written_on_stop_all(
     all_written = threading.Event()
 
     @fake_emitter.on(Emitter.START_TRACE)
-    def on_start_trace(rid: str, tid: str, dt: DataType) -> None:
+    def on_start_trace(
+        tid: str,
+        rid: str,
+        dt: DataType,
+        dt_name: str,
+        robot_inst: int,
+        dataset_id: str | None,
+        dataset_name: str | None,
+        robot_name: str | None,
+        robot_id: str | None,
+        path: str,
+    ) -> None:
         if rid == recording_id:
             start_events.append((rid, tid, dt))
 
     @fake_emitter.on(Emitter.TRACE_WRITTEN)
-    def on_trace_written(tid: str, bytes_written: int) -> None:
+    def on_trace_written(tid: str, rid: str, bytes_written: int) -> None:
         if tid not in expected_traces:
             return
         written_events.append((tid, bytes_written))
@@ -212,6 +223,8 @@ def test_rdm_emits_start_trace_once_and_trace_written_on_stop_all(
             recording_id=recording_id,
             trace_id=rgb_trace_id,
             data_type=DataType.RGB_IMAGES,
+            data_type_name="rgb_camera",
+            robot_instance=0,
             data=_json_bytes(meta),
             final_chunk=False,
         )
@@ -227,6 +240,8 @@ def test_rdm_emits_start_trace_once_and_trace_written_on_stop_all(
                     recording_id=recording_id,
                     trace_id=rgb_trace_id,
                     data_type=DataType.RGB_IMAGES,
+                    data_type_name="rgb_camera",
+                    robot_instance=0,
                     data=_make_rgb24_frame_bytes(i, width, height),
                     final_chunk=False,
                 )
@@ -246,6 +261,8 @@ def test_rdm_emits_start_trace_once_and_trace_written_on_stop_all(
                         recording_id=recording_id,
                         trace_id=joint,
                         data_type=DataType.JOINT_POSITIONS,
+                        data_type_name="joint_position",
+                        robot_instance=0,
                         data=_json_bytes(payload),
                         final_chunk=False,
                     )
@@ -288,7 +305,7 @@ def test_rdm_stop_recording_drops_future_messages(
     done = threading.Event()
 
     @fake_emitter.on(Emitter.TRACE_WRITTEN)
-    def on_written(tid: str, bytes_written: int) -> None:
+    def on_written(tid: str, rid: str, bytes_written: int) -> None:
         if tid == trace_id:
             written.append((tid, bytes_written))
             done.set()
@@ -299,6 +316,8 @@ def test_rdm_stop_recording_drops_future_messages(
             recording_id=recording_id,
             trace_id=trace_id,
             data_type=DataType.JOINT_POSITIONS,
+            data_type_name="joint_position",
+            robot_instance=0,
             data=_json_bytes({"x": 1}),
             final_chunk=False,
         )
@@ -320,6 +339,8 @@ def test_rdm_stop_recording_drops_future_messages(
             recording_id=recording_id,
             trace_id=trace_id,
             data_type=DataType.JOINT_POSITIONS,
+            data_type_name="joint_position",
+            robot_instance=0,
             data=_json_bytes({"x": 2}),
             final_chunk=False,
         )
@@ -350,6 +371,8 @@ def test_rdm_delete_trace_event_deletes_trace_dir(
             recording_id=recording_id,
             trace_id=trace_id,
             data_type=DataType.JOINT_POSITIONS,
+            data_type_name="joint_position",
+            robot_instance=0,
             data=_json_bytes({"x": 1}),
             final_chunk=False,
         )
@@ -384,7 +407,7 @@ def test_rdm_storage_limit_aborts_trace_and_emits_trace_written_zero(
     done = threading.Event()
 
     @fake_emitter.on(Emitter.TRACE_WRITTEN)
-    def on_written(tid: str, bytes_written: int) -> None:
+    def on_written(tid: str, rid: str, bytes_written: int) -> None:
         if tid == trace_id:
             written.append((tid, bytes_written))
             done.set()
@@ -395,6 +418,8 @@ def test_rdm_storage_limit_aborts_trace_and_emits_trace_written_zero(
             recording_id=recording_id,
             trace_id=trace_id,
             data_type=DataType.JOINT_POSITIONS,
+            data_type_name="joint_position",
+            robot_instance=0,
             data=b"x" * 2048,
             final_chunk=False,
         )
@@ -446,7 +471,7 @@ def test_rdm_encoder_creation_failure_aborts_one_trace_but_other_completes(
     done = threading.Event()
 
     @fake_emitter.on(Emitter.TRACE_WRITTEN)
-    def on_written(tid: str, bytes_written: int) -> None:
+    def on_written(tid: str, rid: str, bytes_written: int) -> None:
         if tid in {bad_trace_id, good_trace_id}:
             written.append((tid, bytes_written))
 
@@ -460,6 +485,8 @@ def test_rdm_encoder_creation_failure_aborts_one_trace_but_other_completes(
             recording_id=recording_id,
             trace_id=bad_trace_id,
             data_type=DataType.JOINT_POSITIONS,
+            data_type_name="joint_position",
+            robot_instance=0,
             data=_json_bytes({"x": 1}),
             final_chunk=False,
         )
@@ -470,6 +497,8 @@ def test_rdm_encoder_creation_failure_aborts_one_trace_but_other_completes(
             recording_id=recording_id,
             trace_id=good_trace_id,
             data_type=DataType.JOINT_POSITIONS,
+            data_type_name="joint_position",
+            robot_instance=0,
             data=_json_bytes({"y": 2}),
             final_chunk=False,
         )

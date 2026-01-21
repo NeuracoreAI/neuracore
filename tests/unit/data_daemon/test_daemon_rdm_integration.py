@@ -27,11 +27,7 @@ from neuracore.data_daemon.const import (
     DATA_TYPE_FIELD_SIZE,
     TRACE_ID_FIELD_SIZE,
 )
-from neuracore.data_daemon.models import (
-    CommandType,
-    CompleteMessage,
-    MessageEnvelope,
-)
+from neuracore.data_daemon.models import CommandType, CompleteMessage, MessageEnvelope
 from tests.unit.data_daemon.helpers import MockConfigManager
 
 
@@ -104,7 +100,9 @@ class TestDaemonInit:
 
         assert daemon._config_manager is not None
 
-    def test_daemon_creates_rdm_with_config_if_not_provided(self, tmp_path: Any) -> None:
+    def test_daemon_creates_rdm_with_config_if_not_provided(
+        self, tmp_path: Any
+    ) -> None:
         """Daemon should create RDM using config_manager if RDM not provided."""
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
@@ -206,6 +204,8 @@ class TestOnCompleteMessage:
             "dataset_name": "test-dataset",
             "robot_name": "test-robot",
             "robot_id": "robot-001",
+            "data_type_name": "custom_data",
+            "robot_instance": 1,
         }
 
         channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
@@ -224,6 +224,8 @@ class TestOnCompleteMessage:
         assert msg.dataset_name == "test-dataset"
         assert msg.robot_name == "test-robot"
         assert msg.robot_id == "robot-001"
+        assert msg.data_type_name == "custom_data"
+        assert msg.robot_instance == 1
 
     def test_on_complete_message_handles_missing_metadata(self, tmp_path: Any) -> None:
         """_on_complete_message should handle missing metadata gracefully."""
@@ -254,6 +256,8 @@ class TestOnCompleteMessage:
         assert msg.dataset_name is None
         assert msg.robot_name is None
         assert msg.robot_id is None
+        assert msg.data_type_name == ""
+        assert msg.robot_instance == 0
 
     def test_on_complete_message_handles_empty_recording_id(
         self, tmp_path: Any
@@ -550,7 +554,7 @@ class TestDrainChannelMessages:
     def test_drain_channel_messages_passes_data_type_to_on_complete(
         self, tmp_path: Any
     ) -> None:
-        """_drain_channel_messages should pass data_type from reader to _on_complete_message."""
+        """Verify data_type is passed from reader to _on_complete_message."""
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
@@ -707,7 +711,7 @@ class TestExpiredChannelCleanup:
     """Tests for _cleanup_expired_channels() method."""
 
     def test_cleanup_expired_channels_sends_final_chunk(self, tmp_path: Any) -> None:
-        """_cleanup_expired_channels should send final_chunk for expired channels with traces."""
+        """Verify final_chunk is sent for expired channels with traces."""
         from datetime import timedelta
 
         from neuracore.data_daemon.const import HEARTBEAT_TIMEOUT_SECS
@@ -793,7 +797,7 @@ class TestExpiredChannelCleanup:
     def test_cleanup_expired_channels_skips_active_channels(
         self, tmp_path: Any
     ) -> None:
-        """_cleanup_expired_channels should not remove channels with recent heartbeat."""
+        """_cleanup_expired_channels does not remove channels with recent heartbeat."""
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
@@ -830,9 +834,7 @@ class TestExpiredChannelCleanup:
 class TestRDMEnqueueErrorHandling:
     """Tests for error handling when RDM.enqueue() fails."""
 
-    def test_on_complete_message_handles_enqueue_exception(
-        self, tmp_path: Any
-    ) -> None:
+    def test_on_complete_message_handles_enqueue_exception(self, tmp_path: Any) -> None:
         """_on_complete_message should catch and log exceptions from RDM.enqueue()."""
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
