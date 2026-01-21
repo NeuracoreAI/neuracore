@@ -71,6 +71,8 @@ def test_trace_record_serialization_encodes_data() -> None:
         True,
         "trace",
         DataType.CUSTOM_1D,
+        "custom_data",
+        0,
         b"hello",
         None,
         None,
@@ -87,6 +89,8 @@ def test_trace_record_serialization_encodes_data() -> None:
     assert as_map["robot_name"] is None
     assert as_map["robot_id"] is None
     assert as_map["data_type"] == DataType.CUSTOM_1D.value
+    assert as_map["data_type_name"] == "custom_data"
+    assert as_map["robot_instance"] == 0
     assert datetime.fromisoformat(as_map["received_at"])
     assert as_map["data"] == base64.b64encode(b"hello").decode("ascii")
 

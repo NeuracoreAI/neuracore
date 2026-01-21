@@ -317,6 +317,8 @@ class CompleteMessage:
     robot_name: str | None
     robot_id: str | None
     data_type: DataType
+    data_type_name: str
+    robot_instance: int
     received_at: str
     data: str
     final_chunk: bool
@@ -329,6 +331,8 @@ class CompleteMessage:
         final_chunk: bool,
         trace_id: str,
         data_type: DataType,
+        data_type_name: str,
+        robot_instance: int,
         data: bytes,
         dataset_id: str | None = None,
         dataset_name: str | None = None,
@@ -343,6 +347,8 @@ class CompleteMessage:
         :param producer_id: The ID of the producer that sent the message.
         :param trace_id: The trace ID of the message.
         :param data_type: The data type of the message payload.
+        :param data_type_name: The name of the data type.
+        :param robot_instance: The robot instance number.
         :param data: The message data.
         :param dataset_id: The dataset ID for the message payload.
         :param dataset_name: The dataset name for the message payload.
@@ -359,6 +365,8 @@ class CompleteMessage:
             robot_name=robot_name,
             robot_id=robot_id,
             data_type=data_type,
+            data_type_name=data_type_name,
+            robot_instance=robot_instance,
             final_chunk=final_chunk,
             received_at=datetime.now(timezone.utc).isoformat(),
             data=base64.b64encode(data).decode("ascii"),
@@ -385,6 +393,8 @@ class CompleteMessage:
             "robot_name": self.robot_name,
             "robot_id": self.robot_id,
             "data_type": self.data_type.value,
+            "data_type_name": self.data_type_name,
+            "robot_instance": self.robot_instance,
             "received_at": self.received_at,
             "data": self.data,
             "final_chunk": self.final_chunk,

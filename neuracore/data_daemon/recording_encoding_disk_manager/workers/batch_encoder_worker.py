@@ -131,7 +131,12 @@ class _BatchEncoderWorker:
                 continue
 
             bytes_written = self._filesystem.trace_bytes_on_disk(trace_key)
-            emitter.emit(Emitter.TRACE_WRITTEN, trace_key.trace_id, bytes_written)
+            emitter.emit(
+                Emitter.TRACE_WRITTEN,
+                trace_key.trace_id,
+                trace_key.recording_id,
+                bytes_written,
+            )
 
     def _process_batch_into_encoder(
         self,
@@ -213,4 +218,9 @@ class _BatchEncoderWorker:
             return
 
         bytes_written = self._filesystem.trace_bytes_on_disk(trace_key)
-        emitter.emit(Emitter.TRACE_WRITTEN, trace_key.trace_id, bytes_written)
+        emitter.emit(
+            Emitter.TRACE_WRITTEN,
+            trace_key.trace_id,
+            trace_key.recording_id,
+            bytes_written,
+        )

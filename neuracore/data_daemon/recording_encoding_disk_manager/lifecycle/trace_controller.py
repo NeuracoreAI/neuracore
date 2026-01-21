@@ -96,7 +96,9 @@ class _TraceController:
         shutil.rmtree(trace_dir, ignore_errors=True)
         self._storage_budget.release(reclaimed_bytes)
 
-        emitter.emit(Emitter.TRACE_WRITTEN, trace_key.trace_id, 0)
+        emitter.emit(
+            Emitter.TRACE_WRITTEN, trace_key.trace_id, trace_key.recording_id, 0
+        )
 
     def on_stop_all_traces_for_recording(
         self, recording_id: str, *, flush_state: Callable[[_WriteState], None]
