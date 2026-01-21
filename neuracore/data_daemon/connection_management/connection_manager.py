@@ -10,6 +10,8 @@ import time
 
 import requests
 
+from neuracore.data_daemon.config_manager.config import ConfigManager
+from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.const import API_URL
 from neuracore.data_daemon.event_emitter import Emitter, emitter
 
@@ -25,26 +27,40 @@ class ConnectionManager:
 
     def __init__(
         self,
+        config_manager: ConfigManager,
+        *,
         timeout: float = 5.0,
         check_interval: float = 10.0,
     ) -> None:
         """Initialize the connection manager.
 
         Args:
-            emitter: Event emitter for broadcasting connection state
+            config_manager: Config to resolve for Connection Manager
             timeout: Timeout in seconds for connectivity checks
             check_interval: Seconds between connectivity checks
         """
+        self.config_manager = config_manager
         self._timeout = timeout
         self._check_interval = check_interval
         self._is_connected = False
         self._running = False
         self._checker_thread: threading.Thread | None = None
+        self._offline_mode = False
+
+        self._init_state()
+
+    def _init_state(self) -> None:
+        effective_config: DaemonConfig = self.config_manager.resolve_effective_config()
+        if effective_config.offline:
+            self._offline_mode = effective_config.offline
 
         emitter.emit(Emitter.IS_CONNECTED, self._is_connected)
 
     def start(self) -> None:
         """Start the connection monitoring thread."""
+        if self._offline_mode:
+            logger.info("ConnectionManager in offline mode")
+            return
         if self._running:
             logger.warning("ConnectionManager already running")
             return
@@ -64,6 +80,9 @@ class ConnectionManager:
         Args:
             timeout: Maximum time to wait for thread to stop
         """
+        if self._offline_mode:
+            logger.info("ConnectionManager in offline mode")
+            return
         if not self._running:
             logger.warning("ConnectionManager not running")
             return

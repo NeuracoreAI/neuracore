@@ -27,11 +27,7 @@ from neuracore.data_daemon.const import (
     DATA_TYPE_FIELD_SIZE,
     TRACE_ID_FIELD_SIZE,
 )
-from neuracore.data_daemon.models import (
-    CommandType,
-    CompleteMessage,
-    MessageEnvelope,
-)
+from neuracore.data_daemon.models import CommandType, CompleteMessage, MessageEnvelope
 from tests.unit.data_daemon.helpers import MockConfigManager
 
 
@@ -79,7 +75,7 @@ class TestDaemonInit:
 
     def test_daemon_accepts_config_manager(self, tmp_path: Any) -> None:
         """Daemon should accept config_manager parameter."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -104,9 +100,11 @@ class TestDaemonInit:
 
         assert daemon._config_manager is not None
 
-    def test_daemon_creates_rdm_with_config_if_not_provided(self, tmp_path: Any) -> None:
+    def test_daemon_creates_rdm_with_config_if_not_provided(
+        self, tmp_path: Any
+    ) -> None:
         """Daemon should create RDM using config_manager if RDM not provided."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
 
         with patch(
@@ -134,7 +132,7 @@ class TestOnCompleteMessage:
 
     def test_on_complete_message_enqueues_to_rdm(self, tmp_path: Any) -> None:
         """_on_complete_message should construct CompleteMessage and enqueue to RDM."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -164,7 +162,7 @@ class TestOnCompleteMessage:
 
     def test_on_complete_message_with_final_chunk(self, tmp_path: Any) -> None:
         """_on_complete_message should set final_chunk=True when specified."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -190,7 +188,7 @@ class TestOnCompleteMessage:
 
     def test_on_complete_message_uses_trace_metadata(self, tmp_path: Any) -> None:
         """_on_complete_message should use metadata from _trace_metadata."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -227,7 +225,7 @@ class TestOnCompleteMessage:
 
     def test_on_complete_message_handles_missing_metadata(self, tmp_path: Any) -> None:
         """_on_complete_message should handle missing metadata gracefully."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -259,7 +257,7 @@ class TestOnCompleteMessage:
         self, tmp_path: Any
     ) -> None:
         """_on_complete_message should use empty string if recording_id is None."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -294,7 +292,7 @@ class TestHandleEndTrace:
 
     def test_handle_end_trace_sends_final_chunk_message(self, tmp_path: Any) -> None:
         """_handle_end_trace should send final_chunk=True message to RDM."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -339,7 +337,7 @@ class TestHandleEndTrace:
         self, tmp_path: Any
     ) -> None:
         """_handle_end_trace should default to CUSTOM_1D for unknown data_type."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -380,7 +378,7 @@ class TestHandleEndTrace:
         self, tmp_path: Any
     ) -> None:
         """_handle_end_trace should default to CUSTOM_1D if no metadata exists."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -416,7 +414,7 @@ class TestHandleEndTrace:
 
     def test_handle_end_trace_removes_trace_after_sending(self, tmp_path: Any) -> None:
         """_handle_end_trace should remove trace from internal state after sending."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -452,7 +450,7 @@ class TestHandleEndTrace:
 
     def test_handle_end_trace_skips_if_missing_trace_id(self, tmp_path: Any) -> None:
         """_handle_end_trace should skip if trace_id is missing."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -483,7 +481,7 @@ class TestHandleEndTrace:
         self, tmp_path: Any
     ) -> None:
         """_handle_end_trace should skip if recording_id is missing."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -550,8 +548,8 @@ class TestDrainChannelMessages:
     def test_drain_channel_messages_passes_data_type_to_on_complete(
         self, tmp_path: Any
     ) -> None:
-        """_drain_channel_messages should pass data_type from reader to _on_complete_message."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        """_drain_channel_messages passes data_type to _on_complete_message."""
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -595,7 +593,7 @@ class TestDrainChannelMessages:
         self, tmp_path: Any
     ) -> None:
         """_drain_channel_messages should reassemble multi-chunk messages correctly."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -673,7 +671,7 @@ class TestDataTypeHandling:
         self, tmp_path: Any, data_type: DataType
     ) -> None:
         """_on_complete_message should handle all DataType values."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -707,12 +705,16 @@ class TestExpiredChannelCleanup:
     """Tests for _cleanup_expired_channels() method."""
 
     def test_cleanup_expired_channels_sends_final_chunk(self, tmp_path: Any) -> None:
-        """_cleanup_expired_channels should send final_chunk for expired channels with traces."""
+        """
+        _cleanup_expired_channels sends final_chunk for expired channels.
+
+        This covers the case where a channel has active traces.
+        """
         from datetime import timedelta
 
         from neuracore.data_daemon.const import HEARTBEAT_TIMEOUT_SECS
 
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -760,7 +762,7 @@ class TestExpiredChannelCleanup:
 
         from neuracore.data_daemon.const import HEARTBEAT_TIMEOUT_SECS
 
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -793,8 +795,10 @@ class TestExpiredChannelCleanup:
     def test_cleanup_expired_channels_skips_active_channels(
         self, tmp_path: Any
     ) -> None:
-        """_cleanup_expired_channels should not remove channels with recent heartbeat."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        """
+        _cleanup_expired_channels should not remove channels with recent heartbeat.
+        """
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -830,11 +834,9 @@ class TestExpiredChannelCleanup:
 class TestRDMEnqueueErrorHandling:
     """Tests for error handling when RDM.enqueue() fails."""
 
-    def test_on_complete_message_handles_enqueue_exception(
-        self, tmp_path: Any
-    ) -> None:
+    def test_on_complete_message_handles_enqueue_exception(self, tmp_path: Any) -> None:
         """_on_complete_message should catch and log exceptions from RDM.enqueue()."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
 
         # Create a mock RDM that raises an exception
@@ -865,7 +867,7 @@ class TestRDMEnqueueErrorHandling:
 
     def test_daemon_continues_after_enqueue_failure(self, tmp_path: Any) -> None:
         """Daemon should continue processing after RDM.enqueue() failure."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+        mock_config = MockConfigManager(path_to_store_record=str(tmp_path))
         mock_comm = MockComm()
 
         # Create a mock RDM that fails on first call, succeeds on second

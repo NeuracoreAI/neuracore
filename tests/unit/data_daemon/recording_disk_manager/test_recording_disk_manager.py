@@ -13,6 +13,7 @@ from neuracore_types import DataType
 
 from neuracore.data_daemon.models import CompleteMessage
 from tests.unit.data_daemon.helpers import MockConfigManager
+from tests.unit.data_daemon.helpers.mock_config_manager import MockDaemonConfig
 
 
 class FakeEmitter:
@@ -157,9 +158,11 @@ def rdm_factory(
 ):
     def _make(*, storage_limit: int | None, flush_bytes: int = 1):
         recordings_root = tmp_path / "recordings"
-        cfg = MockConfigManager(
-            path_to_store_record=str(recordings_root), storage_limit=storage_limit
+        mock_config = MockDaemonConfig(
+            storage_limit=storage_limit,
+            path_to_store_record=str(recordings_root),
         )
+        cfg = MockConfigManager(config=mock_config)
 
         rdm = rdm_module.RecordingDiskManager(cfg, flush_bytes=flush_bytes)
         request.addfinalizer(rdm.shutdown)
