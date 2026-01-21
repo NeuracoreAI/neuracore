@@ -194,8 +194,18 @@ def test_producer_send_data_chunks_and_base64() -> None:
         assert decoded == (b"ab" if idx == 0 else b"cd")
 
 
+class DummyRecordingDiskManager:
+    """Minimal recording disk manager for tests."""
+
+    def enqueue(self, msg):
+        pass
+
+
 def test_cleanup_removes_channel_without_heartbeat() -> None:
-    daemon = Daemon()
+    daemon = Daemon(
+        comm_manager=DummyComm(),
+        recording_disk_manager=DummyRecordingDiskManager(),
+    )
     channel = ChannelState(
         producer_id="stale",
         last_heartbeat=datetime.now(timezone.utc)
@@ -209,7 +219,10 @@ def test_cleanup_removes_channel_without_heartbeat() -> None:
 
 
 def test_cleanup_keeps_recent_channel() -> None:
-    daemon = Daemon()
+    daemon = Daemon(
+        comm_manager=DummyComm(),
+        recording_disk_manager=DummyRecordingDiskManager(),
+    )
     channel = ChannelState(
         producer_id="active",
         last_heartbeat=datetime.now(timezone.utc) - timedelta(seconds=1),
