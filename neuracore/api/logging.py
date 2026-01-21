@@ -518,6 +518,72 @@ def log_joint_torque(
     )
 
 
+def log_visual_joint_positions(
+    positions: dict[str, float],
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+) -> None:
+    """Log visual joint positions for a robot.
+
+    Visual joint positions are joint positions that are required for URDF
+    visualisation but not used during training (e.g. individual finger
+    joints in a gripper).
+
+    Args:
+        positions: Dictionary mapping joint names to positions (in radians)
+        robot_name: Optional robot name.
+            If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+        ValueError: If positions is not a dictionary of floats
+    """
+    _log_group_of_joint_data(
+        DataType.VISUAL_JOINT_POSITIONS,
+        positions,
+        robot_name,
+        instance,
+        timestamp,
+    )
+
+
+def log_visual_joint_position(
+    name: str,
+    position: float,
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+) -> None:
+    """Log visual joint position for a robot.
+
+    Visual joint positions are joint positions that are required for URDF
+    visualisation but not used during training (e.g. individual finger
+    joints in a gripper).
+
+    Args:
+        name: Name of the joint
+        position: Position of the joint (in radians)
+        robot_name: Optional robot name.
+            If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+        ValueError: If position is not a float
+    """
+    _log_group_of_joint_data(
+        DataType.VISUAL_JOINT_POSITIONS,
+        {name: position},
+        robot_name,
+        instance,
+        timestamp,
+    )
+
+
 def log_pose(
     name: str,
     pose: np.ndarray,

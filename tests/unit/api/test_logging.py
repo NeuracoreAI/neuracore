@@ -104,6 +104,27 @@ def test_log_joint_velocities_and_torques(
     nc.log_joint_torque(name="joint2", torque=2.3)
 
 
+def test_log_visual_joint_positions(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test logging visual joint positions."""
+    # Ensure login and robot connection
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    # Test plural function with dict
+    nc.log_visual_joint_positions({"finger1": 0.5, "finger2": -0.3})
+
+    # Test singular function
+    nc.log_visual_joint_position(name="finger1", position=0.5)
+    nc.log_visual_joint_position(name="finger2", position=-0.3)
+
+
 def test_log_language(
     temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
 ):
