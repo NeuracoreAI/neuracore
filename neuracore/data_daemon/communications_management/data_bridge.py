@@ -143,10 +143,9 @@ class Daemon:
         logger.info("Daemon started and ready to receive messages...")
         try:
             while True:
-                # Get message from socket
-                msg = self.comm.receive_message()
-                # Write to ring buffer
-                self.handle_message(msg)
+                raw = self.comm.receive_raw()
+                if not self.process_raw_message(raw):
+                    continue
                 self._cleanup_expired_channels()
                 # Check for full messages from the ring buffer
                 self._drain_channel_messages()
@@ -154,6 +153,20 @@ class Daemon:
             logger.info("Shutting down daemon...")
         finally:
             self.comm.cleanup_daemon()
+
+    def process_raw_message(self, raw: bytes) -> bool:
+        """Parse and handle a raw message payload.
+
+        Returns True if the message was successfully parsed (even if the command
+        is ignored), False if parsing failed.
+        """
+        try:
+            message = MessageEnvelope.from_bytes(raw)
+        except Exception:
+            logger.exception("Failed to parse incoming message bytes")
+            return False
+        self.handle_message(message)
+        return True
 
     # Producer
     def handle_message(self, message: MessageEnvelope) -> None:
@@ -190,7 +203,14 @@ class Daemon:
         if handler is None:
             logger.warning("Unknown command %s from producer_id=%s", cmd, producer_id)
             return
-        handler(channel, message)
+        try:
+            handler(channel, message)
+        except Exception:
+            logger.exception(
+                "Failed to handle command %s from producer_id=%s",
+                cmd,
+                producer_id,
+            )
 
     def _handle_open_ring_buffer(
         self, channel: ChannelState, message: MessageEnvelope
@@ -396,7 +416,9 @@ class Daemon:
                 channel.producer_id,
             )
             return
-        data_chunk_payload = message.payload
+        data_chunk_payload = message.payload.get("data_chunk")
+        if data_chunk_payload is None:
+            data_chunk_payload = message.payload
 
         data_chunk = DataChunkPayload.from_dict(data_chunk_payload)
 
@@ -547,7 +569,10 @@ class Daemon:
         emitter.emit(Emitter.STOP_RECORDING, recording_id)
 
     def cleanup_stopped_channels(
-        self, trace_id: str, recording_id: str, bytes_written: int
+        self,
+        trace_id: str,
+        _: str | None = None,
+        __: int | None = None,
     ) -> None:
         """Clean up a stopped channel.
 
@@ -556,18 +581,16 @@ class Daemon:
         channel state.
 
         :param trace_id: ID of the trace to clean up
-        :param recording_id: ignored parameter
-        :param bytes_written: total number of bytes written for the trace
+        :param bytes_written: total number of bytes written for the trace (unused)
         """
         channel = next(
             (ch for ch in self.channels.values() if ch.trace_id == trace_id),
             None,
         )
+
         if channel is None:
             return
 
-        if recording_id != channel.recording_id:
-            logger.warning("Recording ID mismatch for trace %s", trace_id)
         if channel.recording_id:
             self._remove_trace(str(channel.recording_id), str(trace_id))
 

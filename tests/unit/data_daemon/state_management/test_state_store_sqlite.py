@@ -108,6 +108,28 @@ def test_update_bytes_uploaded_accumulates(store: SqliteStateStore) -> None:
     assert row is not None
 
 
+def test_bytes_uploaded_persisted_across_restart(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    store = SqliteStateStore(db_path)
+    store.create_trace(
+        "trace-restart",
+        "rec-restart",
+        PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-restart.bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+    store.update_bytes_uploaded("trace-restart", 1024)
+    row = _get_trace_row(store, "trace-restart")
+    assert row is not None
+    assert row["bytes_uploaded"] == 1024
+
+    restarted_store = SqliteStateStore(db_path)
+    row_after = _get_trace_row(restarted_store, "trace-restart")
+    assert row_after is not None
+    assert row_after["bytes_uploaded"] == 1024
+
+
 def test_update_status_sets_error(store: SqliteStateStore) -> None:
     store.create_trace(
         "trace-4",

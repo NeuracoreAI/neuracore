@@ -162,6 +162,9 @@ class Producer:
             self._heartbeat_thread.join(timeout=1)
         if self._control_thread is not None:
             self._control_thread.join(timeout=1)
+        if self.socket is not None:
+            self.socket.close(0)
+            self.socket = None
         self._comm.cleanup_producer()
 
     def _send(self, command: CommandType, payload: dict | None = None) -> None:
@@ -288,4 +291,4 @@ class Producer:
                 robot_instance=robot_instance,
                 data=chunk,
             )
-            self._send(CommandType.DATA_CHUNK, payload.to_dict())
+            self._send(CommandType.DATA_CHUNK, {"data_chunk": payload.to_dict()})

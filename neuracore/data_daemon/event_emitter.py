@@ -56,7 +56,7 @@ class Emitter(EventEmitter):
 
     # State manager -> RDM
     DELETE_TRACE = "DELETE_TRACE"
-    # (trace_id, path1)
+    # (recording_id, trace_id, data_type)
 
     def __init__(self) -> None:
         """Initialize the event emitter."""

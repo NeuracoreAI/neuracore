@@ -1,12 +1,13 @@
-"""Tests for ResumableFileUploader.
-
-Tests chunked file uploads, resumable sessions, retry logic, and error handling.
-"""
+"""Tests for ResumableFileUploader with a local GCS-like server."""
 
 from __future__ import annotations
 
+import hashlib
+from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from typing import Any
+from unittest.mock import MagicMock, patch
+from urllib.parse import urlparse
 
 import pytest
 import requests
@@ -16,33 +17,224 @@ from neuracore.data_daemon.upload_management.resumable_file_uploader import (
 )
 
 
-@pytest.fixture
-def test_file(tmp_path: Path) -> Path:
-    """Create a 5MB test file."""
-    test_file = tmp_path / "test_video.mp4"
-    test_file.write_bytes(b"X" * (5 * 1024 * 1024))
-    return test_file
+@dataclass
+class RequestInfo:
+    method: str
+    path: str
+    content_length: int
+    content_range: str
+    is_status_check: bool
+    is_finalize: bool
+    is_final_chunk: bool
+    session_id: str | None
+
+
+@dataclass
+class ResponseAction:
+    status: int
+    headers: dict[str, str] | None = None
+    body: bytes | None = None
+    drop: bool = False
+
+
+class UploadSession:
+    def __init__(self) -> None:
+        self.uploaded_bytes = 0
+        self.total_bytes: int | None = None
+        self.data = bytearray()
+        self.finalized = False
+
+
+class FakeResponse:
+    def __init__(
+        self,
+        status_code: int,
+        headers: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
+        text: str | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.headers = headers or {}
+        self._json_body = json_body
+        self.text = text or ""
+
+    def json(self) -> dict[str, Any]:
+        if self._json_body is None:
+            raise ValueError("No JSON body")
+        return self._json_body
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}")
+
+
+class FakeResumableTransport:
+    def __init__(self) -> None:
+        self.sessions: dict[str, UploadSession] = {}
+        self.session_count = 0
+        self.last_session_id: str | None = None
+        self.request_log: list[dict[str, Any]] = []
+        self.pre_request: callable | None = None
+        self.post_store: callable | None = None
+        self.base_url = "http://fake"
+
+    def _create_session(self) -> str:
+        self.session_count += 1
+        session_id = f"sess-{self.session_count}"
+        self.sessions[session_id] = UploadSession()
+        self.last_session_id = session_id
+        return session_id
+
+    def _record_request(self, info: RequestInfo) -> None:
+        self.request_log.append({
+            "method": info.method,
+            "path": info.path,
+            "content_length": info.content_length,
+            "content_range": info.content_range,
+            "is_status_check": info.is_status_check,
+            "is_finalize": info.is_finalize,
+            "is_final_chunk": info.is_final_chunk,
+            "session_id": info.session_id,
+        })
+
+    def get(
+        self, url: str, params: dict[str, Any] | None = None, **_: Any
+    ) -> FakeResponse:
+        parsed = urlparse(url)
+        if parsed.path.endswith("/resumable_upload_url"):
+            session_id = self._create_session()
+            session_url = f"{self.base_url}/upload/{session_id}"
+            return FakeResponse(200, json_body={"url": session_url})
+        return FakeResponse(404)
+
+    def put(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        data: bytes | None = None,
+        **_: Any,
+    ) -> FakeResponse:
+        parsed = urlparse(url)
+        if not parsed.path.startswith("/upload/"):
+            return FakeResponse(404)
+
+        session_id = parsed.path.split("/")[-1]
+        session = self.sessions.get(session_id)
+        if session is None:
+            return FakeResponse(404)
+
+        headers = headers or {}
+        content_length = int(headers.get("Content-Length", "0"))
+        content_range = headers.get("Content-Range", "")
+        is_status_check = content_length == 0 and content_range.startswith("bytes */")
+        is_finalize = (
+            is_status_check
+            and session.total_bytes is not None
+            and content_range == f"bytes */{session.total_bytes}"
+        )
+        is_final_chunk = "/" in content_range and content_range.split("/")[-1] != "*"
+
+        info = RequestInfo(
+            method="PUT",
+            path=parsed.path,
+            content_length=content_length,
+            content_range=content_range,
+            is_status_check=is_status_check,
+            is_finalize=is_finalize,
+            is_final_chunk=is_final_chunk,
+            session_id=session_id,
+        )
+        self._record_request(info)
+
+        if self.pre_request:
+            action = self.pre_request(info)
+            if action:
+                if action.drop:
+                    raise requests.exceptions.ConnectionError("Dropped connection")
+                return FakeResponse(
+                    action.status,
+                    headers=action.headers,
+                    text=action.body.decode() if action.body else "",
+                )
+
+        if is_status_check:
+            if is_finalize and session.total_bytes is not None:
+                if session.uploaded_bytes >= session.total_bytes:
+                    session.finalized = True
+                    md5_hash = hashlib.md5(session.data).hexdigest()
+                    return FakeResponse(200, headers={"X-Checksum-MD5": md5_hash})
+            if session.finalized:
+                return FakeResponse(200)
+            headers_out: dict[str, str] = {}
+            if session.uploaded_bytes > 0:
+                headers_out["Range"] = f"bytes=0-{session.uploaded_bytes - 1}"
+            return FakeResponse(308, headers=headers_out)
+
+        data = data or b""
+        try:
+            _, range_spec = content_range.split(" ", 1)
+            range_part, total_part = range_spec.split("/")
+            range_start, range_end = range_part.split("-")
+            start = int(range_start)
+            end = int(range_end)
+            total = None if total_part == "*" else int(total_part)
+        except ValueError:
+            return FakeResponse(400)
+
+        if total is not None:
+            session.total_bytes = total
+
+        if start != session.uploaded_bytes:
+            headers_out: dict[str, str] = {}
+            if session.uploaded_bytes > 0:
+                headers_out["Range"] = f"bytes=0-{session.uploaded_bytes - 1}"
+            return FakeResponse(308, headers=headers_out)
+
+        session.data.extend(data)
+        session.uploaded_bytes += len(data)
+
+        if self.post_store:
+            action = self.post_store(info, session)
+            if action:
+                if action.drop:
+                    raise requests.exceptions.ConnectionError("Dropped connection")
+                return FakeResponse(
+                    action.status,
+                    headers=action.headers,
+                    text=action.body.decode() if action.body else "",
+                )
+
+        if (
+            session.total_bytes is not None
+            and session.uploaded_bytes >= session.total_bytes
+        ):
+            session.finalized = True
+            md5_hash = hashlib.md5(session.data).hexdigest()
+            return FakeResponse(200, headers={"X-Checksum-MD5": md5_hash})
+
+        if end >= session.uploaded_bytes:
+            headers_out = {"Range": f"bytes=0-{session.uploaded_bytes - 1}"}
+            return FakeResponse(308, headers=headers_out)
+
+        return FakeResponse(200)
 
 
 @pytest.fixture
-def large_test_file(tmp_path: Path) -> Path:
-    """Create a 10MB test file."""
-    test_file = tmp_path / "large_file.mp4"
-    test_file.write_bytes(b"X" * (10 * 1024 * 1024))
-    return test_file
-
-
-@pytest.fixture
-def very_large_test_file(tmp_path: Path) -> Path:
-    """Create a 200MB test file for multi-chunk upload testing."""
-    test_file = tmp_path / "very_large_file.mp4"
-    test_file.write_bytes(b"X" * (200 * 1024 * 1024))
-    return test_file
+def transport(monkeypatch) -> FakeResumableTransport:
+    fake_transport = FakeResumableTransport()
+    monkeypatch.setattr(
+        "neuracore.data_daemon.upload_management.resumable_file_uploader.requests.get",
+        fake_transport.get,
+    )
+    monkeypatch.setattr(
+        "neuracore.data_daemon.upload_management.resumable_file_uploader.requests.put",
+        fake_transport.put,
+    )
+    return fake_transport
 
 
 @pytest.fixture
 def mock_auth():
-    """Mock authentication."""
     with patch(
         "neuracore.data_daemon.upload_management.resumable_file_uploader.get_auth"
     ) as mock_get_auth:
@@ -54,8 +246,13 @@ def mock_auth():
 
 
 @pytest.fixture
-def uploader(test_file: Path, mock_auth) -> ResumableFileUploader:
-    """Create a basic ResumableFileUploader instance."""
+def test_file(tmp_path: Path) -> Path:
+    test_file = tmp_path / "test_video.mp4"
+    test_file.write_bytes(b"X" * (3 * 1024 * 1024))
+    return test_file
+
+
+def _make_uploader(test_file: Path) -> ResumableFileUploader:
     return ResumableFileUploader(
         recording_id="rec-123",
         filepath=str(test_file),
@@ -65,306 +262,369 @@ def uploader(test_file: Path, mock_auth) -> ResumableFileUploader:
     )
 
 
-def test_uploader_initializes_correctly(
-    uploader: ResumableFileUploader, test_file: Path
+def _set_api_url(monkeypatch, transport: FakeResumableTransport) -> None:
+    monkeypatch.setattr(
+        "neuracore.data_daemon.upload_management.resumable_file_uploader.API_URL",
+        transport.base_url,
+    )
+
+
+def test_successful_upload_and_checksum_verification(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
 ) -> None:
-    """Test ResumableFileUploader initialization."""
-    assert uploader._recording_id == "rec-123"
-    assert uploader._filepath == str(test_file)
-    assert uploader._cloud_filepath == "RGB_IMAGES/camera/trace.mp4"
-    assert uploader._content_type == "video/mp4"
-    assert uploader._bytes_uploaded == 0
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    uploader = _make_uploader(test_file)
+    success, bytes_uploaded, error_message = uploader.upload()
+
+    assert success is True
+    assert bytes_uploaded == 3 * 1024 * 1024
+    assert error_message is None
+    session = transport.sessions[transport.last_session_id]  # type: ignore[index]
+    assert session.finalized is True
 
 
-def test_uploader_gets_session_uri(uploader: ResumableFileUploader) -> None:
-    """Test obtaining upload session URI from backend."""
+def test_resume_after_interruption_no_duplicate_data(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    drop_once = {"done": False}
+
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_status_check:
+            return None
+        if not drop_once["done"] and info.content_range.startswith("bytes 1048576-"):
+            drop_once["done"] = True
+            return ResponseAction(status=500, drop=True)
+        return None
+
+    transport.pre_request = pre_request
+
+    uploader = _make_uploader(test_file)
+    success, bytes_uploaded, _ = uploader.upload()
+
+    assert success is True
+    assert bytes_uploaded == 3 * 1024 * 1024
+    retry_ranges = [
+        entry["content_range"]
+        for entry in transport.request_log
+        if entry["content_range"].startswith("bytes 1048576-")
+    ]
+    assert len(retry_ranges) >= 1
+    session = transport.sessions[transport.last_session_id]  # type: ignore[index]
+    assert session.uploaded_bytes == 3 * 1024 * 1024
+    assert len(session.data) == 3 * 1024 * 1024
+    assert transport.session_count == 1
+
+
+def test_resumable_session_preserved_on_retry(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    failures = {"count": 0}
+
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_status_check:
+            return None
+        if failures["count"] < 2:
+            failures["count"] += 1
+            return ResponseAction(status=503)
+        return None
+
+    transport.pre_request = pre_request
+
+    uploader = _make_uploader(test_file)
+    success, bytes_uploaded, _ = uploader.upload()
+
+    assert success is True
+    assert bytes_uploaded == 3 * 1024 * 1024
+    assert transport.session_count == 1
+
+
+def test_session_expiration_refreshes_session(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    expired_once = {"done": False}
+
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_status_check:
+            return None
+        if not expired_once["done"]:
+            expired_once["done"] = True
+            return ResponseAction(status=410)
+        return None
+
+    transport.pre_request = pre_request
+
+    uploader = _make_uploader(test_file)
+    success, bytes_uploaded, _ = uploader.upload()
+
+    assert success is True
+    assert bytes_uploaded == 3 * 1024 * 1024
+    assert transport.session_count == 2
+    assert mock_auth.call_count >= 2
+
+
+def test_signed_url_expired_reacquires_session(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    expired_once = {"done": False}
+
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_status_check:
+            return None
+        if not expired_once["done"]:
+            expired_once["done"] = True
+            return ResponseAction(status=403, headers={"X-Signed-Url-Expired": "true"})
+        return None
+
+    transport.pre_request = pre_request
+
+    uploader = _make_uploader(test_file)
+    success, bytes_uploaded, _ = uploader.upload()
+
+    assert success is True
+    assert bytes_uploaded == 3 * 1024 * 1024
+    assert transport.session_count == 2
+    assert mock_auth.call_count >= 2
+
+
+def test_permission_denied_fails_fast(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_status_check:
+            return None
+        return ResponseAction(status=403)
+
+    transport.pre_request = pre_request
+
+    uploader = _make_uploader(test_file)
+    success, _, error_message = uploader.upload()
+
+    assert success is False
+    assert "Permission denied" in (error_message or "")
+    assert transport.session_count == 1
+
+
+def test_bucket_not_found_fails_fast(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_status_check:
+            return None
+        return ResponseAction(status=404)
+
+    transport.pre_request = pre_request
+
+    uploader = _make_uploader(test_file)
+    success, _, error_message = uploader.upload()
+
+    assert success is False
+    assert "Bucket not found" in (error_message or "")
+
+
+def test_retry_on_5xx_with_backoff(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    failures = {"count": 0}
+
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_status_check:
+            return None
+        if failures["count"] < 2:
+            failures["count"] += 1
+            return ResponseAction(status=500)
+        return None
+
+    transport.pre_request = pre_request
+
+    with patch("time.sleep") as mock_sleep:
+        uploader = _make_uploader(test_file)
+        success, _, _ = uploader.upload()
+
+    assert success is True
+    mock_sleep.assert_any_call(1)
+    mock_sleep.assert_any_call(2)
+
+
+def test_retry_on_429_with_backoff(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    failures = {"count": 0}
+
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_status_check:
+            return None
+        if failures["count"] < 2:
+            failures["count"] += 1
+            return ResponseAction(status=429)
+        return None
+
+    transport.pre_request = pre_request
+
+    with patch("time.sleep") as mock_sleep:
+        uploader = _make_uploader(test_file)
+        success, _, _ = uploader.upload()
+
+    assert success is True
+    mock_sleep.assert_any_call(1)
+    mock_sleep.assert_any_call(2)
+
+
+def test_finalization_retry_without_reupload(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    fail_finalize_once = {"done": False}
+
+    def post_store(info: RequestInfo, session: UploadSession) -> ResponseAction | None:
+        if (
+            info.is_final_chunk
+            and not info.is_status_check
+            and not fail_finalize_once["done"]
+        ):
+            fail_finalize_once["done"] = True
+            return ResponseAction(status=500)
+        return None
+
+    transport.post_store = post_store
+
+    uploader = _make_uploader(test_file)
+    success, bytes_uploaded, _ = uploader.upload()
+
+    assert success is True
+    assert bytes_uploaded == 3 * 1024 * 1024
+    session = transport.sessions[transport.last_session_id]  # type: ignore[index]
+    assert len(session.data) == 3 * 1024 * 1024
+    finalize_calls = [entry for entry in transport.request_log if entry["is_finalize"]]
+    assert len(finalize_calls) >= 1
+
+
+def test_bucket_unreachable_at_start(mock_auth, test_file: Path) -> None:
+    uploader = _make_uploader(test_file)
     with patch("requests.get") as mock_get:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "url": "https://storage.googleapis.com/upload/session/123"
-        }
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        session_uri = uploader._get_upload_session_uri()
-
-        assert session_uri == "https://storage.googleapis.com/upload/session/123"
-        mock_get.assert_called_once()
+        mock_get.side_effect = requests.exceptions.ConnectionError("Unreachable")
+        success, _, error_message = uploader.upload()
+    assert success is False
+    assert "Failed to get upload session URI" in (error_message or "")
 
 
-def test_uploader_handles_successful_upload(uploader: ResumableFileUploader) -> None:
-    """Test successful file upload."""
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        mock_put.return_value.status_code = 200
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is True
-        assert bytes_uploaded == 5 * 1024 * 1024
-        assert error_message is None
-
-
-def test_uploader_tracks_progress_with_callback(test_file: Path, mock_auth) -> None:
-    """Test progress callback is called with byte deltas."""
-    progress_updates = []
-
-    def progress_callback(bytes_delta: int) -> None:
-        progress_updates.append(bytes_delta)
-
-    uploader = ResumableFileUploader(
-        recording_id="rec-123",
-        filepath=str(test_file),
-        cloud_filepath="RGB_IMAGES/camera/trace.mp4",
-        content_type="video/mp4",
-        progress_callback=progress_callback,
-    )
-
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        mock_put.return_value.status_code = 200
-
-        uploader.upload()
-
-        assert len(progress_updates) > 0
-        assert sum(progress_updates) == 5 * 1024 * 1024
-
-
-def test_uploader_resumes_from_offset(large_test_file: Path, mock_auth) -> None:
-    """Test resuming upload from a specific offset."""
-    uploader = ResumableFileUploader(
-        recording_id="rec-123",
-        filepath=str(large_test_file),
-        cloud_filepath="RGB_IMAGES/camera/trace.mp4",
-        content_type="video/mp4",
-        bytes_uploaded=5 * 1024 * 1024,
-    )
-
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        mock_put.return_value.status_code = 200
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is True
-        assert bytes_uploaded == 10 * 1024 * 1024
-
-        first_put_call = mock_put.call_args_list[0]
-        content_range = first_put_call[1]["headers"]["Content-Range"]
-        assert content_range.startswith("bytes 5242880-")
-
-
-def test_uploader_handles_session_expiration(uploader: ResumableFileUploader) -> None:
-    """Test handling of 410 Gone (session expiration)."""
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.side_effect = [
-            {"url": "https://upload.url/session1"},
-            {"url": "https://upload.url/session2"},
-        ]
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        mock_put.return_value.status_code = 410
-        mock_put.side_effect = [
-            MagicMock(status_code=410),  # Session expired
-            MagicMock(status_code=200),  # Success with new session
-        ]
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is True
-        assert mock_get.call_count == 2
-
-
-def test_uploader_handles_network_error(uploader: ResumableFileUploader) -> None:
-    """Test handling of network connection errors."""
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        # Mock network error
-        mock_put.side_effect = requests.exceptions.ConnectionError("Network error")
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is False
-        assert "Network connection error" in error_message
-
-
-def test_uploader_handles_file_not_found(mock_auth) -> None:
-    """Test handling when file doesn't exist."""
-    uploader = ResumableFileUploader(
-        recording_id="rec-123",
-        filepath="/nonexistent/file.mp4",
-        cloud_filepath="RGB_IMAGES/camera/trace.mp4",
-        content_type="video/mp4",
-    )
-
-    with pytest.raises(FileNotFoundError):
-        uploader.upload()
-
-
-def test_uploader_retries_on_timeout(uploader: ResumableFileUploader) -> None:
-    """Test retry logic on timeout errors."""
-    with (
-        patch("requests.get") as mock_get,
-        patch("requests.put") as mock_put,
-        patch("time.sleep"),
-    ):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        mock_put.side_effect = [
-            requests.exceptions.Timeout("Timeout"),
-            requests.exceptions.Timeout("Timeout"),
-            MagicMock(status_code=200),
-        ]
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is True
-        assert mock_put.call_count == 3
-
-
-def test_uploader_fails_after_max_retries(uploader: ResumableFileUploader) -> None:
-    """Test upload fails after MAX_RETRIES attempts."""
-    with (
-        patch("requests.get") as mock_get,
-        patch("requests.put") as mock_put,
-        patch("time.sleep"),
-    ):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        mock_put.side_effect = requests.exceptions.Timeout("Timeout")
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is False
-        assert "failed after" in error_message
-        assert mock_put.call_count == ResumableFileUploader.MAX_RETRIES
-
-
-def test_uploader_handles_http_errors(uploader: ResumableFileUploader) -> None:
-    """Test handling of HTTP error responses."""
-    with (
-        patch("requests.get") as mock_get,
-        patch("requests.put") as mock_put,
-        patch("time.sleep"),
-    ):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        mock_put.return_value.status_code = 500
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is False
-        assert "failed after" in error_message
-
-
-def test_uploader_sets_correct_content_range_headers(
-    uploader: ResumableFileUploader,
-) -> None:
-    """Test Content-Range headers are set correctly."""
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        mock_put.return_value.status_code = 200
-
-        uploader.upload()
-
-        last_put_call = mock_put.call_args_list[-1]
-        headers = last_put_call[1]["headers"]
-        content_range = headers["Content-Range"]
-
-        assert content_range.endswith(f"/{5 * 1024 * 1024}")
-
-
-def test_uploader_handles_session_uri_fetch_failure(
-    uploader: ResumableFileUploader,
-) -> None:
-    """Test handling when fetching session URI fails."""
+def test_dns_resolution_failure(mock_auth, test_file: Path) -> None:
+    uploader = _make_uploader(test_file)
     with patch("requests.get") as mock_get:
-        # Mock session URI fetch failure
-        mock_get.side_effect = requests.exceptions.RequestException("API Error")
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is False
-        assert "Failed to get upload session URI" in error_message
+        mock_get.side_effect = requests.exceptions.ConnectionError("DNS failure")
+        success, _, error_message = uploader.upload()
+    assert success is False
+    assert "Failed to get upload session URI" in (error_message or "")
 
 
-def test_uploader_handles_large_file(very_large_test_file: Path, mock_auth) -> None:
-    """Test uploading large file (multiple chunks)."""
-    progress_updates = []
+def test_ssl_handshake_failure_on_upload(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
 
-    def progress_callback(bytes_delta: int) -> None:
-        progress_updates.append(bytes_delta)
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_status_check:
+            return None
+        return ResponseAction(status=200)
 
+    transport.pre_request = pre_request
+
+    with patch("requests.put") as mock_put:
+        mock_put.side_effect = requests.exceptions.SSLError("TLS failure")
+        uploader = _make_uploader(test_file)
+        success, _, error_message = uploader.upload()
+
+    assert success is False
+    assert "SSL error" in (error_message or "")
+
+
+def test_max_retries_exceeded(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_status_check:
+            return None
+        return ResponseAction(status=500)
+
+    transport.pre_request = pre_request
+
+    uploader = _make_uploader(test_file)
+    success, _, error_message = uploader.upload()
+
+    assert success is False
+    assert "failed after" in (error_message or "")
+
+
+def test_backoff_caps_at_five_minutes() -> None:
     uploader = ResumableFileUploader(
         recording_id="rec-123",
-        filepath=str(very_large_test_file),
-        cloud_filepath="RGB_IMAGES/camera/trace.mp4",
+        filepath="/tmp/does-not-matter",
+        cloud_filepath="trace.mp4",
         content_type="video/mp4",
-        progress_callback=progress_callback,
     )
-
-    with patch("requests.get") as mock_get, patch("requests.put") as mock_put:
-        # Mock session URI
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
-
-        def mock_put_response(*args, **kwargs):
-            if mock_put.call_count < 4:
-                return MagicMock(status_code=308)
-            return MagicMock(status_code=200)
-
-        mock_put.side_effect = mock_put_response
-
-        success, bytes_uploaded, error_message = uploader.upload()
-
-        assert success is True
-        assert bytes_uploaded == 200 * 1024 * 1024
-        assert len(progress_updates) == 4
-        assert sum(progress_updates) == 200 * 1024 * 1024
+    with patch("time.sleep") as mock_sleep:
+        uploader._sleep_backoff(10)
+    mock_sleep.assert_called_once_with(300)
 
 
-def test_uploader_exponential_backoff(uploader: ResumableFileUploader) -> None:
-    """Test exponential backoff between retries."""
-    with (
-        patch("requests.get") as mock_get,
-        patch("requests.put") as mock_put,
-        patch("time.sleep") as mock_sleep,
-    ):
-        # Mock session URI
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"url": "https://upload.url"}
-        mock_get.return_value.raise_for_status = MagicMock()
+def test_resume_from_server_offset(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
 
-        # Mock timeouts then success
-        mock_put.side_effect = [
-            requests.exceptions.Timeout("Timeout"),
-            requests.exceptions.Timeout("Timeout"),
-            MagicMock(status_code=200),
-        ]
+    primed = {"done": False}
 
-        uploader.upload()
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_status_check and not primed["done"]:
+            primed["done"] = True
+            session = transport.sessions[info.session_id]  # type: ignore[index]
+            session.data.extend(b"X" * (1024 * 1024))
+            session.uploaded_bytes = 1024 * 1024
+            return None
+        return None
 
-        sleep_calls = [call(1), call(2)]
-        mock_sleep.assert_has_calls(sleep_calls)
+    transport.pre_request = pre_request
+
+    uploader = _make_uploader(test_file)
+    success, bytes_uploaded, _ = uploader.upload()
+
+    assert success is True
+    assert bytes_uploaded == 3 * 1024 * 1024
+    upload_starts = [
+        entry["content_range"]
+        for entry in transport.request_log
+        if entry["content_range"].startswith("bytes 1048576-")
+    ]
+    assert upload_starts
