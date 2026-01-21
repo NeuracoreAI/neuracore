@@ -5,10 +5,12 @@ on:
     branches:
       - main
       - develop
+      - ndd-dev
   push:
     branches:
       - main
       - develop
+      - ndd-dev
 
 jobs:
   pre-commit:
