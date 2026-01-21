@@ -153,7 +153,7 @@ def test_connection_manager_stops_thread_on_stop(manager: ConnectionManager) -> 
     assert thread is not None
     assert thread.is_alive()
 
-    manager.stop(timeout=2.0)
+    manager.stop()
 
     time.sleep(2)
 

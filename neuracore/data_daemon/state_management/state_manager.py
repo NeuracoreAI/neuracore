@@ -107,6 +107,10 @@ class StateManager:
         """
         emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
         self._store.set_stopped_ats(recording_id)
+        if not self._is_connected:
+            return
+        traces = self._store.find_traces_by_recording_id(recording_id)
+        self._emit_progress_report_if_recording_stopped(traces)
 
     def handle_is_connected(self, is_connected: bool) -> None:
         """Handle a connection status event from the data bridge.
@@ -145,9 +149,10 @@ class StateManager:
         for trace in unreported_traces:
             traces_by_recording.setdefault(trace.recording_id, []).append(trace)
         for _, recording_traces in traces_by_recording.items():
-            self._emit_progress_report_if_recording_stopped(recording_traces)
+            if all(trace.ready_for_upload == 1 for trace in recording_traces):
+                self._emit_progress_report_if_recording_stopped(recording_traces)
 
-    def handle_upload_complete(self, trace_id: str, path: str) -> None:
+    def handle_upload_complete(self, trace_id: str) -> None:
         """Handle an upload complete event from an uploader.
 
         This function is called when an uploader completes an upload.

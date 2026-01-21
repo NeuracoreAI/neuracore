@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -212,7 +213,7 @@ def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
 
     emitter.on(Emitter.DELETE_TRACE, handler)
     try:
-        emitter.emit(Emitter.UPLOAD_COMPLETE, "trace-3", "/tmp/trace-3.bin")
+        emitter.emit(Emitter.UPLOAD_COMPLETE, "trace-3")
         time.sleep(2)
         assert store.deleted == ["trace-3"]
         assert received == [("rec-3", "trace-3", DataType.CUSTOM_1D)]
@@ -253,6 +254,7 @@ def test_trace_written_emits_ready_for_upload_when_connected(state_manager) -> N
     received: list[tuple] = []
 
     def handler(*args) -> None:
+        assert store.marked_written == [("trace-5", 64)]
         received.append(args)
 
     emitter.on(Emitter.READY_FOR_UPLOAD, handler)
@@ -270,6 +272,71 @@ def test_trace_written_emits_ready_for_upload_when_connected(state_manager) -> N
         )]
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, handler)
+
+
+def test_trace_written_emits_progress_report_with_bounds(state_manager) -> None:
+    manager, store = state_manager
+    created_early = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    created_late = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    updated_early = datetime(2024, 1, 3, tzinfo=timezone.utc)
+    updated_late = datetime(2024, 1, 4, tzinfo=timezone.utc)
+
+    trace_pending = _make_trace(
+        "trace-1",
+        "rec-1",
+        status=TraceStatus.WRITING,
+        created_at=created_early,
+        last_updated=updated_early,
+    )
+    trace_written = _make_trace(
+        "trace-2",
+        "rec-1",
+        status=TraceStatus.WRITTEN,
+        ready_for_upload=1,
+        bytes_written=10,
+        total_bytes=10,
+        created_at=created_late,
+        last_updated=updated_late,
+    )
+    store._traces_by_id["trace-1"] = trace_pending
+    store._traces_by_id["trace-2"] = trace_written
+    store._traces_by_recording["rec-1"] = [trace_pending, trace_written]
+
+    emitter.emit(Emitter.IS_CONNECTED, True)
+    progress_event = threading.Event()
+    ready_events: list[tuple] = []
+    progress_events: list[tuple] = []
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+
+    def progress_handler(*args) -> None:
+        progress_events.append(args)
+        progress_event.set()
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
+    try:
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-1", "rec-1", 10)
+        assert ready_events == [(
+            "trace-1",
+            "rec-1",
+            "/tmp/trace-1.bin",
+            DataType.CUSTOM_1D,
+            "custom",
+            0,
+        )]
+        assert progress_event.wait(timeout=1.0)
+        start_time, end_time, traces = progress_events[0]
+        assert start_time == created_early.timestamp()
+        assert end_time == updated_late.timestamp()
+        assert [trace.trace_id for trace in traces] == ["trace-1", "trace-2"]
+
+        emitter.emit(Emitter.UPLOADED_BYTES, "trace-1", 5)
+        assert store.updated_bytes == [("trace-1", 5)]
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+        emitter.remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
 
 
 def test_is_connected_emits_ready_and_progress_report(state_manager) -> None:
@@ -336,4 +403,324 @@ def test_is_connected_emits_ready_and_progress_report(state_manager) -> None:
         assert [trace.trace_id for trace in traces] == ["trace-7"]
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+        emitter.remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
+
+
+def test_stop_recording_emits_progress_report_when_ready_and_connected(
+    state_manager,
+) -> None:
+    _, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    trace_one = _make_trace(
+        "trace-1",
+        "rec-1",
+        status=TraceStatus.WRITTEN,
+        ready_for_upload=1,
+        bytes_written=8,
+        total_bytes=8,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    trace_two = _make_trace(
+        "trace-2",
+        "rec-1",
+        status=TraceStatus.WRITTEN,
+        ready_for_upload=1,
+        bytes_written=6,
+        total_bytes=6,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    store._traces_by_id["trace-1"] = trace_one
+    store._traces_by_id["trace-2"] = trace_two
+    store._traces_by_recording["rec-1"] = [trace_one, trace_two]
+
+    progress_event = threading.Event()
+    progress_events: list[tuple] = []
+
+    def progress_handler(*args) -> None:
+        progress_events.append(args)
+        progress_event.set()
+
+    emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        emitter.emit(Emitter.STOP_RECORDING, "rec-1")
+        assert progress_event.wait(timeout=1.0)
+        _, _, traces = progress_events[0]
+        assert {trace.trace_id for trace in traces} == {"trace-1", "trace-2"}
+    finally:
+        emitter.remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
+
+
+def test_stop_recording_skips_progress_report_when_disconnected(state_manager) -> None:
+    _, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    trace = _make_trace(
+        "trace-1",
+        "rec-1",
+        status=TraceStatus.WRITTEN,
+        ready_for_upload=1,
+        bytes_written=8,
+        total_bytes=8,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    store._traces_by_id["trace-1"] = trace
+    store._traces_by_recording["rec-1"] = [trace]
+
+    progress_events: list[tuple] = []
+
+    def progress_handler(*args) -> None:
+        progress_events.append(args)
+
+    emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
+    try:
+        emitter.emit(Emitter.STOP_RECORDING, "rec-1")
+        assert progress_events == []
+    finally:
+        emitter.remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
+
+
+def test_stop_recording_waits_for_all_traces_written(state_manager) -> None:
+    _, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    trace_written = _make_trace(
+        "trace-written",
+        "rec-1",
+        status=TraceStatus.WRITTEN,
+        ready_for_upload=1,
+        bytes_written=8,
+        total_bytes=8,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    trace_writing = _make_trace(
+        "trace-writing",
+        "rec-1",
+        status=TraceStatus.WRITING,
+        ready_for_upload=0,
+        bytes_written=4,
+        total_bytes=8,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    store._traces_by_id["trace-written"] = trace_written
+    store._traces_by_id["trace-writing"] = trace_writing
+    store._traces_by_recording["rec-1"] = [trace_written, trace_writing]
+
+    progress_event = threading.Event()
+
+    def progress_handler(*_args) -> None:
+        progress_event.set()
+
+    emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        emitter.emit(Emitter.STOP_RECORDING, "rec-1")
+        assert not progress_event.wait(timeout=0.2)
+    finally:
+        emitter.remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
+
+
+def test_trace_written_waits_for_all_traces_before_progress_report(
+    state_manager,
+) -> None:
+    _, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    trace_written = _make_trace(
+        "trace-written",
+        "rec-1",
+        status=TraceStatus.WRITTEN,
+        ready_for_upload=1,
+        bytes_written=8,
+        total_bytes=8,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    trace_writing = _make_trace(
+        "trace-writing",
+        "rec-1",
+        status=TraceStatus.WRITING,
+        ready_for_upload=0,
+        bytes_written=4,
+        total_bytes=8,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    store._traces_by_id["trace-written"] = trace_written
+    store._traces_by_id["trace-writing"] = trace_writing
+    store._traces_by_recording["rec-1"] = [trace_written, trace_writing]
+
+    progress_event = threading.Event()
+
+    def progress_handler(*_args) -> None:
+        progress_event.set()
+
+    emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-written", "rec-1", 8)
+        assert not progress_event.wait(timeout=0.2)
+    finally:
+        emitter.remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
+
+
+def test_recording_completion_isolated_across_recordings(state_manager) -> None:
+    _, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    trace_a = _make_trace(
+        "trace-a",
+        "rec-a",
+        status=TraceStatus.WRITING,
+        ready_for_upload=0,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    trace_b1 = _make_trace(
+        "trace-b1",
+        "rec-b",
+        status=TraceStatus.WRITTEN,
+        ready_for_upload=1,
+        bytes_written=10,
+        total_bytes=10,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    trace_b2 = _make_trace(
+        "trace-b2",
+        "rec-b",
+        status=TraceStatus.WRITING,
+        ready_for_upload=0,
+        bytes_written=0,
+        total_bytes=10,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    store._traces_by_id["trace-a"] = trace_a
+    store._traces_by_id["trace-b1"] = trace_b1
+    store._traces_by_id["trace-b2"] = trace_b2
+    store._traces_by_recording["rec-a"] = [trace_a]
+    store._traces_by_recording["rec-b"] = [trace_b1, trace_b2]
+
+    progress_event = threading.Event()
+    progress_events: list[tuple] = []
+
+    def progress_handler(*args) -> None:
+        progress_events.append(args)
+        progress_event.set()
+
+    emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-b2", "rec-b", 10)
+        assert progress_event.wait(timeout=1.0)
+        _, _, traces = progress_events[0]
+        assert {trace.recording_id for trace in traces} == {"rec-b"}
+    finally:
+        emitter.remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
+
+
+def test_upload_failed_does_not_block_other_recordings(state_manager) -> None:
+    _, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    trace_a = _make_trace(
+        "trace-a",
+        "rec-a",
+        status=TraceStatus.WRITING,
+        ready_for_upload=0,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    trace_b = _make_trace(
+        "trace-b",
+        "rec-b",
+        status=TraceStatus.PENDING,
+        ready_for_upload=0,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    store._traces_by_id["trace-a"] = trace_a
+    store._traces_by_id["trace-b"] = trace_b
+    store._traces_by_recording["rec-a"] = [trace_a]
+    store._traces_by_recording["rec-b"] = [trace_b]
+
+    ready_events: list[tuple] = []
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        emitter.emit(
+            Emitter.UPLOAD_FAILED,
+            "trace-a",
+            0,
+            TraceStatus.WRITTEN,
+            TraceErrorCode.DISK_FULL,
+            "disk full",
+        )
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-b", "rec-b", 10)
+        assert ready_events == [(
+            "trace-b",
+            "rec-b",
+            "/tmp/trace-b.bin",
+            DataType.CUSTOM_1D,
+            "custom",
+            0,
+        )]
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+
+def test_progress_report_sent_on_reconnect_after_stop(state_manager) -> None:
+    _, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    trace_one = _make_trace(
+        "trace-1",
+        "rec-1",
+        status=TraceStatus.WRITTEN,
+        ready_for_upload=1,
+        bytes_written=8,
+        total_bytes=8,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    trace_two = _make_trace(
+        "trace-2",
+        "rec-1",
+        status=TraceStatus.WRITTEN,
+        ready_for_upload=1,
+        bytes_written=6,
+        total_bytes=6,
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+    store._traces_by_id["trace-1"] = trace_one
+    store._traces_by_id["trace-2"] = trace_two
+    store._traces_by_recording["rec-1"] = [trace_one, trace_two]
+    store.unreported_traces = [trace_one, trace_two]
+    store.ready_traces = [trace_one, trace_two]
+
+    progress_event = threading.Event()
+
+    def progress_handler(*_args) -> None:
+        progress_event.set()
+
+    emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
+    try:
+        emitter.emit(Emitter.STOP_RECORDING, "rec-1")
+        assert not progress_event.wait(timeout=0.2)
+
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        assert progress_event.wait(timeout=1.0)
+    finally:
         emitter.remove_listener(Emitter.PROGRESS_REPORT, progress_handler)

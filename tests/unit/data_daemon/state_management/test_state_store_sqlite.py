@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
+from neuracore.data_daemon.event_emitter import Emitter, emitter
 from neuracore.data_daemon.models import (
     DATA_TYPE_CONTENT_MAPPING,
+    DataType,
     TraceErrorCode,
     TraceStatus,
 )
+from neuracore.data_daemon.state_management.state_manager import StateManager
 from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
 from neuracore.data_daemon.state_management.tables import traces
 
@@ -32,6 +36,16 @@ def _get_trace_row(store: SqliteStateStore, trace_id: str) -> dict | None:
             .first()
         )
         return dict(row) if row else None
+
+
+def _cleanup_state_manager(manager: StateManager) -> None:
+    emitter.remove_listener(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
+    emitter.remove_listener(Emitter.START_TRACE, manager.create_trace)
+    emitter.remove_listener(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
+    emitter.remove_listener(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
+    emitter.remove_listener(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
+    emitter.remove_listener(Emitter.STOP_RECORDING, manager.handle_stop_recording)
+    emitter.remove_listener(Emitter.IS_CONNECTED, manager.handle_is_connected)
 
 
 def test_create_trace_inserts_row(store: SqliteStateStore) -> None:
@@ -372,3 +386,190 @@ def test_find_unreported_traces_filters_reported(store: SqliteStateStore) -> Non
 
     unreported = store.find_unreported_traces()
     assert sorted(trace.trace_id for trace in unreported) == ["trace-12"]
+
+
+def test_wal_mode_enabled(store: SqliteStateStore) -> None:
+    with store._engine.begin() as conn:
+        mode = conn.execute(text("PRAGMA journal_mode;")).scalar_one()
+    assert str(mode).lower() == "wal"
+
+
+def test_state_transition_sequence(store: SqliteStateStore) -> None:
+    store.create_trace(
+        "trace-transition",
+        "rec-transition",
+        PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-transition.bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+
+    store.update_status("trace-transition", TraceStatus.WRITING)
+    store.mark_trace_as_written("trace-transition", 256)
+
+    claimed = store.claim_ready_traces(limit=1)
+    assert [row["trace_id"] for row in claimed] == ["trace-transition"]
+    assert claimed[0]["status"] == TraceStatus.UPLOADING
+
+    store.update_status("trace-transition", TraceStatus.UPLOADED)
+    row = _get_trace_row(store, "trace-transition")
+    assert row is not None
+    assert row["status"] == TraceStatus.UPLOADED
+
+
+def test_invalid_state_transition_rejected(store: SqliteStateStore) -> None:
+    store.create_trace(
+        "trace-invalid",
+        "rec-invalid",
+        PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-invalid.bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+
+    with pytest.raises(ValueError, match="Invalid status transition"):
+        store.update_status("trace-invalid", TraceStatus.UPLOADED)
+
+    row = _get_trace_row(store, "trace-invalid")
+    assert row is not None
+    assert row["status"] == TraceStatus.PENDING
+
+
+def test_multiple_state_managers_share_sqlite_db(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    store_one = SqliteStateStore(db_path)
+    store_two = SqliteStateStore(db_path)
+    manager_one = StateManager(store_one)
+    manager_two = StateManager(store_two)
+    barrier = threading.Barrier(2)
+
+    def worker(manager: StateManager, trace_id: str) -> None:
+        barrier.wait()
+        manager.create_trace(
+            trace_id,
+            "rec-shared",
+            DataType.CUSTOM_1D,
+            "custom",
+            1,
+            path=f"/tmp/{trace_id}.bin",
+            total_bytes=64,
+        )
+
+    try:
+        thread_one = threading.Thread(
+            target=worker, args=(manager_one, "trace-multi-1")
+        )
+        thread_two = threading.Thread(
+            target=worker, args=(manager_two, "trace-multi-2")
+        )
+        thread_one.start()
+        thread_two.start()
+        thread_one.join()
+        thread_two.join()
+    finally:
+        _cleanup_state_manager(manager_one)
+        _cleanup_state_manager(manager_two)
+
+    assert store_one.get_trace("trace-multi-1") is not None
+    assert store_one.get_trace("trace-multi-2") is not None
+
+
+def test_concurrent_writes_do_not_lock(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    store_one = SqliteStateStore(db_path)
+    store_two = SqliteStateStore(db_path)
+    store_one.create_trace(
+        "trace-concurrent",
+        "rec-concurrent",
+        PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-concurrent.bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+
+    barrier = threading.Barrier(2)
+    errors: list[Exception] = []
+
+    def worker(store: SqliteStateStore, bytes_uploaded: int) -> None:
+        try:
+            barrier.wait()
+            for _ in range(5):
+                store.update_bytes_uploaded("trace-concurrent", bytes_uploaded)
+        except Exception as exc:
+            errors.append(exc)
+
+    thread_one = threading.Thread(target=worker, args=(store_one, 10))
+    thread_two = threading.Thread(target=worker, args=(store_two, 20))
+    thread_one.start()
+    thread_two.start()
+    thread_one.join()
+    thread_two.join()
+
+    assert errors == []
+    row = _get_trace_row(store_one, "trace-concurrent")
+    assert row is not None
+    assert row["bytes_uploaded"] in {10, 20}
+
+
+def test_race_conditions_on_rapid_state_changes(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    store_one = SqliteStateStore(db_path)
+    store_two = SqliteStateStore(db_path)
+    store_one.create_trace(
+        "trace-race",
+        "rec-race",
+        PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-race.bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+    store_one.update_status("trace-race", TraceStatus.WRITING)
+
+    barrier = threading.Barrier(2)
+    errors: list[str] = []
+
+    def worker(store: SqliteStateStore) -> None:
+        try:
+            barrier.wait()
+            store.update_status("trace-race", TraceStatus.WRITTEN)
+            store.update_status("trace-race", TraceStatus.UPLOADING)
+            store.update_status("trace-race", TraceStatus.UPLOADED)
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    thread_one = threading.Thread(target=worker, args=(store_one,))
+    thread_two = threading.Thread(target=worker, args=(store_two,))
+    thread_one.start()
+    thread_two.start()
+    thread_one.join()
+    thread_two.join()
+
+    assert errors
+    row = _get_trace_row(store_one, "trace-race")
+    assert row is not None
+    assert row["status"] == TraceStatus.UPLOADED
+
+
+def test_state_recovery_after_restart(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    store = SqliteStateStore(db_path)
+    store.create_trace(
+        "trace-recover",
+        "rec-recover",
+        PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-recover.bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+    store.update_status("trace-recover", TraceStatus.WRITING)
+    store.mark_trace_as_written("trace-recover", 512)
+
+    recovered_store = SqliteStateStore(db_path)
+    recovered_trace = recovered_store.get_trace("trace-recover")
+    assert recovered_trace is not None
+    assert recovered_trace.status == TraceStatus.WRITTEN
+    assert recovered_trace.ready_for_upload == 1
+
+    claimed = recovered_store.claim_ready_traces(limit=1)
+    assert [row["trace_id"] for row in claimed] == ["trace-recover"]
+    assert claimed[0]["status"] == TraceStatus.UPLOADING
