@@ -8,6 +8,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from neuracore_types import DataType
+
 from neuracore.data_daemon.communications_management.channel_reader import (
     CHUNK_HEADER_FORMAT,
     ChannelMessageReader,
@@ -16,15 +18,36 @@ from neuracore.data_daemon.communications_management.communications_manager impo
     CommunicationsManager,
 )
 from neuracore.data_daemon.communications_management.ring_buffer import RingBuffer
+from neuracore.data_daemon.config_manager.config import ConfigManager
+from neuracore.data_daemon.config_manager.profiles import ProfileManager
 from neuracore.data_daemon.const import (
     DATA_TYPE_FIELD_SIZE,
     HEARTBEAT_TIMEOUT_SECS,
     TRACE_ID_FIELD_SIZE,
 )
 from neuracore.data_daemon.event_emitter import Emitter, emitter
-from neuracore.data_daemon.models import CommandType, DataChunkPayload, MessageEnvelope
+from neuracore.data_daemon.models import (
+    CommandType,
+    CompleteMessage,
+    DataChunkPayload,
+    MessageEnvelope,
+)
+from neuracore.data_daemon.recording_encoding_disk_manager import (
+    recording_disk_manager as rdm_module,
+)
+
+RecordingDiskManager = rdm_module.RecordingDiskManager
 
 logger = logging.getLogger(__name__)
+
+
+def _str_or_none(value: str | int | None) -> str | None:
+    """Convert value to string or None.
+
+    Used to safely convert metadata values that may be str, int, or None
+    into the str | None type expected by CompleteMessage.from_bytes().
+    """
+    return None if value is None else str(value)
 
 
 @dataclass
@@ -57,7 +80,12 @@ class Daemon:
     - Handles heartbeats and channel lifetime cleanup.
     """
 
-    def __init__(self, comm_manager: CommunicationsManager | None = None) -> None:
+    def __init__(
+        self,
+        comm_manager: CommunicationsManager | None = None,
+        config_manager: ConfigManager | None = None,
+        recording_disk_manager: RecordingDiskManager | None = None,
+    ) -> None:
         """Initializes the daemon.
 
         If `comm_manager` is not provided, it will be initialized to a
@@ -71,12 +99,22 @@ class Daemon:
                 The communications manager to use for receiving
                 ManagementMessages from producers. If not provided, a new
                 `CommunicationsManager` instance will be created.
+            config_manager: ConfigManager | None, optional
+                The config manager to use for resolving daemon configuration.
+                If not provided, a new `ConfigManager` instance will be created.
+            recording_disk_manager: RecordingDiskManager | None, optional
+                The recording disk manager to use for persisting trace data.
+                If not provided, a new `RecordingDiskManager` instance will be
+                created using the config_manager.
 
         Returns:
             None
         """
         self.comm = comm_manager or CommunicationsManager()
-        # self.recording_disk_manager = RecordingDiskManager()
+        self._config_manager = config_manager or ConfigManager(ProfileManager())
+        self.recording_disk_manager = recording_disk_manager or RecordingDiskManager(
+            self._config_manager
+        )
         self.channels: dict[str, ChannelState] = {}
         self._recording_traces: dict[str, set[str]] = {}
         self._trace_recordings: dict[str, str] = {}
@@ -208,46 +246,50 @@ class Daemon:
                     break
 
                 trace_id, data_type, payload = result
-                self._on_complete_message(channel, trace_id, payload)
+                self._on_complete_message(channel, trace_id, data_type, payload)
 
     def _on_complete_message(
-        self, channel: ChannelState, trace_id: str, data: bytes
+        self,
+        channel: ChannelState,
+        trace_id: str,
+        data_type: DataType,
+        data: bytes,
+        final_chunk: bool = False,
     ) -> None:
         """Handle a completed message from a channel.
 
         This function is called when a message is fully assembled from a channel's ring
         buffer. It is responsible for enqueueing the message in the recording
-        manager.
+        disk manager.
 
         :param channel: The channel that the message was received on.
         :param trace_id: The trace ID that the message belongs to.
         :param data_type: The data type of the message payload.
         :param data: The message data.
+        :param final_chunk: Whether this is the final chunk for the trace.
         """
-        # metadata = self._trace_metadata.pop(
-        #     trace_id,
-        #     {
-        #         "dataset_id": None,
-        #         "dataset_name": None,
-        #         "robot_name": None,
-        #         "robot_id": None,
-        #         "data_type": None,
-        #     },
-        # )
-        # self.recording_disk_manager.enqueue(
-        #     CompleteMessage(
-        #         producer_id=channel.producer_id,
-        #         trace_id=trace_id,
-        #         recording_id=channel.recording_id or '',
-        #         dataset_id=metadata["dataset_id"],
-        #         dataset_name=metadata["dataset_name"],
-        #         robot_name=metadata["robot_name"],
-        #         robot_id=metadata["robot_id"],
-        #         data_type=metadata["data_type"],
-        #         data=base64.b64encode(data).decode("ascii"),
-        #         received_at=datetime.now(timezone.utc).isoformat(),
-        #     )
-        # )
+        metadata = self._trace_metadata.get(trace_id, {})
+        try:
+            self.recording_disk_manager.enqueue(
+                CompleteMessage.from_bytes(
+                    producer_id=channel.producer_id,
+                    trace_id=trace_id,
+                    recording_id=channel.recording_id or "",
+                    final_chunk=final_chunk,
+                    data_type=data_type,
+                    data=data,
+                    dataset_id=_str_or_none(metadata.get("dataset_id")),
+                    dataset_name=_str_or_none(metadata.get("dataset_name")),
+                    robot_name=_str_or_none(metadata.get("robot_name")),
+                    robot_id=_str_or_none(metadata.get("robot_id")),
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Failed to enqueue message for trace_id=%s producer_id=%s",
+                trace_id,
+                channel.producer_id,
+            )
 
     def _handle_heartbeat(self, channel: ChannelState, _: MessageEnvelope) -> None:
         """Update the heartbeat timestamp for a producer.
@@ -466,9 +508,28 @@ class Daemon:
                 channel.producer_id,
             )
             return
+
+        # Get metadata before removing the trace
+        metadata = self._trace_metadata.get(str(trace_id), {})
+        data_type_str = metadata.get("data_type")
+        if data_type_str:
+            try:
+                data_type = DataType(data_type_str)
+            except ValueError:
+                data_type = DataType.CUSTOM_1D
+        else:
+            data_type = DataType.CUSTOM_1D
+
+        # Send final_chunk=True message to RDM to signal trace end
+        self._on_complete_message(
+            channel=channel,
+            trace_id=str(trace_id),
+            data_type=data_type,
+            data=b"",
+            final_chunk=True,
+        )
+
         self._remove_trace(str(recording_id), str(trace_id))
-        # Send to the RDM to end trace
-        # self.recording_disk_manager.enqueue(CompleteMessage(final=True))
 
     def _handle_recording_stopped(
         self, _: ChannelState, message: MessageEnvelope
