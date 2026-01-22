@@ -22,6 +22,7 @@ from neuracore.data_daemon.config_manager.config import ConfigManager
 from neuracore.data_daemon.config_manager.profiles import ProfileManager
 from neuracore.data_daemon.const import (
     DATA_TYPE_FIELD_SIZE,
+    DEFAULT_RING_BUFFER_SIZE,
     HEARTBEAT_TIMEOUT_SECS,
     TRACE_ID_FIELD_SIZE,
 )
@@ -220,10 +221,8 @@ class Daemon:
         Returns:
             None
         """
-        payload = message.payload.get(message.command)
-        size = 1024
-        if payload:
-            size = payload.get("size", 1024)
+        payload = message.payload.get(message.command.value, {})
+        size = payload.get("size", DEFAULT_RING_BUFFER_SIZE)
 
         channel.ring_buffer = RingBuffer(size=size)
         channel.reader = ChannelMessageReader(channel.ring_buffer)
@@ -402,7 +401,7 @@ class Daemon:
                 channel.producer_id,
             )
             return
-        data_chunk_payload = message.payload.get("data_chunk", {})
+        data_chunk_payload = message.payload
 
         data_chunk = DataChunkPayload.from_dict(data_chunk_payload)
 

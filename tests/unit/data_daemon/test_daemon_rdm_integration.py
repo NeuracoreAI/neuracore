@@ -554,7 +554,7 @@ class TestDrainChannelMessages:
     def test_drain_channel_messages_passes_data_type_to_on_complete(
         self, tmp_path: Any
     ) -> None:
-        """Verify data_type is passed from reader to _on_complete_message."""
+        """_drain_channel_messages passes data_type from reader to handler."""
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
@@ -711,7 +711,7 @@ class TestExpiredChannelCleanup:
     """Tests for _cleanup_expired_channels() method."""
 
     def test_cleanup_expired_channels_sends_final_chunk(self, tmp_path: Any) -> None:
-        """Verify final_chunk is sent for expired channels with traces."""
+        """_cleanup_expired_channels sends final_chunk for expired channels."""
         from datetime import timedelta
 
         from neuracore.data_daemon.const import HEARTBEAT_TIMEOUT_SECS
@@ -797,7 +797,7 @@ class TestExpiredChannelCleanup:
     def test_cleanup_expired_channels_skips_active_channels(
         self, tmp_path: Any
     ) -> None:
-        """_cleanup_expired_channels does not remove channels with recent heartbeat."""
+        """_cleanup_expired_channels skips channels with recent heartbeat."""
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
