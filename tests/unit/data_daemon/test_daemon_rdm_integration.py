@@ -12,7 +12,6 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 from neuracore_types import DataType
@@ -74,52 +73,37 @@ class TestDaemonInit:
     """Tests for Daemon constructor dependency injection."""
 
     def test_daemon_accepts_config_manager(self, tmp_path: Any) -> None:
-        """Daemon should accept config_manager parameter."""
+        """Daemon should accept config_manager parameter (deprecated, ignored)."""
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
+            recording_disk_manager=mock_rdm,
             comm_manager=mock_comm,
             config_manager=mock_config,
-            recording_disk_manager=mock_rdm,
         )
 
-        assert daemon._config_manager is mock_config
         assert daemon.recording_disk_manager is mock_rdm
 
-    def test_daemon_creates_default_config_manager_if_not_provided(self) -> None:
-        """Daemon should create default ConfigManager if not provided."""
+    def test_daemon_does_not_require_config_manager(self) -> None:
+        """Daemon should not require config_manager."""
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
-            comm_manager=mock_comm,
             recording_disk_manager=mock_rdm,
+            comm_manager=mock_comm,
         )
 
-        assert daemon._config_manager is not None
+        assert daemon.recording_disk_manager is mock_rdm
 
-    def test_daemon_creates_rdm_with_config_if_not_provided(
-        self, tmp_path: Any
-    ) -> None:
-        """Daemon should create RDM using config_manager if RDM not provided."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
+    def test_daemon_requires_recording_disk_manager(self) -> None:
+        """Daemon should require recording_disk_manager."""
         mock_comm = MockComm()
 
-        with patch(
-            "neuracore.data_daemon.communications_management.data_bridge.RecordingDiskManager"
-        ) as mock_rdm_class:
-            mock_rdm_instance = MagicMock()
-            mock_rdm_class.return_value = mock_rdm_instance
-
-            daemon = Daemon(
-                comm_manager=mock_comm,
-                config_manager=mock_config,
-            )
-
-            mock_rdm_class.assert_called_once_with(mock_config)
-            assert daemon.recording_disk_manager is mock_rdm_instance
+        with pytest.raises(TypeError):
+            Daemon(comm_manager=mock_comm)
 
 
 # -----------------------------------------------------------------------------
@@ -554,7 +538,8 @@ class TestDrainChannelMessages:
     def test_drain_channel_messages_passes_data_type_to_on_complete(
         self, tmp_path: Any
     ) -> None:
-        """_drain_channel_messages passes data_type from reader to handler."""
+        """_drain_channel_messages should pass data_type
+        from reader to _on_complete_message."""
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
@@ -711,7 +696,8 @@ class TestExpiredChannelCleanup:
     """Tests for _cleanup_expired_channels() method."""
 
     def test_cleanup_expired_channels_sends_final_chunk(self, tmp_path: Any) -> None:
-        """_cleanup_expired_channels sends final_chunk for expired channels."""
+        """_cleanup_expired_channels should send
+        final_chunk for expired channels with traces."""
         from datetime import timedelta
 
         from neuracore.data_daemon.const import HEARTBEAT_TIMEOUT_SECS
@@ -797,7 +783,8 @@ class TestExpiredChannelCleanup:
     def test_cleanup_expired_channels_skips_active_channels(
         self, tmp_path: Any
     ) -> None:
-        """_cleanup_expired_channels skips channels with recent heartbeat."""
+        """_cleanup_expired_channels should not
+        remove channels with recent heartbeat."""
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()

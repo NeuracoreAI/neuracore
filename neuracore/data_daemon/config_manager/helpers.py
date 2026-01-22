@@ -4,16 +4,15 @@ import shutil
 from pathlib import Path
 
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
-
-SECONDS_PER_HOUR = 60 * 60
-BYTES_PER_MIB = 1024 * 1024
-
-DEFAULT_STORAGE_FREE_FRACTION = 0.5  # Use 50% of free disk space for local storage.
-DEFAULT_TARGET_DRAIN_HOURS = 12.0  # Aim to drain stored data within ~12 hours.
-DEFAULT_MIN_BANDWIDTH_MIB_S = 1.0  # Avoid too-slow uploads even on large disks.
-DEFAULT_MAX_BANDWIDTH_MIB_S = 20.0  # Cap upload bandwidth to avoid saturating links.
-
-DEFAULT_RECORDINGS_SUBDIR = Path(".neuracore") / "data_daemon" / "recordings"
+from neuracore.data_daemon.const import (
+    BYTES_PER_MIB,
+    DEFAULT_MAX_BANDWIDTH_MIB_S,
+    DEFAULT_MIN_BANDWIDTH_MIB_S,
+    DEFAULT_RECORDING_ROOT_PATH,
+    DEFAULT_STORAGE_FREE_FRACTION,
+    DEFAULT_TARGET_DRAIN_HOURS,
+    SECONDS_PER_HOUR,
+)
 
 
 def parse_bytes(value: int | str) -> int:
@@ -66,6 +65,20 @@ def parse_bytes(value: int | str) -> int:
     return base_value * multiplier
 
 
+def calculate_storage_limit(record_dir: Path, storage_free_fraction: float) -> int:
+    """Calculate the maximum number of bytes to allocate for local storage.
+
+    Args:
+        record_dir: Directory on the target filesystem used to determine free space.
+        storage_free_fraction: Fraction of free bytes to allocate (e.g. 0.5 for 50%).
+
+    Returns:
+        Storage limit in bytes.
+    """
+    free_bytes = shutil.disk_usage(record_dir).free
+    return int(storage_free_fraction * free_bytes)
+
+
 def build_default_daemon_config(
     storage_free_fraction: float = DEFAULT_STORAGE_FREE_FRACTION,
     target_drain_hours: float = DEFAULT_TARGET_DRAIN_HOURS,
@@ -85,11 +98,9 @@ def build_default_daemon_config(
     Returns:
         A DaemonConfig populated with computed limits and the default recordings path.
     """
-    record_dir = Path.home() / DEFAULT_RECORDINGS_SUBDIR
+    record_dir = DEFAULT_RECORDING_ROOT_PATH
     record_dir.mkdir(parents=True, exist_ok=True)
-
-    free_bytes = shutil.disk_usage(record_dir).free
-    storage_limit = int(storage_free_fraction * free_bytes)
+    storage_limit = calculate_storage_limit(record_dir, storage_free_fraction)
 
     bandwidth_limit = int(storage_limit / (target_drain_hours * SECONDS_PER_HOUR))
     min_bw = int(min_bandwidth_mib_s * BYTES_PER_MIB)

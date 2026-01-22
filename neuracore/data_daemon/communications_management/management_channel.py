@@ -12,7 +12,11 @@ from neuracore.data_daemon.communications_management.communications_manager impo
 )
 from neuracore.data_daemon.communications_management.data_bridge import Daemon
 from neuracore.data_daemon.communications_management.producer import Producer
-from neuracore.data_daemon.config_manager.args_handler import config_manager
+from neuracore.data_daemon.recording_encoding_disk_manager import (
+    recording_disk_manager as rdm_module,
+)
+
+RecordingDiskManager = rdm_module.RecordingDiskManager
 
 logger = logging.getLogger(__name__)
 
@@ -55,5 +59,5 @@ class ManagementChannel:
             return None
 
         comm = CommunicationsManager()
-        daemon = Daemon(comm_manager=comm, config_manager=config_manager)
-        return daemon
+        recording_disk_manager = RecordingDiskManager()
+        return Daemon(recording_disk_manager=recording_disk_manager, comm_manager=comm)
