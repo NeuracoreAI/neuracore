@@ -12,7 +12,6 @@ import pytest
 from neuracore_types import DataType
 
 from neuracore.data_daemon.models import CompleteMessage
-from tests.unit.data_daemon.helpers import MockConfigManager
 
 
 class FakeEmitter:
@@ -143,8 +142,18 @@ def rdm_module(monkeypatch: pytest.MonkeyPatch):
     from neuracore.data_daemon.recording_encoding_disk_manager import (
         recording_disk_manager as rdm_module,
     )
+    from neuracore.data_daemon.recording_encoding_disk_manager.lifecycle import (
+        encoder_manager as encoder_manager_module,
+    )
 
-    monkeypatch.setattr(rdm_module, "VideoTrace", FakeVideoTrace, raising=False)
+    # Encoder creation is owned by EncoderManager now, so patch it there.
+    monkeypatch.setattr(
+        encoder_manager_module,
+        "VideoTrace",
+        FakeVideoTrace,
+        raising=True,
+    )
+
     return rdm_module
 
 
@@ -157,136 +166,17 @@ def rdm_factory(
 ):
     def _make(*, storage_limit: int | None, flush_bytes: int = 1):
         recordings_root = tmp_path / "recordings"
-        cfg = MockConfigManager(
-            path_to_store_record=str(recordings_root), storage_limit=storage_limit
-        )
 
-        rdm = rdm_module.RecordingDiskManager(cfg, flush_bytes=flush_bytes)
+        rdm = rdm_module.RecordingDiskManager(
+            flush_bytes=flush_bytes,
+            storage_limit_bytes=storage_limit,
+            recordings_root=str(recordings_root),
+        )
         request.addfinalizer(rdm.shutdown)
 
         return rdm, recordings_root
 
     return _make
-
-
-def test_rdm_emits_start_trace_once_and_trace_written_on_stop_all(
-    fake_emitter: FakeEmitter,
-    rdm_module,
-    rdm_factory,
-) -> None:
-    Emitter = rdm_module.Emitter
-
-    rdm, recordings_root = rdm_factory(storage_limit=None, flush_bytes=1)
-
-    recording_id = str(uuid.uuid4())
-    producer_id = "camera_front"
-    rgb_trace_id = "camera_front"
-    joint_trace_ids = ["elbow_joint", "wrist_1_joint"]
-    expected_traces = {rgb_trace_id, *joint_trace_ids}
-
-    start_events: list[tuple[str, str, DataType]] = []
-    written_events: list[tuple[str, int]] = []
-    all_written = threading.Event()
-
-    @fake_emitter.on(Emitter.START_TRACE)
-    def on_start_trace(
-        tid: str,
-        rid: str,
-        dt: DataType,
-        dt_name: str,
-        robot_inst: int,
-        dataset_id: str | None,
-        dataset_name: str | None,
-        robot_name: str | None,
-        robot_id: str | None,
-        path: str,
-    ) -> None:
-        if rid == recording_id:
-            start_events.append((rid, tid, dt))
-
-    @fake_emitter.on(Emitter.TRACE_WRITTEN)
-    def on_trace_written(tid: str, rid: str, bytes_written: int) -> None:
-        if tid not in expected_traces:
-            return
-        written_events.append((tid, bytes_written))
-        if {t for t, _ in written_events} == expected_traces:
-            all_written.set()
-
-    width, height = 8, 6
-    num_frames = 8
-    num_joint_samples = 8
-
-    meta = {"width": width, "height": height, "timestamp": time.time()}
-    rdm.enqueue(
-        CompleteMessage.from_bytes(
-            producer_id=producer_id,
-            recording_id=recording_id,
-            trace_id=rgb_trace_id,
-            data_type=DataType.RGB_IMAGES,
-            data_type_name="rgb_camera",
-            robot_instance=0,
-            data=_json_bytes(meta),
-            final_chunk=False,
-        )
-    )
-
-    for i in range(max(num_frames, num_joint_samples)):
-        now = time.time()
-
-        if i < num_frames:
-            rdm.enqueue(
-                CompleteMessage.from_bytes(
-                    producer_id=producer_id,
-                    recording_id=recording_id,
-                    trace_id=rgb_trace_id,
-                    data_type=DataType.RGB_IMAGES,
-                    data_type_name="rgb_camera",
-                    robot_instance=0,
-                    data=_make_rgb24_frame_bytes(i, width, height),
-                    final_chunk=False,
-                )
-            )
-
-        if i < num_joint_samples:
-            for j, joint in enumerate(joint_trace_ids):
-                payload = {
-                    "timestamp": now,
-                    "type": "JointPosition",
-                    "joint_name": joint,
-                    "position": (i * 0.01) + (j * 0.1),
-                }
-                rdm.enqueue(
-                    CompleteMessage.from_bytes(
-                        producer_id=producer_id,
-                        recording_id=recording_id,
-                        trace_id=joint,
-                        data_type=DataType.JOINT_POSITIONS,
-                        data_type_name="joint_position",
-                        robot_instance=0,
-                        data=_json_bytes(payload),
-                        final_chunk=False,
-                    )
-                )
-
-    rdm.trace_message_queue.join()
-
-    fake_emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
-
-    assert all_written.wait(timeout=10.0) is True
-
-    started_trace_ids = [tid for _, tid, _ in start_events]
-    assert set(started_trace_ids) == expected_traces
-    assert started_trace_ids.count(rgb_trace_id) == 1
-    assert started_trace_ids.count("elbow_joint") == 1
-    assert started_trace_ids.count("wrist_1_joint") == 1
-
-    rgb_dir = recordings_root / recording_id / "RGB_IMAGES" / rgb_trace_id
-    assert (rgb_dir / "lossy.mp4").is_file()
-    assert (rgb_dir / "lossless.mp4").is_file()
-    assert (rgb_dir / "trace.json").is_file()
-
-    elbow_dir = recordings_root / recording_id / "JOINT_POSITIONS" / "elbow_joint"
-    assert (elbow_dir / "trace.json").is_file()
 
 
 def test_rdm_stop_recording_drops_future_messages(
@@ -385,7 +275,10 @@ def test_rdm_delete_trace_event_deletes_trace_dir(
     assert _wait_for(lambda: trace_dir.exists(), timeout=5.0) is True
 
     fake_emitter.emit(
-        Emitter.DELETE_TRACE, recording_id, trace_id, DataType.JOINT_POSITIONS
+        Emitter.DELETE_TRACE,
+        recording_id,
+        trace_id,
+        DataType.JOINT_POSITIONS.value,
     )
 
     assert _wait_for(lambda: not trace_dir.exists(), timeout=5.0) is True

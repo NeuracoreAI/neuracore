@@ -35,6 +35,7 @@ class _RawBatchWriter:
         stopped_recordings: set[str],
         recording_traces: dict[str, dict[str, Any]],
         abort_trace: Callable[[_TraceKey], None],
+        closed_traces: set[_TraceKey],
         sentinel: object,
     ) -> None:
         """Initialise _RawBatchWriter.
@@ -51,6 +52,7 @@ class _RawBatchWriter:
             stopped_recordings: Shared set of recordings that should be ignored.
             recording_traces: Recording-to-traces bookkeeping map.
             abort_trace: Callback used to abort traces on failure.
+            closed_traces: Set of trace keys that are closed.
             sentinel: Sentinel object used to stop the worker.
         """
         self.flush_bytes = flush_bytes
@@ -66,6 +68,7 @@ class _RawBatchWriter:
         self._stopped_recordings = stopped_recordings
         self.recording_traces = recording_traces
         self._abort_trace = abort_trace
+        self._closed_traces = closed_traces
 
         self.SENTINEL = sentinel
 
@@ -157,7 +160,10 @@ class _RawBatchWriter:
             )
 
             with self._state_lock:
-                if trace_key in self._aborted_traces:
+                if (
+                    trace_key in self._aborted_traces
+                    or trace_key in self._closed_traces
+                ):
                     self.trace_message_queue.task_done()
                     continue
 
@@ -224,5 +230,7 @@ class _RawBatchWriter:
                 with self._state_lock:
                     if writer_state.trace_done:
                         self._writer_states.pop(trace_key, None)
+                        if raw_message.final_chunk:
+                            self._closed_traces.add(trace_key)
 
             self.trace_message_queue.task_done()

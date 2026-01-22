@@ -19,7 +19,6 @@ from neuracore.data_daemon.communications_management.communications_manager impo
 )
 from neuracore.data_daemon.communications_management.ring_buffer import RingBuffer
 from neuracore.data_daemon.config_manager.config import ConfigManager
-from neuracore.data_daemon.config_manager.profiles import ProfileManager
 from neuracore.data_daemon.const import (
     DATA_TYPE_FIELD_SIZE,
     DEFAULT_RING_BUFFER_SIZE,
@@ -83,9 +82,10 @@ class Daemon:
 
     def __init__(
         self,
+        recording_disk_manager: RecordingDiskManager,
         comm_manager: CommunicationsManager | None = None,
+        *,
         config_manager: ConfigManager | None = None,
-        recording_disk_manager: RecordingDiskManager | None = None,
     ) -> None:
         """Initializes the daemon.
 
@@ -96,6 +96,8 @@ class Daemon:
         ManagementMessages from producers.
 
         Args:
+            recording_disk_manager: RecordingDiskManager
+                The recording disk manager to use for persisting trace data.
             comm_manager: CommunicationsManager | None, optional
                 The communications manager to use for receiving
                 ManagementMessages from producers. If not provided, a new
@@ -103,19 +105,12 @@ class Daemon:
             config_manager: ConfigManager | None, optional
                 The config manager to use for resolving daemon configuration.
                 If not provided, a new `ConfigManager` instance will be created.
-            recording_disk_manager: RecordingDiskManager | None, optional
-                The recording disk manager to use for persisting trace data.
-                If not provided, a new `RecordingDiskManager` instance will be
-                created using the config_manager.
 
         Returns:
             None
         """
         self.comm = comm_manager or CommunicationsManager()
-        self._config_manager = config_manager or ConfigManager(ProfileManager())
-        self.recording_disk_manager = recording_disk_manager or RecordingDiskManager(
-            self._config_manager
-        )
+        self.recording_disk_manager = recording_disk_manager
         self.channels: dict[str, ChannelState] = {}
         self._recording_traces: dict[str, set[str]] = {}
         self._trace_recordings: dict[str, str] = {}

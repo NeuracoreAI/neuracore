@@ -41,6 +41,7 @@ class _TraceController:
         recording_traces: dict[str, dict[str, Any]],
         aborted_traces: set[_TraceKey],
         stopped_recordings: set[str],
+        closed_traces: set[_TraceKey],
     ) -> None:
         """Initialise _TraceController.
 
@@ -53,6 +54,7 @@ class _TraceController:
             recording_traces: Recording-to-traces bookkeeping map.
             aborted_traces: Shared set of aborted traces.
             stopped_recordings: Shared set of recordings that should be ignored.
+            closed_traces: set of trace keys that are closed
         """
         self._filesystem = filesystem
         self._storage_budget = storage_budget
@@ -63,6 +65,7 @@ class _TraceController:
         self.recording_traces = recording_traces
         self._aborted_traces = aborted_traces
         self._stopped_recordings = stopped_recordings
+        self._closed_traces = closed_traces
 
     def abort_trace_due_to_storage(self, trace_key: _TraceKey) -> None:
         """Abort a trace due to storage constraints and emit TRACE_WRITTEN(trace_id, 0).
@@ -75,6 +78,7 @@ class _TraceController:
         """
         with self._state_lock:
             self._aborted_traces.add(trace_key)
+            self._closed_traces.add(trace_key)
 
             writer_state = self._writer_states.pop(trace_key, None)
             if writer_state is not None:
@@ -120,6 +124,13 @@ class _TraceController:
                 if writer_state.trace_key.recording_id == recording_id_value
             ]
 
+            for writer_state in writer_states_to_flush:
+                self._closed_traces.add(writer_state.trace_key)
+
+            for trace_key in list(self._encoders.keys()):
+                if trace_key.recording_id == recording_id_value:
+                    self._closed_traces.add(trace_key)
+
         for writer_state in writer_states_to_flush:
             with self._state_lock:
                 writer_state.trace_done = True
@@ -162,6 +173,7 @@ class _TraceController:
 
             active_encoder = self._encoders.pop(trace_key, None)
             self._aborted_traces.add(trace_key)
+            self._closed_traces.add(trace_key)
 
         if active_encoder is not None:
             try:

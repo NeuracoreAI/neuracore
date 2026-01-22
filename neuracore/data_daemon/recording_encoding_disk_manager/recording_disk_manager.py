@@ -7,7 +7,15 @@ import queue
 import threading
 from typing import Any
 
-from neuracore.data_daemon.config_manager.config import ConfigManager
+from neuracore.data_daemon.config_manager.helpers import calculate_storage_limit
+from neuracore.data_daemon.const import (
+    DEFAULT_FLUSH_BYTES,
+    DEFAULT_RECORDING_ROOT_PATH,
+    DEFAULT_STORAGE_FREE_FRACTION,
+    MIN_FREE_DISK_BYTES,
+    SENTINEL,
+    STORAGE_REFRESH_SECONDS,
+)
 from neuracore.data_daemon.event_emitter import Emitter, emitter
 from neuracore.data_daemon.models import CompleteMessage, parse_data_type
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
@@ -32,26 +40,24 @@ from .workers.raw_batch_writer import _RawBatchWriter
 class RecordingDiskManager:
     """Persist trace payloads to disk and emit lifecycle events."""
 
-    SENTINEL = object()
-    DEFAULT_FLUSH_BYTES = 4 * 1024 * 1024  # 4 MiB
-
-    MIN_FREE_DISK_BYTES = 32 * 1024 * 1024  # 32 MiB safety margin
-    STORAGE_REFRESH_SECONDS = 5.0
-
     def __init__(
         self,
-        config_manager: ConfigManager,
         *,
         flush_bytes: int | None = None,
+        storage_limit_bytes: int | None = None,
+        recordings_root: str | None = None,
     ) -> None:
         """Initialise RecordingDiskManager.
 
         Args:
-            config_manager: Config manager used to resolve effective config.
             flush_bytes: Flush threshold for buffered raw writes.
+            storage_limit_bytes: Max bytes allowed for on-disk trace storage.
+            recordings_root: Root directory for per-recording trace folders.
         """
-        self.config_manager = config_manager
-        self.flush_bytes = int(flush_bytes or self.DEFAULT_FLUSH_BYTES)
+        self.flush_bytes = flush_bytes or DEFAULT_FLUSH_BYTES
+        self.storage_limit_bytes = storage_limit_bytes
+        self._recordings_root_value = recordings_root
+        self.recordings_root: pathlib.Path
 
         self.trace_message_queue: queue.Queue[CompleteMessage | object] = queue.Queue()
         self.raw_file_queue: queue.Queue[_BatchJob | object] = queue.Queue()
@@ -63,14 +69,12 @@ class RecordingDiskManager:
 
         self._aborted_traces: set[_TraceKey] = set()
         self._stopped_recordings: set[str] = set()
+        self._closed_traces: set[_TraceKey] = set()
 
         self._stop_lock = threading.Lock()
         self._stop_requested = False
 
         self._state_lock = threading.RLock()
-
-        self.recordings_root: pathlib.Path | None = None
-        self.storage_limit_bytes: int | None = None
 
         self._filesystem: _TraceFilesystem | None = None
         self._storage_budget: StorageBudget | None = None
@@ -92,24 +96,21 @@ class RecordingDiskManager:
         Returns:
             None
         """
-        effective_config = self.config_manager.resolve_effective_config()
-        recordings_root_value = effective_config.path_to_store_record
-        if recordings_root_value is None:
-            recordings_root_value = str(
-                pathlib.Path.home() / ".neuracore" / "data_daemon" / "recordings"
-            )
-
-        self.recordings_root = pathlib.Path(recordings_root_value)
+        root_value = self._recordings_root_value or str(DEFAULT_RECORDING_ROOT_PATH)
+        self.recordings_root = pathlib.Path(root_value)
         self.recordings_root.mkdir(parents=True, exist_ok=True)
 
-        self.storage_limit_bytes = effective_config.storage_limit
+        if self.storage_limit_bytes is None:
+            self.storage_limit_bytes = calculate_storage_limit(
+                self.recordings_root, DEFAULT_STORAGE_FREE_FRACTION
+            )
 
         self._storage_budget = StorageBudget(
             recordings_root=self.recordings_root,
             policy=StoragePolicy(
                 storage_limit_bytes=self.storage_limit_bytes,
-                min_free_disk_bytes=self.MIN_FREE_DISK_BYTES,
-                refresh_seconds=self.STORAGE_REFRESH_SECONDS,
+                min_free_disk_bytes=MIN_FREE_DISK_BYTES,
+                refresh_seconds=STORAGE_REFRESH_SECONDS,
             ),
         )
 
@@ -124,6 +125,7 @@ class RecordingDiskManager:
             recording_traces=self.recording_traces,
             aborted_traces=self._aborted_traces,
             stopped_recordings=self._stopped_recordings,
+            closed_traces=self._closed_traces,
         )
 
         self._encoder_manager = _EncoderManager(
@@ -142,10 +144,11 @@ class RecordingDiskManager:
             state_lock=self._state_lock,
             writer_states=self._writer_states,
             aborted_traces=self._aborted_traces,
+            closed_traces=self._closed_traces,
             stopped_recordings=self._stopped_recordings,
             recording_traces=self.recording_traces,
             abort_trace=self._controller.abort_trace_due_to_storage,
-            sentinel=self.SENTINEL,
+            sentinel=SENTINEL,
         )
 
         self._encoder_worker = _BatchEncoderWorker(
@@ -156,7 +159,7 @@ class RecordingDiskManager:
             state_lock=self._state_lock,
             aborted_traces=self._aborted_traces,
             abort_trace=self._controller.abort_trace_due_to_storage,
-            sentinel=self.SENTINEL,
+            sentinel=SENTINEL,
         )
 
     def start(self) -> None:
@@ -203,7 +206,7 @@ class RecordingDiskManager:
             if self._stop_requested:
                 return
             self._stop_requested = True
-        self.trace_message_queue.put(self.SENTINEL)
+        self.trace_message_queue.put(SENTINEL)
 
     def shutdown(self) -> None:
         """Stop worker threads and wait for them to exit.
