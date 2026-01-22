@@ -9,6 +9,7 @@ Tests for ring buffer integration with Daemon components:
 
 from __future__ import annotations
 
+import base64
 import struct
 from typing import Any
 
@@ -131,8 +132,6 @@ def test_daemon_writes_chunk_to_ring_buffer(tmp_path: Any) -> None:
     assert initial_available == 0
 
     # Send data chunk
-    import base64
-
     data = b"test-payload-data"
     data_msg = MessageEnvelope(
         producer_id="test-producer",
@@ -177,8 +176,6 @@ def test_daemon_writes_correct_header_format(tmp_path: Any) -> None:
         payload={"open_ring_buffer": {"size": 4096}},
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
-
-    import base64
 
     data = b"payload"
     data_msg = MessageEnvelope(
@@ -244,8 +241,6 @@ def test_daemon_handles_multiple_channels(tmp_path: Any) -> None:
         )
         daemon._handle_open_ring_buffer(channel, open_msg)
 
-    import base64
-
     # Write to channel A only
     data_msg = MessageEnvelope(
         producer_id="producer-A",
@@ -298,8 +293,6 @@ def test_daemon_header_trace_id_padding(tmp_path: Any) -> None:
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
 
-    import base64
-
     # Short trace_id
     data_msg = MessageEnvelope(
         producer_id="test-producer",
@@ -349,8 +342,6 @@ def test_daemon_header_data_type_padding(tmp_path: Any) -> None:
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
 
-    import base64
-
     data_msg = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.DATA_CHUNK,
@@ -399,8 +390,6 @@ def test_daemon_header_with_long_trace_id(tmp_path: Any) -> None:
         payload={"open_ring_buffer": {"size": 4096}},
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
-
-    import base64
 
     long_trace_id = "x" * 100  # Much longer than 36 bytes
     data_msg = MessageEnvelope(
@@ -452,8 +441,6 @@ def test_new_channel_fresh_buffer(tmp_path: Any) -> None:
         payload={"open_ring_buffer": {"size": 2048}},
     )
     daemon._handle_open_ring_buffer(channel1, open_msg1)
-
-    import base64
 
     # Write some data to first channel
     data_msg = MessageEnvelope(

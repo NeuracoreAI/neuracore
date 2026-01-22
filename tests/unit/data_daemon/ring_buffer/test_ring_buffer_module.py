@@ -505,15 +505,18 @@ def test_trace_id_with_null_bytes() -> None:
 def test_partial_message_with_total_chunks_zero() -> None:
     """total_chunks=0 edge case.
 
-    Invalid but possible. Should error clearly rather than divide-by-zero or
-    infinite loop.
+    Invalid but possible. Should not cause divide-by-zero or infinite loop.
+    With total_chunks=0, the message is considered "complete" immediately
+    and assemble() returns empty bytes.
     """
     partial = PartialMessage(total_chunks=0)
 
-    # With 0 total chunks, it's arguably already "complete"
-    # Test current behavior
-    partial.add_chunk(0, b"data")
-    # Behavior depends on implementation
+    # With 0 total chunks, received_chunks == total_chunks (0 == 0) immediately
+    assert partial.received_chunks == partial.total_chunks
+
+    # assemble() returns empty bytes (range(0) yields nothing)
+    result = partial.assemble()
+    assert result == b""
 
 
 def test_partial_message_with_very_large_total() -> None:
