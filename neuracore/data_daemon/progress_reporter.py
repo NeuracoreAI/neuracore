@@ -1,19 +1,17 @@
 """Progress report API integration."""
 
 import logging
-import os
 from typing import Any
 
 import requests
 
 from neuracore.data_daemon.auth_management.auth_manager import get_auth
+from neuracore.data_daemon.const import API_URL
 from neuracore.data_daemon.event_emitter import Emitter, emitter
 
 # from neuracore.data_daemon.models import TraceRecord
 
 logger = logging.getLogger(__name__)
-
-BASE_URL = os.getenv("NEURACORE_BASE_API_URL", "https://api.neuracore.app/api")
 
 
 class ProgressReporter:
@@ -59,7 +57,7 @@ class ProgressReporter:
 
         try:
             response = requests.post(
-                f"{BASE_URL}/{org_id}/recording/register-traces",
+                f"{API_URL}/{org_id}/recording/register-traces",
                 json=body,
                 headers=auth.get_headers(),
                 timeout=10,
