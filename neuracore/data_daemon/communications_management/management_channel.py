@@ -13,6 +13,7 @@ from neuracore.data_daemon.communications_management.communications_manager impo
 from neuracore.data_daemon.communications_management.data_bridge import Daemon
 from neuracore.data_daemon.communications_management.producer import Producer
 from neuracore.data_daemon.config_manager.args_handler import config_manager
+from neuracore.data_daemon.event_loop_manager import EventLoopManager
 
 logger = logging.getLogger(__name__)
 
@@ -55,5 +56,6 @@ class ManagementChannel:
             return None
 
         comm = CommunicationsManager()
-        daemon = Daemon(comm_manager=comm, config_manager=config_manager)
+        loop_manager = EventLoopManager()
+        daemon = Daemon(comm_manager=comm, loop_manager=loop_manager)
         return daemon

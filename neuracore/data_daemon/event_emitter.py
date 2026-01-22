@@ -1,9 +1,9 @@
 """Shared event emitter for cross-component signaling."""
 
-from pyee import EventEmitter
+from pyee.asyncio import AsyncIOEventEmitter
 
 
-class Emitter(EventEmitter):
+class Emitter(AsyncIOEventEmitter):
     """Shared event emitter for cross-component signaling."""
 
     # Comms manager to State manager
