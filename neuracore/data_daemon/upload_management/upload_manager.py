@@ -10,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 from neuracore_types import DataType, RecordingDataTraceStatus
 
-from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.event_emitter import Emitter, emitter
 from neuracore.data_daemon.models import TraceErrorCode, TraceStatus, get_content_type
 from neuracore.data_daemon.upload_management.trace_manager import TraceManager
@@ -32,12 +31,14 @@ class UploadManager(TraceManager):
     Uploads are triggered via READY_FOR_UPLOAD events from state manager.
     """
 
-    def __init__(self, config: DaemonConfig):
-        """Initialize the upload manager."""
-        self._config = config
+    def __init__(self, num_threads: int = 4):
+        """Initialize the upload manager.
 
+        Args:
+            num_threads: Number of concurrent upload threads
+        """
         # Threading
-        self._num_threads = self._config.num_threads or 4
+        self._num_threads = num_threads
         self._executor = ThreadPoolExecutor(
             max_workers=self._num_threads,
             thread_name_prefix="uploader",
