@@ -29,6 +29,7 @@ from neuracore.core.streaming.recording_state_manager import (
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
 from .exceptions import RobotError, ValidationError
+from .utils.http_errors import extract_error_detail
 
 logger = logging.getLogger(__name__)
 
@@ -270,7 +271,10 @@ class Robot:
                 "please check your internet connection and try again."
             )
         except requests.exceptions.RequestException as e:
-            raise RobotError(f"Failed to start recording: {str(e)}")
+            detail = None
+            if e.response is not None:
+                detail = extract_error_detail(e.response)
+            raise RobotError(f"Failed to start recording: {detail or str(e)}")
 
     def stop_recording(self, recording_id: str) -> None:
         """Stop an active recording session.

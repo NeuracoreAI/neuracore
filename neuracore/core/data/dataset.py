@@ -27,6 +27,7 @@ from neuracore.core.data.synced_dataset import SynchronizedDataset
 from ..auth import Auth, get_auth
 from ..const import API_URL
 from ..exceptions import DatasetError
+from ..utils.http_errors import extract_error_detail
 
 DEFAULT_CACHE_DIR = Path.home() / ".neuracore" / "training"
 DEFAULT_RECORDING_CACHE_DIR = DEFAULT_CACHE_DIR / "recording_cache"
@@ -339,7 +340,7 @@ class Dataset:
             The newly created Dataset instance.
 
         Raises:
-            requests.HTTPError: If the API request fails.
+            DatasetError: If the API request fails.
         """
         auth: Auth = get_auth()
         org_id = get_current_org()
@@ -353,7 +354,11 @@ class Dataset:
                 "is_shared": shared,
             },
         )
-        response.raise_for_status()
+        if not response.ok:
+            detail = extract_error_detail(response)
+            error_message = detail or f"{response.status_code} {response.reason}"
+            raise DatasetError(f"Failed to create dataset: {error_message}")
+
         dataset_model = DatasetModel.model_validate(response.json())
         return Dataset(
             id=dataset_model.id,

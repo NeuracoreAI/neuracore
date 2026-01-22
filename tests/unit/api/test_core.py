@@ -1,10 +1,15 @@
 import json
+from types import SimpleNamespace
 
+import pytest
 import requests_mock
 
 import neuracore as nc
+from neuracore.api import core
+from neuracore.api.globals import GlobalSingleton
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
+from neuracore.core.exceptions import RobotError
 
 
 def test_login_with_api_key(temp_config_dir, monkeypatch):
@@ -121,3 +126,60 @@ def test_connect_robot(
     # Verify robot connection
     assert robot is not None
     assert robot.name == "test_robot"
+
+
+def _set_active_dataset_id(dataset_id: str | None) -> str | None:
+    singleton = GlobalSingleton()
+    previous = singleton._active_dataset_id
+    singleton._active_dataset_id = dataset_id
+    return previous
+
+
+def test_start_recording_shared_robot_non_shared_dataset(monkeypatch):
+    active_dataset_id = "dataset-123"
+    previous = _set_active_dataset_id(active_dataset_id)
+
+    dataset = SimpleNamespace(
+        id=active_dataset_id,
+        name="NonShared Dataset",
+        is_shared=False,
+    )
+    robot = SimpleNamespace(shared=True, start_recording=lambda _: None)
+
+    monkeypatch.setattr(core.Dataset, "get_by_id", lambda _: dataset)
+    monkeypatch.setattr(core, "_get_robot", lambda *_args, **_kwargs: robot)
+
+    try:
+        with pytest.raises(RobotError) as exc_info:
+            core.start_recording()
+        message = str(exc_info.value)
+        assert "Shared robot cannot be used" in message
+        assert "not authorized to upload shared datasets" in message
+        assert "Active dataset: 'NonShared Dataset'" in message
+    finally:
+        _set_active_dataset_id(previous)
+
+
+def test_start_recording_non_shared_robot_shared_dataset(monkeypatch):
+    active_dataset_id = "dataset-456"
+    previous = _set_active_dataset_id(active_dataset_id)
+
+    dataset = SimpleNamespace(
+        id=active_dataset_id,
+        name="Shared Dataset",
+        is_shared=True,
+    )
+    robot = SimpleNamespace(shared=False, start_recording=lambda _: None)
+
+    monkeypatch.setattr(core.Dataset, "get_by_id", lambda _: dataset)
+    monkeypatch.setattr(core, "_get_robot", lambda *_args, **_kwargs: robot)
+
+    try:
+        with pytest.raises(RobotError) as exc_info:
+            core.start_recording()
+        message = str(exc_info.value)
+        assert "Non-shared robot cannot be used" in message
+        assert "connect_robot(shared=True)" in message
+        assert "Active dataset: 'Shared Dataset'" in message
+    finally:
+        _set_active_dataset_id(previous)
