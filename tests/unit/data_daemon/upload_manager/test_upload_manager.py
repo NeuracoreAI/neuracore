@@ -13,7 +13,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from neuracore_types import DataType, RecordingDataTraceStatus
 
-from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.event_emitter import Emitter, emitter
 from neuracore.data_daemon.models import TraceErrorCode, TraceStatus
 from neuracore.data_daemon.upload_management.upload_manager import UploadManager
@@ -43,8 +42,7 @@ def mock_auth():
 @pytest.fixture
 def upload_manager() -> UploadManager:
     """Create and cleanup UploadManager instance."""
-    config = DaemonConfig(num_threads=2)
-    manager = UploadManager(config=config)
+    manager = UploadManager(num_threads=2)
     try:
         yield manager
     finally:
@@ -54,8 +52,7 @@ def upload_manager() -> UploadManager:
 @pytest.fixture
 def upload_manager_with_more_threads() -> UploadManager:
     """Create UploadManager with more threads for concurrent tests."""
-    config = DaemonConfig(num_threads=4)
-    manager = UploadManager(config=config)
+    manager = UploadManager(num_threads=4)
     try:
         yield manager
     finally:
@@ -80,13 +77,11 @@ def setup_test_env(mock_auth):
 
 def test_initialize_with_config() -> None:
     """Initialization with configuration."""
-    config = DaemonConfig(num_threads=8)
-    manager = UploadManager(config=config)
+    manager = UploadManager(num_threads=8)
 
     try:
         assert manager._num_threads == 8
         assert manager._executor is not None
-        assert manager._config == config
     finally:
         manager.shutdown(wait=False)
 
@@ -594,8 +589,7 @@ def test_upload_manager_updates_backend_periodically_during_upload(
 
 def test_upload_manager_shutdown_waits_for_in_flight_uploads(test_file: Path) -> None:
     """Test UploadManager shutdown waits for in-flight uploads."""
-    config = DaemonConfig(num_threads=2)
-    upload_manager = UploadManager(config=config)
+    upload_manager = UploadManager(num_threads=2)
 
     upload_completed = []
 
@@ -640,8 +634,7 @@ def test_upload_manager_shutdown_waits_for_in_flight_uploads(test_file: Path) ->
 
 def test_upload_manager_shutdown_unsubscribes_from_events(test_file: Path) -> None:
     """Test UploadManager shutdown unsubscribes from READY_FOR_UPLOAD events."""
-    config = DaemonConfig(num_threads=2)
-    upload_manager = UploadManager(config=config)
+    upload_manager = UploadManager(num_threads=2)
 
     upload_manager.shutdown()
 

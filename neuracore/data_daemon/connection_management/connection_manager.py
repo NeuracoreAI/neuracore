@@ -25,26 +25,33 @@ class ConnectionManager:
 
     def __init__(
         self,
+        *,
         timeout: float = 5.0,
         check_interval: float = 10.0,
+        offline_mode: bool = False,
     ) -> None:
         """Initialize the connection manager.
 
         Args:
-            emitter: Event emitter for broadcasting connection state
+            config_manager: Config to resolve for Connection Manager
             timeout: Timeout in seconds for connectivity checks
             check_interval: Seconds between connectivity checks
+            offline_mode: Daemon is in offline mode; skip connectivity checks
         """
         self._timeout = timeout
         self._check_interval = check_interval
         self._is_connected = False
         self._running = False
         self._checker_thread: threading.Thread | None = None
+        self._offline_mode = offline_mode
 
         emitter.emit(Emitter.IS_CONNECTED, self._is_connected)
 
     def start(self) -> None:
         """Start the connection monitoring thread."""
+        if self._offline_mode:
+            logger.info("ConnectionManager in offline mode")
+            return
         if self._running:
             logger.warning("ConnectionManager already running")
             return
@@ -64,6 +71,9 @@ class ConnectionManager:
         Args:
             timeout: Maximum time to wait for thread to stop
         """
+        if self._offline_mode:
+            logger.info("ConnectionManager in offline mode")
+            return
         if not self._running:
             logger.warning("ConnectionManager not running")
             return
