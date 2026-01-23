@@ -113,14 +113,12 @@ class ResumableFileUploader:
             f"{self._bytes_uploaded} bytes already uploaded"
         )
 
-        # Validate file exists and get size
         file_path = Path(self._filepath)
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {self._filepath}")
 
         self._total_bytes = file_path.stat().st_size
 
-        # Get upload session URI if needed
         if self._session_uri is None:
             try:
                 self._session_uri = self._get_upload_session_uri()
@@ -129,12 +127,10 @@ class ResumableFileUploader:
                 logger.error(error_msg)
                 return (False, self._bytes_uploaded, error_msg)
 
-        # Sync resume point with server state to avoid duplicates
         success, error_message = self._sync_with_server_upload_position()
         if not success:
             return (False, self._bytes_uploaded, error_message)
 
-        # Upload file in chunks
         success, error_message, final_response = self._upload_file_in_chunks()
 
         if success:
@@ -284,13 +280,20 @@ class ResumableFileUploader:
                         return (False, "Finalization incomplete", None)
                     return (True, None, None)
                 if status_code == self.SESSION_EXPIRED_CODE:
-                    # Session expired - get new session
                     logger.info("Upload session expired, obtaining new session")
+                    try:
+                        get_auth().invalidate_token()
+                    except Exception:
+                        pass
                     self._session_uri = self._get_upload_session_uri()
                     continue
                 if status_code == 403:
                     if self._is_signed_url_expired(response):
                         logger.info("Signed URL expired, re-acquiring session URL")
+                        try:
+                            get_auth().invalidate_token()
+                        except Exception:
+                            pass
                         self._session_uri = self._get_upload_session_uri()
                         continue
                     return (False, "Permission denied (403)", None)
