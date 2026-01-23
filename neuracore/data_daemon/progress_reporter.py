@@ -1,15 +1,14 @@
 """Progress report API integration."""
 
+import asyncio
 import logging
 from typing import Any
 
-import requests
+import aiohttp
 
 from neuracore.data_daemon.auth_management.auth_manager import get_auth
 from neuracore.data_daemon.const import API_URL
-from neuracore.data_daemon.event_emitter import Emitter, emitter
-
-# from neuracore.data_daemon.models import TraceRecord
+from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 
 logger = logging.getLogger(__name__)
 
@@ -17,15 +16,16 @@ logger = logging.getLogger(__name__)
 class ProgressReporter:
     """Send progress reports to the Neuracore backend."""
 
-    def __init__(self) -> None:
+    def __init__(self, client_session: aiohttp.ClientSession) -> None:
         """Subscribe to progress report events."""
-        emitter.on(Emitter.PROGRESS_REPORT, self.report_progress)
+        self.client_session = client_session
+        self._emitter = get_emitter()
+        self._emitter.on(Emitter.PROGRESS_REPORT, self.report_progress)
 
-    def report_progress(
+    async def report_progress(
         self,
         start_time: float,
         end_time: float,
-        # traces: list[TraceRecord]
         traces: Any,
     ) -> None:
         """Post a progress report for the provided trace records."""
@@ -56,23 +56,23 @@ class ProgressReporter:
         org_id = auth.get_org_id()
 
         try:
-            response = requests.post(
+            async with self.client_session.post(
                 f"{API_URL}/{org_id}/recording/register-traces",
                 json=body,
                 headers=auth.get_headers(),
-                timeout=10,
-            )
-            if response.status_code >= 400:
-                logger.warning(
-                    "Progress report failed: %s %s",
-                    response.status_code,
-                    response.text,
-                )
-        except requests.exceptions.RequestException as exc:
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as response:
+                if response.status >= 400:
+                    logger.warning(
+                        "Progress report failed: %s %s",
+                        response.status,
+                        response.text,
+                    )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             logger.warning("Progress report request failed: %s", exc)
-            emitter.emit(
+            self._emitter.emit(
                 Emitter.PROGRESS_REPORT_FAILED,
                 traces[0].recording_id,
-                exc.response.reason if exc.response else str(exc),
+                str(exc),
             )
-        emitter.emit(Emitter.PROGRESS_REPORTED, traces[0].recording_id)
+        self._emitter.emit(Emitter.PROGRESS_REPORTED, traces[0].recording_id)

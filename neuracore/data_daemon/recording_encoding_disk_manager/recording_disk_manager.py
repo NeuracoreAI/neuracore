@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
-import queue
 import threading
+from concurrent.futures import Future
 from typing import Any
 
 from neuracore.data_daemon.config_manager.helpers import calculate_storage_limit
@@ -16,7 +17,8 @@ from neuracore.data_daemon.const import (
     SENTINEL,
     STORAGE_REFRESH_SECONDS,
 )
-from neuracore.data_daemon.event_emitter import Emitter, emitter
+from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.models import CompleteMessage, parse_data_type
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
     StorageBudget,
@@ -43,6 +45,7 @@ class RecordingDiskManager:
     def __init__(
         self,
         *,
+        loop_manager: EventLoopManager,
         flush_bytes: int | None = None,
         storage_limit_bytes: int | None = None,
         recordings_root: str | None = None,
@@ -50,6 +53,7 @@ class RecordingDiskManager:
         """Initialise RecordingDiskManager.
 
         Args:
+            loop_manager: EventLoopManager instance for scheduling workers.
             flush_bytes: Flush threshold for buffered raw writes.
             storage_limit_bytes: Max bytes allowed for on-disk trace storage.
             recordings_root: Root directory for per-recording trace folders.
@@ -59,8 +63,10 @@ class RecordingDiskManager:
         self._recordings_root_value = recordings_root
         self.recordings_root: pathlib.Path
 
-        self.trace_message_queue: queue.Queue[CompleteMessage | object] = queue.Queue()
-        self.raw_file_queue: queue.Queue[_BatchJob | object] = queue.Queue()
+        self.trace_message_queue: asyncio.Queue[CompleteMessage | object] = (
+            asyncio.Queue()
+        )
+        self.raw_file_queue: asyncio.Queue[_BatchJob | object] = asyncio.Queue()
 
         self.recording_traces: dict[str, dict[str, Any]] = {}
 
@@ -83,8 +89,9 @@ class RecordingDiskManager:
         self._writer: _RawBatchWriter | None = None
         self._encoder_worker: _BatchEncoderWorker | None = None
 
-        self.write_thread: threading.Thread | None = None
-        self.encoder_thread: threading.Thread | None = None
+        self._loop_manager = loop_manager
+        self._writer_future: Future[Any] | None = None
+        self._encoder_future: Future[Any] | None = None
 
         self._init_state()
 
@@ -163,7 +170,7 @@ class RecordingDiskManager:
         )
 
     def start(self) -> None:
-        """Start worker threads and register event handlers.
+        """Start worker tasks on event loops and register event handlers.
 
         Returns:
             None
@@ -171,22 +178,25 @@ class RecordingDiskManager:
         if self._writer is None or self._encoder_worker is None:
             raise RuntimeError("RecordingDiskManager not initialised correctly")
 
-        self.write_thread = threading.Thread(target=self._writer.worker, daemon=False)
-        self.encoder_thread = threading.Thread(
-            target=self._encoder_worker.worker, daemon=False
+        # Schedule writer on General Loop
+        self._writer_future = self._loop_manager.schedule_on_general_loop(
+            self._writer.worker()
         )
 
-        emitter.on(
+        # Schedule encoder on Encoder Loop
+        self._encoder_future = self._loop_manager.schedule_on_encoder_loop(
+            self._encoder_worker.worker()
+        )
+
+        self._emitter = get_emitter()
+        self._emitter.on(
             Emitter.STOP_ALL_TRACES_FOR_RECORDING,
             self._on_stop_all_traces_for_recording,
         )
-        emitter.on(Emitter.DELETE_TRACE, self._on_delete_trace)
-
-        self.write_thread.start()
-        self.encoder_thread.start()
+        self._emitter.on(Emitter.DELETE_TRACE, self._on_delete_trace)
 
     def enqueue(self, complete_message: CompleteMessage) -> None:
-        """Enqueue a completed message for persistence.
+        """Enqueue a completed message for persistence (thread-safe).
 
         Args:
             complete_message: Message to persist.
@@ -194,10 +204,14 @@ class RecordingDiskManager:
         Returns:
             None
         """
-        self.trace_message_queue.put(complete_message)
+        if self._loop_manager is None:
+            raise RuntimeError("RecordingDiskManager not started")
+        self._loop_manager.schedule_on_general_loop(
+            self.trace_message_queue.put(complete_message)
+        )
 
-    def request_stop(self) -> None:
-        """Request a graceful stop of the worker threads.
+    async def request_stop(self) -> None:
+        """Request a graceful stop of the worker tasks.
 
         Returns:
             None
@@ -206,21 +220,26 @@ class RecordingDiskManager:
             if self._stop_requested:
                 return
             self._stop_requested = True
-        self.trace_message_queue.put(SENTINEL)
 
-    def shutdown(self) -> None:
-        """Stop worker threads and wait for them to exit.
+        # Put sentinel directly - we're already in an async context
+        await self.trace_message_queue.put(SENTINEL)
+
+    async def shutdown(self) -> None:
+        """Stop worker tasks and wait for them to exit.
 
         Returns:
             None
         """
-        self.request_stop()
-        if self.write_thread is not None:
-            self.write_thread.join()
-        if self.encoder_thread is not None:
-            self.encoder_thread.join()
+        await self.request_stop()
 
-    def _on_stop_all_traces_for_recording(self, recording_id: str) -> None:
+        if self._writer_future is not None and self._encoder_future is not None:
+            await asyncio.gather(
+                asyncio.wrap_future(self._writer_future),
+                asyncio.wrap_future(self._encoder_future),
+                return_exceptions=True,
+            )
+
+    async def _on_stop_all_traces_for_recording(self, recording_id: str) -> None:
         """Handle STOP_ALL_TRACES_FOR_RECORDING(recording_id).
 
         Args:
@@ -232,7 +251,7 @@ class RecordingDiskManager:
         if self._controller is None or self._writer is None:
             raise RuntimeError("RecordingDiskManager not initialised correctly")
 
-        self._controller.on_stop_all_traces_for_recording(
+        await self._controller.on_stop_all_traces_for_recording(
             recording_id,
             flush_state=self._writer._flush_state,
         )

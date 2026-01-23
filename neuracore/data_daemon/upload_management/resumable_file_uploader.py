@@ -4,14 +4,14 @@ This module provides a file uploader that handles chunked uploads to cloud
 storage with crash recovery and retry logic.
 """
 
+import asyncio
 import base64
 import hashlib
 import logging
-import time
 from collections.abc import Callable
 from pathlib import Path
 
-import requests
+import aiohttp
 
 from neuracore.data_daemon.auth_management.auth_manager import get_auth
 from neuracore.data_daemon.const import API_URL
@@ -42,6 +42,7 @@ class ResumableFileUploader:
         filepath: str,
         cloud_filepath: str,
         content_type: str,
+        client_session: aiohttp.ClientSession,
         bytes_uploaded: int = 0,
         progress_callback: Callable[[int], None] | None = None,
     ) -> None:
@@ -52,6 +53,7 @@ class ResumableFileUploader:
             filepath: Local filesystem path to file
             cloud_filepath: Cloud storage path
             content_type: MIME type
+            client_session: aiohttp ClientSession for HTTP requests
             bytes_uploaded: Starting offset for resume
             progress_callback: Called after each chunk to report progress
         """
@@ -59,13 +61,14 @@ class ResumableFileUploader:
         self._filepath = filepath
         self._cloud_filepath = cloud_filepath
         self._content_type = content_type
+        self._session = client_session
         self._bytes_uploaded = bytes_uploaded
         self._progress_callback = progress_callback
 
         self._session_uri: str | None = None
         self._total_bytes = 0
 
-    def _get_upload_session_uri(self) -> str:
+    async def _get_upload_session_uri(self) -> str:
         """Get a resumable upload session URI from the backend.
 
         Makes an API call to obtain a resumable upload session URL from
@@ -75,7 +78,7 @@ class ResumableFileUploader:
             The resumable upload session URI from Google Cloud Storage.
 
         Raises:
-            requests.HTTPError: If the API request fails.
+            aiohttp.ClientError: If the API request fails.
         """
         params = {
             "filepath": self._cloud_filepath,
@@ -85,17 +88,18 @@ class ResumableFileUploader:
         auth = get_auth()
         org_id = auth.get_org_id()
 
-        response = requests.get(
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with self._session.get(
             f"{API_URL}/org/{org_id}/recording/{self._recording_id}/resumable_upload_url",
             params=params,
             headers=auth.get_headers(),
-            timeout=30,
-        )
+            timeout=timeout,
+        ) as response:
+            response.raise_for_status()
+            data = await response.json()
+            return data["url"]
 
-        response.raise_for_status()
-        return response.json()["url"]
-
-    def upload(self) -> tuple[bool, int, str | None]:
+    async def upload(self) -> tuple[bool, int, str | None]:
         """Upload the file with resumable chunks.
 
         Reads the file from disk starting at the bytes_uploaded offset and
@@ -123,22 +127,22 @@ class ResumableFileUploader:
         # Get upload session URI if needed
         if self._session_uri is None:
             try:
-                self._session_uri = self._get_upload_session_uri()
-            except requests.RequestException as e:
+                self._session_uri = await self._get_upload_session_uri()
+            except aiohttp.ClientError as e:
                 error_msg = f"Failed to get upload session URI: {e}"
                 logger.error(error_msg)
                 return (False, self._bytes_uploaded, error_msg)
 
         # Sync resume point with server state to avoid duplicates
-        success, error_message = self._sync_with_server_upload_position()
+        success, error_message = await self._sync_with_server_upload_position()
         if not success:
             return (False, self._bytes_uploaded, error_message)
 
         # Upload file in chunks
-        success, error_message, final_response = self._upload_file_in_chunks()
+        success, error_message, final_response = await self._upload_file_in_chunks()
 
         if success:
-            checksum_ok, checksum_error = self._verify_checksum(final_response)
+            checksum_ok, checksum_error = await self._verify_checksum(final_response)
             if not checksum_ok:
                 logger.warning(
                     f"Upload failed checksum verification for {self._filepath}: "
@@ -157,9 +161,9 @@ class ResumableFileUploader:
             )
             return (False, self._bytes_uploaded, error_message)
 
-    def _upload_file_in_chunks(
+    async def _upload_file_in_chunks(
         self,
-    ) -> tuple[bool, str | None, requests.Response | None]:
+    ) -> tuple[bool, str | None, aiohttp.ClientResponse | None]:
         """Read file from disk and upload in chunks.
 
         Opens the file, seeks to the resume point, and uploads remaining
@@ -176,7 +180,7 @@ class ResumableFileUploader:
                 # Seek to resume point
                 f.seek(self._bytes_uploaded)
 
-                final_response: requests.Response | None = None
+                final_response: aiohttp.ClientResponse | None = None
 
                 while True:
                     # Read next chunk
@@ -190,7 +194,7 @@ class ResumableFileUploader:
                     is_final = (chunk_end + 1) >= self._total_bytes
 
                     # Upload chunk with retry logic
-                    success, error_msg, final_response = self._upload_chunk(
+                    success, error_msg, final_response = await self._upload_chunk(
                         chunk, chunk_start, chunk_end, is_final
                     )
 
@@ -222,13 +226,13 @@ class ResumableFileUploader:
             logger.error(error_msg)
             return (False, error_msg, None)
 
-    def _upload_chunk(
+    async def _upload_chunk(
         self,
         data: bytes,
         chunk_start: int,
         chunk_end: int,
         is_final: bool,
-    ) -> tuple[bool, str | None, requests.Response | None]:
+    ) -> tuple[bool, str | None, aiohttp.ClientResponse | None]:
         """Upload a single chunk with exponential backoff retry.
 
         Uploads a chunk of data to the resumable upload session with proper
@@ -261,70 +265,72 @@ class ResumableFileUploader:
                 if self._session_uri is None:
                     return (False, "No upload session URI available", None)
 
-                response = requests.put(
+                timeout = aiohttp.ClientTimeout(total=300)  # 5 minutes
+                async with self._session.put(
                     self._session_uri,
                     headers=headers,
                     data=data,
-                    timeout=300,  # 5 minutes
-                )
+                    timeout=timeout,
+                ) as response:
+                    status_code = response.status
 
-                status_code = response.status_code
-
-                if status_code in self.FINAL_SUCCESS_CODES:
-                    return (True, None, response if is_final else None)
-                if status_code == self.RESUME_INCOMPLETE_CODE:
-                    if is_final:
-                        if self._is_server_upload_complete():
+                    if status_code in self.FINAL_SUCCESS_CODES:
+                        return (True, None, response if is_final else None)
+                    if status_code == self.RESUME_INCOMPLETE_CODE:
+                        if is_final:
+                            if await self._is_server_upload_complete():
+                                finalized, error_msg, final_response = (
+                                    await self._finalize_upload()
+                                )
+                                if finalized:
+                                    return (True, None, final_response)
+                                return (False, error_msg, None)
+                            return (False, "Finalization incomplete", None)
+                        return (True, None, None)
+                    if status_code == self.SESSION_EXPIRED_CODE:
+                        # Session expired - get new session
+                        logger.info("Upload session expired, obtaining new session")
+                        self._session_uri = await self._get_upload_session_uri()
+                        continue
+                    if status_code == 403:
+                        if await self._is_signed_url_expired(response):
+                            logger.info("Signed URL expired, re-acquiring session URL")
+                            self._session_uri = await self._get_upload_session_uri()
+                            continue
+                        return (False, "Permission denied (403)", None)
+                    if status_code == 404:
+                        return (False, "Bucket not found (404)", None)
+                    if status_code in self.RETRYABLE_STATUS_CODES:
+                        if is_final and await self._is_server_upload_complete():
                             finalized, error_msg, final_response = (
-                                self._finalize_upload()
+                                await self._finalize_upload()
                             )
                             if finalized:
                                 return (True, None, final_response)
                             return (False, error_msg, None)
-                        return (False, "Finalization incomplete", None)
-                    return (True, None, None)
-                if status_code == self.SESSION_EXPIRED_CODE:
-                    # Session expired - get new session
-                    logger.info("Upload session expired, obtaining new session")
-                    self._session_uri = self._get_upload_session_uri()
-                    continue
-                if status_code == 403:
-                    if self._is_signed_url_expired(response):
-                        logger.info("Signed URL expired, re-acquiring session URL")
-                        self._session_uri = self._get_upload_session_uri()
-                        continue
-                    return (False, "Permission denied (403)", None)
-                if status_code == 404:
-                    return (False, "Bucket not found (404)", None)
-                if status_code in self.RETRYABLE_STATUS_CODES:
-                    if is_final and self._is_server_upload_complete():
-                        finalized, error_msg, final_response = self._finalize_upload()
-                        if finalized:
-                            return (True, None, final_response)
-                        return (False, error_msg, None)
-                    logger.warning(
-                        f"Upload chunk failed "
-                        f"(attempt {attempt + 1}/{self.MAX_RETRIES}): "
-                        f"HTTP {status_code}"
-                    )
-                else:
-                    return (False, f"Upload failed with HTTP {status_code}", None)
+                        logger.warning(
+                            f"Upload chunk failed "
+                            f"(attempt {attempt + 1}/{self.MAX_RETRIES}): "
+                            f"HTTP {status_code}"
+                        )
+                    else:
+                        return (False, f"Upload failed with HTTP {status_code}", None)
 
-            except requests.exceptions.ConnectionError as e:
+            except aiohttp.ClientConnectorError as e:
                 logger.warning(f"Network connection error (attempt {attempt + 1})")
                 if attempt < self.MAX_RETRIES - 1:
-                    self._sleep_backoff(attempt)
+                    await self._sleep_backoff(attempt)
                     continue
                 return (False, f"Network connection error: {e}", None)
 
-            except requests.exceptions.SSLError as e:
+            except aiohttp.ClientSSLError as e:
                 logger.warning(f"SSL error (attempt {attempt + 1})")
                 if attempt < self.MAX_RETRIES - 1:
-                    self._sleep_backoff(attempt)
+                    await self._sleep_backoff(attempt)
                     continue
                 return (False, f"SSL error: {e}", None)
 
-            except requests.exceptions.Timeout:
+            except asyncio.TimeoutError:
                 logger.warning(f"Upload chunk timeout (attempt {attempt + 1})")
 
             except Exception as e:
@@ -332,29 +338,29 @@ class ResumableFileUploader:
                 return (False, f"Unexpected error: {e}", None)
 
             if attempt < self.MAX_RETRIES - 1:
-                self._sleep_backoff(attempt)
+                await self._sleep_backoff(attempt)
 
         error_msg = f"Upload chunk failed after {self.MAX_RETRIES} attempts"
         logger.error(error_msg)
         return (False, error_msg, None)
 
-    def _sleep_backoff(self, attempt: int) -> None:
+    async def _sleep_backoff(self, attempt: int) -> None:
         """Sleep with exponential backoff, capped at MAX_BACKOFF_SECONDS."""
         delay = min(2**attempt, self.MAX_BACKOFF_SECONDS)
-        time.sleep(delay)
+        await asyncio.sleep(delay)
 
-    def _is_signed_url_expired(self, response: requests.Response) -> bool:
+    async def _is_signed_url_expired(self, response: aiohttp.ClientResponse) -> bool:
         """Detect signed URL expiration from response headers/body."""
         header_value = response.headers.get("X-Signed-Url-Expired", "").lower()
         if header_value == "true":
             return True
         try:
-            body_text = response.text or ""
+            body_text = await response.text()
         except Exception:
             body_text = ""
         return "expired" in body_text.lower()
 
-    def _check_session_status(self) -> int | None:
+    async def _check_session_status(self) -> int | None:
         """Check current uploaded bytes on the server.
 
         Returns:
@@ -363,38 +369,42 @@ class ResumableFileUploader:
         if self._session_uri is None:
             return None
         headers = {"Content-Length": "0", "Content-Range": "bytes */*"}
-        response = requests.put(
-            self._session_uri, headers=headers, data=b"", timeout=30
-        )
-        if response.status_code in self.FINAL_SUCCESS_CODES:
-            return self._total_bytes
-        if response.status_code == self.RESUME_INCOMPLETE_CODE:
-            range_header = response.headers.get("Range")
-            if range_header:
-                last_byte = int(range_header.split("-")[1])
-                return last_byte + 1
-            return 0
-        if response.status_code in {404, self.SESSION_EXPIRED_CODE}:
-            return None
-        if response.status_code == 403 and self._is_signed_url_expired(response):
-            return None
-        raise requests.HTTPError(
-            f"Unexpected status code while checking status: {response.status_code}"
-        )
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with self._session.put(
+            self._session_uri, headers=headers, data=b"", timeout=timeout
+        ) as response:
+            if response.status in self.FINAL_SUCCESS_CODES:
+                return self._total_bytes
+            if response.status == self.RESUME_INCOMPLETE_CODE:
+                range_header = response.headers.get("Range")
+                if range_header:
+                    last_byte = int(range_header.split("-")[1])
+                    return last_byte + 1
+                return 0
+            if response.status in {404, self.SESSION_EXPIRED_CODE}:
+                return None
+            if response.status == 403 and await self._is_signed_url_expired(response):
+                return None
+            raise aiohttp.ClientResponseError(
+                response.request_info,
+                response.history,
+                status=response.status,
+                message=f"Unexpected status checking: {response.status}",
+            )
 
-    def _sync_with_server_upload_position(self) -> tuple[bool, str | None]:
+    async def _sync_with_server_upload_position(self) -> tuple[bool, str | None]:
         """Ensure local resume offset matches server state to avoid duplicates."""
         try:
-            server_bytes = self._check_session_status()
-        except requests.exceptions.SSLError as e:
+            server_bytes = await self._check_session_status()
+        except aiohttp.ClientSSLError as e:
             return (False, f"SSL error: {e}")
-        except requests.RequestException as e:
+        except aiohttp.ClientError as e:
             return (False, f"Failed to check upload status: {e}")
 
         if server_bytes is None:
             try:
-                self._session_uri = self._get_upload_session_uri()
-            except requests.RequestException as e:
+                self._session_uri = await self._get_upload_session_uri()
+            except aiohttp.ClientError as e:
                 return (False, f"Failed to refresh upload session URI: {e}")
             return (True, None)
 
@@ -407,15 +417,17 @@ class ResumableFileUploader:
             self._bytes_uploaded = server_bytes
         return (True, None)
 
-    def _is_server_upload_complete(self) -> bool:
+    async def _is_server_upload_complete(self) -> bool:
         """Check if server has all bytes uploaded for this file."""
         try:
-            server_bytes = self._check_session_status()
-        except requests.RequestException:
+            server_bytes = await self._check_session_status()
+        except aiohttp.ClientError:
             return False
         return server_bytes == self._total_bytes
 
-    def _finalize_upload(self) -> tuple[bool, str | None, requests.Response | None]:
+    async def _finalize_upload(
+        self,
+    ) -> tuple[bool, str | None, aiohttp.ClientResponse | None]:
         """Finalize an upload without re-sending data."""
         if self._session_uri is None:
             return (False, "No upload session URI available", None)
@@ -425,33 +437,38 @@ class ResumableFileUploader:
         }
         for attempt in range(self.MAX_RETRIES):
             try:
-                response = requests.put(
-                    self._session_uri, headers=headers, data=b"", timeout=30
-                )
-                if response.status_code in self.FINAL_SUCCESS_CODES:
-                    return (True, None, response)
-                if response.status_code == self.RESUME_INCOMPLETE_CODE:
-                    return (False, "Finalization incomplete", None)
-                if response.status_code in self.RETRYABLE_STATUS_CODES:
-                    if attempt < self.MAX_RETRIES - 1:
-                        self._sleep_backoff(attempt)
-                        continue
-                if response.status_code == self.SESSION_EXPIRED_CODE:
-                    return (False, "Upload session expired during finalization", None)
-                return (
-                    False,
-                    f"Finalization failed with HTTP {response.status_code}",
-                    None,
-                )
-            except requests.exceptions.RequestException as e:
+                timeout = aiohttp.ClientTimeout(total=30)
+                async with self._session.put(
+                    self._session_uri, headers=headers, data=b"", timeout=timeout
+                ) as response:
+                    if response.status in self.FINAL_SUCCESS_CODES:
+                        return (True, None, response)
+                    if response.status == self.RESUME_INCOMPLETE_CODE:
+                        return (False, "Finalization incomplete", None)
+                    if response.status in self.RETRYABLE_STATUS_CODES:
+                        if attempt < self.MAX_RETRIES - 1:
+                            await self._sleep_backoff(attempt)
+                            continue
+                    if response.status == self.SESSION_EXPIRED_CODE:
+                        return (
+                            False,
+                            "Upload session expired during finalization",
+                            None,
+                        )
+                    return (
+                        False,
+                        f"Finalization failed with HTTP {response.status}",
+                        None,
+                    )
+            except aiohttp.ClientError as e:
                 if attempt < self.MAX_RETRIES - 1:
-                    self._sleep_backoff(attempt)
+                    await self._sleep_backoff(attempt)
                     continue
                 return (False, f"Finalization request failed: {e}", None)
         return (False, "Finalization failed after retries", None)
 
-    def _verify_checksum(
-        self, response: requests.Response | None
+    async def _verify_checksum(
+        self, response: aiohttp.ClientResponse | None
     ) -> tuple[bool, str | None]:
         """Verify file integrity after finalization using server checksum."""
         if response is None:
@@ -470,7 +487,7 @@ class ResumableFileUploader:
                     break
         else:
             try:
-                body = response.json()
+                body = await response.json()
                 if "md5Hash" in body:
                     server_md5_hex = base64.b64decode(body["md5Hash"]).hex()
             except Exception:

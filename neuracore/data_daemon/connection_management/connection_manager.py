@@ -4,14 +4,13 @@ This module provides a connection manager that monitors network connectivity
 to the Neuracore API and emits events when connection state changes.
 """
 
+import asyncio
 import logging
-import threading
-import time
 
-import requests
+import aiohttp
 
 from neuracore.data_daemon.const import API_URL
-from neuracore.data_daemon.event_emitter import Emitter, emitter
+from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 
 logger = logging.getLogger(__name__)
 
@@ -25,80 +24,65 @@ class ConnectionManager:
 
     def __init__(
         self,
+        client_session: aiohttp.ClientSession,
         timeout: float = 5.0,
         check_interval: float = 10.0,
     ) -> None:
         """Initialize the connection manager.
 
         Args:
+            client_session: aiohttp ClientSession for making requests
             emitter: Event emitter for broadcasting connection state
             timeout: Timeout in seconds for connectivity checks
             check_interval: Seconds between connectivity checks
         """
+        self.client_session = client_session
         self._timeout = timeout
         self._check_interval = check_interval
         self._is_connected = False
-        self._running = False
-        self._checker_thread: threading.Thread | None = None
+        self._stopped = False
+        self._connection_task: asyncio.Task | None = None
 
-        emitter.emit(Emitter.IS_CONNECTED, self._is_connected)
+        self._emitter = get_emitter()
+        self._emitter.emit(Emitter.IS_CONNECTED, self._is_connected)
 
-    def start(self) -> None:
-        """Start the connection monitoring thread."""
-        if self._running:
-            logger.warning("ConnectionManager already running")
-            return
-
-        self._running = True
-        self._checker_thread = threading.Thread(
-            target=self._check_loop,
-            name="connection-checker",
-            daemon=False,
-        )
-        self._checker_thread.start()
+    async def start(self) -> None:
+        """Start the connectivity check loop."""
+        self._stopped = False
+        self._connection_task = asyncio.create_task(self._check_loop())
         logger.info("ConnectionManager started")
 
-    def stop(self, timeout: float = 5.0) -> None:
-        """Stop the connection monitoring thread.
-
-        Args:
-            timeout: Maximum time to wait for thread to stop
-        """
-        if not self._running:
-            logger.warning("ConnectionManager not running")
-            return
-
-        logger.info("Stopping ConnectionManager...")
-        self._running = False
-
-        if self._checker_thread and self._checker_thread.is_alive():
-            self._checker_thread.join(timeout=timeout)
-
+    async def stop(self) -> None:
+        """Stop the connectivity check loop."""
+        self._stopped = True
+        if self._connection_task:
+            self._connection_task.cancel()
+            try:
+                await self._connection_task
+            except asyncio.CancelledError:
+                pass
         logger.info("ConnectionManager stopped")
 
-    def _check_loop(self) -> None:
-        """Background loop that checks connectivity and emits state changes."""
-        logger.info("Connection checking loop started")
-
-        while self._running:
+    async def _check_loop(self) -> None:
+        """Periodically check connectivity and emit events on state change."""
+        while not self._stopped:
             try:
-                new_state = self._check_connectivity()
+                is_connected = await self._check_connectivity()
 
                 # Emit event if state changed
-                if new_state != self._is_connected:
-                    self._is_connected = new_state
-                    logger.info(f"Connection state changed: {new_state}")
-                    emitter.emit(Emitter.IS_CONNECTED, new_state)
+                if is_connected != self._is_connected:
+                    self._is_connected = is_connected
+                    self._emitter.emit(Emitter.IS_CONNECTED, is_connected)
+                    logger.info(f"{'Connected' if is_connected else 'Disconnected'}")
+                await asyncio.sleep(self._check_interval)
 
-                time.sleep(self._check_interval)
-
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                logger.error(f"Error in connection check loop: {e}", exc_info=True)
-                time.sleep(self._check_interval)
+                logger.error(f"Error in connectivity check loop: {e}", exc_info=True)
+                await asyncio.sleep(self._check_interval)
 
-        logger.info("Connection checking loop stopped")
-
-    def _check_connectivity(self) -> bool:
+    async def _check_connectivity(self) -> bool:
         """Check if we have network connectivity to the API.
 
         Makes a HEAD request to the API URL to verify connectivity.
@@ -107,10 +91,13 @@ class ConnectionManager:
             True if connected, False otherwise
         """
         try:
-            response = requests.head(API_URL, timeout=self._timeout)
-            return response.status_code < 500
+            async with self.client_session.head(
+                API_URL,
+                timeout=aiohttp.ClientTimeout(total=self._timeout),
+            ) as response:
+                return response.status < 500
 
-        except requests.exceptions.RequestException:
+        except (aiohttp.ClientError, asyncio.TimeoutError):
             return False
 
     def is_connected(self) -> bool:

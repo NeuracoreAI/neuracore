@@ -5,12 +5,12 @@ from __future__ import annotations
 import logging
 import shutil
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from neuracore_types import DataType
 
-from neuracore.data_daemon.event_emitter import Emitter, emitter
+from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
     StorageBudget,
 )
@@ -67,6 +67,8 @@ class _TraceController:
         self._stopped_recordings = stopped_recordings
         self._closed_traces = closed_traces
 
+        self._emitter = get_emitter()
+
     def abort_trace_due_to_storage(self, trace_key: _TraceKey) -> None:
         """Abort a trace due to storage constraints and emit TRACE_WRITTEN(trace_id, 0).
 
@@ -100,12 +102,15 @@ class _TraceController:
         shutil.rmtree(trace_dir, ignore_errors=True)
         self._storage_budget.release(reclaimed_bytes)
 
-        emitter.emit(
+        self._emitter.emit(
             Emitter.TRACE_WRITTEN, trace_key.trace_id, trace_key.recording_id, 0
         )
 
-    def on_stop_all_traces_for_recording(
-        self, recording_id: str, *, flush_state: Callable[[_WriteState], None]
+    async def on_stop_all_traces_for_recording(
+        self,
+        recording_id: str,
+        *,
+        flush_state: Callable[[_WriteState], Awaitable[None]],
     ) -> None:
         """Handle STOP_ALL_TRACES_FOR_RECORDING(recording_id).
 
@@ -134,7 +139,7 @@ class _TraceController:
         for writer_state in writer_states_to_flush:
             with self._state_lock:
                 writer_state.trace_done = True
-            flush_state(writer_state)
+            await flush_state(writer_state)
             with self._state_lock:
                 self._writer_states.pop(writer_state.trace_key, None)
 

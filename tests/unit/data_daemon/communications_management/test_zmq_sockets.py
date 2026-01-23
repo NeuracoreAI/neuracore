@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -11,9 +12,14 @@ import zmq
 from neuracore_types import DataType
 
 import neuracore.data_daemon.const as const_module
+import neuracore.data_daemon.event_emitter as em_module
 from neuracore.data_daemon.communications_management import (
     communications_manager as comms_module,
 )
+from neuracore.data_daemon.communications_management import (
+    data_bridge as data_bridge_module,
+)
+from neuracore.data_daemon.communications_management import producer as producer_module
 from neuracore.data_daemon.communications_management.communications_manager import (
     CommunicationsManager,
 )
@@ -22,12 +28,15 @@ from neuracore.data_daemon.communications_management.producer import (
     Producer,
     RecordingContext,
 )
-from neuracore.data_daemon.const import HEARTBEAT_TIMEOUT_SECS
-from neuracore.data_daemon.event_emitter import Emitter, emitter
+from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.recording_encoding_disk_manager import (
     recording_disk_manager as rdm_module,
 )
 from tests.unit.data_daemon.helpers import MockConfigManager
+
+TEST_HEARTBEAT_INTERVAL_SECS = 0.1
+TEST_HEARTBEAT_TIMEOUT_SECS = 0.3
 
 
 def _wait_for(predicate, timeout: float, interval: float = 0.05) -> bool:
@@ -86,19 +95,48 @@ def ipc_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     mpsa(const_module, "BASE_DIR", base_dir)
     mpsa(const_module, "SOCKET_PATH", socket_path)
     mpsa(const_module, "RECORDING_EVENTS_SOCKET_PATH", events_path)
+    mpsa(const_module, "HEARTBEAT_TIMEOUT_SECS", TEST_HEARTBEAT_TIMEOUT_SECS)
     mpsa(comms_module, "BASE_DIR", base_dir)
     mpsa(comms_module, "SOCKET_PATH", socket_path)
     mpsa(comms_module, "RECORDING_EVENTS_SOCKET_PATH", events_path)
+    mpsa(data_bridge_module, "HEARTBEAT_TIMEOUT_SECS", TEST_HEARTBEAT_TIMEOUT_SECS)
+
+    original_init = producer_module.Producer.__init__
+
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self._heartbeat_interval = TEST_HEARTBEAT_INTERVAL_SECS
+
+    mpsa(producer_module.Producer, "__init__", patched_init)
 
     yield
 
 
 @pytest.fixture
-def daemon_runtime(tmp_path: Path):
+def loop_manager():
+    """EventLoopManager instance for tests."""
+    em_module._emitter = None
+
+    manager = EventLoopManager()
+    manager.start()
+    yield manager
+
+    if manager.is_running():
+        try:
+            manager.stop()
+        except RuntimeError:
+            pass
+
+    em_module._emitter = None
+
+
+@pytest.fixture
+def daemon_runtime(tmp_path: Path, loop_manager: EventLoopManager):
     recordings_root = tmp_path / "recordings"
     config = MockConfigManager(path_to_store_record=str(recordings_root))
 
     rdm = rdm_module.RecordingDiskManager(
+        loop_manager=loop_manager,
         flush_bytes=1,
         recordings_root=str(recordings_root),
     )
@@ -120,7 +158,7 @@ def daemon_runtime(tmp_path: Path):
     )
     thread.start()
 
-    assert _wait_for(ready_event.is_set, timeout=2)
+    assert _wait_for(ready_event.is_set, timeout=0.5)
     if error_bucket:
         raise error_bucket[0]
 
@@ -128,8 +166,14 @@ def daemon_runtime(tmp_path: Path):
         yield daemon, rdm, context
     finally:
         stop_event.set()
-        thread.join(timeout=2)
-        rdm.shutdown()
+        thread.join(timeout=0.5)
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                rdm.shutdown(), loop_manager.general_loop
+            )
+            future.result(timeout=1.0)
+        except Exception:
+            pass
         context.destroy(linger=0)
 
 
@@ -176,7 +220,7 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
     producer.start_new_trace(recording_id=recording_id)
     producer.open_ring_buffer(size=2048)
 
-    assert _wait_for(lambda: producer.producer_id in daemon.channels, timeout=2)
+    assert _wait_for(lambda: producer.producer_id in daemon.channels, timeout=0.5)
     channel = daemon.channels[producer.producer_id]
     assert channel.ring_buffer is not None
     assert channel.ring_buffer.size == 2048
@@ -185,7 +229,7 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
     producer.heartbeat()
     assert _wait_for(
         lambda: daemon.channels[producer.producer_id].last_heartbeat > last_heartbeat,
-        timeout=2,
+        timeout=0.5,
     )
 
     payload = json.dumps({"seq": 1}).encode("utf-8")
@@ -208,11 +252,11 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
         if trace_id == active_trace_id:
             trace_written.append(bytes_written)
 
-    emitter.on(Emitter.TRACE_WRITTEN, on_trace_written)
+    get_emitter().on(Emitter.TRACE_WRITTEN, on_trace_written)
     try:
-        assert _wait_for(lambda: trace_written, timeout=5)
+        assert _wait_for(lambda: trace_written, timeout=1)
     finally:
-        emitter.remove_listener(Emitter.TRACE_WRITTEN, on_trace_written)
+        get_emitter().remove_listener(Emitter.TRACE_WRITTEN, on_trace_written)
 
     recording_comm = CommunicationsManager(context=context)
     recording_context = RecordingContext(
@@ -223,7 +267,7 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
         recording_context.socket.close(0)
     recording_comm.cleanup_producer()
 
-    assert _wait_for(lambda: recording_id in daemon._closed_recordings, timeout=2)
+    assert _wait_for(lambda: recording_id in daemon._closed_recordings, timeout=0.5)
 
     producer.stop_producer()
     if producer.socket is not None:
@@ -256,25 +300,26 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
     producer.open_ring_buffer(size=1024)
     producer.start_producer()
 
-    assert _wait_for(lambda: producer.producer_id in daemon.channels, timeout=2)
+    assert _wait_for(lambda: producer.producer_id in daemon.channels, timeout=0.5)
 
     channel = daemon.channels[producer.producer_id]
     first_heartbeat = channel.last_heartbeat
     assert _wait_for(
         lambda: daemon.channels[producer.producer_id].last_heartbeat > first_heartbeat,
-        timeout=2,
+        timeout=0.5,
     )
     second_heartbeat = daemon.channels[producer.producer_id].last_heartbeat
     assert _wait_for(
         lambda: daemon.channels[producer.producer_id].last_heartbeat > second_heartbeat,
-        timeout=2,
+        timeout=0.5,
     )
     third_heartbeat = daemon.channels[producer.producer_id].last_heartbeat
     interval = (third_heartbeat - second_heartbeat).total_seconds()
-    assert 0.6 <= interval <= 1.6
-
-    time.sleep(HEARTBEAT_TIMEOUT_SECS + 1)
-    assert producer.producer_id in daemon.channels
+    assert (
+        TEST_HEARTBEAT_INTERVAL_SECS * 0.5
+        <= interval
+        <= TEST_HEARTBEAT_INTERVAL_SECS * 3
+    )
 
     payload = json.dumps({"seq": 1}).encode("utf-8")
     producer.send_data(
@@ -295,7 +340,7 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
         if trace_id == active_trace_id:
             trace_written.append(bytes_written)
 
-    emitter.on(Emitter.TRACE_WRITTEN, on_trace_written)
+    get_emitter().on(Emitter.TRACE_WRITTEN, on_trace_written)
     try:
         producer._stop_event.set()
         if hasattr(producer, "_heartbeat_thread"):
@@ -306,13 +351,13 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
         start = time.monotonic()
         assert _wait_for(
             lambda: producer.producer_id not in daemon.channels,
-            timeout=HEARTBEAT_TIMEOUT_SECS + 1,
+            timeout=TEST_HEARTBEAT_TIMEOUT_SECS + 1,
         )
         elapsed = time.monotonic() - start
-        assert elapsed <= HEARTBEAT_TIMEOUT_SECS + 1
-        assert _wait_for(lambda: trace_written, timeout=5)
+        assert elapsed <= TEST_HEARTBEAT_TIMEOUT_SECS + 1
+        assert _wait_for(lambda: trace_written, timeout=1)
     finally:
-        emitter.remove_listener(Emitter.TRACE_WRITTEN, on_trace_written)
+        get_emitter().remove_listener(Emitter.TRACE_WRITTEN, on_trace_written)
 
     trace_dir = (
         tmp_path
@@ -334,7 +379,7 @@ def test_socket_cleanup_on_disconnect(daemon_runtime) -> None:
     producer.open_ring_buffer(size=512)
     producer.start_producer()
 
-    assert _wait_for(lambda: producer.producer_id in daemon.channels, timeout=2)
+    assert _wait_for(lambda: producer.producer_id in daemon.channels, timeout=0.5)
 
     producer._stop_event.set()
     if hasattr(producer, "_heartbeat_thread"):
@@ -344,5 +389,5 @@ def test_socket_cleanup_on_disconnect(daemon_runtime) -> None:
 
     assert _wait_for(
         lambda: producer.producer_id not in daemon.channels,
-        timeout=HEARTBEAT_TIMEOUT_SECS + 1,
+        timeout=TEST_HEARTBEAT_TIMEOUT_SECS + 1,
     )

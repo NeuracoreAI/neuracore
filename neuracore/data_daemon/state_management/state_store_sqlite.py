@@ -8,9 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, delete, insert, select, text, update
-from sqlalchemy.engine import Engine
+from sqlalchemy import delete, insert, select, text, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from neuracore.data_daemon.models import (
     DataType,
@@ -46,30 +46,37 @@ class SqliteStateStore(StateStore):
         db_path = Path(db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self._engine: Engine = create_engine(f"sqlite:///{db_path}", future=True)
-        self._apply_pragmas()
-        self._ensure_schema()
+        self._engine: AsyncEngine = create_async_engine(
+            f"sqlite+aiosqlite:///{db_path}",
+            future=True,
+        )
 
-    def _apply_pragmas(self) -> None:
+    async def init_async_store(self) -> None:
+        """Apply pragmas and ensure schema."""
+        await self._apply_pragmas()
+        await self._ensure_schema()
+
+    async def _apply_pragmas(self) -> None:
         """Apply database pragmas for better performance.
 
         Sets the journal mode to WAL (Write-Ahead Logging) to ensure that
         database changes are written to disk immediately. Sets the synchronous
         mode to NORMAL to prevent the database from blocking on disk I/O.
         """
-        with self._engine.begin() as conn:
-            conn.execute(text("PRAGMA journal_mode=WAL;"))
-            conn.execute(text("PRAGMA synchronous=NORMAL;"))
+        async with self._engine.begin() as conn:
+            await conn.execute(text("PRAGMA journal_mode=WAL;"))
+            await conn.execute(text("PRAGMA synchronous=NORMAL;"))
 
-    def _ensure_schema(self) -> None:
+    async def _ensure_schema(self) -> None:
         """Ensures that the database schema is created.
 
         Calls :meth:`sqlalchemy.Meta.create_all` on the :attr:`_engine` to create
         the database schema if it does not already exist.
         """
-        metadata.create_all(self._engine)
+        async with self._engine.begin() as conn:
+            await conn.run_sync(metadata.create_all)
 
-    def set_stopped_ats(self, recording_id: str) -> None:
+    async def set_stopped_ats(self, recording_id: str) -> None:
         """Set the end stopped_at for all traces associated with a recording.
 
         Updates the stopped_at of all traces associated with a recording to the
@@ -78,14 +85,14 @@ class SqliteStateStore(StateStore):
         Args:
             recording_id (str): The unique identifier for the recording.
         """
-        with self._engine.begin() as conn:
-            conn.execute(
+        async with self._engine.begin() as conn:
+            await conn.execute(
                 update(traces)
                 .where(traces.c.recording_id == recording_id)
                 .values(stopped_at=_utc_now())
             )
 
-    def create_trace(
+    async def create_trace(
         self,
         trace_id: str,
         recording_id: str,
@@ -120,9 +127,9 @@ class SqliteStateStore(StateStore):
             None
         """
         now = _utc_now()
-        with self._engine.begin() as conn:
+        async with self._engine.begin() as conn:
             try:
-                conn.execute(
+                await conn.execute(
                     insert(traces).values(
                         trace_id=trace_id,
                         recording_id=recording_id,
@@ -147,7 +154,7 @@ class SqliteStateStore(StateStore):
                     )
                 )
             except IntegrityError:
-                conn.execute(
+                await conn.execute(
                     update(traces)
                     .where(traces.c.trace_id == trace_id)
                     .values(
@@ -160,7 +167,7 @@ class SqliteStateStore(StateStore):
                     )
                 )
 
-    def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
+    async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
         """Increment the number of bytes uploaded for a trace.
 
         Args:
@@ -168,8 +175,8 @@ class SqliteStateStore(StateStore):
             bytes_uploaded (int): number of bytes uploaded.
         """
         now = _utc_now()
-        with self._engine.begin() as conn:
-            conn.execute(
+        async with self._engine.begin() as conn:
+            await conn.execute(
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
                 .values(
@@ -178,7 +185,7 @@ class SqliteStateStore(StateStore):
                 )
             )
 
-    def get_trace(self, trace_id: str) -> TraceRecord | None:
+    async def get_trace(self, trace_id: str) -> TraceRecord | None:
         """Return a trace record by ID.
 
         Args:
@@ -187,9 +194,13 @@ class SqliteStateStore(StateStore):
         Returns:
             TraceRecord | None: The trace record if it exists, otherwise None.
         """
-        with self._engine.begin() as conn:
+        async with self._engine.begin() as conn:
             row = (
-                conn.execute(select(traces).where(traces.c.trace_id == trace_id))
+                (
+                    await conn.execute(
+                        select(traces).where(traces.c.trace_id == trace_id)
+                    )
+                )
                 .mappings()
                 .one_or_none()
             )
@@ -197,7 +208,7 @@ class SqliteStateStore(StateStore):
             return None
         return TraceRecord.from_row(dict(row))
 
-    def find_traces_by_recording_id(self, recording_id: str) -> list[TraceRecord]:
+    async def find_traces_by_recording_id(self, recording_id: str) -> list[TraceRecord]:
         """Return all traces associated with a recording ID.
 
         Args:
@@ -206,17 +217,19 @@ class SqliteStateStore(StateStore):
         Returns:
             list[TraceRecord]: A list of trace records associated with the recording ID.
         """
-        with self._engine.begin() as conn:
+        async with self._engine.begin() as conn:
             rows = (
-                conn.execute(
-                    select(traces).where(traces.c.recording_id == recording_id)
+                (
+                    await conn.execute(
+                        select(traces).where(traces.c.recording_id == recording_id)
+                    )
                 )
                 .mappings()
                 .all()
             )
         return [TraceRecord.from_row(dict(row)) for row in rows]
 
-    def update_status(
+    async def update_status(
         self,
         trace_id: str,
         status: TraceStatus,
@@ -235,43 +248,45 @@ class SqliteStateStore(StateStore):
         if error_message is not None:
             values["error_message"] = error_message
         allowed_previous = _ALLOWED_PREVIOUS_STATUSES.get(status, set())
-        with self._engine.begin() as conn:
-            # No previous enforcement
+        async with self._engine.begin() as conn:
+            # No previous enforcement for FAILED status
             if status == TraceStatus.FAILED:
-                result = conn.execute(
+                result = await conn.execute(
                     update(traces).where(traces.c.trace_id == trace_id).values(**values)
                 )
             elif allowed_previous:
-                result = conn.execute(
+                result = await conn.execute(
                     update(traces)
                     .where(traces.c.trace_id == trace_id)
                     .where(traces.c.status.in_(allowed_previous))
                     .values(**values)
                 )
             else:
-                result = conn.execute(
+                result = await conn.execute(
                     update(traces)
                     .where(traces.c.trace_id == trace_id)
                     .where(traces.c.status == status)
                     .values(**values)
                 )
             if result.rowcount == 0:
-                current = conn.execute(
-                    select(traces.c.status).where(traces.c.trace_id == trace_id)
+                current = (
+                    await conn.execute(
+                        select(traces.c.status).where(traces.c.trace_id == trace_id)
+                    )
                 ).scalar_one_or_none()
                 if current is None:
                     raise ValueError(f"Trace not found: {trace_id}")
                 if current == status:
                     logger.warning(
-                        f"Failed to update trace status: Trace {trace_id} \
-                        already has status {status}"
+                        f"Failed to update trace status: Trace {trace_id} "
+                        f"already has status {status}"
                     )
                     return
                 raise ValueError(
                     f"Invalid status transition {current} -> {status} for {trace_id}"
                 )
 
-    def record_error(
+    async def record_error(
         self,
         trace_id: str,
         error_message: str,
@@ -289,8 +304,8 @@ class SqliteStateStore(StateStore):
             recording the error, by default TraceStatus.FAILED.
         """
         now = _utc_now()
-        with self._engine.begin() as conn:
-            conn.execute(
+        async with self._engine.begin() as conn:
+            await conn.execute(
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
                 .values(
@@ -301,16 +316,16 @@ class SqliteStateStore(StateStore):
                 )
             )
 
-    def delete_trace(self, trace_id: str) -> None:
+    async def delete_trace(self, trace_id: str) -> None:
         """Delete a trace record.
 
         Args:
             trace_id (str): Unique identifier for the trace to delete.
         """
-        with self._engine.begin() as conn:
-            conn.execute(delete(traces).where(traces.c.trace_id == trace_id))
+        async with self._engine.begin() as conn:
+            await conn.execute(delete(traces).where(traces.c.trace_id == trace_id))
 
-    def mark_trace_as_written(self, trace_id: str, bytes_written: int) -> None:
+    async def mark_trace_as_written(self, trace_id: str, bytes_written: int) -> None:
         """Mark a trace as written, ready for upload.
 
         Args:
@@ -320,8 +335,8 @@ class SqliteStateStore(StateStore):
         Updates the trace record in the database to mark it as written
         and ready for upload.
         """
-        with self._engine.begin() as conn:
-            result = conn.execute(
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
                 .where(
@@ -338,8 +353,10 @@ class SqliteStateStore(StateStore):
                 )
             )
             if result.rowcount == 0:
-                current = conn.execute(
-                    select(traces.c.status).where(traces.c.trace_id == trace_id)
+                current = (
+                    await conn.execute(
+                        select(traces.c.status).where(traces.c.trace_id == trace_id)
+                    )
                 ).scalar_one_or_none()
                 if current is None:
                     raise ValueError(f"Trace not found: {trace_id}")
@@ -348,38 +365,48 @@ class SqliteStateStore(StateStore):
                     f"for {trace_id}"
                 )
 
-    def find_ready_traces(self) -> list[TraceRecord]:
+    async def find_ready_traces(self) -> list[TraceRecord]:
         """Return all traces marked as ready for upload."""
-        with self._engine.begin() as conn:
+        async with self._engine.begin() as conn:
             rows = (
-                conn.execute(select(traces).where(traces.c.ready_for_upload == 1))
-                .mappings()
-                .all()
-            )
-        return [TraceRecord.from_row(dict(row)) for row in rows]
-
-    def find_unreported_traces(self) -> list[TraceRecord]:
-        """Return all traces that have not been progress-reported."""
-        with self._engine.begin() as conn:
-            rows = (
-                conn.execute(select(traces).where(traces.c.progress_reported == 0))
-                .mappings()
-                .all()
-            )
-        return [TraceRecord.from_row(dict(row)) for row in rows]
-
-    def claim_ready_traces(self, limit: int = 50) -> list[Mapping[str, Any]]:
-        """Claim ready traces for upload and mark them in-progress."""
-        with self._engine.begin() as conn:
-            rows = (
-                conn.execute(
-                    select(traces)
-                    .where(
-                        (traces.c.ready_for_upload == 1)
-                        & (traces.c.status == TraceStatus.WRITTEN)
+                (
+                    await conn.execute(
+                        select(traces).where(traces.c.ready_for_upload == 1)
                     )
-                    .order_by(traces.c.last_updated.asc())
-                    .limit(int(limit))
+                )
+                .mappings()
+                .all()
+            )
+        return [TraceRecord.from_row(dict(row)) for row in rows]
+
+    async def find_unreported_traces(self) -> list[TraceRecord]:
+        """Return all traces that have not been progress-reported."""
+        async with self._engine.begin() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        select(traces).where(traces.c.progress_reported == 0)
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [TraceRecord.from_row(dict(row)) for row in rows]
+
+    async def claim_ready_traces(self, limit: int = 50) -> list[Mapping[str, Any]]:
+        """Claim ready traces for upload and mark them in-progress."""
+        async with self._engine.begin() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        select(traces)
+                        .where(
+                            (traces.c.ready_for_upload == 1)
+                            & (traces.c.status == TraceStatus.WRITTEN)
+                        )
+                        .order_by(traces.c.last_updated.asc())
+                        .limit(int(limit))
+                    )
                 )
                 .mappings()
                 .all()
@@ -388,7 +415,7 @@ class SqliteStateStore(StateStore):
                 return []
             trace_ids = [row["trace_id"] for row in rows]
             now = _utc_now()
-            conn.execute(
+            await conn.execute(
                 update(traces)
                 .where(traces.c.trace_id.in_(trace_ids))
                 .where(traces.c.ready_for_upload == 1)
@@ -400,22 +427,24 @@ class SqliteStateStore(StateStore):
                 )
             )
             updated_rows = (
-                conn.execute(
-                    select(traces)
-                    .where(traces.c.trace_id.in_(trace_ids))
-                    .where(traces.c.status == TraceStatus.UPLOADING)
-                    .where(traces.c.last_updated == now)
+                (
+                    await conn.execute(
+                        select(traces)
+                        .where(traces.c.trace_id.in_(trace_ids))
+                        .where(traces.c.status == TraceStatus.UPLOADING)
+                        .where(traces.c.last_updated == now)
+                    )
                 )
                 .mappings()
                 .all()
             )
             return [dict(row) for row in updated_rows]
 
-    def mark_recording_reported(self, recording_id: str) -> None:
+    async def mark_recording_reported(self, recording_id: str) -> None:
         """Mark a recording as progress-reported."""
         now = _utc_now()
-        with self._engine.begin() as conn:
-            conn.execute(
+        async with self._engine.begin() as conn:
+            await conn.execute(
                 update(traces)
                 .where(traces.c.recording_id == recording_id)
                 .values(progress_reported=1, last_updated=now)
