@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
@@ -474,17 +475,71 @@ def delete_training(
         "-y",
         help="Confirm deletion without prompting.",
     ),
+    local: bool = typer.Option(
+        False,
+        "--local",
+        help="Delete a local training run (directory under --root).",
+    ),
+    cloud: bool = typer.Option(
+        False,
+        "--cloud",
+        help="Delete a cloud training run (default).",
+    ),
+    root: Path = typer.Option(
+        LOCAL_RUNS_ROOT,
+        "--root",
+        "-r",
+        help="Root directory containing local training runs.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        writable=False,
+        readable=True,
+        resolve_path=True,
+    ),
 ) -> None:
-    """Delete a cloud training run by name or id."""
+    """Delete a training run (cloud by default, or local with --local)."""
+    if local and cloud:
+        typer.echo("Please choose either --cloud or --local, not both.", err=True)
+        raise typer.Exit(code=1)
+
+    use_cloud = cloud or not local
+
     try:
-        job_id, job = _resolve_cloud_training_job(training_name)
-        if not yes:
-            confirm = typer.confirm(f"Delete training run '{job.name}' ({job_id})?")
-            if not confirm:
-                typer.echo("Aborted.")
-                raise typer.Exit(code=0)
-        delete_training_job(job_id)
-        typer.echo(f"Deleted training run {job_id}.")
+        if use_cloud:
+            job_id, job = _resolve_cloud_training_job(training_name)
+            if not yes:
+                confirm = typer.confirm(
+                    f"Delete cloud training run '{job.name}' ({job_id})?"
+                )
+                if not confirm:
+                    typer.echo("Aborted.")
+                    raise typer.Exit(code=0)
+            delete_training_job(job_id)
+            typer.echo(f"Deleted cloud training run '{job.name}' ({job_id}).")
+        else:
+            run_path = _resolve_local_run_path(training_name, root)
+            try:
+                metadata = _load_local_metadata_from_path(run_path)
+                display_name = metadata.get("name") or metadata.get("id")
+            except TrainingRunError:
+                display_name = None
+            display_name = display_name or run_path.name
+
+            if not yes:
+                confirm = typer.confirm(
+                    f"Delete local training run '{display_name}' at {run_path}?"
+                )
+                if not confirm:
+                    typer.echo("Aborted.")
+                    raise typer.Exit(code=0)
+
+            try:
+                shutil.rmtree(run_path)
+            except OSError as exc:
+                raise TrainingRunError(f"Failed to delete local run: {exc}") from exc
+
+            typer.echo(f"Deleted local training run '{display_name}' at {run_path}.")
     except (AuthenticationError, ConfigError, TrainingRunError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1)

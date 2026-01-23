@@ -44,6 +44,8 @@ neuracore launch-server \
 5) **Clean up**
 ```bash
 neuracore training delete --training-name <RUN_NAME_OR_ID> --yes
+# Delete a local run directory instead:
+# neuracore training delete --local --root <RUNS_DIR> --training-name <RUN_NAME> --yes
 ```
 
 ## Core commands reference
@@ -54,7 +56,8 @@ neuracore training delete --training-name <RUN_NAME_OR_ID> --yes
   - Status examples: `PENDING`, `RUNNING`, `COMPLETED`.
 - `neuracore training inspect --training-name <RUN> [--cloud | --local] [--root <DIR>] [--config] [--json]`  
   - Cloud is the default; add `--local` to read `training_run.json` from a local run directory.
-- `neuracore training delete --training-name <RUN> [--yes]` — cloud only, prompts unless `--yes` is used.
+- `neuracore training delete --training-name <RUN> [--cloud | --local] [--root <DIR>] [--yes]`  
+  - Cloud is the default; add `--local` to remove a run directory under `--root`. Prompts unless `--yes` is used.
 - `neuracore training start` — currently a placeholder; use the SDK to launch training and return here to monitor.
 - `neuracore launch-server --model_input_order '<JSON>' --model_output_order '<JSON>' [--job_id <RUN_ID>] [--org_id <ORG_ID>] [--host <HOST>] [--port <PORT>]`  
   - JSON must map DataType strings (e.g., `"RGB_IMAGES"`) to ordered name lists.
