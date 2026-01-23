@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,9 +22,20 @@ from neuracore.data_daemon.models import (
 from .state_store import StateStore
 from .tables import metadata, traces
 
+logger = logging.getLogger(__name__)
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+_ALLOWED_PREVIOUS_STATUSES: dict[TraceStatus, set[TraceStatus]] = {
+    TraceStatus.WRITING: {TraceStatus.PENDING},
+    TraceStatus.WRITTEN: {TraceStatus.PENDING, TraceStatus.WRITING},
+    TraceStatus.UPLOADING: {TraceStatus.WRITTEN, TraceStatus.PAUSED},
+    TraceStatus.UPLOADED: {TraceStatus.UPLOADING},
+    TraceStatus.PAUSED: {TraceStatus.UPLOADING},
+}
 
 
 class SqliteStateStore(StateStore):
@@ -222,10 +234,42 @@ class SqliteStateStore(StateStore):
         values: dict[str, Any] = {"status": status, "last_updated": now}
         if error_message is not None:
             values["error_message"] = error_message
+        allowed_previous = _ALLOWED_PREVIOUS_STATUSES.get(status, set())
         with self._engine.begin() as conn:
-            conn.execute(
-                update(traces).where(traces.c.trace_id == trace_id).values(**values)
-            )
+            # No previous enforcement
+            if status == TraceStatus.FAILED:
+                result = conn.execute(
+                    update(traces).where(traces.c.trace_id == trace_id).values(**values)
+                )
+            elif allowed_previous:
+                result = conn.execute(
+                    update(traces)
+                    .where(traces.c.trace_id == trace_id)
+                    .where(traces.c.status.in_(allowed_previous))
+                    .values(**values)
+                )
+            else:
+                result = conn.execute(
+                    update(traces)
+                    .where(traces.c.trace_id == trace_id)
+                    .where(traces.c.status == status)
+                    .values(**values)
+                )
+            if result.rowcount == 0:
+                current = conn.execute(
+                    select(traces.c.status).where(traces.c.trace_id == trace_id)
+                ).scalar_one_or_none()
+                if current is None:
+                    raise ValueError(f"Trace not found: {trace_id}")
+                if current == status:
+                    logger.warning(
+                        f"Failed to update trace status: Trace {trace_id} \
+                        already has status {status}"
+                    )
+                    return
+                raise ValueError(
+                    f"Invalid status transition {current} -> {status} for {trace_id}"
+                )
 
     def record_error(
         self,
@@ -277,9 +321,14 @@ class SqliteStateStore(StateStore):
         and ready for upload.
         """
         with self._engine.begin() as conn:
-            conn.execute(
+            result = conn.execute(
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
+                .where(
+                    traces.c.status.in_(
+                        [TraceStatus.PENDING, TraceStatus.WRITING, TraceStatus.WRITTEN]
+                    )
+                )
                 .values(
                     status=TraceStatus.WRITTEN,
                     last_updated=_utc_now(),
@@ -288,6 +337,16 @@ class SqliteStateStore(StateStore):
                     bytes_written=bytes_written,
                 )
             )
+            if result.rowcount == 0:
+                current = conn.execute(
+                    select(traces.c.status).where(traces.c.trace_id == trace_id)
+                ).scalar_one_or_none()
+                if current is None:
+                    raise ValueError(f"Trace not found: {trace_id}")
+                raise ValueError(
+                    f"Invalid status transition {current} -> {TraceStatus.WRITTEN} "
+                    f"for {trace_id}"
+                )
 
     def find_ready_traces(self) -> list[TraceRecord]:
         """Return all traces marked as ready for upload."""
@@ -332,6 +391,8 @@ class SqliteStateStore(StateStore):
             conn.execute(
                 update(traces)
                 .where(traces.c.trace_id.in_(trace_ids))
+                .where(traces.c.ready_for_upload == 1)
+                .where(traces.c.status == TraceStatus.WRITTEN)
                 .values(
                     ready_for_upload=0,
                     status=TraceStatus.UPLOADING,

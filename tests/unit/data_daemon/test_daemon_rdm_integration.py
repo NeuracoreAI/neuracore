@@ -1,16 +1,10 @@
-"""Tests for Daemon → RecordingDiskManager integration.
-
-These tests verify the fixes made to connect the Daemon to RDM:
-1. Daemon.__init__() accepts config_manager and instantiates RDM
-2. _on_complete_message() constructs CompleteMessage and enqueues to RDM
-3. _handle_end_trace() sends final_chunk=True message to RDM
-4. data_type is properly passed through the chain
-"""
+"""Tests for Daemon → RecordingDiskManager integration."""
 
 from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -24,6 +18,7 @@ from neuracore.data_daemon.communications_management.ring_buffer import RingBuff
 from neuracore.data_daemon.const import (
     CHUNK_HEADER_FORMAT,
     DATA_TYPE_FIELD_SIZE,
+    HEARTBEAT_TIMEOUT_SECS,
     TRACE_ID_FIELD_SIZE,
 )
 from neuracore.data_daemon.models import CommandType, CompleteMessage, MessageEnvelope
@@ -64,11 +59,6 @@ class MockComm:
         raise KeyboardInterrupt()
 
 
-# -----------------------------------------------------------------------------
-# Test 1: Daemon.__init__() with dependency injection
-# -----------------------------------------------------------------------------
-
-
 class TestDaemonInit:
     """Tests for Daemon constructor dependency injection."""
 
@@ -104,11 +94,6 @@ class TestDaemonInit:
 
         with pytest.raises(TypeError):
             Daemon(comm_manager=mock_comm)
-
-
-# -----------------------------------------------------------------------------
-# Test 2: _on_complete_message() constructs and enqueues CompleteMessage
-# -----------------------------------------------------------------------------
 
 
 class TestOnCompleteMessage:
@@ -272,11 +257,6 @@ class TestOnCompleteMessage:
         assert msg.recording_id == ""
 
 
-# -----------------------------------------------------------------------------
-# Test 3: _handle_end_trace() sends final_chunk=True message
-# -----------------------------------------------------------------------------
-
-
 class TestHandleEndTrace:
     """Tests for _handle_end_trace() method."""
 
@@ -295,7 +275,6 @@ class TestHandleEndTrace:
         channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
         daemon.channels["test-producer"] = channel
 
-        # Register trace metadata with data_type
         daemon._trace_metadata["trace-456"] = {
             "data_type": DataType.JOINT_POSITIONS.value,
             "dataset_id": "ds-001",
@@ -321,7 +300,7 @@ class TestHandleEndTrace:
         assert msg.trace_id == "trace-456"
         assert msg.final_chunk is True
         assert msg.data_type == DataType.JOINT_POSITIONS
-        assert msg.data == ""  # Empty data encoded as base64
+        assert msg.data == ""
 
     def test_handle_end_trace_uses_custom_1d_for_unknown_data_type(
         self, tmp_path: Any
@@ -434,7 +413,6 @@ class TestHandleEndTrace:
 
         daemon._handle_end_trace(channel, message)
 
-        # Trace should be removed from internal state
         assert "trace-456" not in daemon._trace_recordings
         assert "trace-456" not in daemon._trace_metadata
 
@@ -499,11 +477,6 @@ class TestHandleEndTrace:
         assert len(mock_rdm.enqueued) == 0
 
 
-# -----------------------------------------------------------------------------
-# Test 4: _drain_channel_messages passes data_type correctly
-# -----------------------------------------------------------------------------
-
-
 def _write_chunk_to_ring_buffer(
     ring: RingBuffer,
     trace_id: str,
@@ -538,8 +511,8 @@ class TestDrainChannelMessages:
     def test_drain_channel_messages_passes_data_type_to_on_complete(
         self, tmp_path: Any
     ) -> None:
-        """_drain_channel_messages should pass data_type
-        from reader to _on_complete_message."""
+        """_drain_channel_messages should pass
+        data_type from reader to _on_complete_message."""
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
@@ -550,11 +523,9 @@ class TestDrainChannelMessages:
             recording_disk_manager=mock_rdm,
         )
 
-        # Create channel with ring buffer
         channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
         daemon.channels["test-producer"] = channel
 
-        # Handle OPEN_RING_BUFFER to initialize ring buffer
         open_msg = MessageEnvelope(
             producer_id="test-producer",
             command=CommandType.OPEN_RING_BUFFER,
@@ -562,7 +533,6 @@ class TestDrainChannelMessages:
         )
         daemon._handle_open_ring_buffer(channel, open_msg)
 
-        # Write a complete message (single chunk) to ring buffer
         _write_chunk_to_ring_buffer(
             ring=channel.ring_buffer,
             trace_id="trace-789",
@@ -572,7 +542,6 @@ class TestDrainChannelMessages:
             data=b"image-data",
         )
 
-        # Drain messages
         daemon._drain_channel_messages()
 
         assert len(mock_rdm.enqueued) == 1
@@ -604,7 +573,6 @@ class TestDrainChannelMessages:
         )
         daemon._handle_open_ring_buffer(channel, open_msg)
 
-        # Write first chunk
         _write_chunk_to_ring_buffer(
             ring=channel.ring_buffer,
             trace_id="trace-multi",
@@ -614,11 +582,9 @@ class TestDrainChannelMessages:
             data=b"part1",
         )
 
-        # First drain - should not produce a message yet (partial)
         daemon._drain_channel_messages()
         assert len(mock_rdm.enqueued) == 0
 
-        # Write second chunk
         _write_chunk_to_ring_buffer(
             ring=channel.ring_buffer,
             trace_id="trace-multi",
@@ -628,18 +594,12 @@ class TestDrainChannelMessages:
             data=b"part2",
         )
 
-        # Second drain - now should produce the complete message
         daemon._drain_channel_messages()
 
         assert len(mock_rdm.enqueued) == 1
         msg = mock_rdm.enqueued[0]
         assert msg.trace_id == "trace-multi"
         assert msg.data_type == DataType.JOINT_VELOCITIES
-
-
-# -----------------------------------------------------------------------------
-# Test 5: Different DataType scenarios
-# -----------------------------------------------------------------------------
 
 
 class TestDataTypeHandling:
@@ -687,21 +647,18 @@ class TestDataTypeHandling:
         assert msg.data_type == data_type
 
 
-# -----------------------------------------------------------------------------
-# Test 6: Expired channel cleanup
-# -----------------------------------------------------------------------------
-
-
 class TestExpiredChannelCleanup:
     """Tests for _cleanup_expired_channels() method."""
 
     def test_cleanup_expired_channels_sends_final_chunk(self, tmp_path: Any) -> None:
-        """_cleanup_expired_channels should send
-        final_chunk for expired channels with traces."""
-        from datetime import timedelta
+        """Tests that _cleanup_expired_channels() sends a final_chunk message to
+        RDM and removes the channel from daemon.channels.
 
-        from neuracore.data_daemon.const import HEARTBEAT_TIMEOUT_SECS
-
+        This test creates a channel with an active trace and
+        sets its heartbeat to be expired.
+        It then runs _cleanup_expired_channels() and verifies that a final_chunk message
+        is sent to RDM and the channel is removed from daemon.channels.
+        """
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
@@ -712,36 +669,30 @@ class TestExpiredChannelCleanup:
             recording_disk_manager=mock_rdm,
         )
 
-        # Create a channel with an active trace
         channel = ChannelState(
             producer_id="expired-producer",
             recording_id="rec-expired",
             trace_id="trace-expired",
         )
-        # Set heartbeat to be expired
         channel.last_heartbeat = channel.last_heartbeat - timedelta(
             seconds=HEARTBEAT_TIMEOUT_SECS + 10
         )
         daemon.channels["expired-producer"] = channel
 
-        # Register trace metadata
         daemon._trace_metadata["trace-expired"] = {
             "data_type": DataType.JOINT_POSITIONS.value,
         }
         daemon._trace_recordings["trace-expired"] = "rec-expired"
         daemon._recording_traces["rec-expired"] = {"trace-expired"}
 
-        # Run cleanup
         daemon._cleanup_expired_channels()
 
-        # Should have sent a final_chunk message
         assert len(mock_rdm.enqueued) == 1
         msg = mock_rdm.enqueued[0]
         assert msg.trace_id == "trace-expired"
         assert msg.final_chunk is True
         assert msg.data_type == DataType.JOINT_POSITIONS
 
-        # Channel should be removed
         assert "expired-producer" not in daemon.channels
 
     def test_cleanup_expired_channels_no_trace_no_message(self, tmp_path: Any) -> None:
@@ -760,7 +711,6 @@ class TestExpiredChannelCleanup:
             recording_disk_manager=mock_rdm,
         )
 
-        # Create a channel without an active trace
         channel = ChannelState(
             producer_id="expired-producer",
             recording_id=None,
@@ -771,20 +721,22 @@ class TestExpiredChannelCleanup:
         )
         daemon.channels["expired-producer"] = channel
 
-        # Run cleanup
         daemon._cleanup_expired_channels()
 
-        # No message should be sent
         assert len(mock_rdm.enqueued) == 0
 
-        # Channel should still be removed
         assert "expired-producer" not in daemon.channels
 
     def test_cleanup_expired_channels_skips_active_channels(
         self, tmp_path: Any
     ) -> None:
-        """_cleanup_expired_channels should not
-        remove channels with recent heartbeat."""
+        """Test _cleanup_expired_channels doesn't remove channels with recent heartbeat.
+
+        This test creates a channel with a recent heartbeat and
+        then runs _cleanup_expired_channels.
+        It verifies that no message is sent to the RDM and
+        that the channel is not removed.
+        """
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
@@ -795,7 +747,6 @@ class TestExpiredChannelCleanup:
             recording_disk_manager=mock_rdm,
         )
 
-        # Create a channel with recent heartbeat (default is now)
         channel = ChannelState(
             producer_id="active-producer",
             recording_id="rec-active",
@@ -803,19 +754,11 @@ class TestExpiredChannelCleanup:
         )
         daemon.channels["active-producer"] = channel
 
-        # Run cleanup
         daemon._cleanup_expired_channels()
 
-        # No message should be sent
         assert len(mock_rdm.enqueued) == 0
 
-        # Channel should NOT be removed
         assert "active-producer" in daemon.channels
-
-
-# -----------------------------------------------------------------------------
-# Test 7: Error handling in RDM.enqueue()
-# -----------------------------------------------------------------------------
 
 
 class TestRDMEnqueueErrorHandling:
@@ -826,7 +769,6 @@ class TestRDMEnqueueErrorHandling:
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
 
-        # Create a mock RDM that raises an exception
         class FailingRDM:
             def enqueue(self, message: CompleteMessage) -> None:
                 raise RuntimeError("Simulated RDM failure")
@@ -841,7 +783,6 @@ class TestRDMEnqueueErrorHandling:
 
         channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
 
-        # This should NOT raise - exception should be caught and logged
         daemon._on_complete_message(
             channel=channel,
             trace_id="trace-456",
@@ -850,14 +791,11 @@ class TestRDMEnqueueErrorHandling:
             final_chunk=False,
         )
 
-        # If we get here without exception, the test passes
-
     def test_daemon_continues_after_enqueue_failure(self, tmp_path: Any) -> None:
         """Daemon should continue processing after RDM.enqueue() failure."""
         mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
 
-        # Create a mock RDM that fails on first call, succeeds on second
         class FailOnceThenSucceedRDM:
             def __init__(self) -> None:
                 self.call_count = 0
@@ -879,7 +817,6 @@ class TestRDMEnqueueErrorHandling:
 
         channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
 
-        # First call - should fail silently
         daemon._on_complete_message(
             channel=channel,
             trace_id="trace-1",
@@ -888,7 +825,6 @@ class TestRDMEnqueueErrorHandling:
             final_chunk=False,
         )
 
-        # Second call - should succeed
         daemon._on_complete_message(
             channel=channel,
             trace_id="trace-2",
@@ -897,6 +833,5 @@ class TestRDMEnqueueErrorHandling:
             final_chunk=False,
         )
 
-        # Only second message should be enqueued
         assert len(rdm.enqueued) == 1
         assert rdm.enqueued[0].trace_id == "trace-2"
