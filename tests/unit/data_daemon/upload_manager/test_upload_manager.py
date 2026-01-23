@@ -401,6 +401,60 @@ def test_upload_failure(upload_manager: UploadManager, test_file: Path) -> None:
         assert failures[0]["status"] == TraceStatus.WRITTEN
 
 
+def test_no_complete_event_when_uploader_reports_failure(test_file: Path) -> None:
+    """UploadManager should not emit UPLOAD_COMPLETE on uploader failure."""
+    completed = []
+
+    def on_complete(trace_id: str, recording_id: str) -> None:
+        completed.append((trace_id, recording_id))
+
+    emitter.on(Emitter.UPLOAD_COMPLETE, on_complete)
+
+    with (
+        patch(
+            "neuracore.data_daemon.upload_management.trace_manager.requests.post"
+        ) as mock_post,
+        patch(
+            "neuracore.data_daemon.upload_management.trace_manager.requests.put"
+        ) as mock_put,
+        patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
+        ) as MockUploader,
+    ):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = {"id": "backend-trace-123"}
+        mock_post.return_value.raise_for_status = MagicMock()
+
+        mock_put.return_value.status_code = 200
+        mock_put.return_value.raise_for_status = MagicMock()
+
+        mock_instance = MagicMock()
+        mock_instance.upload.return_value = (
+            False,
+            1024 * 1024,
+            "Checksum mismatch after finalization",
+        )
+        MockUploader.return_value = mock_instance
+
+        emitter.emit(
+            Emitter.READY_FOR_UPLOAD,
+            str(test_file),
+            "trace-1",
+            DataType.RGB_IMAGES,
+            "camera",
+            "rec-1",
+            0,
+        )
+        time.sleep(0.5)
+
+        assert completed == []
+        put_calls = [call[1]["json"] for call in mock_put.call_args_list]
+        assert all(
+            call.get("status") != RecordingDataTraceStatus.UPLOAD_COMPLETE
+            for call in put_calls
+        )
+
+
 def test_file_not_found(upload_manager: UploadManager) -> None:
     """Test UploadManager handles missing file."""
     failures = []

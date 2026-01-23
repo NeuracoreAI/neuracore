@@ -9,6 +9,7 @@ import requests_mock
 import neuracore as nc
 from neuracore.core.config import config_manager
 from neuracore.core.const import API_URL
+from neuracore.data_daemon.const import API_URL as DAEMON_API_URL
 from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
     get_consume_live_data_enabled_manager,
     get_provide_live_data_enabled_manager,
@@ -39,21 +40,22 @@ def mock_auth_requests():
     get_consume_live_data_enabled_manager().disable()
 
     with requests_mock.Mocker(real_http=True) as m:
-        # Mock API Key Verification
-        m.post(
-            f"{API_URL}/auth/verify-api-key",
-            json={"access_token": "test_token"},
-            status_code=200,
-        )
+        # Mock API Key Verification (core + data daemon API base URLs)
+        for base_url in (API_URL, DAEMON_API_URL):
+            m.post(
+                f"{base_url}/auth/verify-api-key",
+                json={"access_token": "test_token"},
+                status_code=200,
+            )
 
-        # Mock token generation
-        m.post(
-            f"{API_URL}/auth/token",
-            json={"access_token": "test_token"},
-            status_code=200,
-        )
+            # Mock token generation
+            m.post(
+                f"{base_url}/auth/token",
+                json={"access_token": "test_token"},
+                status_code=200,
+            )
 
-        m.get(f"{API_URL}/auth/verify-version", status_code=200)
+            m.get(f"{base_url}/auth/verify-version", status_code=200)
 
         # Mock robots endpoint
         m.get(f"{API_URL}/org/{MOCKED_ORG_ID}/robots", json=[], status_code=200)
