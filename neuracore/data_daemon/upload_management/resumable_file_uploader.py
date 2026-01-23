@@ -4,6 +4,8 @@ This module provides a file uploader that handles chunked uploads to cloud
 storage with crash recovery and retry logic.
 """
 
+import base64
+import hashlib
 import logging
 import time
 from collections.abc import Callable
@@ -27,6 +29,12 @@ class ResumableFileUploader:
 
     CHUNK_SIZE = 64 * 1024 * 1024
     MAX_RETRIES = 5
+    MAX_BACKOFF_SECONDS = 300
+    RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+    FINAL_SUCCESS_CODES = {200, 201}
+    RESUME_INCOMPLETE_CODE = 308
+    SESSION_EXPIRED_CODE = 410
+    FAST_FAIL_STATUS_CODES = {403, 404}
 
     def __init__(
         self,
@@ -112,18 +120,31 @@ class ResumableFileUploader:
 
         self._total_bytes = file_path.stat().st_size
 
-        # Get upload session URI
-        try:
-            self._session_uri = self._get_upload_session_uri()
-        except requests.RequestException as e:
-            error_msg = f"Failed to get upload session URI: {e}"
-            logger.error(error_msg)
-            return (False, self._bytes_uploaded, error_msg)
+        # Get upload session URI if needed
+        if self._session_uri is None:
+            try:
+                self._session_uri = self._get_upload_session_uri()
+            except requests.RequestException as e:
+                error_msg = f"Failed to get upload session URI: {e}"
+                logger.error(error_msg)
+                return (False, self._bytes_uploaded, error_msg)
+
+        # Sync resume point with server state to avoid duplicates
+        success, error_message = self._sync_with_server_upload_position()
+        if not success:
+            return (False, self._bytes_uploaded, error_message)
 
         # Upload file in chunks
-        success, error_message = self._upload_file_in_chunks()
+        success, error_message, final_response = self._upload_file_in_chunks()
 
         if success:
+            checksum_ok, checksum_error = self._verify_checksum(final_response)
+            if not checksum_ok:
+                logger.warning(
+                    f"Upload failed checksum verification for {self._filepath}: "
+                    f"{checksum_error}"
+                )
+                return (False, self._bytes_uploaded, checksum_error)
             logger.info(
                 f"Upload complete for {self._recording_id}/{self._filepath}: "
                 f"{self._total_bytes} bytes"
@@ -136,14 +157,16 @@ class ResumableFileUploader:
             )
             return (False, self._bytes_uploaded, error_message)
 
-    def _upload_file_in_chunks(self) -> tuple[bool, str | None]:
+    def _upload_file_in_chunks(
+        self,
+    ) -> tuple[bool, str | None, requests.Response | None]:
         """Read file from disk and upload in chunks.
 
         Opens the file, seeks to the resume point, and uploads remaining
         data in chunks. Calls progress_callback after each successful chunk.
 
         Returns:
-            Tuple of (success, error_message)
+            Tuple of (success, error_message, final_response)
 
         Raises:
             IOError: If there's an error reading the file.
@@ -152,6 +175,8 @@ class ResumableFileUploader:
             with open(self._filepath, "rb") as f:
                 # Seek to resume point
                 f.seek(self._bytes_uploaded)
+
+                final_response: requests.Response | None = None
 
                 while True:
                     # Read next chunk
@@ -165,12 +190,12 @@ class ResumableFileUploader:
                     is_final = (chunk_end + 1) >= self._total_bytes
 
                     # Upload chunk with retry logic
-                    success, error_msg = self._upload_chunk(
+                    success, error_msg, final_response = self._upload_chunk(
                         chunk, chunk_start, chunk_end, is_final
                     )
 
                     if not success:
-                        return (False, error_msg)
+                        return (False, error_msg, None)
 
                     # Update progress
                     chunk_size = len(chunk)
@@ -185,12 +210,17 @@ class ResumableFileUploader:
                         f"{self._total_bytes} bytes"
                     )
 
-                return (True, None)
+                if final_response is None:
+                    error_msg = "Upload did not finalize successfully"
+                    logger.error(error_msg)
+                    return (False, error_msg, None)
+
+                return (True, None, final_response)
 
         except OSError as e:
             error_msg = f"File I/O error: {e}"
             logger.error(error_msg)
-            return (False, error_msg)
+            return (False, error_msg, None)
 
     def _upload_chunk(
         self,
@@ -198,7 +228,7 @@ class ResumableFileUploader:
         chunk_start: int,
         chunk_end: int,
         is_final: bool,
-    ) -> tuple[bool, str | None]:
+    ) -> tuple[bool, str | None, requests.Response | None]:
         """Upload a single chunk with exponential backoff retry.
 
         Uploads a chunk of data to the resumable upload session with proper
@@ -213,7 +243,7 @@ class ResumableFileUploader:
             is_final: Whether this is the final chunk
 
         Returns:
-            Tuple of (success, error_message)
+            Tuple of (success, error_message, final_response)
         """
         # Prepare headers
         headers = {"Content-Length": str(len(data))}
@@ -229,7 +259,7 @@ class ResumableFileUploader:
         for attempt in range(self.MAX_RETRIES):
             try:
                 if self._session_uri is None:
-                    return (False, "No upload session URI available")
+                    return (False, "No upload session URI available", None)
 
                 response = requests.put(
                     self._session_uri,
@@ -240,36 +270,224 @@ class ResumableFileUploader:
 
                 status_code = response.status_code
 
-                if status_code in (200, 201, 308):
-                    return (True, None)
-                elif status_code == 410:
+                if status_code in self.FINAL_SUCCESS_CODES:
+                    return (True, None, response if is_final else None)
+                if status_code == self.RESUME_INCOMPLETE_CODE:
+                    if is_final:
+                        if self._is_server_upload_complete():
+                            finalized, error_msg, final_response = (
+                                self._finalize_upload()
+                            )
+                            if finalized:
+                                return (True, None, final_response)
+                            return (False, error_msg, None)
+                        return (False, "Finalization incomplete", None)
+                    return (True, None, None)
+                if status_code == self.SESSION_EXPIRED_CODE:
                     # Session expired - get new session
                     logger.info("Upload session expired, obtaining new session")
                     self._session_uri = self._get_upload_session_uri()
                     continue
-                else:
-                    # Other error
+                if status_code == 403:
+                    if self._is_signed_url_expired(response):
+                        logger.info("Signed URL expired, re-acquiring session URL")
+                        self._session_uri = self._get_upload_session_uri()
+                        continue
+                    return (False, "Permission denied (403)", None)
+                if status_code == 404:
+                    return (False, "Bucket not found (404)", None)
+                if status_code in self.RETRYABLE_STATUS_CODES:
+                    if is_final and self._is_server_upload_complete():
+                        finalized, error_msg, final_response = self._finalize_upload()
+                        if finalized:
+                            return (True, None, final_response)
+                        return (False, error_msg, None)
                     logger.warning(
                         f"Upload chunk failed "
                         f"(attempt {attempt + 1}/{self.MAX_RETRIES}): "
                         f"HTTP {status_code}"
                     )
+                else:
+                    return (False, f"Upload failed with HTTP {status_code}", None)
 
             except requests.exceptions.ConnectionError as e:
                 logger.warning(f"Network connection error (attempt {attempt + 1})")
-                # Network error - don't retry
-                return (False, f"Network connection error: {e}")
+                if attempt < self.MAX_RETRIES - 1:
+                    self._sleep_backoff(attempt)
+                    continue
+                return (False, f"Network connection error: {e}", None)
+
+            except requests.exceptions.SSLError as e:
+                logger.warning(f"SSL error (attempt {attempt + 1})")
+                if attempt < self.MAX_RETRIES - 1:
+                    self._sleep_backoff(attempt)
+                    continue
+                return (False, f"SSL error: {e}", None)
 
             except requests.exceptions.Timeout:
                 logger.warning(f"Upload chunk timeout (attempt {attempt + 1})")
 
             except Exception as e:
                 logger.error(f"Unexpected error uploading chunk: {e}")
-                return (False, f"Unexpected error: {e}")
+                return (False, f"Unexpected error: {e}", None)
 
             if attempt < self.MAX_RETRIES - 1:
-                time.sleep(2**attempt)
+                self._sleep_backoff(attempt)
 
         error_msg = f"Upload chunk failed after {self.MAX_RETRIES} attempts"
         logger.error(error_msg)
-        return (False, error_msg)
+        return (False, error_msg, None)
+
+    def _sleep_backoff(self, attempt: int) -> None:
+        """Sleep with exponential backoff, capped at MAX_BACKOFF_SECONDS."""
+        delay = min(2**attempt, self.MAX_BACKOFF_SECONDS)
+        time.sleep(delay)
+
+    def _is_signed_url_expired(self, response: requests.Response) -> bool:
+        """Detect signed URL expiration from response headers/body."""
+        header_value = response.headers.get("X-Signed-Url-Expired", "").lower()
+        if header_value == "true":
+            return True
+        try:
+            body_text = response.text or ""
+        except Exception:
+            body_text = ""
+        return "expired" in body_text.lower()
+
+    def _check_session_status(self) -> int | None:
+        """Check current uploaded bytes on the server.
+
+        Returns:
+            Bytes uploaded on server, or None if session is invalid/expired.
+        """
+        if self._session_uri is None:
+            return None
+        headers = {"Content-Length": "0", "Content-Range": "bytes */*"}
+        response = requests.put(
+            self._session_uri, headers=headers, data=b"", timeout=30
+        )
+        if response.status_code in self.FINAL_SUCCESS_CODES:
+            return self._total_bytes
+        if response.status_code == self.RESUME_INCOMPLETE_CODE:
+            range_header = response.headers.get("Range")
+            if range_header:
+                last_byte = int(range_header.split("-")[1])
+                return last_byte + 1
+            return 0
+        if response.status_code in {404, self.SESSION_EXPIRED_CODE}:
+            return None
+        if response.status_code == 403 and self._is_signed_url_expired(response):
+            return None
+        raise requests.HTTPError(
+            f"Unexpected status code while checking status: {response.status_code}"
+        )
+
+    def _sync_with_server_upload_position(self) -> tuple[bool, str | None]:
+        """Ensure local resume offset matches server state to avoid duplicates."""
+        try:
+            server_bytes = self._check_session_status()
+        except requests.exceptions.SSLError as e:
+            return (False, f"SSL error: {e}")
+        except requests.RequestException as e:
+            return (False, f"Failed to check upload status: {e}")
+
+        if server_bytes is None:
+            try:
+                self._session_uri = self._get_upload_session_uri()
+            except requests.RequestException as e:
+                return (False, f"Failed to refresh upload session URI: {e}")
+            return (True, None)
+
+        if server_bytes != self._bytes_uploaded:
+            logger.info(
+                "Adjusting resume offset from %s to %s based on server status",
+                self._bytes_uploaded,
+                server_bytes,
+            )
+            self._bytes_uploaded = server_bytes
+        return (True, None)
+
+    def _is_server_upload_complete(self) -> bool:
+        """Check if server has all bytes uploaded for this file."""
+        try:
+            server_bytes = self._check_session_status()
+        except requests.RequestException:
+            return False
+        return server_bytes == self._total_bytes
+
+    def _finalize_upload(self) -> tuple[bool, str | None, requests.Response | None]:
+        """Finalize an upload without re-sending data."""
+        if self._session_uri is None:
+            return (False, "No upload session URI available", None)
+        headers = {
+            "Content-Length": "0",
+            "Content-Range": f"bytes */{self._total_bytes}",
+        }
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                response = requests.put(
+                    self._session_uri, headers=headers, data=b"", timeout=30
+                )
+                if response.status_code in self.FINAL_SUCCESS_CODES:
+                    return (True, None, response)
+                if response.status_code == self.RESUME_INCOMPLETE_CODE:
+                    return (False, "Finalization incomplete", None)
+                if response.status_code in self.RETRYABLE_STATUS_CODES:
+                    if attempt < self.MAX_RETRIES - 1:
+                        self._sleep_backoff(attempt)
+                        continue
+                if response.status_code == self.SESSION_EXPIRED_CODE:
+                    return (False, "Upload session expired during finalization", None)
+                return (
+                    False,
+                    f"Finalization failed with HTTP {response.status_code}",
+                    None,
+                )
+            except requests.exceptions.RequestException as e:
+                if attempt < self.MAX_RETRIES - 1:
+                    self._sleep_backoff(attempt)
+                    continue
+                return (False, f"Finalization request failed: {e}", None)
+        return (False, "Finalization failed after retries", None)
+
+    def _verify_checksum(
+        self, response: requests.Response | None
+    ) -> tuple[bool, str | None]:
+        """Verify file integrity after finalization using server checksum."""
+        if response is None:
+            return (False, "No finalization response available for checksum")
+
+        server_md5_hex: str | None = None
+        if "X-Checksum-MD5" in response.headers:
+            server_md5_hex = response.headers["X-Checksum-MD5"].strip().lower()
+        elif "x-goog-hash" in response.headers:
+            hashes = response.headers["x-goog-hash"]
+            for part in hashes.split(","):
+                part = part.strip()
+                if part.startswith("md5="):
+                    b64_hash = part.split("=", 1)[1]
+                    server_md5_hex = base64.b64decode(b64_hash).hex()
+                    break
+        else:
+            try:
+                body = response.json()
+                if "md5Hash" in body:
+                    server_md5_hex = base64.b64decode(body["md5Hash"]).hex()
+            except Exception:
+                server_md5_hex = None
+
+        if not server_md5_hex:
+            return (False, "Missing checksum from server response")
+
+        md5_hash = hashlib.md5()
+        try:
+            with open(self._filepath, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    md5_hash.update(chunk)
+        except OSError as e:
+            return (False, f"Failed to compute checksum: {e}")
+
+        local_md5_hex = md5_hash.hexdigest().lower()
+        if local_md5_hex != server_md5_hex:
+            return (False, "Checksum mismatch after finalization")
+        return (True, None)

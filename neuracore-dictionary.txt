@@ -223,3 +223,8 @@ RDEM
 secho
 wakelock
 WAKELOCK
+RCVTIMEO
+inproc
+mpsa
+POLLIN
+sess

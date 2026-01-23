@@ -180,7 +180,7 @@ def test_producer_send_data_chunks_and_base64() -> None:
     assert len(comm.messages) == 2
     for idx, envelope in enumerate(comm.messages):
         assert envelope.command == CommandType.DATA_CHUNK
-        payload = envelope.payload
+        payload = envelope.payload.get("data_chunk")
         assert payload["trace_id"] == "7"
         assert payload["chunk_index"] == idx
         assert payload["total_chunks"] == 2

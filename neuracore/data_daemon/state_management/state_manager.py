@@ -44,8 +44,8 @@ class StateManager:
         emitter.on(Emitter.IS_CONNECTED, self.handle_is_connected)
 
         # From progress report service
-        # emitter.on(Emitter.PROGRESS_REPORTED, self.mark_progress_as_reported)
-        # emitter.on(Emitter.PROGRESS_REPORT_ERROR, self.handle_progress_report_error)
+        emitter.on(Emitter.PROGRESS_REPORTED, self.mark_progress_as_reported)
+        emitter.on(Emitter.PROGRESS_REPORT_FAILED, self.handle_progress_report_error)
 
     def create_trace(
         self,
@@ -155,7 +155,17 @@ class StateManager:
         deletes the trace record from the database.
         """
         # Trigger file deletion
-        emitter.emit(Emitter.DELETE_TRACE, trace_id, path)
+        trace_record = self._store.get_trace(trace_id)
+        if trace_record is None:
+            logger.warning("Trace record not found: %s", trace_id)
+            return
+
+        emitter.emit(
+            Emitter.DELETE_TRACE,
+            trace_record.recording_id,
+            trace_id,
+            trace_record.data_type,
+        )
         # Delete db entry
         self._store.delete_trace(trace_id)
 

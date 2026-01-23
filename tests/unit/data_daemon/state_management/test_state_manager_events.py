@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -196,16 +197,25 @@ def test_uploaded_bytes_updates_store(state_manager) -> None:
 
 def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
     _, store = state_manager
-    received: list[tuple[str, str]] = []
+    trace = _make_trace(
+        "trace-3",
+        "rec-3",
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        last_updated=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    store._traces_by_id["trace-3"] = trace
+    store._traces_by_recording["rec-3"] = [trace]
+    received: list[tuple[str, str, DataType]] = []
 
-    def handler(trace_id: str, path: str) -> None:
-        received.append((trace_id, path))
+    def handler(recording_id: str, trace_id: str, data_type: DataType) -> None:
+        received.append((recording_id, trace_id, data_type))
 
     emitter.on(Emitter.DELETE_TRACE, handler)
     try:
         emitter.emit(Emitter.UPLOAD_COMPLETE, "trace-3", "/tmp/trace-3.bin")
+        time.sleep(2)
         assert store.deleted == ["trace-3"]
-        assert received == [("trace-3", "/tmp/trace-3.bin")]
+        assert received == [("rec-3", "trace-3", DataType.CUSTOM_1D)]
     finally:
         emitter.remove_listener(Emitter.DELETE_TRACE, handler)
 
