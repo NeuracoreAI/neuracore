@@ -207,6 +207,70 @@ class TestOnlineMode:
         rgb = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
         nc.log_rgb("camera", rgb)
 
+    def test_stop_recording_online(
+        self,
+        temp_config_dir,
+        mock_auth_requests,
+        reset_neuracore,
+        mock_urdf,
+        mocked_org_id,
+        mock_daemon_recording_context,
+    ):
+        """Test stopping recording in online mode calls both daemon and API."""
+        nc.login("test_api_key")
+
+        mock_auth_requests.post(
+            f"{API_URL}/org/{mocked_org_id}/robots",
+            json={"robot_id": "robot_id", "has_urdf": True},
+            status_code=200,
+        )
+        mock_auth_requests.get(
+            f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+            status_code=404,
+        )
+        mock_auth_requests.post(
+            f"{API_URL}/org/{mocked_org_id}/datasets",
+            json={
+                "id": "dataset_id",
+                "name": "test_dataset",
+                "size_bytes": 0,
+                "tags": [],
+                "is_shared": False,
+                "all_data_types": {},
+                "created_at": 1704067200.0,
+                "modified_at": 1704067200.0,
+            },
+            status_code=200,
+        )
+        mock_auth_requests.post(
+            f"{API_URL}/org/{mocked_org_id}/recording/start",
+            json={"id": "server_recording_id"},
+            status_code=200,
+        )
+        mock_auth_requests.post(
+            f"{API_URL}/org/{mocked_org_id}/recording/stop",
+            json="OK",
+            status_code=200,
+        )
+
+        nc.connect_robot("test_robot", urdf_path=mock_urdf)
+        nc.create_dataset("test_dataset")
+        nc.start_recording()
+
+        robot = GlobalSingleton()._active_robot
+        recording_id = robot.get_current_recording_id()
+        assert recording_id == "server_recording_id"
+
+        robot.stop_recording(recording_id)
+
+        # Verify daemon context was used
+        mock_daemon_recording_context.stop_recording.assert_called_once()
+
+        # Verify API was called
+        stop_request = mock_auth_requests.request_history[-1]
+        assert "/recording/stop" in stop_request.url
+        assert f"recording_id={recording_id}" in stop_request.url
+
 
 # =============================================================================
 # OFFLINE MODE TESTS

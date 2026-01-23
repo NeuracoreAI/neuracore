@@ -312,14 +312,43 @@ class Robot:
     def stop_recording(self, recording_id: str) -> None:
         """Stop an active recording session.
 
-        Ends the specified recording session by notifying the daemon, which
-        signals all Producers to end their traces. The daemon handles data
-        persistence and eventual upload to the backend.
+        Ends the specified recording session and stops data collection from
+        all streams. The recorded data will be processed and stored in the
+        associated dataset.
 
         Args:
             recording_id: Unique identifier of the recording session to stop.
+
+        Raises:
+            RobotError: If the robot is not initialized, if the recording cannot
+                be stopped, or if storage limits are exceeded.
+            ConfigError: If there is an error trying to get the current org
         """
         DaemonRecordingContext(recording_id=recording_id).stop_recording()
+
+        if self.is_connected and self.id and self._auth.is_authenticated:
+            try:
+                response = requests.post(
+                    f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}",
+                    headers=self._auth.get_headers(),
+                )
+                response.raise_for_status()
+                result = response.json()
+
+                if result == "WrongUser":
+                    raise RobotError("Cannot stop recording initiated by another user")
+
+                if result == "UsageLimitExceeded":
+                    raise RobotError(
+                        "Storage limit exceeded. Please upgrade your plan."
+                    )
+            except requests.exceptions.ConnectionError:
+                logger.warning(
+                    "Failed to connect to server to stop recording. "
+                    "Recording stopped locally."
+                )
+            except requests.exceptions.RequestException as e:
+                logger.warning("Failed to notify server of recording stop: %s", e)
 
         get_recording_state_manager().recording_stopped(
             robot_identifier=self.id or self.name,
@@ -496,7 +525,6 @@ class Robot:
         Args:
             recording_id: the ID of the recording to cancel.
         """
-        # Online mode - notify server to cancel/discard
         if self.is_connected and self.id and self._auth.is_authenticated:
             try:
                 response = requests.post(
@@ -521,7 +549,6 @@ class Robot:
                     e,
                 )
 
-        # Stop recording via daemon (works for both online and offline)
         DaemonRecordingContext(recording_id=recording_id).stop_recording()
 
         get_recording_state_manager().recording_stopped(
