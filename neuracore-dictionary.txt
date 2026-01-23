@@ -228,3 +228,5 @@ inproc
 mpsa
 POLLIN
 sess
+excinfo
+RETRYABLE

@@ -1,6 +1,14 @@
 """Handlers for nc-data-daemon CLI commands."""
 
+from __future__ import annotations
+
 import argparse
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
 from typing import Any
 
 from neuracore.data_daemon.config_manager.config import ConfigManager
@@ -14,6 +22,9 @@ from neuracore.data_daemon.config_manager.profiles import (
 
 profile_manager = ProfileManager()
 config_manager = ConfigManager(profile_manager)
+
+daemon_state_dir_path = Path.home() / ".neuracore"
+pid_file_path = daemon_state_dir_path / "daemon.pid"
 
 
 def add_common_config_args(parser: argparse.ArgumentParser) -> None:
@@ -95,6 +106,82 @@ def _extract_config_updates(args: argparse.Namespace) -> dict[str, Any]:
     return {k: v for k, v in raw.items() if k in allowed and v is not None}
 
 
+def _ensure_daemon_state_dir_exists() -> None:
+    """Ensure the daemon state directory exists.
+
+    Args:
+        args: Parsed CLI arguments for the command.
+
+    Returns:
+        None
+    """
+    daemon_state_dir_path.mkdir(parents=True, exist_ok=True)
+
+
+def _read_pid_from_file(pid_path: Path) -> int | None:
+    """Read an integer PID from the pid file.
+
+    Args:
+        args: Parsed CLI arguments for the command.
+
+    Returns:
+        None
+    """
+    try:
+        pid_text = pid_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+
+    if not pid_text:
+        return None
+
+    try:
+        pid_value = int(pid_text)
+    except ValueError:
+        return None
+
+    if pid_value <= 0:
+        return None
+
+    return pid_value
+
+
+def _pid_is_running(pid_value: int) -> bool:
+    """Check whether a PID is running.
+
+    Args:
+        pid_value: Process ID to check.
+
+    Returns:
+        True if the process exists, otherwise False.
+    """
+    try:
+        os.kill(pid_value, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _terminate_pid(pid_value: int) -> bool:
+    """Terminate a process using SIGTERM.
+
+    Args:
+        pid_value: Process ID to terminate.
+
+    Returns:
+        True if the PID does not exist after the call, otherwise False.
+    """
+    try:
+        os.kill(pid_value, signal.SIGTERM)
+        return True
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+
+
 def handle_profile_create(args: argparse.Namespace) -> None:
     """Handle the ``profile create`` CLI command.
 
@@ -172,17 +259,36 @@ def handle_list_profile(args: argparse.Namespace) -> None:
 def handle_launch(args: argparse.Namespace) -> None:
     """Handle the ``launch`` CLI command.
 
-    This is a scaffolding implementation that resolves the effective
-    configuration for the current run and prints it. Actual process
-    management for the daemon will be added in a later ticket.
-
     Args:
         args: Parsed CLI arguments for the command.
 
     Returns:
         None
     """
-    print("launch command is not implemented yet.")
+    _ensure_daemon_state_dir_exists()
+
+    runner_command = [
+        sys.executable,
+        "-m",
+        "neuracore.data_daemon.runner_entry",
+    ]
+
+    daemon_process = subprocess.Popen(
+        runner_command,
+        start_new_session=True,
+        close_fds=True,
+        cwd=str(Path.cwd()),
+    )
+
+    spawned_daemon_pid = daemon_process.pid
+
+    time.sleep(0.1)
+    if daemon_process.poll() is not None:
+        print("Daemon failed to start.")
+        sys.exit(1)
+
+    pid_file_path.write_text(str(spawned_daemon_pid), encoding="utf-8")
+    print(f"Daemon launched (pid={spawned_daemon_pid}).")
 
 
 def handle_stop(args: argparse.Namespace) -> None:
@@ -194,7 +300,48 @@ def handle_stop(args: argparse.Namespace) -> None:
     Returns:
         None
     """
-    print("Stop command is not implemented yet.")
+    pid_value = _read_pid_from_file(pid_file_path)
+    if pid_value is None:
+        print("Daemon is not running.")
+        return
+
+    _terminate_pid(pid_value)
+    time.sleep(0.1)
+    if not _pid_is_running(pid_value):
+        try:
+            pid_file_path.unlink()
+        except FileNotFoundError:
+            pass
+        print("Daemon stopped.")
+        return
+
+    print(f"Failed to stop daemon (pid={pid_value}).")
+    sys.exit(1)
+
+
+def handle_status(args: argparse.Namespace) -> None:
+    """Handle the ``status`` CLI command.
+
+    Args:
+        args: Parsed CLI arguments for the command.
+
+    Returns:
+        None
+    """
+    pid_value = _read_pid_from_file(pid_file_path)
+    if pid_value is None:
+        print("Daemon not running.")
+        return
+
+    if not _pid_is_running(pid_value):
+        try:
+            pid_file_path.unlink()
+        except FileNotFoundError:
+            pass
+        print("Daemon not running.")
+        return
+
+    print(f"Daemon running (pid={pid_value}).")
 
 
 def handle_install(args: argparse.Namespace) -> None:
