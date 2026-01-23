@@ -1,11 +1,7 @@
 """Main entry point for the Neuracore data daemon CLI."""
 
 import argparse
-import sys
 
-from neuracore.data_daemon.communications_management.management_channel import (
-    ManagementChannel,
-)
 from neuracore.data_daemon.config_manager.args_handler import (
     add_common_config_args,
     handle_install,
@@ -14,6 +10,7 @@ from neuracore.data_daemon.config_manager.args_handler import (
     handle_profile_create,
     handle_profile_show,
     handle_profile_update,
+    handle_status,
     handle_stop,
     handle_uninstall,
     handle_update,
@@ -62,6 +59,9 @@ def main() -> None:
     stop_parser = subparsers.add_parser("stop", help="Stop the data daemon.")
     stop_parser.set_defaults(handler=handle_stop)
 
+    status_parser = subparsers.add_parser("status", help="Show daemon status.")
+    status_parser.set_defaults(handler=handle_status)
+
     install_parser = subparsers.add_parser(
         "install", help="Install the data daemon as a system service."
     )
@@ -79,15 +79,6 @@ def main() -> None:
 
     args = parser.parse_args()
     args.handler(args)
-    channel = ManagementChannel()
-    daemon = channel.get_ndd_context()
-    if daemon is None:
-        sys.exit(1)
-    try:
-        daemon.run()
-    except SystemExit:
-        # SystemExit may be raised if we detect another daemon running
-        sys.exit(1)
 
 
 if __name__ == "__main__":
