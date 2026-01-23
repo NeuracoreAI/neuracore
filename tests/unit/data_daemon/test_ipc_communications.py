@@ -173,12 +173,12 @@ def test_large_payload_chunked_round_trip_over_ipc(zmq_context: zmq.Context) -> 
     )
 
     producer.open_ring_buffer(size=128 * 1024)
+    producer.start_new_trace()
     _drain_messages(daemon, daemon_comm, expected=1)
 
     payload = b"x" * 50_000
     producer.send_data(
         payload,
-        trace_id="trace-large",
         data_type=DataType.CUSTOM_1D,
         data_type_name="custom",
         robot_instance=1,
@@ -223,6 +223,8 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context) -> None:
 
     producer_a.open_ring_buffer(size=4096)
     producer_b.open_ring_buffer(size=4096)
+    producer_a.start_new_trace()
+    producer_b.start_new_trace()
     _drain_messages(daemon, daemon_comm, expected=2)
 
     payload_a = b"payload-a"
@@ -230,7 +232,6 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context) -> None:
 
     producer_a.send_data(
         payload_a,
-        trace_id="trace-a",
         data_type=DataType.CUSTOM_1D,
         data_type_name="custom",
         robot_instance=1,
@@ -239,7 +240,6 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context) -> None:
     )
     producer_b.send_data(
         payload_b,
-        trace_id="trace-b",
         data_type=DataType.CUSTOM_1D,
         data_type_name="custom",
         robot_instance=2,
@@ -354,11 +354,12 @@ def test_interleaved_chunks_reassemble_per_producer(zmq_context: zmq.Context) ->
     daemon_comm.cleanup_daemon()
 
 
-def test_recording_id_required_on_send_data() -> None:
+def test_trace_id_required_on_send_data() -> None:
+    """send_data() requires start_new_trace() to be called first."""
     producer_comm = CommunicationsManager()
-    producer = Producer(comm_manager=producer_comm)
+    producer = Producer(comm_manager=producer_comm, recording_id="rec-1")
 
-    with pytest.raises(ValueError, match="Recording ID required"):
+    with pytest.raises(ValueError, match="Trace ID required"):
         producer.send_data(
             b"data",
             data_type=DataType.CUSTOM_1D,
@@ -367,6 +368,17 @@ def test_recording_id_required_on_send_data() -> None:
             robot_id="robot",
             dataset_id="dataset",
         )
+
+    producer.stop_producer()
+
+
+def test_recording_id_required_on_start_new_trace() -> None:
+    """start_new_trace() requires recording_id to be set on init."""
+    producer_comm = CommunicationsManager()
+    producer = Producer(comm_manager=producer_comm)
+
+    with pytest.raises(ValueError, match="recording_id is required"):
+        producer.start_new_trace()
 
     producer.stop_producer()
 
