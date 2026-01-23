@@ -376,3 +376,104 @@ def test_log_parallel_gripper_target_open_amount_validation(
     # Test invalid name type
     with pytest.raises(ValueError, match="Parallel gripper names must be strings"):
         nc.log_parallel_gripper_target_open_amount(name=123, value=0.5)
+
+
+def test_log_suction_gripper_active(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test logging suction gripper active data."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    # Test singular function
+    nc.log_suction_gripper_active(name="suction1", active=True)
+    nc.log_suction_gripper_active(name="suction2", active=False)
+
+    # Test plural function with dict
+    nc.log_suction_gripper_actives({"suction1": True, "suction2": False})
+
+
+def test_log_suction_gripper_target_active(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test logging target suction gripper active data."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    # Test singular function
+    nc.log_suction_gripper_target_active(name="suction1", active=True)
+    nc.log_suction_gripper_target_active(name="suction2", active=False)
+
+    # Test plural function with dict
+    nc.log_suction_gripper_target_actives({"suction1": True, "suction2": False})
+
+
+def test_log_suction_gripper_active_validation(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test validation of suction gripper active inputs."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    # Test invalid active type
+    with pytest.raises(
+        ValueError, match="Suction gripper active state must be a boolean"
+    ):
+        nc.log_suction_gripper_active(name="suction1", active="not_a_bool")
+
+    with pytest.raises(
+        ValueError, match="Suction gripper active state must be a boolean"
+    ):
+        nc.log_suction_gripper_active(name="suction1", active=1)
+
+    with pytest.raises(
+        ValueError, match="Suction gripper active state must be a boolean"
+    ):
+        nc.log_suction_gripper_active(name="suction1", active=0.5)
+
+    # Test invalid name type
+    with pytest.raises(ValueError, match="Suction gripper names must be strings"):
+        nc.log_suction_gripper_active(name=123, active=True)
+
+
+def test_log_suction_gripper_target_active_validation(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test validation of target suction gripper active inputs."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    # Test invalid active type
+    with pytest.raises(
+        ValueError, match="Suction gripper target active state must be a boolean"
+    ):
+        nc.log_suction_gripper_target_active(name="suction1", active="not_a_bool")
+
+    with pytest.raises(
+        ValueError, match="Suction gripper target active state must be a boolean"
+    ):
+        nc.log_suction_gripper_target_active(name="suction1", active=1)
+
+    # Test invalid name type
+    with pytest.raises(ValueError, match="Suction gripper names must be strings"):
+        nc.log_suction_gripper_target_active(name=123, active=True)

@@ -21,6 +21,7 @@ from neuracore_types import (
     PointCloudData,
     PoseData,
     RGBCameraData,
+    SuctionGripperActiveData,
 )
 from neuracore_types.utils import validate_safe_name
 
@@ -811,6 +812,176 @@ def log_parallel_gripper_target_open_amounts(
         log_parallel_gripper_target_open_amount(
             name=name,
             value=value,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=timestamp,
+        )
+
+
+def log_suction_gripper_active(
+    name: str,
+    active: bool,
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+) -> None:
+    """Log suction gripper active state for a robot.
+
+    Args:
+        name: Name of the suction gripper
+        active: Whether suction is active (True = on, False = off)
+        robot_name: Optional robot ID
+        instance: Optional instance number
+        timestamp: Optional timestamp
+    """
+    timestamp = timestamp or time.time()
+    if not isinstance(name, str):
+        raise ValueError(
+            f"Suction gripper names must be strings. " f"{name} is not a string."
+        )
+    if not isinstance(active, bool):
+        raise ValueError(
+            f"Suction gripper active state must be a boolean. "
+            f"{active} is not a boolean."
+        )
+
+    robot = _get_robot(robot_name, instance)
+    storage_name = validate_safe_name(name)
+    str_id = f"{DataType.SUCTION_GRIPPER_ACTIVES.value}:{name}"
+    stream = robot.get_data_stream(str_id)
+    if stream is None:
+        stream = JsonDataStream(
+            data_type=DataType.SUCTION_GRIPPER_ACTIVES,
+            data_type_name=storage_name,
+        )
+        robot.add_data_stream(str_id, stream)
+
+    start_stream(robot, stream)
+    assert isinstance(stream, JsonDataStream)
+
+    suction_gripper_active_data = SuctionGripperActiveData(
+        timestamp=timestamp, active=active
+    )
+    stream.log(suction_gripper_active_data)
+
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(str_id, DataType.SUCTION_GRIPPER_ACTIVES, str_id).publish(
+        suction_gripper_active_data.model_dump(mode="json")
+    )
+
+
+def log_suction_gripper_actives(
+    values: dict[str, bool],
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+) -> None:
+    """Log suction gripper active states for a robot.
+
+    Args:
+        values: Dictionary mapping gripper names to active states
+            (True = on, False = off)
+        robot_name: Optional robot ID
+        instance: Optional instance number
+        timestamp: Optional timestamp
+    """
+    timestamp = timestamp or time.time()
+    for name, active in values.items():
+        log_suction_gripper_active(
+            name=name,
+            active=active,
+            robot_name=robot_name,
+            instance=instance,
+            timestamp=timestamp,
+        )
+
+
+def log_suction_gripper_target_active(
+    name: str,
+    active: bool,
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+) -> None:
+    """Log suction gripper target active state for a robot.
+
+    This logs the commanded/target suction gripper state, as opposed to
+    log_suction_gripper_active which logs the actual gripper state.
+
+    Args:
+        name: Name of the suction gripper
+        active: Target suction state (True = on, False = off)
+        robot_name: Optional robot ID
+        instance: Optional instance number
+        timestamp: Optional timestamp
+    """
+    timestamp = timestamp or time.time()
+    if not isinstance(name, str):
+        raise ValueError(
+            f"Suction gripper names must be strings. " f"{name} is not a string."
+        )
+    if not isinstance(active, bool):
+        raise ValueError(
+            f"Suction gripper target active state must be a boolean. "
+            f"{active} is not a boolean."
+        )
+
+    robot = _get_robot(robot_name, instance)
+    storage_name = validate_safe_name(name)
+    str_id = f"{DataType.SUCTION_GRIPPER_TARGET_ACTIVES.value}:{name}"
+    stream = robot.get_data_stream(str_id)
+    if stream is None:
+        stream = JsonDataStream(
+            data_type=DataType.SUCTION_GRIPPER_TARGET_ACTIVES,
+            data_type_name=storage_name,
+        )
+        robot.add_data_stream(str_id, stream)
+
+    start_stream(robot, stream)
+    assert isinstance(stream, JsonDataStream)
+
+    suction_gripper_target_active_data = SuctionGripperActiveData(
+        timestamp=timestamp, active=active
+    )
+    stream.log(suction_gripper_target_active_data)
+
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(str_id, DataType.SUCTION_GRIPPER_TARGET_ACTIVES, str_id).publish(
+        suction_gripper_target_active_data.model_dump(mode="json")
+    )
+
+
+def log_suction_gripper_target_actives(
+    values: dict[str, bool],
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+) -> None:
+    """Log suction gripper target active states for a robot.
+
+    This logs the commanded/target suction gripper states, as opposed to
+    log_suction_gripper_actives which logs the actual gripper states.
+
+    Args:
+        values: Dictionary mapping gripper names to target active states
+            (True = on, False = off)
+        robot_name: Optional robot ID
+        instance: Optional instance number
+        timestamp: Optional timestamp
+    """
+    timestamp = timestamp or time.time()
+    for name, active in values.items():
+        log_suction_gripper_target_active(
+            name=name,
+            active=active,
             robot_name=robot_name,
             instance=instance,
             timestamp=timestamp,
