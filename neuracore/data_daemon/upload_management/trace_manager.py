@@ -47,12 +47,12 @@ class TraceManager(ABC):
 
         try:
             auth = get_auth()
-            org_id = auth.get_org_id()
+            org_id = await auth.get_org_id()
 
             async with self.client_session.post(
                 f"{API_URL}/org/{org_id}/recording/{recording_id}/traces",
                 json={"data_type": data_type.value},
-                headers=auth.get_headers(),
+                headers=await auth.get_headers(self.client_session),
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 if response.status >= 400:
@@ -109,12 +109,12 @@ class TraceManager(ABC):
 
         try:
             auth = get_auth()
-            org_id = auth.get_org_id()
+            org_id = await auth.get_org_id()
 
             async with self.client_session.put(
                 f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/{backend_trace_id}",
                 json=data_trace_payload,
-                headers=auth.get_headers(),
+                headers=await auth.get_headers(self.client_session),
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 if response.status >= 400:

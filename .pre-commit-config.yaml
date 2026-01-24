@@ -41,7 +41,7 @@ repos:
       - id: mypy
         files: neuracore/
         args: ["--disallow-untyped-defs", "--ignore-missing-imports"]
-        additional_dependencies: [types-requests, types-PyYAML]
+        additional_dependencies: [types-requests, types-PyYAML, types-aiofiles]
         
   - repo: https://github.com/streetsidesoftware/cspell-cli
     rev: v9.2.0
