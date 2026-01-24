@@ -174,8 +174,12 @@ def test_schedule_on_not_started_raises_error(loop_manager: EventLoopManager):
     async def test_coroutine():
         pass
 
-    with pytest.raises(RuntimeError, match="not initialized|not running"):
-        loop_manager.schedule_on_general_loop(test_coroutine())
+    coroutine = test_coroutine()
+    try:
+        with pytest.raises(RuntimeError, match="not initialized|not running"):
+            loop_manager.schedule_on_general_loop(coroutine)
+    finally:
+        coroutine.close()
 
 
 def test_multiple_threads_can_schedule(running_loop_manager: EventLoopManager):
