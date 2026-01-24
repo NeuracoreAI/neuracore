@@ -10,7 +10,7 @@ import base64
 import hashlib
 import ssl
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
@@ -64,8 +64,10 @@ def mock_auth():
         "neuracore.data_daemon.upload_management.resumable_file_uploader.get_auth"
     ) as mock_get_auth:
         auth_instance = MagicMock()
-        auth_instance.get_org_id.return_value = "test-org"
-        auth_instance.get_headers.return_value = {"Authorization": "Bearer test-token"}
+        auth_instance.get_org_id = AsyncMock(return_value="test-org")
+        auth_instance.get_headers = AsyncMock(
+            return_value={"Authorization": "Bearer test-token"}
+        )
         mock_get_auth.return_value = auth_instance
         yield mock_get_auth
 

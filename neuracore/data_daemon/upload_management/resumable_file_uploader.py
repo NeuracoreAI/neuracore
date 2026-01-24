@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import aiofiles
 import aiohttp
 
 from neuracore.data_daemon.auth_management.auth_manager import get_auth
@@ -101,13 +102,13 @@ class ResumableFileUploader:
         }
 
         auth = get_auth()
-        org_id = auth.get_org_id()
+        org_id = await auth.get_org_id()
 
         timeout = aiohttp.ClientTimeout(total=30)
         async with self._session.get(
             f"{API_URL}/org/{org_id}/recording/{self._recording_id}/resumable_upload_url",
             params=params,
-            headers=auth.get_headers(),
+            headers=await auth.get_headers(self._session),
             timeout=timeout,
         ) as response:
             response.raise_for_status()
@@ -183,6 +184,7 @@ class ResumableFileUploader:
 
         Opens the file, seeks to the resume point, and uploads remaining
         data in chunks. Calls progress_callback after each successful chunk.
+        Uses aiofiles for non-blocking file I/O.
 
         Returns:
             Tuple of (success, error_message, final_response)
@@ -191,15 +193,15 @@ class ResumableFileUploader:
             IOError: If there's an error reading the file.
         """
         try:
-            with open(self._filepath, "rb") as f:
+            async with aiofiles.open(self._filepath, "rb") as f:
                 # Seek to resume point
-                f.seek(self._bytes_uploaded)
+                await f.seek(self._bytes_uploaded)
 
                 final_response: FinalResponseData | None = None
 
                 while True:
-                    # Read next chunk
-                    chunk = f.read(self.CHUNK_SIZE)
+                    # Read next chunk asynchronously
+                    chunk = await f.read(self.CHUNK_SIZE)
                     if not chunk:
                         break  # End of file
 
@@ -527,8 +529,11 @@ class ResumableFileUploader:
 
         md5_hash = hashlib.md5()
         try:
-            with open(self._filepath, "rb") as f:
-                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            async with aiofiles.open(self._filepath, "rb") as f:
+                while True:
+                    chunk = await f.read(1024 * 1024)
+                    if not chunk:
+                        break
                     md5_hash.update(chunk)
         except OSError as e:
             return (False, f"Failed to compute checksum: {e}")
