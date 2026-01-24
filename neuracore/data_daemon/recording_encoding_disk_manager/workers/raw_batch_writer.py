@@ -8,6 +8,8 @@ import threading
 from collections.abc import Callable
 from typing import Any, cast
 
+import aiofiles
+
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.models import CompleteMessage
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
@@ -108,8 +110,8 @@ class _RawBatchWriter:
         batch_file_name = f"batch_{batch_index:06d}.raw"
         batch_path = trace_dir / batch_file_name
         try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, batch_path.write_bytes, payload_bytes)
+            async with aiofiles.open(batch_path, "wb") as f:
+                await f.write(payload_bytes)
         except Exception:
             self._storage_budget.release(buffered_bytes)
             self._abort_trace(trace_key)
@@ -182,7 +184,12 @@ class _RawBatchWriter:
             with self._state_lock:
                 writer_state: _WriteState | None = self._writer_states.get(trace_key)
                 if writer_state is None:
-                    trace_dir.mkdir(parents=True, exist_ok=True)
+                    try:
+                        trace_dir.mkdir(parents=True, exist_ok=True)
+                    except OSError:
+                        self._abort_trace(trace_key)
+                        self.trace_message_queue.task_done()
+                        continue
                     writer_state = _WriteState(
                         trace_key=trace_key,
                         trace_dir=trace_dir,
