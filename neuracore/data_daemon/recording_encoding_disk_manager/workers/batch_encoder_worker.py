@@ -8,7 +8,11 @@ import json
 import logging
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from typing import cast
+
+import aiofiles
+import aiofiles.os
 
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
@@ -68,6 +72,16 @@ class _BatchEncoderWorker:
 
         self._emitter = get_emitter()
 
+    @staticmethod
+    async def _remove_file(path: Path) -> None:
+        """Remove a file, ignoring if it doesn't exist."""
+        try:
+            await aiofiles.os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("Failed to remove batch file: %s", path, exc_info=True)
+
     async def worker(self) -> None:
         """Consumes raw batch jobs, decode them, and feed per-trace encoders.
 
@@ -88,21 +102,16 @@ class _BatchEncoderWorker:
 
                 with self._state_lock:
                     if batch_job.trace_key in self._aborted_traces:
-                        loop = asyncio.get_event_loop()
-                        await loop.run_in_executor(
-                            None, batch_job.batch_path.unlink, True
-                        )
+                        await self._remove_file(batch_job.batch_path)
                         continue
 
                 encoder = self._encoder_manager.safe_get_encoder(batch_job.trace_key)
                 if encoder is None:
-                    loop = asyncio.get_event_loop()
-                    await loop.run_in_executor(None, batch_job.batch_path.unlink, True)
+                    await self._remove_file(batch_job.batch_path)
                     continue
 
                 ok = await self._process_batch_into_encoder(batch_job, encoder)
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, batch_job.batch_path.unlink, True)
+                await self._remove_file(batch_job.batch_path)
                 if not ok:
                     continue
 
@@ -161,10 +170,8 @@ class _BatchEncoderWorker:
                 otherwise False (trace aborted).
         """
         try:
-            loop = asyncio.get_event_loop()
-            raw_bytes = await loop.run_in_executor(
-                None, batch_job.batch_path.read_bytes
-            )
+            async with aiofiles.open(batch_job.batch_path, "rb") as f:
+                raw_bytes = await f.read()
             for raw_line in raw_bytes.splitlines():
                 if not raw_line:
                     continue
