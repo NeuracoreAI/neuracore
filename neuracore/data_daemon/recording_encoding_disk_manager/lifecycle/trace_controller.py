@@ -98,7 +98,11 @@ class _TraceController:
                 )
 
         trace_dir = self._filesystem.trace_dir_for(trace_key)
-        reclaimed_bytes = self._filesystem.trace_bytes_on_disk(trace_key)
+        try:
+            reclaimed_bytes = self._filesystem.trace_bytes_on_disk(trace_key)
+        except OSError:
+            logger.warning("Failed to get bytes on disk for trace %s", trace_key)
+            reclaimed_bytes = 0
         shutil.rmtree(trace_dir, ignore_errors=True)
         self._storage_budget.release(reclaimed_bytes)
 
@@ -163,7 +167,11 @@ class _TraceController:
             data_type=data_type,
         )
         trace_dir_path = self._filesystem.trace_dir_for(trace_key)
-        reclaimed_bytes = self._filesystem.trace_bytes_on_disk(trace_key)
+        try:
+            reclaimed_bytes = self._filesystem.trace_bytes_on_disk(trace_key)
+        except OSError:
+            logger.warning("Failed to get bytes on disk for trace %s", trace_key)
+            reclaimed_bytes = 0
 
         with self._state_lock:
             recording_entry = self.recording_traces.get(trace_key.recording_id)
