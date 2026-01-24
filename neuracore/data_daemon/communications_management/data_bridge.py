@@ -18,7 +18,6 @@ from neuracore.data_daemon.communications_management.communications_manager impo
     CommunicationsManager,
 )
 from neuracore.data_daemon.communications_management.ring_buffer import RingBuffer
-from neuracore.data_daemon.config_manager.config import ConfigManager
 from neuracore.data_daemon.const import (
     DATA_TYPE_FIELD_SIZE,
     DEFAULT_RING_BUFFER_SIZE,
@@ -26,7 +25,6 @@ from neuracore.data_daemon.const import (
     TRACE_ID_FIELD_SIZE,
 )
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
-from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.models import (
     CommandType,
     CompleteMessage,
@@ -85,36 +83,17 @@ class Daemon:
         self,
         recording_disk_manager: RecordingDiskManager,
         comm_manager: CommunicationsManager | None = None,
-        *,
-        config_manager: ConfigManager | None = None,
-        loop_manager: EventLoopManager | None = None,
     ) -> None:
         """Initializes the daemon.
 
-        If `comm_manager` is not provided, it will be initialized to a
-        `CommunicationsManager` instance.
-
-        The daemon will use the provided communications manager to receive
-        ManagementMessages from producers.
-
         Args:
-            recording_disk_manager: RecordingDiskManager
-                The recording disk manager to use for persisting trace data.
-            comm_manager: CommunicationsManager | None, optional
-                The communications manager to use for receiving
-                ManagementMessages from producers. If not provided, a new
-                `CommunicationsManager` instance will be created.
-            config_manager: ConfigManager | None, optional
-                The config manager to use for resolving daemon configuration.
-                If not provided, a new `ConfigManager` instance will be created.
-
-        Returns:
-            None
+            recording_disk_manager: The recording disk manager for persisting
+                trace data to disk.
+            comm_manager: The communications manager for ZMQ operations.
+                If not provided, a new instance will be created.
         """
         self.comm = comm_manager or CommunicationsManager()
         self.recording_disk_manager = recording_disk_manager
-        self.loop_manager = loop_manager or EventLoopManager()
-        # self.recording_disk_manager = RecordingDiskManager()
         self.channels: dict[str, ChannelState] = {}
         self._recording_traces: dict[str, set[str]] = {}
         self._trace_recordings: dict[str, str] = {}

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import base64
 import struct
-from typing import Any
 
 from neuracore_types import DataType
 
@@ -26,7 +25,6 @@ from neuracore.data_daemon.const import (
     TRACE_ID_FIELD_SIZE,
 )
 from neuracore.data_daemon.models import CommandType, CompleteMessage, MessageEnvelope
-from tests.unit.data_daemon.helpers import MockConfigManager
 
 
 class MockRDM:
@@ -65,19 +63,17 @@ class MockComm:
 # =============================================================================
 
 
-def test_daemon_creates_ring_buffer_on_open(tmp_path: Any) -> None:
+def test_daemon_creates_ring_buffer_on_open() -> None:
     """OPEN_RING_BUFFER creates buffer.
 
     Buffer created on-demand when producer requests it. Lazy initialization
     saves memory.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -101,19 +97,17 @@ def test_daemon_creates_ring_buffer_on_open(tmp_path: Any) -> None:
     assert channel.reader is not None
 
 
-def test_daemon_writes_chunk_to_ring_buffer(tmp_path: Any) -> None:
+def test_daemon_writes_chunk_to_ring_buffer() -> None:
     """DATA_CHUNK writes to buffer.
 
     Data path works: producer sends chunk, daemon writes to buffer. Core
     functionality.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -151,19 +145,17 @@ def test_daemon_writes_chunk_to_ring_buffer(tmp_path: Any) -> None:
     assert channel.ring_buffer.available() > 0
 
 
-def test_daemon_writes_correct_header_format(tmp_path: Any) -> None:
+def test_daemon_writes_correct_header_format() -> None:
     """Header format matches spec.
 
     Daemon must write headers that reader can parse. Format mismatch breaks
     everything.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -211,18 +203,16 @@ def test_daemon_writes_correct_header_format(tmp_path: Any) -> None:
     assert chunk_len == len(data)
 
 
-def test_daemon_handles_multiple_channels(tmp_path: Any) -> None:
+def test_daemon_handles_multiple_channels() -> None:
     """Separate buffers per producer.
 
     Channel isolation: producer A's data never appears in producer B's buffer.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -268,18 +258,16 @@ def test_daemon_handles_multiple_channels(tmp_path: Any) -> None:
 # =============================================================================
 
 
-def test_daemon_header_trace_id_padding(tmp_path: Any) -> None:
+def test_daemon_header_trace_id_padding() -> None:
     """trace_id padded to 36 bytes.
 
     Short trace_ids must be null-padded to fill fixed field size.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -316,19 +304,17 @@ def test_daemon_header_trace_id_padding(tmp_path: Any) -> None:
     assert raw_trace_id.rstrip(b"\x00") == b"short"
 
 
-def test_daemon_header_data_type_padding(tmp_path: Any) -> None:
+def test_daemon_header_data_type_padding() -> None:
     """data_type padded to 32 bytes.
 
     Same padding requirement for data_type field. Fixed format requires
     padding.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -365,19 +351,17 @@ def test_daemon_header_data_type_padding(tmp_path: Any) -> None:
     assert len(raw_data_type) == DATA_TYPE_FIELD_SIZE
 
 
-def test_daemon_header_with_long_trace_id(tmp_path: Any) -> None:
+def test_daemon_header_with_long_trace_id() -> None:
     """Long trace_id truncated.
 
     Truncation must happen silently. Long IDs shouldn't corrupt header or
     crash.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -416,18 +400,16 @@ def test_daemon_header_with_long_trace_id(tmp_path: Any) -> None:
     assert len(raw_trace_id) == TRACE_ID_FIELD_SIZE
 
 
-def test_new_channel_fresh_buffer(tmp_path: Any) -> None:
+def test_new_channel_fresh_buffer() -> None:
     """New channel gets clean buffer.
 
     Each channel starts fresh. No cross-contamination from previous channels.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 

@@ -33,7 +33,6 @@ from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.recording_encoding_disk_manager import (
     recording_disk_manager as rdm_module,
 )
-from tests.unit.data_daemon.helpers import MockConfigManager
 
 TEST_HEARTBEAT_INTERVAL_SECS = 0.1
 TEST_HEARTBEAT_TIMEOUT_SECS = 0.3
@@ -133,7 +132,6 @@ def loop_manager():
 @pytest.fixture
 def daemon_runtime(tmp_path: Path, loop_manager: EventLoopManager):
     recordings_root = tmp_path / "recordings"
-    config = MockConfigManager(path_to_store_record=str(recordings_root))
 
     rdm = rdm_module.RecordingDiskManager(
         loop_manager=loop_manager,
@@ -144,7 +142,6 @@ def daemon_runtime(tmp_path: Path, loop_manager: EventLoopManager):
     comm = CommunicationsManager(context=context)
     daemon = Daemon(
         comm_manager=comm,
-        config_manager=config,
         recording_disk_manager=rdm,
     )
 

@@ -35,6 +35,7 @@ async def manager_store(tmp_path) -> tuple[StateManager, SqliteStateStore]:
         yield manager, store
     finally:
         _cleanup_state_manager(manager)
+        await store.close()
 
 
 async def _set_created_at(
@@ -250,12 +251,14 @@ async def test_multiple_state_managers_share_sqlite_db(tmp_path) -> None:
             1,
             path="/tmp/trace-multi-2.bin",
         )
+
+        assert await store_one.get_trace("trace-multi-1") is not None
+        assert await store_one.get_trace("trace-multi-2") is not None
     finally:
         _cleanup_state_manager(manager_one)
         _cleanup_state_manager(manager_two)
-
-    assert await store_one.get_trace("trace-multi-1") is not None
-    assert await store_one.get_trace("trace-multi-2") is not None
+        await store_one.close()
+        await store_two.close()
 
 
 @pytest.mark.asyncio
@@ -265,36 +268,42 @@ async def test_concurrent_writes_with_wal(tmp_path) -> None:
     store_two = SqliteStateStore(db_path)
     await store_one.init_async_store()
     await store_two.init_async_store()
-    await store_one.create_trace(
-        trace_id="trace-concurrent",
-        recording_id="rec-concurrent",
-        data_type=DataType.CUSTOM_1D,
-        path="/tmp/trace-concurrent.bin",
-        data_type_name="custom",
-        robot_instance=1,
-    )
-    async with store_one._engine.begin() as conn:
-        mode = (await conn.execute(text("PRAGMA journal_mode;"))).scalar_one()
-    assert str(mode).lower() == "wal"
+    try:
+        await store_one.create_trace(
+            trace_id="trace-concurrent",
+            recording_id="rec-concurrent",
+            data_type=DataType.CUSTOM_1D,
+            path="/tmp/trace-concurrent.bin",
+            data_type_name="custom",
+            robot_instance=1,
+        )
+        async with store_one._engine.begin() as conn:
+            mode = (await conn.execute(text("PRAGMA journal_mode;"))).scalar_one()
+        assert str(mode).lower() == "wal"
 
-    errors: list[Exception] = []
+        errors: list[Exception] = []
 
-    async def worker(store: SqliteStateStore, bytes_uploaded: int) -> None:
-        try:
-            for _ in range(5):
-                await store.update_bytes_uploaded("trace-concurrent", bytes_uploaded)
-        except Exception as exc:
-            errors.append(exc)
+        async def worker(store: SqliteStateStore, bytes_uploaded: int) -> None:
+            try:
+                for _ in range(5):
+                    await store.update_bytes_uploaded(
+                        "trace-concurrent", bytes_uploaded
+                    )
+            except Exception as exc:
+                errors.append(exc)
 
-    await asyncio.gather(
-        worker(store_one, 10),
-        worker(store_two, 20),
-    )
+        await asyncio.gather(
+            worker(store_one, 10),
+            worker(store_two, 20),
+        )
 
-    assert errors == []
-    trace = await store_one.get_trace("trace-concurrent")
-    assert trace is not None
-    assert trace.bytes_uploaded in {10, 20}
+        assert errors == []
+        trace = await store_one.get_trace("trace-concurrent")
+        assert trace is not None
+        assert trace.bytes_uploaded in {10, 20}
+    finally:
+        await store_one.close()
+        await store_two.close()
 
 
 @pytest.mark.asyncio
@@ -340,38 +349,42 @@ async def test_race_conditions_on_rapid_state_changes(tmp_path, caplog) -> None:
     await store_two.init_async_store()
     manager_one = StateManager(store_one)
     manager_two = StateManager(store_two)
-    await manager_one.create_trace(
-        "trace-race",
-        "rec-race",
-        DataType.CUSTOM_1D,
-        "custom",
-        1,
-        path="/tmp/trace-race.bin",
-    )
-    await manager_one.update_status("trace-race", TraceStatus.WRITING)
-
-    errors: list[str] = []
-
-    async def worker(manager: StateManager) -> None:
-        try:
-            await manager.update_status("trace-race", TraceStatus.WRITTEN)
-            await manager.update_status("trace-race", TraceStatus.UPLOADING)
-            await manager.update_status("trace-race", TraceStatus.UPLOADED)
-        except ValueError as exc:
-            errors.append(str(exc))
-
     try:
+        await manager_one.create_trace(
+            "trace-race",
+            "rec-race",
+            DataType.CUSTOM_1D,
+            "custom",
+            1,
+            path="/tmp/trace-race.bin",
+        )
+        await manager_one.update_status("trace-race", TraceStatus.WRITING)
+
+        errors: list[str] = []
+
+        async def worker(manager: StateManager) -> None:
+            try:
+                await manager.update_status("trace-race", TraceStatus.WRITTEN)
+                await manager.update_status("trace-race", TraceStatus.UPLOADING)
+                await manager.update_status("trace-race", TraceStatus.UPLOADED)
+            except ValueError as exc:
+                errors.append(str(exc))
+
         with caplog.at_level(logging.INFO):
             await asyncio.gather(
                 worker(manager_one),
                 worker(manager_two),
             )
+
+        assert (
+            errors or "Failed to update trace status: Trace trace-race" in caplog.text
+        )
+        assert await _get_trace_status(store_one, "trace-race") == TraceStatus.UPLOADED
     finally:
         _cleanup_state_manager(manager_one)
         _cleanup_state_manager(manager_two)
-
-    assert errors or "Failed to update trace status: Trace trace-race" in caplog.text
-    assert await _get_trace_status(store_one, "trace-race") == TraceStatus.UPLOADED
+        await store_one.close()
+        await store_two.close()
 
 
 @pytest.mark.asyncio
@@ -395,17 +408,21 @@ async def test_state_recovery_after_restart(tmp_path) -> None:
         await asyncio.sleep(0.1)
     finally:
         _cleanup_state_manager(manager)
+        await store.close()
 
     recovered_store = SqliteStateStore(db_path)
     await recovered_store.init_async_store()
-    recovered_trace = await recovered_store.get_trace("trace-recover")
-    assert recovered_trace is not None
-    assert recovered_trace.status == TraceStatus.WRITTEN
-    assert recovered_trace.ready_for_upload == 1
+    try:
+        recovered_trace = await recovered_store.get_trace("trace-recover")
+        assert recovered_trace is not None
+        assert recovered_trace.status == TraceStatus.WRITTEN
+        assert recovered_trace.ready_for_upload == 1
 
-    claimed = await recovered_store.claim_ready_traces(limit=1)
-    assert [row["trace_id"] for row in claimed] == ["trace-recover"]
-    assert claimed[0]["status"] == TraceStatus.UPLOADING
+        claimed = await recovered_store.claim_ready_traces(limit=1)
+        assert [row["trace_id"] for row in claimed] == ["trace-recover"]
+        assert claimed[0]["status"] == TraceStatus.UPLOADING
+    finally:
+        await recovered_store.close()
 
 
 @pytest.mark.asyncio
@@ -469,6 +486,7 @@ async def test_ready_for_upload_includes_bytes_after_restart(tmp_path) -> None:
         await asyncio.sleep(0.1)
     finally:
         _cleanup_state_manager(manager)
+        await store.close()
 
     recovered_store = SqliteStateStore(db_path)
     await recovered_store.init_async_store()
@@ -493,6 +511,7 @@ async def test_ready_for_upload_includes_bytes_after_restart(tmp_path) -> None:
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
         _cleanup_state_manager(recovered_manager)
+        await recovered_store.close()
 
 
 @pytest.mark.asyncio

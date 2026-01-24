@@ -449,3 +449,11 @@ class SqliteStateStore(StateStore):
                 .where(traces.c.recording_id == recording_id)
                 .values(progress_reported=1, last_updated=now)
             )
+
+    async def close(self) -> None:
+        """Close the database connection and dispose of the engine.
+
+        This must be called before the event loop closes to prevent
+        aiosqlite worker thread exceptions.
+        """
+        await self._engine.dispose()

@@ -15,7 +15,6 @@ import base64
 import struct
 import threading
 import time
-from typing import Any
 
 import pytest
 from neuracore_types import DataType
@@ -36,7 +35,6 @@ from neuracore.data_daemon.const import (
     TRACE_ID_FIELD_SIZE,
 )
 from neuracore.data_daemon.models import CommandType, CompleteMessage, MessageEnvelope
-from tests.unit.data_daemon.helpers import MockConfigManager
 
 
 class MockRDM:
@@ -387,19 +385,17 @@ def test_reader_assemble_failure_clears_pending() -> None:
 # =============================================================================
 
 
-def test_daemon_continues_after_ring_buffer_write_error(tmp_path: Any) -> None:
+def test_daemon_continues_after_ring_buffer_write_error() -> None:
     """Write error doesn't stop daemon.
 
     One bad message shouldn't kill daemon. Log error, skip message, keep
     processing.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -456,18 +452,16 @@ def test_daemon_continues_after_ring_buffer_write_error(tmp_path: Any) -> None:
     assert len(mock_rdm.enqueued) >= 1
 
 
-def test_daemon_continues_after_ring_buffer_read_error(tmp_path: Any) -> None:
+def test_daemon_continues_after_ring_buffer_read_error() -> None:
     """Read error doesn't stop daemon.
 
     Read failures must be contained. Daemon keeps running for other channels.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -493,18 +487,16 @@ def test_daemon_continues_after_ring_buffer_read_error(tmp_path: Any) -> None:
     assert "test-producer" in daemon.channels
 
 
-def test_daemon_continues_after_reader_poll_error(tmp_path: Any) -> None:
+def test_daemon_continues_after_reader_poll_error() -> None:
     """Reader error doesn't stop daemon.
 
     Per-channel errors isolated. Bad channel doesn't break good channels.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -531,18 +523,16 @@ def test_daemon_continues_after_reader_poll_error(tmp_path: Any) -> None:
     assert daemon.channels is not None
 
 
-def test_daemon_continues_after_channel_error(tmp_path: Any) -> None:
+def test_daemon_continues_after_channel_error() -> None:
     """One bad channel doesn't affect others.
 
     Critical isolation: channels are independent. One failure can't cascade.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -670,19 +660,17 @@ def test_many_partial_messages_memory_bounded() -> None:
     assert total_chunks == 1000
 
 
-def test_rapid_channel_create_destroy(tmp_path: Any) -> None:
+def test_rapid_channel_create_destroy() -> None:
     """Fast churn handled.
 
     Lifecycle stress: rapid channel turnover shouldn't leak resources or
     destabilize.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -784,19 +772,17 @@ def test_reader_state_consistent_after_poll_error() -> None:
     assert "valid-trace" in reader._pending
 
 
-def test_channel_state_consistent_after_error(tmp_path: Any) -> None:
+def test_channel_state_consistent_after_error() -> None:
     """Channel state valid after error.
 
     Channel object must stay in valid state. Partial state is worse than no
     state.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -823,18 +809,16 @@ def test_channel_state_consistent_after_error(tmp_path: Any) -> None:
 # =============================================================================
 
 
-def test_daemon_handles_none_ring_buffer(tmp_path: Any) -> None:
+def test_daemon_handles_none_ring_buffer() -> None:
     """None buffer handled safely.
 
     Defensive: missing buffer shouldn't crash. Skip and continue.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -847,18 +831,16 @@ def test_daemon_handles_none_ring_buffer(tmp_path: Any) -> None:
     daemon._drain_channel_messages()
 
 
-def test_daemon_handles_none_reader(tmp_path: Any) -> None:
+def test_daemon_handles_none_reader() -> None:
     """None reader handled safely.
 
     Same for missing reader. Graceful skip, not crash.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -872,18 +854,16 @@ def test_daemon_handles_none_reader(tmp_path: Any) -> None:
     daemon._drain_channel_messages()
 
 
-def test_data_chunk_before_open_buffer(tmp_path: Any) -> None:
+def test_data_chunk_before_open_buffer() -> None:
     """DATA_CHUNK before OPEN_RING_BUFFER.
 
     Out-of-order commands happen. Must handle gracefully, not crash.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -912,18 +892,16 @@ def test_data_chunk_before_open_buffer(tmp_path: Any) -> None:
         pass
 
 
-def test_trace_end_for_unknown_trace(tmp_path: Any) -> None:
+def test_trace_end_for_unknown_trace() -> None:
     """TRACE_END for nonexistent trace.
 
     Spurious or duplicate trace_end. Must not crash or corrupt state.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
