@@ -48,9 +48,9 @@ class Emitter(AsyncIOEventEmitter):
     PROGRESS_REPORT_FAILED = "PROGRESS_REPORT_FAILED"
     # (recording_id:str, error_message:str)
 
-    # Uploader -> State manager / RDM
+    # Uploader -> State manager
     UPLOAD_COMPLETE = "UPLOAD_COMPLETE"
-    # (delete this file/db entry)
+    # (trace_id)
 
     # Uploader -> state manager
     UPLOAD_FAILED = "UPLOAD_FAILED"
