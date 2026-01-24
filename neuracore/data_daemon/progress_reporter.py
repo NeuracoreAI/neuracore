@@ -53,13 +53,13 @@ class ProgressReporter:
         }
 
         auth = get_auth()
-        org_id = auth.get_org_id()
+        org_id = await auth.get_org_id()
 
         try:
             async with self.client_session.post(
                 f"{API_URL}/{org_id}/recording/register-traces",
                 json=body,
-                headers=auth.get_headers(),
+                headers=await auth.get_headers(self.client_session),
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as response:
                 if response.status >= 400:

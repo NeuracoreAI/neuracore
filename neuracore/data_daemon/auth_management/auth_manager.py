@@ -4,7 +4,8 @@ import logging
 import os
 from pathlib import Path
 
-import requests
+import aiofiles
+import aiohttp
 from pydantic import BaseModel, ValidationError
 
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
@@ -62,7 +63,7 @@ class AuthManager:
         self._access_token: str | None = None
         self._config: DaemonConfig = daemon_config
 
-    def _load_config(self) -> None:
+    async def _load_config(self) -> None:
         """Load authentication configuration from disk and set on DaemonConfig.
 
         Raises:
@@ -73,8 +74,11 @@ class AuthManager:
             return
 
         try:
-            with self._config_path.open("r", encoding=CONFIG_ENCODING) as f:
-                config_data = AuthConfig.model_validate_json(f.read())
+            async with aiofiles.open(
+                self._config_path, "r", encoding=CONFIG_ENCODING
+            ) as f:
+                content = await f.read()
+                config_data = AuthConfig.model_validate_json(content)
             # Set auth values on DaemonConfig
             if config_data.api_key:
                 self._config.api_key = config_data.api_key
@@ -90,8 +94,7 @@ class AuthManager:
         except OSError as e:
             raise ConfigError(f"Error loading config: cannot open file - {e}")
 
-    @property
-    def config(self) -> DaemonConfig:
+    async def load_config(self) -> DaemonConfig:
         """Get the current configuration, loading from disk if necessary.
 
         Returns:
@@ -100,10 +103,10 @@ class AuthManager:
         Raises:
             ConfigError: If there is an error loading the config.
         """
-        self._load_config()
+        await self._load_config()
         return self._config
 
-    def get_api_key(self) -> str:
+    async def get_api_key(self) -> str:
         """Get the API key from environment or config.
 
         Returns:
@@ -112,7 +115,7 @@ class AuthManager:
         Raises:
             AuthenticationError: If no API key is available.
         """
-        _ = self.config
+        await self._load_config()
 
         api_key = os.environ.get("NEURACORE_API_KEY") or self._config.api_key
 
@@ -121,7 +124,7 @@ class AuthManager:
 
         return api_key
 
-    def get_org_id(self) -> str:
+    async def get_org_id(self) -> str:
         """Get the organization ID.
 
         Returns:
@@ -130,15 +133,20 @@ class AuthManager:
         Raises:
             AuthenticationError: If no org_id is configured.
         """
-        _ = self.config
+        await self._load_config()
 
         if not self._config.current_org_id:
             raise AuthenticationError("No organization ID configured.")
 
         return self._config.current_org_id
 
-    def get_access_token(self) -> str:
+    async def get_access_token(
+        self, session: aiohttp.ClientSession | None = None
+    ) -> str:
         """Get a valid access token, obtaining a new one if necessary.
+
+        Args:
+            session: Optional aiohttp session. If not provided, creates a new one.
 
         Returns:
             A valid access token.
@@ -149,39 +157,52 @@ class AuthManager:
         if self._access_token is not None:
             return self._access_token
 
-        api_key = self.get_api_key()
+        api_key = await self.get_api_key()
 
-        try:
-            response = requests.post(
-                f"{API_URL}/auth/verify-api-key",
-                json={"api_key": api_key},
-                timeout=10,
-            )
+        async def _fetch_token(client: aiohttp.ClientSession) -> str:
+            try:
+                async with client.post(
+                    f"{API_URL}/auth/verify-api-key",
+                    json={"api_key": api_key},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as response:
+                    if response.status != 200:
+                        raise AuthenticationError(
+                            f"Failed to verify API key: {response.status}"
+                        )
 
-            if response.status_code != 200:
+                    token_data = await response.json()
+                    access_token = token_data.get("access_token")
+
+                    if not access_token:
+                        raise AuthenticationError("No access token in response")
+
+                    return access_token
+
+            except aiohttp.ClientConnectionError as e:
                 raise AuthenticationError(
-                    f"Failed to verify API key: {response.status_code}"
-                )
+                    f"Failed to connect to Neuracore server: {e}"
+                ) from e
+            except TimeoutError as e:
+                raise AuthenticationError(f"Request timed out: {e}") from e
+            except aiohttp.ClientError as e:
+                raise AuthenticationError(f"Failed to get access token: {e}") from e
 
-            token_data = response.json()
-            self._access_token = token_data.get("access_token")
+        if session is not None:
+            self._access_token = await _fetch_token(session)
+        else:
+            async with aiohttp.ClientSession() as client:
+                self._access_token = await _fetch_token(client)
 
-            if not self._access_token:
-                raise AuthenticationError("No access token in response")
+        return self._access_token
 
-            return self._access_token
-
-        except requests.exceptions.ConnectionError as e:
-            raise AuthenticationError(
-                f"Failed to connect to Neuracore server: {e}"
-            ) from e
-        except requests.exceptions.Timeout as e:
-            raise AuthenticationError(f"Request timed out: {e}") from e
-        except requests.exceptions.RequestException as e:
-            raise AuthenticationError(f"Failed to get access token: {e}") from e
-
-    def get_headers(self) -> dict[str, str]:
+    async def get_headers(
+        self, session: aiohttp.ClientSession | None = None
+    ) -> dict[str, str]:
         """Get HTTP headers for authenticated API requests.
+
+        Args:
+            session: Optional aiohttp session for token retrieval.
 
         Returns:
             Dict containing the Authorization header with bearer token.
@@ -189,7 +210,7 @@ class AuthManager:
         Raises:
             AuthenticationError: If unable to obtain a valid access token.
         """
-        access_token = self.get_access_token()
+        access_token = await self.get_access_token(session)
         return {"Authorization": f"Bearer {access_token}"}
 
     def invalidate_token(self) -> None:
@@ -225,15 +246,12 @@ def initialize_auth(
 def get_auth() -> AuthManager:
     """Get the global AuthManager singleton instance.
 
-    Automatically initializes auth if not already done, loading credentials
-    from the python frontend's config file.
-
     Returns:
         The global AuthManager instance used throughout the application.
+
+    Raises:
+        RuntimeError: If auth has not been initialized.
     """
     if _auth is None:
-        logger.debug("AuthManager not initialized, initializing now")
-        initialize_auth()
-
-    assert _auth is not None  # For mypy
+        raise RuntimeError("AuthManager not initialized. Call initialize_auth() first.")
     return _auth
