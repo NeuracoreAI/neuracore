@@ -6,18 +6,13 @@ import logging
 
 import zmq
 
+from neuracore.data_daemon.bootstrap import DaemonBootstrap
 from neuracore.data_daemon.communications_management.communications_manager import (
     SOCKET_PATH,
     CommunicationsManager,
 )
 from neuracore.data_daemon.communications_management.data_bridge import Daemon
 from neuracore.data_daemon.communications_management.producer import Producer
-from neuracore.data_daemon.event_loop_manager import EventLoopManager
-from neuracore.data_daemon.recording_encoding_disk_manager import (
-    recording_disk_manager as rdm_module,
-)
-
-RecordingDiskManager = rdm_module.RecordingDiskManager
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +22,10 @@ class ManagementChannel:
 
     - `get_nc_context()` → Producer (neuracore client side)
     - `get_ndd_context()` → Daemon instance or None if already running
+
+    Note: For production use, prefer using DaemonBootstrap directly
+    which provides proper lifecycle management. This class is maintained
+    for backward compatibility and testing.
     """
 
     def __init__(self) -> None:
@@ -36,6 +35,7 @@ class ManagementChannel:
         management channel.
         """
         self._ctx = zmq.Context.instance()
+        self._bootstrap: DaemonBootstrap | None = None
 
     def get_nc_context(self) -> Producer:
         """Return a producer-side context used by neuracore."""
@@ -45,11 +45,11 @@ class ManagementChannel:
     def get_ndd_context(self) -> Daemon | None:
         """Return a daemon context, or None if one is already running.
 
-        We try to bind via CommunicationsManager; if it fails with EADDRINUSE,
-        we infer another daemon is already running and return None.
+        Uses DaemonBootstrap for proper initialization of all subsystems
+        including StateManager, UploadManager, and other async services.
 
-        NOTE: This is intentionally simple. More advanced logic could try to
-        probe for a stale socket.
+        Returns:
+            Daemon instance if successful, None if already running or failed.
         """
         if SOCKET_PATH.exists():
             logger.warning(
@@ -59,24 +59,25 @@ class ManagementChannel:
             )
             return None
 
-        comm = CommunicationsManager()
+        # Use DaemonBootstrap for proper initialization
+        self._bootstrap = DaemonBootstrap()
+        context = self._bootstrap.start()
 
-        loop_manager = EventLoopManager()
-        try:
-            loop_manager.start()
-        except Exception:
-            logger.exception("Failed to start EventLoopManager")
-            return None
-
-        try:
-            recording_disk_manager = RecordingDiskManager(loop_manager=loop_manager)
-        except Exception:
-            logger.exception("Failed to initialize RecordingDiskManager")
-            loop_manager.stop()
+        if context is None:
+            logger.error("Failed to initialize daemon context")
             return None
 
         return Daemon(
-            recording_disk_manager=recording_disk_manager,
-            comm_manager=comm,
-            loop_manager=loop_manager,
+            recording_disk_manager=context.recording_disk_manager,
+            comm_manager=context.comm_manager,
         )
+
+    def shutdown(self) -> None:
+        """Shutdown the daemon and cleanup resources.
+
+        Should be called after daemon.run() exits to properly
+        cleanup all subsystems.
+        """
+        if self._bootstrap is not None:
+            self._bootstrap.stop()
+            self._bootstrap = None
