@@ -295,8 +295,8 @@ async def test_emits_upload_complete_event(
     """Manager should emit UPLOAD_COMPLETE event on successful upload."""
     completed = []
 
-    async def on_complete(trace_id: str, recording_id: str) -> None:
-        completed.append((trace_id, recording_id))
+    async def on_complete(trace_id: str) -> None:
+        completed.append(trace_id)
 
     get_emitter().on(Emitter.UPLOAD_COMPLETE, on_complete)
 
@@ -339,7 +339,7 @@ async def test_emits_upload_complete_event(
         await asyncio.sleep(0.5)
 
         assert len(completed) == 1
-        assert completed[0] == ("trace-1", "rec-1")
+        assert completed[0] == "trace-1"
 
 
 @pytest.mark.asyncio
@@ -568,7 +568,7 @@ async def test_upload_manager_handles_concurrent_uploads(
 
     completed = []
 
-    async def on_complete(trace_id: str, recording_id: str) -> None:
+    async def on_complete(trace_id: str) -> None:
         completed.append(trace_id)
 
     get_emitter().on(Emitter.UPLOAD_COMPLETE, on_complete)
