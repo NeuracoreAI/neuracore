@@ -399,7 +399,7 @@ def test_daemon_continues_after_ring_buffer_write_error() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     # Very small buffer
@@ -422,6 +422,7 @@ def test_daemon_continues_after_ring_buffer_write_error() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(huge_data).decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
 
@@ -443,6 +444,7 @@ def test_daemon_continues_after_ring_buffer_write_error() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(small_data).decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
     daemon._handle_write_data_chunk(channel, small_msg)
@@ -466,7 +468,7 @@ def test_daemon_continues_after_ring_buffer_read_error() -> None:
     )
 
     # Create channel with corrupted buffer state
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     # Setup ring buffer with corrupted data
@@ -501,7 +503,7 @@ def test_daemon_continues_after_reader_poll_error() -> None:
     )
 
     # Create channel
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     # Setup ring buffer
@@ -537,8 +539,8 @@ def test_daemon_continues_after_channel_error() -> None:
     )
 
     # Create two channels
-    channel_good = ChannelState(producer_id="good-producer", recording_id="rec-good")
-    channel_bad = ChannelState(producer_id="bad-producer", recording_id="rec-bad")
+    channel_good = ChannelState(producer_id="good-producer")
+    channel_bad = ChannelState(producer_id="bad-producer")
     daemon.channels["good-producer"] = channel_good
     daemon.channels["bad-producer"] = channel_bad
 
@@ -564,6 +566,7 @@ def test_daemon_continues_after_channel_error() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(b"good-data").decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-good",
         },
     )
     daemon._handle_write_data_chunk(channel_good, data_msg)
@@ -676,7 +679,7 @@ def test_rapid_channel_create_destroy() -> None:
 
     for i in range(100):
         producer_id = f"producer-{i}"
-        channel = ChannelState(producer_id=producer_id, recording_id=f"rec-{i}")
+        channel = ChannelState(producer_id=producer_id)
         daemon.channels[producer_id] = channel
 
         open_msg = MessageEnvelope(
@@ -786,7 +789,7 @@ def test_channel_state_consistent_after_error() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     open_msg = MessageEnvelope(
@@ -823,7 +826,7 @@ def test_daemon_handles_none_ring_buffer() -> None:
     )
 
     # Channel without buffer
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
     # channel.ring_buffer is None
 
@@ -845,7 +848,7 @@ def test_daemon_handles_none_reader() -> None:
     )
 
     # Channel with buffer but no reader
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     channel.ring_buffer = RingBuffer(size=1024)
     channel.reader = None
     daemon.channels["test-producer"] = channel
@@ -867,7 +870,7 @@ def test_data_chunk_before_open_buffer() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
     # No OPEN_RING_BUFFER yet
 
@@ -881,6 +884,7 @@ def test_data_chunk_before_open_buffer() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(b"data").decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
 
@@ -905,7 +909,7 @@ def test_trace_end_for_unknown_trace() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     # TRACE_END for trace that was never started

@@ -93,13 +93,14 @@ class TestOnCompleteMessage:
             recording_disk_manager=mock_rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
 
         daemon._on_complete_message(
             channel=channel,
             trace_id="trace-456",
             data_type=DataType.JOINT_POSITIONS,
             data=b"test-data",
+            recording_id="rec-123",
             final_chunk=False,
         )
 
@@ -121,13 +122,14 @@ class TestOnCompleteMessage:
             recording_disk_manager=mock_rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
 
         daemon._on_complete_message(
             channel=channel,
             trace_id="trace-456",
             data_type=DataType.RGB_IMAGES,
             data=b"",
+            recording_id="rec-123",
             final_chunk=True,
         )
 
@@ -155,13 +157,14 @@ class TestOnCompleteMessage:
             "robot_instance": 1,
         }
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
 
         daemon._on_complete_message(
             channel=channel,
             trace_id="trace-456",
             data_type=DataType.CUSTOM_1D,
             data=b"data",
+            recording_id="rec-123",
             final_chunk=False,
         )
 
@@ -184,7 +187,7 @@ class TestOnCompleteMessage:
             recording_disk_manager=mock_rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
 
         # No metadata registered for this trace
         daemon._on_complete_message(
@@ -192,6 +195,7 @@ class TestOnCompleteMessage:
             trace_id="unknown-trace",
             data_type=DataType.CUSTOM_1D,
             data=b"data",
+            recording_id="rec-123",
             final_chunk=False,
         )
 
@@ -203,30 +207,6 @@ class TestOnCompleteMessage:
         assert msg.robot_id is None
         assert msg.data_type_name == ""
         assert msg.robot_instance == 0
-
-    def test_on_complete_message_handles_empty_recording_id(self) -> None:
-        """_on_complete_message should use empty string if recording_id is None."""
-        mock_comm = MockComm()
-        mock_rdm = MockRDM()
-
-        daemon = Daemon(
-            comm_manager=mock_comm,
-            recording_disk_manager=mock_rdm,
-        )
-
-        channel = ChannelState(producer_id="test-producer", recording_id=None)
-
-        daemon._on_complete_message(
-            channel=channel,
-            trace_id="trace-456",
-            data_type=DataType.CUSTOM_1D,
-            data=b"data",
-            final_chunk=False,
-        )
-
-        assert len(mock_rdm.enqueued) == 1
-        msg = mock_rdm.enqueued[0]
-        assert msg.recording_id == ""
 
 
 class TestHandleEndTrace:
@@ -242,7 +222,7 @@ class TestHandleEndTrace:
             recording_disk_manager=mock_rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
         daemon.channels["test-producer"] = channel
 
         daemon._trace_metadata["trace-456"] = {
@@ -282,7 +262,7 @@ class TestHandleEndTrace:
             recording_disk_manager=mock_rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
         daemon.channels["test-producer"] = channel
 
         # Register trace metadata with invalid data_type
@@ -319,7 +299,7 @@ class TestHandleEndTrace:
             recording_disk_manager=mock_rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
         daemon.channels["test-producer"] = channel
 
         # No metadata registered
@@ -353,7 +333,7 @@ class TestHandleEndTrace:
             recording_disk_manager=mock_rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
         daemon.channels["test-producer"] = channel
 
         daemon._trace_metadata["trace-456"] = {"data_type": DataType.CUSTOM_1D.value}
@@ -386,7 +366,7 @@ class TestHandleEndTrace:
             recording_disk_manager=mock_rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
 
         message = MessageEnvelope(
             producer_id="test-producer",
@@ -404,7 +384,7 @@ class TestHandleEndTrace:
         assert len(mock_rdm.enqueued) == 0
 
     def test_handle_end_trace_skips_if_missing_recording_id(self) -> None:
-        """_handle_end_trace should skip if recording_id is missing."""
+        """_handle_end_trace skips if recording_id not in _trace_recordings."""
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -413,7 +393,7 @@ class TestHandleEndTrace:
             recording_disk_manager=mock_rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id=None)
+        channel = ChannelState(producer_id="test-producer")
 
         message = MessageEnvelope(
             producer_id="test-producer",
@@ -421,7 +401,7 @@ class TestHandleEndTrace:
             payload={
                 "trace_end": {
                     "trace_id": "trace-456",
-                    # Missing recording_id and channel.recording_id is None
+                    # Missing recording_id and trace not in _trace_recordings
                 }
             },
         )
@@ -473,8 +453,12 @@ class TestDrainChannelMessages:
             recording_disk_manager=mock_rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
         daemon.channels["test-producer"] = channel
+
+        # Register trace with recording_id (required for drain to work)
+        daemon._trace_recordings["trace-789"] = "rec-123"
+        daemon._recording_traces["rec-123"] = {"trace-789"}
 
         open_msg = MessageEnvelope(
             producer_id="test-producer",
@@ -509,8 +493,12 @@ class TestDrainChannelMessages:
             recording_disk_manager=mock_rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
         daemon.channels["test-producer"] = channel
+
+        # Register trace with recording_id (required for drain to work)
+        daemon._trace_recordings["trace-multi"] = "rec-123"
+        daemon._recording_traces["rec-123"] = {"trace-multi"}
 
         open_msg = MessageEnvelope(
             producer_id="test-producer",
@@ -547,6 +535,42 @@ class TestDrainChannelMessages:
         assert msg.trace_id == "trace-multi"
         assert msg.data_type == DataType.JOINT_VELOCITIES
 
+    def test_drain_channel_messages_drops_unregistered_trace(self) -> None:
+        """_drain_channel_messages should drop messages for unregistered traces."""
+        mock_comm = MockComm()
+        mock_rdm = MockRDM()
+
+        daemon = Daemon(
+            comm_manager=mock_comm,
+            recording_disk_manager=mock_rdm,
+        )
+
+        channel = ChannelState(producer_id="test-producer")
+        daemon.channels["test-producer"] = channel
+
+        # Don't register trace - should be dropped
+
+        open_msg = MessageEnvelope(
+            producer_id="test-producer",
+            command=CommandType.OPEN_RING_BUFFER,
+            payload={"open_ring_buffer": {"size": 4096}},
+        )
+        daemon._handle_open_ring_buffer(channel, open_msg)
+
+        _write_chunk_to_ring_buffer(
+            ring=channel.ring_buffer,
+            trace_id="unregistered-trace",
+            data_type=DataType.DEPTH_IMAGES,
+            chunk_index=0,
+            total_chunks=1,
+            data=b"image-data",
+        )
+
+        daemon._drain_channel_messages()
+
+        # Message should be dropped since trace is not registered
+        assert len(mock_rdm.enqueued) == 0
+
 
 class TestDataTypeHandling:
     """Tests for various DataType scenarios."""
@@ -576,13 +600,14 @@ class TestDataTypeHandling:
             recording_disk_manager=mock_rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
 
         daemon._on_complete_message(
             channel=channel,
             trace_id="trace-456",
             data_type=data_type,
             data=b"test-data",
+            recording_id="rec-123",
             final_chunk=False,
         )
 
@@ -613,7 +638,6 @@ class TestExpiredChannelCleanup:
 
         channel = ChannelState(
             producer_id="expired-producer",
-            recording_id="rec-expired",
             trace_id="trace-expired",
         )
         channel.last_heartbeat = channel.last_heartbeat - timedelta(
@@ -649,7 +673,6 @@ class TestExpiredChannelCleanup:
 
         channel = ChannelState(
             producer_id="expired-producer",
-            recording_id=None,
             trace_id=None,
         )
         channel.last_heartbeat = channel.last_heartbeat - timedelta(
@@ -681,10 +704,13 @@ class TestExpiredChannelCleanup:
 
         channel = ChannelState(
             producer_id="active-producer",
-            recording_id="rec-active",
             trace_id="trace-active",
         )
         daemon.channels["active-producer"] = channel
+
+        # Register trace with recording
+        daemon._trace_recordings["trace-active"] = "rec-active"
+        daemon._recording_traces["rec-active"] = {"trace-active"}
 
         daemon._cleanup_expired_channels()
 
@@ -711,13 +737,14 @@ class TestRDMEnqueueErrorHandling:
             recording_disk_manager=failing_rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
 
         daemon._on_complete_message(
             channel=channel,
             trace_id="trace-456",
             data_type=DataType.CUSTOM_1D,
             data=b"test-data",
+            recording_id="rec-123",
             final_chunk=False,
         )
 
@@ -743,13 +770,14 @@ class TestRDMEnqueueErrorHandling:
             recording_disk_manager=rdm,
         )
 
-        channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+        channel = ChannelState(producer_id="test-producer")
 
         daemon._on_complete_message(
             channel=channel,
             trace_id="trace-1",
             data_type=DataType.CUSTOM_1D,
             data=b"data-1",
+            recording_id="rec-123",
             final_chunk=False,
         )
 
@@ -758,6 +786,7 @@ class TestRDMEnqueueErrorHandling:
             trace_id="trace-2",
             data_type=DataType.CUSTOM_1D,
             data=b"data-2",
+            recording_id="rec-123",
             final_chunk=False,
         )
 
