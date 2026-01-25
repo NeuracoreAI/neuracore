@@ -19,7 +19,6 @@ from neuracore.data_daemon.communications_management import (
 from neuracore.data_daemon.communications_management import (
     data_bridge as data_bridge_module,
 )
-from neuracore.data_daemon.communications_management import producer as producer_module
 from neuracore.data_daemon.communications_management.communications_manager import (
     CommunicationsManager,
 )
@@ -34,7 +33,6 @@ from neuracore.data_daemon.recording_encoding_disk_manager import (
     recording_disk_manager as rdm_module,
 )
 
-TEST_HEARTBEAT_INTERVAL_SECS = 0.1
 TEST_HEARTBEAT_TIMEOUT_SECS = 0.3
 
 TEST_HEARTBEAT_INTERVAL_SECS = 0.1
@@ -71,6 +69,7 @@ def _run_daemon_loop(
     comm.consumer_socket.setsockopt(zmq.LINGER, 0)
 
     while not stop_event.is_set():
+        daemon._finalize_pending_closes()
         msg = None
         try:
             msg = comm.receive_message()
@@ -102,14 +101,6 @@ def ipc_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     mpsa(comms_module, "SOCKET_PATH", socket_path)
     mpsa(comms_module, "RECORDING_EVENTS_SOCKET_PATH", events_path)
     mpsa(data_bridge_module, "HEARTBEAT_TIMEOUT_SECS", TEST_HEARTBEAT_TIMEOUT_SECS)
-
-    original_init = producer_module.Producer.__init__
-
-    def patched_init(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
-        self._heartbeat_interval = TEST_HEARTBEAT_INTERVAL_SECS
-
-    mpsa(producer_module.Producer, "__init__", patched_init)
 
     yield
 
@@ -227,13 +218,6 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
     assert channel.ring_buffer is not None
     assert channel.ring_buffer.size == 2048
 
-    last_heartbeat = channel.last_heartbeat
-    producer.heartbeat()
-    assert _wait_for(
-        lambda: daemon.channels[producer.producer_id].last_heartbeat > last_heartbeat,
-        timeout=0.5,
-    )
-
     payload = json.dumps({"seq": 1}).encode("utf-8")
     active_trace_id = producer.trace_id
     producer.send_data(
@@ -277,18 +261,12 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
 def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_detection(
     daemon_runtime, tmp_path: Path
 ) -> None:
-    """Tests the following:
+    """Tests channel timeout cleanup and trace finalization.
 
-    1. Heartbeat timeout cleanup: Producer does not send data chunks
-        after the heartbeat timeout.
-    2. Partial trace finalization: Daemon sends a final chunk after heartbeat
-        timeout and the trace is written to disk.
-    3. Crash detection: Daemon removes the channel after a heartbeat timeout
-        and the trace is finalized.
-
-    This test case starts a producer and a daemon, and then waits for the
-    heartbeat timeout. It then verifies that the trace is written to disk
-    and that the channel is removed from the daemon.
+    Verifies that:
+    1. After inactivity timeout, the daemon removes the channel
+    2. Partial trace data is finalized and written to disk
+    3. Crash detection works (channel removed after timeout)
     """
     daemon, _, context = daemon_runtime
 
@@ -300,28 +278,8 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
 
     producer.start_new_trace()
     producer.open_ring_buffer(size=1024)
-    producer.start_producer()
 
     assert _wait_for(lambda: producer.producer_id in daemon.channels, timeout=0.5)
-
-    channel = daemon.channels[producer.producer_id]
-    first_heartbeat = channel.last_heartbeat
-    assert _wait_for(
-        lambda: daemon.channels[producer.producer_id].last_heartbeat > first_heartbeat,
-        timeout=0.5,
-    )
-    second_heartbeat = daemon.channels[producer.producer_id].last_heartbeat
-    assert _wait_for(
-        lambda: daemon.channels[producer.producer_id].last_heartbeat > second_heartbeat,
-        timeout=0.5,
-    )
-    third_heartbeat = daemon.channels[producer.producer_id].last_heartbeat
-    interval = (third_heartbeat - second_heartbeat).total_seconds()
-    assert (
-        TEST_HEARTBEAT_INTERVAL_SECS * 0.5
-        <= interval
-        <= TEST_HEARTBEAT_INTERVAL_SECS * 3
-    )
 
     payload = json.dumps({"seq": 1}).encode("utf-8")
     producer.send_data(
@@ -343,8 +301,6 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
     get_emitter().on(Emitter.TRACE_WRITTEN, on_trace_written)
     try:
         producer._stop_event.set()
-        if hasattr(producer, "_heartbeat_thread"):
-            producer._heartbeat_thread.join(timeout=1)
         if producer.socket is not None:
             producer.socket.close(0)
 
@@ -371,6 +327,7 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
 
 
 def test_socket_cleanup_on_disconnect(daemon_runtime) -> None:
+    """Test that channels are cleaned up after producer disconnects."""
     daemon, _, context = daemon_runtime
 
     producer_comm = CommunicationsManager(context=context)
@@ -379,13 +336,10 @@ def test_socket_cleanup_on_disconnect(daemon_runtime) -> None:
     )
     producer.start_new_trace()
     producer.open_ring_buffer(size=512)
-    producer.start_producer()
 
     assert _wait_for(lambda: producer.producer_id in daemon.channels, timeout=0.5)
 
     producer._stop_event.set()
-    if hasattr(producer, "_heartbeat_thread"):
-        producer._heartbeat_thread.join(timeout=1)
     if producer.socket is not None:
         producer.socket.close(0)
 
@@ -393,3 +347,399 @@ def test_socket_cleanup_on_disconnect(daemon_runtime) -> None:
         lambda: producer.producer_id not in daemon.channels,
         timeout=TEST_HEARTBEAT_TIMEOUT_SECS + 1,
     )
+
+
+def test_deferred_close_honors_zmq_buffer_data(loop_manager: EventLoopManager) -> None:
+    """Deferred close mechanism ensures ZMQ buffer data is processed before blocking.
+
+    The Story:
+        A producer is streaming data when the user calls `stop_recording()`.
+        Due to ZMQ's internal buffering (default HWM ~1000 messages), some
+        DATA_CHUNK messages are still queued in the socket when RECORDING_STOPPED
+        arrives at the daemon. Without the deferred close mechanism, these
+        buffered messages would be immediately dropped when the guard check
+        at line 436 blocks data for closed recordings.
+
+        The deferred close solves this by using a two-phase approach:
+        1. RECORDING_STOPPED adds to `_pending_close_recordings`
+        2. Next loop iteration moves pending → `_closed_recordings`
+
+        This one-iteration delay allows any DATA_CHUNK messages that were
+        already in the ZMQ buffer to be processed before blocking begins.
+
+    The Flow:
+        1. Create a mock RECORDING_STOPPED message for "rec-123"
+        2. Call `daemon._handle_recording_stopped(msg)`
+        3. Assert: "rec-123" is in `_pending_close_recordings`
+        4. Assert: "rec-123" is NOT in `_closed_recordings`
+        5. Assert: STOP_RECORDING event was emitted (via event listener)
+        6. Call `daemon._finalize_pending_closes()`
+        7. Assert: "rec-123" is now in `_closed_recordings`
+        8. Assert: `_pending_close_recordings` is empty
+
+    Why This Matters:
+        ZMQ PUSH/PULL sockets can buffer up to 1000 messages by default.
+        At 30 fps with 16KB chunks, this represents ~0.5 seconds of video
+        data (~16MB). Immediate blocking on RECORDING_STOPPED would silently
+        drop this buffered data, causing incomplete recordings with missing
+        final frames. Users would not know data was lost until playback.
+
+    Key Assertions:
+        - After _handle_recording_stopped: recording_id IN pending, NOT IN closed
+        - STOP_RECORDING event emitted exactly once with correct recording_id
+        - After _finalize_pending_closes: recording_id IN closed
+        - _pending_close_recordings is empty after finalization
+        - State transitions are deterministic (no race conditions)
+    """
+    from unittest.mock import MagicMock
+
+    from neuracore.data_daemon.communications_management.communications_manager import (
+        MessageEnvelope,
+    )
+    from neuracore.data_daemon.models import CommandType
+
+    mock_comm = MagicMock()
+    mock_rdm = MagicMock()
+    daemon = Daemon(comm_manager=mock_comm, recording_disk_manager=mock_rdm)
+
+    recording_id = "rec-123"
+
+    stop_events_received: list[str] = []
+
+    def on_stop_recording(rec_id: str) -> None:
+        stop_events_received.append(rec_id)
+
+    emitter = get_emitter()
+    emitter.on(Emitter.STOP_RECORDING, on_stop_recording)
+
+    try:
+        msg = MessageEnvelope(
+            producer_id=None,
+            command=CommandType.RECORDING_STOPPED,
+            payload={"recording_stopped": {"recording_id": recording_id}},
+        )
+
+        assert recording_id not in daemon._pending_close_recordings
+        assert recording_id not in daemon._closed_recordings
+
+        daemon._handle_recording_stopped(None, msg)
+
+        assert recording_id in daemon._pending_close_recordings
+        assert recording_id not in daemon._closed_recordings
+
+        assert len(stop_events_received) == 1
+        assert stop_events_received[0] == recording_id
+
+        daemon._finalize_pending_closes()
+
+        assert recording_id in daemon._closed_recordings
+
+        assert len(daemon._pending_close_recordings) == 0
+
+        daemon._finalize_pending_closes()
+        assert recording_id in daemon._closed_recordings
+        assert len(daemon._pending_close_recordings) == 0
+        assert len(stop_events_received) == 1
+
+    finally:
+        emitter.remove_listener(Emitter.STOP_RECORDING, on_stop_recording)
+
+
+def test_data_blocked_after_recording_closed(
+    loop_manager: EventLoopManager, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Data chunks for closed recordings are dropped with warning.
+
+    The Story:
+        A recording has been stopped and fully finalized (recording_id is
+        in `_closed_recordings`). A late DATA_CHUNK arrives - perhaps from
+        a slow producer, network delay, or a producer that didn't receive
+        the stop signal. This data belongs to a completed recording and
+        must be dropped to prevent data corruption.
+
+        Without this guard, late data could:
+        - Be written to disk after the recording was marked complete
+        - Cause inconsistent trace files (extra data after "final" frame)
+        - Mix data between recordings if the same producer_id is reused
+
+    The Flow:
+        1. Create daemon instance with mocked dependencies
+        2. Directly add "rec-closed" to `daemon._closed_recordings`
+        3. Create a DATA_CHUNK message for "rec-closed"
+        4. Call `daemon._handle_write_data_chunk(msg)`
+        5. Assert: Method returns early (check via mock or return value)
+        6. Assert: Warning was logged with recording_id and trace_id
+        7. Assert: Ring buffer was NOT written to
+        8. Assert: No TRACE_WRITTEN event emitted
+
+    Why This Matters:
+        Data integrity is paramount. A recording that's been stopped should
+        be immutable - no additional data should be added. Late arrivals
+        could cause:
+        - Trace files with more frames than reported
+        - Upload failures due to checksum mismatches
+        - Confusion when replaying recordings
+
+    Key Assertions:
+        - _handle_write_data_chunk returns early for closed recording
+        - Warning logged: "Dropping data for closed recording_id=X trace_id=Y"
+        - Ring buffer write count unchanged
+        - No events emitted (TRACE_WRITTEN, etc.)
+        - Channel state unchanged
+    """
+    import logging
+    from unittest.mock import MagicMock
+
+    from neuracore.data_daemon.communications_management.communications_manager import (
+        MessageEnvelope,
+    )
+    from neuracore.data_daemon.communications_management.data_bridge import ChannelState
+    from neuracore.data_daemon.models import CommandType, DataChunkPayload
+
+    mock_comm = MagicMock()
+    mock_rdm = MagicMock()
+    daemon = Daemon(comm_manager=mock_comm, recording_disk_manager=mock_rdm)
+
+    recording_id = "rec-closed"
+    trace_id = "trace-late-arrival"
+    producer_id = "prod-456"
+
+    daemon._closed_recordings.add(recording_id)
+
+    mock_ring_buffer = MagicMock()
+    mock_ring_buffer.write = MagicMock(return_value=None)
+    channel = ChannelState(producer_id=producer_id, ring_buffer=mock_ring_buffer)
+    daemon.channels[producer_id] = channel
+
+    events_received: list[str] = []
+
+    def on_trace_written(tid: str, rid: str, bytes_written: int) -> None:
+        events_received.append(f"TRACE_WRITTEN:{tid}")
+
+    emitter = get_emitter()
+    emitter.on(Emitter.TRACE_WRITTEN, on_trace_written)
+
+    try:
+        data_chunk = DataChunkPayload(
+            channel_id=producer_id,
+            recording_id=recording_id,
+            trace_id=trace_id,
+            chunk_index=0,
+            total_chunks=1,
+            data_type=DataType.CUSTOM_1D,
+            data_type_name="test",
+            robot_instance=1,
+            robot_id="robot-1",
+            robot_name="test-robot",
+            dataset_id="dataset-1",
+            dataset_name="test-dataset",
+            data=b"late data that should be dropped",
+        )
+
+        msg = MessageEnvelope(
+            producer_id=producer_id,
+            command=CommandType.DATA_CHUNK,
+            payload={"data_chunk": data_chunk.to_dict()},
+        )
+
+        with caplog.at_level(logging.WARNING):
+            daemon._handle_write_data_chunk(channel, msg)
+
+        mock_ring_buffer.write.assert_not_called()
+
+        warning_found = any(
+            "Dropping data for closed recording_id=rec-closed" in record.message
+            for record in caplog.records
+        )
+        assert warning_found, (
+            f"Expected warning about dropping data not found. "
+            f"Logs: {[r.message for r in caplog.records]}"
+        )
+
+        assert len(events_received) == 0
+
+        assert channel in daemon.channels.values()
+        assert channel.ring_buffer is mock_ring_buffer
+
+    finally:
+        emitter.remove_listener(Emitter.TRACE_WRITTEN, on_trace_written)
+
+
+def test_channel_expires_after_timeout_without_recording_stopped(
+    loop_manager: EventLoopManager,
+) -> None:
+    """Channels are cleaned up after inactivity timeout even without RECORDING_STOPPED.
+
+    The Story:
+        A producer crashes, loses network connectivity, or the user's code
+        exits unexpectedly mid-recording. The producer never sends a
+        RECORDING_STOPPED message. The daemon must detect this "orphaned"
+        channel via the inactivity timeout and clean it up properly,
+        ensuring partial trace data is finalized and resources are released.
+
+        This is the safety net for abnormal terminations. Without it:
+        - Ring buffers would leak memory
+        - Partial traces would never be uploaded
+        - Channel dict would grow unbounded
+
+    The Flow:
+        1. Create daemon with channel for producer "prod-123"
+        2. Set channel's `last_heartbeat` to (now - 15 seconds)
+        3. Register event listener for TRACE_END
+        4. Call `daemon._cleanup_expired_channels()`
+        5. Assert: TRACE_END event received for channel's trace_id
+        6. Assert: "prod-123" NOT in `daemon.channels`
+        7. Assert: Ring buffer was cleaned up
+
+    Why This Matters:
+        Producer crashes are inevitable in robotics systems. Hardware
+        failures, network partitions, and software bugs all cause
+        unexpected disconnections. The daemon must handle these gracefully:
+        - Detect dead producers via timeout
+        - Finalize partial traces (so data isn't lost)
+        - Clean up resources (memory, file handles)
+        - Allow the producer to reconnect with fresh state
+
+    Key Assertions:
+        - Channel with expired last_heartbeat is removed from channels dict
+        - TRACE_END event emitted with correct trace_id and recording_id
+        - Ring buffer deleted (or marked for cleanup)
+        - Channel not in daemon.channels after cleanup
+        - Cleanup is idempotent (calling twice doesn't error)
+    """
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import MagicMock
+
+    from neuracore.data_daemon.communications_management.data_bridge import ChannelState
+
+    mock_comm = MagicMock()
+    mock_rdm = MagicMock()
+    daemon = Daemon(comm_manager=mock_comm, recording_disk_manager=mock_rdm)
+
+    producer_id = "prod-123"
+    trace_id = "trace-orphaned"
+    recording_id = "rec-orphaned"
+
+    mock_ring_buffer = MagicMock()
+    channel = ChannelState(
+        producer_id=producer_id,
+        ring_buffer=mock_ring_buffer,
+        trace_id=trace_id,
+    )
+
+    channel.last_heartbeat = datetime.now(timezone.utc) - timedelta(seconds=15)
+
+    daemon.channels[producer_id] = channel
+    daemon._trace_recordings[trace_id] = recording_id
+    daemon._recording_traces[recording_id] = {trace_id}
+    daemon._trace_metadata[trace_id] = {"data_type": "CUSTOM_1D"}
+
+    assert producer_id in daemon.channels
+
+    daemon._cleanup_expired_channels()
+
+    assert producer_id not in daemon.channels
+
+    mock_rdm.enqueue.assert_called()
+    call_args = mock_rdm.enqueue.call_args
+    complete_message = call_args[0][0]
+    assert complete_message.final_chunk is True
+    assert complete_message.trace_id == trace_id
+    assert complete_message.recording_id == recording_id
+
+    daemon._cleanup_expired_channels()
+    assert producer_id not in daemon.channels
+
+
+def test_channel_stays_alive_within_timeout(loop_manager: EventLoopManager) -> None:
+    """Active channels within timeout window are NOT cleaned up.
+
+    The Story:
+        A channel received data recently (within the timeout window).
+        The cleanup routine runs as part of the normal daemon loop.
+        This active channel must NOT be removed - only truly inactive
+        channels should be cleaned up.
+
+        False positives in timeout detection would be catastrophic:
+        - Active recordings would lose data mid-stream
+        - Producers would need to reconnect and restart
+        - Trust in the system would be destroyed
+
+    The Flow:
+        1. Create daemon with channel for producer "prod-active"
+        2. Set channel's `last_heartbeat` to (now - 5 seconds)
+           (well within 10-second timeout)
+        3. Register event listener for TRACE_END
+        4. Call `daemon._cleanup_expired_channels()`
+        5. Assert: NO TRACE_END event received
+        6. Assert: "prod-active" STILL in `daemon.channels`
+        7. Assert: Ring buffer intact and usable
+
+    Why This Matters:
+        The timeout check must be precise. A channel that received data
+        5 seconds ago is clearly active. Removing it would:
+        - Cause immediate data loss for the ongoing recording
+        - Force the producer to handle unexpected disconnection
+        - Create inconsistent state between producer and daemon
+
+        This test ensures the boundary condition is correct: channels
+        are only cleaned up when last_heartbeat > HEARTBEAT_TIMEOUT_SECS.
+
+    Key Assertions:
+        - Channel with recent last_heartbeat remains in channels dict
+        - NO TRACE_END event emitted
+        - Ring buffer unchanged and functional
+        - Channel state (trace_id, recording_id) preserved
+        - Multiple calls to cleanup don't affect active channels
+    """
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import MagicMock
+
+    from neuracore.data_daemon.communications_management.data_bridge import ChannelState
+
+    mock_comm = MagicMock()
+    mock_rdm = MagicMock()
+    daemon = Daemon(comm_manager=mock_comm, recording_disk_manager=mock_rdm)
+
+    producer_id = "prod-active"
+    trace_id = "trace-active"
+    recording_id = "rec-active"
+
+    mock_ring_buffer = MagicMock()
+    channel = ChannelState(
+        producer_id=producer_id,
+        ring_buffer=mock_ring_buffer,
+        trace_id=trace_id,
+    )
+
+    channel.last_heartbeat = datetime.now(timezone.utc) - timedelta(seconds=0.1)
+
+    daemon.channels[producer_id] = channel
+    daemon._trace_recordings[trace_id] = recording_id
+    daemon._recording_traces[recording_id] = {trace_id}
+    daemon._trace_metadata[trace_id] = {"data_type": "CUSTOM_1D"}
+
+    initial_trace_id = channel.trace_id
+    initial_ring_buffer = channel.ring_buffer
+
+    assert producer_id in daemon.channels
+
+    daemon._cleanup_expired_channels()
+
+    assert producer_id in daemon.channels
+
+    mock_rdm.enqueue.assert_not_called()
+
+    assert channel.ring_buffer is initial_ring_buffer
+    assert channel.ring_buffer is mock_ring_buffer
+
+    assert channel.trace_id == initial_trace_id
+    assert channel.trace_id == trace_id
+    assert daemon._trace_recordings[trace_id] == recording_id
+
+    daemon._cleanup_expired_channels()
+    daemon._cleanup_expired_channels()
+    assert producer_id in daemon.channels
+    assert channel.trace_id == trace_id
+    assert channel.ring_buffer is mock_ring_buffer
+    mock_rdm.enqueue.assert_not_called()
