@@ -205,6 +205,8 @@ class VideoDataStream(DataStream):
         # Serialize metadata and frame to bytes
         # Frame is sent as raw numpy bytes with metadata as JSON header
         metadata_dict = metadata.model_dump(mode="json", exclude={"frame"})
+        metadata_dict["width"] = self.width
+        metadata_dict["height"] = self.height
         metadata_json = json.dumps(metadata_dict).encode("utf-8")
 
         # Pack: [metadata_len (4 bytes)] [metadata_json] [frame_bytes]
