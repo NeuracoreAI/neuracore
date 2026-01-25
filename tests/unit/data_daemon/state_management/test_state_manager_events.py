@@ -124,6 +124,7 @@ def _make_trace(
     bytes_written: int = 0,
     total_bytes: int | None = None,
     bytes_uploaded: int = 0,
+    external_trace_id: str | None = None,
     created_at: datetime,
     last_updated: datetime,
 ) -> TraceRecord:
@@ -146,6 +147,7 @@ def _make_trace(
         progress_reported=progress_reported,
         error_code=None,
         error_message=None,
+        external_trace_id=external_trace_id,
         created_at=created_at,
         last_updated=last_updated,
     )
@@ -292,6 +294,7 @@ async def test_trace_written_emits_ready_for_upload_when_connected(
             DataType.CUSTOM_1D,
             "custom",
             0,
+            None,  # external_trace_id
         )]
     finally:
         get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, handler)
@@ -347,6 +350,7 @@ async def test_is_connected_emits_ready_and_progress_report(state_manager) -> No
                 DataType.CUSTOM_1D,
                 "custom",
                 0,
+                None,  # external_trace_id
             ),
             (
                 "trace-7",
@@ -355,6 +359,7 @@ async def test_is_connected_emits_ready_and_progress_report(state_manager) -> No
                 DataType.CUSTOM_1D,
                 "custom",
                 0,
+                None,  # external_trace_id
             ),
         ]
         assert len(progress_events) == 1
@@ -422,6 +427,7 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
             DataType.CUSTOM_1D,
             "custom",
             0,
+            None,  # external_trace_id
         )]
         assert len(progress_events) == 1
         start_time, end_time, traces = progress_events[0]
@@ -741,6 +747,7 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
             DataType.CUSTOM_1D,
             "custom",
             0,
+            None,  # external_trace_id
         )]
     finally:
         get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)

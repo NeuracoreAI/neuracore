@@ -119,6 +119,7 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
             DataType.CUSTOM_1D,
             "custom",
             0,
+            None,  # external_trace_id
         )
         assert ready_by_id["trace-2"] == (
             "trace-2",
@@ -127,6 +128,7 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
             DataType.CUSTOM_1D,
             "custom",
             4,
+            None,  # external_trace_id
         )
 
         try:
@@ -181,6 +183,7 @@ async def test_offline_then_connected_emits_ready(manager_store) -> None:
             DataType.CUSTOM_1D,
             "custom",
             0,
+            None,  # external_trace_id
         )]
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
@@ -458,7 +461,9 @@ async def test_ready_for_upload_includes_bytes_after_reconnect(manager_store) ->
 
         assert ready_events
         assert ready_events[-1][:2] == ("trace-resume", "rec-resume")
-        assert ready_events[-1][-1] == 500
+        # bytes_uploaded is at index 5, external_trace_id at index 6
+        assert ready_events[-1][5] == 500  # bytes_uploaded
+        assert ready_events[-1][6] is None  # external_trace_id
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
 
@@ -507,6 +512,7 @@ async def test_ready_for_upload_includes_bytes_after_restart(tmp_path) -> None:
             DataType.CUSTOM_1D,
             "custom",
             500,
+            None,  # external_trace_id
         )]
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
@@ -637,7 +643,8 @@ async def test_resume_after_failure_and_reconnect(manager_store) -> None:
         ready_events.clear()
         emitter.emit(Emitter.IS_CONNECTED, True)
         await asyncio.sleep(0.1)
-        assert ready_events[-1][-1] == 500
+        # bytes_uploaded is at index 5
+        assert ready_events[-1][5] == 500
 
         emitter.emit(Emitter.UPLOADED_BYTES, "trace-e2e", 1000)
         emitter.emit(Emitter.UPLOAD_COMPLETE, "trace-e2e")

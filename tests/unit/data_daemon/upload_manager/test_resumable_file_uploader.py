@@ -197,7 +197,7 @@ async def test_uploader_tracks_progress_with_callback(
     progress_updates: list[int] = []
     md5_b64 = _compute_file_md5_b64(test_file)
 
-    def progress_callback(bytes_delta: int) -> None:
+    async def progress_callback(bytes_delta: int) -> None:
         progress_updates.append(bytes_delta)
 
     uploader = ResumableFileUploader(
@@ -529,7 +529,7 @@ async def test_uploader_handles_large_file(
     progress_updates: list[int] = []
     md5_b64 = _compute_file_md5_b64(very_large_test_file)
 
-    def progress_callback(bytes_delta: int) -> None:
+    async def progress_callback(bytes_delta: int) -> None:
         progress_updates.append(bytes_delta)
 
     uploader = ResumableFileUploader(

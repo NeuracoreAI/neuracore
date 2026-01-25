@@ -450,6 +450,23 @@ class SqliteStateStore(StateStore):
                 .values(progress_reported=1, last_updated=now)
             )
 
+    async def set_external_trace_id(
+        self, trace_id: str, external_trace_id: str
+    ) -> None:
+        """Store the external trace ID for a trace.
+
+        Args:
+            trace_id: Internal trace identifier.
+            external_trace_id: Backend-generated trace ID to persist.
+        """
+        now = _utc_now()
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                update(traces)
+                .where(traces.c.trace_id == trace_id)
+                .values(external_trace_id=external_trace_id, last_updated=now)
+            )
+
     async def close(self) -> None:
         """Close the database connection and dispose of the engine.
 

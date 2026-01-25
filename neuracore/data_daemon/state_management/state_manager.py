@@ -51,6 +51,11 @@ class StateManager:
             Emitter.PROGRESS_REPORT_FAILED, self.handle_progress_report_error
         )
 
+        # From uploader (external trace ID persistence)
+        self._emitter.on(
+            Emitter.EXTERNAL_TRACE_ID_SET, self._handle_external_trace_id_set
+        )
+
     async def create_trace(
         self,
         trace_id: str,
@@ -147,6 +152,7 @@ class StateManager:
                 trace.data_type,
                 trace.data_type_name,
                 trace.bytes_uploaded,
+                trace.external_trace_id,
             )
         # Find if all traces are written for a recording to trigger progress report
         unreported_traces = await self._store.find_unreported_traces()
@@ -212,6 +218,7 @@ class StateManager:
             trace_record.data_type,
             trace_record.data_type_name,
             trace_record.bytes_uploaded,
+            trace_record.external_trace_id,
         )
 
         traces = await self._store.find_traces_by_recording_id(recording_id)
@@ -349,3 +356,14 @@ class StateManager:
     async def delete_trace(self, trace_id: str) -> None:
         """Delete a trace record."""
         await self._store.delete_trace(trace_id)
+
+    async def _handle_external_trace_id_set(
+        self, trace_id: str, external_trace_id: str
+    ) -> None:
+        """Persist the external trace ID for a trace.
+
+        Args:
+            trace_id: Internal trace identifier.
+            external_trace_id: Backend-generated trace ID to persist.
+        """
+        await self._store.set_external_trace_id(trace_id, external_trace_id)

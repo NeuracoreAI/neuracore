@@ -8,7 +8,7 @@ import asyncio
 import base64
 import hashlib
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -60,7 +60,7 @@ class ResumableFileUploader:
         content_type: str,
         client_session: aiohttp.ClientSession,
         bytes_uploaded: int = 0,
-        progress_callback: Callable[[int], None] | None = None,
+        progress_callback: Callable[[int], Awaitable[None]] | None = None,
     ) -> None:
         """Initialize the file uploader.
 
@@ -224,7 +224,7 @@ class ResumableFileUploader:
 
                     # Notify callback
                     if self._progress_callback:
-                        self._progress_callback(chunk_size)
+                        await self._progress_callback(chunk_size)
 
                     logger.debug(
                         f"Uploaded chunk: {self._bytes_uploaded}/"

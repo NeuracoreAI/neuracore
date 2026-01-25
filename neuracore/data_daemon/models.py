@@ -90,6 +90,7 @@ class TraceRecord:
     progress_reported: int
     error_code: TraceErrorCode | None
     error_message: str | None
+    external_trace_id: str | None
     created_at: datetime
     last_updated: datetime
 
@@ -133,6 +134,7 @@ class TraceRecord:
             progress_reported=int(row.get("progress_reported", 0)),
             error_code=error_code,
             error_message=row.get("error_message"),
+            external_trace_id=row.get("external_trace_id"),
             created_at=row["created_at"],
             last_updated=row["last_updated"],
         )
