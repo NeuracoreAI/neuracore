@@ -96,7 +96,7 @@ def test_end_to_end_data_integrity() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     open_msg = MessageEnvelope(
@@ -117,6 +117,7 @@ def test_end_to_end_data_integrity() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(original_data).decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
     daemon._handle_write_data_chunk(channel, data_msg)
@@ -142,7 +143,7 @@ def test_multi_chunk_reassembly_integrity() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     open_msg = MessageEnvelope(
@@ -172,6 +173,7 @@ def test_multi_chunk_reassembly_integrity() -> None:
                 "total_chunks": total_chunks,
                 "data": base64.b64encode(chunk).decode("ascii"),
                 "robot_instance": 0,
+                "recording_id": "rec-123",
             },
         )
         daemon._handle_write_data_chunk(channel, data_msg)
@@ -198,7 +200,7 @@ def test_binary_payload_through_pipeline() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     open_msg = MessageEnvelope(
@@ -220,6 +222,7 @@ def test_binary_payload_through_pipeline() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(binary_data).decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
     daemon._handle_write_data_chunk(channel, data_msg)
@@ -249,7 +252,7 @@ def test_daemon_handles_corrupted_chunk_gracefully() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     channel.ring_buffer = RingBuffer(size=4096)
@@ -280,7 +283,7 @@ def test_daemon_survives_full_buffer() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     open_msg = MessageEnvelope(
@@ -301,6 +304,7 @@ def test_daemon_survives_full_buffer() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(small_data).decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
     daemon._handle_write_data_chunk(channel, data_msg)
@@ -317,6 +321,7 @@ def test_daemon_survives_full_buffer() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(b"more-data").decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
     daemon._handle_write_data_chunk(channel, data_msg2)
@@ -351,7 +356,7 @@ def test_rdm_failure_does_not_lose_ring_buffer() -> None:
         recording_disk_manager=failing_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     open_msg = MessageEnvelope(
@@ -371,6 +376,7 @@ def test_rdm_failure_does_not_lose_ring_buffer() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(b"data1").decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
     daemon._handle_write_data_chunk(channel, data_msg1)
@@ -388,6 +394,7 @@ def test_rdm_failure_does_not_lose_ring_buffer() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(b"data2").decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
     daemon._handle_write_data_chunk(channel, data_msg2)
@@ -411,7 +418,7 @@ def test_new_trace_independent_of_previous() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     open_msg = MessageEnvelope(
@@ -431,6 +438,7 @@ def test_new_trace_independent_of_previous() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(b"trace-A-data").decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
     daemon._handle_write_data_chunk(channel, data_msg1)
@@ -446,6 +454,7 @@ def test_new_trace_independent_of_previous() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(b"trace-B-data").decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
     daemon._handle_write_data_chunk(channel, data_msg2)
@@ -472,7 +481,7 @@ def test_concurrent_traces_isolation() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     open_msg = MessageEnvelope(
@@ -500,6 +509,7 @@ def test_concurrent_traces_isolation() -> None:
                 "total_chunks": total,
                 "data": base64.b64encode(data).decode("ascii"),
                 "robot_instance": 0,
+                "recording_id": "rec-123",
             },
         )
         daemon._handle_write_data_chunk(channel, msg)

@@ -176,7 +176,8 @@ class DataChunkPayload:
 
         The dict should have the following keys with corresponding types:
         - "channel_id": str
-        - "trace_id": int
+        - "trace_id": str
+        - "recording_id": str (required)
         - "chunk_index": int
         - "total_chunks": int
         - "data": bytes (base64 encoded)
@@ -201,7 +202,7 @@ class DataChunkPayload:
         return cls(
             channel_id=str(data.get("channel_id", "")),
             trace_id=str(data["trace_id"]),
-            recording_id=str(data.get("recording_id", "")),
+            recording_id=str(data["recording_id"]),
             chunk_index=int(data["chunk_index"]),
             total_chunks=int(data["total_chunks"]),
             data_type_name=data.get("data_type_name", ""),

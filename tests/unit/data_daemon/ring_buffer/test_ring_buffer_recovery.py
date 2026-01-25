@@ -99,6 +99,11 @@ def _write_chunk(
     ring.write(header + data)
 
 
+# =============================================================================
+# L5-001 to L5-007: Ring Buffer Internal Error Handling
+# =============================================================================
+
+
 def test_write_oversized_raises_not_crashes() -> None:
     """Oversized write raises ValueError, doesn't corrupt.
 
@@ -106,11 +111,12 @@ def test_write_oversized_raises_not_crashes() -> None:
     state.
     """
     ring = RingBuffer(size=100)
-    ring.write(b"initial")
+    ring.write(b"initial")  # Some data
 
     with pytest.raises(ValueError):
         ring.write(b"x" * 200)
 
+    # Buffer should be unchanged
     assert ring.available() == 7
     assert ring.read(7) == b"initial"
 
@@ -124,11 +130,13 @@ def test_read_after_failed_write_still_works() -> None:
     ring = RingBuffer(size=100)
     ring.write(b"12345")
 
+    # Try oversized write
     try:
         ring.write(b"x" * 200)
     except ValueError:
         pass
 
+    # Buffer should still work
     assert ring.read(5) == b"12345"
 
 
@@ -144,6 +152,7 @@ def test_write_after_failed_write_still_works() -> None:
     except ValueError:
         pass
 
+    # Should be able to write valid data
     ring.write(b"valid")
     assert ring.read(5) == b"valid"
 
@@ -157,7 +166,9 @@ def test_negative_read_length_handled() -> None:
     ring = RingBuffer(size=100)
     ring.write(b"data")
 
+    # Negative length - should return None or handle gracefully
     result = ring.read(-1)
+    # Current implementation returns None for insufficient data
     assert result is None or isinstance(result, bytes)
 
 
@@ -183,6 +194,7 @@ def test_zero_read_length() -> None:
     ring.write(b"data")
 
     ring.read(0)
+    # Should return empty or None, buffer unchanged
     assert ring.available() == 4
 
 
@@ -198,6 +210,11 @@ def test_zero_peek_length() -> None:
     assert ring.available() == 4
 
 
+# =============================================================================
+# L5-008 to L5-014: ChannelMessageReader Error Recovery
+# =============================================================================
+
+
 def test_reader_recovers_from_corrupted_header() -> None:
     """Corrupted header doesn't crash.
 
@@ -207,13 +224,18 @@ def test_reader_recovers_from_corrupted_header() -> None:
     ring = RingBuffer(size=1024)
     reader = ChannelMessageReader(ring)
 
+    # Write garbage that's header-sized but not valid
     ring.write(b"x" * CHUNK_HEADER_SIZE)
 
+    # Should not crash, may return None or log warning
     try:
         reader.poll_one()
+        # If it returns, should be None or a result
     except struct.error:
+        # struct.unpack error is acceptable for corrupted data
         pass
     except Exception:
+        # Other exceptions should not occur
         raise
 
 
@@ -226,16 +248,21 @@ def test_reader_recovers_from_truncated_packet() -> None:
     ring = RingBuffer(size=1024)
     reader = ChannelMessageReader(ring)
 
+    # Write header that says 100 bytes, but only 50 present
     header = _make_chunk_header("trace-1", DataType.CUSTOM_1D, 0, 1, 100)
     ring.write(header + b"x" * 50)
 
+    # Should return None (waiting for more data)
     result = reader.poll_one()
     assert result is None
 
+    # Data should still be in buffer
     assert ring.available() == CHUNK_HEADER_SIZE + 50
 
+    # Add remaining data
     ring.write(b"y" * 50)
 
+    # Now should complete
     result = reader.poll_one()
     assert result is not None
     assert result[0] == "trace-1"
@@ -249,10 +276,13 @@ def test_reader_handles_chunk_index_out_of_range() -> None:
     ring = RingBuffer(size=1024)
     reader = ChannelMessageReader(ring)
 
+    # Create header with absurd chunk index
     header = _make_chunk_header("trace-1", DataType.CUSTOM_1D, 999, 2, 5)
     ring.write(header + b"data!")
 
+    # Should not crash
     reader.poll_one()
+    # Result depends on implementation - may return None or partial
 
 
 def test_reader_handles_total_chunks_zero() -> None:
@@ -263,10 +293,13 @@ def test_reader_handles_total_chunks_zero() -> None:
     ring = RingBuffer(size=1024)
     reader = ChannelMessageReader(ring)
 
+    # Header with total_chunks=0
     header = _make_chunk_header("trace-1", DataType.CUSTOM_1D, 0, 0, 5)
     ring.write(header + b"data!")
 
+    # Should not crash or hang
     reader.poll_one()
+    # Behavior is implementation-defined
 
 
 def test_reader_handles_negative_chunk_len() -> None:
@@ -278,11 +311,14 @@ def test_reader_handles_negative_chunk_len() -> None:
     ring = RingBuffer(size=1024)
     reader = ChannelMessageReader(ring)
 
+    # Manually create header with "negative" (large unsigned) chunk_len
+    # This would be 0xFFFFFFFF interpreted as unsigned
     trace_id_field = b"trace".ljust(TRACE_ID_FIELD_SIZE, b"\x00")
     data_type_field = DataType.CUSTOM_1D.value.encode().ljust(
         DATA_TYPE_FIELD_SIZE, b"\x00"
     )
 
+    # Pack with very large chunk_len
     header = struct.pack(
         CHUNK_HEADER_FORMAT,
         trace_id_field,
@@ -293,6 +329,7 @@ def test_reader_handles_negative_chunk_len() -> None:
     )
     ring.write(header)
 
+    # Should not crash - will return None waiting for impossible amount
     result = reader.poll_one()
     assert result is None
 
@@ -305,12 +342,16 @@ def test_reader_partial_message_cleanup() -> None:
     ring = RingBuffer(size=4096)
     reader = ChannelMessageReader(ring)
 
+    # Start many traces without completing
     for i in range(100):
         _write_chunk(ring, f"trace-{i}", DataType.CUSTOM_1D, 0, 2, b"part0")
         reader.poll_one()
 
+    # All should be in pending
     assert len(reader._pending) == 100
 
+    # In a real system, there would be a cleanup mechanism
+    # For now, verify we can manually clear
     reader._pending.clear()
     assert len(reader._pending) == 0
 
@@ -324,14 +365,24 @@ def test_reader_assemble_failure_clears_pending() -> None:
     ring = RingBuffer(size=4096)
     reader = ChannelMessageReader(ring)
 
+    # Create a partial message
     partial = PartialMessage(total_chunks=2)
     partial.add_chunk(0, b"data")
     reader._pending["test-trace"] = partial
 
+    # Force assemble to fail by having missing chunk
     try:
         partial.assemble()
     except ValueError:
         pass
+
+    # Cleanup should happen in poll_one when it detects assembly failure
+    # For direct testing, verify the cleanup logic exists
+
+
+# =============================================================================
+# L5-015 to L5-018: Daemon Loop Resilience
+# =============================================================================
 
 
 def test_daemon_continues_after_ring_buffer_write_error() -> None:
@@ -348,9 +399,10 @@ def test_daemon_continues_after_ring_buffer_write_error() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
+    # Very small buffer
     open_msg = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.OPEN_RING_BUFFER,
@@ -358,6 +410,7 @@ def test_daemon_continues_after_ring_buffer_write_error() -> None:
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
 
+    # Try to write oversized data - should not crash daemon
     huge_data = b"x" * 1000
     data_msg = MessageEnvelope(
         producer_id="test-producer",
@@ -369,14 +422,17 @@ def test_daemon_continues_after_ring_buffer_write_error() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(huge_data).decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
 
+    # This may fail, but daemon should survive
     try:
         daemon._handle_write_data_chunk(channel, data_msg)
     except ValueError:
-        pass
+        pass  # Expected
 
+    # Daemon should still work with valid data
     small_data = b"small"
     small_msg = MessageEnvelope(
         producer_id="test-producer",
@@ -388,11 +444,13 @@ def test_daemon_continues_after_ring_buffer_write_error() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(small_data).decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
     daemon._handle_write_data_chunk(channel, small_msg)
     daemon._drain_channel_messages()
 
+    # Small message should have been processed
     assert len(mock_rdm.enqueued) >= 1
 
 
@@ -409,19 +467,25 @@ def test_daemon_continues_after_ring_buffer_read_error() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    # Create channel with corrupted buffer state
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
+    # Setup ring buffer with corrupted data
     channel.ring_buffer = RingBuffer(size=1024)
     channel.reader = ChannelMessageReader(channel.ring_buffer)
 
+    # Write garbage that will fail to parse
     channel.ring_buffer.write(b"garbage" * 20)
 
+    # Drain should handle read error gracefully
     try:
         daemon._drain_channel_messages()
     except Exception:
+        # Error is acceptable, but daemon shouldn't crash permanently
         pass
 
+    # Daemon should still be operational
     assert "test-producer" in daemon.channels
 
 
@@ -438,20 +502,26 @@ def test_daemon_continues_after_reader_poll_error() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    # Create channel
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
+    # Setup ring buffer
     channel.ring_buffer = RingBuffer(size=1024)
     channel.reader = ChannelMessageReader(channel.ring_buffer)
 
+    # Write data that will cause poll_one to fail (invalid header)
     bad_header = b"\xff" * CHUNK_HEADER_SIZE
     channel.ring_buffer.write(bad_header)
 
+    # Drain should handle poll error without crashing daemon
     try:
         daemon._drain_channel_messages()
     except Exception:
+        # Error during poll is acceptable
         pass
 
+    # Daemon should still be functional
     assert daemon.channels is not None
 
 
@@ -468,11 +538,13 @@ def test_daemon_continues_after_channel_error() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel_good = ChannelState(producer_id="good-producer", recording_id="rec-good")
-    channel_bad = ChannelState(producer_id="bad-producer", recording_id="rec-bad")
+    # Create two channels
+    channel_good = ChannelState(producer_id="good-producer")
+    channel_bad = ChannelState(producer_id="bad-producer")
     daemon.channels["good-producer"] = channel_good
     daemon.channels["bad-producer"] = channel_bad
 
+    # Setup good channel
     open_good = MessageEnvelope(
         producer_id="good-producer",
         command=CommandType.OPEN_RING_BUFFER,
@@ -480,6 +552,10 @@ def test_daemon_continues_after_channel_error() -> None:
     )
     daemon._handle_open_ring_buffer(channel_good, open_good)
 
+    # Bad channel has no buffer (simulating error state)
+    # channel_bad.ring_buffer remains None
+
+    # Write to good channel
     data_msg = MessageEnvelope(
         producer_id="good-producer",
         command=CommandType.DATA_CHUNK,
@@ -490,14 +566,21 @@ def test_daemon_continues_after_channel_error() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(b"good-data").decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-good",
         },
     )
     daemon._handle_write_data_chunk(channel_good, data_msg)
 
+    # Drain should process good channel, skip bad channel
     daemon._drain_channel_messages()
 
     assert len(mock_rdm.enqueued) == 1
     assert mock_rdm.enqueued[0].trace_id == "trace-good"
+
+
+# =============================================================================
+# L5-019 to L5-022: Resource Exhaustion Recovery
+# =============================================================================
 
 
 def test_buffer_full_blocks_not_crashes() -> None:
@@ -506,7 +589,7 @@ def test_buffer_full_blocks_not_crashes() -> None:
     Back-pressure via blocking. Full buffer is normal condition, not error.
     """
     ring = RingBuffer(size=100)
-    ring.write(b"x" * 100)
+    ring.write(b"x" * 100)  # Fill buffer
 
     write_completed = threading.Event()
 
@@ -517,11 +600,14 @@ def test_buffer_full_blocks_not_crashes() -> None:
     thread = threading.Thread(target=blocked_write)
     thread.start()
 
+    # Give it time to block
     time.sleep(0.05)
     assert not write_completed.is_set()
 
+    # Free space
     ring.read(50)
 
+    # Should complete
     write_completed.wait(timeout=1)
     assert write_completed.is_set()
 
@@ -547,7 +633,7 @@ def test_buffer_full_then_drained_resumes() -> None:
     thread.start()
 
     time.sleep(0.05)
-    ring.read(50)
+    ring.read(50)  # Drain
 
     thread.join(timeout=1)
 
@@ -563,12 +649,16 @@ def test_many_partial_messages_memory_bounded() -> None:
     ring = RingBuffer(size=65536)
     reader = ChannelMessageReader(ring)
 
+    # Start many traces without completing
     for i in range(1000):
         _write_chunk(ring, f"trace-{i}", DataType.CUSTOM_1D, 0, 100, b"x")
         reader.poll_one()
 
+    # All pending, but memory should be reasonable
+    # Each partial has just one small chunk
     assert len(reader._pending) == 1000
 
+    # Each entry should be small
     total_chunks = sum(len(p.chunks) for p in reader._pending.values())
     assert total_chunks == 1000
 
@@ -589,7 +679,7 @@ def test_rapid_channel_create_destroy() -> None:
 
     for i in range(100):
         producer_id = f"producer-{i}"
-        channel = ChannelState(producer_id=producer_id, recording_id=f"rec-{i}")
+        channel = ChannelState(producer_id=producer_id)
         daemon.channels[producer_id] = channel
 
         open_msg = MessageEnvelope(
@@ -599,9 +689,16 @@ def test_rapid_channel_create_destroy() -> None:
         )
         daemon._handle_open_ring_buffer(channel, open_msg)
 
+        # Immediately remove
         del daemon.channels[producer_id]
 
+    # Daemon should be stable
     assert len(daemon.channels) == 0
+
+
+# =============================================================================
+# L5-023 to L5-026: State Consistency After Errors
+# =============================================================================
 
 
 def test_buffer_invariants_after_write_error() -> None:
@@ -622,6 +719,7 @@ def test_buffer_invariants_after_write_error() -> None:
     except ValueError:
         pass
 
+    # State should be unchanged
     assert ring.write_pos == original_write_pos
     assert ring.read_pos == original_read_pos
     assert ring.used == original_used
@@ -639,9 +737,11 @@ def test_buffer_invariants_after_read_error() -> None:
     original_read_pos = ring.read_pos
     original_used = ring.used
 
+    # Try to read more than available
     result = ring.read(100)
     assert result is None
 
+    # State should be unchanged
     assert ring.write_pos == original_write_pos
     assert ring.read_pos == original_read_pos
     assert ring.used == original_used
@@ -656,18 +756,22 @@ def test_reader_state_consistent_after_poll_error() -> None:
     ring = RingBuffer(size=1024)
     reader = ChannelMessageReader(ring)
 
+    # Add a valid partial
     _write_chunk(ring, "valid-trace", DataType.CUSTOM_1D, 0, 2, b"part0")
     reader.poll_one()
 
     len(reader._pending)
 
+    # Add corrupted data
     ring.write(b"garbage" * 20)
 
+    # Try to poll corrupted data
     try:
         reader.poll_one()
     except Exception:
         pass
 
+    # Valid pending should still be there
     assert "valid-trace" in reader._pending
 
 
@@ -685,7 +789,7 @@ def test_channel_state_consistent_after_error() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
     open_msg = MessageEnvelope(
@@ -695,10 +799,17 @@ def test_channel_state_consistent_after_error() -> None:
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
 
+    # Channel should have valid buffer
     assert channel.ring_buffer is not None
     assert channel.reader is not None
 
+    # After any error handling, state should remain consistent
     assert channel.ring_buffer.size == 4096
+
+
+# =============================================================================
+# L5-027 to L5-032: Graceful Degradation
+# =============================================================================
 
 
 def test_daemon_handles_none_ring_buffer() -> None:
@@ -714,9 +825,12 @@ def test_daemon_handles_none_ring_buffer() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    # Channel without buffer
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
+    # channel.ring_buffer is None
 
+    # Should not crash
     daemon._drain_channel_messages()
 
 
@@ -733,11 +847,13 @@ def test_daemon_handles_none_reader() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    # Channel with buffer but no reader
+    channel = ChannelState(producer_id="test-producer")
     channel.ring_buffer = RingBuffer(size=1024)
     channel.reader = None
     daemon.channels["test-producer"] = channel
 
+    # Should not crash
     daemon._drain_channel_messages()
 
 
@@ -754,8 +870,9 @@ def test_data_chunk_before_open_buffer() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
+    # No OPEN_RING_BUFFER yet
 
     data_msg = MessageEnvelope(
         producer_id="test-producer",
@@ -767,12 +884,15 @@ def test_data_chunk_before_open_buffer() -> None:
             "total_chunks": 1,
             "data": base64.b64encode(b"data").decode("ascii"),
             "robot_instance": 0,
+            "recording_id": "rec-123",
         },
     )
 
+    # Should not crash - may log warning or auto-create buffer
     try:
         daemon._handle_write_data_chunk(channel, data_msg)
     except (AttributeError, TypeError):
+        # Expected if buffer is None
         pass
 
 
@@ -789,9 +909,10 @@ def test_trace_end_for_unknown_trace() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
+    channel = ChannelState(producer_id="test-producer")
     daemon.channels["test-producer"] = channel
 
+    # TRACE_END for trace that was never started
     end_msg = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.TRACE_END,
@@ -803,6 +924,7 @@ def test_trace_end_for_unknown_trace() -> None:
         },
     )
 
+    # Should not crash
     daemon._handle_end_trace(channel, end_msg)
 
 
@@ -815,12 +937,16 @@ def test_reader_handles_struct_unpack_error() -> None:
     ring = RingBuffer(size=1024)
     reader = ChannelMessageReader(ring)
 
+    # Write data that's header-sized but will fail to unpack correctly
+    # (valid struct format but garbage values)
     bad_header = b"\xff" * CHUNK_HEADER_SIZE
     ring.write(bad_header)
 
+    # Should not crash - will try to parse and may fail gracefully
     try:
         reader.poll_one()
     except struct.error:
+        # This is acceptable for truly corrupted data
         pass
 
 
@@ -833,6 +959,7 @@ def test_reader_handles_decode_error() -> None:
     ring = RingBuffer(size=1024)
     reader = ChannelMessageReader(ring)
 
+    # Create header with invalid UTF-8 in trace_id field
     invalid_utf8 = b"\xff\xfe" + b"\x00" * (TRACE_ID_FIELD_SIZE - 2)
     data_type_field = DataType.CUSTOM_1D.value.encode().ljust(
         DATA_TYPE_FIELD_SIZE, b"\x00"
@@ -848,4 +975,6 @@ def test_reader_handles_decode_error() -> None:
     )
     ring.write(header + b"data!")
 
+    # Should not crash - errors='ignore' handles invalid UTF-8
     reader.poll_one()
+    # May return result with sanitized trace_id
