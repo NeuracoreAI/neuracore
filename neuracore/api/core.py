@@ -169,9 +169,11 @@ def connect_robot(
         warn(
             f"This robot '{robot.name}' is archived. Was this intentional?",
         )
-    if robot.is_connected and robot.id is not None:
-        StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
-        get_recording_state_manager()
+    # Initialize push update managers
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+    StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
+    get_recording_state_manager()
     return robot
 
 
@@ -195,7 +197,7 @@ def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
 
     Begins a new recording session for the specified robot, capturing all
     configured data streams. Requires an active dataset to be set before
-    starting the recording. Supports both online and offline modes.
+    starting the recording.
 
     Args:
         robot_name: Robot identifier. If not provided, uses the currently
@@ -209,15 +211,9 @@ def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
     """
     robot = _get_robot(robot_name, instance)
     active_dataset_id = GlobalSingleton()._active_dataset_id
-    active_dataset_name = GlobalSingleton()._active_dataset_name
-
-    if active_dataset_id is None and active_dataset_name is None:
+    if active_dataset_id is None:
         raise RobotError("No active dataset. Call create_dataset() first.")
-
-    robot.start_recording(
-        dataset_id=active_dataset_id,
-        dataset_name=active_dataset_name,
-    )
+    robot.start_recording(active_dataset_id)
 
 
 def stop_recording(
@@ -268,17 +264,14 @@ def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:
         robot_name: Robot identifier. If not provided disables streaming for all robots
         instance: Instance number of the robot for multi-instance scenarios.
 
-    Note:
-        In offline mode, this is a no-op since live data streaming is not available.
     """
     if not robot_name:
         get_provide_live_data_enabled_manager().disable()
         return
 
     robot = _get_robot(robot_name, instance)
-    if not robot.is_connected or not robot.id:
-        # No live data streaming in offline mode, silently return
-        return
+    if not robot.id:
+        raise RobotError("Robot not initialized. Call init() first.")
     StreamManagerOrchestrator().remove_manager(robot.id, robot.instance)
 
 

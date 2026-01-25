@@ -49,7 +49,7 @@ def _maybe_add_existing_data(
 def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
     """Check if the specified number of remote nodes are connected for a robot.
 
-    Always false if live data is disabled or robot is in offline mode.
+    Always false if live data is disabled.
 
     Args:
         robot: The robot instance.
@@ -57,14 +57,17 @@ def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
 
     Returns:
         True if the specified number of remote nodes are connected, False otherwise.
-        Always returns False in offline mode.
+
+    Raises:
+        RobotError: If the robot is not initialized.
     """
     if get_consume_live_data_enabled_manager().is_disabled():
         return False
 
-    if not robot.is_connected or robot.id is None:
-        # Remote nodes not available in offline mode
-        return False
+    if robot.id is None:
+        from neuracore.core.exceptions import RobotError
+
+        raise RobotError("Robot not initialized. Call init() first.")
 
     org_node_manager = get_org_nodes_manager(robot.org_id)
 
@@ -109,9 +112,10 @@ def get_latest_sync_point(
     if not include_remote or get_consume_live_data_enabled_manager().is_disabled():
         return sync_point
 
-    if not robot.is_connected or robot.id is None:
-        # Remote data not available in offline mode, return local data only
-        return sync_point
+    if robot.id is None:
+        from neuracore.core.exceptions import RobotError
+
+        raise RobotError("Robot not initialized. Call init() first.")
 
     org_node_manager = get_org_nodes_manager(robot.org_id)
 

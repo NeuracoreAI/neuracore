@@ -23,12 +23,9 @@ class GlobalSingleton(metaclass=SingletonMetaclass):
         _active_robot: Currently active robot instance, used as the default
             for operations when no specific robot is specified.
         _active_dataset_id: ID of the currently active dataset that new
-            recordings will be associated with. May be None in offline mode.
-        _active_dataset_name: Name of the currently active dataset. Always set
-            when a dataset is active (used for offline fallback).
+            recordings will be associated with.
     """
 
     _has_validated_version = False
     _active_robot: Robot | None = None
     _active_dataset_id: str | None = None
-    _active_dataset_name: str | None = None
