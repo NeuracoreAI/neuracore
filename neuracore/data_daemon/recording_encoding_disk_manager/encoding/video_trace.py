@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import struct
 import time
 from typing import Any
 
@@ -66,6 +67,11 @@ class VideoTrace:
     def add_payload(self, payload: bytes) -> None:
         """Consume a payload that is either JSON metadata or raw RGB frame bytes.
 
+        The payload can be in one of three formats:
+        1. Pure JSON metadata (backward compatibility)
+        2. Pure raw RGB frame bytes
+        3. Combined packet: [4-byte metadata_len][JSON metadata][frame_bytes]
+
         Args:
             payload: Incoming payload bytes.
 
@@ -77,7 +83,40 @@ class VideoTrace:
             self._handle_metadata(parsed)
             return
 
+        if self._try_handle_combined_packet(payload):
+            return
+
         self._handle_frame_bytes(payload)
+
+    def _try_handle_combined_packet(self, payload: bytes) -> bool:
+        """Try to parse payload as combined [4B len][JSON][frame] format.
+
+        Args:
+            payload: Incoming payload bytes.
+
+        Returns:
+            True if the payload was successfully handled as a combined packet,
+            False otherwise.
+        """
+        if len(payload) < 4:
+            return False
+
+        metadata_len = struct.unpack("<I", payload[:4])[0]
+        if metadata_len == 0 or metadata_len > len(payload) - 4:
+            return False
+
+        json_bytes = payload[4 : 4 + metadata_len]
+        parsed = self._try_parse_json(json_bytes)
+        if parsed is None:
+            return False
+
+        self._handle_metadata(parsed)
+
+        frame_bytes = payload[4 + metadata_len :]
+        if len(frame_bytes) > 0:
+            self._handle_frame_bytes(frame_bytes)
+
+        return True
 
     def _try_parse_json(self, payload: bytes) -> Any | None:
         """Attempt to parse a payload as JSON.
