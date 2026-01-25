@@ -31,9 +31,10 @@ class RecordingContext:
         self.socket = self._comm.create_producer_socket()
 
         if self.socket is None:
-            logger.warning(
-                "RecordingContext could not connect to daemon; "
-                "has the daemon been started with `nc-daemon start`?"
+            raise RuntimeError(
+                "RecordingContext could not connect to daemon. "
+                "Start the daemon with `nc-daemon start` before recording. "
+                "Data cannot be captured without a running daemon."
             )
 
     def stop_recording(self) -> None:
@@ -70,13 +71,12 @@ class Producer:
         self.trace_id: str | None = None
         self._stop_event = threading.Event()
         self.recording_id: str | None = recording_id
-        self._heartbeat_interval = 1.0
-        self._control_thread: threading.Thread | None = None
 
         if self.socket is None:
-            logger.warning(
-                "Producer could not connect to daemon; "
-                "has the daemon been started with `nc-daemon start`?"
+            raise RuntimeError(
+                "Producer could not connect to daemon. "
+                "Start the daemon with `nc-daemon start` before logging data. "
+                "Data cannot be captured without a running daemon."
             )
 
     def start_new_trace(self, recording_id: str | None = None) -> None:
@@ -105,63 +105,9 @@ class Producer:
             },
         )
 
-    def start_producer(self) -> None:
-        """Starts the producer's heartbeat loop.
-
-        This function starts a separate thread which is responsible for sending
-        periodic heartbeats to the daemon. If a heartbeat fails, it will log
-        a warning message but continue running.
-
-        """
-        if not self.trace_id:
-            self.start_new_trace()
-
-        self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop, name="producer-heartbeat", daemon=True
-        )
-        self._heartbeat_thread.start()
-
-    def _heartbeat_loop(self) -> None:
-        """Heartbeat loop for producer.
-
-        This function runs in a separate thread and is responsible for sending
-        periodic heartbeats to the daemon. If a heartbeat fails, it will log
-        a warning message but continue running.
-
-        """
-        self.heartbeat()
-
-        while not self._stop_event.wait(self._heartbeat_interval):
-            try:
-                self.heartbeat()
-            except Exception as exc:
-                logger.warning("Heartbeat failed: %s", exc)
-
-    def heartbeat(self) -> None:
-        """Send a heartbeat message to the daemon.
-
-        This message is used by the daemon to detect whether a producer is still alive.
-        If the daemon does not receive a heartbeat message
-        from a producer within a certain
-        timeout period, it will assume that the producer has stopped and will clean up
-        any associated resources (e.g. the ring buffer).
-
-        """
-        self._send(CommandType.HEARTBEAT, {})
-
     def stop_producer(self) -> None:
-        """Stops the producer and cleans up any associated resources.
-
-        This method stops the producer's heartbeat loop and then calls
-        `cleanup_producer` on the communications manager to clean up any
-        resources associated with the producer.
-
-        """
+        """Stops the producer and cleans up any associated resources."""
         self._stop_event.set()
-        if hasattr(self, "_heartbeat_thread"):
-            self._heartbeat_thread.join(timeout=1)
-        if self._control_thread is not None:
-            self._control_thread.join(timeout=1)
         if self.socket is not None:
             self.socket.close(0)
             self.socket = None
