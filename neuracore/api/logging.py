@@ -17,7 +17,6 @@ from neuracore_types import (
     EndEffectorPoseData,
     JointData,
     LanguageData,
-    NCData,
     ParallelGripperOpenAmountData,
     PointCloudData,
     PoseData,
@@ -27,6 +26,7 @@ from neuracore_types.utils import validate_safe_name
 
 from neuracore.api.core import _get_robot
 from neuracore.api.globals import GlobalSingleton
+from neuracore.core.exceptions import RobotError
 from neuracore.core.robot import Robot
 from neuracore.core.streaming.data_stream import (
     DataRecordingContext,
@@ -42,28 +42,42 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
 from neuracore.core.utils.depth_utils import MAX_DEPTH
 
 
+class ExperimentalPointCloudWarning(UserWarning):
+    """Warning for experimental point cloud features."""
+
+    pass
+
+
+filterwarnings("once", category=ExperimentalPointCloudWarning)
+
+
 def _publish_json_to_p2p(
     robot: Robot,
     str_id: str,
     data_type: DataType,
-    data: NCData,
-    sensor_key: str | None = None,
+    data: (
+        JointData
+        | Custom1DData
+        | PoseData
+        | EndEffectorPoseData
+        | ParallelGripperOpenAmountData
+        | LanguageData
+        | PointCloudData
+    ),
 ) -> None:
-    """Publish JSON data to P2P streaming if robot is connected (online mode).
+    """Publish JSON data to P2P streaming.
 
     Args:
         robot: Robot instance
         str_id: Stream identifier
         data_type: Type of data being published
-        data: Data to publish (must have model_dump method)
-        sensor_key: Optional sensor key (defaults to str_id)
+        data: Data to publish
     """
-    if not robot.is_connected or robot.id is None:
-        return
-
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
-    ).get_json_source(str_id, data_type, sensor_key=sensor_key or str_id).publish(
+    ).get_json_source(str_id, data_type, sensor_key=str_id).publish(
         data.model_dump(mode="json")
     )
 
@@ -72,35 +86,25 @@ def _publish_video_to_p2p(
     robot: Robot,
     name: str,
     camera_type: DataType,
-    camera_data: CameraData,
-    frame: np.ndarray,
+    camera_data_without_frame: CameraData,
+    image: np.ndarray,
 ) -> None:
-    """Publish video frame to P2P streaming if robot is connected (online mode).
+    """Publish video frame to P2P streaming.
 
     Args:
         robot: Robot instance
         name: Camera name
-        camera_type: Type of camera (RGB_IMAGES or DEPTH_IMAGES)
-        camera_data: Camera metadata (without frame)
-        frame: Video frame as numpy array
+        camera_type: Type of camera (RGB or DEPTH)
+        camera_data_without_frame: Camera metadata
+        image: Frame data
     """
-    if not robot.is_connected or robot.id is None:
-        return
-
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
     ).get_video_source(name, camera_type, f"{name}_{camera_type}").add_frame(
-        camera_data, frame=frame
+        camera_data_without_frame, frame=image
     )
-
-
-class ExperimentalPointCloudWarning(UserWarning):
-    """Warning for experimental point cloud features."""
-
-    pass
-
-
-filterwarnings("once", category=ExperimentalPointCloudWarning)
 
 
 def start_stream(robot: Robot, data_stream: DataStream) -> None:
@@ -118,7 +122,7 @@ def start_stream(robot: Robot, data_stream: DataStream) -> None:
             robot_name=robot.name,
             robot_instance=robot.instance,
             dataset_id=GlobalSingleton()._active_dataset_id,
-            dataset_name=GlobalSingleton()._active_dataset_name,
+            dataset_name=None,
         )
         data_stream.start_recording(context)
 
@@ -865,9 +869,9 @@ def log_language(
         stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
 
-    data = LanguageData(timestamp=timestamp, text=language)
-    stream.log(data)
-    _publish_json_to_p2p(robot, str_id, DataType.LANGUAGE, data)
+    language_data = LanguageData(timestamp=timestamp, text=language)
+    stream.log(language_data)
+    _publish_json_to_p2p(robot, str_id, DataType.LANGUAGE, language_data)
 
 
 def log_rgb(
