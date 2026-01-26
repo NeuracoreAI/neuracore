@@ -92,6 +92,7 @@ class TraceRecord:
     error_message: str | None
     created_at: datetime
     last_updated: datetime
+    upload_attempts: int = 0
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "TraceRecord":
@@ -129,6 +130,7 @@ class TraceRecord:
             bytes_written=int(row.get("bytes_written", 0)),
             total_bytes=row.get("total_bytes"),
             bytes_uploaded=int(row.get("bytes_uploaded", 0)),
+            upload_attempts=int(row.get("upload_attempts", 0)),
             ready_for_upload=int(row.get("ready_for_upload", 0)),
             progress_reported=int(row.get("progress_reported", 0)),
             error_code=error_code,

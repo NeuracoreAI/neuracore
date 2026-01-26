@@ -45,6 +45,7 @@ traces = Table(
     Column("error_code", Text, nullable=True, default=None),
     Column("error_message", Text, nullable=True, default=None),
     Column("stopped_at", DateTime(timezone=False), nullable=True, default=None),
+    Column("upload_attempts", Integer, nullable=True, default=0),
     Column(
         "created_at",
         DateTime(timezone=False),

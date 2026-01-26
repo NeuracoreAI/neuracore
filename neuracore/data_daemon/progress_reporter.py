@@ -1,15 +1,13 @@
 """Progress report API integration."""
 
 import logging
-from typing import Any
 
 import requests
 
 from neuracore.data_daemon.auth_management.auth_manager import get_auth
 from neuracore.data_daemon.const import API_URL
 from neuracore.data_daemon.event_emitter import Emitter, emitter
-
-# from neuracore.data_daemon.models import TraceRecord
+from neuracore.data_daemon.models import TraceRecord
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +20,7 @@ class ProgressReporter:
         emitter.on(Emitter.PROGRESS_REPORT, self.report_progress)
 
     def report_progress(
-        self,
-        start_time: float,
-        end_time: float,
-        # traces: list[TraceRecord]
-        traces: Any,
+        self, start_time: float, end_time: float, traces: list[TraceRecord]
     ) -> None:
         """Post a progress report for the provided trace records."""
         if not traces:
@@ -38,7 +32,14 @@ class ProgressReporter:
         trace_map: dict[str, int] = {}
 
         for trace in traces:
+            if not isinstance(trace.total_bytes, int):
+                raise ValueError("total_bytes must be present and must be an integer")
             trace_map[trace.trace_id] = trace.total_bytes
+            if trace.upload_attempts >= 3:
+                logger.warning(
+                    f"Trace {trace.trace_id} failed to upload  \
+                    after reaching max attempts(3)"
+                )
 
         body = {
             "recording_id": traces[0].recording_id,
