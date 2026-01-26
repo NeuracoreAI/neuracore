@@ -54,6 +54,7 @@ setup(
         "sqlalchemy>=2.0.0",
         "aiosqlite>=0.19.0",
         "aiohttp>=3.9.0",
+        "aiofiles>=23.0.0",
         "pyee==13.0.0",
     ],
     extras_require={
@@ -85,6 +86,7 @@ setup(
             "twine>=3.4.2",
             "requests-mock>=1.9.3",
             "pre-commit",
+            "types-aiofiles",
         ],
     },
     entry_points={
