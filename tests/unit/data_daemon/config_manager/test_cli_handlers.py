@@ -1,6 +1,7 @@
 """Tests for nc-data-daemon CLI handlers."""
 
 import argparse
+import os
 from pathlib import Path
 from typing import Any
 
@@ -229,6 +230,54 @@ def test_handle_launch_writes_pid_file_and_prints_success(
 ) -> None:
     test_state_dir = tmp_path / ".neuracore"
     test_pid_file = test_state_dir / "daemon.pid"
+
+    monkeypatch.setattr(args_handler, "daemon_state_dir_path", test_state_dir)
+    monkeypatch.setattr(args_handler, "pid_file_path", test_pid_file)
+    monkeypatch.setattr(args_handler.time, "sleep", lambda _: None)
+
+    monkeypatch.setattr(
+        args_handler.subprocess,
+        "Popen",
+        lambda *a, **k: _FakePopen(pid=12345, poll_value=None),
+    )
+
+    args_handler.handle_launch(_ns())
+    out = capsys.readouterr().out.strip()
+
+    assert test_pid_file.read_text(encoding="utf-8").strip() == "12345"
+    assert out == "Daemon launched (pid=12345)."
+
+
+def test_handle_launch_rejects_running_pid(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    test_state_dir = tmp_path / ".neuracore"
+    test_pid_file = test_state_dir / "daemon.pid"
+    test_state_dir.mkdir(parents=True, exist_ok=True)
+    test_pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+    monkeypatch.setattr(args_handler, "daemon_state_dir_path", test_state_dir)
+    monkeypatch.setattr(args_handler, "pid_file_path", test_pid_file)
+
+    with pytest.raises(SystemExit) as excinfo:
+        args_handler.handle_launch(_ns())
+
+    out = capsys.readouterr().out.strip()
+    assert excinfo.value.code == 1
+    assert out == f"Daemon already running (pid={os.getpid()})."
+
+
+def test_handle_launch_clears_stale_pid_and_starts(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    test_state_dir = tmp_path / ".neuracore"
+    test_pid_file = test_state_dir / "daemon.pid"
+    test_state_dir.mkdir(parents=True, exist_ok=True)
+    test_pid_file.write_text("999999", encoding="utf-8")
 
     monkeypatch.setattr(args_handler, "daemon_state_dir_path", test_state_dir)
     monkeypatch.setattr(args_handler, "pid_file_path", test_pid_file)

@@ -266,6 +266,15 @@ def handle_launch(args: argparse.Namespace) -> None:
         None
     """
     _ensure_daemon_state_dir_exists()
+    existing_pid = _read_pid_from_file(pid_file_path)
+    if existing_pid is not None:
+        if _pid_is_running(existing_pid):
+            print(f"Daemon already running (pid={existing_pid}).")
+            sys.exit(1)
+        try:
+            pid_file_path.unlink()
+        except FileNotFoundError:
+            pass
 
     runner_command = [
         sys.executable,
@@ -273,11 +282,16 @@ def handle_launch(args: argparse.Namespace) -> None:
         "neuracore.data_daemon.runner_entry",
     ]
 
+    env = os.environ.copy()
+    env["NEURACORE_DAEMON_PID_PATH"] = str(pid_file_path)
+    env["NEURACORE_DAEMON_MANAGE_PID"] = "0"
+
     daemon_process = subprocess.Popen(
         runner_command,
         start_new_session=True,
         close_fds=True,
         cwd=str(Path.cwd()),
+        env=env,
     )
 
     spawned_daemon_pid = daemon_process.pid

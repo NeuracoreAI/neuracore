@@ -227,6 +227,12 @@ class SqliteStateStore(StateStore):
             )
         return [TraceRecord.from_row(dict(row)) for row in rows]
 
+    def list_traces(self) -> list[TraceRecord]:
+        """Return all trace records."""
+        with self._engine.begin() as conn:
+            rows = conn.execute(select(traces)).mappings().all()
+        return [TraceRecord.from_row(dict(row)) for row in rows]
+
     async def update_status(
         self,
         trace_id: str,
