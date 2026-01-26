@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,9 @@ from urllib.parse import urlparse
 import pytest
 import requests
 
+from neuracore.data_daemon.auth_management import auth_manager as daemon_auth
+from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
+from neuracore.data_daemon.const import API_URL, CONFIG_ENCODING
 from neuracore.data_daemon.upload_management.resumable_file_uploader import (
     ResumableFileUploader,
 )
@@ -269,6 +273,16 @@ def _set_api_url(monkeypatch, transport: FakeResumableTransport) -> None:
     )
 
 
+def _init_auth(tmp_path: Path, org_id: str, api_key: str = "test_api_key"):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"api_key": api_key, "current_org_id": org_id}),
+        encoding=CONFIG_ENCODING,
+    )
+    daemon_auth.initialize_auth(DaemonConfig(), config_path=config_path)
+    return daemon_auth.get_auth()
+
+
 def test_successful_upload_and_checksum_verification(
     transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
 ) -> None:
@@ -495,6 +509,34 @@ def test_retry_on_429_with_backoff(
     mock_sleep.assert_any_call(2)
 
 
+def test_bucket_unreachable_mid_upload_fails_after_retries(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_status_check:
+            return None
+        if info.content_range.startswith("bytes 1048576-"):
+            return ResponseAction(status=500, drop=True)
+        return None
+
+    transport.pre_request = pre_request
+
+    with patch("time.sleep") as mock_sleep:
+        uploader = _make_uploader(test_file)
+        success, bytes_uploaded, error_message = uploader.upload()
+
+    assert success is False
+    assert "Network connection error" in (error_message or "")
+    assert bytes_uploaded == 1024 * 1024
+    mock_sleep.assert_any_call(1)
+    mock_sleep.assert_any_call(2)
+    mock_sleep.assert_any_call(4)
+    mock_sleep.assert_any_call(8)
+
+
 def test_finalization_retry_without_reupload(
     transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
 ) -> None:
@@ -524,6 +566,81 @@ def test_finalization_retry_without_reupload(
     assert len(session.data) == 3 * 1024 * 1024
     finalize_calls = [entry for entry in transport.request_log if entry["is_finalize"]]
     assert len(finalize_calls) >= 1
+
+
+def test_finalization_retries_do_not_reupload_chunks(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    failures = {"count": 0}
+    fail_chunk_once = {"done": False}
+
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_finalize and failures["count"] < 2:
+            failures["count"] += 1
+            return ResponseAction(status=500)
+        return None
+
+    def post_store(info: RequestInfo, session: UploadSession) -> ResponseAction | None:
+        if (
+            info.is_final_chunk
+            and not info.is_status_check
+            and not fail_chunk_once["done"]
+        ):
+            fail_chunk_once["done"] = True
+            return ResponseAction(status=500)
+        return None
+
+    transport.pre_request = pre_request
+    transport.post_store = post_store
+
+    with patch("time.sleep"):
+        uploader = _make_uploader(test_file)
+        success, bytes_uploaded, _ = uploader.upload()
+
+    assert success is True
+    assert bytes_uploaded == 3 * 1024 * 1024
+    upload_calls = [
+        entry for entry in transport.request_log if entry["content_length"] > 0
+    ]
+    assert len(upload_calls) == 3
+    finalize_calls = [entry for entry in transport.request_log if entry["is_finalize"]]
+    assert len(finalize_calls) >= 3
+
+
+def test_finalization_failure_after_retries(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    def post_store(info: RequestInfo, session: UploadSession) -> ResponseAction | None:
+        if info.is_final_chunk and not info.is_status_check:
+            return ResponseAction(status=500)
+        return None
+
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_finalize:
+            return ResponseAction(status=500)
+        return None
+
+    transport.post_store = post_store
+    transport.pre_request = pre_request
+
+    with patch("time.sleep"):
+        uploader = _make_uploader(test_file)
+        success, _, error_message = uploader.upload()
+
+    assert success is False
+    assert "Finalization failed" in (error_message or "")
+    session = transport.sessions[transport.last_session_id]  # type: ignore[index]
+    assert session.uploaded_bytes == 3 * 1024 * 1024
+    upload_calls = [
+        entry for entry in transport.request_log if entry["content_length"] > 0
+    ]
+    assert len(upload_calls) == 3
 
 
 def test_bucket_unreachable_at_start(mock_auth, test_file: Path) -> None:
@@ -564,6 +681,150 @@ def test_ssl_handshake_failure_on_upload(
 
     assert success is False
     assert "SSL error" in (error_message or "")
+
+
+def test_signed_url_expired_during_status_check_refreshes_session(
+    transport: FakeResumableTransport, mock_auth, test_file: Path, monkeypatch
+) -> None:
+    _set_api_url(monkeypatch, transport)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    expired_once = {"done": False}
+
+    def pre_request(info: RequestInfo) -> ResponseAction | None:
+        if info.is_status_check and not expired_once["done"]:
+            expired_once["done"] = True
+            return ResponseAction(status=403, headers={"X-Signed-Url-Expired": "true"})
+        return None
+
+    transport.pre_request = pre_request
+
+    uploader = _make_uploader(test_file)
+    success, bytes_uploaded, _ = uploader.upload()
+
+    assert success is True
+    assert bytes_uploaded == 3 * 1024 * 1024
+    assert transport.session_count == 2
+
+
+def test_reacquire_credentials_on_session_expired_refreshes_token(
+    mock_auth_requests, mocked_org_id, tmp_path: Path, monkeypatch
+) -> None:
+    file_path = tmp_path / "small.bin"
+    payload = b"X" * (1024 * 1024)
+    file_path.write_bytes(payload)
+
+    _init_auth(tmp_path, mocked_org_id)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    session_url = (
+        f"{API_URL}/org/{mocked_org_id}/recording/rec-123/resumable_upload_url"
+    )
+    mock_auth_requests.register_uri(
+        "GET",
+        session_url,
+        [
+            {"json": {"url": "http://upload/session1"}, "status_code": 200},
+            {"json": {"url": "http://upload/session2"}, "status_code": 200},
+        ],
+    )
+
+    md5_hex = hashlib.md5(payload).hexdigest()
+    mock_auth_requests.register_uri(
+        "PUT",
+        "http://upload/session1",
+        [
+            {"status_code": 308, "headers": {}},
+            {"status_code": 410},
+        ],
+    )
+    mock_auth_requests.register_uri(
+        "PUT",
+        "http://upload/session2",
+        [{"status_code": 200, "headers": {"X-Checksum-MD5": md5_hex}}],
+    )
+
+    try:
+        uploader = ResumableFileUploader(
+            recording_id="rec-123",
+            filepath=str(file_path),
+            cloud_filepath="RGB_IMAGES/camera/trace.bin",
+            content_type="application/octet-stream",
+            bytes_uploaded=0,
+        )
+        success, bytes_uploaded, error_message = uploader.upload()
+    finally:
+        daemon_auth._auth = None
+
+    assert success is True
+    assert bytes_uploaded == 1024 * 1024
+    assert error_message is None
+    auth_calls = [
+        request
+        for request in mock_auth_requests.request_history
+        if request.method == "POST" and request.url.endswith("/auth/verify-api-key")
+    ]
+    assert len(auth_calls) >= 2
+
+
+def test_token_refresh_during_mid_upload_signed_url_expiry(
+    mock_auth_requests, mocked_org_id, tmp_path: Path, monkeypatch
+) -> None:
+    file_path = tmp_path / "two_chunks.bin"
+    payload = b"Y" * (2 * 1024 * 1024)
+    file_path.write_bytes(payload)
+
+    _init_auth(tmp_path, mocked_org_id)
+    monkeypatch.setattr(ResumableFileUploader, "CHUNK_SIZE", 1024 * 1024)
+
+    session_url = (
+        f"{API_URL}/org/{mocked_org_id}/recording/rec-456/resumable_upload_url"
+    )
+    mock_auth_requests.register_uri(
+        "GET",
+        session_url,
+        [
+            {"json": {"url": "http://upload/session1"}, "status_code": 200},
+            {"json": {"url": "http://upload/session2"}, "status_code": 200},
+        ],
+    )
+
+    md5_hex = hashlib.md5(payload).hexdigest()
+    mock_auth_requests.register_uri(
+        "PUT",
+        "http://upload/session1",
+        [
+            {"status_code": 308, "headers": {"Range": "bytes=0-1048575"}},
+            {"status_code": 403, "headers": {"X-Signed-Url-Expired": "true"}},
+        ],
+    )
+    mock_auth_requests.register_uri(
+        "PUT",
+        "http://upload/session2",
+        [{"status_code": 200, "headers": {"X-Checksum-MD5": md5_hex}}],
+    )
+
+    try:
+        uploader = ResumableFileUploader(
+            recording_id="rec-456",
+            filepath=str(file_path),
+            cloud_filepath="RGB_IMAGES/camera/trace.bin",
+            content_type="application/octet-stream",
+            bytes_uploaded=0,
+        )
+        success, bytes_uploaded, error_message = uploader.upload()
+    finally:
+        daemon_auth._auth = None
+
+    assert success is True
+    assert bytes_uploaded == 2 * 1024 * 1024
+    assert error_message is None
+    auth_calls = [
+        request
+        for request in mock_auth_requests.request_history
+        if request.method == "POST" and request.url.endswith("/auth/verify-api-key")
+    ]
+    assert len(auth_calls) >= 2
 
 
 def test_max_retries_exceeded(

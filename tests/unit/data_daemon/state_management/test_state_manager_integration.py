@@ -169,6 +169,50 @@ def test_offline_then_connected_emits_ready(manager_store) -> None:
     assert _get_trace_status(store, "trace-offline") == TraceStatus.WRITTEN
 
 
+def test_resume_progress_persists_across_restart(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    store = SqliteStateStore(db_path)
+    manager = StateManager(store)
+
+    manager.create_trace(
+        "trace-resume",
+        "rec-resume",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        path="/tmp/trace-resume.bin",
+        total_bytes=10,
+    )
+    store.mark_trace_as_written("trace-resume", 10)
+    store.update_bytes_uploaded("trace-resume", 4)
+
+    _cleanup_state_manager(manager)
+
+    store_restarted = SqliteStateStore(db_path)
+    manager_restarted = StateManager(store_restarted)
+
+    ready_events: list[tuple] = []
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+        _cleanup_state_manager(manager_restarted)
+
+    assert ready_events == [(
+        "trace-resume",
+        "rec-resume",
+        "/tmp/trace-resume.bin",
+        DataType.CUSTOM_1D,
+        "custom",
+        4,
+    )]
+
+
 def test_uploaded_bytes_updates_store(manager_store) -> None:
     manager, store = manager_store
     manager.create_trace(
