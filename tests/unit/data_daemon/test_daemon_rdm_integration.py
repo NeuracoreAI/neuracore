@@ -5,7 +5,6 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
 
 import pytest
 from neuracore_types import DataType
@@ -22,7 +21,6 @@ from neuracore.data_daemon.const import (
     TRACE_ID_FIELD_SIZE,
 )
 from neuracore.data_daemon.models import CommandType, CompleteMessage, MessageEnvelope
-from tests.unit.data_daemon.helpers import MockConfigManager
 
 
 @dataclass
@@ -62,22 +60,8 @@ class MockComm:
 class TestDaemonInit:
     """Tests for Daemon constructor dependency injection."""
 
-    def test_daemon_accepts_config_manager(self, tmp_path: Any) -> None:
-        """Daemon should accept config_manager parameter (deprecated, ignored)."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
-        mock_comm = MockComm()
-        mock_rdm = MockRDM()
-
-        daemon = Daemon(
-            recording_disk_manager=mock_rdm,
-            comm_manager=mock_comm,
-            config_manager=mock_config,
-        )
-
-        assert daemon.recording_disk_manager is mock_rdm
-
-    def test_daemon_does_not_require_config_manager(self) -> None:
-        """Daemon should not require config_manager."""
+    def test_daemon_accepts_required_params(self) -> None:
+        """Daemon should accept recording_disk_manager and comm_manager."""
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -99,15 +83,13 @@ class TestDaemonInit:
 class TestOnCompleteMessage:
     """Tests for _on_complete_message() method."""
 
-    def test_on_complete_message_enqueues_to_rdm(self, tmp_path: Any) -> None:
+    def test_on_complete_message_enqueues_to_rdm(self) -> None:
         """_on_complete_message should construct CompleteMessage and enqueue to RDM."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -129,15 +111,13 @@ class TestOnCompleteMessage:
         assert msg.data_type == DataType.JOINT_POSITIONS
         assert msg.final_chunk is False
 
-    def test_on_complete_message_with_final_chunk(self, tmp_path: Any) -> None:
+    def test_on_complete_message_with_final_chunk(self) -> None:
         """_on_complete_message should set final_chunk=True when specified."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -155,15 +135,13 @@ class TestOnCompleteMessage:
         msg = mock_rdm.enqueued[0]
         assert msg.final_chunk is True
 
-    def test_on_complete_message_uses_trace_metadata(self, tmp_path: Any) -> None:
+    def test_on_complete_message_uses_trace_metadata(self) -> None:
         """_on_complete_message should use metadata from _trace_metadata."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -196,15 +174,13 @@ class TestOnCompleteMessage:
         assert msg.data_type_name == "custom_data"
         assert msg.robot_instance == 1
 
-    def test_on_complete_message_handles_missing_metadata(self, tmp_path: Any) -> None:
+    def test_on_complete_message_handles_missing_metadata(self) -> None:
         """_on_complete_message should handle missing metadata gracefully."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -228,17 +204,13 @@ class TestOnCompleteMessage:
         assert msg.data_type_name == ""
         assert msg.robot_instance == 0
 
-    def test_on_complete_message_handles_empty_recording_id(
-        self, tmp_path: Any
-    ) -> None:
+    def test_on_complete_message_handles_empty_recording_id(self) -> None:
         """_on_complete_message should use empty string if recording_id is None."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -260,15 +232,13 @@ class TestOnCompleteMessage:
 class TestHandleEndTrace:
     """Tests for _handle_end_trace() method."""
 
-    def test_handle_end_trace_sends_final_chunk_message(self, tmp_path: Any) -> None:
+    def test_handle_end_trace_sends_final_chunk_message(self) -> None:
         """_handle_end_trace should send final_chunk=True message to RDM."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -302,17 +272,13 @@ class TestHandleEndTrace:
         assert msg.data_type == DataType.JOINT_POSITIONS
         assert msg.data == ""
 
-    def test_handle_end_trace_uses_custom_1d_for_unknown_data_type(
-        self, tmp_path: Any
-    ) -> None:
+    def test_handle_end_trace_uses_custom_1d_for_unknown_data_type(self) -> None:
         """_handle_end_trace should default to CUSTOM_1D for unknown data_type."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -343,17 +309,13 @@ class TestHandleEndTrace:
         msg = mock_rdm.enqueued[0]
         assert msg.data_type == DataType.CUSTOM_1D
 
-    def test_handle_end_trace_uses_custom_1d_for_missing_metadata(
-        self, tmp_path: Any
-    ) -> None:
+    def test_handle_end_trace_uses_custom_1d_for_missing_metadata(self) -> None:
         """_handle_end_trace should default to CUSTOM_1D if no metadata exists."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -381,15 +343,13 @@ class TestHandleEndTrace:
         msg = mock_rdm.enqueued[0]
         assert msg.data_type == DataType.CUSTOM_1D
 
-    def test_handle_end_trace_removes_trace_after_sending(self, tmp_path: Any) -> None:
+    def test_handle_end_trace_removes_trace_after_sending(self) -> None:
         """_handle_end_trace should remove trace from internal state after sending."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -416,15 +376,13 @@ class TestHandleEndTrace:
         assert "trace-456" not in daemon._trace_recordings
         assert "trace-456" not in daemon._trace_metadata
 
-    def test_handle_end_trace_skips_if_missing_trace_id(self, tmp_path: Any) -> None:
+    def test_handle_end_trace_skips_if_missing_trace_id(self) -> None:
         """_handle_end_trace should skip if trace_id is missing."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -445,17 +403,13 @@ class TestHandleEndTrace:
 
         assert len(mock_rdm.enqueued) == 0
 
-    def test_handle_end_trace_skips_if_missing_recording_id(
-        self, tmp_path: Any
-    ) -> None:
+    def test_handle_end_trace_skips_if_missing_recording_id(self) -> None:
         """_handle_end_trace should skip if recording_id is missing."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -508,18 +462,14 @@ def _write_chunk_to_ring_buffer(
 class TestDrainChannelMessages:
     """Tests for _drain_channel_messages() method."""
 
-    def test_drain_channel_messages_passes_data_type_to_on_complete(
-        self, tmp_path: Any
-    ) -> None:
+    def test_drain_channel_messages_passes_data_type_to_on_complete(self) -> None:
         """_drain_channel_messages should pass
         data_type from reader to _on_complete_message."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -549,17 +499,13 @@ class TestDrainChannelMessages:
         assert msg.trace_id == "trace-789"
         assert msg.data_type == DataType.DEPTH_IMAGES
 
-    def test_drain_channel_messages_handles_multi_chunk_message(
-        self, tmp_path: Any
-    ) -> None:
+    def test_drain_channel_messages_handles_multi_chunk_message(self) -> None:
         """_drain_channel_messages should reassemble multi-chunk messages correctly."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -619,16 +565,14 @@ class TestDataTypeHandling:
         ],
     )
     def test_on_complete_message_handles_all_data_types(
-        self, tmp_path: Any, data_type: DataType
+        self, data_type: DataType
     ) -> None:
         """_on_complete_message should handle all DataType values."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -650,7 +594,7 @@ class TestDataTypeHandling:
 class TestExpiredChannelCleanup:
     """Tests for _cleanup_expired_channels() method."""
 
-    def test_cleanup_expired_channels_sends_final_chunk(self, tmp_path: Any) -> None:
+    def test_cleanup_expired_channels_sends_final_chunk(self) -> None:
         """Tests that _cleanup_expired_channels() sends a final_chunk message to
         RDM and removes the channel from daemon.channels.
 
@@ -659,13 +603,11 @@ class TestExpiredChannelCleanup:
         It then runs _cleanup_expired_channels() and verifies that a final_chunk message
         is sent to RDM and the channel is removed from daemon.channels.
         """
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -695,19 +637,13 @@ class TestExpiredChannelCleanup:
 
         assert "expired-producer" not in daemon.channels
 
-    def test_cleanup_expired_channels_no_trace_no_message(self, tmp_path: Any) -> None:
+    def test_cleanup_expired_channels_no_trace_no_message(self) -> None:
         """_cleanup_expired_channels should not send message if channel has no trace."""
-        from datetime import timedelta
-
-        from neuracore.data_daemon.const import HEARTBEAT_TIMEOUT_SECS
-
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -727,9 +663,7 @@ class TestExpiredChannelCleanup:
 
         assert "expired-producer" not in daemon.channels
 
-    def test_cleanup_expired_channels_skips_active_channels(
-        self, tmp_path: Any
-    ) -> None:
+    def test_cleanup_expired_channels_skips_active_channels(self) -> None:
         """Test _cleanup_expired_channels doesn't remove channels with recent heartbeat.
 
         This test creates a channel with a recent heartbeat and
@@ -737,13 +671,11 @@ class TestExpiredChannelCleanup:
         It verifies that no message is sent to the RDM and
         that the channel is not removed.
         """
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=mock_rdm,
         )
 
@@ -764,9 +696,8 @@ class TestExpiredChannelCleanup:
 class TestRDMEnqueueErrorHandling:
     """Tests for error handling when RDM.enqueue() fails."""
 
-    def test_on_complete_message_handles_enqueue_exception(self, tmp_path: Any) -> None:
+    def test_on_complete_message_handles_enqueue_exception(self) -> None:
         """_on_complete_message should catch and log exceptions from RDM.enqueue()."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
 
         class FailingRDM:
@@ -777,7 +708,6 @@ class TestRDMEnqueueErrorHandling:
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=failing_rdm,
         )
 
@@ -791,9 +721,8 @@ class TestRDMEnqueueErrorHandling:
             final_chunk=False,
         )
 
-    def test_daemon_continues_after_enqueue_failure(self, tmp_path: Any) -> None:
+    def test_daemon_continues_after_enqueue_failure(self) -> None:
         """Daemon should continue processing after RDM.enqueue() failure."""
-        mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
         mock_comm = MockComm()
 
         class FailOnceThenSucceedRDM:
@@ -811,7 +740,6 @@ class TestRDMEnqueueErrorHandling:
 
         daemon = Daemon(
             comm_manager=mock_comm,
-            config_manager=mock_config,
             recording_disk_manager=rdm,
         )
 

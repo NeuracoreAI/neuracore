@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import base64
 import struct
-from typing import Any
 
 from neuracore_types import DataType
 
@@ -26,7 +25,6 @@ from neuracore.data_daemon.const import (
     TRACE_ID_FIELD_SIZE,
 )
 from neuracore.data_daemon.models import CommandType, CompleteMessage, MessageEnvelope
-from tests.unit.data_daemon.helpers import MockConfigManager
 
 
 class MockRDM:
@@ -89,19 +87,17 @@ def _write_chunk_to_ring_buffer(
 # =============================================================================
 
 
-def test_end_to_end_data_integrity(tmp_path: Any) -> None:
+def test_end_to_end_data_integrity() -> None:
     """Bytes preserved producer→RDM.
 
     The ultimate test: data in equals data out. Any corruption anywhere in
     pipeline fails this.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -141,19 +137,17 @@ def test_end_to_end_data_integrity(tmp_path: Any) -> None:
     assert received_data == original_data
 
 
-def test_multi_chunk_reassembly_integrity(tmp_path: Any) -> None:
+def test_multi_chunk_reassembly_integrity() -> None:
     """Large data split and reassembled correctly.
 
     Chunking is lossless. Large messages must survive split/reassemble without
     byte loss.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -204,19 +198,17 @@ def test_multi_chunk_reassembly_integrity(tmp_path: Any) -> None:
     assert reassembled == original_data
 
 
-def test_binary_payload_through_pipeline(tmp_path: Any) -> None:
+def test_binary_payload_through_pipeline() -> None:
     """Binary with null bytes preserved.
 
     Full byte range must work. No special character handling that corrupts
     binary data.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -258,7 +250,7 @@ def test_binary_payload_through_pipeline(tmp_path: Any) -> None:
 # =============================================================================
 
 
-def test_daemon_handles_corrupted_chunk_gracefully(tmp_path: Any) -> None:
+def test_daemon_handles_corrupted_chunk_gracefully() -> None:
     """Malformed chunk doesn't crash.
 
     Corruption happens. Daemon must log and continue, not crash the whole
@@ -269,13 +261,11 @@ def test_daemon_handles_corrupted_chunk_gracefully(tmp_path: Any) -> None:
     )
     from neuracore.data_daemon.const import CHUNK_HEADER_SIZE
 
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -303,19 +293,17 @@ def test_daemon_handles_corrupted_chunk_gracefully(tmp_path: Any) -> None:
     assert daemon.channels["test-producer"] is not None
 
 
-def test_daemon_survives_full_buffer(tmp_path: Any) -> None:
+def test_daemon_survives_full_buffer() -> None:
     """Daemon handles buffer pressure.
 
     Back-pressure scenario: system must survive temporary overload without
     crashing.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -369,13 +357,12 @@ def test_daemon_survives_full_buffer(tmp_path: Any) -> None:
     assert len(mock_rdm.enqueued) == 2
 
 
-def test_rdm_failure_does_not_lose_ring_buffer(tmp_path: Any) -> None:
+def test_rdm_failure_does_not_lose_ring_buffer() -> None:
     """RDM error doesn't corrupt buffer.
 
     Downstream failure shouldn't corrupt upstream state. Isolation between
     components.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
 
     # RDM that fails on first call
@@ -394,7 +381,6 @@ def test_rdm_failure_does_not_lose_ring_buffer(tmp_path: Any) -> None:
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=failing_rdm,
     )
 
@@ -453,19 +439,17 @@ def test_rdm_failure_does_not_lose_ring_buffer(tmp_path: Any) -> None:
 # =============================================================================
 
 
-def test_new_trace_independent_of_previous(tmp_path: Any) -> None:
+def test_new_trace_independent_of_previous() -> None:
     """New trace unaffected by prior.
 
     Trace isolation: completing one trace must not leave state that affects
     next trace.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -519,19 +503,17 @@ def test_new_trace_independent_of_previous(tmp_path: Any) -> None:
     assert mock_rdm.enqueued[1].data_type == DataType.JOINT_VELOCITIES
 
 
-def test_concurrent_traces_isolation(tmp_path: Any) -> None:
+def test_concurrent_traces_isolation() -> None:
     """Multiple traces don't interfere.
 
     Concurrent traces are common. Must not mix up chunks between different
     traces.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
