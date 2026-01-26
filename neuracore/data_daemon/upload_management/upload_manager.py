@@ -39,6 +39,7 @@ class UploadManager(TraceManager):
         """Initialize the upload manager."""
         self._config = config
         self._active_uploads: set[asyncio.Task] = set()
+        self._uploading_traces: set[str] = set()  # Prevent duplicate uploads
         self._client_session = client_session
         super().__init__(client_session)
 
@@ -95,7 +96,13 @@ class UploadManager(TraceManager):
             bytes_uploaded: Starting offset for resume
             external_trace_id: Backend trace ID if previously registered
         """
-        logger.info(f"Received READY_FOR_UPLOAD for trace {trace_id}")
+        # Prevent duplicate concurrent uploads for the same trace
+        if trace_id in self._uploading_traces:
+            logger.debug(f"Upload already in progress for trace {trace_id}, skipping")
+            return
+
+        self._uploading_traces.add(trace_id)
+        logger.debug(f"Starting upload for trace {trace_id}")
 
         # Create upload task
         task = asyncio.create_task(
@@ -110,8 +117,12 @@ class UploadManager(TraceManager):
             )
         )
 
+        def on_complete(t: asyncio.Task[bool]) -> None:
+            self._active_uploads.discard(t)
+            self._uploading_traces.discard(trace_id)
+
         self._active_uploads.add(task)
-        task.add_done_callback(self._active_uploads.discard)
+        task.add_done_callback(on_complete)
 
     def _find_resume_point(
         self, files: list[Path], bytes_uploaded: int

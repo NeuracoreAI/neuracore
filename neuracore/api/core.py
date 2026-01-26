@@ -7,7 +7,6 @@ recording sessions.
 """
 
 import logging
-import time
 from warnings import warn
 
 from neuracore.core.config.config_manager import get_config_manager
@@ -19,7 +18,6 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
-from neuracore.core.utils import backend_utils
 
 from ..core.auth import get_auth
 from ..core.exceptions import RobotError
@@ -216,20 +214,15 @@ def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
     robot.start_recording(active_dataset_id)
 
 
-def stop_recording(
-    robot_name: str | None = None, instance: int = 0, wait: bool = False
-) -> None:
+def stop_recording(robot_name: str | None = None, instance: int = 0) -> None:
     """Stop recording data for a specific robot.
 
-    Ends the current recording session for the specified robot. Optionally
-    waits for all data streams to finish uploading before returning.
+    Ends the current recording session for the specified robot.
 
     Args:
         robot_name: Robot identifier. If not provided, uses the currently
             active robot from the global state.
         instance: Instance number of the robot for multi-instance scenarios.
-        wait: Whether to block until all data streams have finished uploading
-            to the backend storage.
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided.
@@ -245,12 +238,6 @@ def stop_recording(
     if not recording_id:
         raise ValueError("Recording_id is None, no current recording")
     robot.stop_recording(recording_id)
-    if wait:
-        while True:
-            data_traces = backend_utils.get_active_data_traces(recording_id)
-            if len(data_traces) == 0:
-                break
-        time.sleep(2.0)
 
 
 def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:
