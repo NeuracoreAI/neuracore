@@ -1,9 +1,11 @@
 """Shared event emitter for cross-component signaling."""
 
-from pyee import EventEmitter
+import asyncio
+
+from pyee.asyncio import AsyncIOEventEmitter
 
 
-class Emitter(EventEmitter):
+class Emitter(AsyncIOEventEmitter):
     """Shared event emitter for cross-component signaling."""
 
     # Comms manager to State manager
@@ -58,26 +60,34 @@ class Emitter(EventEmitter):
     DELETE_TRACE = "DELETE_TRACE"
     # (recording_id, trace_id, data_type)
 
-    def __init__(self) -> None:
-        """Initialize the event emitter."""
-        super().__init__()
+    def __init__(self, *, loop: asyncio.AbstractEventLoop) -> None:
+        """Initialize the event emitter.
+
+        Args:
+            loop: The event loop to use for async event handlers.
+        """
+        super().__init__(loop=loop)
 
 
-emitter = Emitter()
-
-# Progress report service job is to send progress report
-# updates to the backend (bytes uploaded)
+_emitter: Emitter | None = None
 
 
-# Example usage:
+def init_emitter(*, loop: asyncio.AbstractEventLoop) -> Emitter:
+    """Initialize the global emitter once the General loop is running.
 
-# from neuracore.data_daemon.event_emitter import emitter, Emitter
+    Args:
+        loop: The event loop to use for async event handlers.
 
-# @emitter.on(Emitter.UPLOAD_COMPLETE)
-# def on_upload_complete(trace_id: str) -> None:
-#     print("uploaded", trace_id)
+    """
+    global _emitter
+    if _emitter is not None:
+        raise RuntimeError("Emitter already initialized")
+    _emitter = Emitter(loop=loop)
+    return _emitter
 
-# emitter.emit(Emitter.UPLOAD_COMPLETE, "trace-123")
 
-# Use a simple decorator with the .on method to subscribe to the events,
-# arguments must match the function being called
+def get_emitter() -> Emitter:
+    """Return the initialized emitter."""
+    if _emitter is None:
+        raise RuntimeError("Emitter not initialized.")
+    return _emitter

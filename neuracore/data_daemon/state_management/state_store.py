@@ -16,11 +16,11 @@ from neuracore.data_daemon.models import (
 class StateStore(Protocol):
     """Persistence interface for trace state."""
 
-    def set_stopped_ats(self, recording_id: str) -> None:
+    async def set_stopped_ats(self, recording_id: str) -> None:
         """Set the end time for all traces for a recording."""
         ...
 
-    def create_trace(
+    async def create_trace(
         self,
         trace_id: str,
         recording_id: str,
@@ -37,39 +37,39 @@ class StateStore(Protocol):
         """Create or update a trace record."""
         ...
 
-    def get_trace(self, trace_id: str) -> TraceRecord | None:
+    async def get_trace(self, trace_id: str) -> TraceRecord | None:
         """Get a trace record by ID."""
         ...
 
-    def find_traces_by_recording_id(self, recording_id: str) -> list[TraceRecord]:
+    async def find_traces_by_recording_id(self, recording_id: str) -> list[TraceRecord]:
         """Return all traces for a given recording ID."""
         ...
 
-    def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
+    async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
         """Increment uploaded byte count for a trace."""
         ...
 
-    def mark_trace_as_written(self, trace_id: str, bytes_written: int) -> None:
+    async def mark_trace_as_written(self, trace_id: str, bytes_written: int) -> None:
         """Finalize writing for a trace and mark it ready for upload."""
         ...
 
-    def find_ready_traces(self) -> list[TraceRecord]:
+    async def find_ready_traces(self) -> list[TraceRecord]:
         """Return all traces marked as ready for upload."""
         ...
 
-    def find_unreported_traces(self) -> list[TraceRecord]:
+    async def find_unreported_traces(self) -> list[TraceRecord]:
         """Return all traces that have not been progress-reported."""
         ...
 
-    def claim_ready_traces(self, limit: int = 50) -> list[Mapping[str, Any]]:
+    async def claim_ready_traces(self, limit: int = 50) -> list[Mapping[str, Any]]:
         """Claim ready traces for upload and mark them in-progress."""
         ...
 
-    def mark_recording_reported(self, recording_id: str) -> None:
+    async def mark_recording_reported(self, recording_id: str) -> None:
         """Mark a recording as progress-reported."""
         ...
 
-    def update_status(
+    async def update_status(
         self,
         trace_id: str,
         status: TraceStatus,
@@ -79,7 +79,7 @@ class StateStore(Protocol):
         """Update the status and optional error message for a trace."""
         ...
 
-    def record_error(
+    async def record_error(
         self,
         trace_id: str,
         error_message: str,
@@ -89,6 +89,6 @@ class StateStore(Protocol):
         """Record a standardized error for a trace."""
         ...
 
-    def delete_trace(self, trace_id: str) -> None:
+    async def delete_trace(self, trace_id: str) -> None:
         """Delete a trace record."""
         ...

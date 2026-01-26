@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
-import queue
 import threading
 from collections.abc import Callable
 from typing import cast
 
-from neuracore.data_daemon.event_emitter import Emitter, emitter
+from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
     StorageBudget,
 )
@@ -34,7 +34,7 @@ class _BatchEncoderWorker:
     def __init__(
         self,
         *,
-        raw_file_queue: queue.Queue[_BatchJob | object],
+        raw_file_queue: asyncio.Queue[_BatchJob | object],
         filesystem: _TraceFilesystem,
         encoder_manager: _EncoderManager,
         storage_budget: StorageBudget,
@@ -66,7 +66,9 @@ class _BatchEncoderWorker:
 
         self.SENTINEL = sentinel
 
-    def worker(self) -> None:
+        self._emitter = get_emitter()
+
+    async def worker(self) -> None:
         """Consumes raw batch jobs, decode them, and feed per-trace encoders.
 
         Args:
@@ -76,7 +78,7 @@ class _BatchEncoderWorker:
             None
         """
         while True:
-            job_item = self.raw_file_queue.get()
+            job_item = await self.raw_file_queue.get()
             try:
                 if job_item is self.SENTINEL:
                     self._finalise_remaining_encoders()
@@ -86,16 +88,21 @@ class _BatchEncoderWorker:
 
                 with self._state_lock:
                     if batch_job.trace_key in self._aborted_traces:
-                        batch_job.batch_path.unlink(missing_ok=True)
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(
+                            None, batch_job.batch_path.unlink, True
+                        )
                         continue
 
                 encoder = self._encoder_manager.safe_get_encoder(batch_job.trace_key)
                 if encoder is None:
-                    batch_job.batch_path.unlink(missing_ok=True)
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, batch_job.batch_path.unlink, True)
                     continue
 
-                ok = self._process_batch_into_encoder(batch_job, encoder)
-                batch_job.batch_path.unlink(missing_ok=True)
+                ok = await self._process_batch_into_encoder(batch_job, encoder)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, batch_job.batch_path.unlink, True)
                 if not ok:
                     continue
 
@@ -131,14 +138,14 @@ class _BatchEncoderWorker:
                 continue
 
             bytes_written = self._filesystem.trace_bytes_on_disk(trace_key)
-            emitter.emit(
+            self._emitter.emit(
                 Emitter.TRACE_WRITTEN,
                 trace_key.trace_id,
                 trace_key.recording_id,
                 bytes_written,
             )
 
-    def _process_batch_into_encoder(
+    async def _process_batch_into_encoder(
         self,
         batch_job: _BatchJob,
         encoder: JsonTrace | VideoTrace,
@@ -154,7 +161,10 @@ class _BatchEncoderWorker:
                 otherwise False (trace aborted).
         """
         try:
-            raw_bytes = batch_job.batch_path.read_bytes()
+            loop = asyncio.get_event_loop()
+            raw_bytes = await loop.run_in_executor(
+                None, batch_job.batch_path.read_bytes
+            )
             for raw_line in raw_bytes.splitlines():
                 if not raw_line:
                     continue
@@ -218,7 +228,7 @@ class _BatchEncoderWorker:
             return
 
         bytes_written = self._filesystem.trace_bytes_on_disk(trace_key)
-        emitter.emit(
+        self._emitter.emit(
             Emitter.TRACE_WRITTEN,
             trace_key.trace_id,
             trace_key.recording_id,

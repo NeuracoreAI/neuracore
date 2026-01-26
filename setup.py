@@ -50,9 +50,10 @@ setup(
         "typer>=0.20.0",
         "neuracore-types>=4.3.0,<5.0.0",
         "ordered_set",
-        # Dependencies from merged data_daemon:
         "pyzmq==27.1.0",
         "sqlalchemy>=2.0.0",
+        "aiosqlite>=0.19.0",
+        "aiohttp>=3.9.0",
         "pyee==13.0.0",
     ],
     extras_require={

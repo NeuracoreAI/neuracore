@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-import queue
 import threading
 from collections.abc import Callable
 from typing import Any, cast
 
-from neuracore.data_daemon.event_emitter import Emitter, emitter
+from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.models import CompleteMessage
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
     StorageBudget,
@@ -25,8 +25,8 @@ class _RawBatchWriter:
         self,
         *,
         flush_bytes: int,
-        trace_message_queue: queue.Queue[CompleteMessage | object],
-        raw_file_queue: queue.Queue[_BatchJob | object],
+        trace_message_queue: asyncio.Queue[CompleteMessage | object],
+        raw_file_queue: asyncio.Queue[_BatchJob | object],
         filesystem: _TraceFilesystem,
         storage_budget: StorageBudget,
         state_lock: threading.RLock,
@@ -72,7 +72,9 @@ class _RawBatchWriter:
 
         self.SENTINEL = sentinel
 
-    def _flush_state(self, writer_state: _WriteState) -> None:
+        self._emitter = get_emitter()
+
+    async def _flush_state(self, writer_state: _WriteState) -> None:
         """Flush buffered data to a raw batch file and enqueue an encoder job.
 
         Args:
@@ -106,13 +108,14 @@ class _RawBatchWriter:
         batch_file_name = f"batch_{batch_index:06d}.raw"
         batch_path = trace_dir / batch_file_name
         try:
-            batch_path.write_bytes(payload_bytes)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, batch_path.write_bytes, payload_bytes)
         except Exception:
             self._storage_budget.release(buffered_bytes)
             self._abort_trace(trace_key)
             return
 
-        self.raw_file_queue.put(
+        await self.raw_file_queue.put(
             _BatchJob(
                 trace_key=trace_key,
                 batch_path=batch_path,
@@ -120,14 +123,14 @@ class _RawBatchWriter:
             )
         )
 
-    def worker(self) -> None:
+    async def worker(self) -> None:
         """Worker loop: buffer messages and write raw batch files to disk.
 
         Returns:
             None
         """
         while True:
-            queue_item = self.trace_message_queue.get()
+            queue_item = await self.trace_message_queue.get()
 
             if queue_item is self.SENTINEL:
                 with self._state_lock:
@@ -136,12 +139,12 @@ class _RawBatchWriter:
                 for state_to_flush in writer_states_remaining:
                     with self._state_lock:
                         state_to_flush.trace_done = True
-                    self._flush_state(state_to_flush)
+                    await self._flush_state(state_to_flush)
 
                 with self._state_lock:
                     self._writer_states.clear()
 
-                self.raw_file_queue.put(self.SENTINEL)
+                await self.raw_file_queue.put(self.SENTINEL)
                 self.trace_message_queue.task_done()
                 break
 
@@ -190,7 +193,7 @@ class _RawBatchWriter:
                     self._writer_states[trace_key] = writer_state
 
             if is_new_trace:
-                emitter.emit(
+                self._emitter.emit(
                     Emitter.START_TRACE,
                     trace_key.trace_id,
                     trace_key.recording_id,
@@ -226,7 +229,7 @@ class _RawBatchWriter:
                 )
 
             if should_flush:
-                self._flush_state(writer_state)
+                await self._flush_state(writer_state)
                 with self._state_lock:
                     if writer_state.trace_done:
                         self._writer_states.pop(trace_key, None)

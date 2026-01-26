@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import threading
 from collections.abc import Mapping
 from typing import Any
 
-from neuracore.data_daemon.event_emitter import Emitter, emitter
+from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.models import (
     DataType,
     TraceErrorCode,
@@ -28,26 +28,30 @@ class StateManager:
         self._store = store
         self._is_connected = False
 
+        self._emitter = get_emitter()
+
         # From RDEM
-        emitter.on(Emitter.TRACE_WRITTEN, self._handle_trace_written)
-        emitter.on(Emitter.START_TRACE, self.create_trace)
+        self._emitter.on(Emitter.TRACE_WRITTEN, self._handle_trace_written)
+        self._emitter.on(Emitter.START_TRACE, self.create_trace)
 
         # From uploader
-        emitter.on(Emitter.UPLOAD_COMPLETE, self.handle_upload_complete)
-        emitter.on(Emitter.UPLOADED_BYTES, self.update_bytes_uploaded)
-        emitter.on(Emitter.UPLOAD_FAILED, self.handle_upload_failed)
+        self._emitter.on(Emitter.UPLOAD_COMPLETE, self.handle_upload_complete)
+        self._emitter.on(Emitter.UPLOADED_BYTES, self.update_bytes_uploaded)
+        self._emitter.on(Emitter.UPLOAD_FAILED, self.handle_upload_failed)
 
         # From the data bridge
-        emitter.on(Emitter.STOP_RECORDING, self.handle_stop_recording)
+        self._emitter.on(Emitter.STOP_RECORDING, self.handle_stop_recording)
 
         # From connection manager
-        emitter.on(Emitter.IS_CONNECTED, self.handle_is_connected)
+        self._emitter.on(Emitter.IS_CONNECTED, self.handle_is_connected)
 
         # From progress report service
-        emitter.on(Emitter.PROGRESS_REPORTED, self.mark_progress_as_reported)
-        emitter.on(Emitter.PROGRESS_REPORT_FAILED, self.handle_progress_report_error)
+        self._emitter.on(Emitter.PROGRESS_REPORTED, self.mark_progress_as_reported)
+        self._emitter.on(
+            Emitter.PROGRESS_REPORT_FAILED, self.handle_progress_report_error
+        )
 
-    def create_trace(
+    async def create_trace(
         self,
         trace_id: str,
         recording_id: str,
@@ -81,7 +85,7 @@ class StateManager:
             path (str): path to the trace file.
             total_bytes (int | None): total number of bytes in the trace file.
         """
-        self._store.create_trace(
+        await self._store.create_trace(
             trace_id=trace_id,
             recording_id=recording_id,
             data_type=data_type,
@@ -95,7 +99,7 @@ class StateManager:
             total_bytes=total_bytes,
         )
 
-    def handle_stop_recording(self, recording_id: str) -> None:
+    async def handle_stop_recording(self, recording_id: str) -> None:
         """Handle a stop recording event from the data bridge.
 
         This function is called when the data bridge wants to stop all traces
@@ -105,14 +109,14 @@ class StateManager:
         Args:
             recording_id (str): unique identifier for the recording.
         """
-        emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
-        self._store.set_stopped_ats(recording_id)
+        self._emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
+        await self._store.set_stopped_ats(recording_id)
         if not self._is_connected:
             return
-        traces = self._store.find_traces_by_recording_id(recording_id)
-        self._emit_progress_report_if_recording_stopped(traces)
+        traces = await self._store.find_traces_by_recording_id(recording_id)
+        await self._emit_progress_report_if_recording_stopped(traces)
 
-    def handle_is_connected(self, is_connected: bool) -> None:
+    async def handle_is_connected(self, is_connected: bool) -> None:
         """Handle a connection status event from the data bridge.
 
         If the connection is lost, do nothing. If the connection is established,
@@ -125,8 +129,9 @@ class StateManager:
         self._is_connected = is_connected
         if not is_connected:
             return
+
         # Find/sort ready traces end trigger upload
-        traces = self._store.find_ready_traces()
+        traces = await self._store.find_ready_traces()
         traces.sort(
             key=lambda trace: (
                 trace.status != TraceStatus.UPLOADING,
@@ -134,7 +139,7 @@ class StateManager:
             )
         )
         for trace in traces:
-            emitter.emit(
+            self._emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
                 trace.trace_id,
                 trace.recording_id,
@@ -144,15 +149,15 @@ class StateManager:
                 trace.bytes_uploaded,
             )
         # Find if all traces are written for a recording to trigger progress report
-        unreported_traces = self._store.find_unreported_traces()
+        unreported_traces = await self._store.find_unreported_traces()
         traces_by_recording: dict[str, list[TraceRecord]] = {}
         for trace in unreported_traces:
             traces_by_recording.setdefault(trace.recording_id, []).append(trace)
         for _, recording_traces in traces_by_recording.items():
             if all(trace.ready_for_upload == 1 for trace in recording_traces):
-                self._emit_progress_report_if_recording_stopped(recording_traces)
+                await self._emit_progress_report_if_recording_stopped(recording_traces)
 
-    def handle_upload_complete(self, trace_id: str) -> None:
+    async def handle_upload_complete(self, trace_id: str) -> None:
         """Handle an upload complete event from an uploader.
 
         This function is called when an uploader completes an upload.
@@ -160,21 +165,21 @@ class StateManager:
         deletes the trace record from the database.
         """
         # Trigger file deletion
-        trace_record = self._store.get_trace(trace_id)
+        trace_record = await self._store.get_trace(trace_id)
         if trace_record is None:
             logger.warning("Trace record not found: %s", trace_id)
             return
 
-        emitter.emit(
+        self._emitter.emit(
             Emitter.DELETE_TRACE,
             trace_record.recording_id,
             trace_id,
             trace_record.data_type,
         )
         # Delete db entry
-        self._store.delete_trace(trace_id)
+        await self._store.delete_trace(trace_id)
 
-    def _handle_trace_written(
+    async def _handle_trace_written(
         self, trace_id: str, recording_id: str, bytes_written: int
     ) -> None:
         """Handle a trace written event from a producer.
@@ -187,9 +192,9 @@ class StateManager:
         for the recording are written.
         """
         # Update db
-        self._store.mark_trace_as_written(trace_id, bytes_written)
+        await self._store.mark_trace_as_written(trace_id, bytes_written)
 
-        trace_record = self._store.get_trace(trace_id)
+        trace_record = await self._store.get_trace(trace_id)
 
         if not trace_record:
             logger.warning("Trace record not found: %s", trace_id)
@@ -199,7 +204,7 @@ class StateManager:
             return
 
         # Emit event to uploader
-        emitter.emit(
+        self._emitter.emit(
             Emitter.READY_FOR_UPLOAD,
             trace_id,
             trace_record.recording_id,
@@ -209,10 +214,10 @@ class StateManager:
             trace_record.bytes_uploaded,
         )
 
-        traces = self._store.find_traces_by_recording_id(recording_id)
-        self._emit_progress_report_if_recording_stopped(traces)
+        traces = await self._store.find_traces_by_recording_id(recording_id)
+        await self._emit_progress_report_if_recording_stopped(traces)
 
-    def _emit_progress_report_if_recording_stopped(
+    async def _emit_progress_report_if_recording_stopped(
         self, traces: list[TraceRecord]
     ) -> None:
         if not traces:
@@ -227,19 +232,22 @@ class StateManager:
         ):
             return
         start_time, end_time = self._find_recording_start_and_end(traces)
-        threading.Thread(
-            target=emitter.emit,
-            args=(Emitter.PROGRESS_REPORT, start_time, end_time, traces),
-            daemon=True,
-        ).start()
+        asyncio.create_task(self._emit_progress_report(start_time, end_time, traces))
 
-    def mark_progress_as_reported(self, recording_id: str) -> None:
+    async def _emit_progress_report(
+        self, start_time: float, end_time: float, traces: list[TraceRecord]
+    ) -> None:
+        """Emit progress report event asynchronously."""
+        await asyncio.sleep(0)
+        self._emitter.emit(Emitter.PROGRESS_REPORT, start_time, end_time, traces)
+
+    async def mark_progress_as_reported(self, recording_id: str) -> None:
         """Mark a recording as progress-reported.
 
         Args:
             recording_id (str): unique identifier for the recording.
         """
-        self._store.mark_recording_reported(recording_id)
+        await self._store.mark_recording_reported(recording_id)
 
     def _find_recording_start_and_end(
         self, traces: list[TraceRecord]
@@ -253,21 +261,25 @@ class StateManager:
                 latest_end = trace.last_updated
         return earliest_start.timestamp(), latest_end.timestamp()
 
-    def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
+    async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
         """Increment uploaded byte count for a trace."""
-        self._store.update_bytes_uploaded(trace_id, bytes_uploaded)
+        await self._store.update_bytes_uploaded(trace_id, bytes_uploaded)
 
-    def claim_ready_traces(self, limit: int = 50) -> list[Mapping[str, Any]]:
+    async def claim_ready_traces(self, limit: int = 50) -> list[Mapping[str, Any]]:
         """Claim ready traces for upload and mark them in-progress."""
-        return self._store.claim_ready_traces(limit=limit)
+        return await self._store.claim_ready_traces(limit)
 
-    def update_status(
+    async def update_status(
         self, trace_id: str, status: TraceStatus, *, error_message: str | None = None
     ) -> None:
         """Update the status and optional error message for a trace."""
-        self._store.update_status(trace_id, status, error_message=error_message)
+        await self._store.update_status(
+            trace_id,
+            status,
+            error_message=error_message,
+        )
 
-    def handle_upload_failed(
+    async def handle_upload_failed(
         self,
         trace_id: str,
         bytes_uploaded: int,
@@ -276,15 +288,15 @@ class StateManager:
         error_message: str,
     ) -> None:
         """Handle an upload failed event from an uploader."""
-        self._record_error(
+        await self._record_error(
             trace_id,
             error_code=error_code,
             error_message=error_message,
             status=status,
         )
-        self.update_bytes_uploaded(trace_id, bytes_uploaded)
+        await self.update_bytes_uploaded(trace_id, bytes_uploaded)
 
-    def handle_progress_report_error(
+    async def handle_progress_report_error(
         self, recording_id: str, error_message: str
     ) -> None:
         """Handle a progress report error event from an uploader.
@@ -296,18 +308,18 @@ class StateManager:
             error_message (str): Error message associated with
             the progress report error.
         """
-        traces = self._store.find_traces_by_recording_id(recording_id)
+        traces = await self._store.find_traces_by_recording_id(recording_id)
         if not traces:
             return
         for trace in traces:
-            self._record_error(
+            await self._record_error(
                 trace.trace_id,
                 error_message,
                 error_code=TraceErrorCode.PROGRESS_REPORT_ERROR,
                 status=TraceStatus.FAILED,
             )
 
-    def _record_error(
+    async def _record_error(
         self,
         trace_id: str,
         error_message: str,
@@ -327,13 +339,13 @@ class StateManager:
                 Status to set for the trace after recording the error,
                 by default TraceStatus.FAILED.
         """
-        self._store.record_error(
+        await self._store.record_error(
             trace_id,
-            error_message=error_message,
-            error_code=error_code,
-            status=status,
+            error_message,
+            error_code,
+            status,
         )
 
-    def delete_trace(self, trace_id: str) -> None:
+    async def delete_trace(self, trace_id: str) -> None:
         """Delete a trace record."""
-        self._store.delete_trace(trace_id)
+        await self._store.delete_trace(trace_id)
