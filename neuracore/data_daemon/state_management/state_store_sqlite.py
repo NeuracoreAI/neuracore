@@ -289,16 +289,17 @@ class SqliteStateStore(StateStore):
             recording the error, by default TraceStatus.FAILED.
         """
         now = _utc_now()
+        values: dict[str, Any] = {
+            "status": status,
+            "error_message": error_message,
+            "error_code": error_code.value if error_code else None,
+            "last_updated": now,
+        }
+        if error_code == TraceErrorCode.UPLOAD_FAILED:
+            values["upload_attempts"] = traces.c.upload_attempts + 1
         with self._engine.begin() as conn:
             conn.execute(
-                update(traces)
-                .where(traces.c.trace_id == trace_id)
-                .values(
-                    status=status,
-                    error_message=error_message,
-                    error_code=error_code.value if error_code else None,
-                    last_updated=now,
-                )
+                update(traces).where(traces.c.trace_id == trace_id).values(**values)
             )
 
     def delete_trace(self, trace_id: str) -> None:

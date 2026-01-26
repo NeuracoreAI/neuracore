@@ -7,6 +7,7 @@ import threading
 from collections.abc import Mapping
 from typing import Any
 
+from neuracore.data_daemon.const import MAX_UPLOAD_ATTEMPTS
 from neuracore.data_daemon.event_emitter import Emitter, emitter
 from neuracore.data_daemon.models import (
     DataType,
@@ -134,6 +135,13 @@ class StateManager:
             )
         )
         for trace in traces:
+            if trace.upload_attempts >= MAX_UPLOAD_ATTEMPTS:
+                logger.warning(
+                    "Trace %s has failed to upload; max retries (%s) reached",
+                    trace.trace_id,
+                    MAX_UPLOAD_ATTEMPTS,
+                )
+                continue
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
                 trace.trace_id,

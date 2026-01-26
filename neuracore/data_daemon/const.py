@@ -5,6 +5,8 @@ import pathlib
 import struct
 from pathlib import Path
 
+MAX_UPLOAD_ATTEMPTS = 3
+
 HEARTBEAT_TIMEOUT_SECS = 10
 API_URL = os.getenv("NEURACORE_API_URL", "https://api.neuracore.app/api")
 
