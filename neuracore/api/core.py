@@ -26,6 +26,7 @@ from ..core.data.dataset import Dataset
 from ..core.exceptions import DatasetError, RobotError
 from ..core.robot import Robot, get_robot
 from ..core.robot import init as _init_robot
+from ..core.robot import update_robot_name as _update_robot_name
 from .globals import GlobalSingleton
 
 logger = logging.getLogger(__name__)
@@ -176,6 +177,32 @@ def connect_robot(
     StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
     get_recording_state_manager()
     return robot
+
+
+def update_robot_name(
+    robot_key: str,
+    new_robot_name: str,
+    instance: int = 0,
+    shared: bool = False,
+) -> str:
+    """Update the robot name for a robot.
+
+    Args:
+        robot_key: Old robot name or ID of the robot to update.
+        new_robot_name: New robot name to set for the robot.
+        instance: Robot instance to associate with the update.
+        shared: Whether the robot is shared/open-source.
+
+    Returns:
+        The resolved robot ID.
+    """
+    robot_id = _update_robot_name(
+        robot_key,
+        new_robot_name,
+        instance=instance,
+        shared=shared,
+    )
+    return robot_id
 
 
 def is_recording(robot_name: str | None = None, instance: int = 0) -> bool:

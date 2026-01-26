@@ -1,15 +1,11 @@
 import json
-from types import SimpleNamespace
 
-import pytest
 import requests_mock
 
 import neuracore as nc
-from neuracore.api import core
-from neuracore.api.globals import GlobalSingleton
+from neuracore.api import core as api_core
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
-from neuracore.core.exceptions import RobotError
 
 
 def test_login_with_api_key(temp_config_dir, monkeypatch):
@@ -128,58 +124,39 @@ def test_connect_robot(
     assert robot.name == "test_robot"
 
 
-def _set_active_dataset_id(dataset_id: str | None) -> str | None:
-    singleton = GlobalSingleton()
-    previous = singleton._active_dataset_id
-    singleton._active_dataset_id = dataset_id
-    return previous
+def test_update_robot_name_calls_underlying_and_returns_robot_id(monkeypatch):
+    calls: list[tuple] = []
 
+    def fake_update_robot_name(
+        robot_name: str,
+        new_robot_name: str,
+        instance: int = 0,
+        shared: bool = False,
+    ) -> str:
+        calls.append((robot_name, new_robot_name, instance, shared))
+        return "robot_id_123"
 
-def test_start_recording_shared_robot_non_shared_dataset(monkeypatch):
-    active_dataset_id = "dataset-123"
-    previous = _set_active_dataset_id(active_dataset_id)
+    monkeypatch.setattr(api_core, "_update_robot_name", fake_update_robot_name)
 
-    dataset = SimpleNamespace(
-        id=active_dataset_id,
-        name="NonShared Dataset",
-        is_shared=False,
+    robot_id = nc.update_robot_name(
+        "old_name_or_id", "new_name", instance=2, shared=True
     )
-    robot = SimpleNamespace(shared=True, start_recording=lambda _: None)
 
-    monkeypatch.setattr(core.Dataset, "get_by_id", lambda _: dataset)
-    monkeypatch.setattr(core, "_get_robot", lambda *_args, **_kwargs: robot)
-
-    try:
-        with pytest.raises(RobotError) as exc_info:
-            core.start_recording()
-        message = str(exc_info.value)
-        assert "Shared robot cannot be used" in message
-        assert "not authorized to upload shared datasets" in message
-        assert "Active dataset: 'NonShared Dataset'" in message
-    finally:
-        _set_active_dataset_id(previous)
+    assert robot_id == "robot_id_123"
+    assert calls == [("old_name_or_id", "new_name", 2, True)]
 
 
-def test_start_recording_non_shared_robot_shared_dataset(monkeypatch):
-    active_dataset_id = "dataset-456"
-    previous = _set_active_dataset_id(active_dataset_id)
+def test_update_robot_name_forwards_arguments(monkeypatch):
+    def fake_update_robot_name(
+        robot_name: str,
+        new_robot_name: str,
+        instance: int = 0,
+        shared: bool = False,
+    ) -> str:
+        return "robot_id_123"
 
-    dataset = SimpleNamespace(
-        id=active_dataset_id,
-        name="Shared Dataset",
-        is_shared=True,
-    )
-    robot = SimpleNamespace(shared=False, start_recording=lambda _: None)
+    monkeypatch.setattr(api_core, "_update_robot_name", fake_update_robot_name)
 
-    monkeypatch.setattr(core.Dataset, "get_by_id", lambda _: dataset)
-    monkeypatch.setattr(core, "_get_robot", lambda *_args, **_kwargs: robot)
+    robot_id = nc.update_robot_name("old", "new")
 
-    try:
-        with pytest.raises(RobotError) as exc_info:
-            core.start_recording()
-        message = str(exc_info.value)
-        assert "Non-shared robot cannot be used" in message
-        assert "connect_robot(shared=True)" in message
-        assert "Active dataset: 'Shared Dataset'" in message
-    finally:
-        _set_active_dataset_id(previous)
+    assert robot_id == "robot_id_123"

@@ -29,6 +29,20 @@ nc.connect_robot(
 )
 ```
 
+#### Update Robot Name
+```python
+    nc.connect_robot(
+        robot_name=old_robot_name,
+        urdf_path="/path/to/robot.urdf",
+        overwrite=False,
+    )
+
+    nc.update_robot_name(
+        robot_key=old_robot_name,
+        new_robot_name=new_robot_name,
+        shared=False,
+    )
+```
 ### Data Collection and Logging
 
 #### Basic Data Logging

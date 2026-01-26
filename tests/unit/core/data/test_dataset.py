@@ -15,6 +15,7 @@ from neuracore.core.data.dataset import DEFAULT_RECORDING_CACHE_DIR, Dataset
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.exceptions import DatasetError
+from neuracore.core.utils.robot_mapping import RobotMapping
 
 
 @pytest.fixture
@@ -853,9 +854,15 @@ class TestDatasetSynchronization:
         """Test synchronizing with specific data types."""
         nc.login("test_api_key")
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
+        dataset._robot_ids = ["robot_id"]
+        mapping = RobotMapping("test-org")
+        mapping._id_to_name = {"robot_id": "robot_name"}
+        mapping._name_to_ids = {"robot_name": ["robot_id"]}
+        mapping._initialized = True
+        dataset._robot_mapping = mapping
 
         robot_data_spec = {
-            "robot_id": {
+            "robot_name": {
                 DataType.RGB_IMAGES: [],
                 DataType.DEPTH_IMAGES: [],
                 DataType.JOINT_POSITIONS: [],
@@ -863,7 +870,7 @@ class TestDatasetSynchronization:
         }
         synced = dataset.synchronize(frequency=30, robot_data_spec=robot_data_spec)
 
-        assert synced.robot_data_spec == robot_data_spec
+        assert synced.robot_data_spec == {"robot_id": robot_data_spec["robot_name"]}
 
 
 class TestDatasetMixedOperations:

@@ -288,8 +288,13 @@ def mock_auth_requests(
         status_code=200,
     )
     mock_auth_requests.get(
-        re.compile(f"{API_URL}/org/{mocked_org_id}/datasets/dataset123"),
+        re.compile(f"{API_URL}/org/{mocked_org_id}/datasets/dataset123$"),
         json=dataset_model.model_dump(mode="json"),
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_model.id}/robot_ids",
+        json=[recording["robot_id"] for recording in recordings_list],
         status_code=200,
     )
 

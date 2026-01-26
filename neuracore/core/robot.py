@@ -25,6 +25,7 @@ from neuracore.core.streaming.recording_state_manager import (
     RecordingStateManager,
     get_recording_state_manager,
 )
+from neuracore.core.utils.robot_mapping import RobotMapping
 
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
@@ -593,6 +594,68 @@ def get_robot(robot_name: str, instance: int) -> Robot:
             f"Robot {robot_name}:{instance} not initialized. Call init() first."
         )
     return _robots[key]
+
+
+def _update_local_robot_name_cache(robot_id: str, new_robot_name: str) -> None:
+    """Update in-memory robot name mappings for a renamed robot."""
+    for name, rid in list(_robot_name_id_mapping.items()):
+        if rid == robot_id and name != new_robot_name:
+            _robot_name_id_mapping.pop(name, None)
+    _robot_name_id_mapping[new_robot_name] = robot_id
+    for robot in _robots.values():
+        if robot.id == robot_id:
+            robot.name = new_robot_name
+
+
+def update_robot_name(
+    robot_key: str,
+    new_robot_name: str,
+    instance: int = 0,
+    shared: bool = False,
+) -> str:
+    """Update a robot's name on the server.
+
+    Args:
+        robot_key: Robot old name or ID to update.
+        new_robot_name: New display name to set.
+        instance: Robot instance to associate with the update.
+        shared: Whether the robot is shared/open-source.
+
+    Returns:
+        The resolved robot ID.
+
+    Raises:
+        RobotError: If the update request fails.
+        ValueError: If the robot key or new name is empty.
+    """
+    if not robot_key:
+        raise ValueError("Robot old name or ID cannot be empty.")
+    if not new_robot_name:
+        raise ValueError("New robot name cannot be empty.")
+    if not get_auth().is_authenticated:
+        raise RobotError("Not authenticated. Please call nc.login() first.")
+
+    resolved_org_id = get_current_org()
+    if not resolved_org_id:
+        raise RobotError("No organization selected. Please call nc.select_org() first.")
+    robot_id = _robot_name_id_mapping.get(robot_key, robot_key)
+    try:
+        response = requests.post(
+            f"{API_URL}/org/{resolved_org_id}/robots?is_shared={shared}&robot_id={robot_id}",
+            json={"name": new_robot_name, "instance": instance},
+            headers=get_auth().get_headers(),
+        )
+        response.raise_for_status()
+    except requests.exceptions.ConnectionError:
+        raise RobotError(
+            "Failed to connect to neuracore server, "
+            "please check your internet connection and try again."
+        )
+    except requests.exceptions.RequestException as e:
+        raise RobotError(f"Failed to update robot name: {str(e)}")
+    _update_local_robot_name_cache(robot_id, new_robot_name)
+    RobotMapping.for_org(resolved_org_id, is_shared=shared).refresh()
+    return robot_id
 
 
 def list_organization_robots(
