@@ -38,9 +38,24 @@ class ResumableUpload:
         self.recording_id = recording_id
         self.filepath = filepath
         self.content_type = content_type
+        logger.info(
+            "ResumableUpload init: recording_id=%s filepath=%s content_type=%s",
+            recording_id,
+            filepath,
+            content_type,
+        )
         self.session_uri = self._get_upload_session_uri()
         self.total_bytes_uploaded = 0
         self.max_retries = 5
+        logger.info(
+            "ResumableUpload ready: recording_id=%s session_uri=%s",
+            recording_id,
+            (
+                self.session_uri[:80] + "..."
+                if len(self.session_uri) > 80
+                else self.session_uri
+            ),
+        )
 
     def _get_upload_session_uri(self) -> str:
         """Get a resumable upload session URI from the backend.
@@ -60,10 +75,19 @@ class ResumableUpload:
             "content_type": self.content_type,
         }
         org_id = get_current_org()
-        response = requests.get(
-            f"{API_URL}/org/{org_id}/recording/{self.recording_id}/resumable_upload_url",
-            params=params,
-            headers=auth.get_headers(),
+        url = (
+            f"{API_URL}/org/{org_id}/recording/{self.recording_id}/resumable_upload_url"
+        )
+        logger.info(
+            "GET resumable_upload_url: recording_id=%s filepath=%s",
+            self.recording_id,
+            self.filepath,
+        )
+        response = requests.get(url, params=params, headers=auth.get_headers())
+        logger.info(
+            "GET resumable_upload_url response: status=%d recording_id=%s",
+            response.status_code,
+            self.recording_id,
         )
         response.raise_for_status()
         return response.json()["url"]
@@ -118,11 +142,29 @@ class ResumableUpload:
         # Attempt the upload with retries
         for attempt in range(self.max_retries):
             try:
+                logger.info(
+                    "PUT chunk: rec=%s bytes=%d range=%s final=%s attempt=%d",
+                    self.recording_id,
+                    len(data),
+                    headers.get("Content-Range"),
+                    is_final,
+                    attempt + 1,
+                )
                 response = requests.put(self.session_uri, headers=headers, data=data)
                 status_code = response.status_code
+                logger.info(
+                    "PUT upload_chunk response: status=%d recording_id=%s",
+                    status_code,
+                    self.recording_id,
+                )
 
                 if status_code == 200 or status_code == 201:
                     self.total_bytes_uploaded += len(data)
+                    logger.info(
+                        "Upload complete: recording_id=%s total_bytes=%d",
+                        self.recording_id,
+                        self.total_bytes_uploaded,
+                    )
                     return True
                 elif status_code == 308:
                     # Resume Incomplete, more data expected
@@ -130,6 +172,12 @@ class ResumableUpload:
                     return True
                 else:
                     # Error occurred
+                    logger.warning(
+                        "Upload chunk failed: status=%d recording_id=%s response=%s",
+                        status_code,
+                        self.recording_id,
+                        response.text[:200] if response.text else "",
+                    )
                     if attempt < self.max_retries - 1:
                         time.sleep(2**attempt)  # Exponential backoff
 
@@ -140,6 +188,11 @@ class ResumableUpload:
                 if attempt < self.max_retries - 1:
                     time.sleep(2**attempt)  # Exponential backoff
 
+        logger.error(
+            "Upload chunk failed after %d retries: recording_id=%s",
+            self.max_retries,
+            self.recording_id,
+        )
         return False
 
     def check_status(self) -> int:
@@ -157,14 +210,39 @@ class ResumableUpload:
         """
         headers = {"Content-Length": "0", "Content-Range": "bytes */*"}
 
+        logger.debug("PUT check_status: recording_id=%s", self.recording_id)
         response = requests.put(self.session_uri, headers=headers)
+        logger.info(
+            "PUT check_status response: status=%d recording_id=%s",
+            response.status_code,
+            self.recording_id,
+        )
         if response.status_code == 200 or response.status_code == 201:
-            logger.debug("Upload complete")
+            logger.info(
+                "check_status: upload complete recording_id=%s total_bytes=%d",
+                self.recording_id,
+                self.total_bytes_uploaded,
+            )
             return self.total_bytes_uploaded
         elif response.status_code == 308 and "Range" in response.headers:
             range_header = response.headers["Range"]
-            return int(range_header.split("-")[1]) + 1
+            uploaded_bytes = int(range_header.split("-")[1]) + 1
+            logger.info(
+                "check_status: in progress recording_id=%s uploaded_bytes=%d",
+                self.recording_id,
+                uploaded_bytes,
+            )
+            return uploaded_bytes
         elif response.status_code == 308:
+            logger.info(
+                "check_status: no bytes uploaded yet recording_id=%s",
+                self.recording_id,
+            )
             return 0
 
+        logger.error(
+            "check_status: unexpected status=%d recording_id=%s",
+            response.status_code,
+            self.recording_id,
+        )
         raise Exception(f"Unexpected status code: {response.status_code}")

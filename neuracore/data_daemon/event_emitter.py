@@ -1,8 +1,12 @@
 """Shared event emitter for cross-component signaling."""
 
 import asyncio
+import logging
+from typing import Any
 
 from pyee.asyncio import AsyncIOEventEmitter
+
+logger = logging.getLogger(__name__)
 
 
 class Emitter(AsyncIOEventEmitter):
@@ -72,6 +76,35 @@ class Emitter(AsyncIOEventEmitter):
             loop: The event loop to use for async event handlers.
         """
         super().__init__(loop=loop)
+
+    def emit(self, event: str, *args: Any, **kwargs: Any) -> bool:
+        """Emit an event with logging.
+
+        Args:
+            event: The event name to emit.
+            *args: Positional arguments to pass to handlers.
+            **kwargs: Keyword arguments to pass to handlers.
+
+        Returns:
+            True if the event had listeners, False otherwise.
+        """
+        formatted_args = []
+        for arg in args:
+            if isinstance(arg, str) and len(arg) > 50:
+                formatted_args.append(f"{arg[:50]}...")
+            elif isinstance(arg, bytes) and len(arg) > 20:
+                formatted_args.append(f"<{len(arg)} bytes>")
+            elif isinstance(arg, list):
+                formatted_args.append(f"<list of {len(arg)} items>")
+            else:
+                r = repr(arg)
+                if len(r) > 100:
+                    formatted_args.append(f"{r[:100]}...")
+                else:
+                    formatted_args.append(r)
+        args_str = ", ".join(formatted_args) if formatted_args else ""
+        logger.info("EVENT %s: %s", event, args_str)
+        return super().emit(event, *args, **kwargs)
 
 
 _emitter: Emitter | None = None

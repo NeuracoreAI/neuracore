@@ -62,24 +62,30 @@ class ProgressReporter:
         recording_id = traces[0].recording_id
         last_error: str | None = None
 
+        url = f"{API_URL}/org/{org_id}/recording/register-traces"
+
         for attempt in range(BACKEND_API_MAX_RETRIES):
             try:
                 async with self.client_session.post(
-                    f"{API_URL}/{org_id}/recording/register-traces",
+                    url,
                     json=body,
                     headers=await auth.get_headers(self.client_session),
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as response:
                     if response.status < 400:
+                        logger.info(
+                            "Progress report success for recording %s", recording_id
+                        )
                         self._emitter.emit(Emitter.PROGRESS_REPORTED, recording_id)
                         return
 
                     error_text = await response.text()
                     last_error = f"HTTP {response.status}: {error_text}"
                     logger.warning(
-                        "Progress report failed (attempt %d/%d): %s %s",
+                        "Progress report failed (attempt %d/%d) to %s: %s %s",
                         attempt + 1,
                         BACKEND_API_MAX_RETRIES,
+                        url,
                         response.status,
                         error_text,
                     )
@@ -88,11 +94,13 @@ class ProgressReporter:
                         break  # Non-retryable error, stop immediately
 
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                last_error = str(exc)
+                last_error = f"{type(exc).__name__}: {exc!r}"
                 logger.warning(
-                    "Progress report request failed (attempt %d/%d): %s",
+                    "Progress report request failed (attempt %d/%d) to %s: %s: %r",
                     attempt + 1,
                     BACKEND_API_MAX_RETRIES,
+                    url,
+                    type(exc).__name__,
                     exc,
                 )
 

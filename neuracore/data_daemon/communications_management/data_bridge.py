@@ -34,10 +34,17 @@ from neuracore.data_daemon.models import (
 from neuracore.data_daemon.recording_encoding_disk_manager import (
     recording_disk_manager as rdm_module,
 )
+from neuracore.data_daemon.sampled_logger import make_sampled_logger
 
 RecordingDiskManager = rdm_module.RecordingDiskManager
 
 logger = logging.getLogger(__name__)
+
+
+_log_chunk = make_sampled_logger(
+    "DATA_CHUNK: msg=%d producer_id=%s trace_id=%s chunk=%d/%d",
+    target_logger=logger,
+)
 
 
 def _str_or_none(value: str | int | None) -> str | None:
@@ -461,15 +468,14 @@ class Daemon:
         data = data_chunk.data
         chunk_len = len(data)
 
-        logger.info(
-            "DATA_CHUNK: producer_id=%s channel_id=%s trace_id=%s "
-            "chunk_index=%d/%d size=%d",
+        _log_chunk(
+            trace_id,
+            chunk_index,
+            total_chunks,
             channel.producer_id,
-            data_chunk.channel_id,
             trace_id,
             chunk_index + 1,
             total_chunks,
-            chunk_len,
         )
 
         trace_id_bytes = trace_id.encode("utf-8")
