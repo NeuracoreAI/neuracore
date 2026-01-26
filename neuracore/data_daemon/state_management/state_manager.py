@@ -26,7 +26,8 @@ class StateManager:
     def __init__(self, store: StateStore) -> None:
         """Initialize with a persistence backend."""
         self._store = store
-        self._is_connected = False
+        self._is_connected = True  # Always consider online
+        self._reporting_recordings: set[str] = set()  # Prevent duplicate reports
 
         self._emitter = get_emitter()
 
@@ -41,9 +42,6 @@ class StateManager:
 
         # From the data bridge
         self._emitter.on(Emitter.STOP_RECORDING, self.handle_stop_recording)
-
-        # From connection manager
-        self._emitter.on(Emitter.IS_CONNECTED, self.handle_is_connected)
 
         # From progress report service
         self._emitter.on(Emitter.PROGRESS_REPORTED, self.mark_progress_as_reported)
@@ -122,18 +120,11 @@ class StateManager:
         await self._emit_progress_report_if_recording_stopped(traces)
 
     async def handle_is_connected(self, is_connected: bool) -> None:
-        """Handle a connection status event from the data bridge.
+        """Handle a connection status event - currently ignored.
 
-        If the connection is lost, do nothing. If the connection is established,
-        find all ready traces and sort them by their created time. Then, emit
-        READY_FOR_UPLOAD events for each trace. Finally, find all traces that
-        have not been marked as progress-reported and check if all traces
-        are written for each recording. If all traces are written, emit a
-        PROGRESS_REPORT event for the recording.
+        TODO: Re-enable when connection-aware upload scheduling is needed.
         """
-        self._is_connected = is_connected
-        if not is_connected:
-            return
+        return  # Ignore connection events - always consider online
 
         # Find/sort ready traces end trigger upload
         traces = await self._store.find_ready_traces()
@@ -229,6 +220,11 @@ class StateManager:
     ) -> None:
         if not traces:
             return
+        recording_id = traces[0].recording_id
+        # Prevent duplicate reports for same recording
+        if recording_id in self._reporting_recordings:
+            logger.debug("Progress report already in flight for %s", recording_id)
+            return
         if any(trace.progress_reported == 1 for trace in traces):
             return
         if not all(
@@ -238,6 +234,8 @@ class StateManager:
             for trace in traces
         ):
             return
+        self._reporting_recordings.add(recording_id)
+        logger.info("Starting progress report for recording %s", recording_id)
         start_time, end_time = self._find_recording_start_and_end(traces)
         asyncio.create_task(self._emit_progress_report(start_time, end_time, traces))
 
@@ -254,6 +252,7 @@ class StateManager:
         Args:
             recording_id (str): unique identifier for the recording.
         """
+        self._reporting_recordings.discard(recording_id)
         await self._store.mark_recording_reported(recording_id)
 
     def _find_recording_start_and_end(
@@ -315,6 +314,7 @@ class StateManager:
             error_message (str): Error message associated with
             the progress report error.
         """
+        self._reporting_recordings.discard(recording_id)
         traces = await self._store.find_traces_by_recording_id(recording_id)
         if not traces:
             return
