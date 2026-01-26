@@ -9,7 +9,9 @@ import base64
 import hashlib
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 
@@ -17,6 +19,19 @@ from neuracore.data_daemon.auth_management.auth_manager import get_auth
 from neuracore.data_daemon.const import API_URL
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FinalResponseData:
+    """Container for extracted HTTP response data.
+
+    Holds headers and optional JSON body extracted from an aiohttp.ClientResponse
+    before the response context is closed. This allows checksum verification to
+    access the data after the async with block exits.
+    """
+
+    headers: dict[str, str] = field(default_factory=dict)
+    json_body: dict[str, Any] | None = None
 
 
 class ResumableFileUploader:
@@ -163,7 +178,7 @@ class ResumableFileUploader:
 
     async def _upload_file_in_chunks(
         self,
-    ) -> tuple[bool, str | None, aiohttp.ClientResponse | None]:
+    ) -> tuple[bool, str | None, FinalResponseData | None]:
         """Read file from disk and upload in chunks.
 
         Opens the file, seeks to the resume point, and uploads remaining
@@ -180,7 +195,7 @@ class ResumableFileUploader:
                 # Seek to resume point
                 f.seek(self._bytes_uploaded)
 
-                final_response: aiohttp.ClientResponse | None = None
+                final_response: FinalResponseData | None = None
 
                 while True:
                     # Read next chunk
@@ -232,7 +247,7 @@ class ResumableFileUploader:
         chunk_start: int,
         chunk_end: int,
         is_final: bool,
-    ) -> tuple[bool, str | None, aiohttp.ClientResponse | None]:
+    ) -> tuple[bool, str | None, FinalResponseData | None]:
         """Upload a single chunk with exponential backoff retry.
 
         Uploads a chunk of data to the resumable upload session with proper
@@ -275,7 +290,16 @@ class ResumableFileUploader:
                     status_code = response.status
 
                     if status_code in self.FINAL_SUCCESS_CODES:
-                        return (True, None, response if is_final else None)
+                        if is_final:
+                            final_data = FinalResponseData(
+                                headers=dict(response.headers)
+                            )
+                            try:
+                                final_data.json_body = await response.json()
+                            except Exception:
+                                pass  # JSON body is optional
+                            return (True, None, final_data)
+                        return (True, None, None)
                     if status_code == self.RESUME_INCOMPLETE_CODE:
                         if is_final:
                             if await self._is_server_upload_complete():
@@ -427,7 +451,7 @@ class ResumableFileUploader:
 
     async def _finalize_upload(
         self,
-    ) -> tuple[bool, str | None, aiohttp.ClientResponse | None]:
+    ) -> tuple[bool, str | None, FinalResponseData | None]:
         """Finalize an upload without re-sending data."""
         if self._session_uri is None:
             return (False, "No upload session URI available", None)
@@ -442,7 +466,12 @@ class ResumableFileUploader:
                     self._session_uri, headers=headers, data=b"", timeout=timeout
                 ) as response:
                     if response.status in self.FINAL_SUCCESS_CODES:
-                        return (True, None, response)
+                        final_data = FinalResponseData(headers=dict(response.headers))
+                        try:
+                            final_data.json_body = await response.json()
+                        except Exception:
+                            pass  # JSON body is optional
+                        return (True, None, final_data)
                     if response.status == self.RESUME_INCOMPLETE_CODE:
                         return (False, "Finalization incomplete", None)
                     if response.status in self.RETRYABLE_STATUS_CODES:
@@ -468,17 +497,18 @@ class ResumableFileUploader:
         return (False, "Finalization failed after retries", None)
 
     async def _verify_checksum(
-        self, response: aiohttp.ClientResponse | None
+        self, response_data: FinalResponseData | None
     ) -> tuple[bool, str | None]:
         """Verify file integrity after finalization using server checksum."""
-        if response is None:
+        if response_data is None:
             return (False, "No finalization response available for checksum")
 
         server_md5_hex: str | None = None
-        if "X-Checksum-MD5" in response.headers:
-            server_md5_hex = response.headers["X-Checksum-MD5"].strip().lower()
-        elif "x-goog-hash" in response.headers:
-            hashes = response.headers["x-goog-hash"]
+        headers = response_data.headers
+        if "X-Checksum-MD5" in headers:
+            server_md5_hex = headers["X-Checksum-MD5"].strip().lower()
+        elif "x-goog-hash" in headers:
+            hashes = headers["x-goog-hash"]
             for part in hashes.split(","):
                 part = part.strip()
                 if part.startswith("md5="):
@@ -486,12 +516,9 @@ class ResumableFileUploader:
                     server_md5_hex = base64.b64decode(b64_hash).hex()
                     break
         else:
-            try:
-                body = await response.json()
-                if "md5Hash" in body:
-                    server_md5_hex = base64.b64decode(body["md5Hash"]).hex()
-            except Exception:
-                server_md5_hex = None
+            body = response_data.json_body
+            if body and "md5Hash" in body:
+                server_md5_hex = base64.b64decode(body["md5Hash"]).hex()
 
         if not server_md5_hex:
             return (False, "Missing checksum from server response")
