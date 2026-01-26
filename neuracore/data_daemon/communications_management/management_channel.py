@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 
 import zmq
 
@@ -12,9 +14,18 @@ from neuracore.data_daemon.communications_management.communications_manager impo
 )
 from neuracore.data_daemon.communications_management.data_bridge import Daemon
 from neuracore.data_daemon.communications_management.producer import Producer
+from neuracore.data_daemon.const import (
+    DEFAULT_RECORDING_ROOT_PATH,
+    RECORDING_EVENTS_SOCKET_PATH,
+)
+from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
+    DaemonLifecycleError,
+    startup,
+)
 from neuracore.data_daemon.recording_encoding_disk_manager import (
     recording_disk_manager as rdm_module,
 )
+from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
 
 RecordingDiskManager = rdm_module.RecordingDiskManager
 
@@ -50,12 +61,64 @@ class ManagementChannel:
         NOTE: This is intentionally simple. More advanced logic could try to
         probe for a stale socket.
         """
-        if SOCKET_PATH.exists():
-            logger.warning(
-                "NDD context requested but socket already exists at %s; "
-                "assuming another daemon is running.",
-                SOCKET_PATH,
+        pid_path = Path(
+            os.environ.get(
+                "NEURACORE_DAEMON_PID_PATH",
+                str(Path.home() / ".neuracore" / "daemon.pid"),
             )
+        )
+        db_path = Path(
+            os.environ.get(
+                "NEURACORE_DAEMON_DB_PATH",
+                str(Path.home() / ".neuracore" / "data_daemon" / "state.db"),
+            )
+        )
+        recordings_root = Path(
+            os.environ.get(
+                "NEURACORE_DAEMON_RECORDINGS_ROOT",
+                str(DEFAULT_RECORDING_ROOT_PATH),
+            )
+        )
+        manage_pid = os.environ.get("NEURACORE_DAEMON_MANAGE_PID", "1") != "0"
+
+        if SOCKET_PATH.exists() and pid_path.exists():
+            try:
+                pid_value = int(pid_path.read_text(encoding="utf-8").strip())
+            except Exception:
+                pid_value = None
+            if pid_value is not None:
+                try:
+                    os.kill(pid_value, 0)
+                    logger.warning(
+                        "NDD context requested but socket already exists at %s; "
+                        "daemon appears to be running (pid=%s).",
+                        SOCKET_PATH,
+                        pid_value,
+                    )
+                    return None
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    logger.warning(
+                        "NDD context requested but socket already exists at %s; "
+                        "permission denied checking pid=%s.",
+                        SOCKET_PATH,
+                        pid_value,
+                    )
+                    return None
+
+        store = SqliteStateStore(db_path)
+        try:
+            startup(
+                pid_path=pid_path,
+                socket_paths=(SOCKET_PATH, RECORDING_EVENTS_SOCKET_PATH),
+                db_path=db_path,
+                recordings_root=recordings_root,
+                store=store,
+                recover_sqlite=True,
+                manage_pid=manage_pid,
+            )
+        except DaemonLifecycleError:
             return None
 
         comm = CommunicationsManager()

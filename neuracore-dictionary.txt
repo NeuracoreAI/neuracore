@@ -230,3 +230,7 @@ POLLIN
 sess
 excinfo
 RETRYABLE
+checkpointed
+CREAT
+getpid
+WRONLY
