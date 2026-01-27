@@ -170,7 +170,9 @@ class UploadManager(TraceManager):
             error_message,
         )
 
-    def _validate_trace_directory(self, trace_dir_path: str) -> tuple[list[Path] | None, str | None]:
+    def _validate_trace_directory(
+        self, trace_dir_path: str
+    ) -> tuple[list[Path] | None, str | None]:
         """Validate trace directory and return files to upload.
 
         Args:
@@ -218,9 +220,7 @@ class UploadManager(TraceManager):
         async def progress_callback(bytes_delta: int) -> None:
             cumulative_delta[0] += bytes_delta
             total_bytes_uploaded = base_bytes + cumulative_delta[0]
-            self._emitter.emit(
-                Emitter.UPLOADED_BYTES, trace_id, total_bytes_uploaded
-            )
+            self._emitter.emit(Emitter.UPLOADED_BYTES, trace_id, total_bytes_uploaded)
             now = time.time()
             if now - last_progress_update[0] >= 30.0:
                 await self._update_data_trace(
@@ -290,9 +290,10 @@ class UploadManager(TraceManager):
         logger.info(f"Starting upload for trace {trace_id}")
 
         files, validation_error = self._validate_trace_directory(trace_dir_path)
-        if validation_error:
-            logger.error(validation_error)
-            self._emit_upload_failure(trace_id, bytes_uploaded, validation_error)
+        if validation_error or files is None:
+            error_msg = validation_error or "No files found in trace directory"
+            logger.error(error_msg)
+            self._emit_upload_failure(trace_id, bytes_uploaded, error_msg)
             return False
 
         logger.info(f"Found {len(files)} files to upload for trace {trace_id}")
@@ -315,10 +316,14 @@ class UploadManager(TraceManager):
             )
 
             start_file_idx, file_offset = self._find_resume_point(files, bytes_uploaded)
-            cumulative_bytes = sum(file.stat().st_size for file in files[:start_file_idx])
+            cumulative_bytes = sum(
+                file.stat().st_size for file in files[:start_file_idx]
+            )
             last_progress_update = [time.time()]
 
-            for file_idx, file in enumerate(files[start_file_idx:], start=start_file_idx):
+            for file_idx, file in enumerate(
+                files[start_file_idx:], start=start_file_idx
+            ):
                 cloud_filepath = f"{data_type.value}/{data_type_name}/{file.name}"
                 file_bytes_uploaded = file_offset if file_idx == start_file_idx else 0
 
@@ -332,7 +337,11 @@ class UploadManager(TraceManager):
                 )
 
                 success, file_total_bytes, error_message = await self._upload_file(
-                    file, cloud_filepath, recording_id, file_bytes_uploaded, progress_callback
+                    file,
+                    cloud_filepath,
+                    recording_id,
+                    file_bytes_uploaded,
+                    progress_callback,
                 )
 
                 if not success:
@@ -343,8 +352,11 @@ class UploadManager(TraceManager):
                         else TraceErrorCode.UPLOAD_FAILED
                     )
                     self._emit_upload_failure(
-                        trace_id, failed_bytes, error_message,
-                        status=TraceStatus.WRITTEN, error_code=error_code
+                        trace_id,
+                        failed_bytes,
+                        error_message or "Upload failed",
+                        status=TraceStatus.WRITTEN,
+                        error_code=error_code,
                     )
                     logger.warning(
                         f"Upload failed for trace {trace_id} file {file.name}: "
