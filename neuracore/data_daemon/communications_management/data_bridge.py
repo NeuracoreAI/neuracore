@@ -57,7 +57,6 @@ class ChannelState:
     ring_buffer: RingBuffer | None = None
     last_heartbeat: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     reader: ChannelMessageReader | None = None
-    recording_id: str | None = None
     trace_id: str | None = None
 
     def touch(self) -> None:
@@ -244,7 +243,16 @@ class Daemon:
                     break
 
                 trace_id, data_type, payload = result
-                self._on_complete_message(channel, trace_id, data_type, payload)
+                recording_id = self._trace_recordings.get(trace_id)
+                if not recording_id:
+                    logger.warning(
+                        "No recording_id found for trace_id=%s, dropping message",
+                        trace_id,
+                    )
+                    continue
+                self._on_complete_message(
+                    channel, trace_id, data_type, payload, recording_id
+                )
 
     def _on_complete_message(
         self,
@@ -252,6 +260,7 @@ class Daemon:
         trace_id: str,
         data_type: DataType,
         data: bytes,
+        recording_id: str,
         final_chunk: bool = False,
     ) -> None:
         """Handle a completed message from a channel.
@@ -264,6 +273,7 @@ class Daemon:
         :param trace_id: The trace ID that the message belongs to.
         :param data_type: The data type of the message payload.
         :param data: The message data.
+        :param recording_id: The recording ID (from immutable _trace_recordings).
         :param final_chunk: Whether this is the final chunk for the trace.
         """
         metadata = self._trace_metadata.get(trace_id, {})
@@ -273,7 +283,7 @@ class Daemon:
                 CompleteMessage.from_bytes(
                     producer_id=channel.producer_id,
                     trace_id=trace_id,
-                    recording_id=channel.recording_id or "",
+                    recording_id=recording_id,
                     final_chunk=final_chunk,
                     data_type=data_type,
                     data_type_name=str(metadata.get("data_type_name") or ""),
@@ -410,12 +420,18 @@ class Daemon:
             logger.warning("DATA_CHUNK received without payload …")
             return
 
-        if data_chunk.recording_id and data_chunk.recording_id != channel.recording_id:
-            channel.recording_id = data_chunk.recording_id
+        recording_id = data_chunk.recording_id
+        if not recording_id:
+            logger.warning(
+                "DATA_CHUNK missing recording_id trace_id=%s producer_id=%s",
+                data_chunk.trace_id,
+                channel.producer_id,
+            )
+            return
+
         channel.trace_id = data_chunk.trace_id
 
-        recording_id = data_chunk.recording_id or channel.recording_id
-        if recording_id and recording_id in self._closed_recordings:
+        if recording_id in self._closed_recordings:
             logger.warning(
                 "Dropping data for closed recording_id=%s trace_id=%s",
                 recording_id,
@@ -504,10 +520,18 @@ class Daemon:
         """
         payload = message.payload.get("trace_end", {})
         trace_id = payload.get("trace_id")
-        recording_id = payload.get("recording_id") or channel.recording_id
-        if not trace_id or not recording_id:
+        if not trace_id:
             logger.warning(
-                "TRACE_END missing trace_id or recording_id (producer_id=%s)",
+                "TRACE_END missing trace_id (producer_id=%s)",
+                channel.producer_id,
+            )
+            return
+
+        recording_id = self._trace_recordings.get(str(trace_id))
+        if not recording_id:
+            logger.warning(
+                "TRACE_END: trace_id=%s not in _trace_recordings producer_id=%s",
+                trace_id,
                 channel.producer_id,
             )
             return
@@ -529,6 +553,7 @@ class Daemon:
             trace_id=str(trace_id),
             data_type=data_type,
             data=b"",
+            recording_id=str(recording_id),
             final_chunk=True,
         )
 
@@ -548,8 +573,14 @@ class Daemon:
         :return: None
         """
         payload = message.payload.get("recording_stopped", {})
-        recording_id = str(payload.get("recording_id"))
-        self._closed_recordings.add(recording_id)
+        recording_id = payload.get("recording_id")
+        if not recording_id:
+            logger.warning(
+                "RECORDING_STOPPED missing recording_id (producer_id=%s)",
+                message.producer_id,
+            )
+            return
+        self._closed_recordings.add(str(recording_id))
         self._emitter.emit(Emitter.STOP_RECORDING, recording_id)
 
     def cleanup_stopped_channels(
@@ -575,11 +606,11 @@ class Daemon:
         if channel is None:
             return
 
-        if channel.recording_id:
-            self._remove_trace(str(channel.recording_id), str(trace_id))
+        recording_id = self._trace_recordings.get(trace_id)
+        if recording_id:
+            self._remove_trace(str(recording_id), str(trace_id))
 
         channel.trace_id = None
-        channel.recording_id = None
 
     def _cleanup_expired_channels(self) -> None:
         """Remove channels whose heartbeat has not been seen within the timeout."""
@@ -600,6 +631,7 @@ class Daemon:
             )
             channel = self.channels.get(producer_id)
             if channel is not None and channel.trace_id is not None:
+                recording_id = self._trace_recordings.get(channel.trace_id)
                 self._handle_end_trace(
                     channel,
                     MessageEnvelope(
@@ -608,7 +640,7 @@ class Daemon:
                         payload={
                             "trace_end": {
                                 "trace_id": channel.trace_id,
-                                "recording_id": channel.recording_id,
+                                "recording_id": recording_id,
                             }
                         },
                     ),
