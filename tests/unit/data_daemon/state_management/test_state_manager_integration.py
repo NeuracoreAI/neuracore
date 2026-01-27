@@ -458,7 +458,8 @@ async def test_ready_for_upload_includes_bytes_after_reconnect(manager_store) ->
 
         assert ready_events
         assert ready_events[-1][:2] == ("trace-resume", "rec-resume")
-        assert ready_events[-1][-1] == 500
+        # bytes_uploaded is at index 5
+        assert ready_events[-1][5] == 500  # bytes_uploaded
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
 
@@ -637,7 +638,8 @@ async def test_resume_after_failure_and_reconnect(manager_store) -> None:
         ready_events.clear()
         emitter.emit(Emitter.IS_CONNECTED, True)
         await asyncio.sleep(0.1)
-        assert ready_events[-1][-1] == 500
+        # bytes_uploaded is at index 5
+        assert ready_events[-1][5] == 500
 
         emitter.emit(Emitter.UPLOADED_BYTES, "trace-e2e", 1000)
         emitter.emit(Emitter.UPLOAD_COMPLETE, "trace-e2e")
