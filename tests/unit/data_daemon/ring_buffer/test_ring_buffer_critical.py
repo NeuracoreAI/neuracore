@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import base64
 import struct
-from typing import Any
 
 from neuracore_types import DataType
 
@@ -26,7 +25,6 @@ from neuracore.data_daemon.const import (
     TRACE_ID_FIELD_SIZE,
 )
 from neuracore.data_daemon.models import CommandType, CompleteMessage, MessageEnvelope
-from tests.unit.data_daemon.helpers import MockConfigManager
 
 
 class MockRDM:
@@ -84,31 +82,23 @@ def _write_chunk_to_ring_buffer(
     ring.write(header + data)
 
 
-# =============================================================================
-# L4-001 to L4-003: Data Integrity Through Pipeline
-# =============================================================================
-
-
-def test_end_to_end_data_integrity(tmp_path: Any) -> None:
+def test_end_to_end_data_integrity() -> None:
     """Bytes preserved producer→RDM.
 
     The ultimate test: data in equals data out. Any corruption anywhere in
     pipeline fails this.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
     channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
     daemon.channels["test-producer"] = channel
 
-    # Open ring buffer
     open_msg = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.OPEN_RING_BUFFER,
@@ -116,7 +106,6 @@ def test_end_to_end_data_integrity(tmp_path: Any) -> None:
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
 
-    # Send known payload
     original_data = b"This is the exact payload that must be preserved!"
     data_msg = MessageEnvelope(
         producer_id="test-producer",
@@ -132,28 +121,24 @@ def test_end_to_end_data_integrity(tmp_path: Any) -> None:
     )
     daemon._handle_write_data_chunk(channel, data_msg)
 
-    # Drain to RDM
     daemon._drain_channel_messages()
 
-    # Verify exact bytes received
     assert len(mock_rdm.enqueued) == 1
     received_data = base64.b64decode(mock_rdm.enqueued[0].data)
     assert received_data == original_data
 
 
-def test_multi_chunk_reassembly_integrity(tmp_path: Any) -> None:
+def test_multi_chunk_reassembly_integrity() -> None:
     """Large data split and reassembled correctly.
 
     Chunking is lossless. Large messages must survive split/reassemble without
     byte loss.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -167,10 +152,8 @@ def test_multi_chunk_reassembly_integrity(tmp_path: Any) -> None:
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
 
-    # Create large payload that will be split into chunks
-    original_data = bytes([i % 256 for i in range(10000)])  # 10KB
+    original_data = bytes([i % 256 for i in range(10000)])
 
-    # Simulate chunking (e.g., 4KB chunks)
     chunk_size = 4000
     chunks = [
         original_data[i : i + chunk_size]
@@ -178,7 +161,6 @@ def test_multi_chunk_reassembly_integrity(tmp_path: Any) -> None:
     ]
     total_chunks = len(chunks)
 
-    # Send all chunks
     for idx, chunk in enumerate(chunks):
         data_msg = MessageEnvelope(
             producer_id="test-producer",
@@ -195,28 +177,24 @@ def test_multi_chunk_reassembly_integrity(tmp_path: Any) -> None:
         daemon._handle_write_data_chunk(channel, data_msg)
         daemon._drain_channel_messages()
 
-    # Final drain
     daemon._drain_channel_messages()
 
-    # Should have one complete message
     assert len(mock_rdm.enqueued) == 1
     reassembled = base64.b64decode(mock_rdm.enqueued[0].data)
     assert reassembled == original_data
 
 
-def test_binary_payload_through_pipeline(tmp_path: Any) -> None:
+def test_binary_payload_through_pipeline() -> None:
     """Binary with null bytes preserved.
 
     Full byte range must work. No special character handling that corrupts
     binary data.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -230,7 +208,6 @@ def test_binary_payload_through_pipeline(tmp_path: Any) -> None:
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
 
-    # All possible byte values including null, high bytes
     binary_data = bytes(range(256))
 
     data_msg = MessageEnvelope(
@@ -253,12 +230,7 @@ def test_binary_payload_through_pipeline(tmp_path: Any) -> None:
     assert received == binary_data
 
 
-# =============================================================================
-# L4-004 to L4-006: Error Resilience
-# =============================================================================
-
-
-def test_daemon_handles_corrupted_chunk_gracefully(tmp_path: Any) -> None:
+def test_daemon_handles_corrupted_chunk_gracefully() -> None:
     """Malformed chunk doesn't crash.
 
     Corruption happens. Daemon must log and continue, not crash the whole
@@ -269,60 +241,48 @@ def test_daemon_handles_corrupted_chunk_gracefully(tmp_path: Any) -> None:
     )
     from neuracore.data_daemon.const import CHUNK_HEADER_SIZE
 
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
     channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
     daemon.channels["test-producer"] = channel
 
-    # Manually create ring buffer and reader
     channel.ring_buffer = RingBuffer(size=4096)
     channel.reader = ChannelMessageReader(channel.ring_buffer)
 
-    # Write corrupted/garbage data that looks like a header but isn't valid
     garbage = b"x" * CHUNK_HEADER_SIZE + b"payload"
     channel.ring_buffer.write(garbage)
 
-    # Daemon should not crash when draining
-    # It may log a warning but should continue
     try:
         daemon._drain_channel_messages()
     except Exception:
-        # If it raises, that's acceptable for corrupted data
-        # The key is daemon didn't crash entirely
         pass
 
-    # Daemon should still be functional for subsequent operations
     assert daemon.channels["test-producer"] is not None
 
 
-def test_daemon_survives_full_buffer(tmp_path: Any) -> None:
+def test_daemon_survives_full_buffer() -> None:
     """Daemon handles buffer pressure.
 
     Back-pressure scenario: system must survive temporary overload without
     crashing.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
     channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
     daemon.channels["test-producer"] = channel
 
-    # Small buffer to easily fill
     open_msg = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.OPEN_RING_BUFFER,
@@ -330,7 +290,6 @@ def test_daemon_survives_full_buffer(tmp_path: Any) -> None:
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
 
-    # Write data that nearly fills buffer (header + small payload)
     small_data = b"x" * 100
     data_msg = MessageEnvelope(
         producer_id="test-producer",
@@ -346,10 +305,8 @@ def test_daemon_survives_full_buffer(tmp_path: Any) -> None:
     )
     daemon._handle_write_data_chunk(channel, data_msg)
 
-    # Drain to free space
     daemon._drain_channel_messages()
 
-    # Should be able to write more
     data_msg2 = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.DATA_CHUNK,
@@ -365,20 +322,17 @@ def test_daemon_survives_full_buffer(tmp_path: Any) -> None:
     daemon._handle_write_data_chunk(channel, data_msg2)
     daemon._drain_channel_messages()
 
-    # Both messages should have been processed
     assert len(mock_rdm.enqueued) == 2
 
 
-def test_rdm_failure_does_not_lose_ring_buffer(tmp_path: Any) -> None:
+def test_rdm_failure_does_not_lose_ring_buffer() -> None:
     """RDM error doesn't corrupt buffer.
 
     Downstream failure shouldn't corrupt upstream state. Isolation between
     components.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
 
-    # RDM that fails on first call
     class FailingRDM:
         def __init__(self) -> None:
             self.call_count = 0
@@ -394,7 +348,6 @@ def test_rdm_failure_does_not_lose_ring_buffer(tmp_path: Any) -> None:
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=failing_rdm,
     )
 
@@ -408,7 +361,6 @@ def test_rdm_failure_does_not_lose_ring_buffer(tmp_path: Any) -> None:
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
 
-    # First message - RDM will fail
     data_msg1 = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.DATA_CHUNK,
@@ -422,12 +374,10 @@ def test_rdm_failure_does_not_lose_ring_buffer(tmp_path: Any) -> None:
         },
     )
     daemon._handle_write_data_chunk(channel, data_msg1)
-    daemon._drain_channel_messages()  # This triggers RDM failure
+    daemon._drain_channel_messages()
 
-    # Buffer should still be functional
     assert channel.ring_buffer is not None
 
-    # Second message should work
     data_msg2 = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.DATA_CHUNK,
@@ -443,29 +393,21 @@ def test_rdm_failure_does_not_lose_ring_buffer(tmp_path: Any) -> None:
     daemon._handle_write_data_chunk(channel, data_msg2)
     daemon._drain_channel_messages()
 
-    # Second message should have been enqueued
     assert len(failing_rdm.enqueued) == 1
     assert failing_rdm.enqueued[0].trace_id == "trace-2"
 
 
-# =============================================================================
-# L4-007 to L4-008: Trace Boundaries
-# =============================================================================
-
-
-def test_new_trace_independent_of_previous(tmp_path: Any) -> None:
+def test_new_trace_independent_of_previous() -> None:
     """New trace unaffected by prior.
 
     Trace isolation: completing one trace must not leave state that affects
     next trace.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -479,7 +421,6 @@ def test_new_trace_independent_of_previous(tmp_path: Any) -> None:
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
 
-    # Complete first trace
     data_msg1 = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.DATA_CHUNK,
@@ -495,7 +436,6 @@ def test_new_trace_independent_of_previous(tmp_path: Any) -> None:
     daemon._handle_write_data_chunk(channel, data_msg1)
     daemon._drain_channel_messages()
 
-    # Start second trace
     data_msg2 = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.DATA_CHUNK,
@@ -511,7 +451,6 @@ def test_new_trace_independent_of_previous(tmp_path: Any) -> None:
     daemon._handle_write_data_chunk(channel, data_msg2)
     daemon._drain_channel_messages()
 
-    # Both traces should be complete and independent
     assert len(mock_rdm.enqueued) == 2
     assert mock_rdm.enqueued[0].trace_id == "trace-A"
     assert mock_rdm.enqueued[0].data_type == DataType.JOINT_POSITIONS
@@ -519,19 +458,17 @@ def test_new_trace_independent_of_previous(tmp_path: Any) -> None:
     assert mock_rdm.enqueued[1].data_type == DataType.JOINT_VELOCITIES
 
 
-def test_concurrent_traces_isolation(tmp_path: Any) -> None:
+def test_concurrent_traces_isolation() -> None:
     """Multiple traces don't interfere.
 
     Concurrent traces are common. Must not mix up chunks between different
     traces.
     """
-    mock_config = MockConfigManager().path_to_store_record_from(tmp_path)
     mock_comm = MockComm()
     mock_rdm = MockRDM()
 
     daemon = Daemon(
         comm_manager=mock_comm,
-        config_manager=mock_config,
         recording_disk_manager=mock_rdm,
     )
 
@@ -545,7 +482,6 @@ def test_concurrent_traces_isolation(tmp_path: Any) -> None:
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
 
-    # Interleave chunks from two traces
     chunks = [
         ("trace-X", 0, 2, b"X0"),
         ("trace-Y", 0, 2, b"Y0"),
@@ -569,7 +505,6 @@ def test_concurrent_traces_isolation(tmp_path: Any) -> None:
         daemon._handle_write_data_chunk(channel, msg)
         daemon._drain_channel_messages()
 
-    # Both traces should complete correctly
     assert len(mock_rdm.enqueued) == 2
 
     results = {msg.trace_id: base64.b64decode(msg.data) for msg in mock_rdm.enqueued}
