@@ -565,7 +565,6 @@ async def test_simultaneous_recordings_emit_progress_reports(manager_store) -> N
         _, _, traces_list = args
         recording_ids = frozenset(trace.recording_id for trace in traces_list)
         seen_recordings.add(recording_ids)
-        # Set event when we have progress reports for both recordings
         if (
             frozenset({"rec-a"}) in seen_recordings
             and frozenset({"rec-b"}) in seen_recordings
@@ -582,7 +581,6 @@ async def test_simultaneous_recordings_emit_progress_reports(manager_store) -> N
 
         await asyncio.wait_for(progress_event.wait(), timeout=2.0)
 
-        # Verify we received progress reports for both recordings
         assert seen_recordings == {
             frozenset({"rec-a"}),
             frozenset({"rec-b"}),
@@ -696,10 +694,8 @@ async def test_encoder_crash_does_not_block_other_recordings(manager_store) -> N
         )
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-b", "rec-b", 10)
 
-        # Wait for trace-b's ready event specifically
         await asyncio.wait_for(trace_b_ready.wait(), timeout=2.0)
 
-        # Verify trace-b received a READY_FOR_UPLOAD event
         trace_b_events = [e for e in ready_events if e[:2] == ("trace-b", "rec-b")]
         assert trace_b_events, "trace-b should have received READY_FOR_UPLOAD"
     finally:
