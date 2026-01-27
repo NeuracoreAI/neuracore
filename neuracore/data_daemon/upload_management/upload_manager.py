@@ -206,7 +206,7 @@ class UploadManager(TraceManager):
                     uploaded_bytes=total_bytes_uploaded,
                     total_bytes=total_bytes_uploaded,
                 )
-                self._emitter.emit(Emitter.UPLOAD_COMPLETE, trace_id, recording_id)
+                self._emitter.emit(Emitter.UPLOAD_COMPLETE, trace_id)
                 logger.info(f"Upload successful for trace {trace_id}")
                 return True
             else:
