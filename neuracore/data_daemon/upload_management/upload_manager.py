@@ -7,13 +7,16 @@ of upload workers and handles upload lifecycle via events.
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+from uuid import UUID
 
 import aiohttp
 from neuracore_types import DataType, RecordingDataTraceStatus
 
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
-from neuracore.data_daemon.models import TraceErrorCode, TraceStatus, get_content_type
+from neuracore.data_daemon.models import TraceErrorCode, TraceStatus
 from neuracore.data_daemon.upload_management.trace_manager import TraceManager
 
 from .resumable_file_uploader import ResumableFileUploader
@@ -41,8 +44,6 @@ class UploadManager(TraceManager):
         super().__init__(client_session)
 
         self._emitter = get_emitter()
-
-        # Subscribe to events
         self._emitter.on(Emitter.READY_FOR_UPLOAD, self._on_ready_for_upload)
 
         logger.info("UploadManager initialized")
@@ -64,7 +65,6 @@ class UploadManager(TraceManager):
             )
             await asyncio.gather(*self._active_uploads, return_exceptions=True)
         else:
-            # Cancel all uploads
             for task in self._active_uploads:
                 task.cancel()
             if self._active_uploads:
@@ -93,7 +93,6 @@ class UploadManager(TraceManager):
         """
         logger.info(f"Received READY_FOR_UPLOAD for trace {trace_id}")
 
-        # Create upload task
         task = asyncio.create_task(
             self._upload_single_trace(
                 filepath,
@@ -108,33 +107,118 @@ class UploadManager(TraceManager):
         self._active_uploads.add(task)
         task.add_done_callback(self._active_uploads.discard)
 
+    def _find_resume_point(
+        self, files: list[Path], bytes_uploaded: int
+    ) -> tuple[int, int]:
+        """Find which file and offset to resume from.
+
+        Args:
+            files: Sorted list of files in the trace directory.
+            bytes_uploaded: Cumulative bytes already uploaded.
+
+        Returns:
+            Tuple of (file_index, file_offset) to resume from.
+        """
+        cumulative = 0
+        for i, file in enumerate(files):
+            file_size = file.stat().st_size
+            if cumulative + file_size > bytes_uploaded:
+                # This file is partially uploaded
+                file_offset = bytes_uploaded - cumulative
+                return (i, file_offset)
+            cumulative += file_size
+        return (len(files), 0)  # All complete
+
+    def _get_content_type_for_file(self, file: Path) -> str:
+        """Determine content type from file extension.
+
+        Args:
+            file: Path to the file.
+
+        Returns:
+            Content type string for the file.
+        """
+        ext = file.suffix.lower()
+        if ext == ".mp4":
+            return "video/mp4"
+        elif ext == ".json":
+            return "application/json"
+        else:
+            return "application/octet-stream"
+
     async def _upload_single_trace(
         self,
-        filepath: str,
+        trace_dir_path: str,
         trace_id: str,
         data_type: DataType,
         data_type_name: str,
         recording_id: str,
         bytes_uploaded: int,
     ) -> bool:
-        """Upload a single trace file.
+        """Upload all files in a trace directory.
 
         Args:
-            filepath: Local filesystem path to file
-            trace_id: Trace identifier
-            data_type: Data type
-            data_type_name: Data type name
-            recording_id: Recording identifier
-            bytes_uploaded: Starting offset for resume
+            trace_dir_path: Local filesystem path to trace directory.
+            trace_id: Trace identifier.
+            data_type: Data type.
+            data_type_name: Data type name.
+            recording_id: Recording identifier.
+            bytes_uploaded: Cumulative bytes already uploaded (for resume).
 
         Returns:
-            True if upload succeeded, False otherwise
+            True if all files uploaded successfully, False otherwise.
         """
         logger.info(f"Starting upload for trace {trace_id}")
 
-        backend_trace_id = await self._register_data_trace(recording_id, data_type)
-        if not backend_trace_id:
-            logger.error(f"Failed to register backend trace for {trace_id}")
+        trace_dir = Path(trace_dir_path)
+
+        # Validate directory exists and is a directory
+        if not trace_dir.exists():
+            logger.error(f"Trace directory not found: {trace_dir_path}")
+            self._emitter.emit(
+                Emitter.UPLOAD_FAILED,
+                trace_id,
+                bytes_uploaded,
+                TraceStatus.FAILED,
+                TraceErrorCode.UPLOAD_FAILED,
+                f"Directory not found: {trace_dir_path}",
+            )
+            return False
+
+        if not trace_dir.is_dir():
+            logger.error(f"Path is not a directory: {trace_dir_path}")
+            self._emitter.emit(
+                Emitter.UPLOAD_FAILED,
+                trace_id,
+                bytes_uploaded,
+                TraceStatus.FAILED,
+                TraceErrorCode.UPLOAD_FAILED,
+                f"Path is not a directory: {trace_dir_path}",
+            )
+            return False
+
+        # Enumerate files in sorted order for deterministic resume
+        files = sorted([f for f in trace_dir.iterdir() if f.is_file()])
+
+        if not files:
+            logger.error(f"Empty directory: {trace_dir_path}")
+            self._emitter.emit(
+                Emitter.UPLOAD_FAILED,
+                trace_id,
+                bytes_uploaded,
+                TraceStatus.FAILED,
+                TraceErrorCode.UPLOAD_FAILED,
+                f"Empty directory: {trace_dir_path}",
+            )
+            return False
+
+        logger.info(f"Found {len(files)} files to upload for trace {trace_id}")
+
+        registered = await self._register_data_trace(
+            recording_id, data_type, UUID(trace_id)
+        )
+        if not registered:
+            logger.error(f"Failed to register trace {trace_id} with backend")
             self._emitter.emit(
                 Emitter.UPLOAD_FAILED,
                 trace_id,
@@ -148,84 +232,103 @@ class UploadManager(TraceManager):
         try:
             await self._update_data_trace(
                 recording_id,
-                backend_trace_id,
+                trace_id,
                 RecordingDataTraceStatus.UPLOAD_STARTED,
                 uploaded_bytes=bytes_uploaded,
             )
 
-            content_type_category = get_content_type(data_type)
-            content_type = CONTENT_TYPE_MAPPING[content_type_category]
-            cloud_filepath = (
-                data_type.value + "/" + data_type_name + "/" + filepath.split("/")[-1]
-            )
+            start_file_idx, file_offset = self._find_resume_point(files, bytes_uploaded)
 
-            cumulative_delta = [0]
+            # Calculate cumulative bytes for files we're skipping
+            cumulative_bytes = sum(f.stat().st_size for f in files[:start_file_idx])
             last_progress_update = [time.time()]
 
-            loop = asyncio.get_event_loop()
+            for i, file in enumerate(files[start_file_idx:], start=start_file_idx):
+                cloud_filepath = f"{data_type.value}/{data_type_name}/{file.name}"
+                content_type = self._get_content_type_for_file(file)
+                file_bytes_uploaded = file_offset if i == start_file_idx else 0
+                file_cumulative_bytes = cumulative_bytes
 
-            def progress_callback(bytes_delta: int) -> None:
-                """Called after each chunk with bytes uploaded in that chunk."""
-                cumulative_delta[0] += bytes_delta
-                total_bytes_uploaded = bytes_uploaded + cumulative_delta[0]
-                self._emitter.emit(
-                    Emitter.UPLOADED_BYTES, trace_id, total_bytes_uploaded
+                def make_progress_callback(
+                    base_bytes: int,
+                ) -> "Callable[[int], Awaitable[None]]":
+                    """Create a progress callback with captured base_bytes."""
+                    cumulative_delta = [0]
+
+                    async def progress_callback(bytes_delta: int) -> None:
+                        """Called after each chunk with bytes uploaded in that chunk."""
+                        nonlocal last_progress_update
+                        cumulative_delta[0] += bytes_delta
+                        total_bytes_uploaded = base_bytes + cumulative_delta[0]
+                        self._emitter.emit(
+                            Emitter.UPLOADED_BYTES, trace_id, total_bytes_uploaded
+                        )
+                        # Update backend every 30 seconds
+                        now = time.time()
+                        if now - last_progress_update[0] >= 30.0:
+                            await self._update_data_trace(
+                                recording_id,
+                                trace_id,
+                                RecordingDataTraceStatus.UPLOAD_STARTED,
+                                uploaded_bytes=total_bytes_uploaded,
+                            )
+                            last_progress_update[0] = now
+
+                    return progress_callback
+
+                progress_callback = make_progress_callback(file_cumulative_bytes)
+
+                logger.info(
+                    f"Uploading file {i + 1}/{len(files)}: {file.name} "
+                    f"(offset={file_bytes_uploaded})"
                 )
-                # Update backend every 30 seconds
-                now = time.time()
-                if now - last_progress_update[0] >= 30.0:
-                    asyncio.run_coroutine_threadsafe(
-                        self._update_data_trace(
-                            recording_id,
-                            backend_trace_id,
-                            RecordingDataTraceStatus.UPLOAD_STARTED,
-                            uploaded_bytes=total_bytes_uploaded,
-                        ),
-                        loop,
+
+                uploader = ResumableFileUploader(
+                    recording_id=recording_id,
+                    filepath=str(file),
+                    cloud_filepath=cloud_filepath,
+                    content_type=content_type,
+                    client_session=self._client_session,
+                    bytes_uploaded=file_bytes_uploaded,
+                    progress_callback=progress_callback,
+                )
+
+                success, file_total_bytes, error_message = await uploader.upload()
+
+                if not success:
+                    failed_bytes = cumulative_bytes + file_total_bytes
+                    status = TraceStatus.WRITTEN
+                    error_code = (
+                        TraceErrorCode.NETWORK_ERROR
+                        if "Network" in (error_message or "")
+                        else TraceErrorCode.UPLOAD_FAILED
                     )
-                    last_progress_update[0] = now
+                    self._emitter.emit(
+                        Emitter.UPLOAD_FAILED,
+                        trace_id,
+                        failed_bytes,
+                        status,
+                        error_code,
+                        error_message,
+                    )
+                    logger.warning(
+                        f"Upload failed for trace {trace_id} file {file.name}: "
+                        f"{error_message}"
+                    )
+                    return False
 
-            # Create uploader
-            uploader = ResumableFileUploader(
-                recording_id=recording_id,
-                filepath=filepath,
-                cloud_filepath=cloud_filepath,
-                content_type=content_type,
-                client_session=self._client_session,
-                bytes_uploaded=bytes_uploaded,
-                progress_callback=progress_callback,
+                cumulative_bytes += file.stat().st_size
+
+            await self._update_data_trace(
+                recording_id,
+                trace_id,
+                RecordingDataTraceStatus.UPLOAD_COMPLETE,
+                uploaded_bytes=cumulative_bytes,
+                total_bytes=cumulative_bytes,
             )
-
-            success, total_bytes_uploaded, error_message = await uploader.upload()
-
-            if success:
-                await self._update_data_trace(
-                    recording_id,
-                    backend_trace_id,
-                    RecordingDataTraceStatus.UPLOAD_COMPLETE,
-                    uploaded_bytes=total_bytes_uploaded,
-                    total_bytes=total_bytes_uploaded,
-                )
-                self._emitter.emit(Emitter.UPLOAD_COMPLETE, trace_id)
-                logger.info(f"Upload successful for trace {trace_id}")
-                return True
-            else:
-                status = TraceStatus.WRITTEN
-                error_code = (
-                    TraceErrorCode.NETWORK_ERROR
-                    if "Network" in (error_message or "")
-                    else TraceErrorCode.UPLOAD_FAILED
-                )
-                self._emitter.emit(
-                    Emitter.UPLOAD_FAILED,
-                    trace_id,
-                    total_bytes_uploaded,
-                    status,
-                    error_code,
-                    error_message,
-                )
-                logger.warning(f"Upload failed for trace {trace_id}: {error_message}")
-                return False
+            self._emitter.emit(Emitter.UPLOAD_COMPLETE, trace_id)
+            logger.info(f"Upload successful for trace {trace_id}")
+            return True
 
         except FileNotFoundError as e:
             logger.error(f"File not found for trace {trace_id}: {e}")
