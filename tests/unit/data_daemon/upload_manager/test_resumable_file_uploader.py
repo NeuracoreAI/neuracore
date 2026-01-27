@@ -160,11 +160,8 @@ async def test_uploader_handles_successful_upload(
 ) -> None:
     md5_b64 = _compute_file_md5_b64(test_file)
 
-    # Mock responses: sync check (308 with no Range), then upload (200 with checksum)
     put_responses = [
-        # Sync check - 308 means incomplete, no Range header = start from 0
         _MockAioHTTPResponse(status=308),
-        # Upload chunk - 200 with checksum header for final chunk
         _MockAioHTTPResponse(
             status=200,
             headers={"x-goog-hash": f"md5={md5_b64}"},
@@ -197,7 +194,7 @@ async def test_uploader_tracks_progress_with_callback(
     progress_updates: list[int] = []
     md5_b64 = _compute_file_md5_b64(test_file)
 
-    def progress_callback(bytes_delta: int) -> None:
+    async def progress_callback(bytes_delta: int) -> None:
         progress_updates.append(bytes_delta)
 
     uploader = ResumableFileUploader(
@@ -247,7 +244,6 @@ async def test_uploader_resumes_from_offset(
         bytes_uploaded=5 * 1024 * 1024,
     )
 
-    # Sync check returns 308 with Range header showing 5MB already uploaded
     put_responses = [
         _MockAioHTTPResponse(status=308, headers={"Range": "bytes=0-5242879"}),
         _MockAioHTTPResponse(status=200, headers={"x-goog-hash": f"md5={md5_b64}"}),
@@ -269,7 +265,6 @@ async def test_uploader_resumes_from_offset(
 
     assert success is True
     assert bytes_uploaded == 10 * 1024 * 1024
-    # Second PUT is the actual upload (first is sync check)
     second_put_call = mock_put.call_args_list[1]
     content_range = second_put_call.kwargs["headers"]["Content-Range"]
     assert content_range.startswith("bytes 5242880-")
@@ -297,11 +292,8 @@ async def test_uploader_handles_session_expiration(
             uploader._session,
             "put",
             side_effect=[
-                # Sync check - success
                 _MockAioHTTPResponse(status=308),
-                # Upload - 410 session expired
                 _MockAioHTTPResponse(status=410),
-                # Upload with new session - success
                 _MockAioHTTPResponse(
                     status=200, headers={"x-goog-hash": f"md5={md5_b64}"}
                 ),
@@ -326,7 +318,6 @@ async def test_uploader_handles_network_error(uploader: ResumableFileUploader) -
             uploader._session,
             "put",
             side_effect=[
-                # Sync check - network error
                 _MockAioHTTPResponse(
                     status=0,
                     exc=aiohttp.ClientConnectorError(MagicMock(), OSError("boom")),
@@ -376,13 +367,9 @@ async def test_uploader_retries_on_timeout(
             uploader._session,
             "put",
             side_effect=[
-                # Sync check - success
                 _MockAioHTTPResponse(status=308),
-                # Upload - timeout
                 _MockAioHTTPResponse(status=0, exc=asyncio.TimeoutError()),
-                # Upload - timeout
                 _MockAioHTTPResponse(status=0, exc=asyncio.TimeoutError()),
-                # Upload - success
                 _MockAioHTTPResponse(
                     status=200, headers={"x-goog-hash": f"md5={md5_b64}"}
                 ),
@@ -410,7 +397,6 @@ async def test_uploader_fails_after_max_retries(
             status=200, json_data={"url": "https://upload.url"}
         ),
     ):
-        # Sync check succeeds, then upload fails MAX_RETRIES times
         put_responses = [_MockAioHTTPResponse(status=308)] + [
             _MockAioHTTPResponse(status=0, exc=asyncio.TimeoutError())
         ] * ResumableFileUploader.MAX_RETRIES
@@ -430,22 +416,18 @@ async def test_uploader_fails_after_max_retries(
     assert success is False
     assert error_message is not None
     assert "failed after" in error_message
-    # +1 for sync check
     assert mock_put.call_count == ResumableFileUploader.MAX_RETRIES + 1
 
 
 @pytest.mark.asyncio
 async def test_uploader_handles_http_errors(uploader: ResumableFileUploader) -> None:
-    # Use a function to generate infinite 500 responses
     call_count = 0
 
     def put_side_effect(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            # Sync check - success
             return _MockAioHTTPResponse(status=308)
-        # All other calls return 500
         return _MockAioHTTPResponse(status=500)
 
     with patch.object(
@@ -497,7 +479,6 @@ async def test_uploader_sets_correct_content_range_headers(
         ) as mock_put:
             await uploader.upload()
 
-    # Second PUT is the upload (first is sync check)
     upload_put_call = mock_put.call_args_list[1]
     headers = upload_put_call.kwargs["headers"]
     content_range = headers["Content-Range"]
@@ -529,7 +510,7 @@ async def test_uploader_handles_large_file(
     progress_updates: list[int] = []
     md5_b64 = _compute_file_md5_b64(very_large_test_file)
 
-    def progress_callback(bytes_delta: int) -> None:
+    async def progress_callback(bytes_delta: int) -> None:
         progress_updates.append(bytes_delta)
 
     uploader = ResumableFileUploader(
@@ -550,15 +531,12 @@ async def test_uploader_handles_large_file(
     ):
 
         def put_side_effect(*args, **kwargs):
-            # First call is sync check
             if put_side_effect.calls == 0:
                 put_side_effect.calls += 1
                 return _MockAioHTTPResponse(status=308)
-            # Next 3 calls are chunk uploads (308 for incomplete)
             if put_side_effect.calls < 4:
                 put_side_effect.calls += 1
                 return _MockAioHTTPResponse(status=308)
-            # Last call is final chunk (200 with checksum)
             return _MockAioHTTPResponse(
                 status=200, headers={"x-goog-hash": f"md5={md5_b64}"}
             )
@@ -591,13 +569,9 @@ async def test_uploader_exponential_backoff(
             uploader._session,
             "put",
             side_effect=[
-                # Sync check - success
                 _MockAioHTTPResponse(status=308),
-                # Upload - timeout
                 _MockAioHTTPResponse(status=0, exc=asyncio.TimeoutError()),
-                # Upload - timeout
                 _MockAioHTTPResponse(status=0, exc=asyncio.TimeoutError()),
-                # Upload - success
                 _MockAioHTTPResponse(
                     status=200, headers={"x-goog-hash": f"md5={md5_b64}"}
                 ),
@@ -630,9 +604,7 @@ async def test_uploader_permission_denied_fails_fast(
             uploader._session,
             "put",
             side_effect=[
-                # Sync check - success
                 _MockAioHTTPResponse(status=308),
-                # Upload - 403 permission denied (no X-Signed-Url-Expired header)
                 _MockAioHTTPResponse(status=403),
             ],
         ) as mock_put:
@@ -641,7 +613,6 @@ async def test_uploader_permission_denied_fails_fast(
     assert success is False
     assert error_message is not None
     assert "Permission denied" in error_message
-    # Should fail fast - only 2 calls (sync check + one 403)
     assert mock_put.call_count == 2
 
 
@@ -661,9 +632,7 @@ async def test_uploader_bucket_not_found_fails_fast(
             uploader._session,
             "put",
             side_effect=[
-                # Sync check - success
                 _MockAioHTTPResponse(status=308),
-                # Upload - 404 bucket not found
                 _MockAioHTTPResponse(status=404),
             ],
         ) as mock_put:
@@ -672,7 +641,6 @@ async def test_uploader_bucket_not_found_fails_fast(
     assert success is False
     assert error_message is not None
     assert "Bucket not found" in error_message
-    # Should fail fast - only 2 calls (sync check + one 404)
     assert mock_put.call_count == 2
 
 
@@ -694,13 +662,9 @@ async def test_uploader_retries_on_429_rate_limit(
             uploader._session,
             "put",
             side_effect=[
-                # Sync check - success
                 _MockAioHTTPResponse(status=308),
-                # Upload - 429 rate limited
                 _MockAioHTTPResponse(status=429),
-                # Upload - 429 rate limited again
                 _MockAioHTTPResponse(status=429),
-                # Upload - success
                 _MockAioHTTPResponse(
                     status=200, headers={"x-goog-hash": f"md5={md5_b64}"}
                 ),
@@ -716,9 +680,8 @@ async def test_uploader_retries_on_429_rate_limit(
 
     assert success is True
     assert mock_put.call_count == 4
-    # Verify backoff was applied (at least once for 429)
     assert len(sleep_calls) >= 1
-    assert sleep_calls[0] == 1  # First backoff is 2^0 = 1
+    assert sleep_calls[0] == 1
 
 
 @pytest.mark.asyncio
@@ -744,14 +707,11 @@ async def test_uploader_signed_url_expired_reacquires_session(
             uploader._session,
             "put",
             side_effect=[
-                # Sync check - success
                 _MockAioHTTPResponse(status=308),
-                # Upload - 403 with X-Signed-Url-Expired header
                 _MockAioHTTPResponse(
                     status=403,
                     headers={"X-Signed-Url-Expired": "true"},
                 ),
-                # Upload with new session - success
                 _MockAioHTTPResponse(
                     status=200, headers={"x-goog-hash": f"md5={md5_b64}"}
                 ),
@@ -760,7 +720,6 @@ async def test_uploader_signed_url_expired_reacquires_session(
             success, bytes_uploaded, error_message = await uploader.upload()
 
     assert success is True
-    # Should have requested 2 sessions (original + new after expiration)
     assert mock_get.call_count == 2
 
 
@@ -781,30 +740,24 @@ async def test_uploader_finalization_retry_without_reupload(
         headers = kwargs.get("headers", {})
         content_range = headers.get("Content-Range", "")
 
-        # Call 1: Sync check
         if call_count == 1:
             return _MockAioHTTPResponse(status=308)
 
-        # Call 2: Upload chunk - 308 incomplete (server got data but no finalization)
         if call_count == 2:
             return _MockAioHTTPResponse(
                 status=308,
                 headers={"Range": f"bytes=0-{file_size - 1}"},
             )
 
-        # Call 3: Status check for _is_server_upload_complete
         if call_count == 3 and "bytes */*" in content_range:
             return _MockAioHTTPResponse(
                 status=308,
                 headers={"Range": f"bytes=0-{file_size - 1}"},
             )
 
-        # Call 4+: Finalization attempts
         if f"bytes */{file_size}" in content_range:
             if call_count == 4:
-                # First finalization fails
                 return _MockAioHTTPResponse(status=500)
-            # Second finalization succeeds
             return _MockAioHTTPResponse(
                 status=200, headers={"x-goog-hash": f"md5={md5_b64}"}
             )
@@ -852,7 +805,6 @@ async def test_uploader_ssl_error_handling(
             uploader._session,
             "put",
             side_effect=[
-                # Sync check - SSL error
                 _MockAioHTTPResponse(
                     status=0,
                     exc=aiohttp.ClientSSLError(
@@ -887,7 +839,6 @@ async def test_uploader_backoff_caps_at_five_minutes(
         sleep_calls.append(t)
 
     with patch("asyncio.sleep", side_effect=_sleep):
-        # Test that attempt 10 (2^10 = 1024) is capped at 300
         await uploader._sleep_backoff(10)
 
     assert sleep_calls == [300]
@@ -908,17 +859,14 @@ async def test_uploader_resume_no_duplicate_data(
         cloud_filepath="RGB_IMAGES/camera/trace.mp4",
         content_type="video/mp4",
         client_session=client_session,
-        bytes_uploaded=0,  # Client thinks 0 uploaded
+        bytes_uploaded=0,
     )
 
-    # Server reports it already has 5MB
     put_responses = [
-        # Sync check - server has 5MB already
         _MockAioHTTPResponse(
             status=308,
             headers={"Range": f"bytes=0-{server_offset - 1}"},
         ),
-        # Upload remaining 5MB - success
         _MockAioHTTPResponse(status=200, headers={"x-goog-hash": f"md5={md5_b64}"}),
     ]
 
@@ -939,10 +887,8 @@ async def test_uploader_resume_no_duplicate_data(
     assert success is True
     assert bytes_uploaded == file_size
 
-    # Verify the upload started from server offset, not 0
     upload_call = mock_put.call_args_list[1]
     content_range = upload_call.kwargs["headers"]["Content-Range"]
-    # Should start from 5MB (server_offset)
     assert content_range.startswith(f"bytes {server_offset}-")
 
 
@@ -964,13 +910,9 @@ async def test_uploader_session_preserved_on_retry(
             uploader._session,
             "put",
             side_effect=[
-                # Sync check - success
                 _MockAioHTTPResponse(status=308),
-                # Upload - 503 service unavailable (retryable)
                 _MockAioHTTPResponse(status=503),
-                # Upload - 503 again
                 _MockAioHTTPResponse(status=503),
-                # Upload - success
                 _MockAioHTTPResponse(
                     status=200, headers={"x-goog-hash": f"md5={md5_b64}"}
                 ),
@@ -984,5 +926,4 @@ async def test_uploader_session_preserved_on_retry(
                 success, bytes_uploaded, error_message = await uploader.upload()
 
     assert success is True
-    # Should only request session once (not after each retry)
     assert mock_get.call_count == 1

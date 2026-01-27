@@ -8,6 +8,7 @@ import asyncio
 import logging
 from abc import ABC
 from typing import Any
+from uuid import UUID
 
 import aiohttp
 from neuracore_types import DataType, RecordingDataTraceStatus
@@ -30,20 +31,21 @@ class TraceManager(ABC):
         self.client_session = client_session
 
     async def _register_data_trace(
-        self, recording_id: str, data_type: DataType
-    ) -> str | None:
+        self, recording_id: str, data_type: DataType, trace_id: UUID
+    ) -> bool:
         """Register a backend DataTrace for a recording.
 
         Args:
             recording_id: The recording ID
             data_type: The data type being uploaded
+            trace_id: The trace ID to register with the backend
 
         Returns:
-            The backend trace ID, or None if registration failed
+            True if registration succeeded, False otherwise
         """
         if data_type is None:
             logger.error("data_type cannot be None")
-            return None
+            return False
 
         try:
             auth = get_auth()
@@ -51,36 +53,26 @@ class TraceManager(ABC):
 
             async with self.client_session.post(
                 f"{API_URL}/org/{org_id}/recording/{recording_id}/traces",
-                json={"data_type": data_type.value},
+                json={"data_type": data_type.value, "trace_id": str(trace_id)},
                 headers=await auth.get_headers(self.client_session),
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 if response.status >= 400:
                     error = await response.text()
                     logger.error(f"Failed to register data trace: {error}")
-                    return None
+                    return False
 
-                body = await response.json()
-                backend_trace_id = body.get("id")
-
-                if backend_trace_id:
-                    logger.info(
-                        f"Registered backend trace {backend_trace_id} "
-                        f"for recording {recording_id}"
-                    )
-                else:
-                    logger.error("No trace ID returned from backend")
-
-                return backend_trace_id
+                logger.info(f"Registered trace {trace_id} for recording {recording_id}")
+                return True
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"Failed to register data trace: {e}")
-            return None
+            return False
 
     async def _update_data_trace(
         self,
         recording_id: str,
-        backend_trace_id: str,
+        trace_id: str,
         status: RecordingDataTraceStatus,
         uploaded_bytes: int | None = None,
         total_bytes: int | None = None,
@@ -89,7 +81,7 @@ class TraceManager(ABC):
 
         Args:
             recording_id: The recording ID
-            backend_trace_id: The backend trace ID
+            trace_id: The trace ID
             status: The status of the DataTrace
             uploaded_bytes: The number of bytes uploaded so far
             total_bytes: The total number of bytes to upload
@@ -97,8 +89,8 @@ class TraceManager(ABC):
         Returns:
             True if update succeeded, False otherwise
         """
-        if not backend_trace_id:
-            logger.warning("No backend trace ID provided for update")
+        if not trace_id:
+            logger.warning("No trace ID provided for update")
             return False
 
         data_trace_payload: dict[str, Any] = {"status": status}
@@ -112,7 +104,7 @@ class TraceManager(ABC):
             org_id = await auth.get_org_id()
 
             async with self.client_session.put(
-                f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/{backend_trace_id}",
+                f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/{trace_id}",
                 json=data_trace_payload,
                 headers=await auth.get_headers(self.client_session),
                 timeout=aiohttp.ClientTimeout(total=30),
@@ -124,9 +116,7 @@ class TraceManager(ABC):
                     )
                     return False
 
-                logger.debug(
-                    f"Updated backend trace {backend_trace_id} with status {status}"
-                )
+                logger.debug(f"Updated trace {trace_id} with status {status}")
                 return True
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
