@@ -458,6 +458,7 @@ async def test_ready_for_upload_includes_bytes_after_reconnect(manager_store) ->
 
         assert ready_events
         assert ready_events[-1][:2] == ("trace-resume", "rec-resume")
+        # bytes_uploaded is at index 5
         assert ready_events[-1][5] == 500  # bytes_uploaded
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)

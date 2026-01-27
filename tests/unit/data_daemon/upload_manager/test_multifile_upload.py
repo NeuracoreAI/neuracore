@@ -25,14 +25,25 @@ from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.models import TraceErrorCode, TraceStatus
 from neuracore.data_daemon.upload_management.upload_manager import UploadManager
 
+# =============================================================================
+# TEST CONFIGURATION
+# =============================================================================
+
+# Maximum time (seconds) to wait for async events in tests.
+# Increase this if debugging locally, or set to None to disable.
 TEST_TIMEOUT_SECONDS = 60.0
 
+# Valid UUIDs for testing (upload manager requires valid UUIDs)
 TEST_TRACE_ID = "11111111-1111-1111-1111-111111111111"
 TEST_TRACE_ID_2 = "22222222-2222-2222-2222-222222222222"
 TEST_TRACE_ID_3 = "33333333-3333-3333-3333-333333333333"
 TEST_TRACE_ID_EMPTY = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
 TEST_TRACE_ID_INTERNAL = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 TEST_TRACE_ID_RESUME = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+# =============================================================================
+# FIXTURES
+# =============================================================================
 
 
 @pytest.fixture
@@ -121,6 +132,11 @@ def make_upload_complete_handler(
     return handler
 
 
+# =============================================================================
+# SECTION 1: DIRECTORY UPLOAD HANDLING
+# =============================================================================
+
+
 class TestDirectoryUploadHandling:
     """Tests for directory enumeration and multi-file upload."""
 
@@ -197,12 +213,12 @@ class TestDirectoryUploadHandling:
 
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
-                TEST_TRACE_ID,  
-                "rec-456", 
-                str(trace_directory), 
-                DataType.RGB_IMAGES, 
-                "camera_0", 
-                0, 
+                TEST_TRACE_ID,
+                "rec-456",
+                str(trace_directory),
+                DataType.RGB_IMAGES,
+                "camera_0",
+                0,
             )
 
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
@@ -313,13 +329,13 @@ class TestDirectoryUploadHandling:
             upload_call_count[0] == 3
         ), f"Expected 3 upload calls, got {upload_call_count[0]}"
 
-        complete_events = [e for e in event_sequence if e.startswith("UPLOAD_COMPLETE")]
+        complete_events = [event for event in event_sequence if event.startswith("UPLOAD_COMPLETE")]
         assert (
             len(complete_events) == 1
         ), f"Expected 1 UPLOAD_COMPLETE, got {len(complete_events)}"
 
         upload_positions = [
-            i for i, e in enumerate(event_sequence) if e.startswith("UPLOAD_FILE")
+            idx for idx, event in enumerate(event_sequence) if event.startswith("UPLOAD_FILE")
         ]
         complete_position = event_sequence.index(f"UPLOAD_COMPLETE:{TEST_TRACE_ID}")
 
@@ -414,9 +430,7 @@ class TestDirectoryUploadHandling:
             len(upload_failed_events) == 1
         ), f"Expected 1 UPLOAD_FAILED, got {len(upload_failed_events)}"
         failed_event = upload_failed_events[0]
-        assert (
-            failed_event[0] == "TEST_TRACE_ID_EMPTY"
-        ), "Wrong trace_id in UPLOAD_FAILED"
+        assert failed_event[0] == "TEST_TRACE_ID_EMPTY", "Wrong trace_id in UPLOAD_FAILED"
         assert (
             failed_event[2] == TraceStatus.FAILED
         ), f"Expected status=FAILED, got {failed_event[2]}"
@@ -433,6 +447,11 @@ class TestDirectoryUploadHandling:
         assert not uploader_instantiated[
             0
         ], "ResumableFileUploader should not be instantiated for empty directory"
+
+
+# =============================================================================
+# SECTION 2: CLOUD PATH CONSTRUCTION
+# =============================================================================
 
 
 class TestCloudPathConstruction:
@@ -503,12 +522,12 @@ class TestCloudPathConstruction:
 
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
-                TEST_TRACE_ID,  
-                "rec-456", 
-                str(trace_directory),  
-                DataType.RGB_IMAGES,  
-                "camera_front",  
-                0,  
+                TEST_TRACE_ID,
+                "rec-456",
+                str(trace_directory),
+                DataType.RGB_IMAGES,
+                "camera_front",
+                0,
             )
 
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
@@ -523,6 +542,7 @@ class TestCloudPathConstruction:
             cloud_filepath == expected_path
         ), f"Expected cloud_filepath='{expected_path}', got '{cloud_filepath}'"
 
+        # Starts with DataType enum VALUE (not name)
         assert cloud_filepath.startswith(
             DataType.RGB_IMAGES.value
         ), f"Path should start with '{DataType.RGB_IMAGES.value}': {cloud_filepath}"
@@ -605,6 +625,7 @@ class TestCloudPathConstruction:
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
                 trace_id,
+                "rec-456",
                 str(trace_directory),
                 DataType.RGB_IMAGES,
                 "camera_0",
@@ -643,6 +664,11 @@ class TestCloudPathConstruction:
             assert (
                 "uuid" not in path.lower()
             ), f"'uuid' should not appear in cloud path: {path}"
+
+
+# =============================================================================
+# SECTION 3: REGISTRATION AND UPLOAD FAILURES
+# =============================================================================
 
 
 class TestRegistrationAndUploadFailures:
@@ -753,6 +779,11 @@ class TestRegistrationAndUploadFailures:
         ), f"Expected no UPLOAD_COMPLETE, got {upload_complete_events}"
 
 
+# =============================================================================
+# SECTION 4: BACKEND API CONSISTENCY
+# =============================================================================
+
+
 class TestBackendApiConsistency:
     """Tests for correct backend API usage."""
 
@@ -839,7 +870,6 @@ class TestBackendApiConsistency:
 
         for i, (args, kwargs) in enumerate(update_trace_calls):
             used_trace_id = args[1]
-
             assert used_trace_id == trace_id, (
                 f"Call {i}: Expected trace_id='{trace_id}', "
                 f"but got '{used_trace_id}'"
@@ -947,7 +977,9 @@ class TestBackendApiConsistency:
             args[0] == recording_id
         ), f"Expected recording_id='{recording_id}', got '{args[0]}'"
 
-        assert args[1] == trace_id, f"Expected trace_id='{trace_id}', got '{args[1]}'"
+        assert (
+            args[1] == trace_id
+        ), f"Expected trace_id='{trace_id}', got '{args[1]}'"
 
         assert (
             args[2] == RecordingDataTraceStatus.UPLOAD_STARTED
@@ -1051,7 +1083,9 @@ class TestBackendApiConsistency:
 
         args, kwargs = upload_complete_calls[0]
 
-        assert args[1] == trace_id, f"Expected trace_id='{trace_id}', got '{args[1]}'"
+        assert (
+            args[1] == trace_id
+        ), f"Expected trace_id='{trace_id}', got '{args[1]}'"
 
         assert (
             args[2] == RecordingDataTraceStatus.UPLOAD_COMPLETE
@@ -1157,9 +1191,10 @@ class TestBackendApiConsistency:
         assert len(update_calls) >= 1, "Expected at least one _update_data_trace call"
 
         for i, (args, kwargs) in enumerate(update_calls):
-            used_trace_id = args[1]
+            used_trace_id = args[1]  # Second arg is trace_id
             assert used_trace_id == trace_id, (
-                f"Call {i}: Expected trace_id='{trace_id}', " f"got '{used_trace_id}'"
+                f"Call {i}: Expected trace_id='{trace_id}', "
+                f"got '{used_trace_id}'"
             )
 
         upload_complete_calls = [
@@ -1174,8 +1209,14 @@ class TestBackendApiConsistency:
 
         complete_args, _ = upload_complete_calls[0]
         assert complete_args[1] == trace_id, (
-            f"UPLOAD_COMPLETE should use '{trace_id}', " f"got '{complete_args[1]}'"
+            f"UPLOAD_COMPLETE should use '{trace_id}', "
+            f"got '{complete_args[1]}'"
         )
+
+
+# =============================================================================
+# SECTION 5: RESUME LOGIC
+# =============================================================================
 
 
 class TestResumeLogic:
@@ -1217,10 +1258,12 @@ class TestResumeLogic:
         trace_dir = tmp_path / "trace-resume-test"
         trace_dir.mkdir()
 
+        # Files sorted alphabetically: lossless.mp4 (100B), lossy.mp4 (50B), trace.json (11B)
         (trace_dir / "lossless.mp4").write_bytes(b"L" * 100)
         (trace_dir / "lossy.mp4").write_bytes(b"O" * 50)
         (trace_dir / "trace.json").write_bytes(b'{"data": 1}')
 
+        # Simulate: lossless.mp4 (100) complete + 20 bytes of lossy.mp4 = 120
         bytes_uploaded = 120
 
         uploader_calls: list[dict] = []
@@ -1279,7 +1322,7 @@ class TestResumeLogic:
         )
 
         lossy_call = next(
-            (c for c in uploader_calls if "lossy.mp4" in c["filepath"]),
+            (call for call in uploader_calls if "lossy.mp4" in call["filepath"]),
             None,
         )
         assert lossy_call is not None, "lossy.mp4 should be uploaded"
@@ -1289,7 +1332,7 @@ class TestResumeLogic:
         ), f"lossy.mp4 should resume at offset 20, got {lossy_call['bytes_uploaded']}"
 
         json_call = next(
-            (c for c in uploader_calls if "trace.json" in c["filepath"]),
+            (call for call in uploader_calls if "trace.json" in call["filepath"]),
             None,
         )
         assert json_call is not None, "trace.json should be uploaded"
@@ -1336,8 +1379,9 @@ class TestResumeLogic:
         trace_dir = tmp_path / "trace-partial-fail"
         trace_dir.mkdir()
 
-        (trace_dir / "file_a.mp4").write_bytes(b"A" * 100)
-        (trace_dir / "file_b.mp4").write_bytes(b"B" * 50)
+        # Using bytes for test efficiency
+        (trace_dir / "file_a.mp4").write_bytes(b"A" * 100)  # 100 bytes
+        (trace_dir / "file_b.mp4").write_bytes(b"B" * 50)  # 50 bytes
 
         upload_failed_events: list[tuple] = []
         upload_complete_events: list[str] = []
@@ -1415,6 +1459,11 @@ class TestResumeLogic:
         assert (
             "Network" in failed_event[4] or "network" in failed_event[4].lower()
         ), f"Error message should mention network: {failed_event[4]}"
+
+
+# =============================================================================
+# SECTION 6: CONCURRENT UPLOADS
+# =============================================================================
 
 
 class TestConcurrentUploads:
