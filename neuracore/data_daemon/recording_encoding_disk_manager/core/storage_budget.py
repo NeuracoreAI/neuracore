@@ -26,7 +26,7 @@ def scan_used_bytes(root_path: Path) -> int:
         try:
             if file_path.is_file():
                 total_bytes += file_path.stat().st_size
-        except FileNotFoundError:
+        except OSError:
             continue
     return total_bytes
 
