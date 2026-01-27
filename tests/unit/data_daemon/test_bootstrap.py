@@ -40,7 +40,6 @@ def mock_config() -> DaemonConfig:
 @pytest.fixture
 def mock_async_services() -> AsyncServices:
     """Create a mock AsyncServices instance for shutdown tests."""
-    # Use MagicMock for base objects, only make specific methods async
     mock_session = MagicMock(spec=aiohttp.ClientSession)
     mock_session.close = AsyncMock()
 
@@ -113,7 +112,6 @@ class TestBootstrapAsyncServices:
             patch("neuracore.data_daemon.bootstrap.SqliteStateStore") as MockStateStore,
             patch("neuracore.data_daemon.bootstrap.StateManager") as MockStateMgr,
         ):
-            # Setup mocks
             mock_conn_instance = AsyncMock()
             mock_conn_instance.start = AsyncMock()
             MockConnMgr.return_value = mock_conn_instance
@@ -131,35 +129,26 @@ class TestBootstrapAsyncServices:
             mock_state_manager_instance = MagicMock()
             MockStateMgr.return_value = mock_state_manager_instance
 
-            # Execute
             services = await bootstrap_async_services(mock_config, temp_db_path)
 
-            # Verify AsyncServices returned with all components
             assert services is not None
             assert isinstance(services, AsyncServices)
 
-            # Verify client_session is aiohttp.ClientSession
             assert isinstance(services.client_session, aiohttp.ClientSession)
 
-            # Verify state_store is initialized (init_async_store called)
             assert services.state_store is mock_state_store_instance
             mock_state_store_instance.init_async_store.assert_called_once()
 
-            # Verify state_manager exists
             assert services.state_manager is mock_state_manager_instance
 
-            # Verify upload_manager, connection_manager, progress_reporter exist
             assert services.upload_manager is mock_upload_instance
             assert services.connection_manager is mock_conn_instance
             assert services.progress_reporter is mock_progress_instance
 
-            # Verify initialize_auth was called with config
             mock_init_auth.assert_called_once_with(daemon_config=mock_config)
 
-            # Verify connection_manager.start() was called
             mock_conn_instance.start.assert_called_once()
 
-            # Cleanup
             await services.client_session.close()
 
     @pytest.mark.asyncio
@@ -225,13 +214,10 @@ class TestBootstrapAsyncServices:
 
             services = await bootstrap_async_services(mock_config, temp_db_path)
 
-            # Verify initialize_auth called exactly once
             mock_init_auth.assert_called_once()
 
-            # Verify initialize_auth called with daemon_config=config
             mock_init_auth.assert_called_with(daemon_config=mock_config)
 
-            # Verify initialize_auth called before services that depend on auth
             assert call_order.index("initialize_auth") < call_order.index(
                 "UploadManager"
             )
@@ -239,7 +225,6 @@ class TestBootstrapAsyncServices:
                 "ProgressReporter"
             )
 
-            # Cleanup
             await services.client_session.close()
 
 
@@ -278,19 +263,14 @@ class TestShutdownAsyncServices:
         - client_session.close() called
         - No exceptions raised
         """
-        # Execute
         await shutdown_async_services(mock_async_services)
 
-        # Verify connection_manager.stop() called
         mock_async_services.connection_manager.stop.assert_called_once()
 
-        # Verify upload_manager.shutdown() called
         mock_async_services.upload_manager.shutdown.assert_called_once()
 
-        # Verify state_store.close() called
         mock_async_services.state_store.close.assert_called_once()
 
-        # Verify client_session.close() called
         mock_async_services.client_session.close.assert_called_once()
 
     @pytest.mark.asyncio
@@ -324,24 +304,17 @@ class TestShutdownAsyncServices:
         - All shutdown methods still called despite earlier error
         - Error is logged (check log capture)
         """
-        # Setup: connection_manager.stop() raises error
         mock_async_services.connection_manager.stop = AsyncMock(
             side_effect=RuntimeError("Connection already closed")
         )
 
-        # Execute - should not raise
         with caplog.at_level(logging.ERROR):
             await shutdown_async_services(mock_async_services)
 
-        # Verify no exception propagated (we got here)
-
-        # Verify upload_manager.shutdown() still called despite earlier error
         mock_async_services.upload_manager.shutdown.assert_called_once()
 
-        # Verify client_session.close() still called
         mock_async_services.client_session.close.assert_called_once()
 
-        # Verify error was logged
         assert "Error stopping ConnectionManager" in caplog.text
 
 
@@ -395,7 +368,7 @@ class TestDaemonBootstrapStart:
             patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
             patch(
                 "neuracore.data_daemon.bootstrap.bootstrap_async_services",
-                new=MagicMock(),  # Completely replace with sync mock
+                new=MagicMock(),
             ),
             patch(
                 "neuracore.data_daemon.bootstrap.rdm.RecordingDiskManager",
@@ -406,12 +379,10 @@ class TestDaemonBootstrapStart:
                 return_value=mock_comm,
             ),
         ):
-            # Setup config manager mock
             mock_config_mgr_instance = MagicMock()
             mock_config_mgr_instance.resolve_effective_config.return_value = mock_config
             MockConfigMgr.return_value = mock_config_mgr_instance
 
-            # Setup loop manager mock - simulates successful startup
             mock_loop_mgr.is_running.return_value = True
             services_future = MagicMock()
             services_future.result.return_value = mock_services
@@ -421,24 +392,18 @@ class TestDaemonBootstrapStart:
             bootstrap = DaemonBootstrap(db_path=temp_db_path)
             context = bootstrap.start()
 
-            # Returns DaemonContext (not None)
             assert context is not None
             assert isinstance(context, DaemonContext)
 
-            # context.config is the resolved DaemonConfig
             assert context.config is mock_config
 
-            # context.loop_manager is running
             assert context.loop_manager is mock_loop_mgr
             assert context.loop_manager.is_running()
 
-            # context.services contains all AsyncServices
             assert context.services is mock_services
 
-            # context.recording_disk_manager is initialized
             assert context.recording_disk_manager is mock_rdm
 
-            # context.comm_manager is ready
             assert context.comm_manager is mock_comm
 
     def test_d2_config_failure_returns_none(
@@ -476,7 +441,6 @@ class TestDaemonBootstrapStart:
             patch("neuracore.data_daemon.bootstrap.ConfigManager") as MockConfigMgr,
             patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
         ):
-            # Setup: config resolution fails
             mock_config_mgr_instance = MagicMock()
             mock_config_mgr_instance.resolve_effective_config.side_effect = ValueError(
                 "Invalid API key format"
@@ -488,13 +452,10 @@ class TestDaemonBootstrapStart:
             with caplog.at_level(logging.ERROR):
                 context = bootstrap.start()
 
-            # Returns None
             assert context is None
 
-            # Error is logged
             assert "Failed to resolve configuration" in caplog.text
 
-            # No EventLoopManager started
             MockLoopMgr.return_value.start.assert_not_called()
 
     def test_d3_loop_manager_failure_returns_none(
@@ -535,12 +496,10 @@ class TestDaemonBootstrapStart:
             patch("neuracore.data_daemon.bootstrap.ConfigManager") as MockConfigMgr,
             patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
         ):
-            # Setup: config succeeds
             mock_config_mgr_instance = MagicMock()
             mock_config_mgr_instance.resolve_effective_config.return_value = mock_config
             MockConfigMgr.return_value = mock_config_mgr_instance
 
-            # Setup: EventLoopManager.start() fails
             mock_loop_mgr_instance = MagicMock()
             mock_loop_mgr_instance.start.side_effect = RuntimeError(
                 "Cannot create thread"
@@ -553,16 +512,12 @@ class TestDaemonBootstrapStart:
             with caplog.at_level(logging.ERROR):
                 context = bootstrap.start()
 
-            # Returns None
             assert context is None
 
-            # Config was resolved
             mock_config_mgr_instance.resolve_effective_config.assert_called_once()
 
-            # No loops left running (start failed, so is_running should be False)
             assert mock_loop_mgr_instance.is_running() is False
 
-            # Error logged
             assert "Failed to start EventLoopManager" in caplog.text
 
     def test_d4_async_services_failure_cleans_up_loops(
@@ -605,20 +560,17 @@ class TestDaemonBootstrapStart:
             patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
             patch(
                 "neuracore.data_daemon.bootstrap.bootstrap_async_services",
-                new=MagicMock(),  # Completely replace with sync mock
+                new=MagicMock(),
             ),
         ):
-            # Setup: config succeeds
             mock_config_mgr_instance = MagicMock()
             mock_config_mgr_instance.resolve_effective_config.return_value = mock_config
             MockConfigMgr.return_value = mock_config_mgr_instance
 
-            # Setup: EventLoopManager starts successfully but async services fail
             mock_loop_mgr_instance = MagicMock()
             mock_future = MagicMock()
             mock_future.result.side_effect = RuntimeError("Database init failed")
             mock_loop_mgr_instance.schedule_on_general_loop.return_value = mock_future
-            # After stop() is called, is_running returns False
             mock_loop_mgr_instance.is_running.return_value = False
             MockLoopMgr.return_value = mock_loop_mgr_instance
 
@@ -627,16 +579,12 @@ class TestDaemonBootstrapStart:
             with caplog.at_level(logging.ERROR):
                 context = bootstrap.start()
 
-            # Returns None
             assert context is None
 
-            # EventLoopManager.stop() was called for cleanup
             mock_loop_mgr_instance.stop.assert_called_once()
 
-            # No threads left alive (loops were stopped)
             assert mock_loop_mgr_instance.is_running() is False
 
-            # Error logged
             assert "Failed to bootstrap async services" in caplog.text
 
     def test_d5_rdm_failure_cleans_up_services_and_loops(
@@ -676,7 +624,6 @@ class TestDaemonBootstrapStart:
         """
         mock_services = MagicMock(spec=AsyncServices)
 
-        # Create mock for shutdown_async_services to track calls
         mock_shutdown = MagicMock()
 
         with (
@@ -685,25 +632,22 @@ class TestDaemonBootstrapStart:
             patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
             patch(
                 "neuracore.data_daemon.bootstrap.bootstrap_async_services",
-                new=MagicMock(),  # Completely replace with sync mock
+                new=MagicMock(),
             ),
             patch(
                 "neuracore.data_daemon.bootstrap.shutdown_async_services",
-                new=mock_shutdown,  # Completely replace with sync mock
+                new=mock_shutdown,
             ),
             patch(
                 "neuracore.data_daemon.bootstrap.rdm.RecordingDiskManager"
             ) as MockRDM,
         ):
-            # Setup: config succeeds
             mock_config_mgr_instance = MagicMock()
             mock_config_mgr_instance.resolve_effective_config.return_value = mock_config
             MockConfigMgr.return_value = mock_config_mgr_instance
 
-            # Setup: EventLoopManager and async services succeed
             mock_loop_mgr_instance = MagicMock()
 
-            # First call returns services, second call (shutdown) returns None
             services_future = MagicMock()
             services_future.result.return_value = mock_services
             shutdown_future = MagicMock()
@@ -715,7 +659,6 @@ class TestDaemonBootstrapStart:
             ]
             MockLoopMgr.return_value = mock_loop_mgr_instance
 
-            # Setup: RDM fails
             MockRDM.side_effect = RuntimeError("Invalid recordings path")
 
             bootstrap = DaemonBootstrap(db_path=temp_db_path)
@@ -723,24 +666,17 @@ class TestDaemonBootstrapStart:
             with caplog.at_level(logging.ERROR):
                 context = bootstrap.start()
 
-            # Returns None
             assert context is None
 
-            # shutdown_async_services was scheduled (cleanup)
             assert mock_loop_mgr_instance.schedule_on_general_loop.call_count == 2
 
-            # Verify shutdown_async_services was called with the services
-            # (This ensures aiohttp session close will be called)
             mock_shutdown.assert_called_once_with(mock_services)
 
-            # EventLoopManager.stop() was called
             mock_loop_mgr_instance.stop.assert_called_once()
 
-            # No resource leaks - loops are stopped
             mock_loop_mgr_instance.is_running.return_value = False
             assert mock_loop_mgr_instance.is_running() is False
 
-            # Error logged
             assert "Failed to initialize RecordingDiskManager" in caplog.text
 
 
@@ -801,7 +737,6 @@ class TestDaemonBootstrapStop:
         def track_loop_stop(*args, **kwargs):
             shutdown_order.append("loops")
 
-        # Create a context manually
         context = DaemonContext(
             config=mock_config,
             loop_manager=mock_loop_mgr,
@@ -810,11 +745,9 @@ class TestDaemonBootstrapStop:
             recording_disk_manager=mock_rdm,
         )
 
-        # Track shutdown calls
         call_count = [0]
 
         def schedule_side_effect(coroutine):
-            # Close the coroutine to avoid "never awaited" warnings
             coroutine.close()
             call_count[0] += 1
             if call_count[0] == 1:
@@ -830,10 +763,8 @@ class TestDaemonBootstrapStop:
 
         bootstrap.stop()
 
-        # Verify shutdown order
         assert shutdown_order == ["rdm", "services", "loops"]
 
-        # bootstrap.context is None after
         assert bootstrap.context is None
 
     def test_t2_stop_without_start_logs_warning(
@@ -866,12 +797,9 @@ class TestDaemonBootstrapStop:
         """
         bootstrap = DaemonBootstrap(db_path=temp_db_path)
 
-        # Don't call start()
-
         with caplog.at_level(logging.WARNING):
-            bootstrap.stop()  # Should not raise
+            bootstrap.stop()
 
-        # Warning logged
         assert "Cannot stop: daemon not started" in caplog.text
 
     def test_t3_stop_continues_despite_errors(
@@ -910,7 +838,6 @@ class TestDaemonBootstrapStop:
         mock_services = MagicMock(spec=AsyncServices)
         mock_loop_mgr = MagicMock()
 
-        # Create context
         context = DaemonContext(
             config=mock_config,
             loop_manager=mock_loop_mgr,
@@ -919,18 +846,15 @@ class TestDaemonBootstrapStop:
             recording_disk_manager=mock_rdm,
         )
 
-        # RDM shutdown fails
         rdm_future = MagicMock()
         rdm_future.result.side_effect = TimeoutError("Encoder worker stuck")
 
-        # Services shutdown succeeds
         services_future = MagicMock()
         services_future.result.return_value = None
 
         call_count = [0]
 
         def schedule_side_effect(coroutine):
-            # Close the coroutine to avoid "never awaited" warnings
             coroutine.close()
             call_count[0] += 1
             if call_count[0] == 1:
@@ -944,18 +868,14 @@ class TestDaemonBootstrapStop:
         bootstrap._context = context
 
         with caplog.at_level(logging.ERROR):
-            bootstrap.stop()  # Should not raise
+            bootstrap.stop()
 
-        # All shutdown methods attempted
         assert mock_loop_mgr.schedule_on_general_loop.call_count == 2
 
-        # EventLoopManager.stop() still called
         mock_loop_mgr.stop.assert_called_once()
 
-        # Error logged
         assert "Error shutting down RecordingDiskManager" in caplog.text
 
-        # context is None after
         assert bootstrap.context is None
 
 
@@ -984,10 +904,8 @@ class TestDaemonBootstrapContext:
         """
         bootstrap = DaemonBootstrap(db_path=temp_db_path)
 
-        # Access context before start
         result = bootstrap.context
 
-        # Returns None
         assert result is None
 
     def test_c2_context_property_after_start(
@@ -1022,7 +940,7 @@ class TestDaemonBootstrapContext:
             patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
             patch(
                 "neuracore.data_daemon.bootstrap.bootstrap_async_services",
-                new=MagicMock(),  # Completely replace with sync mock
+                new=MagicMock(),
             ),
             patch(
                 "neuracore.data_daemon.bootstrap.rdm.RecordingDiskManager",
@@ -1037,7 +955,6 @@ class TestDaemonBootstrapContext:
             mock_config_mgr_instance.resolve_effective_config.return_value = mock_config
             MockConfigMgr.return_value = mock_config_mgr_instance
 
-            # Setup loop manager mock
             mock_loop_mgr.is_running.return_value = True
             services_future = MagicMock()
             services_future.result.return_value = mock_services
@@ -1047,14 +964,11 @@ class TestDaemonBootstrapContext:
             bootstrap = DaemonBootstrap(db_path=temp_db_path)
             start_result = bootstrap.start()
 
-            # Access context property
             context_result = bootstrap.context
 
-            # Returns same DaemonContext as start() returned
             assert context_result is start_result
             assert context_result is not None
 
-            # All components accessible
             assert context_result.config is mock_config
             assert context_result.loop_manager is mock_loop_mgr
             assert context_result.services is mock_services

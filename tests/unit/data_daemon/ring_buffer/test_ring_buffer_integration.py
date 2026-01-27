@@ -58,11 +58,6 @@ class MockComm:
         raise KeyboardInterrupt()
 
 
-# =============================================================================
-# L3-001 to L3-004: Daemon → RingBuffer Write Path
-# =============================================================================
-
-
 def test_daemon_creates_ring_buffer_on_open() -> None:
     """OPEN_RING_BUFFER creates buffer.
 
@@ -80,10 +75,8 @@ def test_daemon_creates_ring_buffer_on_open() -> None:
     channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
     daemon.channels["test-producer"] = channel
 
-    # Initially no ring buffer
     assert channel.ring_buffer is None
 
-    # Send OPEN_RING_BUFFER command
     message = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.OPEN_RING_BUFFER,
@@ -91,7 +84,6 @@ def test_daemon_creates_ring_buffer_on_open() -> None:
     )
     daemon._handle_open_ring_buffer(channel, message)
 
-    # Now buffer should exist
     assert channel.ring_buffer is not None
     assert channel.ring_buffer.size == 4096
     assert channel.reader is not None
@@ -114,7 +106,6 @@ def test_daemon_writes_chunk_to_ring_buffer() -> None:
     channel = ChannelState(producer_id="test-producer", recording_id="rec-123")
     daemon.channels["test-producer"] = channel
 
-    # Open ring buffer first
     open_msg = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.OPEN_RING_BUFFER,
@@ -125,7 +116,6 @@ def test_daemon_writes_chunk_to_ring_buffer() -> None:
     initial_available = channel.ring_buffer.available()
     assert initial_available == 0
 
-    # Send data chunk
     data = b"test-payload-data"
     data_msg = MessageEnvelope(
         producer_id="test-producer",
@@ -141,7 +131,6 @@ def test_daemon_writes_chunk_to_ring_buffer() -> None:
     )
     daemon._handle_write_data_chunk(channel, data_msg)
 
-    # Buffer should now have data
     assert channel.ring_buffer.available() > 0
 
 
@@ -184,11 +173,9 @@ def test_daemon_writes_correct_header_format() -> None:
     )
     daemon._handle_write_data_chunk(channel, data_msg)
 
-    # Peek the header from buffer
     header_bytes = channel.ring_buffer.peek(CHUNK_HEADER_SIZE)
     assert header_bytes is not None
 
-    # Should be able to parse
     raw_trace_id, raw_data_type, chunk_index, total_chunks, chunk_len = struct.unpack(
         CHUNK_HEADER_FORMAT, header_bytes
     )
@@ -216,13 +203,11 @@ def test_daemon_handles_multiple_channels() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    # Create two channels
     channel_a = ChannelState(producer_id="producer-A", recording_id="rec-A")
     channel_b = ChannelState(producer_id="producer-B", recording_id="rec-B")
     daemon.channels["producer-A"] = channel_a
     daemon.channels["producer-B"] = channel_b
 
-    # Open buffers for both
     for channel, producer_id in [(channel_a, "producer-A"), (channel_b, "producer-B")]:
         open_msg = MessageEnvelope(
             producer_id=producer_id,
@@ -231,7 +216,6 @@ def test_daemon_handles_multiple_channels() -> None:
         )
         daemon._handle_open_ring_buffer(channel, open_msg)
 
-    # Write to channel A only
     data_msg = MessageEnvelope(
         producer_id="producer-A",
         command=CommandType.DATA_CHUNK,
@@ -246,16 +230,9 @@ def test_daemon_handles_multiple_channels() -> None:
     )
     daemon._handle_write_data_chunk(channel_a, data_msg)
 
-    # Channel A should have data
     assert channel_a.ring_buffer.available() > 0
 
-    # Channel B should be empty
     assert channel_b.ring_buffer.available() == 0
-
-
-# =============================================================================
-# L3-005 to L3-008: Header Construction and Channel Lifecycle
-# =============================================================================
 
 
 def test_daemon_header_trace_id_padding() -> None:
@@ -281,12 +258,11 @@ def test_daemon_header_trace_id_padding() -> None:
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
 
-    # Short trace_id
     data_msg = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.DATA_CHUNK,
         payload={
-            "trace_id": "short",  # Only 5 bytes
+            "trace_id": "short",
             "data_type": DataType.CUSTOM_1D.value,
             "chunk_index": 0,
             "total_chunks": 1,
@@ -299,7 +275,6 @@ def test_daemon_header_trace_id_padding() -> None:
     header = channel.ring_buffer.peek(CHUNK_HEADER_SIZE)
     raw_trace_id = header[:TRACE_ID_FIELD_SIZE]
 
-    # Should be padded to 36 bytes
     assert len(raw_trace_id) == TRACE_ID_FIELD_SIZE
     assert raw_trace_id.rstrip(b"\x00") == b"short"
 
@@ -333,7 +308,7 @@ def test_daemon_header_data_type_padding() -> None:
         command=CommandType.DATA_CHUNK,
         payload={
             "trace_id": "trace-1",
-            "data_type": DataType.CUSTOM_1D.value,  # "custom_1d"
+            "data_type": DataType.CUSTOM_1D.value,
             "chunk_index": 0,
             "total_chunks": 1,
             "data": base64.b64encode(b"x").decode("ascii"),
@@ -347,7 +322,6 @@ def test_daemon_header_data_type_padding() -> None:
         TRACE_ID_FIELD_SIZE : TRACE_ID_FIELD_SIZE + DATA_TYPE_FIELD_SIZE
     ]
 
-    # Should be padded to 32 bytes
     assert len(raw_data_type) == DATA_TYPE_FIELD_SIZE
 
 
@@ -375,7 +349,7 @@ def test_daemon_header_with_long_trace_id() -> None:
     )
     daemon._handle_open_ring_buffer(channel, open_msg)
 
-    long_trace_id = "x" * 100  # Much longer than 36 bytes
+    long_trace_id = "x" * 100
     data_msg = MessageEnvelope(
         producer_id="test-producer",
         command=CommandType.DATA_CHUNK,
@@ -390,11 +364,9 @@ def test_daemon_header_with_long_trace_id() -> None:
     )
     daemon._handle_write_data_chunk(channel, data_msg)
 
-    # Should not crash, and header should be able to parse
     header = channel.ring_buffer.peek(CHUNK_HEADER_SIZE)
     assert header is not None
 
-    # Verify it can be unpacked
     unpacked = struct.unpack(CHUNK_HEADER_FORMAT, header)
     raw_trace_id = unpacked[0]
     assert len(raw_trace_id) == TRACE_ID_FIELD_SIZE
@@ -413,7 +385,6 @@ def test_new_channel_fresh_buffer() -> None:
         recording_disk_manager=mock_rdm,
     )
 
-    # Create and setup first channel
     channel1 = ChannelState(producer_id="producer-1", recording_id="rec-1")
     daemon.channels["producer-1"] = channel1
 
@@ -424,7 +395,6 @@ def test_new_channel_fresh_buffer() -> None:
     )
     daemon._handle_open_ring_buffer(channel1, open_msg1)
 
-    # Write some data to first channel
     data_msg = MessageEnvelope(
         producer_id="producer-1",
         command=CommandType.DATA_CHUNK,
@@ -439,7 +409,6 @@ def test_new_channel_fresh_buffer() -> None:
     )
     daemon._handle_write_data_chunk(channel1, data_msg)
 
-    # Now create a new channel
     channel2 = ChannelState(producer_id="producer-2", recording_id="rec-2")
     daemon.channels["producer-2"] = channel2
 
@@ -450,7 +419,6 @@ def test_new_channel_fresh_buffer() -> None:
     )
     daemon._handle_open_ring_buffer(channel2, open_msg2)
 
-    # New channel should be completely fresh
     assert channel2.ring_buffer is not None
     assert channel2.ring_buffer.available() == 0
     assert channel2.ring_buffer.write_pos == 0
