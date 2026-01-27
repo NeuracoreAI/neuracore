@@ -7,7 +7,12 @@ from typing import Any
 import aiohttp
 
 from neuracore.data_daemon.auth_management.auth_manager import get_auth
-from neuracore.data_daemon.const import API_URL
+from neuracore.data_daemon.const import (
+    API_URL,
+    BACKEND_API_MAX_BACKOFF_SECONDS,
+    BACKEND_API_MAX_RETRIES,
+    BACKEND_API_RETRYABLE_STATUS_CODES,
+)
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 
 logger = logging.getLogger(__name__)
@@ -54,25 +59,49 @@ class ProgressReporter:
 
         auth = get_auth()
         org_id = await auth.get_org_id()
+        recording_id = traces[0].recording_id
+        last_error: str | None = None
 
-        try:
-            async with self.client_session.post(
-                f"{API_URL}/{org_id}/recording/register-traces",
-                json=body,
-                headers=await auth.get_headers(self.client_session),
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as response:
-                if response.status >= 400:
+        for attempt in range(BACKEND_API_MAX_RETRIES):
+            try:
+                async with self.client_session.post(
+                    f"{API_URL}/{org_id}/recording/register-traces",
+                    json=body,
+                    headers=await auth.get_headers(self.client_session),
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as response:
+                    if response.status < 400:
+                        self._emitter.emit(Emitter.PROGRESS_REPORTED, recording_id)
+                        return
+
+                    error_text = await response.text()
+                    last_error = f"HTTP {response.status}: {error_text}"
                     logger.warning(
-                        "Progress report failed: %s %s",
+                        "Progress report failed (attempt %d/%d): %s %s",
+                        attempt + 1,
+                        BACKEND_API_MAX_RETRIES,
                         response.status,
-                        response.text,
+                        error_text,
                     )
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            logger.warning("Progress report request failed: %s", exc)
-            self._emitter.emit(
-                Emitter.PROGRESS_REPORT_FAILED,
-                traces[0].recording_id,
-                str(exc),
-            )
-        self._emitter.emit(Emitter.PROGRESS_REPORTED, traces[0].recording_id)
+
+                    if response.status not in BACKEND_API_RETRYABLE_STATUS_CODES:
+                        break  # Non-retryable error, stop immediately
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "Progress report request failed (attempt %d/%d): %s",
+                    attempt + 1,
+                    BACKEND_API_MAX_RETRIES,
+                    exc,
+                )
+
+            if attempt < BACKEND_API_MAX_RETRIES - 1:
+                delay = min(2**attempt, BACKEND_API_MAX_BACKOFF_SECONDS)
+                await asyncio.sleep(delay)
+
+        self._emitter.emit(
+            Emitter.PROGRESS_REPORT_FAILED,
+            recording_id,
+            last_error or "Unknown error",
+        )
