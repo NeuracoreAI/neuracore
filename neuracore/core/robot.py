@@ -10,7 +10,6 @@ import io
 import logging
 import os
 import tempfile
-import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -79,7 +78,6 @@ class Robot:
         self.overwrite = overwrite
         self.shared = shared
         self.id: str | None = None
-        self.is_connected: bool = False
         self.archived: bool | None = None
         self._auth: Auth = get_auth()
         self._temp_dir = None
@@ -135,17 +133,14 @@ class Robot:
             RobotError: If not authenticated or if server communication fails.
             ConfigError: If there is an error trying to get the current org
         """
+        if not self._auth.is_authenticated:
+            raise RobotError("Not authenticated. Please call nc.login() first.")
+
         if not self.org_id:
             raise RobotError(
                 "Unauthorised: no organisation selected. "
                 "Run `neuracore select-org` and try again."
             )
-
-        if not self._auth.is_authenticated:
-            self.id = None
-            self.is_connected = False
-            logger.warning("No access token available. Running in offline mode.")
-            return
 
         try:
             response = requests.post(
@@ -160,7 +155,6 @@ class Robot:
             response_body = response.json()
             self.id = response_body["robot_id"]
             self.archived = response_body.get("archived")
-            self.is_connected = True
             has_urdf = response_body["has_urdf"]
             # Upload URDF and meshes if provided
             if self.urdf_path and (not has_urdf or self.overwrite):
@@ -168,10 +162,9 @@ class Robot:
                 if self._temp_dir:
                     self._temp_dir.cleanup()
         except requests.exceptions.ConnectionError:
-            self.id = None
-            self.is_connected = False
-            logger.warning(
-                "Failed to connect to neuracore server. " "Running in offline mode."
+            raise RobotError(
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
             )
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 403:
@@ -179,22 +172,9 @@ class Robot:
                     "Unauthorised: no organisation selected. "
                     "Run `neuracore select-org` and try again."
                 )
-            # For other HTTP errors, fallback to offline mode
-            self.id = None
-            self.is_connected = False
-            logger.warning(
-                "Failed to initialize robot on server: %s. "
-                "Running in offline mode - data will be stored locally.",
-                str(e),
-            )
+            raise RobotError(f"Failed to initialize robot: {str(e)}")
         except requests.exceptions.RequestException as e:
-            self.id = None
-            self.is_connected = False
-            logger.warning(
-                "Failed to initialize robot: %s. "
-                "Running in offline mode - data will be stored locally.",
-                str(e),
-            )
+            raise RobotError(f"Failed to initialize robot: {str(e)}")
 
     def add_data_stream(self, stream_id: str, stream: DataStream) -> None:
         """Add a data stream to the robot for sensor data collection.
@@ -232,20 +212,14 @@ class Robot:
         """
         return self._data_streams
 
-    def start_recording(
-        self, dataset_id: str | None = None, dataset_name: str | None = None
-    ) -> str:
+    def start_recording(self, dataset_id: str) -> str:
         """Start recording data from all active streams to a dataset.
 
         Initiates a recording session that will capture data from all registered
-        data streams and associate it with the specified dataset. Supports both
-        online mode (with dataset_id) and offline mode (with dataset_name only).
+        data streams and associate it with the specified dataset.
 
         Args:
             dataset_id: Unique identifier of the dataset to record into.
-                Required for online mode, may be None for offline mode.
-            dataset_name: Name of the dataset. Used for offline mode when
-                dataset_id is not available.
 
         Returns:
             The unique recording ID for this recording session.
@@ -255,59 +229,41 @@ class Robot:
                 the recording fails to start.
             ConfigError: If there is an error trying to get the current org
         """
-        # Online mode - use server-generated recording_id
-        if self.is_connected and self.id and dataset_id and self._auth.is_authenticated:
-            try:
-                response = requests.post(
-                    f"{API_URL}/org/{self.org_id}/recording/start",
-                    headers=self._auth.get_headers(),
-                    json={
-                        "robot_id": self.id,
-                        "instance": self.instance,
-                        "dataset_id": dataset_id,
-                    },
-                )
-                response.raise_for_status()
-                # Inform the state manager immediately to skip the round trip.
+        if not self.id:
+            raise RobotError("Robot not initialized. Call init() first.")
 
-                recording_details = response.json()
-                recording_id = recording_details["id"]
-                assert isinstance(recording_id, str)
+        try:
 
-                if "start_time" in recording_details:
-                    warn("This recording had already been started!")
+            response = requests.post(
+                f"{API_URL}/org/{self.org_id}/recording/start",
+                headers=self._auth.get_headers(),
+                json={
+                    "robot_id": self.id,
+                    "instance": self.instance,
+                    "dataset_id": dataset_id,
+                },
+            )
+            response.raise_for_status()
+            # Inform the state manager immediately to skip the round trip.
 
-                get_recording_state_manager().recording_started(
-                    robot_identifier=self.id,
-                    instance=self.instance,
-                    recording_id=recording_id,
-                )
-                return recording_id
-            except requests.exceptions.ConnectionError:
-                # Fall through to offline mode
-                logger.warning(
-                    "Failed to connect to server for recording. Using offline mode."
-                )
-            except requests.exceptions.RequestException as e:
-                # Fall through to offline mode
-                logger.warning(
-                    "Failed to start online recording: %s. Using offline mode.", e
-                )
+            recording_details = response.json()
+            recording_id = recording_details["id"]
+            assert isinstance(recording_id, str)
 
-        # Offline mode - generate local recording_id
-        recording_id = str(uuid.uuid4())
-        get_recording_state_manager().recording_started(
-            robot_identifier=self.name,
-            instance=self.instance,
-            recording_id=recording_id,
-        )
-        logger.info(
-            "Starting offline recording with local ID: %s (robot=%s, dataset=%s)",
-            recording_id,
-            self.name,
-            dataset_name or dataset_id,
-        )
-        return recording_id
+            if "start_time" in recording_details:
+                warn("This recording had already been started!")
+
+            get_recording_state_manager().recording_started(
+                robot_id=self.id, instance=self.instance, recording_id=recording_id
+            )
+            return recording_id
+        except requests.exceptions.ConnectionError:
+            raise RobotError(
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            )
+        except requests.exceptions.RequestException as e:
+            raise RobotError(f"Failed to start recording: {str(e)}")
 
     def stop_recording(self, recording_id: str) -> None:
         """Stop an active recording session.
@@ -324,39 +280,35 @@ class Robot:
                 be stopped, or if storage limits are exceeded.
             ConfigError: If there is an error trying to get the current org
         """
+        if not self.id:
+            raise RobotError("Robot not initialized. Call init() first.")
+
         DaemonRecordingContext(recording_id=recording_id).stop_recording()
 
-        if self.is_connected and self.id and self._auth.is_authenticated:
-            try:
-                response = requests.post(
-                    f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}",
-                    headers=self._auth.get_headers(),
-                )
-                response.raise_for_status()
-                result = response.json()
+        try:
+            response = requests.post(
+                f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}",
+                headers=self._auth.get_headers(),
+            )
 
-                if result == "WrongUser":
-                    raise RobotError("Cannot stop recording initiated by another user")
+            response.raise_for_status()
 
-                if result == "UsageLimitExceeded":
-                    raise RobotError(
-                        "Storage limit exceeded. Please upgrade your plan."
-                    )
-            except requests.exceptions.ConnectionError:
-                logger.warning(
-                    "Failed to connect to server to stop recording. "
-                    "Recording stopped locally."
-                )
-            except requests.exceptions.RequestException as e:
-                logger.warning("Failed to notify server of recording stop: %s", e)
+            if response.json() == "WrongUser":
+                raise RobotError("Cannot stop recording initiated by another user")
 
-        get_recording_state_manager().recording_stopped(
-            robot_identifier=self.id or self.name,
-            instance=self.instance,
-            recording_id=recording_id,
-        )
+            if response.json() == "UsageLimitExceeded":
+                raise RobotError("Storage limit exceeded. Please upgrade your plan.")
 
-        logger.info("Stopped recording: %s (robot=%s)", recording_id, self.name)
+            get_recording_state_manager().recording_stopped(
+                robot_id=self.id, instance=self.instance, recording_id=recording_id
+            )
+        except requests.exceptions.ConnectionError:
+            raise RobotError(
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            )
+        except requests.exceptions.RequestException as e:
+            raise RobotError(f"Failed to stop recording: {str(e)}")
 
     def is_recording(self) -> bool:
         """Check if the robot is currently recording data.
@@ -364,8 +316,10 @@ class Robot:
         Returns:
             True if the robot is actively recording, False otherwise.
         """
+        if not self.id:
+            raise RobotError("Robot not initialized. Call init() first.")
         return get_recording_state_manager().is_recording(
-            robot_identifier=self.id or self.name, instance=self.instance
+            robot_id=self.id, instance=self.instance
         )
 
     def get_current_recording_id(self) -> str | None:
@@ -374,8 +328,10 @@ class Robot:
         Returns:
             The current recording ID if the robot is recording, None otherwise.
         """
+        if not self.id:
+            raise RobotError("Robot not initialized. Call init() first.")
         return get_recording_state_manager().get_current_recording_id(
-            robot_identifier=self.id or self.name, instance=self.instance
+            robot_id=self.id, instance=self.instance
         )
 
     def _package_urdf(self) -> dict:
@@ -518,45 +474,34 @@ class Robot:
     def cancel_recording(self, recording_id: str) -> None:
         """Cancel an active recording without saving any data.
 
-        In online mode, notifies the server to discard the recording.
-        In offline mode, behaves the same as stop_recording since the daemon
-        only supports stop operations.
-
         Args:
             recording_id: the ID of the recording to cancel.
         """
-        if self.is_connected and self.id and self._auth.is_authenticated:
-            try:
-                response = requests.post(
-                    f"{API_URL}/org/{self.org_id}/recording/cancel?recording_id={recording_id}",
-                    headers=self._auth.get_headers(),
-                )
-                response.raise_for_status()
-
-                if response.json() == "WrongUser":
-                    raise RobotError(
-                        "Cannot cancel recording initiated by another user"
-                    )
-            except requests.exceptions.ConnectionError:
-                logger.warning(
-                    "Failed to connect to server for cancel. "
-                    "Stopping recording locally."
-                )
-            except requests.exceptions.RequestException as e:
-                logger.warning(
-                    "Failed to cancel recording on server: %s. "
-                    "Stopping recording locally.",
-                    e,
-                )
+        if not self.id:
+            raise RobotError("Robot not initialized. Call init() first.")
 
         DaemonRecordingContext(recording_id=recording_id).stop_recording()
 
-        get_recording_state_manager().recording_stopped(
-            robot_identifier=self.id or self.name,
-            instance=self.instance,
-            recording_id=recording_id,
-        )
-        logger.info("Cancelled recording: %s (robot=%s)", recording_id, self.name)
+        try:
+            response = requests.post(
+                f"{API_URL}/org/{self.org_id}/recording/cancel?recording_id={recording_id}",
+                headers=self._auth.get_headers(),
+            )
+            response.raise_for_status()
+
+            if response.json() == "WrongUser":
+                raise RobotError("Cannot cancel recording initiated by another user")
+
+            get_recording_state_manager().recording_stopped(
+                robot_id=self.id, instance=self.instance, recording_id=recording_id
+            )
+        except requests.exceptions.ConnectionError:
+            raise RobotError(
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            )
+        except requests.exceptions.RequestException as e:
+            raise RobotError(f"Failed to cancel recording: {str(e)}")
 
 
 # Global robot registry
@@ -594,16 +539,10 @@ def init(
         raise ValueError("Robot name cannot be empty")
     robot = Robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     robot.init()
-    if robot.id:
-        _robot_name_id_mapping[robot_name] = robot.id
-        _robots[RobotInstanceIdentifier(robot_id=robot.id, robot_instance=instance)] = (
-            robot
-        )
-    else:
-        _robot_name_id_mapping[robot_name] = robot_name
-        _robots[
-            RobotInstanceIdentifier(robot_id=robot_name, robot_instance=instance)
-        ] = robot
+    if not robot.id:
+        raise RobotError("Robot not initialized. Call init() first.")
+    _robot_name_id_mapping[robot_name] = robot.id
+    _robots[RobotInstanceIdentifier(robot_id=robot.id, robot_instance=instance)] = robot
     return robot
 
 
