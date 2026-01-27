@@ -17,7 +17,6 @@ import numpy as np
 from neuracore_types import CameraData, DataType, NCData
 
 from neuracore.data_daemon.communications_management.producer import Producer
-from neuracore.data_daemon.const import DEFAULT_RING_BUFFER_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +84,8 @@ class DataStream(ABC):
             id=producer_id,
             recording_id=context.recording_id,
         )
-        self._producer.open_ring_buffer(DEFAULT_RING_BUFFER_SIZE)
-        self._producer.start_new_trace(recording_id=context.recording_id)
+        self._producer.open_ring_buffer()
+        self._producer.start_new_trace()
 
     def stop_recording(self) -> list[threading.Thread]:
         """Stop recording data.
@@ -127,7 +126,6 @@ class DataStream(ABC):
             data_type=self._data_type,
             robot_instance=self._context.robot_instance,
             data_type_name=self._stream_name,
-            recording_id=self._context.recording_id,
             robot_id=self._context.robot_id,
             robot_name=self._context.robot_name,
             dataset_id=self._context.dataset_id,

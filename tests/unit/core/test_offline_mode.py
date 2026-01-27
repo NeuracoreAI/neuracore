@@ -530,7 +530,7 @@ class TestDataStreamDaemonIntegration:
         stream.log(joint_data)
 
         # Verify producer was created and used
-        mock_daemon_producer.open_ring_buffer.assert_called_once_with(4184304)
+        mock_daemon_producer.open_ring_buffer.assert_called_once()
         mock_daemon_producer.start_new_trace.assert_called_once()
         mock_daemon_producer.send_data.assert_called_once()
 

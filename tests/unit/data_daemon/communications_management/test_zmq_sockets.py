@@ -214,10 +214,12 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
     daemon, _, context = daemon_runtime
 
     producer_comm = CommunicationsManager(context=context)
-    producer = Producer(comm_manager=producer_comm, chunk_size=16)
     recording_id = "rec-zmq-commands"
+    producer = Producer(
+        comm_manager=producer_comm, chunk_size=16, recording_id=recording_id
+    )
 
-    producer.start_new_trace(recording_id=recording_id)
+    producer.start_new_trace()
     producer.open_ring_buffer(size=2048)
 
     assert _wait_for(lambda: producer.producer_id in daemon.channels, timeout=0.5)
@@ -236,8 +238,6 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
     active_trace_id = producer.trace_id
     producer.send_data(
         payload,
-        trace_id=producer.trace_id,
-        recording_id=recording_id,
         data_type=DataType.CUSTOM_1D,
         data_type_name="custom",
         robot_instance=1,
@@ -293,10 +293,12 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
     daemon, _, context = daemon_runtime
 
     producer_comm = CommunicationsManager(context=context)
-    producer = Producer(comm_manager=producer_comm, chunk_size=16)
     recording_id = "rec-zmq-timeout"
+    producer = Producer(
+        comm_manager=producer_comm, chunk_size=16, recording_id=recording_id
+    )
 
-    producer.start_new_trace(recording_id=recording_id)
+    producer.start_new_trace()
     producer.open_ring_buffer(size=1024)
     producer.start_producer()
 
@@ -324,8 +326,6 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
     payload = json.dumps({"seq": 1}).encode("utf-8")
     producer.send_data(
         payload,
-        trace_id=producer.trace_id,
-        recording_id=recording_id,
         data_type=DataType.CUSTOM_1D,
         data_type_name="custom",
         robot_instance=1,
@@ -374,8 +374,10 @@ def test_socket_cleanup_on_disconnect(daemon_runtime) -> None:
     daemon, _, context = daemon_runtime
 
     producer_comm = CommunicationsManager(context=context)
-    producer = Producer(comm_manager=producer_comm, chunk_size=16)
-    producer.start_new_trace(recording_id="rec-disconnect")
+    producer = Producer(
+        comm_manager=producer_comm, chunk_size=16, recording_id="rec-disconnect"
+    )
+    producer.start_new_trace()
     producer.open_ring_buffer(size=512)
     producer.start_producer()
 

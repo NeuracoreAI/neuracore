@@ -165,9 +165,9 @@ def test_producer_send_data_chunks_and_base64() -> None:
     producer = Producer(comm_manager=comm, chunk_size=2, recording_id="rec-1")
 
     assert comm.socket_requested is True
+    producer.start_new_trace()
     producer.send_data(
         b"abcd",
-        trace_id="7",
         data_type=DataType.CUSTOM_1D,
         data_type_name="custom",
         robot_instance=2,
@@ -181,7 +181,7 @@ def test_producer_send_data_chunks_and_base64() -> None:
     for idx, envelope in enumerate(comm.messages):
         assert envelope.command == CommandType.DATA_CHUNK
         payload = envelope.payload.get("data_chunk")
-        assert payload["trace_id"] == "7"
+        assert payload["trace_id"] == producer.trace_id
         assert payload["chunk_index"] == idx
         assert payload["total_chunks"] == 2
         assert payload["dataset_id"] == "dataset-1"

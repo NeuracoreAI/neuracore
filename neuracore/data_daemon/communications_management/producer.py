@@ -11,7 +11,7 @@ from neuracore.data_daemon.communications_management.communications_manager impo
     CommunicationsManager,
     MessageEnvelope,
 )
-from neuracore.data_daemon.const import DEFAULT_CHUNK_SIZE
+from neuracore.data_daemon.const import DEFAULT_CHUNK_SIZE, DEFAULT_RING_BUFFER_SIZE
 from neuracore.data_daemon.models import CommandType, DataChunkPayload, DataType
 
 logger = logging.getLogger(__name__)
@@ -79,11 +79,10 @@ class Producer:
                 "has the daemon been started with `nc-daemon start`?"
             )
 
-    def start_new_trace(self, recording_id: str | None = None) -> None:
+    def start_new_trace(self) -> None:
         """Start a new trace for the given recording."""
-        if not recording_id:
-            raise ValueError("recording_id is required to start a new recording.")
-        self.recording_id = recording_id
+        if not self.recording_id:
+            raise ValueError("recording_id is required; set on Producer init.")
         self.trace_id = str(uuid.uuid4())
 
     def end_trace(self) -> None:
@@ -202,17 +201,15 @@ class Producer:
         """
         return self.socket is not None
 
-    def open_ring_buffer(self, size: int = 1024) -> None:
+    def open_ring_buffer(self, size: int = DEFAULT_RING_BUFFER_SIZE) -> None:
         """Open a ring buffer for sending data chunks to the daemon.
 
         This method sends an OPEN_RING_BUFFER command to the daemon, which
         creates a new RingBuffer instance of the specified size and associates it
         with the producer's channel.
 
-        :param  size (int): The size of the ring buffer in bytes. Defaults to 1024.
+        :param  size (int): The size of the ring buffer in bytes.
         """
-        if not self.trace_id:
-            self.trace_id = str(uuid.uuid4())
         self._send(
             CommandType.OPEN_RING_BUFFER,
             {"open_ring_buffer": {"size": size}},
@@ -224,8 +221,6 @@ class Producer:
         data_type: DataType,
         robot_instance: int,
         data_type_name: str,
-        trace_id: str | None = None,
-        recording_id: str | None = None,
         robot_id: str | None = None,
         robot_name: str | None = None,
         dataset_id: str | None = None,
@@ -234,13 +229,10 @@ class Producer:
         """Send data to the daemon.
 
         This method sends the data to the daemon in chunks, using the
-        DATA_CHUNK command. If no trace ID is provided, a random one will
-        be generated.
+        DATA_CHUNK command. Requires start_new_trace() to be called first.
 
         :param data (bytes): The data to send.
         :param robot_instance (int): The robot instance identifier.
-        :param trace_id (str | None): The trace ID of the data. If None, a random
-            trace ID will be generated.
 
         Returns:
             None
@@ -248,19 +240,9 @@ class Producer:
         if not data:
             return
 
-        if trace_id:
-            self.trace_id = trace_id
-
-        elif not self.trace_id:
-            self.trace_id = str(uuid.uuid4().hex)
-
-        if recording_id:
-            self.recording_id = recording_id
-
-        elif not self.recording_id:
+        if not self.trace_id or not self.recording_id:
             raise ValueError(
-                "Recording ID required; set one "
-                "on init or pass recording_id to send_data()."
+                "Trace ID required; call start_new_trace() before send_data()."
             )
 
         if not robot_id and not robot_name:
