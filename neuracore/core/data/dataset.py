@@ -384,6 +384,14 @@ class Dataset:
             data_types=list(dataset_model.all_data_types.keys()),
         )
 
+    def delete(self) -> None:
+        """Delete this dataset from Neuracore."""
+        response = requests.delete(
+            f"{API_URL}/org/{self.org_id}/datasets/{self.id}",
+            headers=get_auth().get_headers(),
+        )
+        response.raise_for_status()
+
     def _synchronize(
         self,
         frequency: int = 0,
