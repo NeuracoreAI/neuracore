@@ -25,7 +25,8 @@ ROBOT_INSTANCE = 1
 async def store(tmp_path: Path) -> SqliteStateStore:
     store = SqliteStateStore(tmp_path / "state.db")
     await store.init_async_store()
-    return store
+    yield store
+    await store._engine.dispose()
 
 
 async def _get_trace_row(store: SqliteStateStore, trace_id: str) -> dict | None:
@@ -376,27 +377,33 @@ async def test_bytes_uploaded_persisted_across_restart(tmp_path: Path) -> None:
     store = SqliteStateStore(db_path)
     await store.init_async_store()
 
-    await store.create_trace(
-        "trace-restart",
-        "rec-restart",
-        PRIMARY_DATA_TYPE,
-        data_type_name="primary",
-        path="/tmp/trace-restart.bin",
-        robot_instance=ROBOT_INSTANCE,
-    )
-    await store.update_bytes_uploaded("trace-restart", 1024)
+    try:
+        await store.create_trace(
+            "trace-restart",
+            "rec-restart",
+            PRIMARY_DATA_TYPE,
+            data_type_name="primary",
+            path="/tmp/trace-restart.bin",
+            robot_instance=ROBOT_INSTANCE,
+        )
+        await store.update_bytes_uploaded("trace-restart", 1024)
 
-    row = await _get_trace_row(store, "trace-restart")
-    assert row is not None
-    assert row["bytes_uploaded"] == 1024
+        row = await _get_trace_row(store, "trace-restart")
+        assert row is not None
+        assert row["bytes_uploaded"] == 1024
+    finally:
+        await store._engine.dispose()
 
     # Simulate restart by creating new store instance
     restarted_store = SqliteStateStore(db_path)
     await restarted_store.init_async_store()
 
-    row_after = await _get_trace_row(restarted_store, "trace-restart")
-    assert row_after is not None
-    assert row_after["bytes_uploaded"] == 1024
+    try:
+        row_after = await _get_trace_row(restarted_store, "trace-restart")
+        assert row_after is not None
+        assert row_after["bytes_uploaded"] == 1024
+    finally:
+        await restarted_store._engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -460,29 +467,35 @@ async def test_state_recovery_after_restart(tmp_path: Path) -> None:
     store = SqliteStateStore(db_path)
     await store.init_async_store()
 
-    await store.create_trace(
-        "trace-recover",
-        "rec-recover",
-        PRIMARY_DATA_TYPE,
-        data_type_name="primary",
-        path="/tmp/trace-recover.bin",
-        robot_instance=ROBOT_INSTANCE,
-    )
-    await store.update_status("trace-recover", TraceStatus.WRITING)
-    await store.mark_trace_as_written("trace-recover", 512)
+    try:
+        await store.create_trace(
+            "trace-recover",
+            "rec-recover",
+            PRIMARY_DATA_TYPE,
+            data_type_name="primary",
+            path="/tmp/trace-recover.bin",
+            robot_instance=ROBOT_INSTANCE,
+        )
+        await store.update_status("trace-recover", TraceStatus.WRITING)
+        await store.mark_trace_as_written("trace-recover", 512)
+    finally:
+        await store._engine.dispose()
 
     # Simulate restart
     recovered_store = SqliteStateStore(db_path)
     await recovered_store.init_async_store()
 
-    recovered_trace = await recovered_store.get_trace("trace-recover")
-    assert recovered_trace is not None
-    assert recovered_trace.status == TraceStatus.WRITTEN
-    assert recovered_trace.ready_for_upload == 1
+    try:
+        recovered_trace = await recovered_store.get_trace("trace-recover")
+        assert recovered_trace is not None
+        assert recovered_trace.status == TraceStatus.WRITTEN
+        assert recovered_trace.ready_for_upload == 1
 
-    claimed = await recovered_store.claim_ready_traces(limit=1)
-    assert [row["trace_id"] for row in claimed] == ["trace-recover"]
-    assert claimed[0]["status"] == TraceStatus.UPLOADING
+        claimed = await recovered_store.claim_ready_traces(limit=1)
+        assert [row["trace_id"] for row in claimed] == ["trace-recover"]
+        assert claimed[0]["status"] == TraceStatus.UPLOADING
+    finally:
+        await recovered_store._engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -492,30 +505,35 @@ async def test_concurrent_writes_do_not_lock(tmp_path: Path) -> None:
     store = SqliteStateStore(db_path)
     await store.init_async_store()
 
-    await store.create_trace(
-        "trace-concurrent",
-        "rec-concurrent",
-        PRIMARY_DATA_TYPE,
-        data_type_name="primary",
-        path="/tmp/trace-concurrent.bin",
-        robot_instance=ROBOT_INSTANCE,
-    )
+    try:
+        await store.create_trace(
+            "trace-concurrent",
+            "rec-concurrent",
+            PRIMARY_DATA_TYPE,
+            data_type_name="primary",
+            path="/tmp/trace-concurrent.bin",
+            robot_instance=ROBOT_INSTANCE,
+        )
 
-    errors: list[Exception] = []
+        errors: list[Exception] = []
 
-    async def worker(bytes_uploaded: int) -> None:
-        try:
-            for _ in range(5):
-                await store.update_bytes_uploaded("trace-concurrent", bytes_uploaded)
-        except Exception as exc:
-            errors.append(exc)
+        async def worker(bytes_uploaded: int) -> None:
+            try:
+                for _ in range(5):
+                    await store.update_bytes_uploaded(
+                        "trace-concurrent", bytes_uploaded
+                    )
+            except Exception as exc:
+                errors.append(exc)
 
-    await asyncio.gather(worker(10), worker(20))
+        await asyncio.gather(worker(10), worker(20))
 
-    assert errors == []
-    row = await _get_trace_row(store, "trace-concurrent")
-    assert row is not None
-    assert row["bytes_uploaded"] in {10, 20}
+        assert errors == []
+        row = await _get_trace_row(store, "trace-concurrent")
+        assert row is not None
+        assert row["bytes_uploaded"] in {10, 20}
+    finally:
+        await store._engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -525,30 +543,35 @@ async def test_race_conditions_on_rapid_state_changes(tmp_path: Path, caplog) ->
     store = SqliteStateStore(db_path)
     await store.init_async_store()
 
-    await store.create_trace(
-        "trace-race",
-        "rec-race",
-        PRIMARY_DATA_TYPE,
-        data_type_name="primary",
-        path="/tmp/trace-race.bin",
-        robot_instance=ROBOT_INSTANCE,
-    )
-    await store.update_status("trace-race", TraceStatus.WRITING)
+    try:
+        await store.create_trace(
+            "trace-race",
+            "rec-race",
+            PRIMARY_DATA_TYPE,
+            data_type_name="primary",
+            path="/tmp/trace-race.bin",
+            robot_instance=ROBOT_INSTANCE,
+        )
+        await store.update_status("trace-race", TraceStatus.WRITING)
 
-    errors: list[str] = []
+        errors: list[str] = []
 
-    async def worker() -> None:
-        try:
-            await store.update_status("trace-race", TraceStatus.WRITTEN)
-            await store.update_status("trace-race", TraceStatus.UPLOADING)
-            await store.update_status("trace-race", TraceStatus.UPLOADED)
-        except ValueError as exc:
-            errors.append(str(exc))
+        async def worker() -> None:
+            try:
+                await store.update_status("trace-race", TraceStatus.WRITTEN)
+                await store.update_status("trace-race", TraceStatus.UPLOADING)
+                await store.update_status("trace-race", TraceStatus.UPLOADED)
+            except ValueError as exc:
+                errors.append(str(exc))
 
-    await asyncio.gather(worker(), worker())
+        await asyncio.gather(worker(), worker())
 
-    # At least one worker should hit a race (error raised or warning logged)
-    assert errors or "Failed to update trace status: Trace trace-race" in caplog.text
-    row = await _get_trace_row(store, "trace-race")
-    assert row is not None
-    assert row["status"] == TraceStatus.UPLOADED
+        # At least one worker should hit a race (error raised or warning logged)
+        assert (
+            errors or "Failed to update trace status: Trace trace-race" in caplog.text
+        )
+        row = await _get_trace_row(store, "trace-race")
+        assert row is not None
+        assert row["status"] == TraceStatus.UPLOADED
+    finally:
+        await store._engine.dispose()
