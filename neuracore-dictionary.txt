@@ -9,6 +9,7 @@ bibtex
 blit
 buildtool
 caplog
+capsys
 castshadow
 childbody
 childinertia
@@ -38,6 +39,7 @@ distilbert
 docstrings
 dtype
 embs
+excinfo
 extr
 extrinsics
 Extrinsics
@@ -215,3 +217,11 @@ ylabel
 znear
 bigym
 secho
+xyzw
+wxyz
+nans
+posinf
+neginf
+rotvec
+dataconfig
+pbtxt

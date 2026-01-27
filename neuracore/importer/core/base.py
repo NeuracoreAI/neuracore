@@ -1,0 +1,573 @@
+"""Shared uploader framework for dataset ingestion workflows."""
+
+from __future__ import annotations
+
+import inspect
+import logging
+import multiprocessing as mp
+import os
+import traceback
+from abc import ABC, abstractmethod
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from queue import Empty
+from typing import Any
+
+from neuracore_types.nc_data import DatasetImportConfig, DataType
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskID,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
+
+import neuracore as nc
+
+from .exceptions import UploaderError
+
+
+@dataclass(frozen=True)
+class ImportItem:
+    """Unit of upload work (typically one episode)."""
+
+    index: int
+    split: str | None = None
+    description: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WorkerError:
+    """Captured failure from a worker process."""
+
+    worker_id: int
+    item_index: int | None
+    message: str
+    traceback: str | None = None
+
+
+@dataclass(frozen=True)
+class ProgressUpdate:
+    """Progress event emitted from workers to update the TUI."""
+
+    worker_id: int
+    item_index: int
+    step: int
+    total_steps: int | None
+    episode_label: str | None = None
+
+
+class NeuracoreDatasetImporter(ABC):
+    """Uploader workflow that manages workers and Neuracore session setup."""
+
+    def __init__(
+        self,
+        dataset_dir: Path,
+        dataset_config: DatasetImportConfig,
+        output_dataset_name: str,
+        max_workers: int | None = 1,
+        min_workers: int = 1,
+        continue_on_error: bool = True,
+        progress_interval: int = 1,
+    ) -> None:
+        """Initialize the base dataset uploader."""
+        self.dataset_dir = Path(dataset_dir)
+        self.dataset_config = dataset_config
+        self.data_config = dataset_config  # Backwards-compat alias used by callers
+        self.output_dataset_name = output_dataset_name
+        self.robot_name = dataset_config.robot.name
+        self.frequency = dataset_config.frequency
+
+        self.max_workers = 1
+        self.min_workers = min_workers
+        self.continue_on_error = continue_on_error
+        self.progress_interval = max(1, progress_interval)
+        self.worker_errors: list[WorkerError] = []
+        self.logger = logging.getLogger(
+            f"{self.__class__.__module__}.{self.__class__.__name__}"
+        )
+        self._progress_queue: mp.Queue[ProgressUpdate] | None = None
+        self._worker_id: int | None = None
+
+    @abstractmethod
+    def build_work_items(self) -> Sequence[ImportItem]:
+        """Enumerate uploadable units in deterministic order."""
+
+    @abstractmethod
+    def upload(self, item: ImportItem) -> None:
+        """Perform the dataset-specific upload for a single item."""
+
+    @abstractmethod
+    def _record_step(self, step: dict, timestamp: float) -> None:
+        """Record a single step of the dataset."""
+
+    def _log_data(
+        self, data_type: DataType, name: str, data: Any, timestamp: float
+    ) -> None:
+        """Log a single data point to Neuracore.
+
+        Args:
+            data_type: The type of data to import.
+            name: The name of the data.
+            data: The data to log.
+            timestamp: Time when the data was logged.
+        """
+        if data_type == DataType.RGB_IMAGES:
+            nc.log_rgb(
+                name=name,
+                rgb=data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+            )
+        elif data_type == DataType.DEPTH_IMAGES:
+            nc.log_depth(
+                name=name,
+                depth=data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+            )
+        elif data_type == DataType.POINT_CLOUDS:
+            nc.log_point_cloud(
+                name=name,
+                points=data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+            )
+        elif data_type == DataType.LANGUAGE:
+            nc.log_language(
+                name=name,
+                language=data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+            )
+        elif data_type == DataType.JOINT_POSITIONS:
+            nc.log_joint_position(
+                name=name,
+                position=data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+            )
+        elif data_type == DataType.JOINT_VELOCITIES:
+            nc.log_joint_velocity(
+                name=name,
+                velocity=data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+            )
+        elif data_type == DataType.JOINT_TORQUES:
+            nc.log_joint_torque(
+                name=name,
+                torque=data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+            )
+        elif data_type == DataType.JOINT_TARGET_POSITIONS:
+            nc.log_joint_target_position(
+                name=name,
+                target_position=data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+            )
+        elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+            nc.log_parallel_gripper_open_amount(
+                name=name,
+                value=data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+            )
+        elif data_type == DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+            nc.log_parallel_gripper_target_open_amount(
+                name=name,
+                value=data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+            )
+        elif data_type == DataType.END_EFFECTOR_POSES:
+            nc.log_end_effector_pose(
+                name=name,
+                pose=data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+            )
+        elif data_type == DataType.POSES:
+            nc.log_pose(
+                name=name,
+                pose=data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+            )
+        elif data_type == DataType.CUSTOM_1D:
+            nc.log_custom_1d(
+                name=name,
+                data=data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+            )
+
+    def prepare_worker(
+        self, worker_id: int, chunk: Sequence[ImportItem] | None = None
+    ) -> None:
+        """Log in and connect to Neuracore dataset for the worker."""
+        nc.login()
+        nc.connect_robot(self.robot_name, instance=worker_id)
+        nc.get_dataset(self.output_dataset_name)
+
+    def upload_all(self) -> None:
+        """Run uploads across workers while aggregating errors."""
+        items = list(self.build_work_items())
+        if not items:
+            self.logger.info("No upload items found; nothing to do.")
+            return
+
+        self.logger.info(
+            "Preparing import -> dataset=%s | source_dir=%s | items=%s | "
+            "continue_on_error=%s",
+            self.output_dataset_name,
+            self.dataset_dir,
+            len(items),
+            self.continue_on_error,
+        )
+
+        worker_count = self._resolve_worker_count(len(items))
+        cpu_count = os.cpu_count()
+        self.logger.info(
+            "Scheduling %s items across %s worker(s) "
+            "(min=%s max=%s cpu=%s progress_interval=%s)",
+            len(items),
+            worker_count,
+            self.min_workers,
+            self.max_workers if self.max_workers is not None else "auto",
+            cpu_count if cpu_count is not None else "unknown",
+            self.progress_interval,
+        )
+
+        ctx = mp.get_context("spawn")
+        error_queue: mp.Queue[WorkerError] = ctx.Queue()
+        progress_queue: mp.Queue[ProgressUpdate] = ctx.Queue()
+        chunks = self._partition(items, worker_count)
+        processes: list[mp.context.SpawnProcess] = []
+
+        for worker_id, chunk in enumerate(chunks):
+            if not chunk:
+                continue
+            process = ctx.Process(
+                target=self._worker_entry,
+                args=(chunk, worker_id, error_queue, progress_queue),
+            )
+            process.start()
+            processes.append(process)
+
+        self._monitor_progress(processes, progress_queue)
+
+        for process in processes:
+            process.join()
+        progress_queue.close()
+        progress_queue.join_thread()
+
+        self.worker_errors = self._collect_errors(error_queue)
+        self._report_process_status(processes)
+        self._report_errors(self.worker_errors)
+
+        if self.worker_errors and not self.continue_on_error:
+            raise UploaderError("Upload aborted due to worker errors.")
+
+    def _resolve_worker_count(self, total_items: int) -> int:
+        """Pick a worker count similar to the archived scripts."""
+        if self.max_workers is not None:
+            return max(1, min(self.max_workers, total_items))
+        cpu_count = os.cpu_count()
+        default = max(
+            self.min_workers,
+            int(cpu_count * 0.8) if cpu_count is not None else self.min_workers,
+        )
+        return max(self.min_workers, min(default, total_items))
+
+    def _partition(
+        self, items: Sequence[ImportItem], worker_count: int
+    ) -> list[list[ImportItem]]:
+        """Partition work into contiguous chunks to preserve order."""
+        total = len(items)
+        if worker_count <= 1 or total <= 1:
+            return [list(items)]
+
+        chunk_size = max(1, total // worker_count)
+        chunks: list[list[ImportItem]] = []
+        for i in range(worker_count):
+            start = i * chunk_size
+            end = (i + 1) * chunk_size if i < worker_count - 1 else total
+            if start >= total:
+                break
+            chunks.append(list(items[start:end]))
+        return chunks
+
+    def _worker_entry(
+        self,
+        chunk: Sequence[ImportItem],
+        worker_id: int,
+        error_queue: mp.Queue,
+        progress_queue: mp.Queue | None,
+    ) -> None:
+        """Worker body that wraps upload with error capture."""
+        self._worker_id = worker_id
+        self._progress_queue = progress_queue
+        try:
+            sig = inspect.signature(self.prepare_worker)
+            if "chunk" in sig.parameters:
+                self.prepare_worker(worker_id, chunk)
+            else:
+                self.prepare_worker(worker_id)  # type: ignore[misc]
+            if chunk:
+                self.logger.info(
+                    "[worker %s] Starting chunk (%s items): %s → %s",
+                    worker_id,
+                    len(chunk),
+                    chunk[0].index,
+                    chunk[-1].index,
+                )
+            else:
+                self.logger.info("[worker %s] Starting with empty chunk.", worker_id)
+        except Exception as exc:  # noqa: BLE001 - propagate unexpected worker failures
+            if error_queue:
+                tb = traceback.format_exc()
+                error_queue.put(
+                    WorkerError(
+                        worker_id=worker_id,
+                        item_index=None,
+                        message=str(exc),
+                        traceback=tb,
+                    )
+                )
+            self._log_worker_error(worker_id, None, str(exc))
+            raise
+
+        for idx, item in enumerate(chunk):
+            try:
+                self._step(item, worker_id, idx, len(chunk), error_queue)
+            except Exception as exc:  # noqa: BLE001 - keep traceback for summary
+                if error_queue:
+                    tb = traceback.format_exc()
+                    error_queue.put(
+                        WorkerError(
+                            worker_id=worker_id,
+                            item_index=item.index,
+                            message=str(exc),
+                            traceback=tb,
+                        )
+                    )
+                self._log_worker_error(worker_id, item.index, str(exc))
+                raise
+
+    def _step(
+        self,
+        item: ImportItem,
+        worker_id: int,
+        local_index: int,
+        chunk_length: int,
+        error_queue: mp.Queue,
+    ) -> None:
+        """Centralized step handler for progress and error capture."""
+        try:
+            self.upload(item)
+        except Exception as exc:  # noqa: BLE001 - keep traceback for summary
+            tb = traceback.format_exc()
+            self._log_worker_error(worker_id, item.index, str(exc))
+            if self.continue_on_error:
+                error_queue.put(
+                    WorkerError(
+                        worker_id=worker_id,
+                        item_index=item.index,
+                        message=str(exc),
+                        traceback=tb,
+                    )
+                )
+                self.logger.warning(
+                    "[worker %s] Continuing after failure on item %s "
+                    "(continue_on_error=True).",
+                    worker_id,
+                    item.index,
+                )
+                return
+            raise
+
+        if (local_index + 1) % self.progress_interval == 0 or (
+            local_index + 1 == chunk_length
+        ):
+            self.logger.info(
+                "[worker %s] processed %s/%s (item index=%s)",
+                worker_id,
+                local_index + 1,
+                chunk_length,
+                item.index,
+            )
+
+    def _collect_errors(self, error_queue: mp.Queue) -> list[WorkerError]:
+        """Drain the error queue after workers complete."""
+        errors: list[WorkerError] = []
+        try:
+            while True:
+                errors.append(error_queue.get_nowait())
+        except Empty:
+            pass
+        return errors
+
+    def _report_process_status(
+        self, processes: Iterable[mp.context.SpawnProcess]
+    ) -> None:
+        """Log any non-zero exit codes from worker processes."""
+        for process in processes:
+            if process.exitcode not in (0, None):
+                self.logger.error(
+                    "Worker pid=%s exited with status %s",
+                    process.pid,
+                    process.exitcode,
+                )
+
+    def _report_errors(self, errors: list[WorkerError]) -> None:
+        """Summarize captured worker errors."""
+        if not errors:
+            self.logger.info("All workers completed without reported errors.")
+            return
+
+        self.logger.error("Completed with %s worker error(s).", len(errors))
+        for err in errors:
+            prefix = f"[worker {err.worker_id}"
+            if err.item_index is not None:
+                prefix += f" item {err.item_index}"
+            prefix += "]"
+            self.logger.error("%s %s", prefix, err.message)
+            if err.traceback:
+                self.logger.debug(err.traceback)
+        self.logger.error(
+            "Import finished with errors. Re-run with DEBUG logging for tracebacks "
+            "or fix the reported issues above."
+        )
+
+    def _log_worker_error(
+        self, worker_id: int, item_index: int | None, message: str
+    ) -> None:
+        """Log a worker error immediately while the process is running."""
+        prefix = f"[worker {worker_id}"
+        if item_index is not None:
+            prefix += f" item {item_index}"
+        prefix += "]"
+        self.logger.error("%s %s", prefix, message)
+
+    def _emit_progress(
+        self,
+        item_index: int,
+        step: int,
+        total_steps: int | None,
+        episode_label: str | None = None,
+    ) -> None:
+        """Send a progress update to the main process if available."""
+        if self._progress_queue is None or self._worker_id is None:
+            return
+        try:
+            self._progress_queue.put_nowait(
+                ProgressUpdate(
+                    worker_id=self._worker_id,
+                    item_index=item_index,
+                    step=step,
+                    total_steps=total_steps,
+                    episode_label=episode_label,
+                )
+            )
+        except Exception:  # noqa: BLE001 - best-effort progress updates
+            self.logger.debug("Failed to emit progress update.", exc_info=True)
+
+    def _monitor_progress(
+        self,
+        processes: Sequence[mp.context.SpawnProcess],
+        progress_queue: mp.Queue[ProgressUpdate],
+    ) -> None:
+        """Render rich progress bars based on worker updates."""
+        if not processes:
+            return
+
+        task_map: dict[int, TaskID] = {}
+        current_items: dict[int, int] = {}
+
+        with Progress(
+            SpinnerColumn(style="cyan"),
+            TextColumn("[bold blue]Worker {task.fields[worker]}"),
+            TextColumn("| Episode {task.fields[episode]}"),
+            BarColumn(bar_width=None, complete_style="green", pulse_style="cyan"),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            refresh_per_second=10,
+            transient=True,
+        ) as progress:
+            while True:
+                any_alive = any(proc.is_alive() for proc in processes)
+                timeout = 0.1 if any_alive else 0
+                try:
+                    update = progress_queue.get(timeout=timeout)
+                except Empty:
+                    update = None
+
+                if update is not None:
+                    self._apply_progress_update(
+                        progress, task_map, current_items, update
+                    )
+
+                if not any_alive:
+                    # Drain remaining updates before exiting.
+                    while True:
+                        try:
+                            update = progress_queue.get_nowait()
+                        except Empty:
+                            return
+                        self._apply_progress_update(
+                            progress, task_map, current_items, update
+                        )
+
+    def _apply_progress_update(
+        self,
+        progress: Progress,
+        task_map: dict[int, TaskID],
+        current_items: dict[int, int],
+        update: ProgressUpdate,
+    ) -> None:
+        """Update or create the progress task for a worker."""
+        desc = update.episode_label or str(update.item_index)
+        task_id = task_map.get(update.worker_id)
+
+        if task_id is None:
+            task_id = progress.add_task(
+                f"Episode {desc}",
+                total=update.total_steps,
+                completed=update.step,
+                worker=update.worker_id,
+                episode=desc,
+            )
+            task_map[update.worker_id] = task_id
+            current_items[update.worker_id] = update.item_index
+            return
+
+        if current_items.get(update.worker_id) != update.item_index:
+            current_items[update.worker_id] = update.item_index
+            progress.update(
+                task_id,
+                total=update.total_steps,
+                completed=update.step,
+                description=f"Episode {desc}",
+                worker=update.worker_id,
+                episode=desc,
+                refresh=True,
+            )
+            return
+
+        progress.update(
+            task_id,
+            total=update.total_steps,
+            completed=update.step,
+            description=f"Episode {desc}",
+            episode=desc,
+            refresh=True,
+        )

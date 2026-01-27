@@ -48,7 +48,7 @@ setup(
         "fastapi",
         "psutil",
         "typer>=0.20.0",
-        "neuracore-types>=4.3.0,<5.0.0",
+        "neuracore-types==5.0.0",
         "ordered_set",
     ],
     extras_require={
@@ -64,7 +64,7 @@ setup(
             "torch",
             "torchvision",
             "transformers==4.57.3",
-            "huggingface-hub==0.36.0",
+            "huggingface-hub>0.34.0,<0.36.0",
             "diffusers==0.35.1",
             "safetensors==0.6.2",
             "einops",
@@ -80,6 +80,13 @@ setup(
             "twine>=3.4.2",
             "requests-mock>=1.9.3",
             "pre-commit",
+        ],
+        "import": [
+            "robot_descriptions @ git+https://github.com/stepjam/robot_descriptions.py.git@main",
+            "lerobot==0.3.3",
+            "huggingface-hub>0.34.0,<0.36.0",
+            "tensorflow-datasets",
+            "tensorflow",
         ],
     },
     entry_points={

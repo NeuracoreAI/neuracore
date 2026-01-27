@@ -43,6 +43,11 @@ For training and ML development:
 pip install neuracore[ml]
 ```
 
+For bulk importing datasets:
+```bash
+pip install neuracore[import]
+```
+
 To run our examples:
 ```bash
 pip install neuracore[examples]
@@ -106,6 +111,7 @@ predictions = policy.predict(timeout=5)
 - [Tutorials](./docs/tutorial.md)
 - [Training](./docs/training.md)
 - [Command Line Tools](./docs/commandline.md)
+- [Dataset Importer](./docs/dataset_importer.md)
 - [Environment Variables](./docs/enironment_variable.md)
 - [Contribution Guide](./docs/contribution_guide.md)
 

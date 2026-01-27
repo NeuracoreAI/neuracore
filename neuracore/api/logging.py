@@ -92,6 +92,7 @@ def _log_single_joint_data(
     joint_stream.log(data=data)
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
+
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
     ).get_json_source(str_id, data_type, sensor_key=str_id).publish(

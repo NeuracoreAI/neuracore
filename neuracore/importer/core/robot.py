@@ -24,7 +24,7 @@ TEMP_DIR = tempfile.TemporaryDirectory()
 
 @dataclass
 class RobotInfo:
-    """Robot information for registration with Neuracore"""
+    """Robot information for registration with Neuracore."""
 
     name: str
     urdf_path: str | None = None
@@ -53,18 +53,28 @@ class RobotType(Enum):
 
 
 class StateType(Enum):
+    """Robot state type enumeration."""
+
     JOINT_POSITIONS = "joint_positions"
     TCP_POSE = "tcp_pose"
 
 
 class Robot:
+    """Robot utility class for processing robot information and kinematics."""
 
     def __init__(self, robot_type: RobotType):
+        """Initialize robot with specified robot type.
+
+        Args:
+            robot_type: Type of robot to initialize.
+        """
         self.robot_type = robot_type
         self.robot_info = self._get_robot_info()
-        self._pinnochio_robot = None  # Needs to be init in the processes
-        self._joint_names = None
-        self._joint_limits = None
+        self._pinnochio_robot: RobotWrapper | None = (
+            None  # Needs to be init in the processes
+        )
+        self._joint_names: list[str] | None = None
+        self._joint_limits: dict[str, tuple[float, float]] | None = None
 
     def _get_robot_info(self) -> RobotInfo:
         """Get paths to common robot description files.
@@ -119,8 +129,7 @@ class Robot:
     def gripper_open_width_to_open_amount(
         self, gripper_open_width: float, gripper_joint_names: list[str]
     ) -> float:
-        """
-        Convert gripper joint positions to open amount.
+        """Convert gripper joint positions to open amount.
 
         Args:
             gripper_joint_names: List of gripper joint names
@@ -144,8 +153,7 @@ class Robot:
         gripper_open_amount: float | None = None,
         gripper_open_width: float | None = None,
     ) -> dict[str, float]:
-        """
-        Process gripper state to get joint positions.
+        """Process gripper state to get joint positions.
 
         Args:
             gripper_joint_names: List of gripper joint names
@@ -187,8 +195,7 @@ class Robot:
         return joint_positions
 
     def tcp_to_joint_positions(self, tcp_pose: list, ee_frame: str) -> dict[str, float]:
-        """
-        Convert TCP pose to joint positions using IK.
+        """Convert TCP pose to joint positions using IK.
 
         Args:
             tcp_pose: List containing [x, y, z, qw, qx, qy, qz]
@@ -197,7 +204,6 @@ class Robot:
         Returns:
             List of joint positions
         """
-
         # TODO: we need a way to get smooth trajectories out
 
         robot = self.pinnochio_robot

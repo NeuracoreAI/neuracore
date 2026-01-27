@@ -1,0 +1,75 @@
+input_dataset_name: austin_buds_dataset_converted_externally_to_rlds
+
+output_dataset:
+  name: austin_buds
+  tags: [panda, austin, manipulation]
+  description: "This dataset contains images and sensor data collected from the Austin Buds robot in an indoor environment."
+
+robot: 
+  name: austin_buds_robot
+  urdf_path: "panda.urdf"
+  override_existing: true
+
+frequency: 20.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    image_convention: CHANNELS_LAST
+    order_of_channels: RGB
+    mapping: 
+      - name: image
+      - name: wrist_image
+
+  JOINT_POSITIONS: 
+    source: observation.state
+    units: RADIANS
+    mapping:
+      - name: panda_joint1
+        index: 0
+      - name: panda_joint2
+        index: 1
+      - name: panda_joint3
+        index: 2
+      - name: panda_joint4
+        index: 3
+      - name: panda_joint5
+        index: 4
+      - name: panda_joint6
+        index: 5
+      - name: panda_joint7
+        index: 6
+      - name: panda_joint8
+        index: 7
+      - name: panda_hand_joint
+        index: 7
+      - name: panda_hand_tcp_joint
+        index: 7
+      - name: panda_finger_joint1
+        index: 7
+      - name: panda_finger_joint2
+        index: 7
+
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.state
+    inverted: false
+    mapping:
+      - name: gripper_open_amount
+        index: 7
+
+  END_EFFECTOR_POSES:
+    source: observation.state
+    format:
+      pose_type: MATRIX
+    mapping:
+      - name: end_effector_pose
+        index_range: 
+          start: 8
+          end: 24
+
+  LANGUAGE:
+    source: language_instruction
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction

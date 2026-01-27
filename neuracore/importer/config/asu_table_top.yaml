@@ -1,0 +1,90 @@
+input_dataset_name: asu_table_top_converted_externally_to_rlds
+
+output_dataset:
+  name: asu_table_top
+  tags: [ur5, table, pushing, picking, rotating]
+  description: "This dataset contains top-view images of tables from Arizona State University (ASU)."
+
+robot:
+  name: asu_robot
+  urdf_path: ""
+  overwrite_existing: true
+
+frequency: 12.5
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping: 
+      - name: image
+        source_name: image
+
+  JOINT_POSITIONS:
+    source: observation.state
+    format:
+      angle_units: RADIANS
+    mapping:
+      - name: shoulder_pan_joint
+        offset: 0.0
+        inverted: false
+        index: 0
+
+      - name: shoulder_lift_joint
+        offset: -1.5707963267948966
+        inverted: true
+        index: 1
+
+      - name: elbow_joint
+        offset: 0.0
+        inverted: false
+        index: 2
+
+      - name: wrist_1_joint
+        offset: -1.5707963267948966
+        inverted: true
+        index: 3
+
+      - name: wrist_2_joint
+        offset: 0.0
+        inverted: true
+        index: 4
+
+      - name: ee_fixed_joint
+        offset: 0.0
+        inverted: false
+        index: 5
+
+  JOINT_VELOCITIES:
+    source: observation.state_vel
+    format:
+      angle_units: RADIANS
+    mapping:
+      - name: joint_1
+      - name: joint_2
+      - name: joint_3
+        inverted: true
+      - name: joint_4
+      - name: joint_5
+      - name: joint_6
+
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.state
+    format:
+      normalize:
+        min: 0.0
+        max: 1.0
+    mapping:
+      - name: gripper
+        index: 6
+        inverted: false
+
+  LANGUAGE:
+    source: language_instruction
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction
+
