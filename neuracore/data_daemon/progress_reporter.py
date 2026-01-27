@@ -6,7 +6,8 @@ from typing import Any
 
 import aiohttp
 
-from neuracore.data_daemon.auth_management.auth_manager import get_auth
+from neuracore.core.auth import get_auth
+from neuracore.core.config.get_current_org import get_current_org
 from neuracore.data_daemon.const import API_URL
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 
@@ -52,14 +53,16 @@ class ProgressReporter:
             "traces": trace_map,
         }
 
+        loop = asyncio.get_running_loop()
         auth = get_auth()
-        org_id = await auth.get_org_id()
+        org_id = await loop.run_in_executor(None, get_current_org)
+        headers = await loop.run_in_executor(None, auth.get_headers)
 
         try:
             async with self.client_session.post(
                 f"{API_URL}/{org_id}/recording/register-traces",
                 json=body,
-                headers=await auth.get_headers(self.client_session),
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as response:
                 if response.status >= 400:
