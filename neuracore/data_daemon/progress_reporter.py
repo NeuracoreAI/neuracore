@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 import aiohttp
+from neuracore_types.upload.upload import TracesMetadataRequest
 
 from neuracore.data_daemon.auth_management.auth_manager import get_auth
 from neuracore.data_daemon.const import (
@@ -37,7 +38,8 @@ class ProgressReporter:
         if not traces:
             return
 
-        if not traces[0].recording_id:
+        recording_id = traces[0].recording_id
+        if not recording_id:
             logger.warning("Progress report missing recording_id; skipping request.")
             return
         trace_map: dict[str, int] = {}
@@ -45,30 +47,19 @@ class ProgressReporter:
         for trace in traces:
             trace_map[trace.trace_id] = trace.total_bytes
 
-        body = {
-            "recording_id": traces[0].recording_id,
-            "start_time": float(start_time),
-            "end_time": float(end_time),
-            "robot_id": traces[0].robot_id,
-            "robot_name": traces[0].robot_name,
-            "instance": int(traces[0].robot_instance),
-            "dataset_id": traces[0].dataset_id,
-            "dataset_name": traces[0].dataset_name,
-            "traces": trace_map,
-        }
+        body = TracesMetadataRequest(traces=trace_map)
 
         auth = get_auth()
         org_id = await auth.get_org_id()
-        recording_id = traces[0].recording_id
         last_error: str | None = None
 
-        url = f"{API_URL}/org/{org_id}/recording/register-traces"
+        url = f"{API_URL}/org/{org_id}/recording/{recording_id}/traces-metadata"
 
         for attempt in range(BACKEND_API_MAX_RETRIES):
             try:
                 async with self.client_session.post(
                     url,
-                    json=body,
+                    json=body.model_dump(),
                     headers=await auth.get_headers(self.client_session),
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as response:
