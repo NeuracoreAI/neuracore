@@ -98,6 +98,7 @@ class Daemon:
         self._trace_recordings: dict[str, str] = {}
         self._trace_metadata: dict[str, dict[str, str | int | None]] = {}
         self._closed_recordings: set[str] = set()
+        self._pending_close_recordings: set[str] = set()
         self._command_handlers: dict[CommandType, CommandHandler] = {
             CommandType.OPEN_RING_BUFFER: self._handle_open_ring_buffer,
             CommandType.DATA_CHUNK: self._handle_write_data_chunk,
@@ -126,6 +127,7 @@ class Daemon:
         logger.info("Daemon started and ready to receive messages...")
         try:
             while True:
+                self._finalize_pending_closes()
                 raw = self.comm.receive_raw()
                 if not self.process_raw_message(raw):
                     continue
@@ -580,8 +582,19 @@ class Daemon:
                 message.producer_id,
             )
             return
-        self._closed_recordings.add(str(recording_id))
+        self._pending_close_recordings.add(str(recording_id))
         self._emitter.emit(Emitter.STOP_RECORDING, recording_id)
+
+    def _finalize_pending_closes(self) -> None:
+        """Move pending close recordings to closed set.
+
+        Called at the start of each main loop iteration to ensure any
+        DATA_CHUNK messages that arrived before RECORDING_STOPPED (but
+        were interleaved in ZMQ) get processed first.
+        """
+        if self._pending_close_recordings:
+            self._closed_recordings.update(self._pending_close_recordings)
+            self._pending_close_recordings.clear()
 
     def cleanup_stopped_channels(
         self,
