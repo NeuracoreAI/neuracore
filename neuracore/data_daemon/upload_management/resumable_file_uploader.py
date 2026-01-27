@@ -133,12 +133,14 @@ class ResumableFileUploader:
             f"{self._bytes_uploaded} bytes already uploaded"
         )
 
+        # Validate file exists and get size
         file_path = Path(self._filepath)
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {self._filepath}")
 
         self._total_bytes = file_path.stat().st_size
 
+        # Get upload session URI if needed
         if self._session_uri is None:
             try:
                 self._session_uri = await self._get_upload_session_uri()
@@ -147,10 +149,12 @@ class ResumableFileUploader:
                 logger.error(error_msg)
                 return (False, self._bytes_uploaded, error_msg)
 
+        # Sync resume point with server state to avoid duplicates
         success, error_message = await self._sync_with_server_upload_position()
         if not success:
             return (False, self._bytes_uploaded, error_message)
 
+        # Upload file in chunks
         success, error_message, final_response = await self._upload_file_in_chunks()
 
         if success:
@@ -190,19 +194,23 @@ class ResumableFileUploader:
         """
         try:
             async with aiofiles.open(self._filepath, "rb") as f:
+                # Seek to resume point
                 await f.seek(self._bytes_uploaded)
 
                 final_response: FinalResponseData | None = None
 
                 while True:
+                    # Read next chunk asynchronously
                     chunk = await f.read(self.CHUNK_SIZE)
                     if not chunk:
-                        break
+                        break  # End of file
 
+                    # Calculate byte range
                     chunk_start = self._bytes_uploaded
                     chunk_end = chunk_start + len(chunk) - 1
                     is_final = (chunk_end + 1) >= self._total_bytes
 
+                    # Upload chunk with retry logic
                     success, error_msg, final_response = await self._upload_chunk(
                         chunk, chunk_start, chunk_end, is_final
                     )
@@ -210,9 +218,11 @@ class ResumableFileUploader:
                     if not success:
                         return (False, error_msg, None)
 
+                    # Update progress
                     chunk_size = len(chunk)
                     self._bytes_uploaded += chunk_size
 
+                    # Notify callback
                     if self._progress_callback:
                         await self._progress_callback(chunk_size)
 
@@ -256,14 +266,17 @@ class ResumableFileUploader:
         Returns:
             Tuple of (success, error_message, final_response)
         """
+        # Prepare headers
         headers = {"Content-Length": str(len(data))}
 
         if is_final:
+            # Final chunk - include total size
             total_size = chunk_end + 1
             headers["Content-Range"] = f"bytes {chunk_start}-{chunk_end}/{total_size}"
         else:
             headers["Content-Range"] = f"bytes {chunk_start}-{chunk_end}/*"
 
+        # Retry with exponential backoff
         for attempt in range(self.MAX_RETRIES):
             try:
                 if self._session_uri is None:
@@ -280,6 +293,7 @@ class ResumableFileUploader:
 
                     if status_code in self.FINAL_SUCCESS_CODES:
                         if is_final:
+                            # Extract response data before context exits
                             final_data = FinalResponseData(
                                 headers=dict(response.headers)
                             )
@@ -301,6 +315,7 @@ class ResumableFileUploader:
                             return (False, "Finalization incomplete", None)
                         return (True, None, None)
                     if status_code == self.SESSION_EXPIRED_CODE:
+                        # Session expired - get new session
                         logger.info("Upload session expired, obtaining new session")
                         self._session_uri = await self._get_upload_session_uri()
                         continue
@@ -454,6 +469,7 @@ class ResumableFileUploader:
                     self._session_uri, headers=headers, data=b"", timeout=timeout
                 ) as response:
                     if response.status in self.FINAL_SUCCESS_CODES:
+                        # Extract response data before context exits
                         final_data = FinalResponseData(headers=dict(response.headers))
                         try:
                             final_data.json_body = await response.json()

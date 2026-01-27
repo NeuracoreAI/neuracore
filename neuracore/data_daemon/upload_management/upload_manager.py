@@ -44,6 +44,7 @@ class UploadManager(TraceManager):
         super().__init__(client_session)
 
         self._emitter = get_emitter()
+
         self._emitter.on(Emitter.READY_FOR_UPLOAD, self._on_ready_for_upload)
 
         logger.info("UploadManager initialized")
@@ -172,7 +173,6 @@ class UploadManager(TraceManager):
 
         trace_dir = Path(trace_dir_path)
 
-        # Validate directory exists and is a directory
         if not trace_dir.exists():
             logger.error(f"Trace directory not found: {trace_dir_path}")
             self._emitter.emit(
@@ -197,7 +197,6 @@ class UploadManager(TraceManager):
             )
             return False
 
-        # Enumerate files in sorted order for deterministic resume
         files = sorted([f for f in trace_dir.iterdir() if f.is_file()])
 
         if not files:
@@ -239,14 +238,15 @@ class UploadManager(TraceManager):
 
             start_file_idx, file_offset = self._find_resume_point(files, bytes_uploaded)
 
-            # Calculate cumulative bytes for files we're skipping
             cumulative_bytes = sum(f.stat().st_size for f in files[:start_file_idx])
             last_progress_update = [time.time()]
 
             for i, file in enumerate(files[start_file_idx:], start=start_file_idx):
                 cloud_filepath = f"{data_type.value}/{data_type_name}/{file.name}"
                 content_type = self._get_content_type_for_file(file)
+
                 file_bytes_uploaded = file_offset if i == start_file_idx else 0
+
                 file_cumulative_bytes = cumulative_bytes
 
                 def make_progress_callback(
@@ -263,7 +263,6 @@ class UploadManager(TraceManager):
                         self._emitter.emit(
                             Emitter.UPLOADED_BYTES, trace_id, total_bytes_uploaded
                         )
-                        # Update backend every 30 seconds
                         now = time.time()
                         if now - last_progress_update[0] >= 30.0:
                             await self._update_data_trace(

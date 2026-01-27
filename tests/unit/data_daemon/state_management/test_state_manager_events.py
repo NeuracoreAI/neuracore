@@ -211,7 +211,6 @@ async def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
     _, store = state_manager
     received: list[tuple[str, str, DataType]] = []
 
-    # Add a trace to the store so handle_upload_complete can find it
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     trace = _make_trace(
         "trace-3",
@@ -567,7 +566,6 @@ async def test_stop_recording_waits_for_all_traces_written(state_manager) -> Non
         get_emitter().emit(Emitter.STOP_RECORDING, "rec-1")
         await asyncio.sleep(0.3)
 
-        # Should not emit progress report because trace-writing is not done
         assert progress_events == []
     finally:
         get_emitter().remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
@@ -618,7 +616,6 @@ async def test_trace_written_waits_for_all_traces_before_progress_report(
         get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-written", "rec-1", 8)
         await asyncio.sleep(0.3)
 
-        # Should not emit because trace-writing is still in WRITING status
         assert progress_events == []
     finally:
         get_emitter().remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
@@ -787,12 +784,10 @@ async def test_progress_report_sent_on_reconnect_after_stop(state_manager) -> No
     try:
         get_emitter().emit(Emitter.STOP_RECORDING, "rec-1")
         await asyncio.sleep(0.3)
-        # Should not emit when disconnected
         assert progress_events == []
 
         get_emitter().emit(Emitter.IS_CONNECTED, True)
         await asyncio.sleep(0.3)
-        # Should emit on reconnect
         assert len(progress_events) == 1
     finally:
         get_emitter().remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
