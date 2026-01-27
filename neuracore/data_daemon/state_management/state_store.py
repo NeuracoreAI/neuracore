@@ -92,14 +92,3 @@ class StateStore(Protocol):
     async def delete_trace(self, trace_id: str) -> None:
         """Delete a trace record."""
         ...
-
-    async def set_external_trace_id(
-        self, trace_id: str, external_trace_id: str
-    ) -> None:
-        """Store the external trace ID for a trace.
-
-        Args:
-            trace_id: Internal trace identifier.
-            external_trace_id: Backend-generated trace ID to persist.
-        """
-        ...

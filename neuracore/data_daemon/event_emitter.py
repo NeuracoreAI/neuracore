@@ -28,8 +28,7 @@ class Emitter(AsyncIOEventEmitter):
 
     # State manager -> Uploader
     READY_FOR_UPLOAD = "READY_FOR_UPLOAD"
-    # (trace_id, recording_id, path, data_type, data_type_name, bytes_uploaded,
-    #  external_trace_id)
+    # (trace_id, recording_id, path, data_type, data_type_name, bytes_uploaded)
 
     # Connection manager -> Uploader
     IS_CONNECTED = "IS_CONNECTED"
@@ -60,10 +59,6 @@ class Emitter(AsyncIOEventEmitter):
     # Uploader -> state manager
     UPLOAD_FAILED = "UPLOAD_FAILED"
     # (Trace_id, bytes_uploaded, status, error_code, error_message)
-
-    # Uploader -> State manager
-    EXTERNAL_TRACE_ID_SET = "EXTERNAL_TRACE_ID_SET"
-    # (trace_id, external_trace_id)
 
     # State manager -> RDM
     DELETE_TRACE = "DELETE_TRACE"

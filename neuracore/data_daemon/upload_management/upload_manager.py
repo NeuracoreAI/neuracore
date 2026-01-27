@@ -9,6 +9,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from uuid import UUID
 
 import aiohttp
 from neuracore_types import DataType, RecordingDataTraceStatus
@@ -83,7 +84,6 @@ class UploadManager(TraceManager):
         data_type: DataType,
         data_type_name: str,
         bytes_uploaded: int,
-        external_trace_id: str | None,
     ) -> None:
         """Handle READY_FOR_UPLOAD event from state manager.
 
@@ -94,7 +94,6 @@ class UploadManager(TraceManager):
             data_type: Data type
             data_type_name: Data type name
             bytes_uploaded: Starting offset for resume
-            external_trace_id: Backend trace ID if previously registered
         """
         # Prevent duplicate concurrent uploads for the same trace
         if trace_id in self._uploading_traces:
@@ -113,7 +112,6 @@ class UploadManager(TraceManager):
                 data_type_name,
                 recording_id,
                 bytes_uploaded,
-                external_trace_id,
             )
         )
 
@@ -171,7 +169,6 @@ class UploadManager(TraceManager):
         data_type_name: str,
         recording_id: str,
         bytes_uploaded: int,
-        external_trace_id: str | None,
     ) -> bool:
         """Upload all files in a trace directory.
 
@@ -182,7 +179,6 @@ class UploadManager(TraceManager):
             data_type_name: Data type name.
             recording_id: Recording identifier.
             bytes_uploaded: Cumulative bytes already uploaded (for resume).
-            external_trace_id: Backend trace ID if previously registered.
 
         Returns:
             True if all files uploaded successfully, False otherwise.
@@ -233,32 +229,26 @@ class UploadManager(TraceManager):
 
         logger.info(f"Found {len(files)} files to upload for trace {trace_id}")
 
-        # Get or register external trace ID
-        if external_trace_id is None:
-            backend_trace_id = await self._register_data_trace(recording_id, data_type)
-            if not backend_trace_id:
-                logger.error(f"Failed to register backend trace for {trace_id}")
-                self._emitter.emit(
-                    Emitter.UPLOAD_FAILED,
-                    trace_id,
-                    bytes_uploaded,
-                    TraceStatus.FAILED,
-                    TraceErrorCode.UPLOAD_FAILED,
-                    "Failed to register trace with backend",
-                )
-                return False
-            # Save for future retries
+        # Register trace with backend using our trace_id
+        registered = await self._register_data_trace(
+            recording_id, data_type, UUID(trace_id)
+        )
+        if not registered:
+            logger.error(f"Failed to register trace {trace_id} with backend")
             self._emitter.emit(
-                Emitter.EXTERNAL_TRACE_ID_SET, trace_id, backend_trace_id
+                Emitter.UPLOAD_FAILED,
+                trace_id,
+                bytes_uploaded,
+                TraceStatus.FAILED,
+                TraceErrorCode.UPLOAD_FAILED,
+                "Failed to register trace with backend",
             )
-        else:
-            backend_trace_id = external_trace_id
-            logger.info(f"Reusing existing external_trace_id {backend_trace_id}")
+            return False
 
         try:
             await self._update_data_trace(
                 recording_id,
-                backend_trace_id,
+                trace_id,
                 RecordingDataTraceStatus.UPLOAD_STARTED,
                 uploaded_bytes=bytes_uploaded,
             )
@@ -301,7 +291,7 @@ class UploadManager(TraceManager):
                         if now - last_progress_update[0] >= 30.0:
                             await self._update_data_trace(
                                 recording_id,
-                                backend_trace_id,
+                                trace_id,
                                 RecordingDataTraceStatus.UPLOAD_STARTED,
                                 uploaded_bytes=total_bytes_uploaded,
                             )
@@ -359,7 +349,7 @@ class UploadManager(TraceManager):
             # All files uploaded successfully
             await self._update_data_trace(
                 recording_id,
-                backend_trace_id,
+                trace_id,
                 RecordingDataTraceStatus.UPLOAD_COMPLETE,
                 uploaded_bytes=cumulative_bytes,
                 total_bytes=cumulative_bytes,
