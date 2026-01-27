@@ -39,8 +39,7 @@ def mock_trace():
 def mock_auth():
     """Create a mock auth manager."""
     auth = MagicMock()
-    auth.get_org_id = AsyncMock(return_value="org-123")
-    auth.get_headers = AsyncMock(return_value={"Authorization": "Bearer token"})
+    auth.get_headers = MagicMock(return_value={"Authorization": "Bearer token"})
     return auth
 
 
@@ -66,6 +65,10 @@ class TestProgressReporterSuccess:
             patch(
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
+            ),
+            patch(
+                "neuracore.data_daemon.progress_reporter.get_current_org",
+                return_value="org-123",
             ),
         ):
             reporter = ProgressReporter(mock_session)
@@ -111,6 +114,10 @@ class TestProgressReporterRetry:
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
             ),
+            patch(
+                "neuracore.data_daemon.progress_reporter.get_current_org",
+                return_value="org-123",
+            ),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             reporter = ProgressReporter(mock_session)
@@ -143,6 +150,10 @@ class TestProgressReporterRetry:
             patch(
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
+            ),
+            patch(
+                "neuracore.data_daemon.progress_reporter.get_current_org",
+                return_value="org-123",
             ),
         ):
             reporter = ProgressReporter(mock_session)
@@ -183,6 +194,10 @@ class TestProgressReporterRetry:
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
             ),
+            patch(
+                "neuracore.data_daemon.progress_reporter.get_current_org",
+                return_value="org-123",
+            ),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             reporter = ProgressReporter(mock_session)
@@ -215,6 +230,10 @@ class TestProgressReporterRetry:
             patch(
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
+            ),
+            patch(
+                "neuracore.data_daemon.progress_reporter.get_current_org",
+                return_value="org-123",
             ),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
@@ -290,6 +309,10 @@ class TestProgressReporterEdgeCases:
             patch(
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
+            ),
+            patch(
+                "neuracore.data_daemon.progress_reporter.get_current_org",
+                return_value="org-123",
             ),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):

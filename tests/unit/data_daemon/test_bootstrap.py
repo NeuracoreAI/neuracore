@@ -99,11 +99,9 @@ class TestBootstrapAsyncServices:
         - client_session is an aiohttp.ClientSession
         - state_store is initialized (init_async_store called)
         - state_manager, upload_manager, connection_manager, progress_reporter all exist
-        - initialize_auth() was called with the config
         - connection_manager.start() was called
         """
         with (
-            patch("neuracore.data_daemon.bootstrap.initialize_auth") as mock_init_auth,
             patch("neuracore.data_daemon.bootstrap.ConnectionManager") as MockConnMgr,
             patch("neuracore.data_daemon.bootstrap.UploadManager") as MockUploadMgr,
             patch(
@@ -145,85 +143,7 @@ class TestBootstrapAsyncServices:
             assert services.connection_manager is mock_conn_instance
             assert services.progress_reporter is mock_progress_instance
 
-            mock_init_auth.assert_called_once_with(daemon_config=mock_config)
-
             mock_conn_instance.start.assert_called_once()
-
-            await services.client_session.close()
-
-    @pytest.mark.asyncio
-    async def test_b2_auth_initialization_receives_config(
-        self,
-        mock_config: DaemonConfig,
-        temp_db_path: Path,
-    ) -> None:
-        """
-        B2: Auth Initialization Receives Config
-
-        The Story:
-        The AuthManager is a singleton that needs the daemon config to know
-        which API key and org to use. It must be initialized BEFORE any service
-        that makes authenticated API calls.
-
-        The Flow:
-        1. Call `bootstrap_async_services(config, db_path)`
-        2. Verify `initialize_auth(daemon_config=config)` is called first
-        3. Other services initialize after
-
-        Why This Matters:
-        Services like UploadManager and ProgressReporter use `get_auth()` to get
-        credentials. If auth isn't initialized first, they'll fail with "auth not
-        initialized" errors when trying to upload.
-
-        Key Assertions:
-        - initialize_auth called exactly once
-        - initialize_auth called with daemon_config=config
-        - Called before other services that depend on auth
-        """
-        call_order: list[str] = []
-
-        def track_init_auth(**kwargs):
-            call_order.append("initialize_auth")
-
-        def track_upload_manager(*args, **kwargs):
-            call_order.append("UploadManager")
-            return MagicMock()
-
-        def track_progress_reporter(*args, **kwargs):
-            call_order.append("ProgressReporter")
-            return MagicMock()
-
-        with (
-            patch(
-                "neuracore.data_daemon.bootstrap.initialize_auth",
-                side_effect=track_init_auth,
-            ) as mock_init_auth,
-            patch("neuracore.data_daemon.bootstrap.ConnectionManager") as MockConnMgr,
-            patch(
-                "neuracore.data_daemon.bootstrap.UploadManager",
-                side_effect=track_upload_manager,
-            ),
-            patch(
-                "neuracore.data_daemon.bootstrap.ProgressReporter",
-                side_effect=track_progress_reporter,
-            ),
-        ):
-            mock_conn_instance = AsyncMock()
-            mock_conn_instance.start = AsyncMock()
-            MockConnMgr.return_value = mock_conn_instance
-
-            services = await bootstrap_async_services(mock_config, temp_db_path)
-
-            mock_init_auth.assert_called_once()
-
-            mock_init_auth.assert_called_with(daemon_config=mock_config)
-
-            assert call_order.index("initialize_auth") < call_order.index(
-                "UploadManager"
-            )
-            assert call_order.index("initialize_auth") < call_order.index(
-                "ProgressReporter"
-            )
 
             await services.client_session.close()
 
