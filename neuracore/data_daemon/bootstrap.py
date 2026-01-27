@@ -172,33 +172,26 @@ async def bootstrap_async_services(
     """
     logger.info("Bootstrapping async services on General Loop...")
 
-    # 0. Initialize AuthManager - must be done before any service that uses get_auth()
     initialize_auth(daemon_config=config)
     logger.info("AuthManager initialized with config")
 
-    # 1. HTTP client - shared by all services that make API calls
     client_session = aiohttp.ClientSession()
     logger.debug("Created aiohttp.ClientSession")
 
-    # 2. SQLite state store - must call init_async_store() before any other operations
     state_store = SqliteStateStore(db_path)
     await state_store.init_async_store()
     logger.info("SqliteStateStore initialized at %s", db_path)
 
-    # 3. StateManager - coordinates state via event listeners
     state_manager = StateManager(state_store)
     logger.info("StateManager initialized")
 
-    # 4. UploadManager - handles trace uploads to cloud
     upload_manager = UploadManager(config, client_session)
     logger.info("UploadManager initialized")
 
-    # 5. ConnectionManager - monitors API connectivity
     connection_manager = ConnectionManager(client_session)
     await connection_manager.start()
     logger.info("ConnectionManager started")
 
-    # 6. ProgressReporter - reports trace progress to backend
     progress_reporter = ProgressReporter(client_session)
     logger.info("ProgressReporter initialized")
 
@@ -225,28 +218,24 @@ async def shutdown_async_services(services: AsyncServices) -> None:
     """
     logger.info("Shutting down async services...")
 
-    # 5. Stop ConnectionManager
     try:
         await services.connection_manager.stop()
         logger.debug("ConnectionManager stopped")
     except Exception:
         logger.exception("Error stopping ConnectionManager")
 
-    # 4. Shutdown UploadManager (waits for in-flight uploads)
     try:
         await services.upload_manager.shutdown()
         logger.debug("UploadManager shutdown")
     except Exception:
         logger.exception("Error shutting down UploadManager")
 
-    # 2. Close SqliteStateStore
     try:
         await services.state_store.close()
         logger.debug("SqliteStateStore closed")
     except Exception:
         logger.exception("Error closing SqliteStateStore")
 
-    # 1. Close HTTP client
     try:
         await services.client_session.close()
         logger.debug("aiohttp session closed")
