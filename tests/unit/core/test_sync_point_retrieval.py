@@ -92,6 +92,13 @@ def setup_test_config():
                 name: {"value": value} for name, value in data.items()
             },
         ),
+        DataType.VISUAL_JOINT_POSITIONS: TestConfigItem(
+            data=DummyData.joint_data,
+            logging_function=lambda data: nc.log_visual_joint_positions(positions=data),
+            expected_value=lambda data: {
+                name: {"value": value} for name, value in data.items()
+            },
+        ),
         DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: TestConfigItem(
             data=DummyData.parallel_gripper,
             logging_function=lambda data: nc.log_parallel_gripper_open_amount(
