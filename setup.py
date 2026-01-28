@@ -50,6 +50,7 @@ setup(
         "typer>=0.20.0",
         "neuracore-types>=6.0.1,<7.0.0",
         "ordered_set",
+        "omegaconf",
     ],
     extras_require={
         "examples": [
