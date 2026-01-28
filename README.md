@@ -4,6 +4,7 @@
 
 <div align="center">
 
+[![Downloads](https://img.shields.io/pypi/dm/neuracore.svg)](https://pypi.org/project/neuracore/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyPI - Version](https://img.shields.io/pypi/v/neuracore)](https://pypi.org/project/neuracore/)
 [![Discord](https://img.shields.io/badge/Discord-join%20chat-7289da.svg)](https://discord.gg/DF5m8V6nbD)
