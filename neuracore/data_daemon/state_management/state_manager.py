@@ -26,7 +26,6 @@ class StateManager:
     def __init__(self, store: StateStore) -> None:
         """Initialize with a persistence backend."""
         self._store = store
-        self._is_connected = False
         self._reporting_recordings: set[str] = set()
 
         self._emitter = get_emitter()
@@ -114,45 +113,8 @@ class StateManager:
         await self._store.set_stopped_ats(recording_id)
 
     async def handle_is_connected(self, is_connected: bool) -> None:
-        """Handle a connection status event from the data bridge.
-
-        If the connection is lost, do nothing. If the connection is established,
-        find all ready traces and sort them by their created time. Then, emit
-        READY_FOR_UPLOAD events for each trace. Finally, find all traces that
-        have not been marked as progress-reported and check if all traces
-        are written for each recording. If all traces are written, emit a
-        PROGRESS_REPORT event for the recording.
-        """
-        self._is_connected = is_connected
-        if not is_connected:
-            return
-
-        # Find/sort ready traces end trigger upload
-        traces = await self._store.find_ready_traces()
-        traces.sort(
-            key=lambda trace: (
-                trace.status != TraceStatus.UPLOADING,
-                trace.created_at,
-            )
-        )
-        for trace in traces:
-            self._emitter.emit(
-                Emitter.READY_FOR_UPLOAD,
-                trace.trace_id,
-                trace.recording_id,
-                trace.path,
-                trace.data_type,
-                trace.data_type_name,
-                trace.bytes_uploaded,
-            )
-        # Find if all traces are written for a recording to trigger progress report
-        unreported_traces = await self._store.find_unreported_traces()
-        traces_by_recording: dict[str, list[TraceRecord]] = {}
-        for trace in unreported_traces:
-            traces_by_recording.setdefault(trace.recording_id, []).append(trace)
-        for _, recording_traces in traces_by_recording.items():
-            if all(trace.ready_for_upload == 1 for trace in recording_traces):
-                await self._emit_progress_report_if_recording_stopped(recording_traces)
+        """Handle a connection status event from the data bridge."""
+        pass
 
     async def handle_upload_complete(self, trace_id: str) -> None:
         """Handle an upload complete event from an uploader.
@@ -195,9 +157,6 @@ class StateManager:
 
         if not trace_record:
             logger.warning("Trace record not found: %s", trace_id)
-            return
-
-        if not self._is_connected:
             return
 
         # Emit event to uploader
