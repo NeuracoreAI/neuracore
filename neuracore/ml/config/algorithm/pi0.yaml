@@ -1,22 +1,30 @@
 # @package _global_
+# cspell:ignore bfloat checkpointing finetune
 algorithm:
   _target_: neuracore.ml.algorithms.pi0.pi0.Pi0
-  vlm_expert_intermediate_size: 16384
-  vlm_expert_num_heads: 8
-  vlm_expert_num_kv_heads: 1
-  vlm_expert_head_dim: 256
-  vlm_max_text_tokens: 128
-  action_expert_width: 1024
-  action_expert_intermediate_size: 4096
-  action_expert_num_heads: 8
-  action_expert_num_kv_heads: 1
-  action_expert_head_dim: 256
-  moe_depth: 18
+  vlm_max_text_tokens: 48
   num_inference_steps: 10
-  flow_sig_min: 0.001
-  flow_alpha: 1.5
-  flow_beta: 1.0
-  lr: 5e-5
-  weight_decay: 0.0
+  dtype: "bfloat16"
+  paligemma_variant: "gemma_2b"
+  action_expert_variant: "gemma_300m"
+  use_pretrained_weights: True
+  pretrained_name_or_path: "lerobot/pi0_base"
+  time_sampling_beta_alpha: 1.5
+  time_sampling_beta_beta: 1.0
+  time_sampling_scale: 0.999
+  time_sampling_offset: 0.001
+  min_period: 4e-3
+  max_period: 4.0
+  gradient_checkpointing: True
+  compile_model: False
+  compile_mode: "max-autotune"
+  optimizer_lr: 2.5e-5
+  optimizer_betas: [0.9, 0.95]
+  optimizer_eps: 1e-8
+  optimizer_weight_decay: 0.01
   clip_grad_norm: 1.0
-  dtype: torch.float32
+  lr_scheduler_warmup_steps: 1000
+  lr_scheduler_num_decay_steps: 30000
+  lr_scheduler_decay_lr: 2.5e-6
+  finetune_action_expert_only: False
+  freeze_language_model_only: True

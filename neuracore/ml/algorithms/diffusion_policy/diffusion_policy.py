@@ -596,7 +596,6 @@ class DiffusionPolicy(NeuracoreModel):
         action_data = torch.cat(action_targets, dim=-1)  # (B, T, total_action_dim)
 
         target_actions = self.action_normalizer.normalize(action_data)
-        target_actions = target_actions
 
         # Sample noise to add to the trajectory.
         eps = torch.randn(target_actions.shape, device=target_actions.device)
