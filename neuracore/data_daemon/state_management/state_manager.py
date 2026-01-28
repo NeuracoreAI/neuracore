@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
-from typing import Any
 
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.models import (
@@ -159,7 +157,9 @@ class StateManager:
             logger.warning("Trace record not found: %s", trace_id)
             return
 
-        # Emit event to uploader
+        # Update status to UPLOADING before emitting to prevent duplicate uploads
+        await self._store.update_status(trace_id, TraceStatus.UPLOADING)
+
         self._emitter.emit(
             Emitter.READY_FOR_UPLOAD,
             trace_id,
@@ -184,9 +184,9 @@ class StateManager:
         if any(trace.progress_reported == 1 for trace in traces):
             return
         if not all(
-            trace.status == TraceStatus.WRITTEN
+            trace.status
+            in (TraceStatus.WRITTEN, TraceStatus.UPLOADING, TraceStatus.UPLOADED)
             and trace.total_bytes == trace.bytes_written
-            and trace.ready_for_upload == 1
             for trace in traces
         ):
             return
@@ -225,10 +225,6 @@ class StateManager:
     async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
         """Increment uploaded byte count for a trace."""
         await self._store.update_bytes_uploaded(trace_id, bytes_uploaded)
-
-    async def claim_ready_traces(self, limit: int = 50) -> list[Mapping[str, Any]]:
-        """Claim ready traces for upload and mark them in-progress."""
-        return await self._store.claim_ready_traces(limit)
 
     async def update_status(
         self, trace_id: str, status: TraceStatus, *, error_message: str | None = None

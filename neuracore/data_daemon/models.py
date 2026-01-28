@@ -86,7 +86,6 @@ class TraceRecord:
     bytes_written: int
     total_bytes: int | None
     bytes_uploaded: int
-    ready_for_upload: int
     progress_reported: int
     error_code: TraceErrorCode | None
     error_message: str | None
@@ -129,7 +128,6 @@ class TraceRecord:
             bytes_written=int(row.get("bytes_written", 0)),
             total_bytes=row.get("total_bytes"),
             bytes_uploaded=int(row.get("bytes_uploaded", 0)),
-            ready_for_upload=int(row.get("ready_for_upload", 0)),
             progress_reported=int(row.get("progress_reported", 0)),
             error_code=error_code,
             error_message=row.get("error_message"),

@@ -266,31 +266,6 @@ async def test_concurrent_writes_with_wal(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_full_state_transition_chain(manager_store) -> None:
-    manager, store = manager_store
-    emitter = get_emitter()
-    await manager.create_trace(
-        "trace-chain",
-        "rec-chain",
-        DataType.CUSTOM_1D,
-        "custom",
-        1,
-        path="/tmp/trace-chain.bin",
-    )
-
-    await manager.update_status("trace-chain", TraceStatus.WRITING)
-    emitter.emit(Emitter.TRACE_WRITTEN, "trace-chain", "rec-chain", 12)
-    await asyncio.sleep(0.1)
-
-    claimed = await manager.claim_ready_traces(limit=1)
-    assert [row["trace_id"] for row in claimed] == ["trace-chain"]
-    assert claimed[0]["status"] == TraceStatus.UPLOADING
-
-    await manager.update_status("trace-chain", TraceStatus.UPLOADED)
-    assert await _get_trace_status(store, "trace-chain") == TraceStatus.UPLOADED
-
-
-@pytest.mark.asyncio
 async def test_race_conditions_on_rapid_state_changes(tmp_path, caplog) -> None:
     """Test race conditions on rapid state changes.
 
@@ -374,35 +349,17 @@ async def test_state_recovery_after_restart(tmp_path) -> None:
     try:
         recovered_trace = await recovered_store.get_trace("trace-recover")
         assert recovered_trace is not None
-        assert recovered_trace.status == TraceStatus.WRITTEN
-        assert recovered_trace.ready_for_upload == 1
+        assert recovered_trace.status == TraceStatus.UPLOADING
 
-        claimed = await recovered_store.claim_ready_traces(limit=1)
-        assert [row["trace_id"] for row in claimed] == ["trace-recover"]
-        assert claimed[0]["status"] == TraceStatus.UPLOADING
+        ready = await recovered_store.find_ready_traces()
+        assert ready == []
+
+        await recovered_store.update_status("trace-recover", TraceStatus.UPLOADED)
+        updated = await recovered_store.get_trace("trace-recover")
+        assert updated is not None
+        assert updated.status == TraceStatus.UPLOADED
     finally:
         await recovered_store.close()
-
-
-@pytest.mark.asyncio
-async def test_failed_trace_not_claimed_for_retry(manager_store) -> None:
-    manager, _ = manager_store
-    emitter = get_emitter()
-    await manager.create_trace(
-        "trace-failed",
-        "rec-failed",
-        DataType.CUSTOM_1D,
-        "custom",
-        1,
-        path="/tmp/trace-failed.bin",
-        total_bytes=10,
-    )
-    emitter.emit(Emitter.TRACE_WRITTEN, "trace-failed", "rec-failed", 10)
-    await asyncio.sleep(0.1)
-    await manager.update_status("trace-failed", TraceStatus.FAILED)
-
-    claimed = await manager.claim_ready_traces(limit=1)
-    assert claimed == []
 
 
 @pytest.mark.asyncio
@@ -507,5 +464,256 @@ async def test_encoder_crash_does_not_block_other_recordings(manager_store) -> N
 
         trace_b_events = [e for e in ready_events if e[:2] == ("trace-b", "rec-b")]
         assert trace_b_events, "trace-b should have received READY_FOR_UPLOAD"
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+
+@pytest.mark.asyncio
+async def test_status_is_uploading_during_active_upload(manager_store) -> None:
+    """Verify trace status is UPLOADING between TRACE_WRITTEN and UPLOAD_COMPLETE.
+
+    The Story:
+    A single trace completes writing. The state machine should transition
+    the trace to UPLOADING status before emitting READY_FOR_UPLOAD, and
+    the trace should remain in UPLOADING status until upload completes.
+
+    The Flow:
+    1. Create a trace in PENDING state
+    2. Emit IS_CONNECTED to enable online mode
+    3. Emit TRACE_WRITTEN to signal writing is complete
+    4. Capture the trace status from DB before UPLOAD_COMPLETE
+    5. Verify status is UPLOADING (not WRITTEN)
+
+    Why This Matters:
+    Without proper UPLOADING transition, the same trace could be picked up
+    by multiple uploaders causing duplicate uploads and wasted bandwidth.
+
+    Key Assertions:
+    - Status is UPLOADING after TRACE_WRITTEN event is processed
+    - READY_FOR_UPLOAD event is emitted with correct trace data
+    """
+    manager, store = manager_store
+    emitter = get_emitter()
+
+    await manager.create_trace(
+        "trace-upload-status",
+        "rec-upload-status",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        path="/tmp/trace-upload-status.bin",
+        total_bytes=64,
+    )
+
+    ready_event = asyncio.Event()
+    ready_events: list[tuple] = []
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+        if args[0] == "trace-upload-status":
+            ready_event.set()
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        emitter.emit(
+            Emitter.TRACE_WRITTEN, "trace-upload-status", "rec-upload-status", 64
+        )
+
+        await asyncio.wait_for(ready_event.wait(), timeout=2.0)
+
+        status = await _get_trace_status(store, "trace-upload-status")
+        assert status == TraceStatus.UPLOADING, f"Expected UPLOADING, got {status}"
+
+        assert len(ready_events) == 1
+        assert ready_events[0] == (
+            "trace-upload-status",
+            "rec-upload-status",
+            "/tmp/trace-upload-status.bin",
+            DataType.CUSTOM_1D,
+            "custom",
+            0,
+        )
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+
+@pytest.mark.asyncio
+async def test_two_traces_same_recording_sequential_completion(manager_store) -> None:
+    """Verify two traces in the same recording transition independently.
+
+    The Story:
+    A recording produces two traces (e.g., video and sensor data). Both
+    complete writing at nearly the same time. Each trace should transition
+    to UPLOADING independently without blocking the other.
+
+    The Flow:
+    1. Create two traces for the same recording
+    2. Emit IS_CONNECTED to enable online mode
+    3. Emit TRACE_WRITTEN for both traces in sequence
+    4. Verify both traces are in UPLOADING status
+    5. Verify READY_FOR_UPLOAD emitted for both traces
+
+    Why This Matters:
+    Multi-stream recordings are common. Each trace must be uploadable
+    independently to maximize upload throughput and minimize latency.
+
+    Key Assertions:
+    - Both traces reach UPLOADING status
+    - READY_FOR_UPLOAD emitted for each trace
+    - Neither trace blocks the other's state transition
+    """
+    manager, store = manager_store
+    emitter = get_emitter()
+
+    await manager.create_trace(
+        "trace-seq-1",
+        "rec-seq",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        path="/tmp/trace-seq-1.bin",
+        total_bytes=32,
+    )
+    await manager.create_trace(
+        "trace-seq-2",
+        "rec-seq",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        path="/tmp/trace-seq-2.bin",
+        total_bytes=48,
+    )
+
+    both_ready = asyncio.Event()
+    ready_trace_ids: set[str] = set()
+    ready_events: list[tuple] = []
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+        trace_id = args[0]
+        if trace_id in ("trace-seq-1", "trace-seq-2"):
+            ready_trace_ids.add(trace_id)
+            if ready_trace_ids == {"trace-seq-1", "trace-seq-2"}:
+                both_ready.set()
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-seq-1", "rec-seq", 32)
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-seq-2", "rec-seq", 48)
+
+        await asyncio.wait_for(both_ready.wait(), timeout=2.0)
+
+        status_1 = await _get_trace_status(store, "trace-seq-1")
+        status_2 = await _get_trace_status(store, "trace-seq-2")
+        assert (
+            status_1 == TraceStatus.UPLOADING
+        ), f"trace-seq-1: expected UPLOADING, got {status_1}"
+        assert (
+            status_2 == TraceStatus.UPLOADING
+        ), f"trace-seq-2: expected UPLOADING, got {status_2}"
+
+        emitted_trace_ids = {event[0] for event in ready_events}
+        assert "trace-seq-1" in emitted_trace_ids
+        assert "trace-seq-2" in emitted_trace_ids
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+
+@pytest.mark.asyncio
+async def test_two_traces_staggered_completion(manager_store) -> None:
+    """Verify trace-A can upload while trace-B is still writing.
+
+    The Story:
+    A recording has two traces. Trace-A finishes writing and starts uploading.
+    While trace-A uploads, trace-B is still being written. Trace-B's ongoing
+    write should not interfere with trace-A's upload, and vice versa.
+
+    The Flow:
+    1. Create two traces for the same recording
+    2. Emit IS_CONNECTED to enable online mode
+    3. Emit TRACE_WRITTEN for trace-A only
+    4. Verify trace-A transitions to UPLOADING and READY_FOR_UPLOAD emits
+    5. Verify trace-B remains in PENDING status (still writing)
+    6. Emit TRACE_WRITTEN for trace-B
+    7. Verify trace-B transitions to UPLOADING independently
+
+    Why This Matters:
+    Different data types have different write durations. A 10-second video
+    trace should not wait for a 60-second sensor trace to finish writing.
+
+    Key Assertions:
+    - Trace-A reaches UPLOADING while trace-B is PENDING
+    - Trace-B's eventual completion triggers its own UPLOADING transition
+    - No cross-contamination between trace states
+    """
+    manager, store = manager_store
+    emitter = get_emitter()
+
+    await manager.create_trace(
+        "trace-stag-a",
+        "rec-stag",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        path="/tmp/trace-stag-a.bin",
+        total_bytes=32,
+    )
+    await manager.create_trace(
+        "trace-stag-b",
+        "rec-stag",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        path="/tmp/trace-stag-b.bin",
+        total_bytes=64,
+    )
+
+    trace_a_ready = asyncio.Event()
+    trace_b_ready = asyncio.Event()
+    ready_events: list[tuple] = []
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+        trace_id = args[0]
+        if trace_id == "trace-stag-a":
+            trace_a_ready.set()
+        elif trace_id == "trace-stag-b":
+            trace_b_ready.set()
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-stag-a", "rec-stag", 32)
+
+        await asyncio.wait_for(trace_a_ready.wait(), timeout=2.0)
+
+        status_a = await _get_trace_status(store, "trace-stag-a")
+        status_b = await _get_trace_status(store, "trace-stag-b")
+        assert (
+            status_a == TraceStatus.UPLOADING
+        ), f"trace-stag-a: expected UPLOADING, got {status_a}"
+        assert (
+            status_b == TraceStatus.PENDING
+        ), f"trace-stag-b: expected PENDING, got {status_b}"
+
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-stag-b", "rec-stag", 64)
+
+        await asyncio.wait_for(trace_b_ready.wait(), timeout=2.0)
+
+        status_b_after = await _get_trace_status(store, "trace-stag-b")
+        assert (
+            status_b_after == TraceStatus.UPLOADING
+        ), f"trace-stag-b: expected UPLOADING, got {status_b_after}"
+
+        status_a_after = await _get_trace_status(store, "trace-stag-a")
+        assert (
+            status_a_after == TraceStatus.UPLOADING
+        ), f"trace-stag-a: expected UPLOADING, got {status_a_after}"
+
+        emitted_trace_ids = [event[0] for event in ready_events]
+        assert emitted_trace_ids.count("trace-stag-a") == 1
+        assert emitted_trace_ids.count("trace-stag-b") == 1
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)

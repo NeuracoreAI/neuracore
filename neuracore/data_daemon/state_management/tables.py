@@ -40,7 +40,6 @@ traces = Table(
     Column("bytes_written", Integer, nullable=False, default=0),
     Column("total_bytes", Integer, nullable=True, default=None),
     Column("bytes_uploaded", Integer, default=0),
-    Column("ready_for_upload", Integer, nullable=False, default=0),
     Column("progress_reported", Integer, nullable=False, default=0),
     Column("error_code", Text, nullable=True, default=None),
     Column("error_message", Text, nullable=True, default=None),
@@ -61,4 +60,3 @@ traces = Table(
 
 Index("idx_traces_trace_id", traces.c.trace_id)
 Index("idx_traces_status", traces.c.status)
-Index("idx_traces_ready_for_upload", traces.c.ready_for_upload)

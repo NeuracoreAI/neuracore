@@ -54,7 +54,6 @@ class FakeStateStore:
                 status=TraceStatus.WRITTEN,
                 bytes_written=bytes_written,
                 total_bytes=bytes_written,
-                ready_for_upload=1,
             )
             self._traces_by_id[trace_id] = updated
             traces = self._traces_by_recording.get(trace.recording_id, [])
@@ -67,9 +66,6 @@ class FakeStateStore:
 
     async def find_unreported_traces(self) -> list[TraceRecord]:
         return list(self.unreported_traces)
-
-    async def claim_ready_traces(self, limit: int = 50) -> list[dict]:
-        return []
 
     async def mark_recording_reported(self, recording_id: str) -> None:
         return None
@@ -119,7 +115,6 @@ def _make_trace(
     recording_id: str,
     *,
     status: TraceStatus = TraceStatus.PENDING,
-    ready_for_upload: int = 0,
     progress_reported: int = 0,
     bytes_written: int = 0,
     total_bytes: int | None = None,
@@ -142,7 +137,6 @@ def _make_trace(
         bytes_written=bytes_written,
         total_bytes=total_bytes,
         bytes_uploaded=bytes_uploaded,
-        ready_for_upload=ready_for_upload,
         progress_reported=progress_reported,
         error_code=None,
         error_message=None,
@@ -316,7 +310,6 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
         "trace-2",
         "rec-1",
         status=TraceStatus.WRITTEN,
-        ready_for_upload=1,
         bytes_written=10,
         total_bytes=10,
         created_at=created_late,
@@ -378,7 +371,6 @@ async def test_trace_written_waits_for_all_traces_before_progress_report(
         "trace-written",
         "rec-1",
         status=TraceStatus.WRITTEN,
-        ready_for_upload=1,
         bytes_written=8,
         total_bytes=8,
         created_at=created_at,
@@ -388,7 +380,6 @@ async def test_trace_written_waits_for_all_traces_before_progress_report(
         "trace-writing",
         "rec-1",
         status=TraceStatus.WRITING,
-        ready_for_upload=0,
         bytes_written=4,
         total_bytes=8,
         created_at=created_at,
@@ -426,7 +417,6 @@ async def test_recording_completion_isolated_across_recordings(state_manager) ->
         "trace-a",
         "rec-a",
         status=TraceStatus.WRITING,
-        ready_for_upload=0,
         created_at=created_at,
         last_updated=updated_at,
     )
@@ -434,7 +424,6 @@ async def test_recording_completion_isolated_across_recordings(state_manager) ->
         "trace-b1",
         "rec-b",
         status=TraceStatus.WRITTEN,
-        ready_for_upload=1,
         bytes_written=10,
         total_bytes=10,
         created_at=created_at,
@@ -444,7 +433,6 @@ async def test_recording_completion_isolated_across_recordings(state_manager) ->
         "trace-b2",
         "rec-b",
         status=TraceStatus.WRITING,
-        ready_for_upload=0,
         bytes_written=0,
         total_bytes=10,
         created_at=created_at,
@@ -486,7 +474,6 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
         "trace-a",
         "rec-a",
         status=TraceStatus.WRITING,
-        ready_for_upload=0,
         created_at=created_at,
         last_updated=updated_at,
     )
@@ -494,7 +481,6 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
         "trace-b",
         "rec-b",
         status=TraceStatus.PENDING,
-        ready_for_upload=0,
         created_at=created_at,
         last_updated=updated_at,
     )
