@@ -1,0 +1,89 @@
+baseURL: https://docs.neuracore.com/
+title: Neuracore Documentation
+languageCode: en-us
+# theme is handled via Hugo modules
+
+enableRobotsTXT: true
+enableGitInfo: true
+
+services:
+  googleAnalytics:
+    ID: ""
+
+outputs:
+  home: [HTML]
+  page: [HTML]
+  section: [HTML, RSS]
+
+defaultContentLanguage: en
+languages:
+  en:
+    languageName: English
+    weight: 1
+
+module:
+  imports:
+    - path: github.com/imfing/hextra
+
+menu:
+  main:
+    - name: Documentation
+      pageRef: /docs
+      weight: 1
+    - name: Examples
+      pageRef: /examples
+      weight: 2
+    - name: Search
+      weight: 3
+      params:
+        type: search
+    - name: GitHub
+      weight: 4
+      url: "https://github.com/NeuracoreAI/neuracore"
+      params:
+        icon: github
+
+params:
+  description: Neuracore - A powerful robot learning library for data collection, model training, and real-time inference
+
+  navbar:
+    displayTitle: true
+    displayLogo: true
+    logo:
+      path: images/neuracore_logo.jpg
+      dark: images/neuracore_logo.jpg
+      link: /
+      width: 40
+      height: 20
+
+  page:
+    width: normal
+
+  theme:
+    default: system
+    displayToggle: true
+
+  footer:
+    enable: true
+    displayCopyright: true
+    displayPoweredBy: false
+    width: normal
+
+  displayUpdatedDate: true
+  dateFormat: "January 2, 2006"
+
+  search:
+    enable: true
+    type: flexsearch
+    flexsearch:
+      index: content
+      tokenize: forward
+
+  highlight:
+    copy:
+      enable: true
+      display: hover
+
+  editURL:
+    enable: true
+    base: "https://github.com/NeuracoreAI/neuracore/edit/main/docs-site/content"
