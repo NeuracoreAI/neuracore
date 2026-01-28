@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Protocol
 
 from neuracore.data_daemon.models import (
     DataType,
@@ -59,10 +58,6 @@ class StateStore(Protocol):
 
     async def find_unreported_traces(self) -> list[TraceRecord]:
         """Return all traces that have not been progress-reported."""
-        ...
-
-    async def claim_ready_traces(self, limit: int = 50) -> list[Mapping[str, Any]]:
-        """Claim ready traces for upload and mark them in-progress."""
         ...
 
     async def mark_recording_reported(self, recording_id: str) -> None:

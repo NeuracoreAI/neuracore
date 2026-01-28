@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -145,7 +144,6 @@ class SqliteStateStore(StateStore):
                         status=TraceStatus.PENDING,
                         bytes_written=0,
                         bytes_uploaded=0,
-                        ready_for_upload=0,
                         progress_reported=0,
                         error_code=None,
                         error_message=None,
@@ -348,7 +346,6 @@ class SqliteStateStore(StateStore):
                     status=TraceStatus.WRITTEN,
                     last_updated=_utc_now(),
                     total_bytes=bytes_written,
-                    ready_for_upload=1,
                     bytes_written=bytes_written,
                 )
             )
@@ -366,12 +363,12 @@ class SqliteStateStore(StateStore):
                 )
 
     async def find_ready_traces(self) -> list[TraceRecord]:
-        """Return all traces marked as ready for upload."""
+        """Return all traces with WRITTEN status (ready for upload)."""
         async with self._engine.begin() as conn:
             rows = (
                 (
                     await conn.execute(
-                        select(traces).where(traces.c.ready_for_upload == 1)
+                        select(traces).where(traces.c.status == TraceStatus.WRITTEN)
                     )
                 )
                 .mappings()
@@ -392,53 +389,6 @@ class SqliteStateStore(StateStore):
                 .all()
             )
         return [TraceRecord.from_row(dict(row)) for row in rows]
-
-    async def claim_ready_traces(self, limit: int = 50) -> list[Mapping[str, Any]]:
-        """Claim ready traces for upload and mark them in-progress."""
-        async with self._engine.begin() as conn:
-            rows = (
-                (
-                    await conn.execute(
-                        select(traces)
-                        .where(
-                            (traces.c.ready_for_upload == 1)
-                            & (traces.c.status == TraceStatus.WRITTEN)
-                        )
-                        .order_by(traces.c.last_updated.asc())
-                        .limit(int(limit))
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            if not rows:
-                return []
-            trace_ids = [row["trace_id"] for row in rows]
-            now = _utc_now()
-            await conn.execute(
-                update(traces)
-                .where(traces.c.trace_id.in_(trace_ids))
-                .where(traces.c.ready_for_upload == 1)
-                .where(traces.c.status == TraceStatus.WRITTEN)
-                .values(
-                    ready_for_upload=0,
-                    status=TraceStatus.UPLOADING,
-                    last_updated=now,
-                )
-            )
-            updated_rows = (
-                (
-                    await conn.execute(
-                        select(traces)
-                        .where(traces.c.trace_id.in_(trace_ids))
-                        .where(traces.c.status == TraceStatus.UPLOADING)
-                        .where(traces.c.last_updated == now)
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            return [dict(row) for row in updated_rows]
 
     async def mark_recording_reported(self, recording_id: str) -> None:
         """Mark a recording as progress-reported."""
