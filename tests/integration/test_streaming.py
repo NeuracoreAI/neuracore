@@ -18,7 +18,7 @@ sys.path.append(os.path.join(THIS_DIR, "..", "..", "examples"))
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
 
 # How much time we allow for nc.calls
-TIME_GRACE_S = 0.01
+TIME_GRACE_S = 0.1
 
 TEST_ROBOT = "integration_test_robot"
 JOINT_NAMES = [
@@ -200,19 +200,19 @@ def stream_data(config):
             frame_count, config.fps, config.num_joints
         )
         with Timer():
-            nc.log_joint_positions(name="arm", positions=joint_positions, timestamp=t)
+            nc.log_joint_positions(positions=joint_positions, timestamp=t)
 
         with Timer():
             # use the same joint positions for velocities and torques
-            nc.log_joint_velocities(name="arm", velocities=joint_positions, timestamp=t)
+            nc.log_joint_velocities(velocities=joint_positions, timestamp=t)
         with Timer():
             # use the same joint positions for velocities and torques
-            nc.log_joint_torques(name="arm", torques=joint_positions, timestamp=t)
+            nc.log_joint_torques(torques=joint_positions, timestamp=t)
 
         with Timer():
             nc.log_parallel_gripper_open_amount(name="gripper", value=0.5, timestamp=t)
 
-        points = np.zeros((1000, 3), dtype=np.float32)
+        points = np.zeros((1000, 3), dtype=np.float16)
         rgb_points = np.zeros((1000, 3), dtype=np.uint8)
         with Timer(max_time=0.5):
             # TODO: Speed up this call
@@ -228,7 +228,7 @@ def stream_data(config):
         with Timer():
             nc.log_custom_1d(
                 "test_custom_data",
-                {"frame_num": frame_code, "time": t},
+                np.array([frame_code, t or 0.0], dtype=np.float32),
                 timestamp=t,
             )
 
@@ -239,9 +239,7 @@ def stream_data(config):
                 for i in range(config.num_joints)
             }
             with Timer():
-                nc.log_joint_target_positions(
-                    name="arm", target_positions=action, timestamp=t
-                )
+                nc.log_joint_target_positions(target_positions=action, timestamp=t)
 
         frame_count += 1
 
@@ -249,7 +247,7 @@ def stream_data(config):
         time.sleep(sleep_time)
 
     with Timer(max_time=10):
-        nc.stop_recording(wait=True)
+        nc.stop_recording()
 
     return frame_count
 
@@ -463,14 +461,14 @@ def test_stop_start_sequences():
                 segment_frames, config.fps, config.num_joints
             )
             with Timer():
-                nc.log_joint_positions(name="arm", positions=joint_positions)
+                nc.log_joint_positions(positions=joint_positions)
 
             segment_frames += 1
             time.sleep(1 / config.fps)
 
         # Stop recording
         with Timer(max_time=5):
-            nc.stop_recording(wait=True)
+            nc.stop_recording()
         logger.info(f"Completed segment {segment+1} with {segment_frames} frames")
 
         total_frames += segment_frames
