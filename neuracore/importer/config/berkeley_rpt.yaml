@@ -1,16 +1,15 @@
-input_dataset_name: lerobot/nyu_franka_play_dataset
+input_dataset_name: lerobot/berkeley_rpt
 dataset_type: LEROBOT
 output_dataset:
-  name: NYU_franka_play
+  name: berkeley_rpt
   tags: [unitree, humanoid, folding, clothes, manipulation]
   description: "This dataset contains images and sensor data collected from the LeRobot Unitree H1 robot while performing fold clothes tasks in an indoor environment."
 
 robot:
   name: nyu_franka
   mjcf_path: "panda.urdf"
-  overwrite: true
 
-frequency: 20
+frequency: 50
 
 data_import_config: 
   RGB_IMAGES:
@@ -20,16 +19,13 @@ data_import_config:
       order_of_channels: RGB
       normalized_pixel_values: TRUE
     mapping: 
-      - name: image
-        source_name: image
-      - name: additional
-        source_name: image_additional_view
+      - name: hand_image
+        source_name: hand_image
       
 
   JOINT_POSITIONS: 
     source: observation.state
     units: RADIANS
-    # TODO: Robot finger joint is inverted but breaks when inverted = true
     mapping:
       - name: panda_joint1
         index: 0
@@ -47,14 +43,25 @@ data_import_config:
         index: 6
       - name: panda_joint8
         index: 7
+        inverted: true
       - name: panda_hand_joint
         index: 7
+        offset: 1
+        inverted: true
       - name: panda_hand_tcp_joint
         index: 7
+        offset: 1
+        inverted: true
       - name: panda_finger_joint1
         index: 7
+        offset: 1
+        inverted: true
       - name: panda_finger_joint2
         index: 7
+        offset: 1
+        inverted: true
+ 
+
 
   LANGUAGE:
     source: task
