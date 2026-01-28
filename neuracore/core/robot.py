@@ -241,6 +241,7 @@ class Robot:
                     "robot_id": self.id,
                     "instance": self.instance,
                     "dataset_id": dataset_id,
+                    "upload_method": "data_daemon",
                 },
             )
             response.raise_for_status()
