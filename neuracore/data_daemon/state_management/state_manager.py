@@ -27,6 +27,7 @@ class StateManager:
         """Initialize with a persistence backend."""
         self._store = store
         self._is_connected = False
+        self._reporting_recordings: set[str] = set()
 
         self._emitter = get_emitter()
 
@@ -111,10 +112,6 @@ class StateManager:
         """
         self._emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
         await self._store.set_stopped_ats(recording_id)
-        if not self._is_connected:
-            return
-        traces = await self._store.find_traces_by_recording_id(recording_id)
-        await self._emit_progress_report_if_recording_stopped(traces)
 
     async def handle_is_connected(self, is_connected: bool) -> None:
         """Handle a connection status event from the data bridge.
@@ -222,6 +219,9 @@ class StateManager:
     ) -> None:
         if not traces:
             return
+        recording_id = traces[0].recording_id
+        if recording_id in self._reporting_recordings:
+            return
         if any(trace.progress_reported == 1 for trace in traces):
             return
         if not all(
@@ -231,6 +231,7 @@ class StateManager:
             for trace in traces
         ):
             return
+        self._reporting_recordings.add(recording_id)
         start_time, end_time = self._find_recording_start_and_end(traces)
         asyncio.create_task(self._emit_progress_report(start_time, end_time, traces))
 
@@ -247,6 +248,7 @@ class StateManager:
         Args:
             recording_id (str): unique identifier for the recording.
         """
+        self._reporting_recordings.discard(recording_id)
         await self._store.mark_recording_reported(recording_id)
 
     def _find_recording_start_and_end(
@@ -308,6 +310,7 @@ class StateManager:
             error_message (str): Error message associated with
             the progress report error.
         """
+        self._reporting_recordings.discard(recording_id)
         traces = await self._store.find_traces_by_recording_id(recording_id)
         if not traces:
             return
