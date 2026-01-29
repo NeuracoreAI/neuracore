@@ -35,23 +35,23 @@ neuracore/
 ```
 
 ## Training Command Examples
-
+**Note**: Passing `run_name` is optional. If you don't pass the `run_name`, the system will generate a random name together with the timestamp. To better track the training experiment, we highly recommend you to pass a `run_name`.
 ```bash
 # Basic training with Diffusion Policy
-python -m neuracore.ml.train algorithm=diffusion_policy dataset_name="my_dataset"
+python -m neuracore.ml.train algorithm=diffusion_policy dataset_name="my_dataset" run_name="my_experiment"
 
 # Train ACT with custom algorithm hyperparameters
-python -m neuracore.ml.train algorithm=act algorithm.lr=5e-4 algorithm.hidden_dim=1024 dataset_name="my_dataset"
+python -m neuracore.ml.train algorithm=act algorithm.lr=5e-4 algorithm.hidden_dim=1024 dataset_name="my_dataset" run_name="my_experiment"
 
 # Auto-tune batch size
-python -m neuracore.ml.train algorithm=diffusion_policy batch_size=auto dataset_name="my_dataset"
+python -m neuracore.ml.train algorithm=diffusion_policy batch_size=auto dataset_name="my_dataset" run_name="my_experiment"
 
 # Hyperparameter sweeps
-python -m neuracore.ml.train --multirun algorithm=cnnmlp algorithm.lr=1e-4,5e-4,1e-3 algorithm.hidden_dim=256,512,1024 dataset_name="my_dataset"
+python -m neuracore.ml.train --multirun algorithm=cnnmlp algorithm.lr=1e-4,5e-4,1e-3 algorithm.hidden_dim=256,512,1024 dataset_name="my_dataset" run_name="my_experiment"
 
 # Training with specified modalities
 python -m neuracore.ml.train algorithm=pi0 dataset_name="my_multimodal_dataset" input_robot_data_spec={"my_robot": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...], "RGB_IMAGES": ["wrist_camera"], "LANGUAGE": ["task_instruction"]}}
-output_robot_data_spec={"my_robot": {"JOINT_TARGET_POSITIONS": ["joint_1", "joint_2", ...]}}
+output_robot_data_spec={"my_robot": {"JOINT_TARGET_POSITIONS": ["joint_1", "joint_2", ...]}} run_name="my_experiment"
 ```
 
 ## Configuration Management

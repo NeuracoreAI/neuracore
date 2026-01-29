@@ -9,38 +9,83 @@ would be the natural home for these shared utilities.
 from neuracore_types import DataType, RobotDataSpec
 from ordered_set import OrderedSet
 
+from neuracore.core.exceptions import DatasetError
+from neuracore.core.utils.robot_mapping import RobotMapping
+
 
 def convert_str_to_robot_data_spec(
-    robot_id_to_data_types: dict[str, dict[str, list[str]]],
+    robot_name_to_data_types: dict[str, dict[str, list[str]]],
 ) -> RobotDataSpec:
     """Converts string representations of data types to DataType enums.
 
-    Takes a dictionary mapping robot IDs to dictionaries of
+    Takes a dictionary mapping robot names to dictionaries of
     data type strings and their associated item names,
     and converts the data type strings to DataType enums.
 
     Args:
-        robot_id_to_data_types: A dictionary where keys are robot IDs and
+        robot_name_to_data_types: A dictionary where keys are robot names and
             values are dictionaries mapping data type strings to lists of item names.
 
     Returns:
-        A dictionary where keys are robot IDs and values are dictionaries
+        A dictionary where keys are robot names and values are dictionaries
             mapping DataType enums to lists of item names, preserving insertion order.
     """
     result: dict[str, dict[DataType, list[str]]] = {}
-    for robot_id, data_type_dict in robot_id_to_data_types.items():
-        result[robot_id] = {
+    for robot_name, data_type_dict in robot_name_to_data_types.items():
+        result[robot_name] = {
             DataType(data_type): list(data_list)
             for data_type, data_list in data_type_dict.items()
         }
     return result
 
 
+def convert_robot_data_spec_names_to_ids(
+    robot_data_spec: RobotDataSpec,
+    robot_mapping: RobotMapping,
+) -> dict[str, dict[DataType, list[str]]]:
+    """Convert RobotDataSpec from robot names/IDs to robot IDs using a mapping.
+
+    Args:
+        robot_data_spec: Robot data spec keyed by robot names or IDs.
+        robot_mapping: Organization-level robot name/id mapping cache.
+
+    Returns:
+        Robot data spec keyed by robot IDs.
+
+    Raises:
+        DatasetError: If a robot identifier is ambiguous.
+    """
+    resolved: dict[str, dict[DataType, list[str]]] = {}
+
+    for robot_key, data_spec in robot_data_spec.items():
+        try:
+            robot_id = robot_mapping.robot_key_to_id(
+                robot_key,
+            )
+        except ValueError as exc:
+            raise DatasetError(str(exc)) from exc
+        if robot_id is None:
+            # Assume the key is already a robot ID; backend will validate if needed.
+            robot_id = robot_key
+
+        if robot_id in resolved:
+            # Merge data specs for the same robot
+            merged_data_spec: dict[DataType, list[str]] = dict(resolved[robot_id])
+            for data_type, items in data_spec.items():
+                merged_items = list(merged_data_spec.get(data_type, [])) + list(items)
+                # Preserve order while removing duplicates
+                merged_data_spec[data_type] = list(dict.fromkeys(merged_items))
+            resolved[robot_id] = merged_data_spec
+        else:
+            resolved[robot_id] = data_spec
+    return resolved
+
+
 def merge_robot_data_spec(
     data_spec_1: RobotDataSpec,
     data_spec_2: RobotDataSpec,
 ) -> RobotDataSpec:
-    """Merge two robot ID to data types dictionaries.
+    """Merge two robot name to data types dictionaries.
 
     Order is preserved: data_spec_1's order takes priority, then data_spec_2's
     items are appended in their original order.
@@ -76,10 +121,10 @@ def merge_robot_data_spec(
 
 
 def extract_data_types(robot_id_to_data_types: RobotDataSpec) -> OrderedSet[DataType]:
-    """Extract unique data types from robot ID to data types dictionary.
+    """Extract unique data types from robot name to data types dictionary.
 
     Args:
-        robot_id_to_data_types: A dictionary where keys are robot IDs and
+        robot_id_to_data_types: A dictionary where keys are robot names and
             values are dictionaries mapping DataType enums to lists of item names.
 
     Returns:

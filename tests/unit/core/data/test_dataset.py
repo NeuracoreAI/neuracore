@@ -15,6 +15,7 @@ from neuracore.core.data.dataset import DEFAULT_RECORDING_CACHE_DIR, Dataset
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.exceptions import DatasetError
+from neuracore.core.utils.robot_mapping import RobotMapping
 
 
 @pytest.fixture
@@ -532,6 +533,37 @@ class TestDatasetCreation:
         assert dataset.is_shared is True
 
     @pytest.mark.usefixtures("mock_login")
+    def test_create_dataset_unauthorized_error_detail(self, dataset_model):
+        """Test dataset creation errors include backend details."""
+        mocked_org_id = "test-org-id"
+        error_detail = (
+            "User is not authorized to upload shared datasets. Uploading shared "
+            "data is a privileged action. Please email contact@neuracore.com to "
+            "request access."
+        )
+
+        with requests_mock.Mocker() as m:
+            m.get(
+                f"{API_URL}/org-management/my-orgs",
+                json=[{"org": {"id": mocked_org_id, "name": "test organization"}}],
+            )
+            m.get(
+                f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+                json={},
+                status_code=404,
+            )
+            m.post(
+                f"{API_URL}/org/{mocked_org_id}/datasets",
+                json={"detail": {"error": error_detail}},
+                status_code=403,
+            )
+
+            with pytest.raises(
+                DatasetError, match=f"Failed to create dataset: {error_detail}"
+            ):
+                Dataset.create("unauthorized_shared_dataset", shared=True)
+
+    @pytest.mark.usefixtures("mock_login")
     def test_create_with_special_characters_in_name(self, dataset_model):
         """Test creating a dataset with special characters in name."""
 
@@ -822,9 +854,15 @@ class TestDatasetSynchronization:
         """Test synchronizing with specific data types."""
         nc.login("test_api_key")
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
+        dataset._robot_ids = ["robot_id"]
+        mapping = RobotMapping("test-org")
+        mapping._id_to_name = {"robot_id": "robot_name"}
+        mapping._name_to_ids = {"robot_name": ["robot_id"]}
+        mapping._initialized = True
+        dataset._robot_mapping = mapping
 
         robot_data_spec = {
-            "robot_id": {
+            "robot_name": {
                 DataType.RGB_IMAGES: [],
                 DataType.DEPTH_IMAGES: [],
                 DataType.JOINT_POSITIONS: [],
@@ -832,7 +870,7 @@ class TestDatasetSynchronization:
         }
         synced = dataset.synchronize(frequency=30, robot_data_spec=robot_data_spec)
 
-        assert synced.robot_data_spec == robot_data_spec
+        assert synced.robot_data_spec == {"robot_id": robot_data_spec["robot_name"]}
 
 
 class TestDatasetMixedOperations:

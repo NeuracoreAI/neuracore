@@ -156,6 +156,10 @@ def _log_single_joint_data(
         joint_stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
     joint_stream.log(data=data)
+
+    if robot.id is None:
+        raise RobotError("Robot not initialized. Call init() first.")
+
     _publish_json_to_p2p(robot, str_id, data_type, data)
 
 

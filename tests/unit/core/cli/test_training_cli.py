@@ -220,3 +220,64 @@ def test_training_list_defaults_to_all(
     assert result.exit_code == 0
     assert "Local Training Runs" in result.output
     assert "Cloud Training Runs" in result.output
+
+
+def test_training_local_delete(tmp_path):
+    """Delete a local training run directory."""
+    run_dir = tmp_path / "run_local"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "training_run.json").write_text('{"name": "run_local"}')
+
+    result = runner.invoke(
+        app,
+        [
+            "training",
+            "delete",
+            "--local",
+            "--root",
+            str(tmp_path),
+            "--training-name",
+            "run_local",
+            "--yes",
+        ],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert "Deleted local training run 'run_local'" in result.output
+    assert not run_dir.exists()
+
+
+def test_training_cloud_delete(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    sample_training_jobs_response,
+):
+    """Delete a cloud training run by name."""
+    nc.login("test_api_key")
+
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
+        json=sample_training_jobs_response,
+        status_code=200,
+    )
+    mock_auth_requests.delete(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/job_123", status_code=204
+    )
+
+    result = runner.invoke(
+        app,
+        ["training", "delete", "--training-name", "training_run_1", "--yes"],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert "Deleted cloud training run 'training_run_1' (job_123)." in result.output
+    assert any(
+        req.method == "DELETE" and req.url.endswith("/job_123")
+        for req in mock_auth_requests.request_history
+    )

@@ -172,7 +172,7 @@ def eval_model(
             {
                 DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
             },
-            0.5,
+            0.2,
             {
                 "batch_size": BATCH_SIZE,
                 "epochs": 50,

@@ -23,10 +23,15 @@ from tqdm import tqdm
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
+from neuracore.core.utils.robot_data_spec_utils import (
+    convert_robot_data_spec_names_to_ids,
+)
+from neuracore.core.utils.robot_mapping import RobotMapping
 
 from ..auth import Auth, get_auth
 from ..const import API_URL
 from ..exceptions import DatasetError
+from ..utils.http_errors import extract_error_detail
 
 DEFAULT_CACHE_DIR = Path.home() / ".neuracore" / "training"
 DEFAULT_RECORDING_CACHE_DIR = DEFAULT_CACHE_DIR / "recording_cache"
@@ -90,6 +95,16 @@ class Dataset:
         self._num_recordings: int | None = len(recordings) if recordings else None
         self._start_after: dict | None = None
         self._robot_ids: list[str] | None = None
+        self._robot_mapping: RobotMapping | None = None
+
+    @property
+    def robot_mapping(self) -> RobotMapping:
+        """Organization-level robot name/id mapping cache."""
+        if self._robot_mapping is None:
+            self._robot_mapping = RobotMapping.for_org(
+                self.org_id, is_shared=self.is_shared
+            )
+        return self._robot_mapping
 
     def _wrap_raw_recording(self, raw_recording: dict) -> Recording:
         """Wrap a raw recording dict into a Recording object.
@@ -345,8 +360,7 @@ class Dataset:
             The newly created Dataset instance.
 
         Raises:
-            requests.HTTPError: If the API request fails.
-            requests.exceptions.ConnectionError: If cannot connect to server.
+            DatasetError: If the API request fails.
         """
         auth: Auth = get_auth()
         org_id = get_current_org()
@@ -360,7 +374,11 @@ class Dataset:
                 "is_shared": shared,
             },
         )
-        response.raise_for_status()
+        if not response.ok:
+            detail = extract_error_detail(response)
+            error_message = detail or f"{response.status_code} {response.reason}"
+            raise DatasetError(f"Failed to create dataset: {error_message}")
+
         dataset_model = DatasetModel.model_validate(response.json())
         return Dataset(
             id=dataset_model.id,
@@ -372,6 +390,14 @@ class Dataset:
             data_types=list(dataset_model.all_data_types.keys()),
         )
 
+    def delete(self) -> None:
+        """Delete this dataset from Neuracore."""
+        response = requests.delete(
+            f"{API_URL}/org/{self.org_id}/datasets/{self.id}",
+            headers=get_auth().get_headers(),
+        )
+        response.raise_for_status()
+
     def _synchronize(
         self,
         frequency: int = 0,
@@ -382,7 +408,7 @@ class Dataset:
         Args:
             frequency: Frequency at which to synchronize the dataset.
                 If 0, uses the default frequency.
-            robot_data_spec: Dict specifying robot id to
+            robot_data_spec: Dict specifying robot name to
                 data types and their names to include in synchronization.
                 If None, will use all available data types from the dataset.
 
@@ -437,7 +463,7 @@ class Dataset:
         Args:
             frequency: Frequency at which to synchronize the dataset.
                 If 0, uses the default frequency.
-            robot_data_spec: Dict specifying robot id to
+            robot_data_spec: Dict specifying robot name to
                 data types and their names to include in synchronization.
                 If None, will use all available data types from the dataset.
             prefetch_videos: Whether to prefetch video data for the synchronized data.
@@ -451,12 +477,23 @@ class Dataset:
             DatasetError: If frequency is not greater than 0.
         """
         if robot_data_spec is None:
-            robot_data_spec = {}
-            for rid in self.robot_ids:
-                robot_data_spec[rid] = {data_type: [] for data_type in self.data_types}
+            robot_data_spec = {
+                robot_id: {data_type: [] for data_type in self.data_types}
+                for robot_id in self.robot_ids
+            }
+
+        try:
+            robot_data_spec_with_ids = convert_robot_data_spec_names_to_ids(
+                robot_data_spec,
+                self.robot_mapping,
+            )
+        except DatasetError as exc:
+            raise DatasetError(
+                f"Failed to resolve robot_data_spec for dataset {self.name}: {exc}"
+            ) from exc
 
         synced_dataset = self._synchronize(
-            frequency=frequency, robot_data_spec=robot_data_spec
+            frequency=frequency, robot_data_spec=robot_data_spec_with_ids
         )
         synchronization_progress = self._get_synchronization_progress(synced_dataset.id)
         total = synced_dataset.num_demonstrations
@@ -481,20 +518,23 @@ class Dataset:
             id=synced_dataset.id,
             dataset=self,
             frequency=frequency,
-            robot_data_spec=robot_data_spec,
+            robot_data_spec=robot_data_spec_with_ids,
             prefetch_videos=prefetch_videos,
             max_prefetch_workers=max_prefetch_workers,
         )
 
-    def get_full_data_spec(self, robot_id: str) -> DataSpec:
-        """Get full data spec for a given robot ID in the dataset.
+    def get_full_data_spec(self, robot_key: str) -> DataSpec:
+        """Get full data spec for a given robot name (or ID) in the dataset.
 
         Args:
-            robot_id: The robot ID to get the data spec for.
+            robot_key: The robot name (or ID) to get the data spec for.
 
         Returns:
             A dictionary mapping DataType to list of data names.
         """
+        # Best-effort resolution without additional network calls.
+        # If we can resolve a robot_name to an ID, do so; otherwise delegate to server.
+        robot_id = self.robot_mapping.robot_key_to_id(robot_key) or robot_key
         response = requests.get(
             f"{API_URL}/org/{self.org_id}/datasets/{self.id}/full-data-spec/{robot_id}",
             headers=get_auth().get_headers(),
@@ -516,7 +556,20 @@ class Dataset:
             )
             response.raise_for_status()
             self._robot_ids = response.json()
+            # Populate names to keep order consistent with IDs
+            self._initialize_robot_metadata()
         return self._robot_ids
+
+    def _initialize_robot_metadata(self) -> None:
+        """Fetch robot metadata into the shared mapping cache."""
+        self.robot_mapping.ensure_loaded()
+
+    def refresh_robot_metadata(self) -> None:
+        """Refresh cached robot name mappings from the API."""
+        if self._robot_ids is None:
+            _ = self.robot_ids
+            return
+        self.robot_mapping.refresh()
 
     def __iter__(self) -> Iterator[Recording]:
         """Yield recordings one by one, fetching pages lazily."""
