@@ -272,7 +272,7 @@ async def test_join_pattern_bytes_then_metadata_transitions_to_written(
     assert row["status"] == TraceStatus.WRITTEN
     assert row["bytes_written"] == 128
     assert row["total_bytes"] == 128
-    assert row["progress_reported"] == 0
+    assert row["progress_reported"] == ProgressReportStatus.PENDING
 
 
 @pytest.mark.asyncio
