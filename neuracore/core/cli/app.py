@@ -58,7 +58,7 @@ else:
         )
         if _training_import_error:
             typer.echo(f"Import error: {_training_import_error}", err=True)
-        raise typer.Exit(code=1)
+        raise SystemExit(1)
 
 
 def main() -> None:
