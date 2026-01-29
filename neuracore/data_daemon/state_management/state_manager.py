@@ -28,28 +28,19 @@ class StateManager:
 
         self._emitter = get_emitter()
 
-        # From RDEM
         self._emitter.on(Emitter.TRACE_WRITTEN, self._handle_trace_written)
-        self._emitter.on(Emitter.START_TRACE, self.create_trace)
-
-        # From uploader
+        self._emitter.on(Emitter.START_TRACE, self._handle_start_trace)
         self._emitter.on(Emitter.UPLOAD_COMPLETE, self.handle_upload_complete)
         self._emitter.on(Emitter.UPLOADED_BYTES, self.update_bytes_uploaded)
         self._emitter.on(Emitter.UPLOAD_FAILED, self.handle_upload_failed)
-
-        # From the data bridge
         self._emitter.on(Emitter.STOP_RECORDING, self.handle_stop_recording)
-
-        # From connection manager
         self._emitter.on(Emitter.IS_CONNECTED, self.handle_is_connected)
-
-        # From progress report service
         self._emitter.on(Emitter.PROGRESS_REPORTED, self.mark_progress_as_reported)
         self._emitter.on(
             Emitter.PROGRESS_REPORT_FAILED, self.handle_progress_report_error
         )
 
-    async def create_trace(
+    async def _handle_start_trace(
         self,
         trace_id: str,
         recording_id: str,
@@ -64,26 +55,12 @@ class StateManager:
         path: str,
         total_bytes: int | None = None,
     ) -> None:
-        """Create a trace record.
+        """Handle START_TRACE event - upsert trace metadata.
 
-        This function is called when a producer wants to create a new trace.
-        It will create or update a trace record in the database and emit an event
-        to the uploader to trigger an upload.
-
-        Args:
-            trace_id (str): unique identifier for the trace.
-            recording_id (str): unique identifier for the recording.
-            data_type (DataType): type of data being recorded.
-            data_type_name (str | None): name of the data type.
-            dataset_id (str | None): unique identifier for the dataset.
-            dataset_name (str | None): name of the dataset.
-            robot_name (str | None): name of the robot.
-            robot_id (str | None): unique identifier for the robot.
-            robot_instance (int): instance of the robot.
-            path (str): path to the trace file.
-            total_bytes (int | None): total number of bytes in the trace file.
+        Creates trace in PENDING if new, updates metadata if exists.
+        If trace is complete (has both metadata and bytes), finalizes it.
         """
-        await self._store.create_trace(
+        trace = await self._store.upsert_trace_metadata(
             trace_id=trace_id,
             recording_id=recording_id,
             data_type=data_type,
@@ -96,6 +73,8 @@ class StateManager:
             path=path,
             total_bytes=total_bytes,
         )
+        if self._is_trace_complete(trace):
+            await self._finalize_trace(trace)
 
     async def handle_stop_recording(self, recording_id: str) -> None:
         """Handle a stop recording event from the data bridge.
@@ -139,38 +118,39 @@ class StateManager:
     async def _handle_trace_written(
         self, trace_id: str, recording_id: str, bytes_written: int
     ) -> None:
-        """Handle a trace written event from a producer.
+        """Handle TRACE_WRITTEN event - upsert trace bytes.
 
-        This function is called when a producer completes writing a trace.
-        It updates the trace record in the database and emits an event to
-        the uploader to trigger an upload.
-
-        Additionally, it will trigger a progress report event if all traces
-        for the recording are written.
+        Creates trace in PENDING if new, updates bytes_written if exists.
+        If trace is complete (has both metadata and bytes), finalizes it.
         """
-        # Update db
-        await self._store.mark_trace_as_written(trace_id, bytes_written)
+        trace = await self._store.upsert_trace_bytes(
+            trace_id=trace_id,
+            recording_id=recording_id,
+            bytes_written=bytes_written,
+        )
+        if self._is_trace_complete(trace):
+            await self._finalize_trace(trace)
 
-        trace_record = await self._store.get_trace(trace_id)
+    def _is_trace_complete(self, trace: TraceRecord) -> bool:
+        """Check if trace has both metadata and bytes."""
+        return trace.data_type is not None and trace.bytes_written is not None
 
-        if not trace_record:
-            logger.warning("Trace record not found: %s", trace_id)
-            return
-
-        # Update status to UPLOADING before emitting to prevent duplicate uploads
-        await self._store.update_status(trace_id, TraceStatus.UPLOADING)
+    async def _finalize_trace(self, trace: TraceRecord) -> None:
+        """Finalize a complete trace and emit READY_FOR_UPLOAD."""
+        await self._store.update_status(trace.trace_id, TraceStatus.WRITTEN)
+        await self._store.update_status(trace.trace_id, TraceStatus.UPLOADING)
 
         self._emitter.emit(
             Emitter.READY_FOR_UPLOAD,
-            trace_id,
-            trace_record.recording_id,
-            trace_record.path,
-            trace_record.data_type,
-            trace_record.data_type_name,
-            trace_record.bytes_uploaded,
+            trace.trace_id,
+            trace.recording_id,
+            trace.path,
+            trace.data_type,
+            trace.data_type_name,
+            trace.bytes_uploaded,
         )
 
-        traces = await self._store.find_traces_by_recording_id(recording_id)
+        traces = await self._store.find_traces_by_recording_id(trace.recording_id)
         await self._emit_progress_report_if_recording_stopped(traces)
 
     async def _emit_progress_report_if_recording_stopped(

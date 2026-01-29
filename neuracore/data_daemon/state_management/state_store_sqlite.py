@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, insert, select, text, update
+from sqlalchemy import delete, select, text, update
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -29,8 +30,7 @@ def _utc_now() -> datetime:
 
 
 _ALLOWED_PREVIOUS_STATUSES: dict[TraceStatus, set[TraceStatus]] = {
-    TraceStatus.WRITING: {TraceStatus.PENDING},
-    TraceStatus.WRITTEN: {TraceStatus.PENDING, TraceStatus.WRITING},
+    TraceStatus.WRITTEN: {TraceStatus.PENDING},
     TraceStatus.UPLOADING: {TraceStatus.WRITTEN, TraceStatus.PAUSED},
     TraceStatus.UPLOADED: {TraceStatus.UPLOADING},
     TraceStatus.PAUSED: {TraceStatus.UPLOADING},
@@ -337,11 +337,7 @@ class SqliteStateStore(StateStore):
             result = await conn.execute(
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
-                .where(
-                    traces.c.status.in_(
-                        [TraceStatus.PENDING, TraceStatus.WRITING, TraceStatus.WRITTEN]
-                    )
-                )
+                .where(traces.c.status.in_([TraceStatus.PENDING, TraceStatus.WRITTEN]))
                 .values(
                     status=TraceStatus.WRITTEN,
                     last_updated=_utc_now(),
@@ -399,6 +395,116 @@ class SqliteStateStore(StateStore):
                 .where(traces.c.recording_id == recording_id)
                 .values(progress_reported=1, last_updated=now)
             )
+
+    async def upsert_trace_metadata(
+        self,
+        trace_id: str,
+        recording_id: str,
+        data_type: DataType,
+        path: str,
+        data_type_name: str,
+        robot_instance: int,
+        dataset_id: str | None = None,
+        dataset_name: str | None = None,
+        robot_name: str | None = None,
+        robot_id: str | None = None,
+        total_bytes: int | None = None,
+    ) -> TraceRecord:
+        """Insert or update trace with metadata from START_TRACE.
+
+        Creates trace in PENDING if new, updates metadata fields if exists.
+        Returns the trace record after upsert.
+        """
+        now = _utc_now()
+        stmt = insert(traces).values(
+            trace_id=trace_id,
+            recording_id=recording_id,
+            data_type=data_type,
+            data_type_name=data_type_name,
+            dataset_id=dataset_id,
+            dataset_name=dataset_name,
+            robot_name=robot_name,
+            robot_id=robot_id,
+            robot_instance=robot_instance,
+            path=path,
+            total_bytes=total_bytes,
+            status=TraceStatus.PENDING,
+            bytes_uploaded=0,
+            progress_reported=0,
+            created_at=now,
+            last_updated=now,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["trace_id"],
+            set_={
+                "data_type": data_type,
+                "data_type_name": data_type_name,
+                "dataset_id": dataset_id,
+                "dataset_name": dataset_name,
+                "robot_name": robot_name,
+                "robot_id": robot_id,
+                "robot_instance": robot_instance,
+                "path": path,
+                "total_bytes": total_bytes,
+                "last_updated": now,
+            },
+        )
+        async with self._engine.begin() as conn:
+            await conn.execute(stmt)
+            row = (
+                (
+                    await conn.execute(
+                        select(traces).where(traces.c.trace_id == trace_id)
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        return TraceRecord.from_row(dict(row))
+
+    async def upsert_trace_bytes(
+        self,
+        trace_id: str,
+        recording_id: str,
+        bytes_written: int,
+    ) -> TraceRecord:
+        """Insert or update trace with bytes from TRACE_WRITTEN.
+
+        Creates trace in PENDING if new, updates bytes_written if exists.
+        Returns the trace record after upsert.
+        """
+        now = _utc_now()
+        stmt = insert(traces).values(
+            trace_id=trace_id,
+            recording_id=recording_id,
+            bytes_written=bytes_written,
+            total_bytes=bytes_written,
+            status=TraceStatus.PENDING,
+            bytes_uploaded=0,
+            progress_reported=0,
+            created_at=now,
+            last_updated=now,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["trace_id"],
+            set_={
+                "bytes_written": bytes_written,
+                "total_bytes": bytes_written,
+                "last_updated": now,
+            },
+        )
+        async with self._engine.begin() as conn:
+            await conn.execute(stmt)
+            row = (
+                (
+                    await conn.execute(
+                        select(traces).where(traces.c.trace_id == trace_id)
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        return TraceRecord.from_row(dict(row))
 
     async def close(self) -> None:
         """Close the database connection and dispose of the engine.

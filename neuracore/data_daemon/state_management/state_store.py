@@ -87,3 +87,37 @@ class StateStore(Protocol):
     async def delete_trace(self, trace_id: str) -> None:
         """Delete a trace record."""
         ...
+
+    async def upsert_trace_metadata(
+        self,
+        trace_id: str,
+        recording_id: str,
+        data_type: DataType,
+        path: str,
+        data_type_name: str,
+        robot_instance: int,
+        dataset_id: str | None = None,
+        dataset_name: str | None = None,
+        robot_name: str | None = None,
+        robot_id: str | None = None,
+        total_bytes: int | None = None,
+    ) -> TraceRecord:
+        """Insert or update trace with metadata from START_TRACE.
+
+        Creates trace in PENDING if new, updates metadata fields if exists.
+        Returns the trace record after upsert.
+        """
+        ...
+
+    async def upsert_trace_bytes(
+        self,
+        trace_id: str,
+        recording_id: str,
+        bytes_written: int,
+    ) -> TraceRecord:
+        """Insert or update trace with bytes from TRACE_WRITTEN.
+
+        Creates trace in PENDING if new, updates bytes_written if exists.
+        Returns the trace record after upsert.
+        """
+        ...

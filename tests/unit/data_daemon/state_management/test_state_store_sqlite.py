@@ -342,7 +342,10 @@ async def test_wal_mode_enabled(store: SqliteStateStore) -> None:
 
 @pytest.mark.asyncio
 async def test_state_transition_sequence(store: SqliteStateStore) -> None:
-    """Test a valid sequence of state transitions."""
+    """Test a valid sequence of state transitions.
+
+    Flow: PENDING -> WRITTEN -> UPLOADING -> UPLOADED
+    """
     await store.create_trace(
         "trace-transition",
         "rec-transition",
@@ -352,7 +355,6 @@ async def test_state_transition_sequence(store: SqliteStateStore) -> None:
         robot_instance=ROBOT_INSTANCE,
     )
 
-    await store.update_status("trace-transition", TraceStatus.WRITING)
     await store.mark_trace_as_written("trace-transition", 256)
 
     row = await _get_trace_row(store, "trace-transition")
@@ -406,7 +408,6 @@ async def test_state_recovery_after_restart(tmp_path: Path) -> None:
             path="/tmp/trace-recover.bin",
             robot_instance=ROBOT_INSTANCE,
         )
-        await store.update_status("trace-recover", TraceStatus.WRITING)
         await store.mark_trace_as_written("trace-recover", 512)
     finally:
         await store._engine.dispose()
@@ -485,7 +486,6 @@ async def test_race_conditions_on_rapid_state_changes(tmp_path: Path, caplog) ->
             path="/tmp/trace-race.bin",
             robot_instance=ROBOT_INSTANCE,
         )
-        await store.update_status("trace-race", TraceStatus.WRITING)
 
         errors: list[str] = []
 
