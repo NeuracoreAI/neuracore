@@ -14,7 +14,7 @@ from sqlalchemy import (
     func,
 )
 
-from neuracore.data_daemon.models import DataType, TraceStatus
+from neuracore.data_daemon.models import DataType, ProgressReportStatus, TraceStatus
 
 metadata = MetaData()
 
@@ -49,7 +49,16 @@ traces = Table(
     Column("bytes_written", Integer, nullable=True),
     Column("total_bytes", Integer, nullable=True, default=None),
     Column("bytes_uploaded", Integer, default=0),
-    Column("progress_reported", Integer, nullable=False, default=0),
+    Column(
+        "progress_reported",
+        Enum(
+            ProgressReportStatus,
+            native_enum=False,
+            values_callable=lambda x: [e.value for e in x],
+        ),
+        nullable=False,
+        default=ProgressReportStatus.PENDING,
+    ),
     Column("error_code", Text, nullable=True, default=None),
     Column("error_message", Text, nullable=True, default=None),
     Column("stopped_at", DateTime(timezone=False), nullable=True, default=None),
