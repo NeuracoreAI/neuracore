@@ -246,36 +246,6 @@ async def test_join_pattern_bytes_then_metadata_transitions_to_written(
 
 
 @pytest.mark.asyncio
-async def test_join_pattern_bytes_then_metadata_transitions_to_written(
-    store: SqliteStateStore,
-) -> None:
-    """Test PENDING_BYTES + metadata -> WRITTEN transition."""
-    trace = await store.upsert_trace_bytes(
-        trace_id="trace-6c",
-        recording_id="rec-6c",
-        bytes_written=128,
-    )
-    assert trace.status == TraceStatus.PENDING_BYTES
-
-    trace = await store.upsert_trace_metadata(
-        trace_id="trace-6c",
-        recording_id="rec-6c",
-        data_type=PRIMARY_DATA_TYPE,
-        data_type_name="primary",
-        path="/tmp/trace-6c.bin",
-        robot_instance=ROBOT_INSTANCE,
-    )
-
-    assert trace.status == TraceStatus.WRITTEN
-    row = await _get_trace_row(store, "trace-6c")
-    assert row is not None
-    assert row["status"] == TraceStatus.WRITTEN
-    assert row["bytes_written"] == 128
-    assert row["total_bytes"] == 128
-    assert row["progress_reported"] == ProgressReportStatus.PENDING
-
-
-@pytest.mark.asyncio
 async def test_delete_trace_removes_row(store: SqliteStateStore) -> None:
     await store.upsert_trace_metadata(
         trace_id="trace-7",

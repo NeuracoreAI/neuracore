@@ -153,11 +153,6 @@ class _RawBatchWriter:
             raw_message = cast(CompleteMessage, queue_item)
             recording_id_value = str(raw_message.recording_id)
 
-            with self._state_lock:
-                if recording_id_value in self._stopped_recordings:
-                    self.trace_message_queue.task_done()
-                    continue
-
             trace_key = _TraceKey(
                 recording_id=recording_id_value,
                 data_type=raw_message.data_type,
@@ -211,7 +206,7 @@ class _RawBatchWriter:
                     raw_message.dataset_name,
                     raw_message.robot_name,
                     raw_message.robot_id,
-                    path=str(trace_dir),
+                    str(trace_dir),  # path as positional arg
                 )
 
             if writer_state is None:

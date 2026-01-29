@@ -373,14 +373,12 @@ async def test_upload_failed_records_error(state_manager) -> None:
     )
     await asyncio.sleep(0.2)
 
-    assert store.errors == [
-        (
-            "trace-4",
-            "lost connection",
-            TraceErrorCode.NETWORK_ERROR,
-            TraceStatus.FAILED,
-        )
-    ]
+    assert store.errors == [(
+        "trace-4",
+        "lost connection",
+        TraceErrorCode.NETWORK_ERROR,
+        TraceStatus.FAILED,
+    )]
 
 
 @pytest.mark.asyncio
@@ -421,16 +419,14 @@ async def test_trace_written_emits_ready_for_upload_when_connected(
         await asyncio.sleep(0.2)
 
         # Now READY_FOR_UPLOAD should be emitted
-        assert received == [
-            (
-                "trace-5",
-                "rec-5",
-                "/tmp/trace-5.bin",
-                DataType.CUSTOM_1D,
-                "custom",
-                0,
-            )
-        ]
+        assert received == [(
+            "trace-5",
+            "rec-5",
+            "/tmp/trace-5.bin",
+            DataType.CUSTOM_1D,
+            "custom",
+            0,
+        )]
     finally:
         get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, handler)
 
@@ -666,15 +662,13 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
         get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-b", "rec-b", 10)
         await asyncio.sleep(0.3)
 
-        assert ready_events == [
-            (
-                "trace-b",
-                "rec-b",
-                "/tmp/trace-b.bin",
-                DataType.CUSTOM_1D,
-                "custom",
-                0,
-            )
-        ]
+        assert ready_events == [(
+            "trace-b",
+            "rec-b",
+            "/tmp/trace-b.bin",
+            DataType.CUSTOM_1D,
+            "custom",
+            0,
+        )]
     finally:
         get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
