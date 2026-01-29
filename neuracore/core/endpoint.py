@@ -522,8 +522,7 @@ def policy(
         model_output_order: Specification of the order that will
             be output from the model
         train_run_name: Name of the training run to load the model from.
-        robot_name: Robot identifier.
-        instance: Instance number of the robot.
+        model_file: Path to the model file to load.
         device: Torch device to run the model on (CPU or GPU, or MPS).
 
     Returns:
@@ -567,10 +566,9 @@ def policy_local_server(
         model_output_order: Specification of the order that
             will be output from the model
         train_run_name: Name of the training run to load the model from.
+        model_file: Path to the model file to load.
+        device: Device model to be loaded on.
         port: Port to run the server on.
-        device: Device model to be loaded on
-        robot_name: Robot identifier.
-        instance: Instance number of the robot.
         host: Host to bind to.
         job_id: Optional job ID to associate with the server.
 
@@ -613,8 +611,6 @@ def policy_remote_server(
 
     Args:
         endpoint_name: Name of the deployed endpoint.
-        robot_name: Robot identifier.
-        instance: Instance number of the robot.
 
     Returns:
         RemoteServerPolicy instance for remote inference.

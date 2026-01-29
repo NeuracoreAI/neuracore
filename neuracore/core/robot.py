@@ -12,6 +12,7 @@ import os
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from warnings import warn
 
@@ -21,6 +22,7 @@ from neuracore_types import RobotInstanceIdentifier
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
+from neuracore.core.utils.robot_mapping import RobotMapping
 from neuracore.data_daemon.communications_management.producer import (
     RecordingContext as DaemonRecordingContext,
 )
@@ -28,8 +30,30 @@ from neuracore.data_daemon.communications_management.producer import (
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
 from .exceptions import RobotError, ValidationError
+from .utils.http_errors import extract_error_detail
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class JointLimits:
+    """Limit and capability values associated with a single joint."""
+
+    lower: float | None = None
+    upper: float | None = None
+    effort: float | None = None
+    velocity: float | None = None
+
+
+@dataclass
+class JointInfo:
+    """Kinematic metadata describing how a joint connects two links."""
+
+    type: str | None = None
+    parent: str | None = None
+    child: str | None = None
+    axis: list[float] | None = None
+    limits: JointLimits = field(default_factory=JointLimits)
 
 
 class Robot:
@@ -264,7 +288,10 @@ class Robot:
                 "please check your internet connection and try again."
             )
         except requests.exceptions.RequestException as e:
-            raise RobotError(f"Failed to start recording: {str(e)}")
+            detail = None
+            if e.response is not None:
+                detail = extract_error_detail(e.response)
+            raise RobotError(f"Failed to start recording: {detail or str(e)}")
 
     def stop_recording(self, recording_id: str) -> None:
         """Stop an active recording session.
@@ -432,6 +459,69 @@ class Robot:
         # Create the files dict with the ZIP data
         return {"robot_package": ("robot_package.zip", zip_data, "application/zip")}
 
+    def _load_urdf(self) -> ET.Element:
+        """Load the URDF contents either from disk or by downloading the package.
+
+        Returns:
+            Parsed URDF XML root element.
+
+        Raises:
+            RobotError: If no URDF is available or if fetching/parsing fails.
+        """
+        if self.urdf_path:
+            try:
+                return ET.parse(self.urdf_path).getroot()
+            except FileNotFoundError:
+                logger.debug(
+                    "URDF path %s not found locally, attempting to fetch from server.",
+                    self.urdf_path,
+                )
+            except ET.ParseError as e:
+                raise RobotError(f"Failed to parse URDF: {str(e)}") from e
+
+        if not self.id:
+            raise RobotError(
+                "Robot not initialized and no local URDF available. "
+                "Provide urdf_path or call init() first."
+            )
+        if not self.org_id:
+            raise RobotError(
+                "Unauthorised: no organisation selected. "
+                "Run `nc-select-org` and try again."
+            )
+
+        try:
+            response = requests.get(
+                f"{API_URL}/org/{self.org_id}/robots/{self.id}/package?is_shared={self.shared}",
+                headers=self._auth.get_headers(),
+            )
+            response.raise_for_status()
+        except requests.exceptions.ConnectionError:
+            raise RobotError(
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            )
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                raise RobotError(
+                    "No URDF available for this robot. "
+                    "Upload a URDF package or provide urdf_path."
+                ) from e
+            raise RobotError(f"Failed to download URDF package: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            raise RobotError(f"Failed to download URDF package: {str(e)}")
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(response.content), "r") as zf:
+                if "robot.urdf" not in zf.namelist():
+                    raise RobotError("URDF package does not contain robot.urdf")
+                try:
+                    return ET.fromstring(zf.read("robot.urdf"))
+                except ET.ParseError as e:
+                    raise RobotError(f"Failed to parse URDF: {str(e)}") from e
+        except zipfile.BadZipFile as e:
+            raise RobotError("Invalid URDF package received from server.") from e
+
     def _upload_urdf_and_meshes(self) -> None:
         """Upload URDF and associated mesh files as a ZIP package to the server.
 
@@ -471,6 +561,59 @@ class Robot:
             raise RobotError(f"Failed to upload URDF package: {str(e)}")
         except Exception as e:
             raise RobotError(f"Error preparing URDF package: {str(e)}")
+
+    def get_joint_info(self) -> dict[str, JointInfo]:
+        """Return metadata for all joints defined in the robot URDF.
+
+        Returns:
+            Mapping of joint name to metadata including type, parent/child links,
+            axis, and joint limits.
+
+        Raises:
+            RobotError: If no URDF is available or parsing fails.
+        """
+        root = self._load_urdf()
+
+        joint_info: dict[str, JointInfo] = {}
+        for joint in root.iter("joint"):
+            name = joint.get("name")
+            if not name:
+                continue
+            info = JointInfo(type=joint.get("type"))
+            limits = info.limits
+
+            parent = joint.find("parent")
+            if parent is not None:
+                info.parent = parent.get("link")
+
+            child = joint.find("child")
+            if child is not None:
+                info.child = child.get("link")
+
+            axis = joint.find("axis")
+            axis_xyz = axis.get("xyz") if axis is not None else None
+            if axis_xyz:
+                try:
+                    info.axis = [float(val) for val in axis_xyz.split()]
+                except ValueError:
+                    logger.warning("Could not parse axis for joint %s", name)
+
+            limit = joint.find("limit")
+            if limit is not None:
+                for key in ("lower", "upper", "effort", "velocity"):
+                    if key in limit.attrib:
+                        try:
+                            setattr(limits, key, float(limit.attrib[key]))
+                        except ValueError:
+                            logger.warning(
+                                "Could not parse limit '%s' for joint %s", key, name
+                            )
+
+            joint_info[name] = info
+
+        if not joint_info:
+            raise RobotError("No joints found in the robot URDF.")
+        return joint_info
 
     def cancel_recording(self, recording_id: str) -> None:
         """Cancel an active recording without saving any data.
@@ -567,6 +710,68 @@ def get_robot(robot_name: str, instance: int) -> Robot:
             f"Robot {robot_name}:{instance} not initialized. Call init() first."
         )
     return _robots[key]
+
+
+def _update_local_robot_name_cache(robot_id: str, new_robot_name: str) -> None:
+    """Update in-memory robot name mappings for a renamed robot."""
+    for name, rid in list(_robot_name_id_mapping.items()):
+        if rid == robot_id and name != new_robot_name:
+            _robot_name_id_mapping.pop(name, None)
+    _robot_name_id_mapping[new_robot_name] = robot_id
+    for robot in _robots.values():
+        if robot.id == robot_id:
+            robot.name = new_robot_name
+
+
+def update_robot_name(
+    robot_key: str,
+    new_robot_name: str,
+    instance: int = 0,
+    shared: bool = False,
+) -> str:
+    """Update a robot's name on the server.
+
+    Args:
+        robot_key: Robot old name or ID to update.
+        new_robot_name: New display name to set.
+        instance: Robot instance to associate with the update.
+        shared: Whether the robot is shared/open-source.
+
+    Returns:
+        The resolved robot ID.
+
+    Raises:
+        RobotError: If the update request fails.
+        ValueError: If the robot key or new name is empty.
+    """
+    if not robot_key:
+        raise ValueError("Robot old name or ID cannot be empty.")
+    if not new_robot_name:
+        raise ValueError("New robot name cannot be empty.")
+    if not get_auth().is_authenticated:
+        raise RobotError("Not authenticated. Please call nc.login() first.")
+
+    resolved_org_id = get_current_org()
+    if not resolved_org_id:
+        raise RobotError("No organization selected. Please call nc.select_org() first.")
+    robot_id = _robot_name_id_mapping.get(robot_key, robot_key)
+    try:
+        response = requests.post(
+            f"{API_URL}/org/{resolved_org_id}/robots?is_shared={shared}&robot_id={robot_id}",
+            json={"name": new_robot_name, "instance": instance},
+            headers=get_auth().get_headers(),
+        )
+        response.raise_for_status()
+    except requests.exceptions.ConnectionError:
+        raise RobotError(
+            "Failed to connect to neuracore server, "
+            "please check your internet connection and try again."
+        )
+    except requests.exceptions.RequestException as e:
+        raise RobotError(f"Failed to update robot name: {str(e)}")
+    _update_local_robot_name_cache(robot_id, new_robot_name)
+    RobotMapping.for_org(resolved_org_id, is_shared=shared).refresh()
+    return robot_id
 
 
 def list_organization_robots(

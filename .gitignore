@@ -36,6 +36,7 @@ htmlcov/
 .coverage
 *.cover
 .coverage.*
+.pre-commit-cache/
 .cache
 nosetests.xml
 coverage.xml

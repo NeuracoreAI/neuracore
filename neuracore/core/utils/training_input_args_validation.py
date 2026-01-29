@@ -38,24 +38,32 @@ def validate_robot_existence(
 ) -> None:
     """Validate that all robots referenced by the input/output specs exist.
 
-    This checks that every robot ID appearing in either the input or output
+    This checks that every robot name appearing in either the input or output
     robot data specifications is present in the dataset.
 
     Args:
         dataset: Dataset metadata object.
         dataset_name: Human-readable dataset name (used for error messages).
-        input_robot_data_spec: Input robot data specification keyed by robot ID.
-        output_robot_data_spec: Output robot data specification keyed by robot ID.
+        input_robot_data_spec: Input robot data specification keyed by robot name/ID.
+        output_robot_data_spec: Output robot data specification keyed by robot name/ID.
 
     Raises:
-        ValueError: If any robot ID referenced in the specs is not present in the
+        ValueError: If any robot name/ID referenced in the specs is not present in the
             dataset.
     """
-    robot_ids = input_robot_data_spec.keys() | output_robot_data_spec.keys()
-    for robot_id in robot_ids:
-        if robot_id not in dataset.robot_ids:
+    # robot_keys can be either robot name or ID
+    robot_keys = input_robot_data_spec.keys() | output_robot_data_spec.keys()
+    mapping = dataset.robot_mapping
+    for robot_key in robot_keys:
+        try:
+            resolved_id = mapping.robot_key_to_id(
+                robot_key,
+            )
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if resolved_id is None:
             raise ValueError(
-                f"Robot ID {robot_id} not found in dataset {dataset_name}. "
+                f"Robot {robot_key} not found in dataset {dataset_name}. "
                 "Please check the dataset contents."
             )
 
@@ -92,7 +100,7 @@ def validate_data_specs(
         dataset: Dataset metadata object.
         dataset_name: Human-readable dataset name (used for error messages).
         algorithm_name: Algorithm name (used for error messages).
-        robot_data_spec: Robot data specification keyed by robot ID.
+        robot_data_spec: Robot data specification keyed by robot name/ID.
         supported_data_types: Data types supported by the algorithm for this spec kind.
         spec_kind: Label used in error messages (typically "input" or "output").
 
@@ -100,8 +108,22 @@ def validate_data_specs(
         ValueError: If any requested data type is unsupported by the algorithm or
             missing from the dataset.
     """
-    for robot_id, robot_data in robot_data_spec.items():
-        dataset_spec: DataSpec = dataset.get_full_data_spec(robot_id)
+    known_robot_ids = set(dataset.robot_ids)
+    for robot_key, robot_data in robot_data_spec.items():
+        # Resolve robot key to ID (supports name or ID)
+        if robot_key in known_robot_ids:
+            resolved_robot_id = robot_key
+        else:
+            try:
+                resolved_robot_id = dataset.robot_mapping.robot_key_to_id(robot_key)
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+            if resolved_robot_id is None or resolved_robot_id not in known_robot_ids:
+                raise ValueError(
+                    f"Robot {robot_key} not found in dataset {dataset_name}. "
+                    "Please check the dataset contents."
+                )
+        dataset_spec: DataSpec = dataset.get_full_data_spec(resolved_robot_id)
         for data_type, data_value in robot_data.items():
             if data_type not in supported_data_types:
                 raise ValueError(
@@ -201,8 +223,8 @@ def validate_training_params(
         dataset: Dataset metadata object.
         dataset_name: Human-readable dataset name (used for error messages).
         algorithm_name: Algorithm name.
-        input_robot_data_spec: Input robot data specification keyed by robot ID.
-        output_robot_data_spec: Output robot data specification keyed by robot ID.
+        input_robot_data_spec: Input robot data specification keyed by robot name/ID.
+        output_robot_data_spec: Output robot data specification keyed by robot name/ID.
         algorithm_jsons: List of algorithm metadata dictionaries.
 
     Raises:

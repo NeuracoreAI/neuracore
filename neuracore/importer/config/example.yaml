@@ -1,0 +1,155 @@
+input_dataset_name: example_input_dataset
+dataset_type: RLDS # RLDS | LEROBOT | TFDS, can be left blank and we will detect based on file structure
+
+output_dataset:
+  name: example_output_dataset
+  tags: [table, top_view]
+  description: "This dataset contains top-view images of tables."
+
+robot:
+  name: example_robot
+  urdf_path: "" # path to the urdf file if available
+  # mjcf_path: "" # path to the mjcf file if available
+  overwrite_existing: true # whether to overwrite the existing robot configuration
+
+frequency: 50.0 # frequency of the data in the input dataset
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation # path to the data in the input dataset
+    format:
+      image_convention: CHANNELS_LAST # CHANNELS_FIRST | CHANNELS_LAST
+      order_of_channels: RGB # RGB | BGR
+    mapping: 
+      - name: image # name in neuracore
+        source_name: image # name in input dataset
+
+  JOINT_POSITIONS:
+    source: observation.state # path to the data in the input dataset
+    format:
+      angle_units: RADIANS # RADIANS | DEGREES
+    mapping:
+      - name: joint_1 # name in neuracore
+        offset: 0.0 # offset to apply to the input data in radians
+        inverted: false # default false; true to flip sign
+        index: 0 # index in input dataset, auto increment if none are given
+
+      - name: joint_2
+        offset: -1.5707963267948966 # -pi/2
+        inverted: true
+        index: 1
+
+      - name: joint_3
+        offset: 0.0
+        inverted: false
+        index: 2
+
+      - name: joint_4
+        offset: -1.5707963267948966 # -pi/2
+        inverted: true
+        index: 3
+
+      - name: joint_5
+        offset: 0.0
+        inverted: true
+        index: 4
+
+      - name: joint_6
+        offset: 0.0
+        inverted: false
+        index: 5
+
+  JOINT_VELOCITIES:
+    source: observation.state_vel # path to the data in the input dataset
+    format:
+      angle_units: RADIANS # RADIANS | DEGREES
+    mapping:
+      - name: joint_1
+      - name: joint_2
+      - name: joint_3
+        inverted: true
+      - name: joint_4
+      - name: joint_5
+      - name: joint_6
+  
+  JOINT_TORQUES:
+    source: observation.state_torque # path to the data in the input dataset
+    format:
+      torque_units: NM # NM | NCM
+    mapping:
+      - name: joint_1
+      - name: joint_2
+      - name: joint_3
+        inverted: true
+      - name: joint_4
+      - name: joint_5
+      - name: joint_6
+
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.state # path to the data in the input dataset
+    format:
+      normalize: # normalize the data to be between 0 and 1
+        min: 0.0
+        max: 1.0
+    mapping:
+      - name: gripper
+        index: 6
+        inverted: false
+
+  END_EFFECTOR_POSES:
+    source: observation.state # path to the data in the input dataset
+    format:
+      pose_type: POSITION_ORIENTATION  # MATRIX | POSITION_ORIENTATION
+      # Only required if format == POSITION_ORIENTATION
+      orientation:
+        type: EULER # QUATERNION | EULER | MATRIX | AXIS_ANGLE
+        euler_order: XYZ # XYZ | ZYX | YXZ | XZY | YZX | ZXY
+        angle_units: RADIANS # RADIANS | DEGREES
+        # Example for quaternion
+        # type: QUATERNION
+        # quaternion_order: XYZW # XYZW | WXYZ
+        # angle_units: RADIANS       # optional, default RADIANS
+    mapping:
+      - name: end_effector_pose
+        index_range: 
+          # validation of index length
+          # 16 if format == MATRIX
+          # 3 + 4 = 7 if format == POSITION_ORIENTATION and orientation.type == QUATERNION
+          # 3 + 3 = 6 if format == POSITION_ORIENTATION and orientation.type == EULER
+          start: 0
+          end: 6
+
+  LANGUAGE:
+    source: language_instruction # path to the data in the input dataset
+    format:
+      language_type: BYTES # STRING | BYTES
+    mapping:
+      - name: instruction # name in neuracore
+
+  DEPTH_IMAGES:
+    source: observation # path to the data in the input dataset
+    format:
+      distance_units: M # M | MM
+    # makes all nans, posinf, neginf zeroes
+    mapping:
+      - name: depth_static
+        source_name: depth_static
+      - name: depth_gripper
+        source_name: depth_gripper
+
+  POINT_CLOUDS:
+    source: observation # path to the data in the input dataset
+    format:
+      distance_units: M # M | MM
+    mapping:
+      - name: point_cloud
+        source_name: point_cloud
+
+  CUSTOM_1D:
+    source: observation.state # path to the data in the input dataset
+    mapping:
+      - name: custom_1d
+        index_range: # range of the data in the input dataset
+          start: 0
+          end: 10
+

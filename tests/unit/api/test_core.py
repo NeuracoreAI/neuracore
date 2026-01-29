@@ -3,6 +3,7 @@ import json
 import requests_mock
 
 import neuracore as nc
+from neuracore.api import core as api_core
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 
@@ -121,3 +122,41 @@ def test_connect_robot(
     # Verify robot connection
     assert robot is not None
     assert robot.name == "test_robot"
+
+
+def test_update_robot_name_calls_underlying_and_returns_robot_id(monkeypatch):
+    calls: list[tuple] = []
+
+    def fake_update_robot_name(
+        robot_name: str,
+        new_robot_name: str,
+        instance: int = 0,
+        shared: bool = False,
+    ) -> str:
+        calls.append((robot_name, new_robot_name, instance, shared))
+        return "robot_id_123"
+
+    monkeypatch.setattr(api_core, "_update_robot_name", fake_update_robot_name)
+
+    robot_id = nc.update_robot_name(
+        "old_name_or_id", "new_name", instance=2, shared=True
+    )
+
+    assert robot_id == "robot_id_123"
+    assert calls == [("old_name_or_id", "new_name", 2, True)]
+
+
+def test_update_robot_name_forwards_arguments(monkeypatch):
+    def fake_update_robot_name(
+        robot_name: str,
+        new_robot_name: str,
+        instance: int = 0,
+        shared: bool = False,
+    ) -> str:
+        return "robot_id_123"
+
+    monkeypatch.setattr(api_core, "_update_robot_name", fake_update_robot_name)
+
+    robot_id = nc.update_robot_name("old", "new")
+
+    assert robot_id == "robot_id_123"

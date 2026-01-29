@@ -36,7 +36,7 @@ input_data_types:
 output_data_types:
   - "JOINT_TARGET_POSITIONS"
 
-# Dict[str, Dict[DataType, List[str]], e.g., {"robot-id-1": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...]}}
+# Dict[str, Dict[DataType, List[str]], e.g., {"my_robot": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...]}}
 # You can also pass in an empty dict {} to use all available data for all robots
 input_robot_data_spec: null
 output_robot_data_spec: null
