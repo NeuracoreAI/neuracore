@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, insert, select, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import case, delete, select, text, update
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from neuracore.data_daemon.models import (
@@ -29,8 +29,7 @@ def _utc_now() -> datetime:
 
 
 _ALLOWED_PREVIOUS_STATUSES: dict[TraceStatus, set[TraceStatus]] = {
-    TraceStatus.WRITING: {TraceStatus.PENDING},
-    TraceStatus.WRITTEN: {TraceStatus.PENDING, TraceStatus.WRITING},
+    TraceStatus.WRITTEN: {TraceStatus.INITIALIZING, TraceStatus.PENDING_BYTES},
     TraceStatus.UPLOADING: {TraceStatus.WRITTEN, TraceStatus.PAUSED},
     TraceStatus.UPLOADED: {TraceStatus.UPLOADING},
     TraceStatus.PAUSED: {TraceStatus.UPLOADING},
@@ -90,80 +89,6 @@ class SqliteStateStore(StateStore):
                 .where(traces.c.recording_id == recording_id)
                 .values(stopped_at=_utc_now())
             )
-
-    async def create_trace(
-        self,
-        trace_id: str,
-        recording_id: str,
-        data_type: DataType,
-        path: str,
-        data_type_name: str,
-        robot_instance: int,
-        dataset_id: str | None = None,
-        dataset_name: str | None = None,
-        robot_name: str | None = None,
-        robot_id: str | None = None,
-        total_bytes: int | None = None,
-    ) -> None:
-        """Create a trace record.
-
-        This function creates a trace record or updates an existing trace record if
-        a trace with the same trace ID already exists.
-
-        Args:
-            trace_id (str): Unique identifier for the trace.
-            recording_id (str): Unique identifier for the recording.
-            data_type (DataType): Type of data being recorded.
-            path (str): Path to the trace file.
-            data_type_name (str | None): Name of the data type.
-            dataset_id (str | None): Unique identifier for the dataset.
-            dataset_name (str | None): Name of the dataset.
-            robot_name (str | None): Name of the robot.
-            robot_id (str | None): Unique identifier for the robot.
-            total_bytes (int | None): Total number of bytes in the trace file.
-
-        Returns:
-            None
-        """
-        now = _utc_now()
-        async with self._engine.begin() as conn:
-            try:
-                await conn.execute(
-                    insert(traces).values(
-                        trace_id=trace_id,
-                        recording_id=recording_id,
-                        data_type=data_type,
-                        data_type_name=data_type_name,
-                        dataset_id=dataset_id,
-                        dataset_name=dataset_name,
-                        robot_name=robot_name,
-                        robot_id=robot_id,
-                        robot_instance=robot_instance,
-                        path=path,
-                        total_bytes=total_bytes,
-                        status=TraceStatus.PENDING,
-                        bytes_written=0,
-                        bytes_uploaded=0,
-                        progress_reported=0,
-                        error_code=None,
-                        error_message=None,
-                        created_at=now,
-                        last_updated=now,
-                    )
-                )
-            except IntegrityError:
-                await conn.execute(
-                    update(traces)
-                    .where(traces.c.trace_id == trace_id)
-                    .values(
-                        recording_id=recording_id,
-                        data_type=data_type,
-                        data_type_name=data_type_name,
-                        path=path,
-                        total_bytes=total_bytes,
-                        last_updated=now,
-                    )
-                )
 
     async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
         """Increment the number of bytes uploaded for a trace.
@@ -238,7 +163,7 @@ class SqliteStateStore(StateStore):
         trace_id: str,
         status: TraceStatus,
         error_message: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Update the status and optional error message for a trace.
 
         Args:
@@ -246,6 +171,12 @@ class SqliteStateStore(StateStore):
             status (TraceStatus): New status for the trace.
             error_message (str | None): Optional error message to
             associate with the trace.
+
+        Returns:
+            True if status was changed, False if already at target status.
+
+        Raises:
+            ValueError: If trace not found or invalid transition.
         """
         now = _utc_now()
         values: dict[str, Any] = {"status": status, "last_updated": now}
@@ -281,14 +212,14 @@ class SqliteStateStore(StateStore):
                 if current is None:
                     raise ValueError(f"Trace not found: {trace_id}")
                 if current == status:
-                    logger.warning(
-                        f"Failed to update trace status: Trace {trace_id} "
-                        f"already has status {status}"
+                    logger.debug(
+                        "Trace %s already has status %s (no-op)", trace_id, status
                     )
-                    return
+                    return False
                 raise ValueError(
                     f"Invalid status transition {current} -> {status} for {trace_id}"
                 )
+            return True
 
     async def record_error(
         self,
@@ -329,45 +260,6 @@ class SqliteStateStore(StateStore):
         async with self._engine.begin() as conn:
             await conn.execute(delete(traces).where(traces.c.trace_id == trace_id))
 
-    async def mark_trace_as_written(self, trace_id: str, bytes_written: int) -> None:
-        """Mark a trace as written, ready for upload.
-
-        Args:
-            trace_id (str): Unique identifier for the trace.
-            bytes_written (int): Number of bytes written to the trace.
-
-        Updates the trace record in the database to mark it as written
-        and ready for upload.
-        """
-        async with self._engine.begin() as conn:
-            result = await conn.execute(
-                update(traces)
-                .where(traces.c.trace_id == trace_id)
-                .where(
-                    traces.c.status.in_(
-                        [TraceStatus.PENDING, TraceStatus.WRITING, TraceStatus.WRITTEN]
-                    )
-                )
-                .values(
-                    status=TraceStatus.WRITTEN,
-                    last_updated=_utc_now(),
-                    total_bytes=bytes_written,
-                    bytes_written=bytes_written,
-                )
-            )
-            if result.rowcount == 0:
-                current = (
-                    await conn.execute(
-                        select(traces.c.status).where(traces.c.trace_id == trace_id)
-                    )
-                ).scalar_one_or_none()
-                if current is None:
-                    raise ValueError(f"Trace not found: {trace_id}")
-                raise ValueError(
-                    f"Invalid status transition {current} -> {TraceStatus.WRITTEN} "
-                    f"for {trace_id}"
-                )
-
     async def find_ready_traces(self) -> list[TraceRecord]:
         """Return all traces with WRITTEN status (ready for upload)."""
         async with self._engine.begin() as conn:
@@ -405,6 +297,140 @@ class SqliteStateStore(StateStore):
                 .where(traces.c.recording_id == recording_id)
                 .values(progress_reported=1, last_updated=now)
             )
+
+    async def upsert_trace_metadata(
+        self,
+        trace_id: str,
+        recording_id: str,
+        data_type: DataType,
+        path: str,
+        data_type_name: str,
+        robot_instance: int,
+        dataset_id: str | None = None,
+        dataset_name: str | None = None,
+        robot_name: str | None = None,
+        robot_id: str | None = None,
+        total_bytes: int | None = None,
+    ) -> TraceRecord:
+        """Insert or update trace with metadata from START_TRACE.
+
+        State transitions:
+        - If trace doesn't exist: creates with INITIALIZING status
+        - If trace exists with PENDING_BYTES: transitions to WRITTEN
+        - If trace exists with other status: updates metadata only
+
+        Returns the trace record after upsert.
+        """
+        now = _utc_now()
+        stmt = insert(traces).values(
+            trace_id=trace_id,
+            recording_id=recording_id,
+            data_type=data_type,
+            data_type_name=data_type_name,
+            dataset_id=dataset_id,
+            dataset_name=dataset_name,
+            robot_name=robot_name,
+            robot_id=robot_id,
+            robot_instance=robot_instance,
+            path=path,
+            total_bytes=total_bytes,
+            status=TraceStatus.INITIALIZING,
+            bytes_uploaded=0,
+            progress_reported=0,
+            created_at=now,
+            last_updated=now,
+        )
+        update_set: dict[str, Any] = {
+            "data_type": data_type,
+            "data_type_name": data_type_name,
+            "dataset_id": dataset_id,
+            "dataset_name": dataset_name,
+            "robot_name": robot_name,
+            "robot_id": robot_id,
+            "robot_instance": robot_instance,
+            "path": path,
+            "last_updated": now,
+            "status": case(
+                (
+                    traces.c.status == TraceStatus.PENDING_BYTES,
+                    TraceStatus.WRITTEN,
+                ),
+                else_=traces.c.status,
+            ),
+        }
+        if total_bytes is not None:
+            update_set["total_bytes"] = total_bytes
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["trace_id"],
+            set_=update_set,
+        )
+        async with self._engine.begin() as conn:
+            await conn.execute(stmt)
+            row = (
+                (
+                    await conn.execute(
+                        select(traces).where(traces.c.trace_id == trace_id)
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        return TraceRecord.from_row(dict(row))
+
+    async def upsert_trace_bytes(
+        self,
+        trace_id: str,
+        recording_id: str,
+        bytes_written: int,
+    ) -> TraceRecord:
+        """Insert or update trace with bytes from TRACE_WRITTEN.
+
+        State transitions:
+        - If trace doesn't exist: creates with PENDING_BYTES status
+        - If trace exists with INITIALIZING: transitions to WRITTEN
+        - If trace exists with other status: updates bytes only
+
+        Returns the trace record after upsert.
+        """
+        now = _utc_now()
+        stmt = insert(traces).values(
+            trace_id=trace_id,
+            recording_id=recording_id,
+            bytes_written=bytes_written,
+            total_bytes=bytes_written,
+            status=TraceStatus.PENDING_BYTES,
+            bytes_uploaded=0,
+            progress_reported=0,
+            created_at=now,
+            last_updated=now,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["trace_id"],
+            set_={
+                "bytes_written": bytes_written,
+                "total_bytes": bytes_written,
+                "last_updated": now,
+                "status": case(
+                    (
+                        traces.c.status == TraceStatus.INITIALIZING,
+                        TraceStatus.WRITTEN,
+                    ),
+                    else_=traces.c.status,
+                ),
+            },
+        )
+        async with self._engine.begin() as conn:
+            await conn.execute(stmt)
+            row = (
+                (
+                    await conn.execute(
+                        select(traces).where(traces.c.trace_id == trace_id)
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        return TraceRecord.from_row(dict(row))
 
     async def close(self) -> None:
         """Close the database connection and dispose of the engine.
