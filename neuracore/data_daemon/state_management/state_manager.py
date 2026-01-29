@@ -30,14 +30,14 @@ class StateManager:
 
         self._emitter.on(Emitter.TRACE_WRITTEN, self._handle_trace_written)
         self._emitter.on(Emitter.START_TRACE, self._handle_start_trace)
-        self._emitter.on(Emitter.UPLOAD_COMPLETE, self.handle_upload_complete)
-        self._emitter.on(Emitter.UPLOADED_BYTES, self.update_bytes_uploaded)
-        self._emitter.on(Emitter.UPLOAD_FAILED, self.handle_upload_failed)
-        self._emitter.on(Emitter.STOP_RECORDING, self.handle_stop_recording)
-        self._emitter.on(Emitter.IS_CONNECTED, self.handle_is_connected)
-        self._emitter.on(Emitter.PROGRESS_REPORTED, self.mark_progress_as_reported)
+        self._emitter.on(Emitter.UPLOAD_COMPLETE, self._handle_upload_complete)
+        self._emitter.on(Emitter.UPLOADED_BYTES, self._handle_uploaded_bytes)
+        self._emitter.on(Emitter.UPLOAD_FAILED, self._handle_upload_failed)
+        self._emitter.on(Emitter.STOP_RECORDING, self._handle_stop_recording)
+        self._emitter.on(Emitter.IS_CONNECTED, self._handle_is_connected)
+        self._emitter.on(Emitter.PROGRESS_REPORTED, self._handle_progress_reported)
         self._emitter.on(
-            Emitter.PROGRESS_REPORT_FAILED, self.handle_progress_report_error
+            Emitter.PROGRESS_REPORT_FAILED, self._handle_progress_report_failed
         )
 
     async def _handle_start_trace(
@@ -76,7 +76,7 @@ class StateManager:
         if self._is_trace_complete(trace):
             await self._finalize_trace(trace)
 
-    async def handle_stop_recording(self, recording_id: str) -> None:
+    async def _handle_stop_recording(self, recording_id: str) -> None:
         """Handle a stop recording event from the data bridge.
 
         This function is called when the data bridge wants to stop all traces
@@ -89,11 +89,11 @@ class StateManager:
         self._emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
         await self._store.set_stopped_ats(recording_id)
 
-    async def handle_is_connected(self, is_connected: bool) -> None:
+    async def _handle_is_connected(self, is_connected: bool) -> None:
         """Handle a connection status event from the data bridge."""
         pass
 
-    async def handle_upload_complete(self, trace_id: str) -> None:
+    async def _handle_upload_complete(self, trace_id: str) -> None:
         """Handle an upload complete event from an uploader.
 
         This function is called when an uploader completes an upload.
@@ -181,8 +181,8 @@ class StateManager:
         await asyncio.sleep(0)
         self._emitter.emit(Emitter.PROGRESS_REPORT, start_time, end_time, traces)
 
-    async def mark_progress_as_reported(self, recording_id: str) -> None:
-        """Mark a recording as progress-reported.
+    async def _handle_progress_reported(self, recording_id: str) -> None:
+        """Handle progress reported event.
 
         Args:
             recording_id (str): unique identifier for the recording.
@@ -202,8 +202,8 @@ class StateManager:
                 latest_end = trace.last_updated
         return earliest_start.timestamp(), latest_end.timestamp()
 
-    async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
-        """Increment uploaded byte count for a trace."""
+    async def _handle_uploaded_bytes(self, trace_id: str, bytes_uploaded: int) -> None:
+        """Handle uploaded bytes event."""
         await self._store.update_bytes_uploaded(trace_id, bytes_uploaded)
 
     async def update_status(
@@ -216,7 +216,7 @@ class StateManager:
             error_message=error_message,
         )
 
-    async def handle_upload_failed(
+    async def _handle_upload_failed(
         self,
         trace_id: str,
         bytes_uploaded: int,
@@ -231,9 +231,9 @@ class StateManager:
             error_message=error_message,
             status=status,
         )
-        await self.update_bytes_uploaded(trace_id, bytes_uploaded)
+        await self._handle_uploaded_bytes(trace_id, bytes_uploaded)
 
-    async def handle_progress_report_error(
+    async def _handle_progress_report_failed(
         self, recording_id: str, error_message: str
     ) -> None:
         """Handle a progress report error event from an uploader.

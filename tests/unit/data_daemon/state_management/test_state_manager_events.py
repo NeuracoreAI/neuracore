@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -15,6 +17,64 @@ from neuracore.data_daemon.models import (
     TraceStatus,
 )
 from neuracore.data_daemon.state_management.state_manager import StateManager
+
+DEFAULT_TIMEOUT = 2.0
+
+
+class EventCollector:
+    """Collects events and signals when expected count is reached."""
+
+    def __init__(self, expected_count: int = 1) -> None:
+        self.events: list[tuple] = []
+        self.expected_count = expected_count
+        self._done = asyncio.Event()
+
+    def handler(self, *args: Any) -> None:
+        self.events.append(args)
+        if len(self.events) >= self.expected_count:
+            self._done.set()
+
+    async def wait(self, timeout: float = DEFAULT_TIMEOUT) -> list[tuple]:
+        await asyncio.wait_for(self._done.wait(), timeout=timeout)
+        return self.events
+
+    async def wait_for_count(
+        self, count: int, timeout: float = DEFAULT_TIMEOUT
+    ) -> list[tuple]:
+        self.expected_count = count
+        if len(self.events) >= count:
+            return self.events
+        self._done.clear()
+        await asyncio.wait_for(self._done.wait(), timeout=timeout)
+        return self.events
+
+
+@asynccontextmanager
+async def listen_for(event: str, expected_count: int = 1) -> EventCollector:
+    """Context manager that listens for events and cleans up."""
+    collector = EventCollector(expected_count)
+    emitter = get_emitter()
+    emitter.on(event, collector.handler)
+    try:
+        yield collector
+    finally:
+        emitter.remove_listener(event, collector.handler)
+
+
+@asynccontextmanager
+async def listen_for_multiple(events: dict[str, int]) -> dict[str, EventCollector]:
+    """Context manager that listens for multiple event types."""
+    collectors: dict[str, EventCollector] = {}
+    emitter = get_emitter()
+    for event, expected_count in events.items():
+        collector = EventCollector(expected_count)
+        collectors[event] = collector
+        emitter.on(event, collector.handler)
+    try:
+        yield collectors
+    finally:
+        for event, collector in collectors.items():
+            emitter.remove_listener(event, collector.handler)
 
 
 class FakeStateStore:
@@ -213,12 +273,22 @@ def _cleanup_state_manager(manager: StateManager) -> None:
     get_emitter().remove_listener(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
     get_emitter().remove_listener(Emitter.START_TRACE, manager._handle_start_trace)
     get_emitter().remove_listener(
-        Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete
+        Emitter.UPLOAD_COMPLETE, manager._handle_upload_complete
     )
-    get_emitter().remove_listener(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
-    get_emitter().remove_listener(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
-    get_emitter().remove_listener(Emitter.STOP_RECORDING, manager.handle_stop_recording)
-    get_emitter().remove_listener(Emitter.IS_CONNECTED, manager.handle_is_connected)
+    get_emitter().remove_listener(
+        Emitter.UPLOADED_BYTES, manager._handle_uploaded_bytes
+    )
+    get_emitter().remove_listener(Emitter.UPLOAD_FAILED, manager._handle_upload_failed)
+    get_emitter().remove_listener(
+        Emitter.STOP_RECORDING, manager._handle_stop_recording
+    )
+    get_emitter().remove_listener(Emitter.IS_CONNECTED, manager._handle_is_connected)
+    get_emitter().remove_listener(
+        Emitter.PROGRESS_REPORTED, manager._handle_progress_reported
+    )
+    get_emitter().remove_listener(
+        Emitter.PROGRESS_REPORT_FAILED, manager._handle_progress_report_failed
+    )
 
 
 @pytest_asyncio.fixture
@@ -269,32 +339,26 @@ def _make_trace(
 @pytest.mark.asyncio
 async def test_stop_recording_emits_stop_all_and_sets_stopped(state_manager) -> None:
     manager, store = state_manager
-    received: list[str] = []
 
-    def handler(recording_id: str) -> None:
-        received.append(recording_id)
+    async with listen_for(Emitter.STOP_ALL_TRACES_FOR_RECORDING) as collector:
+        await manager._handle_stop_recording("rec-1")
 
-    get_emitter().on(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)
-    try:
-        get_emitter().emit(Emitter.STOP_RECORDING, "rec-1")
-        await asyncio.sleep(0.2)
+        events = await collector.wait()
+        assert events == [("rec-1",)]
         assert store.stopped == ["rec-1"]
-        assert received == ["rec-1"]
-    finally:
-        get_emitter().remove_listener(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)
 
 
 @pytest.mark.asyncio
 async def test_start_trace_creates_trace(state_manager) -> None:
     """START_TRACE creates trace in PENDING with metadata (partial data)."""
-    _, store = state_manager
-    get_emitter().emit(
-        Emitter.START_TRACE,
+    manager, store = state_manager
+
+    await manager._handle_start_trace(
         "trace-1",
         "rec-1",
         DataType.CUSTOM_1D,
         "custom",
-        0,  # robot_instance
+        0,
         None,
         None,
         None,
@@ -302,9 +366,7 @@ async def test_start_trace_creates_trace(state_manager) -> None:
         path="/tmp/trace-1.bin",
         total_bytes=128,
     )
-    await asyncio.sleep(0.2)
 
-    # Trace should be in store with metadata but no bytes_written yet
     trace = store._traces_by_id.get("trace-1")
     assert trace is not None
     assert trace.trace_id == "trace-1"
@@ -314,22 +376,21 @@ async def test_start_trace_creates_trace(state_manager) -> None:
     assert trace.path == "/tmp/trace-1.bin"
     assert trace.total_bytes == 128
     assert trace.status == TraceStatus.PENDING
-    assert trace.bytes_written is None  # Not complete yet
+    assert trace.bytes_written is None
 
 
 @pytest.mark.asyncio
 async def test_uploaded_bytes_updates_store(state_manager) -> None:
-    _, store = state_manager
-    get_emitter().emit(Emitter.UPLOADED_BYTES, "trace-2", 42)
-    await asyncio.sleep(0.2)
+    manager, store = state_manager
+
+    await manager._handle_uploaded_bytes("trace-2", 42)
 
     assert store.updated_bytes == [("trace-2", 42)]
 
 
 @pytest.mark.asyncio
 async def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
-    _, store = state_manager
-    received: list[tuple[str, str, DataType]] = []
+    manager, store = state_manager
 
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     trace = _make_trace(
@@ -340,32 +401,25 @@ async def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
     )
     store._traces_by_id["trace-3"] = trace
 
-    def handler(recording_id: str, trace_id: str, data_type: DataType) -> None:
-        received.append((recording_id, trace_id, data_type))
+    async with listen_for(Emitter.DELETE_TRACE) as collector:
+        await manager._handle_upload_complete("trace-3")
 
-    get_emitter().on(Emitter.DELETE_TRACE, handler)
-    try:
-        get_emitter().emit(Emitter.UPLOAD_COMPLETE, "trace-3")
-        await asyncio.sleep(0.2)
-
+        events = await collector.wait()
+        assert events == [("rec-3", "trace-3", DataType.CUSTOM_1D)]
         assert store.deleted == ["trace-3"]
-        assert received == [("rec-3", "trace-3", DataType.CUSTOM_1D)]
-    finally:
-        get_emitter().remove_listener(Emitter.DELETE_TRACE, handler)
 
 
 @pytest.mark.asyncio
 async def test_upload_failed_records_error(state_manager) -> None:
-    _, store = state_manager
-    get_emitter().emit(
-        Emitter.UPLOAD_FAILED,
+    manager, store = state_manager
+
+    await manager._handle_upload_failed(
         "trace-4",
         12,
         TraceStatus.FAILED,
         TraceErrorCode.NETWORK_ERROR,
         "lost connection",
     )
-    await asyncio.sleep(0.2)
 
     assert store.errors == [(
         "trace-4",
@@ -381,39 +435,26 @@ async def test_trace_written_emits_ready_for_upload_when_connected(
 ) -> None:
     """When both START_TRACE and TRACE_WRITTEN arrive, emit READY_FOR_UPLOAD."""
     manager, store = state_manager
-    received: list[tuple] = []
 
-    def handler(*args) -> None:
-        received.append(args)
+    await manager._handle_start_trace(
+        "trace-5",
+        "rec-5",
+        DataType.CUSTOM_1D,
+        "custom",
+        0,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-5.bin",
+        total_bytes=64,
+    )
 
-    get_emitter().on(Emitter.READY_FOR_UPLOAD, handler)
-    try:
-        # First: START_TRACE with metadata (creates PENDING trace)
-        get_emitter().emit(
-            Emitter.START_TRACE,
-            "trace-5",
-            "rec-5",
-            DataType.CUSTOM_1D,
-            "custom",
-            0,  # robot_instance
-            None,
-            None,
-            None,
-            None,
-            path="/tmp/trace-5.bin",
-            total_bytes=64,
-        )
-        await asyncio.sleep(0.2)
+    async with listen_for(Emitter.READY_FOR_UPLOAD) as collector:
+        await manager._handle_trace_written("trace-5", "rec-5", 64)
 
-        # No READY_FOR_UPLOAD yet (missing bytes_written)
-        assert received == []
-
-        # Second: TRACE_WRITTEN with bytes (completes the trace)
-        get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-5", "rec-5", 64)
-        await asyncio.sleep(0.2)
-
-        # Now READY_FOR_UPLOAD should be emitted
-        assert received == [(
+        events = await collector.wait()
+        assert events == [(
             "trace-5",
             "rec-5",
             "/tmp/trace-5.bin",
@@ -421,8 +462,6 @@ async def test_trace_written_emits_ready_for_upload_when_connected(
             "custom",
             0,
         )]
-    finally:
-        get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, handler)
 
 
 @pytest.mark.asyncio
@@ -430,74 +469,48 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
     """Test that progress report is emitted when all traces in recording complete."""
     manager, store = state_manager
 
-    ready_events: list[tuple] = []
-    progress_events: list[tuple] = []
+    await manager._handle_start_trace(
+        "trace-1",
+        "rec-1",
+        DataType.CUSTOM_1D,
+        "custom",
+        0,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-1.bin",
+        total_bytes=10,
+    )
+    await manager._handle_start_trace(
+        "trace-2",
+        "rec-1",
+        DataType.CUSTOM_1D,
+        "custom",
+        0,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-2.bin",
+        total_bytes=10,
+    )
 
-    def ready_handler(*args) -> None:
-        ready_events.append(args)
+    async with listen_for_multiple({
+        Emitter.READY_FOR_UPLOAD: 2,
+        Emitter.PROGRESS_REPORT: 1,
+    }) as collectors:
+        await manager._handle_trace_written("trace-1", "rec-1", 10)
+        await manager._handle_trace_written("trace-2", "rec-1", 10)
 
-    def progress_handler(*args) -> None:
-        progress_events.append(args)
+        ready_events = await collectors[Emitter.READY_FOR_UPLOAD].wait()
+        assert len(ready_events) == 2
 
-    get_emitter().on(Emitter.READY_FOR_UPLOAD, ready_handler)
-    get_emitter().on(Emitter.PROGRESS_REPORT, progress_handler)
-    try:
-        # Create two traces in the same recording via START_TRACE
-        get_emitter().emit(
-            Emitter.START_TRACE,
-            "trace-1",
-            "rec-1",
-            DataType.CUSTOM_1D,
-            "custom",
-            0,
-            None,
-            None,
-            None,
-            None,
-            path="/tmp/trace-1.bin",
-            total_bytes=10,
-        )
-        get_emitter().emit(
-            Emitter.START_TRACE,
-            "trace-2",
-            "rec-1",
-            DataType.CUSTOM_1D,
-            "custom",
-            0,
-            None,
-            None,
-            None,
-            None,
-            path="/tmp/trace-2.bin",
-            total_bytes=10,
-        )
-        await asyncio.sleep(0.2)
-
-        # No progress report yet - neither trace has bytes_written
-        assert len(progress_events) == 0
-
-        # Complete first trace
-        get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-1", "rec-1", 10)
-        await asyncio.sleep(0.2)
-
-        # Still no progress report - trace-2 not complete
-        assert len(progress_events) == 0
-        assert len(ready_events) == 1  # trace-1 ready for upload
-
-        # Complete second trace
-        get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-2", "rec-1", 10)
-        await asyncio.sleep(0.3)
-
-        # Now progress report should be emitted
-        assert len(ready_events) == 2  # both traces ready
+        progress_events = await collectors[Emitter.PROGRESS_REPORT].wait()
         assert len(progress_events) == 1
         start_time, end_time, traces = progress_events[0]
         assert {trace.trace_id for trace in traces} == {"trace-1", "trace-2"}
-        # Verify time bounds are reasonable (both created close to now)
         assert start_time <= end_time
-    finally:
-        get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
-        get_emitter().remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
 
 
 @pytest.mark.asyncio
@@ -505,7 +518,7 @@ async def test_trace_written_waits_for_all_traces_before_progress_report(
     state_manager,
 ) -> None:
     """Test that progress report waits for all traces before emitting."""
-    _, store = state_manager
+    manager, store = state_manager
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
     trace_written = _make_trace(
@@ -530,28 +543,20 @@ async def test_trace_written_waits_for_all_traces_before_progress_report(
     store._traces_by_id["trace-pending"] = trace_pending
     store._traces_by_recording["rec-1"] = [trace_written, trace_pending]
 
-    progress_events: list[tuple] = []
+    async with listen_for(Emitter.PROGRESS_REPORT) as collector:
+        await manager._handle_is_connected(True)
+        await manager._handle_trace_written("trace-written", "rec-1", 8)
 
-    def progress_handler(*args) -> None:
-        progress_events.append(args)
+        with pytest.raises(asyncio.TimeoutError):
+            await collector.wait(timeout=0.1)
 
-    get_emitter().on(Emitter.PROGRESS_REPORT, progress_handler)
-    try:
-        get_emitter().emit(Emitter.IS_CONNECTED, True)
-        await asyncio.sleep(0.1)
-
-        get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-written", "rec-1", 8)
-        await asyncio.sleep(0.3)
-
-        assert progress_events == []
-    finally:
-        get_emitter().remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
+        assert collector.events == []
 
 
 @pytest.mark.asyncio
 async def test_recording_completion_isolated_across_recordings(state_manager) -> None:
     """Test that recordings complete independently of each other."""
-    _, store = state_manager
+    manager, store = state_manager
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
     trace_a = _make_trace(
@@ -586,30 +591,20 @@ async def test_recording_completion_isolated_across_recordings(state_manager) ->
     store._traces_by_recording["rec-a"] = [trace_a]
     store._traces_by_recording["rec-b"] = [trace_b1, trace_b2]
 
-    progress_events: list[tuple] = []
+    async with listen_for(Emitter.PROGRESS_REPORT) as collector:
+        await manager._handle_is_connected(True)
+        await manager._handle_trace_written("trace-b2", "rec-b", 10)
 
-    def progress_handler(*args) -> None:
-        progress_events.append(args)
-
-    get_emitter().on(Emitter.PROGRESS_REPORT, progress_handler)
-    try:
-        get_emitter().emit(Emitter.IS_CONNECTED, True)
-        await asyncio.sleep(0.1)
-
-        get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-b2", "rec-b", 10)
-        await asyncio.sleep(0.3)
-
-        assert len(progress_events) == 1
-        _, _, traces = progress_events[0]
+        events = await collector.wait()
+        assert len(events) == 1
+        _, _, traces = events[0]
         assert {trace.recording_id for trace in traces} == {"rec-b"}
-    finally:
-        get_emitter().remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
 
 
 @pytest.mark.asyncio
 async def test_upload_failed_does_not_block_other_recordings(state_manager) -> None:
     """Test that upload failure in one recording doesn't block others."""
-    _, store = state_manager
+    manager, store = state_manager
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
     trace_a = _make_trace(
@@ -633,30 +628,19 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
     store._traces_by_recording["rec-a"] = [trace_a]
     store._traces_by_recording["rec-b"] = [trace_b]
 
-    ready_events: list[tuple] = []
-
-    def ready_handler(*args) -> None:
-        ready_events.append(args)
-
-    get_emitter().on(Emitter.READY_FOR_UPLOAD, ready_handler)
-    try:
-        get_emitter().emit(Emitter.IS_CONNECTED, True)
-        await asyncio.sleep(0.1)
-
-        get_emitter().emit(
-            Emitter.UPLOAD_FAILED,
+    async with listen_for(Emitter.READY_FOR_UPLOAD) as collector:
+        await manager._handle_is_connected(True)
+        await manager._handle_upload_failed(
             "trace-a",
             0,
             TraceStatus.WRITTEN,
             TraceErrorCode.DISK_FULL,
             "disk full",
         )
-        await asyncio.sleep(0.1)
+        await manager._handle_trace_written("trace-b", "rec-b", 10)
 
-        get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-b", "rec-b", 10)
-        await asyncio.sleep(0.3)
-
-        assert ready_events == [(
+        events = await collector.wait()
+        assert events == [(
             "trace-b",
             "rec-b",
             "/tmp/trace-b.bin",
@@ -664,5 +648,3 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
             "custom",
             0,
         )]
-    finally:
-        get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
