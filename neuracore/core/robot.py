@@ -312,6 +312,7 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         DaemonRecordingContext(recording_id=recording_id).stop_recording()
+        self._stop_all_streams()
 
         try:
             response = requests.post(
@@ -337,6 +338,14 @@ class Robot:
             )
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to stop recording: {str(e)}")
+
+    def _stop_all_streams(self) -> None:
+        """Stop recording on all data streams for this robot instance."""
+        for stream_id, stream in self._data_streams.items():
+            try:
+                stream.stop_recording()
+            except Exception:
+                logger.exception("Failed to stop data stream %s", stream_id)
 
     def is_recording(self) -> bool:
         """Check if the robot is currently recording data.

@@ -81,7 +81,7 @@ def init_emitter(*, loop: asyncio.AbstractEventLoop) -> Emitter:
     """
     global _emitter
     if _emitter is not None:
-        raise RuntimeError("Emitter already initialized")
+        return _emitter
     _emitter = Emitter(loop=loop)
     return _emitter
 

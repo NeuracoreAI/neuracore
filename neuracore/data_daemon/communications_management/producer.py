@@ -72,6 +72,8 @@ class Producer:
         self._stop_event = threading.Event()
         self.recording_id: str | None = recording_id
         self.id = id or str(uuid.uuid4())
+        self._heartbeat_interval = 1.0
+        self._heartbeat_thread: threading.Thread | None = None
 
         if self.socket is None:
             raise RuntimeError(
@@ -79,6 +81,51 @@ class Producer:
                 "Start the daemon with `nc-daemon start` before logging data. "
                 "Data cannot be captured without a running daemon."
             )
+
+    def start_producer(self) -> None:
+        """Starts the producer's heartbeat loop.
+
+        This function starts a separate thread which is responsible for sending
+        periodic heartbeats to the daemon. If a heartbeat fails, it will log
+        a warning message but continue running.
+
+        """
+        if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
+            return
+
+        self._stop_event.clear()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop, name="producer-heartbeat", daemon=True
+        )
+        self._heartbeat_thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        """Heartbeat loop for producer.
+
+        This function runs in a separate thread and is responsible for sending
+        periodic heartbeats to the daemon. If a heartbeat fails, it will log
+        a warning message but continue running.
+
+        """
+        self.heartbeat()
+
+        while not self._stop_event.wait(self._heartbeat_interval):
+            try:
+                self.heartbeat()
+            except Exception as exc:
+                logger.warning("Heartbeat failed: %s", exc)
+
+    def heartbeat(self) -> None:
+        """Send a heartbeat message to the daemon.
+
+        This message is used by the daemon to detect whether a producer is still alive.
+        If the daemon does not receive a heartbeat message
+        from a producer within a certain
+        timeout period, it will assume that the producer has stopped and will clean up
+        any associated resources (e.g. the ring buffer).
+
+        """
+        self._send(CommandType.HEARTBEAT, {})
 
     def set_recording_id(self, recording_id: str | None) -> None:
         """Set the recording ID for the producer.
@@ -122,6 +169,8 @@ class Producer:
     def stop_producer(self) -> None:
         """Stops the producer and cleans up any associated resources."""
         self._stop_event.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=1)
         if self.socket is not None:
             self.socket.close(0)
             self.socket = None
@@ -213,7 +262,6 @@ class Producer:
             raise ValueError("Dataset ID or name required")
 
         total_chunks = math.ceil(len(data) / self.chunk_size)
-
         for idx in range(total_chunks):
             start = idx * self.chunk_size
             end = min(start + self.chunk_size, len(data))
@@ -241,7 +289,10 @@ class Producer:
 
         This method starts a new trace and opens a ring buffer.
         """
-        self.start_new_trace()
+        if not self.trace_id:
+            self.start_new_trace()
+
+        self.start_producer()
         self.open_ring_buffer()
 
     def cleanup_producer(self) -> None:
