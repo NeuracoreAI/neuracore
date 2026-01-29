@@ -88,26 +88,15 @@ class FakeStateStore:
         self.deleted.append(trace_id)
 
 
-def _cleanup_state_manager(manager: StateManager) -> None:
-    get_emitter().remove_listener(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
-    get_emitter().remove_listener(Emitter.START_TRACE, manager.create_trace)
-    get_emitter().remove_listener(
-        Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete
-    )
-    get_emitter().remove_listener(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
-    get_emitter().remove_listener(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
-    get_emitter().remove_listener(Emitter.STOP_RECORDING, manager.handle_stop_recording)
-    get_emitter().remove_listener(Emitter.IS_CONNECTED, manager.handle_is_connected)
-
-
 @pytest_asyncio.fixture
 async def state_manager() -> tuple[StateManager, FakeStateStore]:
     store = FakeStateStore()
     manager = StateManager(store)
+    manager.start()
     try:
         yield manager, store
     finally:
-        _cleanup_state_manager(manager)
+        await manager.shutdown()
 
 
 def _make_trace(
@@ -156,7 +145,7 @@ async def test_stop_recording_emits_stop_all_and_sets_stopped(state_manager) -> 
     get_emitter().on(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)
     try:
         get_emitter().emit(Emitter.STOP_RECORDING, "rec-1")
-        await asyncio.sleep(0.2)
+        await manager.wait_until_idle()
         assert store.stopped == ["rec-1"]
         assert received == ["rec-1"]
     finally:
@@ -165,7 +154,7 @@ async def test_stop_recording_emits_stop_all_and_sets_stopped(state_manager) -> 
 
 @pytest.mark.asyncio
 async def test_start_trace_creates_trace(state_manager) -> None:
-    _, store = state_manager
+    manager, store = state_manager
     get_emitter().emit(
         Emitter.START_TRACE,
         "trace-1",
@@ -179,7 +168,7 @@ async def test_start_trace_creates_trace(state_manager) -> None:
         path="/tmp/trace-1.bin",
         total_bytes=128,
     )
-    await asyncio.sleep(0.2)
+    await manager.wait_until_idle()
 
     assert len(store.created) == 1
     payload = store.created[0]
@@ -193,16 +182,16 @@ async def test_start_trace_creates_trace(state_manager) -> None:
 
 @pytest.mark.asyncio
 async def test_uploaded_bytes_updates_store(state_manager) -> None:
-    _, store = state_manager
+    manager, store = state_manager
     get_emitter().emit(Emitter.UPLOADED_BYTES, "trace-2", 42)
-    await asyncio.sleep(0.2)
+    await manager.wait_until_idle()
 
     assert store.updated_bytes == [("trace-2", 42)]
 
 
 @pytest.mark.asyncio
 async def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
-    _, store = state_manager
+    manager, store = state_manager
     received: list[tuple[str, str, DataType]] = []
 
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -220,7 +209,7 @@ async def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
     get_emitter().on(Emitter.DELETE_TRACE, handler)
     try:
         get_emitter().emit(Emitter.UPLOAD_COMPLETE, "trace-3")
-        await asyncio.sleep(0.2)
+        await manager.wait_until_idle()
 
         assert store.deleted == ["trace-3"]
         assert received == [("rec-3", "trace-3", DataType.CUSTOM_1D)]
@@ -230,7 +219,7 @@ async def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
 
 @pytest.mark.asyncio
 async def test_upload_failed_records_error(state_manager) -> None:
-    _, store = state_manager
+    manager, store = state_manager
     get_emitter().emit(
         Emitter.UPLOAD_FAILED,
         "trace-4",
@@ -239,7 +228,7 @@ async def test_upload_failed_records_error(state_manager) -> None:
         TraceErrorCode.NETWORK_ERROR,
         "lost connection",
     )
-    await asyncio.sleep(0.2)
+    await manager.wait_until_idle()
 
     assert store.errors == [(
         "trace-4",
@@ -272,10 +261,10 @@ async def test_trace_written_emits_ready_for_upload_when_connected(
     get_emitter().on(Emitter.READY_FOR_UPLOAD, handler)
     try:
         get_emitter().emit(Emitter.IS_CONNECTED, True)
-        await asyncio.sleep(0.2)
+        await manager.wait_until_idle()
 
         get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-5", "rec-5", 64)
-        await asyncio.sleep(0.2)
+        await manager.wait_until_idle()
 
         assert store.marked_written == [("trace-5", 64)]
         assert received == [(
@@ -320,7 +309,7 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
     store._traces_by_recording["rec-1"] = [trace_pending, trace_written]
 
     get_emitter().emit(Emitter.IS_CONNECTED, True)
-    await asyncio.sleep(0.1)
+    await manager.wait_until_idle()
 
     ready_events: list[tuple] = []
     progress_events: list[tuple] = []
@@ -335,7 +324,8 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
     get_emitter().on(Emitter.PROGRESS_REPORT, progress_handler)
     try:
         get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-1", "rec-1", 10)
-        await asyncio.sleep(0.3)
+        await manager.wait_until_idle()
+        await asyncio.sleep(0)
 
         assert ready_events == [(
             "trace-1",
@@ -352,7 +342,7 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
         assert {trace.trace_id for trace in traces} == {"trace-1", "trace-2"}
 
         get_emitter().emit(Emitter.UPLOADED_BYTES, "trace-1", 5)
-        await asyncio.sleep(0.1)
+        await manager.wait_until_idle()
         assert store.updated_bytes == [("trace-1", 5)]
     finally:
         get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
@@ -364,7 +354,7 @@ async def test_trace_written_waits_for_all_traces_before_progress_report(
     state_manager,
 ) -> None:
     """Test that progress report waits for all traces before emitting."""
-    _, store = state_manager
+    manager, store = state_manager
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
     trace_written = _make_trace(
@@ -397,10 +387,10 @@ async def test_trace_written_waits_for_all_traces_before_progress_report(
     get_emitter().on(Emitter.PROGRESS_REPORT, progress_handler)
     try:
         get_emitter().emit(Emitter.IS_CONNECTED, True)
-        await asyncio.sleep(0.1)
+        await manager.wait_until_idle()
 
         get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-written", "rec-1", 8)
-        await asyncio.sleep(0.3)
+        await manager.wait_until_idle()
 
         assert progress_events == []
     finally:
@@ -410,7 +400,7 @@ async def test_trace_written_waits_for_all_traces_before_progress_report(
 @pytest.mark.asyncio
 async def test_recording_completion_isolated_across_recordings(state_manager) -> None:
     """Test that recordings complete independently of each other."""
-    _, store = state_manager
+    manager, store = state_manager
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
     trace_a = _make_trace(
@@ -452,10 +442,11 @@ async def test_recording_completion_isolated_across_recordings(state_manager) ->
     get_emitter().on(Emitter.PROGRESS_REPORT, progress_handler)
     try:
         get_emitter().emit(Emitter.IS_CONNECTED, True)
-        await asyncio.sleep(0.1)
+        await manager.wait_until_idle()
 
         get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-b2", "rec-b", 10)
-        await asyncio.sleep(0.3)
+        await manager.wait_until_idle()
+        await asyncio.sleep(0)
 
         assert len(progress_events) == 1
         _, _, traces = progress_events[0]
@@ -467,7 +458,7 @@ async def test_recording_completion_isolated_across_recordings(state_manager) ->
 @pytest.mark.asyncio
 async def test_upload_failed_does_not_block_other_recordings(state_manager) -> None:
     """Test that upload failure in one recording doesn't block others."""
-    _, store = state_manager
+    manager, store = state_manager
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
     trace_a = _make_trace(
@@ -497,7 +488,7 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
     get_emitter().on(Emitter.READY_FOR_UPLOAD, ready_handler)
     try:
         get_emitter().emit(Emitter.IS_CONNECTED, True)
-        await asyncio.sleep(0.1)
+        await manager.wait_until_idle()
 
         get_emitter().emit(
             Emitter.UPLOAD_FAILED,
@@ -507,10 +498,10 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
             TraceErrorCode.DISK_FULL,
             "disk full",
         )
-        await asyncio.sleep(0.1)
+        await manager.wait_until_idle()
 
         get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-b", "rec-b", 10)
-        await asyncio.sleep(0.3)
+        await manager.wait_until_idle()
 
         assert ready_events == [(
             "trace-b",

@@ -15,27 +15,46 @@ from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStat
 from neuracore.data_daemon.state_management.tables import traces
 
 
-def _cleanup_state_manager(manager: StateManager) -> None:
-    emitter = get_emitter()
-    emitter.remove_listener(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
-    emitter.remove_listener(Emitter.START_TRACE, manager.create_trace)
-    emitter.remove_listener(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
-    emitter.remove_listener(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
-    emitter.remove_listener(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
-    emitter.remove_listener(Emitter.STOP_RECORDING, manager.handle_stop_recording)
-    emitter.remove_listener(Emitter.IS_CONNECTED, manager.handle_is_connected)
-
-
 @pytest_asyncio.fixture
 async def manager_store(tmp_path) -> tuple[StateManager, SqliteStateStore]:
     store = SqliteStateStore(tmp_path / "state.db")
     await store.init_async_store()
     manager = StateManager(store)
+    manager.start()
     try:
         yield manager, store
     finally:
-        _cleanup_state_manager(manager)
+        await manager.shutdown()
         await store.close()
+
+
+async def _emit_start_trace(
+    manager: StateManager,
+    trace_id: str,
+    recording_id: str,
+    data_type: DataType,
+    data_type_name: str,
+    robot_instance: int,
+    *,
+    path: str,
+    total_bytes: int | None = None,
+) -> None:
+    """Emit START_TRACE event and wait for it to be processed."""
+    get_emitter().emit(
+        Emitter.START_TRACE,
+        trace_id,
+        recording_id,
+        data_type,
+        data_type_name,
+        robot_instance,
+        None,
+        None,
+        None,
+        None,
+        path=path,
+        total_bytes=total_bytes,
+    )
+    await manager.wait_until_idle()
 
 
 async def _set_created_at(
@@ -65,7 +84,8 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
     created_early = datetime(2024, 1, 1)
     created_late = datetime(2024, 1, 2)
 
-    await manager.create_trace(
+    await _emit_start_trace(
+        manager,
         "trace-1",
         "rec-1",
         DataType.CUSTOM_1D,
@@ -74,7 +94,8 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
         path="/tmp/trace-1.bin",
         total_bytes=10,
     )
-    await manager.create_trace(
+    await _emit_start_trace(
+        manager,
         "trace-2",
         "rec-1",
         DataType.CUSTOM_1D,
@@ -88,7 +109,7 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
 
     emitter.emit(Emitter.UPLOADED_BYTES, "trace-2", 4)
     emitter.emit(Emitter.IS_CONNECTED, True)
-    await asyncio.sleep(0.1)
+    await manager.wait_until_idle()
 
     ready_events: list[tuple] = []
     progress_events: list[tuple] = []
@@ -107,7 +128,7 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
         before_second = datetime.now()
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-1", "rec-1", 10)
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-2", "rec-1", 10)
-        await asyncio.sleep(0.2)
+        await manager.wait_until_idle()
         after_second = datetime.now()
 
         assert len(ready_events) == 2
@@ -151,7 +172,8 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
 async def test_uploaded_bytes_updates_store(manager_store) -> None:
     manager, store = manager_store
     emitter = get_emitter()
-    await manager.create_trace(
+    await _emit_start_trace(
+        manager,
         "trace-uploaded",
         "rec-uploaded",
         DataType.CUSTOM_1D,
@@ -161,7 +183,7 @@ async def test_uploaded_bytes_updates_store(manager_store) -> None:
     )
 
     emitter.emit(Emitter.UPLOADED_BYTES, "trace-uploaded", 5)
-    await asyncio.sleep(0.1)
+    await manager.wait_until_idle()
     trace = await store.get_trace("trace-uploaded")
     assert trace is not None
     assert trace.bytes_uploaded == 5
@@ -170,7 +192,8 @@ async def test_uploaded_bytes_updates_store(manager_store) -> None:
 @pytest.mark.asyncio
 async def test_invalid_transition_raises_via_manager(manager_store) -> None:
     manager, _ = manager_store
-    await manager.create_trace(
+    await _emit_start_trace(
+        manager,
         "trace-invalid",
         "rec-invalid",
         DataType.CUSTOM_1D,
@@ -185,37 +208,41 @@ async def test_invalid_transition_raises_via_manager(manager_store) -> None:
 
 @pytest.mark.asyncio
 async def test_multiple_state_managers_share_sqlite_db(tmp_path) -> None:
+    """Test that two stores sharing a SQLite database can work together.
+
+    Note: This test focuses on SQLite concurrency at the store level.
+    With the event-driven architecture, having two state managers listening
+    to the same global emitter is not a supported pattern - each manager
+    would receive all events. For production, there should be one
+    StateManager per daemon process.
+    """
     db_path = tmp_path / "state.db"
     store_one = SqliteStateStore(db_path)
     store_two = SqliteStateStore(db_path)
     await store_one.init_async_store()
     await store_two.init_async_store()
-    manager_one = StateManager(store_one)
-    manager_two = StateManager(store_two)
 
     try:
-        await manager_one.create_trace(
-            "trace-multi-1",
-            "rec-shared",
-            DataType.CUSTOM_1D,
-            "custom",
-            1,
+        await store_one.create_trace(
+            trace_id="trace-multi-1",
+            recording_id="rec-shared",
+            data_type=DataType.CUSTOM_1D,
+            data_type_name="custom",
+            robot_instance=1,
             path="/tmp/trace-multi-1.bin",
         )
-        await manager_two.create_trace(
-            "trace-multi-2",
-            "rec-shared",
-            DataType.CUSTOM_1D,
-            "custom",
-            1,
+        await store_two.create_trace(
+            trace_id="trace-multi-2",
+            recording_id="rec-shared",
+            data_type=DataType.CUSTOM_1D,
+            data_type_name="custom",
+            robot_instance=1,
             path="/tmp/trace-multi-2.bin",
         )
 
         assert await store_one.get_trace("trace-multi-1") is not None
         assert await store_one.get_trace("trace-multi-2") is not None
     finally:
-        _cleanup_state_manager(manager_one)
-        _cleanup_state_manager(manager_two)
         await store_one.close()
         await store_two.close()
 
@@ -274,6 +301,8 @@ async def test_race_conditions_on_rapid_state_changes(tmp_path, caplog) -> None:
     The second task will update the state to WRITTEN, then UPLOADING, then UPLOADED.
     The test asserts that the final state of the trace is UPLOADED
     and that a ValueError is raised when updating the state.
+
+    Note: This test focuses on SQLite concurrency at the store level.
     """
 
     db_path = tmp_path / "state.db"
@@ -284,12 +313,12 @@ async def test_race_conditions_on_rapid_state_changes(tmp_path, caplog) -> None:
     manager_one = StateManager(store_one)
     manager_two = StateManager(store_two)
     try:
-        await manager_one.create_trace(
-            "trace-race",
-            "rec-race",
-            DataType.CUSTOM_1D,
-            "custom",
-            1,
+        await store_one.create_trace(
+            trace_id="trace-race",
+            recording_id="rec-race",
+            data_type=DataType.CUSTOM_1D,
+            data_type_name="custom",
+            robot_instance=1,
             path="/tmp/trace-race.bin",
         )
         await manager_one.update_status("trace-race", TraceStatus.WRITING)
@@ -315,8 +344,6 @@ async def test_race_conditions_on_rapid_state_changes(tmp_path, caplog) -> None:
         )
         assert await _get_trace_status(store_one, "trace-race") == TraceStatus.UPLOADED
     finally:
-        _cleanup_state_manager(manager_one)
-        _cleanup_state_manager(manager_two)
         await store_one.close()
         await store_two.close()
 
@@ -328,8 +355,10 @@ async def test_state_recovery_after_restart(tmp_path) -> None:
     store = SqliteStateStore(db_path)
     await store.init_async_store()
     manager = StateManager(store)
+    manager.start()
     try:
-        await manager.create_trace(
+        await _emit_start_trace(
+            manager,
             "trace-recover",
             "rec-recover",
             DataType.CUSTOM_1D,
@@ -339,9 +368,9 @@ async def test_state_recovery_after_restart(tmp_path) -> None:
         )
         await manager.update_status("trace-recover", TraceStatus.WRITING)
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-recover", "rec-recover", 8)
-        await asyncio.sleep(0.1)
+        await manager.wait_until_idle()
     finally:
-        _cleanup_state_manager(manager)
+        await manager.shutdown()
         await store.close()
 
     recovered_store = SqliteStateStore(db_path)
@@ -372,7 +401,8 @@ async def test_simultaneous_recordings_emit_progress_reports(manager_store) -> N
         ("trace-b1", "rec-b"),
         ("trace-b2", "rec-b"),
     ]:
-        await manager.create_trace(
+        await _emit_start_trace(
+            manager,
             trace_id,
             recording_id,
             DataType.CUSTOM_1D,
@@ -419,7 +449,8 @@ async def test_simultaneous_recordings_emit_progress_reports(manager_store) -> N
 async def test_encoder_crash_does_not_block_other_recordings(manager_store) -> None:
     manager, _ = manager_store
     emitter = get_emitter()
-    await manager.create_trace(
+    await _emit_start_trace(
+        manager,
         "trace-a",
         "rec-a",
         DataType.CUSTOM_1D,
@@ -428,7 +459,8 @@ async def test_encoder_crash_does_not_block_other_recordings(manager_store) -> N
         path="/tmp/trace-a.bin",
         total_bytes=10,
     )
-    await manager.create_trace(
+    await _emit_start_trace(
+        manager,
         "trace-b",
         "rec-b",
         DataType.CUSTOM_1D,
@@ -495,7 +527,8 @@ async def test_status_is_uploading_during_active_upload(manager_store) -> None:
     manager, store = manager_store
     emitter = get_emitter()
 
-    await manager.create_trace(
+    await _emit_start_trace(
+        manager,
         "trace-upload-status",
         "rec-upload-status",
         DataType.CUSTOM_1D,
@@ -566,7 +599,8 @@ async def test_two_traces_same_recording_sequential_completion(manager_store) ->
     manager, store = manager_store
     emitter = get_emitter()
 
-    await manager.create_trace(
+    await _emit_start_trace(
+        manager,
         "trace-seq-1",
         "rec-seq",
         DataType.CUSTOM_1D,
@@ -575,7 +609,8 @@ async def test_two_traces_same_recording_sequential_completion(manager_store) ->
         path="/tmp/trace-seq-1.bin",
         total_bytes=32,
     )
-    await manager.create_trace(
+    await _emit_start_trace(
+        manager,
         "trace-seq-2",
         "rec-seq",
         DataType.CUSTOM_1D,
@@ -651,7 +686,8 @@ async def test_two_traces_staggered_completion(manager_store) -> None:
     manager, store = manager_store
     emitter = get_emitter()
 
-    await manager.create_trace(
+    await _emit_start_trace(
+        manager,
         "trace-stag-a",
         "rec-stag",
         DataType.CUSTOM_1D,
@@ -660,7 +696,8 @@ async def test_two_traces_staggered_completion(manager_store) -> None:
         path="/tmp/trace-stag-a.bin",
         total_bytes=32,
     )
-    await manager.create_trace(
+    await _emit_start_trace(
+        manager,
         "trace-stag-b",
         "rec-stag",
         DataType.CUSTOM_1D,

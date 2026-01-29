@@ -21,7 +21,7 @@ INITIALIZATION SEQUENCE
          │     ├── AuthManager (initialize_auth with config)
          │     ├── aiohttp.ClientSession
          │     ├── SqliteStateStore + init_async_store()
-         │     ├── StateManager (registers event listeners)
+         │     ├── StateManager + start() (event queue worker)
          │     ├── UploadManager (listens for READY_FOR_UPLOAD)
          │     ├── ConnectionManager + start() (monitors API)
          │     └── ProgressReporter (listens for PROGRESS_REPORT)
@@ -183,7 +183,8 @@ async def bootstrap_async_services(
     logger.info("SqliteStateStore initialized at %s", db_path)
 
     state_manager = StateManager(state_store)
-    logger.info("StateManager initialized")
+    state_manager.start()
+    logger.info("StateManager initialized and worker started")
 
     upload_manager = UploadManager(config, client_session)
     logger.info("UploadManager initialized")
@@ -229,6 +230,12 @@ async def shutdown_async_services(services: AsyncServices) -> None:
         logger.debug("UploadManager shutdown")
     except Exception:
         logger.exception("Error shutting down UploadManager")
+
+    try:
+        await services.state_manager.shutdown()
+        logger.debug("StateManager shutdown")
+    except Exception:
+        logger.exception("Error shutting down StateManager")
 
     try:
         await services.state_store.close()
