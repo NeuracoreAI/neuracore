@@ -46,6 +46,11 @@ class UploadManager(TraceManager):
         self._emitter = get_emitter()
         self._emitter.on(Emitter.READY_FOR_UPLOAD, self._on_ready_for_upload)
 
+        # Semaphore to serialize uploads when bandwidth limiting is enabled
+        self._upload_semaphore: asyncio.Semaphore | None = None
+        if config.bandwidth_limit is not None and config.bandwidth_limit > 0:
+            self._upload_semaphore = asyncio.Semaphore(1)
+
         logger.info("UploadManager initialized")
 
     async def shutdown(self, wait: bool = True) -> None:
@@ -94,7 +99,7 @@ class UploadManager(TraceManager):
         logger.info(f"Received READY_FOR_UPLOAD for trace {trace_id}")
 
         task = asyncio.create_task(
-            self._upload_single_trace(
+            self._prepare_upload(
                 filepath,
                 trace_id,
                 data_type,
@@ -262,8 +267,50 @@ class UploadManager(TraceManager):
             client_session=self._client_session,
             bytes_uploaded=file_bytes_uploaded,
             progress_callback=progress_callback,
+            bandwidth_limit=self._config.bandwidth_limit,
         )
         return await uploader.upload()
+
+    async def _prepare_upload(
+        self,
+        trace_dir_path: str,
+        trace_id: str,
+        data_type: DataType,
+        data_type_name: str,
+        recording_id: str,
+        bytes_uploaded: int,
+    ) -> bool:
+        """Prepare and execute upload, respecting bandwidth limits.
+
+        Args:
+            trace_dir_path: Local filesystem path to trace directory.
+            trace_id: Trace identifier.
+            data_type: Data type.
+            data_type_name: Data type name.
+            recording_id: Recording identifier.
+            bytes_uploaded: Cumulative bytes already uploaded (for resume).
+
+        Returns:
+            True if all files uploaded successfully, False otherwise.
+        """
+        if self._upload_semaphore is not None:
+            async with self._upload_semaphore:
+                return await self._upload_single_trace(
+                    trace_dir_path,
+                    trace_id,
+                    data_type,
+                    data_type_name,
+                    recording_id,
+                    bytes_uploaded,
+                )
+        return await self._upload_single_trace(
+            trace_dir_path,
+            trace_id,
+            data_type,
+            data_type_name,
+            recording_id,
+            bytes_uploaded,
+        )
 
     async def _upload_single_trace(
         self,
