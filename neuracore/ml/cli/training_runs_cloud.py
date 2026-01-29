@@ -16,9 +16,8 @@ from rich.console import Console
 from neuracore.core.auth import get_auth
 from neuracore.core.cli.training_display import RunDisplayRow, print_run_table
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.const import API_URL
 from neuracore.core.exceptions import AuthenticationError, ConfigError, TrainingRunError
-
-from ..const import API_URL
 
 TRAINING_JOB_LIST_ADAPTER = TypeAdapter(list[TrainingJob])
 console = Console()

@@ -18,7 +18,6 @@ from rich.table import Table
 from rich.text import Text
 
 from neuracore.api.training import delete_training_job
-from neuracore.core.cli import training_runs_cloud as training_runs
 from neuracore.core.cli.training_display import (
     STATUS_STYLES,
     RunDisplayRow,
@@ -26,6 +25,7 @@ from neuracore.core.cli.training_display import (
 )
 from neuracore.core.data.dataset import DEFAULT_CACHE_DIR
 from neuracore.core.exceptions import AuthenticationError, ConfigError, TrainingRunError
+from neuracore.ml.cli import training_runs_cloud as training_runs
 
 training_app = typer.Typer(help="Training utilities.")
 console = Console()

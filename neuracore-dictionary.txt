@@ -60,6 +60,7 @@ FRANKA
 frictionloss
 fromarray
 frombuffer
+fromlist
 gelu
 geomadr
 geomid
