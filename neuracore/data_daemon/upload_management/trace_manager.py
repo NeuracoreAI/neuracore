@@ -13,7 +13,8 @@ from uuid import UUID
 import aiohttp
 from neuracore_types import DataType, RecordingDataTraceStatus
 
-from neuracore.data_daemon.auth_management.auth_manager import get_auth
+from neuracore.core.auth import get_auth
+from neuracore.core.config.get_current_org import get_current_org
 from neuracore.data_daemon.const import API_URL
 
 logger = logging.getLogger(__name__)
@@ -48,13 +49,15 @@ class TraceManager(ABC):
             return False
 
         try:
+            loop = asyncio.get_running_loop()
             auth = get_auth()
-            org_id = await auth.get_org_id()
+            org_id = await loop.run_in_executor(None, get_current_org)
+            headers = await loop.run_in_executor(None, auth.get_headers)
 
             async with self.client_session.post(
                 f"{API_URL}/org/{org_id}/recording/{recording_id}/traces",
                 json={"data_type": data_type.value, "trace_id": str(trace_id)},
-                headers=await auth.get_headers(self.client_session),
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 if response.status >= 400:
@@ -100,13 +103,15 @@ class TraceManager(ABC):
             data_trace_payload["total_bytes"] = total_bytes
 
         try:
+            loop = asyncio.get_running_loop()
             auth = get_auth()
-            org_id = await auth.get_org_id()
+            org_id = await loop.run_in_executor(None, get_current_org)
+            headers = await loop.run_in_executor(None, auth.get_headers)
 
             async with self.client_session.put(
                 f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/{trace_id}",
                 json=data_trace_payload,
-                headers=await auth.get_headers(self.client_session),
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 if response.status >= 400:

@@ -74,7 +74,6 @@ from pathlib import Path
 
 import aiohttp
 
-from neuracore.data_daemon.auth_management.auth_manager import initialize_auth
 from neuracore.data_daemon.communications_management.communications_manager import (
     CommunicationsManager,
 )
@@ -171,9 +170,6 @@ async def bootstrap_async_services(
         AsyncServices with all initialized services.
     """
     logger.info("Bootstrapping async services on General Loop...")
-
-    initialize_auth(daemon_config=config)
-    logger.info("AuthManager initialized with config")
 
     client_session = aiohttp.ClientSession()
     logger.debug("Created aiohttp.ClientSession")
