@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
-import threading
 from concurrent.futures import Future
 from typing import Any
 
@@ -24,15 +23,8 @@ from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget i
     StorageBudget,
     StoragePolicy,
 )
-from neuracore.data_daemon.recording_encoding_disk_manager.encoding.json_trace import (
-    JsonTrace,
-)
-from neuracore.data_daemon.recording_encoding_disk_manager.encoding.video_trace import (
-    VideoTrace,
-)
 
 from .core.trace_filesystem import _TraceFilesystem
-from .core.types import _BatchJob, _TraceKey, _WriteState
 from .lifecycle.encoder_manager import _EncoderManager
 from .lifecycle.trace_controller import _TraceController
 from .workers.batch_encoder_worker import _BatchEncoderWorker
@@ -66,21 +58,10 @@ class RecordingDiskManager:
         self.trace_message_queue: asyncio.Queue[CompleteMessage | object] = (
             asyncio.Queue()
         )
-        self.raw_file_queue: asyncio.Queue[_BatchJob | object] = asyncio.Queue()
 
         self.recording_traces: dict[str, dict[str, Any]] = {}
 
-        self._writer_states: dict[_TraceKey, _WriteState] = {}
-        self._encoders: dict[_TraceKey, JsonTrace | VideoTrace] = {}
-
-        self._aborted_traces: set[_TraceKey] = set()
-        self._stopped_recordings: set[str] = set()
-        self._closed_traces: set[_TraceKey] = set()
-
-        self._stop_lock = threading.Lock()
         self._stop_requested = False
-
-        self._state_lock = threading.RLock()
 
         self._filesystem: _TraceFilesystem | None = None
         self._storage_budget: StorageBudget | None = None
@@ -91,7 +72,6 @@ class RecordingDiskManager:
 
         self._loop_manager = loop_manager
         self._writer_future: Future[Any] | None = None
-        self._encoder_future: Future[Any] | None = None
 
         self._init_state()
 
@@ -126,47 +106,29 @@ class RecordingDiskManager:
         self._controller = _TraceController(
             filesystem=self._filesystem,
             storage_budget=self._storage_budget,
-            state_lock=self._state_lock,
-            writer_states=self._writer_states,
-            encoders=self._encoders,
             recording_traces=self.recording_traces,
-            aborted_traces=self._aborted_traces,
-            stopped_recordings=self._stopped_recordings,
-            closed_traces=self._closed_traces,
         )
 
         self._encoder_manager = _EncoderManager(
             filesystem=self._filesystem,
-            state_lock=self._state_lock,
-            encoders=self._encoders,
             abort_trace=self._controller.abort_trace_due_to_storage,
         )
 
         self._writer = _RawBatchWriter(
             flush_bytes=self.flush_bytes,
             trace_message_queue=self.trace_message_queue,
-            raw_file_queue=self.raw_file_queue,
             filesystem=self._filesystem,
             storage_budget=self._storage_budget,
-            state_lock=self._state_lock,
-            writer_states=self._writer_states,
-            aborted_traces=self._aborted_traces,
-            closed_traces=self._closed_traces,
-            stopped_recordings=self._stopped_recordings,
             recording_traces=self.recording_traces,
             abort_trace=self._controller.abort_trace_due_to_storage,
             sentinel=SENTINEL,
         )
 
         self._encoder_worker = _BatchEncoderWorker(
-            raw_file_queue=self.raw_file_queue,
             filesystem=self._filesystem,
             encoder_manager=self._encoder_manager,
             storage_budget=self._storage_budget,
-            state_lock=self._state_lock,
-            aborted_traces=self._aborted_traces,
             abort_trace=self._controller.abort_trace_due_to_storage,
-            sentinel=SENTINEL,
         )
 
     def start(self) -> None:
@@ -178,14 +140,8 @@ class RecordingDiskManager:
         if self._writer is None or self._encoder_worker is None:
             raise RuntimeError("RecordingDiskManager not initialised correctly")
 
-        # Schedule writer on General Loop
         self._writer_future = self._loop_manager.schedule_on_general_loop(
             self._writer.worker()
-        )
-
-        # Schedule encoder on Encoder Loop
-        self._encoder_future = self._loop_manager.schedule_on_encoder_loop(
-            self._encoder_worker.worker()
         )
 
         self._emitter = get_emitter()
@@ -216,12 +172,10 @@ class RecordingDiskManager:
         Returns:
             None
         """
-        with self._stop_lock:
-            if self._stop_requested:
-                return
-            self._stop_requested = True
+        if self._stop_requested:
+            return
+        self._stop_requested = True
 
-        # Put sentinel directly - we're already in an async context
         await self.trace_message_queue.put(SENTINEL)
 
     async def shutdown(self) -> None:
@@ -232,14 +186,18 @@ class RecordingDiskManager:
         """
         await self.request_stop()
 
-        if self._writer_future is not None and self._encoder_future is not None:
-            await asyncio.gather(
-                asyncio.wrap_future(self._writer_future),
-                asyncio.wrap_future(self._encoder_future),
-                return_exceptions=True,
-            )
+        if self._writer_future is not None:
+            await asyncio.wrap_future(self._writer_future)
 
-    async def _on_stop_all_traces_for_recording(self, recording_id: str) -> None:
+        if self._encoder_worker is not None:
+            while self._encoder_worker.in_flight_count > 0:
+                await asyncio.sleep(0.01)
+            self._encoder_worker.shutdown()
+
+        if self._encoder_manager is not None:
+            self._encoder_manager.cleanup()
+
+    def _on_stop_all_traces_for_recording(self, recording_id: str) -> None:
         """Handle STOP_ALL_TRACES_FOR_RECORDING(recording_id).
 
         Args:
@@ -248,13 +206,10 @@ class RecordingDiskManager:
         Returns:
             None
         """
-        if self._controller is None or self._writer is None:
+        if self._controller is None:
             raise RuntimeError("RecordingDiskManager not initialised correctly")
 
-        await self._controller.on_stop_all_traces_for_recording(
-            recording_id,
-            flush_state=self._writer._flush_state,
-        )
+        self._controller.on_stop_all_traces_for_recording(recording_id)
 
     def _on_delete_trace(
         self,

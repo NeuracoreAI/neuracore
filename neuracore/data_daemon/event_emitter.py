@@ -60,6 +60,18 @@ class Emitter(AsyncIOEventEmitter):
     DELETE_TRACE = "DELETE_TRACE"
     # (recording_id, trace_id, data_type)
 
+    # RDM internal: RawBatchWriter -> BatchEncoderWorker
+    BATCH_READY = "BATCH_READY"
+    # (_BatchJob)
+
+    # RDM internal: TraceController -> workers
+    TRACE_ABORTED = "TRACE_ABORTED"
+    # (_TraceKey)
+
+    # RDM internal: TraceController -> RawBatchWriter
+    RECORDING_STOPPED = "RECORDING_STOPPED"
+    # (recording_id: str)
+
     def __init__(self, *, loop: asyncio.AbstractEventLoop) -> None:
         """Initialize the event emitter.
 
