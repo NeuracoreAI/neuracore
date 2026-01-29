@@ -1,0 +1,25 @@
+# Environment Variables
+
+Configure Neuracore behavior with environment variables.
+
+## Available Variables
+
+| Variable | Function | Default |
+|----------|----------|---------|
+| `NEURACORE_REMOTE_RECORDING_TRIGGER_ENABLED` | Allow remote recording triggers | `true` |
+| `NEURACORE_PROVIDE_LIVE_DATA` | Enable live data streaming | `true` |
+| `NEURACORE_CONSUME_LIVE_DATA` | Enable live data consumption | `true` |
+| `NEURACORE_API_URL` | Base URL for Neuracore platform | `https://api.neuracore.com/api` |
+| `NEURACORE_API_KEY` | API key override | Configured via `neuracore login` |
+| `NEURACORE_ORG_ID` | Organization ID override | Configured via `neuracore select-org` |
+
+## Usage Examples
+
+```bash
+# Set API URL for staging
+export NEURACORE_API_URL=https://staging.api.neuracore.com/api
+
+# Disable live data streaming
+export NEURACORE_PROVIDE_LIVE_DATA=false
+python my_robot_script.py
+```

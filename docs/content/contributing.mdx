@@ -1,0 +1,49 @@
+# Contributing
+
+We welcome contributions! Please open GitHub issues or submit pull requests for:
+
+- New algorithms and models
+- Performance improvements
+- Documentation enhancements
+- Bug fixes and feature requests
+
+## Creating Custom Algorithms
+
+All algorithms must extend the `NeuracoreModel` class:
+
+```python
+from neuracore.ml import NeuracoreModel
+
+class MyCustomAlgorithm(NeuracoreModel):
+    def __init__(self, model_init_description, lr=1e-4):
+        super().__init__(model_init_description)
+        self.lr = lr
+        # ... setup model
+
+    def forward(self, batch):
+        # Inference logic
+        pass
+
+    def training_step(self, batch):
+        # Training logic
+        pass
+
+    def configure_optimizers(self):
+        return [torch.optim.Adam(self.parameters(), lr=self.lr)]
+```
+
+## Validate Your Algorithm
+
+```bash
+neuracore-validate /path/to/your/algorithm
+```
+
+## PR Guidelines
+
+1. Add version label: `version:major`, `version:minor`, `version:patch`, or `version:none`
+2. Use conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, etc.
+
+## Release Process
+
+1. Go to **Actions** → **Release Package** → **Run workflow**
+2. The workflow bumps version, creates tag, and publishes to PyPI

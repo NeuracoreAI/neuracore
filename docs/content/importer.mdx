@@ -1,0 +1,64 @@
+# Dataset Importer
+
+The `neuracore.importer` module provides utilities for importing and uploading robot datasets to Neuracore.
+
+## Installation
+
+```bash
+pip install neuracore[import]
+```
+
+## Supported Formats
+
+- **RLDS** - Reinforcement Learning Datasets
+- **LeRobot** - Hugging Face Arrow format
+- **TFDS** - TensorFlow Datasets (coming soon)
+
+## Usage
+
+```bash
+python -m neuracore.importer.importer \
+    --dataset-config path/to/config.yaml \
+    --dataset-dir path/to/dataset \
+    --robot-dir path/to/robot/description/files
+```
+
+## Configuration
+
+```yaml
+input_dataset_name: my_dataset
+dataset_type: RLDS
+
+output_dataset:
+  name: my_output_dataset
+  tags: [tag1, tag2]
+  description: "Dataset description"
+
+robot:
+  name: my_robot
+  urdf_path: ""
+  overwrite_existing: true
+
+frequency: 50.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping:
+      - name: image
+        source_name: image
+```
+
+## Supported Data Types
+
+| Data Type | Description |
+|-----------|-------------|
+| `RGB_IMAGES` | RGB camera images |
+| `DEPTH_IMAGES` | Depth images |
+| `JOINT_POSITIONS` | Robot joint positions |
+| `JOINT_VELOCITIES` | Robot joint velocities |
+| `LANGUAGE` | Language instructions |
+| `CUSTOM_1D` | Custom 1D data arrays |

@@ -1,0 +1,49 @@
+# Examples
+
+Examples for using Neuracore with simulated robot environments.
+
+## Installation
+
+```bash
+conda create -n neuracore_examples python=3.10
+conda activate neuracore_examples
+pip install "neuracore[examples]"
+```
+
+## Data Collection
+
+```bash
+# ALOHA example
+python example_data_collection_vx300s.py --record --num_episodes=1
+
+# Bi Gym example
+python example_data_collection_bigym.py --record --num_episodes=1
+```
+
+## Launch Training
+
+```bash
+python example_launch_training.py \
+   --name 'My Training Job' \
+   --algorithm_name 'CNNMLP' \
+   --dataset_name 'Example Dataset'
+```
+
+## Local Deployment
+
+```bash
+pip install "neuracore[ml]"
+python example_local_endpoint.py
+```
+
+## Server Deployment
+
+```bash
+python example_server_endpoint.py
+```
+
+## View Dataset
+
+```bash
+python example_view_dataset.py
+```

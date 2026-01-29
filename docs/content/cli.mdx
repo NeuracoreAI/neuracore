@@ -1,0 +1,61 @@
+# Command Line Interface
+
+The `neuracore` command helps you authenticate, choose an organization, monitor training runs (cloud and local), and launch a local policy server for quick validation.
+
+## Configure Once
+
+```bash
+# Login and save an API key
+neuracore login
+
+# Non-interactive login
+neuracore login --email you@example.com --password '<PASSWORD>'
+
+# Select your organization
+neuracore select-org --org-name "<ORG_NAME>"
+```
+
+> **Note:** Config is stored at `~/.neuracore/config.json`. Override the backend with `NEURACORE_API_URL=https://staging.api.neuracore.com/api` if needed.
+
+## Quick Start
+
+### 1. Sign in and pick your org
+
+```bash
+neuracore login
+neuracore select-org --org-name "<ORG_NAME>"
+```
+
+### 2. List recent training runs
+
+```bash
+neuracore training list --cloud --limit 5
+```
+
+### 3. Inspect a run
+
+```bash
+neuracore training inspect --training-name <RUN_NAME_OR_ID>
+```
+
+### 4. Launch a local policy server
+
+```bash
+neuracore launch-server \
+  --model_input_order '{"RGB_IMAGES": ["front_cam"]}' \
+  --model_output_order '{"JOINT_TARGET_POSITIONS": ["arm"]}' \
+  --job_id <RUN_ID> \
+  --org_id <ORG_ID> \
+  --port 8080
+```
+
+## Core Commands Reference
+
+| Command | Description |
+|---------|-------------|
+| `neuracore login` | Saves your API key to `~/.neuracore/config.json` |
+| `neuracore select-org` | Sets the active organization |
+| `neuracore training list` | List training runs |
+| `neuracore training inspect` | Inspect a training run |
+| `neuracore training delete` | Delete a training run |
+| `neuracore launch-server` | Launch a local policy server |
