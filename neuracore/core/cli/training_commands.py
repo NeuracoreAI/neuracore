@@ -10,7 +10,6 @@ from pathlib import Path
 
 import typer
 from neuracore_types import TrainingJob, TrainingJobStatus
-from omegaconf import OmegaConf
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -100,6 +99,8 @@ def _load_local_hydra_metadata(run_path: Path) -> tuple[str, str]:
         return ("unknown", "unknown")
 
     try:
+        from omegaconf import OmegaConf
+
         cfg = OmegaConf.load(config_path)
     except Exception:
         return ("unknown", "unknown")
