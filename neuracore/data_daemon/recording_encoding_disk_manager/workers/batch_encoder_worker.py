@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import logging
-import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
 
 import aiofiles
 import aiofiles.os
@@ -33,44 +30,82 @@ logger = logging.getLogger(__name__)
 
 
 class _BatchEncoderWorker:
-    """Encode-stage worker that consumes raw batch jobs and finalises trace outputs."""
+    """Encode-stage worker that processes raw batch jobs and finalises trace outputs.
+
+    Uses event-driven architecture:
+    - Listens for BATCH_READY events from RawBatchWriter
+    - Listens for TRACE_ABORTED events from TraceController
+    - Owns its own state (aborted_traces, in_flight_count)
+    """
 
     def __init__(
         self,
         *,
-        raw_file_queue: asyncio.Queue[_BatchJob | object],
         filesystem: _TraceFilesystem,
         encoder_manager: _EncoderManager,
         storage_budget: StorageBudget,
-        state_lock: threading.RLock,
-        aborted_traces: set[_TraceKey],
         abort_trace: Callable[[_TraceKey], None],
-        sentinel: object,
     ) -> None:
         """Initialise _BatchEncoderWorker.
 
         Args:
-            raw_file_queue: Queue of raw batch jobs produced by the writer.
             filesystem: Filesystem helper for path resolution and sizing.
             encoder_manager: Encoder manager used to get/create per-trace encoders.
             storage_budget: Storage budget tracker used to enforce storage limits.
-            state_lock: Shared lock protecting encoder state.
-            aborted_traces: Shared set of traces that should be ignored.
             abort_trace: Callback used to abort traces on failure.
-            sentinel: Sentinel object used to stop the worker.
         """
-        self.raw_file_queue = raw_file_queue
         self._filesystem = filesystem
         self._encoder_manager = encoder_manager
         self._storage_budget = storage_budget
-
-        self._state_lock = state_lock
-        self._aborted_traces = aborted_traces
         self._abort_trace = abort_trace
 
-        self.SENTINEL = sentinel
-
         self._emitter = get_emitter()
+
+        self._aborted_traces: set[_TraceKey] = set()
+        self._in_flight_count: int = 0
+
+        self._emitter.on(Emitter.BATCH_READY, self._on_batch_ready)
+        self._emitter.on(Emitter.TRACE_ABORTED, self._on_trace_aborted)
+
+    @property
+    def in_flight_count(self) -> int:
+        """Return the number of batch jobs currently being processed."""
+        return self._in_flight_count
+
+    def _on_trace_aborted(self, trace_key: _TraceKey) -> None:
+        """Handle TRACE_ABORTED event.
+
+        Args:
+            trace_key: Trace key that was aborted.
+        """
+        self._aborted_traces.add(trace_key)
+
+    async def _on_batch_ready(self, batch_job: _BatchJob) -> None:
+        """Handle BATCH_READY event.
+
+        Args:
+            batch_job: The batch work item (trace_key, batch_path, trace_done).
+        """
+        self._in_flight_count += 1
+        try:
+            if batch_job.trace_key in self._aborted_traces:
+                await self._remove_file(batch_job.batch_path)
+                return
+
+            encoder = self._encoder_manager.safe_get_encoder(batch_job.trace_key)
+            if encoder is None:
+                await self._remove_file(batch_job.batch_path)
+                return
+
+            ok = await self._process_batch_into_encoder(batch_job, encoder)
+            await self._remove_file(batch_job.batch_path)
+            if not ok:
+                return
+
+            if batch_job.trace_done:
+                self._finalise_trace_encoder(batch_job.trace_key, encoder)
+        finally:
+            self._in_flight_count -= 1
 
     @staticmethod
     async def _remove_file(path: Path) -> None:
@@ -82,44 +117,11 @@ class _BatchEncoderWorker:
         except OSError:
             logger.warning("Failed to remove batch file: %s", path, exc_info=True)
 
-    async def worker(self) -> None:
-        """Consumes raw batch jobs, decode them, and feed per-trace encoders.
-
-        Args:
-            None
-
-        Returns:
-            None
-        """
-        while True:
-            job_item = await self.raw_file_queue.get()
-            try:
-                if job_item is self.SENTINEL:
-                    self._finalise_remaining_encoders()
-                    return
-
-                batch_job = cast(_BatchJob, job_item)
-
-                with self._state_lock:
-                    if batch_job.trace_key in self._aborted_traces:
-                        await self._remove_file(batch_job.batch_path)
-                        continue
-
-                encoder = self._encoder_manager.safe_get_encoder(batch_job.trace_key)
-                if encoder is None:
-                    await self._remove_file(batch_job.batch_path)
-                    continue
-
-                ok = await self._process_batch_into_encoder(batch_job, encoder)
-                await self._remove_file(batch_job.batch_path)
-                if not ok:
-                    continue
-
-                if batch_job.trace_done:
-                    self._finalise_trace_encoder(batch_job.trace_key, encoder)
-
-            finally:
-                self.raw_file_queue.task_done()
+    def shutdown(self) -> None:
+        """Finalize remaining encoders and cleanup event listeners."""
+        self._emitter.remove_listener(Emitter.BATCH_READY, self._on_batch_ready)
+        self._emitter.remove_listener(Emitter.TRACE_ABORTED, self._on_trace_aborted)
+        self._finalise_remaining_encoders()
 
     def _finalise_remaining_encoders(self) -> None:
         """Finalise and emit TRACE_WRITTEN for all encoders still active at shutdown.
