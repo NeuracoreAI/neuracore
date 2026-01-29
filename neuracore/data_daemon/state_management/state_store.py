@@ -116,6 +116,7 @@ class StateStore(Protocol):
 
         Returns the trace record after upsert.
         """
+        ...
 
     async def schedule_retry(
         self,
