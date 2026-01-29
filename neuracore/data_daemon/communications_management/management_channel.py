@@ -53,10 +53,12 @@ class ManagementChannel:
         self._ctx = zmq.Context.instance()
         self._bootstrap: DaemonBootstrap | None = None
 
-    def get_nc_context(self) -> Producer:
+    def get_nc_context(
+        self, producer_id: str | None = None, recording_id: str | None = None
+    ) -> Producer:
         """Return a producer-side context used by neuracore."""
         comm = CommunicationsManager()
-        return Producer(comm_manager=comm)
+        return Producer(comm_manager=comm, id=producer_id, recording_id=recording_id)
 
     async def get_ndd_context(self) -> Daemon | None:
         """Return a daemon context, or None if one is already running.
