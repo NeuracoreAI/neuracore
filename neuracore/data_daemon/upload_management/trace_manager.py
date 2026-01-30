@@ -52,21 +52,32 @@ class TraceManager(ABC):
             loop = asyncio.get_running_loop()
             auth = get_auth()
             org_id = await loop.run_in_executor(None, get_current_org)
-            headers = await loop.run_in_executor(None, auth.get_headers)
 
-            async with self.client_session.post(
-                f"{API_URL}/org/{org_id}/recording/{recording_id}/traces",
-                json={"data_type": data_type.value, "trace_id": str(trace_id)},
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status >= 400:
-                    error = await response.text()
-                    logger.error(f"Failed to register data trace: {error}")
-                    return False
+            for attempt in range(2):
+                headers = await loop.run_in_executor(None, auth.get_headers)
 
-                logger.info(f"Registered trace {trace_id} for recording {recording_id}")
-                return True
+                async with self.client_session.post(
+                    f"{API_URL}/org/{org_id}/recording/{recording_id}/traces",
+                    json={"data_type": data_type.value, "trace_id": str(trace_id)},
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 401 and attempt == 0:
+                        logger.info("Access token expired, refreshing token")
+                        await loop.run_in_executor(None, auth.login)
+                        continue
+
+                    if response.status >= 400:
+                        error = await response.text()
+                        logger.error(f"Failed to register data trace: {error}")
+                        return False
+
+                    logger.info(
+                        f"Registered trace {trace_id} for recording {recording_id}"
+                    )
+                    return True
+
+            return False
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"Failed to register data trace: {e}")
@@ -106,23 +117,33 @@ class TraceManager(ABC):
             loop = asyncio.get_running_loop()
             auth = get_auth()
             org_id = await loop.run_in_executor(None, get_current_org)
-            headers = await loop.run_in_executor(None, auth.get_headers)
 
-            async with self.client_session.put(
-                f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/{trace_id}",
-                json=data_trace_payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status >= 400:
-                    error = await response.text()
-                    logger.warning(
-                        f"Failed to update data trace: HTTP {response.status}: {error}"
-                    )
-                    return False
+            for attempt in range(2):
+                headers = await loop.run_in_executor(None, auth.get_headers)
 
-                logger.debug(f"Updated trace {trace_id} with status {status}")
-                return True
+                async with self.client_session.put(
+                    f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/{trace_id}",
+                    json=data_trace_payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 401 and attempt == 0:
+                        logger.info("Access token expired, refreshing token")
+                        await loop.run_in_executor(None, auth.login)
+                        continue
+
+                    if response.status >= 400:
+                        error = await response.text()
+                        logger.warning(
+                            f"Failed to update data trace: "
+                            f"HTTP {response.status}: {error}"
+                        )
+                        return False
+
+                    logger.debug(f"Updated trace {trace_id} with status {status}")
+                    return True
+
+            return False
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.warning(f"Failed to update data trace: {e}")
