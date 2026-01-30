@@ -19,23 +19,6 @@ class StateStore(Protocol):
         """Set the end time for all traces for a recording."""
         ...
 
-    async def create_trace(
-        self,
-        trace_id: str,
-        recording_id: str,
-        data_type: DataType,
-        path: str,
-        data_type_name: str,
-        robot_instance: int,
-        dataset_id: str | None = None,
-        dataset_name: str | None = None,
-        robot_name: str | None = None,
-        robot_id: str | None = None,
-        total_bytes: int | None = None,
-    ) -> None:
-        """Create or update a trace record."""
-        ...
-
     async def get_trace(self, trace_id: str) -> TraceRecord | None:
         """Get a trace record by ID."""
         ...
@@ -50,10 +33,6 @@ class StateStore(Protocol):
 
     async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
         """Increment uploaded byte count for a trace."""
-        ...
-
-    async def mark_trace_as_written(self, trace_id: str, bytes_written: int) -> None:
-        """Finalize writing for a trace and mark it ready for upload."""
         ...
 
     async def find_ready_traces(self) -> list[TraceRecord]:
@@ -74,8 +53,12 @@ class StateStore(Protocol):
         status: TraceStatus,
         *,
         error_message: str | None = None,
-    ) -> None:
-        """Update the status and optional error message for a trace."""
+    ) -> bool:
+        """Update the status and optional error message for a trace.
+
+        Returns True if the status was changed, False if already at target status.
+        Raises ValueError for invalid transitions or missing trace.
+        """
         ...
 
     async def record_error(
@@ -90,4 +73,46 @@ class StateStore(Protocol):
 
     async def delete_trace(self, trace_id: str) -> None:
         """Delete a trace record."""
+        ...
+
+    async def upsert_trace_metadata(
+        self,
+        trace_id: str,
+        recording_id: str,
+        data_type: DataType,
+        path: str,
+        data_type_name: str,
+        robot_instance: int,
+        dataset_id: str | None = None,
+        dataset_name: str | None = None,
+        robot_name: str | None = None,
+        robot_id: str | None = None,
+        total_bytes: int | None = None,
+    ) -> TraceRecord:
+        """Insert or update trace with metadata from START_TRACE.
+
+        State transitions:
+        - If trace doesn't exist: creates with INITIALIZING status
+        - If trace exists with PENDING_BYTES: transitions to WRITTEN
+        - If trace exists with other status: updates metadata only
+
+        Returns the trace record after upsert.
+        """
+        ...
+
+    async def upsert_trace_bytes(
+        self,
+        trace_id: str,
+        recording_id: str,
+        bytes_written: int,
+    ) -> TraceRecord:
+        """Insert or update trace with bytes from TRACE_WRITTEN.
+
+        State transitions:
+        - If trace doesn't exist: creates with PENDING_BYTES status
+        - If trace exists with INITIALIZING: transitions to WRITTEN
+        - If trace exists with other status: updates bytes only
+
+        Returns the trace record after upsert.
+        """
         ...

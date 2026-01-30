@@ -27,23 +27,6 @@ from neuracore.data_daemon.models import (
     TraceRecord,
     TraceStatus,
 )
-from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
-
-
-def _create_trace(
-    store: SqliteStateStore,
-    trace_id: str,
-    recording_id: str,
-    path: Path,
-) -> None:
-    store.create_trace(
-        trace_id=trace_id,
-        recording_id=recording_id,
-        data_type=DataType.CUSTOM_1D,
-        data_type_name="custom",
-        robot_instance=1,
-        path=str(path),
-    )
 
 
 class _InMemoryStore:
@@ -120,7 +103,7 @@ def test_startup_reconciles_missing_and_orphaned_traces(tmp_path: Path) -> None:
     now = datetime.now()
     trace = TraceRecord(
         trace_id="trace-missing",
-        status=TraceStatus.WRITING,
+        status=TraceStatus.INITIALIZING,
         recording_id="rec-1",
         data_type=DataType.CUSTOM_1D,
         data_type_name="custom",

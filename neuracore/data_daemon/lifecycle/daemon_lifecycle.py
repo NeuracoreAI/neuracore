@@ -150,10 +150,10 @@ async def reconcile_state_with_filesystem(
 ) -> None:
     """Sync stored traces with disk contents, cleaning orphans and flagging gaps."""
     traces = store.list_traces()
-    trace_paths = {Path(trace.path) for trace in traces}
+    trace_paths = {Path(str(trace.path)) for trace in traces}
 
     for trace in traces:
-        trace_path = Path(trace.path)
+        trace_path = Path(str(trace.path))
         if not trace_path.exists() or not _trace_dir_has_files(trace_path):
             await store.record_error(
                 trace.trace_id,
@@ -163,13 +163,6 @@ async def reconcile_state_with_filesystem(
             )
             continue
 
-        if trace.status == TraceStatus.WRITING:
-            await store.record_error(
-                trace.trace_id,
-                "Trace interrupted on shutdown",
-                error_code=TraceErrorCode.WRITE_FAILED,
-                status=TraceStatus.FAILED,
-            )
         elif trace.status == TraceStatus.UPLOADING:
             await store.update_status(trace.trace_id, TraceStatus.PAUSED)
 

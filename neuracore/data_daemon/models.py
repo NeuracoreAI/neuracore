@@ -45,10 +45,21 @@ class CommandType(Enum):
 
 
 class TraceStatus(str, Enum):
-    """Lifecycle states for a trace."""
+    """Lifecycle states for a trace.
 
-    PENDING = "pending"
-    WRITING = "writing"
+    State transitions:
+    - (none) + START_TRACE    -> INITIALIZING
+    - (none) + TRACE_WRITTEN  -> PENDING_BYTES
+    - INITIALIZING + TRACE_WRITTEN -> WRITTEN
+    - PENDING_BYTES + START_TRACE  -> WRITTEN
+    - WRITTEN -> UPLOADING -> UPLOADED
+    - UPLOADING -> PAUSED -> UPLOADING (resume)
+    - UPLOADING -> WRITTEN (retry on failure)
+    - Any -> FAILED (on error)
+    """
+
+    INITIALIZING = "initializing"
+    PENDING_BYTES = "pending_bytes"
     WRITTEN = "written"
     UPLOADING = "uploading"
     PAUSED = "paused"
@@ -68,6 +79,24 @@ class TraceErrorCode(str, Enum):
     PROGRESS_REPORT_ERROR = "progress_report_error"
 
 
+class ProgressReportStatus(str, Enum):
+    """Status of progress report for a trace."""
+
+    PENDING = "pending"
+    REPORTED = "reported"
+
+
+def _parse_progress_reported(value: Any) -> ProgressReportStatus:
+    """Parse progress_reported from DB (int 0/1 or enum string) to enum."""
+    if value is None or value == 0 or value == "pending":
+        return ProgressReportStatus.PENDING
+    if value == 1 or value == "reported":
+        return ProgressReportStatus.REPORTED
+    if isinstance(value, ProgressReportStatus):
+        return value
+    return ProgressReportStatus(str(value))
+
+
 @dataclass(frozen=True)
 class TraceRecord:
     """Typed representation of a trace row in the state store."""
@@ -75,18 +104,18 @@ class TraceRecord:
     trace_id: str
     status: TraceStatus
     recording_id: str
-    data_type: DataType
-    data_type_name: str
+    data_type: DataType | None
+    data_type_name: str | None
     dataset_id: str | None
     dataset_name: str | None
     robot_name: str | None
     robot_id: str | None
-    robot_instance: int
-    path: str
-    bytes_written: int
+    robot_instance: int | None
+    path: str | None
+    bytes_written: int | None
     total_bytes: int | None
     bytes_uploaded: int
-    progress_reported: int
+    progress_reported: ProgressReportStatus
     error_code: TraceErrorCode | None
     error_message: str | None
     created_at: datetime
@@ -101,11 +130,15 @@ class TraceRecord:
             if isinstance(status_raw, TraceStatus)
             else TraceStatus(str(status_raw))
         )
-        data_type_raw = row["data_type"]
+        data_type_raw = row.get("data_type")
         data_type = (
-            data_type_raw
-            if isinstance(data_type_raw, DataType)
-            else DataType(str(data_type_raw))
+            None
+            if data_type_raw is None
+            else (
+                data_type_raw
+                if isinstance(data_type_raw, DataType)
+                else DataType(str(data_type_raw))
+            )
         )
         error_code_raw = row.get("error_code")
         error_code = (
@@ -113,22 +146,29 @@ class TraceRecord:
             if error_code_raw is None or isinstance(error_code_raw, TraceErrorCode)
             else TraceErrorCode(str(error_code_raw))
         )
+        path_raw = row.get("path")
+        robot_instance_raw = row.get("robot_instance")
+        bytes_written_raw = row.get("bytes_written")
         return cls(
             trace_id=str(row["trace_id"]),
             status=status,
             recording_id=str(row["recording_id"]),
             data_type=data_type,
-            data_type_name=row.get("data_type_name", ""),
+            data_type_name=row.get("data_type_name"),
             dataset_id=row.get("dataset_id"),
             dataset_name=row.get("dataset_name"),
             robot_name=row.get("robot_name"),
             robot_id=row.get("robot_id"),
-            robot_instance=int(row.get("robot_instance", 0)),
-            path=str(row["path"]),
-            bytes_written=int(row.get("bytes_written", 0)),
+            robot_instance=(
+                int(robot_instance_raw) if robot_instance_raw is not None else None
+            ),
+            path=str(path_raw) if path_raw is not None else None,
+            bytes_written=(
+                int(bytes_written_raw) if bytes_written_raw is not None else None
+            ),
             total_bytes=row.get("total_bytes"),
             bytes_uploaded=int(row.get("bytes_uploaded", 0)),
-            progress_reported=int(row.get("progress_reported", 0)),
+            progress_reported=_parse_progress_reported(row.get("progress_reported")),
             error_code=error_code,
             error_message=row.get("error_message"),
             created_at=row["created_at"],
