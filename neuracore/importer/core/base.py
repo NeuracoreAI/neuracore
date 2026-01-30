@@ -14,7 +14,9 @@ from pathlib import Path
 from queue import Empty
 from typing import Any
 
+from neuracore_types.importer.data_config import DataFormat
 from neuracore_types.nc_data import DatasetImportConfig, DataType
+from neuracore_types.nc_data.nc_data import MappingItem
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -27,8 +29,20 @@ from rich.progress import (
 )
 
 import neuracore as nc
+from neuracore.core.robot import JointInfo
+from neuracore.importer.core.validation import (
+    JOINT_DATA_TYPES,
+    validate_depth_images,
+    validate_joint_positions,
+    validate_joint_torques,
+    validate_joint_velocities,
+    validate_language,
+    validate_point_clouds,
+    validate_poses,
+    validate_rgb_images,
+)
 
-from .exceptions import UploaderError
+from .exceptions import DataValidationError, DataValidationWarning, UploaderError
 
 
 @dataclass(frozen=True)
@@ -74,6 +88,9 @@ class NeuracoreDatasetImporter(ABC):
         min_workers: int = 1,
         continue_on_error: bool = True,
         progress_interval: int = 1,
+        joint_info: dict[str, JointInfo] = {},
+        dry_run: bool = False,
+        suppress_warnings: bool = False,
     ) -> None:
         """Initialize the base dataset uploader."""
         self.dataset_dir = Path(dataset_dir)
@@ -82,11 +99,14 @@ class NeuracoreDatasetImporter(ABC):
         self.output_dataset_name = output_dataset_name
         self.robot_name = dataset_config.robot.name
         self.frequency = dataset_config.frequency
+        self.joint_info = joint_info
 
         self.max_workers = 1
         self.min_workers = min_workers
         self.continue_on_error = continue_on_error
         self.progress_interval = max(1, progress_interval)
+        self.dry_run = dry_run
+        self.suppress_warnings = suppress_warnings
         self.worker_errors: list[WorkerError] = []
         self.logger = logging.getLogger(
             f"{self.__class__.__module__}.{self.__class__.__name__}"
@@ -106,107 +126,224 @@ class NeuracoreDatasetImporter(ABC):
     def _record_step(self, step: dict, timestamp: float) -> None:
         """Record a single step of the dataset."""
 
+    def _validate_input_data(
+        self, data_type: DataType, data: Any, format: DataFormat
+    ) -> None:
+        """Validate input data based on the data type and format.
+
+        Args:
+            data_type: The type of data to validate.
+            data: The data to validate.
+            format: The data format configuration.
+
+        Raises:
+            DataValidationError: If the data does not match the expected format.
+        """
+        if data_type == DataType.RGB_IMAGES:
+            validate_rgb_images(data, format)
+        elif data_type == DataType.DEPTH_IMAGES:
+            validate_depth_images(data)
+        elif data_type == DataType.POINT_CLOUDS:
+            validate_point_clouds(data)
+        elif data_type == DataType.LANGUAGE:
+            validate_language(data, format)
+        elif data_type == DataType.POSES or data_type == DataType.END_EFFECTOR_POSES:
+            validate_poses(data, format)
+
+    def _validate_joint_data(self, data_type: DataType, data: Any, name: str) -> None:
+        """Validate joint data based on the data type and joint name.
+
+        Args:
+            data_type: The type of data to validate.
+            data: The data to validate.
+            name: The name of the joint.
+
+        Raises:
+            DataValidationError: If the data does not match the expected format.
+        """
+        if data_type == DataType.JOINT_POSITIONS:
+            validate_joint_positions(data, name, self.joint_info)
+        elif data_type == DataType.JOINT_VELOCITIES:
+            validate_joint_velocities(data, name, self.joint_info)
+        elif data_type == DataType.JOINT_TORQUES:
+            validate_joint_torques(data, name, self.joint_info)
+        elif data_type == DataType.JOINT_TARGET_POSITIONS:
+            validate_joint_positions(data, name, self.joint_info)
+
     def _log_data(
-        self, data_type: DataType, name: str, data: Any, timestamp: float
+        self,
+        data_type: DataType,
+        source_data: Any,
+        item: MappingItem,
+        format: DataFormat,
+        timestamp: float,
     ) -> None:
         """Log a single data point to Neuracore.
 
+        This method validates the source data, transforms it if necessary,
+        and logs it to Neuracore. Transformed joint data is validated
+        against the joint limits.
+
         Args:
             data_type: The type of data to import.
-            name: The name of the data.
-            data: The data to log.
+            source_data: The source data from the dataset.
+            item: The mapping item to use for naming and transformation.
+            format: The data format to use for validation.
             timestamp: Time when the data was logged.
+        """
+        try:
+            self._validate_input_data(data_type, source_data, format)
+        except DataValidationWarning as w:
+            if not self.suppress_warnings:
+                self.logger.warning("[WARNING] %s (%s): %s", data_type, item.name, w)
+        except DataValidationError as e:
+            self.logger.error(
+                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
+            )
+            raise
+
+        try:
+            transformed_data = item.transforms(source_data)
+            if data_type in JOINT_DATA_TYPES and self.joint_info:
+                self._validate_joint_data(data_type, transformed_data, item.name)
+        except DataValidationWarning as w:
+            if not self.suppress_warnings:
+                self.logger.warning("[WARNING] %s (%s): %s", data_type, item.name, w)
+        except DataValidationError as e:
+            self.logger.error(
+                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
+            )
+            raise
+        except Exception as e:
+            self.logger.error(
+                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
+            )
+            raise
+
+        try:
+            self._log_transformed_data(
+                data_type, transformed_data, item.name, timestamp
+            )
+        except Exception as e:
+            self.logger.error(
+                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
+            )
+            raise
+
+    def _log_transformed_data(
+        self, data_type: DataType, transformed_data: Any, name: str, timestamp: float
+    ) -> None:
+        """Log transformed data to Neuracore.
+
+        Args:
+            data_type: The type of data to log.
+            transformed_data: The transformed data to log.
+            name: The name of the data.
+            timestamp: The timestamp of the data.
         """
         if data_type == DataType.RGB_IMAGES:
             nc.log_rgb(
                 name=name,
-                rgb=data,
+                rgb=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.DEPTH_IMAGES:
             nc.log_depth(
                 name=name,
-                depth=data,
+                depth=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.POINT_CLOUDS:
             nc.log_point_cloud(
                 name=name,
-                points=data,
+                points=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.LANGUAGE:
             nc.log_language(
                 name=name,
-                language=data,
+                language=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.JOINT_POSITIONS:
             nc.log_joint_position(
                 name=name,
-                position=data,
+                position=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.JOINT_VELOCITIES:
             nc.log_joint_velocity(
                 name=name,
-                velocity=data,
+                velocity=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.JOINT_TORQUES:
             nc.log_joint_torque(
                 name=name,
-                torque=data,
+                torque=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.JOINT_TARGET_POSITIONS:
             nc.log_joint_target_position(
                 name=name,
-                target_position=data,
+                target_position=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
             nc.log_parallel_gripper_open_amount(
                 name=name,
-                value=data,
+                value=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
             nc.log_parallel_gripper_target_open_amount(
                 name=name,
-                value=data,
+                value=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.END_EFFECTOR_POSES:
             nc.log_end_effector_pose(
                 name=name,
-                pose=data,
+                pose=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.POSES:
             nc.log_pose(
                 name=name,
-                pose=data,
+                pose=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.CUSTOM_1D:
             nc.log_custom_1d(
                 name=name,
-                data=data,
+                data=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
 
     def prepare_worker(
