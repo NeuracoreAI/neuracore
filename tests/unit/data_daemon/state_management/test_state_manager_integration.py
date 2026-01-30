@@ -71,6 +71,10 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
         DataType.CUSTOM_1D,
         "custom",
         1,
+        None,
+        None,
+        None,
+        None,
         path="/tmp/trace-1.bin",
         total_bytes=10,
     )
@@ -80,6 +84,10 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
         DataType.CUSTOM_1D,
         "custom",
         1,
+        None,
+        None,
+        None,
+        None,
         path="/tmp/trace-2.bin",
         total_bytes=10,
     )
@@ -157,6 +165,10 @@ async def test_uploaded_bytes_updates_store(manager_store) -> None:
         DataType.CUSTOM_1D,
         "custom",
         1,
+        None,
+        None,
+        None,
+        None,
         path="/tmp/trace-uploaded.bin",
     )
 
@@ -176,6 +188,10 @@ async def test_invalid_transition_raises_via_manager(manager_store) -> None:
         DataType.CUSTOM_1D,
         "custom",
         1,
+        None,
+        None,
+        None,
+        None,
         path="/tmp/trace-invalid.bin",
     )
 
@@ -200,6 +216,10 @@ async def test_multiple_state_managers_share_sqlite_db(tmp_path) -> None:
             DataType.CUSTOM_1D,
             "custom",
             1,
+            None,
+            None,
+            None,
+            None,
             path="/tmp/trace-multi-1.bin",
         )
         await manager_two._handle_start_trace(
@@ -208,6 +228,10 @@ async def test_multiple_state_managers_share_sqlite_db(tmp_path) -> None:
             DataType.CUSTOM_1D,
             "custom",
             1,
+            None,
+            None,
+            None,
+            None,
             path="/tmp/trace-multi-2.bin",
         )
 
@@ -288,6 +312,10 @@ async def test_race_conditions_on_rapid_state_changes(tmp_path, caplog) -> None:
             DataType.CUSTOM_1D,
             "custom",
             1,
+            None,
+            None,
+            None,
+            None,
             path="/tmp/trace-race.bin",
         )
         await manager_one._handle_trace_written("trace-race", "rec-race", 64)
@@ -328,6 +356,10 @@ async def test_state_recovery_after_restart(tmp_path) -> None:
             DataType.CUSTOM_1D,
             "custom",
             1,
+            None,
+            None,
+            None,
+            None,
             path="/tmp/trace-recover.bin",
         )
         # Emit TRACE_WRITTEN which completes the join pattern
@@ -372,6 +404,10 @@ async def test_simultaneous_recordings_emit_progress_reports(manager_store) -> N
             DataType.CUSTOM_1D,
             "custom",
             1,
+            None,
+            None,
+            None,
+            None,
             path=f"/tmp/{trace_id}.bin",
             total_bytes=10,
         )
@@ -419,6 +455,10 @@ async def test_encoder_crash_does_not_block_other_recordings(manager_store) -> N
         DataType.CUSTOM_1D,
         "custom",
         1,
+        None,
+        None,
+        None,
+        None,
         path="/tmp/trace-a.bin",
         total_bytes=10,
     )
@@ -428,6 +468,10 @@ async def test_encoder_crash_does_not_block_other_recordings(manager_store) -> N
         DataType.CUSTOM_1D,
         "custom",
         1,
+        None,
+        None,
+        None,
+        None,
         path="/tmp/trace-b.bin",
         total_bytes=10,
     )
@@ -495,6 +539,10 @@ async def test_status_is_uploading_during_active_upload(manager_store) -> None:
         DataType.CUSTOM_1D,
         "custom",
         1,
+        None,
+        None,
+        None,
+        None,
         path="/tmp/trace-upload-status.bin",
         total_bytes=64,
     )
@@ -566,6 +614,10 @@ async def test_two_traces_same_recording_sequential_completion(manager_store) ->
         DataType.CUSTOM_1D,
         "custom",
         1,
+        None,
+        None,
+        None,
+        None,
         path="/tmp/trace-seq-1.bin",
         total_bytes=32,
     )
@@ -575,6 +627,10 @@ async def test_two_traces_same_recording_sequential_completion(manager_store) ->
         DataType.CUSTOM_1D,
         "custom",
         1,
+        None,
+        None,
+        None,
+        None,
         path="/tmp/trace-seq-2.bin",
         total_bytes=48,
     )
@@ -651,6 +707,10 @@ async def test_two_traces_staggered_completion(manager_store) -> None:
         DataType.CUSTOM_1D,
         "custom",
         1,
+        None,
+        None,
+        None,
+        None,
         path="/tmp/trace-stag-a.bin",
         total_bytes=32,
     )
@@ -660,6 +720,10 @@ async def test_two_traces_staggered_completion(manager_store) -> None:
         DataType.CUSTOM_1D,
         "custom",
         1,
+        None,
+        None,
+        None,
+        None,
         path="/tmp/trace-stag-b.bin",
         total_bytes=64,
     )
