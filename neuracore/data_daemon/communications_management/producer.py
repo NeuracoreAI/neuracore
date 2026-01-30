@@ -71,6 +71,7 @@ class Producer:
         self.trace_id: str | None = None
         self._stop_event = threading.Event()
         self.recording_id: str | None = recording_id
+        self.id = id or str(uuid.uuid4())
 
         if self.socket is None:
             raise RuntimeError(
@@ -78,6 +79,20 @@ class Producer:
                 "Start the daemon with `nc-daemon start` before logging data. "
                 "Data cannot be captured without a running daemon."
             )
+
+    def set_recording_id(self, recording_id: str | None) -> None:
+        """Set the recording ID for the producer.
+
+        Args:
+            recording_id (str): The unique identifier for the recording session.
+
+        Returns:
+            None
+        """
+        self.recording_id = recording_id
+
+    def _stop_recording(self) -> None:
+        self.recording_id = None
 
     def start_new_trace(self) -> None:
         """Start a new trace for the given recording."""
@@ -220,3 +235,20 @@ class Producer:
                 data=chunk,
             )
             self._send(CommandType.DATA_CHUNK, {"data_chunk": payload.to_dict()})
+
+    def initialize_new_producer(self) -> None:
+        """Initialize a new producer.
+
+        This method starts a new trace and opens a ring buffer.
+        """
+        self.start_new_trace()
+        self.open_ring_buffer()
+
+    def cleanup_producer(self) -> None:
+        """Clean up the producer.
+
+        This method stops the trace and closes the ring buffer, releasing any
+        associated resources.
+        """
+        self.end_trace()
+        self._stop_recording()

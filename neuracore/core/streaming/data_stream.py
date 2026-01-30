@@ -16,6 +16,9 @@ from dataclasses import dataclass
 import numpy as np
 from neuracore_types import CameraData, DataType, NCData
 
+from neuracore.data_daemon.communications_management.management_channel import (
+    ManagementChannel,
+)
 from neuracore.data_daemon.communications_management.producer import Producer
 
 logger = logging.getLogger(__name__)
@@ -62,38 +65,63 @@ class DataStream(ABC):
         self._stream_name = stream_name
         self._producer: Producer | None = None
         self.lock = threading.Lock()
+        self._management_channel = ManagementChannel()
 
     def start_recording(self, context: DataRecordingContext) -> None:
-        """Start recording data.
+        """Start recording data for this stream.
+
+        If the stream is already recording, stop it first. Then, set the
+        recording state to True and store the recording context. Finally,
+        ensure a producer is available for this stream and start a new trace.
 
         Args:
-            context: Recording context containing identifiers for
-                the recording session, robot, and dataset.
+            context: Recording context containing identifiers for the recording
+                session, robot, and dataset.
 
-        Note:
-            This must be kept lightweight and not perform any blocking operations.
+        Returns:
+            None
         """
         if self.is_recording():
             self.stop_recording()
         self._recording = True
         self._context = context
+        self._handle_ensure_producer(context)
 
-        # Initialize producer with stream-specific ID and recording_id
-        producer_id = f"{self._data_type.value}:{self._stream_name}"
-        self._producer = Producer(
-            id=producer_id,
-            recording_id=context.recording_id,
-        )
-        self._producer.open_ring_buffer()
+    def _handle_ensure_producer(self, context: DataRecordingContext) -> None:
+        """Ensures a producer is available for this data stream.
+
+        If the producer does not exist, it is created with the given context.
+        If the producer already exists, its recording ID is updated if necessary.
+        Finally, a new trace is started for this producer.
+
+        Args:
+            context: Recording context containing identifiers for
+                the recording session, robot, and dataset.
+        """
+        if self._producer is None:
+            producer_id = f"{self._data_type.value}:{self._stream_name}"
+            self._producer = self._management_channel.get_nc_context(
+                producer_id=producer_id, recording_id=context.recording_id
+            )
+            self._producer.initialize_new_producer()
+            return
+        if (
+            self._producer.recording_id is None
+            or self._producer.recording_id != context.recording_id
+        ):
+            self._producer.set_recording_id(context.recording_id)
+
         self._producer.start_new_trace()
 
     def stop_recording(self) -> list[threading.Thread]:
-        """Stop recording data.
+        """Stop recording data and end trace if producer exists.
 
         Returns:
             List[threading.Thread]: Empty list (no upload threads needed with daemon).
         """
         self._recording = False
+        if isinstance(self._producer, Producer) and self._producer.trace_id:
+            self._producer.cleanup_producer()
         return []
 
     def is_recording(self) -> bool:
