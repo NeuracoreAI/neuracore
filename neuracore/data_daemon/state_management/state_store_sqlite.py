@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from neuracore.data_daemon.models import (
     DataType,
+    ProgressReportStatus,
     TraceErrorCode,
     TraceRecord,
     TraceStatus,
@@ -280,7 +281,9 @@ class SqliteStateStore(StateStore):
             rows = (
                 (
                     await conn.execute(
-                        select(traces).where(traces.c.progress_reported == 0)
+                        select(traces).where(
+                            traces.c.progress_reported == ProgressReportStatus.PENDING
+                        )
                     )
                 )
                 .mappings()
@@ -295,7 +298,9 @@ class SqliteStateStore(StateStore):
             await conn.execute(
                 update(traces)
                 .where(traces.c.recording_id == recording_id)
-                .values(progress_reported=1, last_updated=now)
+                .values(
+                    progress_reported=ProgressReportStatus.REPORTED, last_updated=now
+                )
             )
 
     async def upsert_trace_metadata(
@@ -336,7 +341,7 @@ class SqliteStateStore(StateStore):
             total_bytes=total_bytes,
             status=TraceStatus.INITIALIZING,
             bytes_uploaded=0,
-            progress_reported=0,
+            progress_reported=ProgressReportStatus.PENDING,
             created_at=now,
             last_updated=now,
         )
@@ -400,7 +405,7 @@ class SqliteStateStore(StateStore):
             total_bytes=bytes_written,
             status=TraceStatus.PENDING_BYTES,
             bytes_uploaded=0,
-            progress_reported=0,
+            progress_reported=ProgressReportStatus.PENDING,
             created_at=now,
             last_updated=now,
         )

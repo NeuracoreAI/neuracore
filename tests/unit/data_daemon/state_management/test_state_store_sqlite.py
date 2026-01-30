@@ -9,6 +9,7 @@ from sqlalchemy import select, text
 
 from neuracore.data_daemon.models import (
     DATA_TYPE_CONTENT_MAPPING,
+    ProgressReportStatus,
     TraceErrorCode,
     TraceStatus,
 )
@@ -59,7 +60,7 @@ async def test_upsert_trace_metadata_inserts_row(store: SqliteStateStore) -> Non
     assert row["status"] == TraceStatus.INITIALIZING
     assert row["bytes_written"] is None
     assert row["bytes_uploaded"] == 0
-    assert row["progress_reported"] == 0
+    assert row["progress_reported"] == ProgressReportStatus.PENDING
     assert row["error_message"] is None
     assert row["robot_instance"] == ROBOT_INSTANCE
 
@@ -211,7 +212,7 @@ async def test_join_pattern_metadata_then_bytes_transitions_to_written(
     assert row["status"] == TraceStatus.WRITTEN
     assert row["bytes_written"] == 64
     assert row["total_bytes"] == 64
-    assert row["progress_reported"] == 0
+    assert row["progress_reported"] == ProgressReportStatus.PENDING
 
 
 @pytest.mark.asyncio
@@ -241,7 +242,7 @@ async def test_join_pattern_bytes_then_metadata_transitions_to_written(
     assert row["status"] == TraceStatus.WRITTEN
     assert row["bytes_written"] == 128
     assert row["total_bytes"] == 128
-    assert row["progress_reported"] == 0
+    assert row["progress_reported"] == ProgressReportStatus.PENDING
 
 
 @pytest.mark.asyncio
@@ -322,8 +323,8 @@ async def test_mark_recording_reported_updates_all_traces(
     row_11 = await _get_trace_row(store, "trace-11")
     assert row_10 is not None
     assert row_11 is not None
-    assert row_10["progress_reported"] == 1
-    assert row_11["progress_reported"] == 1
+    assert row_10["progress_reported"] == ProgressReportStatus.REPORTED
+    assert row_11["progress_reported"] == ProgressReportStatus.REPORTED
 
 
 @pytest.mark.asyncio

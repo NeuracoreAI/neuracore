@@ -8,6 +8,7 @@ import logging
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.models import (
     DataType,
+    ProgressReportStatus,
     TraceErrorCode,
     TraceRecord,
     TraceStatus,
@@ -166,18 +167,23 @@ class StateManager:
     ) -> None:
         if not traces:
             return
+
         recording_id = traces[0].recording_id
+
         if recording_id in self._reporting_recordings:
             return
-        if any(trace.progress_reported == 1 for trace in traces):
+
+        if any(
+            trace.progress_reported == ProgressReportStatus.REPORTED for trace in traces
+        ):
             return
+
         if not all(
-            trace.status
-            in (TraceStatus.WRITTEN, TraceStatus.UPLOADING, TraceStatus.UPLOADED)
-            and trace.total_bytes == trace.bytes_written
+            trace.data_type is not None and trace.bytes_written is not None
             for trace in traces
         ):
             return
+
         self._reporting_recordings.add(recording_id)
         start_time, end_time = self._find_recording_start_and_end(traces)
         asyncio.create_task(self._emit_progress_report(start_time, end_time, traces))

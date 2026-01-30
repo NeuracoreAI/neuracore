@@ -79,6 +79,24 @@ class TraceErrorCode(str, Enum):
     PROGRESS_REPORT_ERROR = "progress_report_error"
 
 
+class ProgressReportStatus(str, Enum):
+    """Status of progress report for a trace."""
+
+    PENDING = "pending"
+    REPORTED = "reported"
+
+
+def _parse_progress_reported(value: Any) -> ProgressReportStatus:
+    """Parse progress_reported from DB (int 0/1 or enum string) to enum."""
+    if value is None or value == 0 or value == "pending":
+        return ProgressReportStatus.PENDING
+    if value == 1 or value == "reported":
+        return ProgressReportStatus.REPORTED
+    if isinstance(value, ProgressReportStatus):
+        return value
+    return ProgressReportStatus(str(value))
+
+
 @dataclass(frozen=True)
 class TraceRecord:
     """Typed representation of a trace row in the state store."""
@@ -97,7 +115,7 @@ class TraceRecord:
     bytes_written: int | None
     total_bytes: int | None
     bytes_uploaded: int
-    progress_reported: int
+    progress_reported: ProgressReportStatus
     error_code: TraceErrorCode | None
     error_message: str | None
     created_at: datetime
@@ -150,7 +168,7 @@ class TraceRecord:
             ),
             total_bytes=row.get("total_bytes"),
             bytes_uploaded=int(row.get("bytes_uploaded", 0)),
-            progress_reported=int(row.get("progress_reported", 0)),
+            progress_reported=_parse_progress_reported(row.get("progress_reported")),
             error_code=error_code,
             error_message=row.get("error_message"),
             created_at=row["created_at"],
