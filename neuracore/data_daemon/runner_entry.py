@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from neuracore.data_daemon.bootstrap import DaemonBootstrap
+from neuracore.data_daemon.communications_management.data_bridge import Daemon
 from neuracore.data_daemon.const import RECORDING_EVENTS_SOCKET_PATH, SOCKET_PATH
 from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
     install_signal_handlers,
@@ -55,15 +56,23 @@ def main() -> None:
         )
         sys.exit(1)
 
+    bootstrap = DaemonBootstrap()
+    context = bootstrap.start()
+
+    if context is None:
+        logger.error("Failed to start daemon")
+        sys.exit(1)
+
+    daemon = Daemon(
+        recording_disk_manager=context.recording_disk_manager,
+        comm_manager=context.comm_manager,
+    )
+
+    install_signal_handlers(lambda _signum: None)
+
     try:
-        bootstrap = DaemonBootstrap()
-        context = bootstrap.start()
-
-        if context is None:
-            logger.error("Failed to start daemon")
-
-        install_signal_handlers(lambda _signum: None)
-
+        logger.info("Daemon starting main loop...")
+        daemon.run()
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt")
     except SystemExit:
