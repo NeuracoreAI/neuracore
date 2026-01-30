@@ -92,7 +92,7 @@ class ConnectionManager:
         """
         try:
             async with self.client_session.head(
-                API_URL,
+                f"{API_URL}/status/health",
                 timeout=aiohttp.ClientTimeout(total=self._timeout),
             ) as response:
                 return response.status < 500
