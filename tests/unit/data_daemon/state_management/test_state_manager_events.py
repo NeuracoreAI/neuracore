@@ -134,6 +134,8 @@ class FakeStateStore:
                 path=path,
                 total_bytes=total_bytes,
                 last_updated=now,
+                num_upload_attempts=0,
+                next_retry_at=None,
             )
         else:
             trace = TraceRecord(
@@ -156,6 +158,8 @@ class FakeStateStore:
                 error_message=None,
                 created_at=now,
                 last_updated=now,
+                num_upload_attempts=0,
+                next_retry_at=None,
             )
         self._traces_by_id[trace_id] = trace
         self._update_trace_in_recording(trace, recording_id)
@@ -215,6 +219,17 @@ class FakeStateStore:
         return trace
 
 
+def _register_state_manager(manager: StateManager) -> None:
+    emitter = get_emitter()
+    emitter.on(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
+    emitter.on(Emitter.START_TRACE, manager._handle_start_trace)
+    emitter.on(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
+    emitter.on(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
+    emitter.on(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
+    emitter.on(Emitter.STOP_RECORDING, manager.handle_stop_recording)
+    emitter.on(Emitter.IS_CONNECTED, manager.handle_is_connected)
+
+
 def _cleanup_state_manager(manager: StateManager) -> None:
     get_emitter().remove_listener(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
     get_emitter().remove_listener(Emitter.START_TRACE, manager._handle_start_trace)
@@ -231,6 +246,7 @@ def _cleanup_state_manager(manager: StateManager) -> None:
 async def state_manager() -> tuple[StateManager, FakeStateStore]:
     store = FakeStateStore()
     manager = StateManager(store)
+    _register_state_manager(manager)
     try:
         yield manager, store
     finally:
@@ -246,6 +262,8 @@ def _make_trace(
     bytes_written: int | None = 0,
     total_bytes: int | None = None,
     bytes_uploaded: int = 0,
+    num_upload_attempts: int = 0,
+    next_retry_at: datetime | None = None,
     created_at: datetime,
     last_updated: datetime,
 ) -> TraceRecord:
@@ -267,6 +285,8 @@ def _make_trace(
         progress_reported=progress_reported,
         error_code=None,
         error_message=None,
+        num_upload_attempts=num_upload_attempts,
+        next_retry_at=next_retry_at,
         created_at=created_at,
         last_updated=last_updated,
     )
@@ -300,13 +320,13 @@ async def test_start_trace_creates_trace(state_manager) -> None:
         "rec-1",
         DataType.CUSTOM_1D,
         "custom",
-        0,  # robot_instance
+        0,
         None,
         None,
         None,
         None,
-        path="/tmp/trace-1.bin",
-        total_bytes=128,
+        "/tmp/trace-1.bin",
+        128,
     )
     await asyncio.sleep(0.2)
 
@@ -361,24 +381,44 @@ async def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
 
 
 @pytest.mark.asyncio
-async def test_upload_failed_records_error(state_manager) -> None:
+async def test_upload_failed_does_not_record_error_in_event_suite(
+    state_manager,
+) -> None:
+    """UPLOAD_FAILED should not call record_error."""
     _, store = state_manager
-    get_emitter().emit(
-        Emitter.UPLOAD_FAILED,
-        "trace-4",
-        12,
-        TraceStatus.FAILED,
-        TraceErrorCode.NETWORK_ERROR,
-        "lost connection",
-    )
-    await asyncio.sleep(0.2)
+    emitter = get_emitter()
 
-    assert store.errors == [(
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    trace = _make_trace(
         "trace-4",
-        "lost connection",
-        TraceErrorCode.NETWORK_ERROR,
-        TraceStatus.FAILED,
-    )]
+        "rec-4",
+        created_at=created_at,
+        last_updated=created_at,
+    )
+    store._traces_by_id["trace-4"] = trace
+    store._traces_by_recording["rec-4"] = [trace]
+
+    ready_events: list[tuple] = []
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        emitter.emit(
+            Emitter.UPLOAD_FAILED,
+            "trace-4",
+            12,
+            TraceStatus.FAILED,
+            TraceErrorCode.NETWORK_ERROR,
+            "lost connection",
+        )
+        await asyncio.sleep(0.2)
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+    assert store.errors == []
+    assert ready_events == []
 
 
 @pytest.mark.asyncio
@@ -401,18 +441,21 @@ async def test_trace_written_emits_ready_for_upload_when_connected(
             "rec-5",
             DataType.CUSTOM_1D,
             "custom",
-            0,  # robot_instance
+            0,
             None,
             None,
             None,
             None,
-            path="/tmp/trace-5.bin",
-            total_bytes=64,
+            "/tmp/trace-5.bin",
+            64,
         )
         await asyncio.sleep(0.2)
 
         # No READY_FOR_UPLOAD yet (missing bytes_written)
         assert received == []
+
+        get_emitter().emit(Emitter.IS_CONNECTED, True)
+        await asyncio.sleep(0)
 
         # Second: TRACE_WRITTEN with bytes (completes the trace)
         get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-5", "rec-5", 64)
@@ -460,8 +503,8 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
             None,
             None,
             None,
-            path="/tmp/trace-1.bin",
-            total_bytes=10,
+            "/tmp/trace-1.bin",
+            10,
         )
         get_emitter().emit(
             Emitter.START_TRACE,
@@ -474,10 +517,13 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
             None,
             None,
             None,
-            path="/tmp/trace-2.bin",
-            total_bytes=10,
+            "/tmp/trace-2.bin",
+            10,
         )
         await asyncio.sleep(0.2)
+
+        get_emitter().emit(Emitter.IS_CONNECTED, True)
+        await asyncio.sleep(0)
 
         # No progress report yet - neither trace has bytes_written
         assert len(progress_events) == 0
@@ -672,3 +718,140 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
         )]
     finally:
         get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+
+@pytest.mark.asyncio
+async def test_is_connected_emits_ready_for_due_retries_event_suite(
+    state_manager,
+) -> None:
+    """When we come online, traces that are eligible should be re-queued."""
+    _, store = state_manager
+    emitter = get_emitter()
+
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
+
+    due_trace = _make_trace(
+        "trace-due",
+        "rec-due",
+        status=TraceStatus.WRITTEN,
+        bytes_written=10,
+        total_bytes=10,
+        bytes_uploaded=3,
+        num_upload_attempts=1,
+        next_retry_at=datetime(2024, 1, 1, 0, 0, 0),
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+
+    store._traces_by_id["trace-due"] = due_trace
+    store._traces_by_recording["rec-due"] = [due_trace]
+
+    # IMPORTANT: StateManager likely queries find_ready_traces()
+    store.ready_traces = [due_trace]
+
+    ready_events: list[tuple] = []
+    ready_evt = asyncio.Event()
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+        if args[0] == "trace-due":
+            ready_evt.set()
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        await asyncio.wait_for(ready_evt.wait(), timeout=2.0)
+
+        assert len(ready_events) == 1
+        assert ready_events[0][:2] == ("trace-due", "rec-due")
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+
+@pytest.mark.asyncio
+async def test_is_connected_emits_ready_even_when_next_retry_at_in_future_event_suite(
+    state_manager,
+) -> None:
+    """IS_CONNECTED emits READY for traces returned by find_ready_traces()."""
+    _, store = state_manager
+    emitter = get_emitter()
+
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
+
+    trace = _make_trace(
+        "trace-not-due",
+        "rec-not-due",
+        status=TraceStatus.WRITTEN,
+        bytes_written=10,
+        total_bytes=10,
+        bytes_uploaded=1,
+        num_upload_attempts=1,
+        next_retry_at=datetime(2099, 1, 1, 0, 0, 0),
+        created_at=created_at,
+        last_updated=updated_at,
+    )
+
+    store._traces_by_id["trace-not-due"] = trace
+    store._traces_by_recording["rec-not-due"] = [trace]
+    store.ready_traces = [trace]
+
+    ready_events: list[tuple] = []
+    ready_evt = asyncio.Event()
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+        if args[0] == "trace-not-due":
+            ready_evt.set()
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        await asyncio.wait_for(ready_evt.wait(), timeout=2.0)
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+    assert len(ready_events) == 1
+    assert ready_events[0][0] == "trace-not-due"
+
+
+@pytest.mark.asyncio
+async def test_upload_failed_does_not_record_error_and_does_not_emit_ready_event_suite(
+    state_manager,
+) -> None:
+    """UPLOAD_FAILED should not call record_error and not emit READY_FOR_UPLOAD."""
+    _, store = state_manager
+    emitter = get_emitter()
+
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    trace = _make_trace(
+        "trace-fail-payload",
+        "rec-fail-payload",
+        created_at=created_at,
+        last_updated=created_at,
+    )
+    store._traces_by_id["trace-fail-payload"] = trace
+    store._traces_by_recording["rec-fail-payload"] = [trace]
+
+    ready_events: list[tuple] = []
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        emitter.emit(
+            Emitter.UPLOAD_FAILED,
+            "trace-fail-payload",
+            7,
+            TraceStatus.WRITTEN,
+            TraceErrorCode.NETWORK_ERROR,
+            "net down",
+        )
+        await asyncio.sleep(0.2)
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+    assert store.errors == []
+    assert ready_events == []

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -574,3 +575,98 @@ async def test_race_conditions_on_rapid_state_changes(tmp_path: Path, caplog) ->
         assert row["status"] == TraceStatus.UPLOADED
     finally:
         await store._engine.dispose()
+
+
+async def _set_attempts_and_retry_at(
+    store: SqliteStateStore, trace_id: str, attempts: int, next_retry_at
+) -> None:
+    async with store._engine.begin() as conn:
+        await conn.execute(
+            traces.update()
+            .where(traces.c.trace_id == trace_id)
+            .values(num_upload_attempts=int(attempts), next_retry_at=next_retry_at)
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_trace_sets_retry_defaults(store: SqliteStateStore) -> None:
+    """New traces should default to 0 attempts and no next_retry_at."""
+    await store.upsert_trace_metadata(
+        trace_id="trace-retry-defaults",
+        recording_id="rec-retry-defaults",
+        data_type=PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-retry-defaults.bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+
+    row = await _get_trace_row(store, "trace-retry-defaults")
+    assert row is not None
+    assert int(row["num_upload_attempts"]) == 0
+    assert row["next_retry_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_retry_fields_persisted_across_restart(tmp_path: Path) -> None:
+    """num_upload_attempts and next_retry_at should persist across restart."""
+    db_path = tmp_path / "state.db"
+    store = SqliteStateStore(db_path)
+    await store.init_async_store()
+    try:
+        await store.upsert_trace_metadata(
+            trace_id="trace-retry-persist",
+            recording_id="rec-retry-persist",
+            data_type=PRIMARY_DATA_TYPE,
+            data_type_name="primary",
+            path="/tmp/trace-retry-persist.bin",
+            robot_instance=ROBOT_INSTANCE,
+        )
+
+        next_retry_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(
+            seconds=30
+        )
+        await _set_attempts_and_retry_at(store, "trace-retry-persist", 2, next_retry_at)
+
+        row = await _get_trace_row(store, "trace-retry-persist")
+        assert row is not None
+        assert int(row["num_upload_attempts"]) == 2
+        assert row["next_retry_at"] is not None
+    finally:
+        await store._engine.dispose()
+
+    restarted = SqliteStateStore(db_path)
+    await restarted.init_async_store()
+    try:
+        row_after = await _get_trace_row(restarted, "trace-retry-persist")
+        assert row_after is not None
+        assert int(row_after["num_upload_attempts"]) == 2
+        assert row_after["next_retry_at"] is not None
+    finally:
+        await restarted._engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_find_ready_traces_excludes_future_retries(
+    store: SqliteStateStore,
+) -> None:
+    """A WRITTEN trace with next_retry_at in the future not be returned as ready."""
+    await store.upsert_trace_metadata(
+        trace_id="trace-id",
+        recording_id="rec-id",
+        data_type=PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/....bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+    async with store._engine.begin() as conn:
+        await conn.execute(
+            traces.update()
+            .where(traces.c.trace_id == "trace-future-retry")
+            .values(status=TraceStatus.WRITTEN)
+        )
+
+    future = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=60)
+    await _set_attempts_and_retry_at(store, "trace-future-retry", 1, future)
+
+    ready = await store.find_ready_traces()
+    assert "trace-future-retry" not in {t.trace_id for t in ready}

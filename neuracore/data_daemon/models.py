@@ -120,6 +120,8 @@ class TraceRecord:
     error_message: str | None
     created_at: datetime
     last_updated: datetime
+    num_upload_attempts: int
+    next_retry_at: datetime | None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "TraceRecord":
@@ -173,6 +175,8 @@ class TraceRecord:
             error_message=row.get("error_message"),
             created_at=row["created_at"],
             last_updated=row["last_updated"],
+            num_upload_attempts=int(row.get("num_upload_attempts", 0)),
+            next_retry_at=row.get("next_retry_at"),
         )
 
 

@@ -74,6 +74,8 @@ traces = Table(
         nullable=False,
         server_default=func.now(),
     ),
+    Column("num_upload_attempts", Integer, nullable=False, default=0),
+    Column("next_retry_at", DateTime(timezone=False), nullable=True, default=None),
 )
 
 Index("idx_traces_trace_id", traces.c.trace_id)

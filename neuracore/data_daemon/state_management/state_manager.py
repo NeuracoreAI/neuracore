@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
+from neuracore.data_daemon.const import (
+    UPLOAD_MAX_RETRIES,
+    UPLOAD_RETRY_BASE_SECONDS,
+    UPLOAD_RETRY_MAX_SECONDS,
+)
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.models import (
     DataType,
@@ -93,7 +99,28 @@ class StateManager:
 
     async def handle_is_connected(self, is_connected: bool) -> None:
         """Handle a connection status event from the data bridge."""
-        pass
+        if not is_connected:
+            return
+
+        traces = await self._store.find_ready_traces()
+        for trace in traces:
+            await self._emit_ready_for_upload_from_trace(trace)
+
+        due = await self._store.find_traces_ready_for_reupload()
+        for trace in due:
+            await self._emit_ready_for_upload_from_trace(trace)
+
+    async def _emit_ready_for_upload_from_trace(self, trace: TraceRecord) -> None:
+        await self._store.update_status(trace.trace_id, TraceStatus.UPLOADING)
+        self._emitter.emit(
+            Emitter.READY_FOR_UPLOAD,
+            trace.trace_id,
+            trace.recording_id,
+            trace.path,
+            trace.data_type,
+            trace.data_type_name,
+            trace.bytes_uploaded,
+        )
 
     async def handle_upload_complete(self, trace_id: str) -> None:
         """Handle an upload complete event from an uploader.
@@ -237,14 +264,70 @@ class StateManager:
         error_code: TraceErrorCode,
         error_message: str,
     ) -> None:
-        """Handle an upload failed event from an uploader."""
-        await self._record_error(
+        """Handle an upload failed event from an uploader.
+
+        Args:
+            trace_id: unique identifier for the trace.
+            bytes_uploaded: latest uploaded byte count for this trace.
+            status: trace status reported at failure time.
+            error_code: error code describing the failure type.
+            error_message: human readable failure message.
+        """
+        await self.update_bytes_uploaded(trace_id, bytes_uploaded)
+
+        trace = await self._store.get_trace(trace_id)
+        if trace is None:
+            logger.warning("Trace record not found: %s", trace_id)
+            return
+
+        next_attempt = int(getattr(trace, "num_upload_attempts", 0)) + 1
+
+        if next_attempt >= UPLOAD_MAX_RETRIES:
+            await self._store.mark_retry_exhausted(
+                trace_id,
+                error_code=error_code,
+                error_message=error_message,
+            )
+            return
+
+        backoff = UPLOAD_RETRY_BASE_SECONDS * (2 ** (next_attempt - 1))
+        if backoff > UPLOAD_RETRY_MAX_SECONDS:
+            backoff = UPLOAD_RETRY_MAX_SECONDS
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        next_retry_at = now + timedelta(seconds=float(backoff))
+
+        await self._store.schedule_retry(
             trace_id,
+            next_retry_at=next_retry_at,
             error_code=error_code,
             error_message=error_message,
-            status=status,
         )
-        await self.update_bytes_uploaded(trace_id, bytes_uploaded)
+
+        loop = asyncio.get_running_loop()
+        loop.call_later(
+            float(backoff),
+            lambda: asyncio.create_task(self._retry_emit(trace_id)),
+        )
+
+    async def _retry_emit(self, trace_id: str) -> None:
+        """Emit READY_FOR_UPLOAD when a trace is due for retry."""
+        trace = await self._store.get_trace(trace_id)
+        if trace is None:
+            return
+        if trace.status != TraceStatus.WRITTEN:
+            return
+        if trace.next_retry_at is not None:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            if trace.next_retry_at > now:
+                delay = (trace.next_retry_at - now).total_seconds()
+                loop = asyncio.get_running_loop()
+                loop.call_later(
+                    float(delay),
+                    lambda: asyncio.create_task(self._retry_emit(trace_id)),
+                )
+                return
+        await self._emit_ready_for_upload_from_trace(trace)
 
     async def handle_progress_report_error(
         self, recording_id: str, error_message: str
