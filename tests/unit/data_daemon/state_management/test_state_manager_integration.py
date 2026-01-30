@@ -2,17 +2,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import select, text, update
 
+from neuracore.data_daemon.const import UPLOAD_MAX_RETRIES
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.models import DataType, TraceErrorCode, TraceStatus
 from neuracore.data_daemon.state_management.state_manager import StateManager
 from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
 from neuracore.data_daemon.state_management.tables import traces
+
+
+def _register_state_manager(manager: StateManager) -> None:
+    emitter = get_emitter()
+    emitter.on(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
+    emitter.on(Emitter.START_TRACE, manager._handle_start_trace)
+    emitter.on(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
+    emitter.on(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
+    emitter.on(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
+    emitter.on(Emitter.STOP_RECORDING, manager.handle_stop_recording)
+    emitter.on(Emitter.IS_CONNECTED, manager.handle_is_connected)
 
 
 def _cleanup_state_manager(manager: StateManager) -> None:
@@ -31,6 +43,7 @@ async def manager_store(tmp_path) -> tuple[StateManager, SqliteStateStore]:
     store = SqliteStateStore(tmp_path / "state.db")
     await store.init_async_store()
     manager = StateManager(store)
+    _register_state_manager(manager)
     try:
         yield manager, store
     finally:
@@ -56,6 +69,27 @@ async def _get_trace_status(store: SqliteStateStore, trace_id: str) -> TraceStat
                 select(traces.c.status).where(traces.c.trace_id == trace_id)
             )
         ).scalar_one()
+
+
+async def _set_attempts_and_retry_at(
+    store, trace_id: str, attempts: int, next_retry_at
+):
+    async with store._engine.begin() as conn:
+        await conn.execute(
+            update(traces)
+            .where(traces.c.trace_id == trace_id)
+            .values(num_upload_attempts=int(attempts), next_retry_at=next_retry_at)
+        )
+
+
+async def _get_trace_row(store, trace_id: str):
+    async with store._engine.begin() as conn:
+        row = (
+            (await conn.execute(select(traces).where(traces.c.trace_id == trace_id)))
+            .mappings()
+            .one()
+        )
+    return dict(row)
 
 
 @pytest.mark.asyncio
@@ -349,6 +383,7 @@ async def test_state_recovery_after_restart(tmp_path) -> None:
     store = SqliteStateStore(db_path)
     await store.init_async_store()
     manager = StateManager(store)
+    _register_state_manager(manager)
     try:
         await manager._handle_start_trace(
             "trace-recover",
@@ -773,5 +808,360 @@ async def test_two_traces_staggered_completion(manager_store) -> None:
         emitted_trace_ids = [event[0] for event in ready_events]
         assert emitted_trace_ids.count("trace-stag-a") == 1
         assert emitted_trace_ids.count("trace-stag-b") == 1
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+
+@pytest.mark.asyncio
+async def test_upload_failed_schedules_retry_increments_attempts_sets_next_retry_at(
+    manager_store, monkeypatch
+) -> None:
+
+    manager, store = manager_store
+    emitter = get_emitter()
+
+    import neuracore.data_daemon.const as const_mod
+    import neuracore.data_daemon.state_management.state_manager as sm_mod
+
+    # Keep it fast, but >0 so code-path uses call_later (no immediate loop).
+    monkeypatch.setattr(const_mod, "UPLOAD_RETRY_BASE_SECONDS", 0.01)
+    monkeypatch.setattr(const_mod, "UPLOAD_RETRY_MAX_SECONDS", 0.01)
+    if hasattr(sm_mod, "UPLOAD_RETRY_BASE_SECONDS"):
+        monkeypatch.setattr(sm_mod, "UPLOAD_RETRY_BASE_SECONDS", 0.01)
+    if hasattr(sm_mod, "UPLOAD_RETRY_MAX_SECONDS"):
+        monkeypatch.setattr(sm_mod, "UPLOAD_RETRY_MAX_SECONDS", 0.01)
+
+    await manager._handle_start_trace(
+        "trace-retry-1",
+        "rec-retry-1",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-retry-1.bin",
+        total_bytes=10,
+    )
+
+    await manager.update_status("trace-retry-1", TraceStatus.INITIALIZING)
+    await manager.update_status("trace-retry-1", TraceStatus.WRITTEN)
+    await manager.update_status("trace-retry-1", TraceStatus.UPLOADING)
+
+    scheduled: list[float] = []
+    scheduled_evt = asyncio.Event()
+
+    loop = asyncio.get_running_loop()
+    orig_call_later = loop.call_later
+
+    def capture_call_later(delay, callback, *args, **kwargs):
+        d = float(delay)
+        if abs(d - 0.01) < 1e-6:
+            scheduled.append(d)
+            scheduled_evt.set()
+        return orig_call_later(delay, callback, *args, **kwargs)
+
+    monkeypatch.setattr(loop, "call_later", capture_call_later)
+
+    emitter.emit(Emitter.IS_CONNECTED, True)
+    await asyncio.sleep(0)
+
+    emitter.emit(
+        Emitter.UPLOAD_FAILED,
+        "trace-retry-1",
+        7,
+        TraceStatus.WRITTEN,
+        TraceErrorCode.NETWORK_ERROR,
+        "net down",
+    )
+
+    await asyncio.wait_for(scheduled_evt.wait(), timeout=2.0)
+
+    async def wait_row(timeout: float = 2.0) -> dict:
+        end = asyncio.get_running_loop().time() + timeout
+        while True:
+            row = await _get_trace_row(store, "trace-retry-1")
+            if (
+                int(row["num_upload_attempts"]) == 1
+                and row["next_retry_at"] is not None
+            ):
+                return row
+            if asyncio.get_running_loop().time() >= end:
+                return row
+            await asyncio.sleep(0.01)
+
+    row = await wait_row()
+
+    assert row["status"] == TraceStatus.WRITTEN.value
+    assert int(row["bytes_uploaded"]) == 7
+    assert row["error_code"] == TraceErrorCode.NETWORK_ERROR.value
+    assert row["error_message"] == "net down"
+    assert int(row["num_upload_attempts"]) == 1
+    assert row["next_retry_at"] is not None
+
+    assert scheduled, "expected retry to be scheduled via call_later"
+    assert 0.01 in scheduled
+
+
+@pytest.mark.asyncio
+async def test_upload_failed_backoff_caps_at_max(manager_store, monkeypatch) -> None:
+    manager, store = manager_store
+    emitter = get_emitter()
+
+    import neuracore.data_daemon.const as const_mod
+    import neuracore.data_daemon.state_management.state_manager as sm_mod
+
+    monkeypatch.setattr(const_mod, "UPLOAD_RETRY_BASE_SECONDS", 1)
+    monkeypatch.setattr(const_mod, "UPLOAD_RETRY_MAX_SECONDS", 3)
+    if hasattr(sm_mod, "UPLOAD_RETRY_BASE_SECONDS"):
+        monkeypatch.setattr(sm_mod, "UPLOAD_RETRY_BASE_SECONDS", 1)
+    if hasattr(sm_mod, "UPLOAD_RETRY_MAX_SECONDS"):
+        monkeypatch.setattr(sm_mod, "UPLOAD_RETRY_MAX_SECONDS", 3)
+
+    await manager._handle_start_trace(
+        "trace-retry-cap",
+        "rec-retry-cap",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-retry-cap.bin",
+        total_bytes=10,
+    )
+
+    await manager.update_status("trace-retry-cap", TraceStatus.INITIALIZING)
+    await manager.update_status("trace-retry-cap", TraceStatus.WRITTEN)
+    await manager.update_status("trace-retry-cap", TraceStatus.UPLOADING)
+
+    cap_attempts = 0
+    while True:
+        cap_attempts += 1
+        if (1 * (2**cap_attempts)) >= 3:
+            break
+
+    await _set_attempts_and_retry_at(store, "trace-retry-cap", cap_attempts, None)
+
+    scheduled: list[float] = []
+    scheduled_evt = asyncio.Event()
+
+    loop = asyncio.get_running_loop()
+    orig_call_later = loop.call_later
+
+    def capture_call_later(delay, callback, *args, **kwargs):
+        d = float(delay)
+        if abs(d - 3.0) < 1e-6:
+            scheduled.append(d)
+            scheduled_evt.set()
+        return orig_call_later(delay, callback, *args, **kwargs)
+
+    monkeypatch.setattr(loop, "call_later", capture_call_later)
+
+    emitter.emit(Emitter.IS_CONNECTED, True)
+    await asyncio.sleep(0)
+
+    emitter.emit(
+        Emitter.UPLOAD_FAILED,
+        "trace-retry-cap",
+        0,
+        TraceStatus.WRITTEN,
+        TraceErrorCode.NETWORK_ERROR,
+        "net",
+    )
+
+    await asyncio.wait_for(scheduled_evt.wait(), timeout=2.0)
+
+    assert scheduled, "expected call_later scheduling"
+    assert 3.0 in scheduled
+
+    async def wait_row(timeout: float = 2.0) -> dict:
+        end = asyncio.get_running_loop().time() + timeout
+        while True:
+            row = await _get_trace_row(store, "trace-retry-cap")
+            if (
+                int(row["num_upload_attempts"]) == cap_attempts + 1
+                and row["next_retry_at"] is not None
+            ):
+                return row
+            if asyncio.get_running_loop().time() >= end:
+                return row
+            await asyncio.sleep(0.01)
+
+    row = await wait_row()
+
+    assert row["status"] == TraceStatus.WRITTEN.value
+    assert int(row["num_upload_attempts"]) == cap_attempts + 1
+    assert row["next_retry_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_upload_failed_after_max_retries_marks_failed_and_no_ready_emitted(
+    manager_store,
+) -> None:
+    manager, store = manager_store
+    emitter = get_emitter()
+
+    await manager._handle_start_trace(
+        "trace-exhaust",
+        "rec-exhaust",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-exhaust.bin",
+        total_bytes=10,
+    )
+
+    await manager.update_status("trace-exhaust", TraceStatus.INITIALIZING)
+    await manager.update_status("trace-exhaust", TraceStatus.WRITTEN)
+    await manager.update_status("trace-exhaust", TraceStatus.UPLOADING)
+
+    await _set_attempts_and_retry_at(
+        store,
+        "trace-exhaust",
+        UPLOAD_MAX_RETRIES - 1,
+        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1),
+    )
+
+    ready_events: list[tuple] = []
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        emitter.emit(
+            Emitter.UPLOAD_FAILED,
+            "trace-exhaust",
+            3,
+            TraceStatus.FAILED,
+            TraceErrorCode.NETWORK_ERROR,
+            "final fail",
+        )
+        await asyncio.sleep(0.15)
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+    assert ready_events == []
+
+    row = await _get_trace_row(store, "trace-exhaust")
+    assert row["status"] == TraceStatus.FAILED.value
+    assert row["error_code"] == TraceErrorCode.NETWORK_ERROR.value
+    assert row["error_message"] == "final fail"
+    assert row["next_retry_at"] is None
+    assert int(row["num_upload_attempts"]) == UPLOAD_MAX_RETRIES
+    assert int(row["bytes_uploaded"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_is_connected_emits_due_retry_only_once(manager_store) -> None:
+    manager, store = manager_store
+    emitter = get_emitter()
+
+    await manager._handle_start_trace(
+        "trace-due",
+        "rec-due",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-due.bin",
+        total_bytes=10,
+    )
+
+    await manager.update_status("trace-due", TraceStatus.INITIALIZING)
+    await manager.update_status("trace-due", TraceStatus.WRITTEN)
+
+    past = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=5)
+    await _set_attempts_and_retry_at(store, "trace-due", 1, past)
+
+    ready_events: list[tuple] = []
+    ready_evt = asyncio.Event()
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+        ready_evt.set()
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        await asyncio.wait_for(ready_evt.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+    assert len(ready_events) == 1
+    assert ready_events[0][0] == "trace-due"
+
+
+@pytest.mark.asyncio
+async def test_retry_emit_does_not_emit_before_next_retry_at(
+    manager_store, monkeypatch
+) -> None:
+    from datetime import datetime as dt
+    from datetime import timedelta, timezone
+
+    manager, store = manager_store
+    emitter = get_emitter()
+
+    await manager._handle_start_trace(
+        "trace-not-due",
+        "rec-not-due",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-not-due.bin",
+        total_bytes=10,
+    )
+
+    await manager.update_status("trace-not-due", TraceStatus.INITIALIZING)
+    await manager.update_status("trace-not-due", TraceStatus.WRITTEN)
+
+    future = dt.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=60)
+    await _set_attempts_and_retry_at(store, "trace-not-due", 1, future)
+
+    ready_events: list[tuple] = []
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+
+    scheduled: list[float] = []
+
+    loop = asyncio.get_running_loop()
+    orig_call_later = loop.call_later
+
+    def capture_call_later(delay, callback, *args, **kwargs):
+        d = float(delay)
+        if d >= 30.0:
+            scheduled.append(d)
+        return orig_call_later(delay, callback, *args, **kwargs)
+
+    monkeypatch.setattr(loop, "call_later", capture_call_later)
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        await manager._retry_emit("trace-not-due")
+
+        for _ in range(200):
+            if scheduled:
+                break
+            await asyncio.sleep(0.01)
+
+        assert ready_events == []
+        assert scheduled, "expected reschedule when next_retry_at is in the future"
+        assert scheduled[0] >= 30.0
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)

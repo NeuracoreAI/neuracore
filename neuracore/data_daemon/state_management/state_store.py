@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from neuracore.data_daemon.models import (
@@ -115,4 +116,30 @@ class StateStore(Protocol):
 
         Returns the trace record after upsert.
         """
+
+    async def schedule_retry(
+        self,
+        trace_id: str,
+        *,
+        next_retry_at: datetime,
+        error_code: TraceErrorCode,
+        error_message: str,
+    ) -> int:
+        """Schedule next upload retry and persist failure details."""
+        ...
+
+    async def mark_retry_exhausted(
+        self,
+        trace_id: str,
+        *,
+        error_code: TraceErrorCode,
+        error_message: str,
+    ) -> int:
+        """Mark retries exhausted and persist final failure details."""
+        ...
+
+    async def find_traces_ready_for_reupload(
+        self, limit: int = 50
+    ) -> list[TraceRecord]:
+        """Return traces due for retry upload attempts."""
         ...

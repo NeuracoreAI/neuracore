@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import case, delete, select, text, update
+from sqlalchemy import case, delete, or_, select, text, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -262,17 +262,35 @@ class SqliteStateStore(StateStore):
             await conn.execute(delete(traces).where(traces.c.trace_id == trace_id))
 
     async def find_ready_traces(self) -> list[TraceRecord]:
-        """Return all traces with WRITTEN status (ready for upload)."""
+        """Return traces ready to start an upload attempt.
+
+        Args:
+            None
+
+        Returns:
+            list[TraceRecord]: Traces eligible for upload.
+        """
+        now = _utc_now()
+
         async with self._engine.begin() as conn:
             rows = (
                 (
                     await conn.execute(
-                        select(traces).where(traces.c.status == TraceStatus.WRITTEN)
+                        select(traces)
+                        .where(traces.c.status == TraceStatus.WRITTEN)
+                        .where(
+                            or_(
+                                traces.c.next_retry_at.is_(None),
+                                traces.c.next_retry_at <= now,
+                            )
+                        )
+                        .order_by(traces.c.created_at.asc())
                     )
                 )
                 .mappings()
                 .all()
             )
+
         return [TraceRecord.from_row(dict(row)) for row in rows]
 
     async def find_unreported_traces(self) -> list[TraceRecord]:
@@ -436,6 +454,127 @@ class SqliteStateStore(StateStore):
                 .one()
             )
         return TraceRecord.from_row(dict(row))
+
+    async def schedule_retry(
+        self,
+        trace_id: str,
+        *,
+        next_retry_at: datetime,
+        error_code: TraceErrorCode,
+        error_message: str,
+    ) -> int:
+        """Schedule a retry for a failed upload attempt.
+
+        Args:
+            trace_id: Unique identifier for the trace.
+            next_retry_at: When the next retry is due (naive UTC).
+            error_code: Error code describing the failure type.
+            error_message: Human-readable failure message.
+
+        Returns:
+            int: Updated num_upload_attempts value.
+
+        Raises:
+            ValueError: If the trace does not exist.
+        """
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                update(traces)
+                .where(traces.c.trace_id == trace_id)
+                .values(
+                    status=TraceStatus.WRITTEN,
+                    error_code=error_code.value,
+                    error_message=error_message,
+                    next_retry_at=next_retry_at,
+                    num_upload_attempts=traces.c.num_upload_attempts + 1,
+                    last_updated=now,
+                )
+            )
+            attempts = (
+                await conn.execute(
+                    select(traces.c.num_upload_attempts).where(
+                        traces.c.trace_id == trace_id
+                    )
+                )
+            ).scalar_one_or_none()
+        if attempts is None:
+            raise ValueError(f"Trace not found: {trace_id}")
+        return int(attempts)
+
+    async def mark_retry_exhausted(
+        self,
+        trace_id: str,
+        *,
+        error_code: TraceErrorCode,
+        error_message: str,
+    ) -> int:
+        """Mark a trace as permanently failed due to exhausted retries.
+
+        Args:
+            trace_id: Unique identifier for the trace.
+            error_code: Error code describing the failure type.
+            error_message: Human-readable failure message.
+
+        Returns:
+            int: Updated num_upload_attempts value.
+
+        Raises:
+            ValueError: If the trace does not exist.
+        """
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                update(traces)
+                .where(traces.c.trace_id == trace_id)
+                .values(
+                    status=TraceStatus.FAILED,
+                    error_code=error_code.value,
+                    error_message=error_message,
+                    next_retry_at=None,
+                    num_upload_attempts=traces.c.num_upload_attempts + 1,
+                    last_updated=now,
+                )
+            )
+            attempts = (
+                await conn.execute(
+                    select(traces.c.num_upload_attempts).where(
+                        traces.c.trace_id == trace_id
+                    )
+                )
+            ).scalar_one_or_none()
+        if attempts is None:
+            raise ValueError(f"Trace not found: {trace_id}")
+        return int(attempts)
+
+    async def find_traces_ready_for_reupload(
+        self, limit: int = 50
+    ) -> list[TraceRecord]:
+        """Return traces due for a retry upload attempt.
+
+        Args:
+            limit: Maximum number of traces to return.
+
+        Returns:
+            list[TraceRecord]: Traces eligible for re-upload.
+        """
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        async with self._engine.begin() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        select(traces)
+                        .where(traces.c.status == TraceStatus.WRITTEN)
+                        .where(traces.c.next_retry_at.is_not(None))
+                        .where(traces.c.next_retry_at <= now)
+                        .order_by(traces.c.next_retry_at.asc())
+                        .limit(int(limit))
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [TraceRecord.from_row(dict(row)) for row in rows]
 
     async def close(self) -> None:
         """Close the database connection and dispose of the engine.
