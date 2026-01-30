@@ -20,15 +20,13 @@ class ConfigLoadError(UploaderError):
 class ConfigValidationError(UploaderError):
     """Raised when dataset config fails validation."""
 
-    def __init__(self, errors: list[str]):
-        """Initialize ConfigValidationError with list of error messages.
 
-        Args:
-            errors: List of error messages from validation.
-        """
-        message = "\n".join(errors)
-        super().__init__(message)
-        self.errors = errors
+class DataValidationError(UploaderError):
+    """Raised when data fails validation and should skip the episode."""
+
+
+class DataValidationWarning(UploaderError):
+    """Raised when data fails validation and should log a warning but continue."""
 
 
 class DatasetDetectionError(UploaderError):

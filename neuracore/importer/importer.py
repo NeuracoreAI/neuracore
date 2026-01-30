@@ -23,6 +23,9 @@ from neuracore.importer.core.exceptions import (
     DatasetOperationError,
     UploaderError,
 )
+from neuracore.importer.core.validation import (
+    validate_dataset_config_against_robot_model,
+)
 from neuracore.importer.lerobot_importer import LeRobotDatasetImporter
 from neuracore.importer.rlds_importer import RLDSDatasetImporter
 
@@ -75,6 +78,18 @@ def parse_args() -> argparse.Namespace:
         "--overwrite",
         action="store_true",
         help="Delete the dataset before importing if it already exists.",
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Perform a dry run without actually logging data to Neuracore.",
+    )
+
+    parser.add_argument(
+        "--no-validation-warnings",
+        action="store_true",
+        help="Suppress warning messages from data validation.",
     )
 
     args = parser.parse_args()
@@ -249,6 +264,10 @@ def main() -> None:
         overwrite=robot_config.overwrite_existing,
     )
     logger.info("Using robot model: %s (id=%s)", robot.name, robot.id)
+
+    if robot.joint_info:
+        validate_dataset_config_against_robot_model(dataconfig, robot.joint_info)
+
     logger.info("Setup complete; beginning import.")
 
     importer: RLDSDatasetImporter | LeRobotDatasetImporter | None = None
@@ -261,6 +280,9 @@ def main() -> None:
             output_dataset_name=dataconfig.output_dataset.name,
             dataset_dir=args.dataset_dir,
             dataset_config=dataconfig,
+            joint_info=robot.joint_info,
+            dry_run=args.dry_run,
+            suppress_warnings=args.no_validation_warnings,
         )
         importer.upload_all()
     elif dataset_type == DatasetTypeConfig.LEROBOT:
@@ -270,6 +292,9 @@ def main() -> None:
             output_dataset_name=dataconfig.output_dataset.name,
             dataset_dir=args.dataset_dir,
             dataset_config=dataconfig,
+            joint_info=robot.joint_info,
+            dry_run=args.dry_run,
+            suppress_warnings=args.no_validation_warnings,
         )
         importer.upload_all()
 

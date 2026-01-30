@@ -29,32 +29,27 @@ data_import_config:
     mapping:
       - name: shoulder_pan_joint
         offset: 0.0
-        inverted: false
         index: 0
 
       - name: shoulder_lift_joint
         offset: -1.5707963267948966
-        inverted: true
         index: 1
 
       - name: elbow_joint
         offset: 0.0
-        inverted: false
+        inverted: true
         index: 2
 
       - name: wrist_1_joint
         offset: -1.5707963267948966
-        inverted: true
         index: 3
 
       - name: wrist_2_joint
         offset: 0.0
-        inverted: true
         index: 4
 
-      - name: ee_fixed_joint
+      - name: wrist_3_joint
         offset: 0.0
-        inverted: false
         index: 5
 
   JOINT_VELOCITIES:
@@ -62,13 +57,12 @@ data_import_config:
     format:
       angle_units: RADIANS
     mapping:
-      - name: joint_1
-      - name: joint_2
-      - name: joint_3
-        inverted: true
-      - name: joint_4
-      - name: joint_5
-      - name: joint_6
+      - name: shoulder_pan_joint
+      - name: shoulder_lift_joint
+      - name: elbow_joint
+      - name: wrist_1_joint
+      - name: wrist_2_joint
+      - name: wrist_3_joint
 
   PARALLEL_GRIPPER_OPEN_AMOUNTS:
     source: observation.state
@@ -79,7 +73,6 @@ data_import_config:
     mapping:
       - name: gripper
         index: 6
-        inverted: false
 
   LANGUAGE:
     source: language_instruction
