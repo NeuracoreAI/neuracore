@@ -241,3 +241,7 @@ neginf
 rotvec
 dataconfig
 pbtxt
+checkpointed
+CREAT
+getpid
+WRONLY

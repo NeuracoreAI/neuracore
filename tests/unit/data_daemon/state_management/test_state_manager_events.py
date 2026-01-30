@@ -42,6 +42,9 @@ class FakeStateStore:
     async def find_traces_by_recording_id(self, recording_id: str) -> list[TraceRecord]:
         return list(self._traces_by_recording.get(recording_id, []))
 
+    def list_traces(self) -> list[TraceRecord]:
+        return list(self._traces_by_id.values())
+
     async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
         self.updated_bytes.append((trace_id, bytes_uploaded))
 

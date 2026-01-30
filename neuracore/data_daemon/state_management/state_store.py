@@ -44,6 +44,10 @@ class StateStore(Protocol):
         """Return all traces for a given recording ID."""
         ...
 
+    def list_traces(self) -> list[TraceRecord]:
+        """Return all trace records."""
+        ...
+
     async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
         """Increment uploaded byte count for a trace."""
         ...
