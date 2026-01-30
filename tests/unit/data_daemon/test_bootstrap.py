@@ -285,6 +285,7 @@ class TestDaemonBootstrapStart:
         with (
             patch("neuracore.data_daemon.bootstrap.ProfileManager"),
             patch("neuracore.data_daemon.bootstrap.ConfigManager") as MockConfigMgr,
+            patch("neuracore.data_daemon.bootstrap.login"),
             patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
             patch(
                 "neuracore.data_daemon.bootstrap.bootstrap_async_services",
@@ -414,6 +415,7 @@ class TestDaemonBootstrapStart:
         with (
             patch("neuracore.data_daemon.bootstrap.ProfileManager"),
             patch("neuracore.data_daemon.bootstrap.ConfigManager") as MockConfigMgr,
+            patch("neuracore.data_daemon.bootstrap.login"),
             patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
         ):
             mock_config_mgr_instance = MagicMock()
@@ -477,6 +479,7 @@ class TestDaemonBootstrapStart:
         with (
             patch("neuracore.data_daemon.bootstrap.ProfileManager"),
             patch("neuracore.data_daemon.bootstrap.ConfigManager") as MockConfigMgr,
+            patch("neuracore.data_daemon.bootstrap.login"),
             patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
             patch(
                 "neuracore.data_daemon.bootstrap.bootstrap_async_services",
@@ -549,6 +552,7 @@ class TestDaemonBootstrapStart:
         with (
             patch("neuracore.data_daemon.bootstrap.ProfileManager"),
             patch("neuracore.data_daemon.bootstrap.ConfigManager") as MockConfigMgr,
+            patch("neuracore.data_daemon.bootstrap.login"),
             patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
             patch(
                 "neuracore.data_daemon.bootstrap.bootstrap_async_services",
@@ -857,6 +861,7 @@ class TestDaemonBootstrapContext:
         with (
             patch("neuracore.data_daemon.bootstrap.ProfileManager"),
             patch("neuracore.data_daemon.bootstrap.ConfigManager") as MockConfigMgr,
+            patch("neuracore.data_daemon.bootstrap.login"),
             patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
             patch(
                 "neuracore.data_daemon.bootstrap.bootstrap_async_services",
