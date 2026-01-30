@@ -5,6 +5,7 @@ including joint positions, camera images, point clouds, and custom data streams.
 All logging functions support optional robot identification and timestamping.
 """
 
+import logging
 import time
 from warnings import filterwarnings, warn
 
@@ -40,6 +41,8 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
 from neuracore.core.utils.depth_utils import MAX_DEPTH
+
+logger = logging.getLogger(__name__)
 
 
 class ExperimentalPointCloudWarning(UserWarning):

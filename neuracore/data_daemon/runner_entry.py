@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import sys
 from pathlib import Path
 
-from neuracore.data_daemon.bootstrap import DaemonBootstrap
+from neuracore.data_daemon.bootstrap import DaemonBootstrap, DaemonContext
 from neuracore.data_daemon.communications_management.data_bridge import Daemon
 from neuracore.data_daemon.const import RECORDING_EVENTS_SOCKET_PATH, SOCKET_PATH
 from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
@@ -16,6 +17,11 @@ from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def on_exit() -> None:
+    """Inform user of daemon exit event."""
+    print("Daemon exiting...")
 
 
 def main() -> None:
@@ -37,6 +43,7 @@ def main() -> None:
 
     The daemon will shut down when it receives a SIGINT or SIGTERM signal.
     """
+    atexit.register(on_exit)
     pid_path = Path(
         os.environ.get(
             "NEURACORE_DAEMON_PID_PATH",
@@ -49,12 +56,6 @@ def main() -> None:
             str(Path.home() / ".neuracore" / "data_daemon" / "state.db"),
         )
     )
-    if SOCKET_PATH.exists():
-        logger.error(
-            "Socket already exists at %s; another daemon may be running",
-            SOCKET_PATH,
-        )
-        sys.exit(1)
 
     bootstrap = DaemonBootstrap()
     context = bootstrap.start()
@@ -71,8 +72,21 @@ def main() -> None:
     install_signal_handlers(lambda _signum: None)
 
     try:
+        bootstrap = DaemonBootstrap()
+        context = bootstrap.start()
+
+        if context is None:
+            logger.error("Failed to start daemon")
+        assert isinstance(context, DaemonContext)
+        install_signal_handlers(lambda _signum: None)
+        daemon = Daemon(
+            recording_disk_manager=context.recording_disk_manager,
+            comm_manager=context.comm_manager,
+        )
+
         logger.info("Daemon starting main loop...")
         daemon.run()
+
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt")
     except SystemExit:

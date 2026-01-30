@@ -295,8 +295,8 @@ class DaemonBootstrap:
             logger.info("       General Loop: started (I/O-bound work)")
             logger.info("       Encoder Loop: started (CPU-bound work)")
             return loop_manager
-        except Exception:
-            logger.exception("Failed to start EventLoopManager")
+        except Exception as e:
+            logger.exception(f"Failed to start EventLoopManager: {str(e)}")
             return None
 
     def _bootstrap_async_services(

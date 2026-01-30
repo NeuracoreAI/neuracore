@@ -148,7 +148,6 @@ class DataStream(ABC):
         """
         if self._producer is None or self._context is None:
             return
-
         self._producer.send_data(
             data=data,
             data_type=self._data_type,

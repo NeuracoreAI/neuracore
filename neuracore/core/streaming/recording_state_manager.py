@@ -152,7 +152,6 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
             self.recording_stopped(robot_id, instance, previous_recording_id)
 
         self.recording_robot_instances[instance_key] = recording_id
-
         self._schedule_recording_timers(
             robot_id=robot_id,
             instance=instance,
