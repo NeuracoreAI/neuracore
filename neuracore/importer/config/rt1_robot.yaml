@@ -1,0 +1,96 @@
+# RT-1 Dataset Import Configuration
+# Dataset: RT-1 (Robotics Transformer) from Google Research
+# Source: gs://gresearch/rt-1-data-release
+# Format: RLDS (array_record)
+# Robot: Google Everyday Robots mobile manipulator
+# Paper: https://robotics-transformer1.github.io/
+
+input_dataset_name: fractal_fractal_20220817_data_traj_transform_rt_1_without_filters_disable_episode_padding_seq_length_6_no_preprocessor
+dataset_type: RLDS
+
+output_dataset:
+  name: rt1_dataset
+  tags: [google, everyday_robots, manipulation, mobile, kitchen, table_top]
+  description: "RT-1 dataset from Google Research containing 130k+ episodes of robotic manipulation tasks collected from a fleet of 13 Everyday Robots over 17 months. Tasks include picking, placing, opening/closing drawers, and various kitchen manipulation skills."
+
+robot:
+  name: everyday_robots_robot
+  urdf_path: ""
+  overwrite_existing: true
+
+# RT-1 operates at 3 Hz
+frequency: 3.0
+
+data_import_config:
+  # Camera image (256x320x3 RGB JPEG encoded)
+  RGB_IMAGES:
+    source: observation
+    format:
+      image_convention: CHANNELS_LAST # HWC format (256, 320, 3)
+      order_of_channels: RGB
+    mapping:
+      - name: image
+        source_name: image
+
+  # Language instruction (stored as string in this dataset)
+  LANGUAGE:
+    source: observation.natural_language_instruction
+    format:
+      language_type: STRING
+    mapping:
+      - name: instruction
+
+  # End-effector pose: position (x,y,z) + quaternion (x,y,z,w) = 7 values
+  # base_pose_tool_reached is "end-effector base-relative position+quaternion pose"
+  END_EFFECTOR_POSES:
+    source: observation.base_pose_tool_reached
+    format:
+      pose_type: POSITION_ORIENTATION
+      orientation:
+        type: QUATERNION
+        quaternion_order: XYZW
+    mapping:
+      - name: end_effector_pose
+        index_range:
+          start: 0
+          end: 7
+
+  # Gripper state (continuous position 0-1)
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.gripper_closedness_commanded
+    format:
+      normalize:
+        min: 0.0
+        max: 1.0
+    mapping:
+      - name: gripper_state
+        index: 0
+
+  # Target gripper action (continuous 0-1)
+  PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+    source: action.gripper_closedness_action
+    format:
+      normalize:
+        min: 0.0
+        max: 1.0
+    mapping:
+      - name: gripper_action
+        index: 0
+
+  # Action commands stored as CUSTOM_1D vectors
+  # Note: The importer extracts whole vectors when using source_name
+  # world_vector[3]: commanded end-effector displacement (x,y,z) in base frame
+  # rotation_delta[3]: commanded rotation (roll, pitch, yaw) in base frame
+  # base_displacement_vector[2]: mobile base movement (x, y)
+  # base_displacement_vertical_rotation[1]: base rotation
+  CUSTOM_1D:
+    source: action
+    mapping:
+      - name: action_world_vector
+        source_name: world_vector
+      - name: action_rotation_delta
+        source_name: rotation_delta
+      - name: action_base_displacement
+        source_name: base_displacement_vector
+      - name: action_base_rotation
+        source_name: base_displacement_vertical_rotation
