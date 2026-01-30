@@ -104,19 +104,31 @@ class ResumableFileUploader:
 
         loop = asyncio.get_running_loop()
         auth = get_auth()
-        org_id = await loop.run_in_executor(None, get_current_org)
         headers = await loop.run_in_executor(None, auth.get_headers)
+        org_id = await loop.run_in_executor(None, get_current_org)
 
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with self._session.get(
-            f"{API_URL}/org/{org_id}/recording/{self._recording_id}/resumable_upload_url",
-            params=params,
-            headers=headers,
-            timeout=timeout,
-        ) as response:
-            response.raise_for_status()
-            data = await response.json()
-            return data["url"]
+        for attempt in range(2):
+
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with self._session.get(
+                f"{API_URL}/org/{org_id}/recording/{self._recording_id}/resumable_upload_url",
+                params=params,
+                headers=headers,
+                timeout=timeout,
+            ) as response:
+                if response.status == 401 and attempt == 0:
+                    logger.info("Access token expired, refreshing token")
+                    await loop.run_in_executor(None, auth.login)
+                    headers = await loop.run_in_executor(None, auth.get_headers)
+                    continue
+
+                response.raise_for_status()
+                data = await response.json()
+                return data["url"]
+
+        raise aiohttp.ClientError(
+            "Failed to get upload session URI after token refresh"
+        )
 
     async def upload(self) -> tuple[bool, int, str | None]:
         """Upload the file with resumable chunks.
