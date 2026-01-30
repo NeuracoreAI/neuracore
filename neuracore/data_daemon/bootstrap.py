@@ -12,13 +12,15 @@ INITIALIZATION SEQUENCE
          ├─[1] Configuration
          │     └── ProfileManager → ConfigManager → DaemonConfig
          │
-         ├─[2] Event Loops (EventLoopManager)
+         ├─[2] Authentication
+         │     └── Auth.login(api_key) - Initialize Auth singleton
+         │
+         ├─[3] Event Loops (EventLoopManager)
          │     ├── General Loop Thread started
          │     ├── Encoder Loop Thread started
          │     └── init_emitter(loop=general_loop)
          │
-         ├─[3] Async Services (on General Loop)
-         │     ├── AuthManager (initialize_auth with config)
+         ├─[4] Async Services (on General Loop)
          │     ├── aiohttp.ClientSession
          │     ├── SqliteStateStore + init_async_store()
          │     ├── StateManager (registers event listeners)
@@ -26,7 +28,7 @@ INITIALIZATION SEQUENCE
          │     ├── ConnectionManager + start() (monitors API)
          │     └── ProgressReporter (listens for PROGRESS_REPORT)
          │
-         ├─[4] Recording & Encoding (RecordingDiskManager)
+         ├─[5] Recording & Encoding (RecordingDiskManager)
          │     ├── _TraceFilesystem (path management)
          │     ├── _TraceController (trace lifecycle)
          │     ├── _EncoderManager (encoder factory)
@@ -34,10 +36,10 @@ INITIALIZATION SEQUENCE
          │     ├── _RawBatchWriter → schedule_on_general_loop()
          │     └── _BatchEncoderWorker → schedule_on_encoder_loop()
          │
-         ├─[5] ZMQ Communications
+         ├─[6] ZMQ Communications
          │     └── CommunicationsManager
          │
-         └─[6] Return DaemonContext
+         └─[7] Return DaemonContext
                └── Daemon created with context, calls run()
 
 
@@ -74,6 +76,7 @@ from pathlib import Path
 
 import aiohttp
 
+from neuracore.core.auth import login
 from neuracore.data_daemon.communications_management.communications_manager import (
     CommunicationsManager,
 )
@@ -372,15 +375,38 @@ class DaemonBootstrap:
         except Exception:
             logger.exception("Error stopping EventLoopManager")
 
+    def _initialize_auth(self, config: DaemonConfig) -> bool:
+        """Initialize authentication using API key from config or environment.
+
+        Args:
+            config: Daemon configuration containing optional API key.
+
+        Returns:
+            True if authentication succeeded or is not required (offline mode),
+            False if authentication failed.
+        """
+        if config.offline:
+            logger.info("Offline mode: skipping authentication")
+            return True
+        try:
+            api_key = config.api_key
+            login(api_key)
+            logger.info("Authentication: successful")
+            return True
+        except Exception:
+            logger.exception("Failed to initialize authentication")
+            return False
+
     def start(self) -> DaemonContext | None:
         """Start all daemon subsystems in correct order.
 
         Initialization sequence:
         1. Configuration - resolve from profiles, env, CLI
-        2. EventLoopManager - start General + Encoder loop threads
-        3. AsyncServices - bootstrap on General Loop
-        4. RecordingDiskManager - initialize with workers on respective loops
-        5. CommunicationsManager - ZMQ socket management
+        2. Authentication - initialize Auth singleton with API key
+        3. EventLoopManager - start General + Encoder loop threads
+        4. AsyncServices - bootstrap on General Loop
+        5. RecordingDiskManager - initialize with workers on respective loops
+        6. CommunicationsManager - ZMQ socket management
 
         Returns:
             DaemonContext if successful, None if startup failed.
@@ -389,29 +415,33 @@ class DaemonBootstrap:
         logger.info("DAEMON BOOTSTRAP STARTING")
         logger.info("=" * 60)
 
-        logger.info("[1/5] Resolving configuration...")
+        logger.info("[1/6] Resolving configuration...")
         config = self._resolve_configuration()
         if config is None:
             return None
 
-        logger.info("[2/5] Starting EventLoopManager...")
+        logger.info("[2/6] Initializing authentication...")
+        if not self._initialize_auth(config):
+            return None
+
+        logger.info("[3/6] Starting EventLoopManager...")
         loop_manager = self._start_event_loops()
         if loop_manager is None:
             return None
 
-        logger.info("[3/5] Bootstrapping async services on General Loop...")
+        logger.info("[4/6] Bootstrapping async services on General Loop...")
         services = self._bootstrap_async_services(config, loop_manager)
         if services is None:
             return None
 
-        logger.info("[4/5] Initializing RecordingDiskManager...")
+        logger.info("[5/6] Initializing RecordingDiskManager...")
         recording_disk_manager = self._init_recording_disk_manager(
             config, loop_manager, services
         )
         if recording_disk_manager is None:
             return None
 
-        logger.info("[5/5] Creating CommunicationsManager...")
+        logger.info("[6/6] Creating CommunicationsManager...")
         comm_manager = CommunicationsManager()
         logger.info("       ZMQ sockets ready")
 
