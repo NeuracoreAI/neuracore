@@ -1,0 +1,75 @@
+<?xml version="1.0"?>
+<robot name="franka_panda_minimal">
+  <!-- Simplified kinematic model for joint validation; no mesh references. -->
+  <link name="panda_link0" />
+  <link name="panda_link1" />
+  <link name="panda_link2" />
+  <link name="panda_link3" />
+  <link name="panda_link4" />
+  <link name="panda_link5" />
+  <link name="panda_link6" />
+  <link name="panda_link7" />
+  <link name="panda_link8" />
+
+  <joint name="panda_joint1" type="revolute">
+    <parent link="panda_link0" />
+    <child link="panda_link1" />
+    <origin xyz="0 0 0.333" rpy="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.8973" upper="2.8973" effort="87" velocity="2.175" />
+  </joint>
+
+  <joint name="panda_joint2" type="revolute">
+    <parent link="panda_link1" />
+    <child link="panda_link2" />
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 0 0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.7628" upper="1.7628" effort="87" velocity="2.175" />
+  </joint>
+
+  <joint name="panda_joint3" type="revolute">
+    <parent link="panda_link2" />
+    <child link="panda_link3" />
+    <origin xyz="0 0.316 0" rpy="1.5707963267948966 0 0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.8973" upper="2.8973" effort="87" velocity="2.175" />
+  </joint>
+
+  <joint name="panda_joint4" type="revolute">
+    <parent link="panda_link3" />
+    <child link="panda_link4" />
+    <origin xyz="0.0825 0 0" rpy="1.5707963267948966 0 0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-3.0718" upper="-0.0698" effort="87" velocity="2.175" />
+  </joint>
+
+  <joint name="panda_joint5" type="revolute">
+    <parent link="panda_link4" />
+    <child link="panda_link5" />
+    <origin xyz="-0.0825 0.384 0" rpy="-1.5707963267948966 0 0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.8973" upper="2.8973" effort="12" velocity="2.610" />
+  </joint>
+
+  <joint name="panda_joint6" type="revolute">
+    <parent link="panda_link5" />
+    <child link="panda_link6" />
+    <origin xyz="0 0 0" rpy="1.5707963267948966 0 0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-0.0175" upper="3.7525" effort="12" velocity="2.610" />
+  </joint>
+
+  <joint name="panda_joint7" type="revolute">
+    <parent link="panda_link6" />
+    <child link="panda_link7" />
+    <origin xyz="0.088 0 0" rpy="1.5707963267948966 0 0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.8973" upper="2.8973" effort="12" velocity="2.610" />
+  </joint>
+
+  <joint name="panda_joint8" type="fixed">
+    <parent link="panda_link7" />
+    <child link="panda_link8" />
+    <origin xyz="0 0 0.107" rpy="0 0 0" />
+  </joint>
+</robot>
