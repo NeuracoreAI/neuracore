@@ -67,7 +67,7 @@ def acquire_pid_file(pid_path: Path) -> bool:
 def remove_pid_file(pid_path: Path) -> None:
     """Remove the pid file if present."""
     try:
-        pid_path.unlink()
+        pid_path.unlink(missing_ok=True)
     except FileNotFoundError:
         logger.error("Failed to remove pid file %s", pid_path)
 
