@@ -23,6 +23,7 @@ from neuracore.importer.core.exceptions import (
     DatasetOperationError,
     UploaderError,
 )
+from neuracore.importer.core.utils import populate_robot_info
 from neuracore.importer.core.validation import (
     validate_dataset_config_against_robot_model,
 )
@@ -267,6 +268,7 @@ def main() -> None:
 
     if robot.joint_info:
         validate_dataset_config_against_robot_model(dataconfig, robot.joint_info)
+        dataconfig = populate_robot_info(dataconfig, robot.joint_info)
 
     logger.info("Setup complete; beginning import.")
 

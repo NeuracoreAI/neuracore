@@ -74,6 +74,28 @@ data_import_config:
       - name: gripper
         index: 6
 
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state
+    format:
+      visual_joint_type: GRIPPER
+    mapping:
+      - name: finger_joint
+        index: 6
+      - name: left_inner_knuckle_joint
+        index: 6
+      - name: left_inner_finger_joint
+        inverted: true
+        index: 6
+      - name: right_inner_knuckle_joint
+        inverted: true
+        index: 6
+      - name: right_inner_finger_joint
+        index: 6
+      - name: right_outer_knuckle_joint
+        inverted: true
+        offset: -0.7853981633974483
+        index: 6
+
   LANGUAGE:
     source: language_instruction
     format:

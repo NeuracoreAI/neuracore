@@ -169,6 +169,8 @@ class NeuracoreDatasetImporter(ABC):
             validate_joint_torques(data, name, self.joint_info)
         elif data_type == DataType.JOINT_TARGET_POSITIONS:
             validate_joint_positions(data, name, self.joint_info)
+        elif data_type == DataType.VISUAL_JOINT_POSITIONS:
+            validate_joint_positions(data, name, self.joint_info)
 
     def _log_data(
         self,
@@ -301,6 +303,14 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_joint_target_position(
                 name=name,
                 target_position=transformed_data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+                dry_run=self.dry_run,
+            )
+        elif data_type == DataType.VISUAL_JOINT_POSITIONS:
+            nc.log_visual_joint_position(
+                name=name,
+                position=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
