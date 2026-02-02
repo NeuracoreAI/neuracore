@@ -17,11 +17,6 @@ from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
 logger = logging.getLogger(__name__)
 
 
-def on_exit() -> None:
-    """Inform user of daemon exit event."""
-    print("Daemon exiting...")
-
-
 def main() -> None:
     """Runner entrypoint for the Neuracore data daemon.
 
@@ -41,8 +36,6 @@ def main() -> None:
 
     The daemon will shut down when it receives a SIGINT or SIGTERM signal.
     """
-    atexit.register(on_exit)
-
     pid_path = get_daemon_pid_path()
     db_path = get_daemon_db_path()
 
@@ -59,6 +52,12 @@ def main() -> None:
             comm_manager=context.comm_manager,
         )
 
+        def on_exit() -> None:
+            """Inform user of daemon exit event."""
+            daemon.stop()
+            print("Daemon exited.")
+
+        atexit.register(on_exit)
         logger.info("Daemon starting main loop...")
         daemon.run()
 
@@ -73,6 +72,7 @@ def main() -> None:
             socket_paths=(SOCKET_PATH, RECORDING_EVENTS_SOCKET_PATH),
             db_path=db_path,
         )
+        print("Daemon stopped.")
 
 
 if __name__ == "__main__":

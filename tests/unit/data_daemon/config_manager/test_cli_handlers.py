@@ -241,7 +241,7 @@ def test_handle_launch_writes_pid_file_and_prints_success(
         lambda *a, **k: _FakePopen(pid=12345, poll_value=None),
     )
 
-    args_handler.handle_launch(_ns())
+    args_handler.handle_launch(_ns(background=True))
     out = capsys.readouterr().out.strip()
 
     assert test_pid_file.read_text(encoding="utf-8").strip() == "12345"
@@ -262,7 +262,7 @@ def test_handle_launch_rejects_running_pid(
     monkeypatch.setattr(args_handler, "pid_file_path", test_pid_file)
 
     with pytest.raises(SystemExit) as excinfo:
-        args_handler.handle_launch(_ns())
+        args_handler.handle_launch(_ns(background=True))
 
     out = capsys.readouterr().out.strip()
     assert excinfo.value.code == 1
@@ -289,7 +289,7 @@ def test_handle_launch_clears_stale_pid_and_starts(
         lambda *a, **k: _FakePopen(pid=12345, poll_value=None),
     )
 
-    args_handler.handle_launch(_ns())
+    args_handler.handle_launch(_ns(background=True))
     out = capsys.readouterr().out.strip()
 
     assert test_pid_file.read_text(encoding="utf-8").strip() == "12345"
@@ -315,7 +315,7 @@ def test_handle_launch_exits_and_does_not_write_pid_file_when_runner_exits_immed
     )
 
     with pytest.raises(SystemExit) as excinfo:
-        args_handler.handle_launch(_ns())
+        args_handler.handle_launch(_ns(background=True))
 
     out = capsys.readouterr().out.strip()
     assert excinfo.value.code == 1

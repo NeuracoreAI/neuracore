@@ -159,12 +159,27 @@ def _pid_is_running(pid_value: int) -> bool:
         True if the process exists, otherwise False.
     """
     try:
+        if _pid_is_zombie(pid_value):
+            return False
         os.kill(pid_value, 0)
         return True
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+
+
+def _pid_is_zombie(pid_value: int) -> bool:
+    """Return True if the PID is a zombie process."""
+    stat_path = Path("/proc") / str(pid_value) / "stat"
+    try:
+        stat = stat_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    parts = stat.split()
+    if len(parts) < 3:
+        return False
+    return parts[2] == "Z"
 
 
 def _terminate_pid(pid_value: int) -> bool:
@@ -308,13 +323,26 @@ def handle_launch(args: argparse.Namespace) -> None:
     env["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
     env["NEURACORE_DAEMON_MANAGE_PID"] = "0"
 
-    daemon_process = subprocess.Popen(
-        runner_command,
-        start_new_session=True,
-        close_fds=True,
-        cwd=str(Path.cwd()),
-        env=env,
-    )
+    background = getattr(args, "background", False)
+    if background:
+        daemon_process = subprocess.Popen(
+            runner_command,
+            start_new_session=True,
+            close_fds=True,
+            cwd=str(Path.cwd()),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+    else:
+        daemon_process = subprocess.Popen(
+            runner_command,
+            start_new_session=False,
+            close_fds=True,
+            cwd=str(Path.cwd()),
+            env=env,
+        )
 
     spawned_daemon_pid = daemon_process.pid
 
@@ -325,6 +353,17 @@ def handle_launch(args: argparse.Namespace) -> None:
 
     pid_path.write_text(str(spawned_daemon_pid), encoding="utf-8")
     print(f"Daemon launched (pid={spawned_daemon_pid}).")
+    if background:
+        return
+
+    try:
+        daemon_process.wait()
+    except KeyboardInterrupt:
+        try:
+            daemon_process.send_signal(signal.SIGINT)
+        except ProcessLookupError:
+            return
+        daemon_process.wait()
 
 
 def handle_stop(args: argparse.Namespace) -> None:

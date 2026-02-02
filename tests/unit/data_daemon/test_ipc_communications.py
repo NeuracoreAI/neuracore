@@ -78,7 +78,10 @@ def _drain_messages(
         remaining = max(0.0, deadline - time.monotonic())
         events = dict(poller.poll(remaining * 1000))
         if comm.consumer_socket in events:
-            message = comm.receive_message()
+            raw = comm.receive_raw()
+            if raw is None:
+                continue
+            message = MessageEnvelope.from_bytes(raw)
             daemon.handle_message(message)
             daemon._drain_channel_messages()
             received += 1
