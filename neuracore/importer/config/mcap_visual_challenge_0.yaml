@@ -1,0 +1,44 @@
+input_dataset_name: visual_challenge_0
+dataset_type: MCAP
+
+output_dataset:
+  name: visual_challenge_0_import
+  tags: [mcap, ros2, slam]
+  description: "ROS2 MCAP import config for Visual_Challenge_0."
+
+robot:
+  name: visual_challenge_sensor_rig
+  urdf_path: ""
+  overwrite_existing: true
+
+data_import_config:
+  RGB_IMAGES:
+    # CompressedImage messages on both stereo camera topics.
+    # The importer decodes JPEG bytes in `.data` to RGB arrays.
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping:
+      - name: left_camera
+        source_name: /left_camera/image/compressed.data
+      - name: right_camera
+        source_name: /right_camera/image/compressed.data
+
+  # Optional metadata channels (safe to enable if you want additional traces).
+  # NOTE: CUSTOM_1D expects a 1D numeric array in Neuracore.
+  # IMU vector fields (x/y/z scalars) are not included here yet.
+  #
+  # CUSTOM_1D:
+  #   source: /livox/imu.angular_velocity_covariance
+  #   mapping:
+  #     - name: imu_angular_velocity_cov
+  #
+  # CUSTOM_1D:
+  #   source: /livox/imu.linear_acceleration_covariance
+  #   mapping:
+  #     - name: imu_linear_acceleration_cov
+  #
+  # CUSTOM_1D:
+  #   source: /livox/imu.orientation_covariance
+  #   mapping:
+  #     - name: imu_orientation_cov

@@ -482,3 +482,25 @@ class TestLogData:
 
         mock_mapping_item.transforms.assert_called_once_with(source_data)
         mock_nc.log_joint_position.assert_called_once()
+
+    @patch("neuracore.importer.core.base.nc")
+    def test_log_data_visual_joint_positions(
+        self, mock_nc, importer, mock_mapping_item
+    ):
+        """Test visual joint position logging path."""
+        format = DataFormat()
+        source_data = 0.5
+        timestamp = 1234567890.0
+        mock_mapping_item.transforms.return_value = 0.25
+        mock_mapping_item.name = "finger_joint"
+
+        importer._log_data(
+            DataType.VISUAL_JOINT_POSITIONS,
+            source_data,
+            mock_mapping_item,
+            format,
+            timestamp,
+        )
+
+        mock_mapping_item.transforms.assert_called_once_with(source_data)
+        mock_nc.log_visual_joint_position.assert_called_once()

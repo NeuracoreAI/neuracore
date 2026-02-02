@@ -1,0 +1,21 @@
+input_dataset_name: microagi_test
+dataset_type: MCAP
+
+output_dataset:
+  name: microagi_v1
+  tags: [mcap]
+  description: "MCAP import for microagi_test (color_cam2 only)."
+
+robot:
+  name: "Human Demonstrator"
+  urdf_path: ""
+  overwrite_existing: true
+
+data_import_config:
+  RGB_IMAGES:
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping:
+      - name: color_cam2
+        source_name: /camera/color/image_cam2.data

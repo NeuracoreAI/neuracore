@@ -12,6 +12,7 @@ TFDS_MARKERS = {
     "features.json",
     "dataset_state.json",
 }
+MCAP_MARKERS = {".mcap"}
 RLDS_MARKERS = {
     "rlds_metadata.json",
     "rlds_metadata.jsonl",
@@ -61,6 +62,12 @@ class DatasetDetector:
 
     def detect(self, dataset_dir: Path) -> DatasetTypeConfig:
         """Detect whether the dataset is TFDS, RLDS, or LeRobot."""
+        if dataset_dir.is_file():
+            if dataset_dir.suffix.lower() in MCAP_MARKERS:
+                return DatasetTypeConfig.MCAP
+            raise DatasetDetectionError(
+                f"Dataset path '{dataset_dir}' is not a directory."
+            )
         if not dataset_dir.is_dir():
             raise DatasetDetectionError(
                 f"Dataset path '{dataset_dir}' is not a directory."
@@ -70,6 +77,7 @@ class DatasetDetector:
         has_tfds_marker = False
         has_rlds_marker = False
         has_lerobot_marker = False
+        has_mcap_marker = False
         has_arrow_data = False
         has_parquet_data = False
 
@@ -83,12 +91,15 @@ class DatasetDetector:
             has_lerobot_marker = has_lerobot_marker or lower_name in LEROBOT_MARKERS
             has_arrow_data = has_arrow_data or path.suffix.lower() == ".arrow"
             has_parquet_data = has_parquet_data or path.suffix.lower() == ".parquet"
+            has_mcap_marker = has_mcap_marker or path.suffix.lower() in MCAP_MARKERS
             if path.parent.name == "meta" and lower_name in LEROBOT_META_MARKERS:
                 has_lerobot_marker = True
 
         has_rlds_marker = has_rlds_marker or "rlds" in lower_dir_name
         has_lerobot_marker = has_lerobot_marker or "lerobot" in lower_dir_name
 
+        if has_mcap_marker:
+            return DatasetTypeConfig.MCAP
         if has_rlds_marker:
             return DatasetTypeConfig.RLDS
         if has_lerobot_marker and (has_arrow_data or has_parquet_data):
@@ -102,5 +113,5 @@ class DatasetDetector:
 
         raise DatasetDetectionError(
             f"Unable to determine dataset type at '{dataset_dir}'. "
-            "Expected TFDS/RLDS or LeRobot layout."
+            "Expected MCAP, TFDS/RLDS, or LeRobot layout."
         )

@@ -1,0 +1,143 @@
+input_dataset_name: microagi_test_run1
+dataset_type: MCAP
+
+output_dataset:
+  name: microagi_v1_run4
+  tags: [mcap]
+  description: "MCAP import for microagi_test_run1 (combined cameras)."
+
+robot:
+  name: "Human Demonstrator"
+  urdf_path: ""
+  overwrite_existing: true
+
+data_import_config:
+  RGB_IMAGES:
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping:
+      - name: color_main
+        source_name: /camera/color/image.data
+      - name: color_cam1
+        source_name: /camera/color/image_cam1.data
+      - name: color_cam2
+        source_name: /camera/color/image_cam2.data
+
+  DEPTH_IMAGES:
+    format:
+      distance_units: MM
+    mapping:
+      - name: depth_main
+        source_name: /camera/depth/image.data
+
+  # Optional info/health/meta/tf topics (uncomment and set source_name paths).
+  # CUSTOM_1D:
+  #   source: /camera/color/info
+  #   mapping:
+  #     - name: camera_color_info
+  #
+  # CUSTOM_1D:
+  #   source: /camera/depth/info
+  #   mapping:
+  #     - name: camera_depth_info
+  #
+  # CUSTOM_1D:
+  #   source: /camera/depth/unit_of_depth_in_mm
+  #   mapping:
+  #     - name: depth_unit_mm
+  #
+  # CUSTOM_1D:
+  #   source: /tf_static
+  #   mapping:
+  #     - name: tf_static
+  #
+  # CUSTOM_1D:
+  #   source: /meta
+  #   mapping:
+  #     - name: meta
+  #
+  # CUSTOM_1D:
+  #   source: /imu/accel/sample
+  #   mapping:
+  #     - name: imu_accel
+  #       source_name: ???  # field path
+  #
+  # CUSTOM_1D:
+  #   source: /imu/gyro/sample
+  #   mapping:
+  #     - name: imu_gyro
+  #       source_name: ???  # field path
+  #
+  # CUSTOM_1D:
+  #   source: /tf/body
+  #   mapping:
+  #     - name: tf_body
+  #
+  # CUSTOM_1D:
+  #   source: /body/upper
+  #   mapping:
+  #     - name: body_upper
+  #
+  # CUSTOM_1D:
+  #   source: /hands/left
+  #   mapping:
+  #     - name: hands_left
+  #
+  # CUSTOM_1D:
+  #   source: /hands/right
+  #   mapping:
+  #     - name: hands_right
+  #
+  # CUSTOM_1D:
+  #   source: /tf/hands
+  #   mapping:
+  #     - name: tf_hands
+  #
+  # CUSTOM_1D:
+  #   source: /hands/left/health
+  #   mapping:
+  #     - name: hands_left_health
+  #
+  # CUSTOM_1D:
+  #   source: /hands/right/health
+  #   mapping:
+  #     - name: hands_right_health
+  #
+  # LANGUAGE:
+  #   source: /task
+  #   format:
+  #     language_type: STRING
+  #   mapping:
+  #     - name: task
+  #       source_name: ???  # field path
+  #
+  # CUSTOM_1D:
+  #   source: /camera/color/health
+  #   mapping:
+  #     - name: camera_color_health
+  #
+  # CUSTOM_1D:
+  #   source: /tf/camera/state
+  #   mapping:
+  #     - name: tf_camera_state
+  #
+  # CUSTOM_1D:
+  #   source: /tf/camera
+  #   mapping:
+  #     - name: tf_camera
+  #
+  # CUSTOM_1D:
+  #   source: /tf/camera/health
+  #   mapping:
+  #     - name: tf_camera_health
+  #
+  # CUSTOM_1D:
+  #   source: /camera/color/image_cam1_info
+  #   mapping:
+  #     - name: camera_color_cam1_info
+  #
+  # CUSTOM_1D:
+  #   source: /camera/color/image_cam2_info
+  #   mapping:
+  #     - name: camera_color_cam2_info

@@ -5,9 +5,13 @@ autoregressively
 autouse
 avgpool
 axvline
+bgra
 bibtex
+bigendian
+bigym
 blit
 buildtool
+byteswap
 caplog
 capsys
 castshadow
@@ -26,6 +30,7 @@ convnet
 ctrllimited
 ctrlrange
 cuda
+dataconfig
 dataformats
 dataid
 ddim
@@ -38,6 +43,7 @@ diaginertia
 distilbert
 docstrings
 dtype
+elems
 embs
 excinfo
 extr
@@ -79,6 +85,7 @@ inertiafromgeom
 inertiagrouprange
 inspectable
 iquat
+itemsize
 jaco
 jdata
 jname
@@ -105,8 +112,11 @@ linalg
 logvar
 maxpool
 maxs
+mcap
+MCAP
 meshgrid
 metadatas
+microagi
 Mish
 mjcf
 mline
@@ -119,6 +129,7 @@ multihead
 Multihead
 multinode
 multirun
+nans
 nbody
 nbytes
 nccl
@@ -126,8 +137,10 @@ ncdata
 NCHW
 ncon
 ndarray
+neginf
 neuraco
 neuracore
+newbyteorder
 nhead
 nheads
 nprocs
@@ -143,12 +156,14 @@ parentbody
 parentid
 patchelf
 pbar
+pbtxt
 perceptrons
 pgoa
 Pieb
 pinnochio
 PJRT
 pointcloud
+posinf
 preds
 preexec
 pretrained
@@ -170,9 +185,11 @@ rgbs
 rlds
 Robotiq
 rosdep
+rotvec
 schematypens
 SCTP
 sdpa
+secho
 setsid
 shadowsize
 siglip
@@ -196,9 +213,9 @@ UFACTORY
 unet
 Unet
 Unet's
-unnormalization
 UNITREE
 unitreeh1
+unnormalization
 URDF
 usefixtures
 chonk
@@ -210,6 +227,7 @@ vertnum
 VIPERX
 vsync
 worldbody
+wxyz
 XARM
 xdata
 xlabel
@@ -217,6 +235,7 @@ xmat
 xmlstr
 xquat
 xyzrgb
+xyzw
 ylabel
 znear
 bigym

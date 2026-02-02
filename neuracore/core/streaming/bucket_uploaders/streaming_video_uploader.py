@@ -9,6 +9,7 @@ metadata handling for robot camera data.
 import io
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -35,6 +36,7 @@ PTS_FRACT = 1000000  # Timebase for pts in microseconds
 CHUNK_MULTIPLE = 256 * 1024  # Chunk size multiple of 256 KiB
 MB_CHUNK = 4 * CHUNK_MULTIPLE
 CHUNK_SIZE = 64 * MB_CHUNK
+MAX_VIDEO_QUEUE_SIZE = int(os.getenv("NEURACORE_MAX_VIDEO_QUEUE_SIZE", "32"))
 
 
 class StreamingVideoUploader(BucketUploader):
@@ -96,7 +98,7 @@ class StreamingVideoUploader(BucketUploader):
         self._streaming_done = False
         self.container_format = "mp4"
         self._check_codec_support()
-        self._upload_queue: queue.Queue = queue.Queue()
+        self._upload_queue: queue.Queue = queue.Queue(maxsize=MAX_VIDEO_QUEUE_SIZE)
         # Thread will continue, even if main thread exits
         self._upload_thread = threading.Thread(target=self._upload_loop, daemon=False)
         self._recording_manager = get_recording_state_manager()
@@ -122,7 +124,7 @@ class StreamingVideoUploader(BucketUploader):
         if self.chunk_size % CHUNK_MULTIPLE != 0:
             self.chunk_size = ((self.chunk_size // CHUNK_MULTIPLE) + 1) * CHUNK_MULTIPLE
             logger.debug(
-                f"Adjusted chunk size to {self.chunk_size/1024:.0f} "
+                f"Adjusted chunk size to {self.chunk_size / 1024:.0f} "
                 "KiB to ensure it's a multiple of {CHUNK_MULTIPLE} MiB"
             )
 
@@ -398,10 +400,20 @@ class StreamingVideoUploader(BucketUploader):
                 params=params,
                 headers=get_auth().get_headers(),
             )
+            upload_url_response.raise_for_status()
         except requests.exceptions.RequestException as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code is not None and status_code >= 500:
+                logger.warning(
+                    "Resumable upload URL request failed for recording %s "
+                    "(status=%s). Forcing local recording stop so caller can rotate.",
+                    self.uploader.recording_id,
+                    status_code,
+                )
+                self._recording_manager.force_stop_recording(self.uploader.recording_id)
+                return
             logger.debug(e)
-            pass
-        upload_url_response.raise_for_status()
+            raise
         upload_url = upload_url_response.json()["url"]
         for i in range(0, len(self.frame_metadatas)):
             self.frame_metadatas[i].frame_idx = i

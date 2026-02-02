@@ -1,0 +1,20 @@
+input_dataset_name: microagi_test
+dataset_type: MCAP
+
+output_dataset:
+  name: microagi_v1
+  tags: [mcap]
+  description: "MCAP import for microagi_test (depth_main only)."
+
+robot:
+  name: "Human Demonstrator"
+  urdf_path: ""
+  overwrite_existing: true
+
+data_import_config:
+  DEPTH_IMAGES:
+    format:
+      distance_units: MM
+    mapping:
+      - name: depth_main
+        source_name: /camera/depth/image.data

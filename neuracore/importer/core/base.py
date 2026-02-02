@@ -14,6 +14,7 @@ from pathlib import Path
 from queue import Empty
 from typing import Any
 
+from neuracore_types.importer.config import DistanceUnitsConfig
 from neuracore_types.importer.data_config import DataFormat
 from neuracore_types.nc_data import DatasetImportConfig, DataType
 from neuracore_types.nc_data.nc_data import MappingItem
@@ -207,6 +208,15 @@ class NeuracoreDatasetImporter(ABC):
             format: The data format to use for validation.
             timestamp: Time when the data was logged.
         """
+        if data_type in {DataType.DEPTH_IMAGES, DataType.POINT_CLOUDS}:
+            if format.distance_units == DistanceUnitsConfig.MM:
+                try:
+                    source_data = source_data / 1000.0
+                except Exception as exc:  # noqa: BLE001
+                    raise DataValidationError(
+                        f"Failed converting {data_type} from mm to meters: {exc}"
+                    ) from exc
+
         try:
             self._validate_input_data(data_type, source_data, format)
         except DataValidationWarning as w:
@@ -374,6 +384,16 @@ class NeuracoreDatasetImporter(ABC):
         self, worker_id: int, chunk: Sequence[ImportItem] | None = None
     ) -> None:
         """Log in and connect to Neuracore dataset for the worker."""
+        root_logger = logging.getLogger()
+        if not root_logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+                )
+            )
+            root_logger.addHandler(handler)
+            root_logger.setLevel(logging.INFO)
         nc.login()
         nc.connect_robot(self.robot_name, instance=worker_id)
         nc.get_dataset(self.output_dataset_name)

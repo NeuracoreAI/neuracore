@@ -128,6 +128,23 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         """
         return recording_id in self._expired_recording_ids
 
+    def force_stop_recording(self, recording_id: str) -> None:
+        """Force-clear a recording id from local active state.
+
+        Use this when an uploader detects a backend-side recording invalidation
+        and local state still thinks the recording is active.
+        """
+        for instance_key, current_recording_id in list(
+            self.recording_robot_instances.items()
+        ):
+            if current_recording_id == recording_id:
+                self.recording_stopped(
+                    instance_key.robot_id,
+                    instance_key.robot_instance,
+                    recording_id,
+                )
+                break
+
     def recording_started(
         self, robot_id: str, instance: int, recording_id: str
     ) -> None:

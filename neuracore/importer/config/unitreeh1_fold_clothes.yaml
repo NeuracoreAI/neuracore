@@ -15,7 +15,6 @@ frequency: 50
 
 data_import_config: 
   RGB_IMAGES:
-    source: observation.images
     format:
       image_convention: CHANNELS_FIRST
       order_of_channels: RGB
