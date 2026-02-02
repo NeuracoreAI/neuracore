@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import atexit
 import logging
-import sys
 
 from neuracore.data_daemon.bootstrap import DaemonBootstrap, DaemonContext
 from neuracore.data_daemon.communications_management.data_bridge import Daemon
@@ -46,20 +45,6 @@ def main() -> None:
 
     pid_path = get_daemon_pid_path()
     db_path = get_daemon_db_path()
-
-    bootstrap = DaemonBootstrap()
-    context = bootstrap.start()
-
-    if context is None:
-        logger.error("Failed to start daemon")
-        sys.exit(1)
-
-    daemon = Daemon(
-        recording_disk_manager=context.recording_disk_manager,
-        comm_manager=context.comm_manager,
-    )
-
-    install_signal_handlers(lambda _signum: None)
 
     try:
         bootstrap = DaemonBootstrap()
