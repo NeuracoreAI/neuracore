@@ -98,7 +98,8 @@ class UploadManager(TraceManager):
         """
         logger.info(f"Received READY_FOR_UPLOAD for trace {trace_id}")
 
-        task = asyncio.create_task(
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(
             self._prepare_upload(
                 filepath,
                 trace_id,
@@ -293,16 +294,6 @@ class UploadManager(TraceManager):
         Returns:
             True if all files uploaded successfully, False otherwise.
         """
-        if self._upload_semaphore is not None:
-            async with self._upload_semaphore:
-                return await self._upload_single_trace(
-                    trace_dir_path,
-                    trace_id,
-                    data_type,
-                    data_type_name,
-                    recording_id,
-                    bytes_uploaded,
-                )
         return await self._upload_single_trace(
             trace_dir_path,
             trace_id,
@@ -354,89 +345,106 @@ class UploadManager(TraceManager):
             self._emit_upload_failure(trace_id, bytes_uploaded, error_msg)
             return False
 
-        try:
-            await self._update_data_trace(
-                recording_id,
-                trace_id,
-                RecordingDataTraceStatus.UPLOAD_STARTED,
-                uploaded_bytes=bytes_uploaded,
-            )
-
-            start_file_idx, file_offset = self._find_resume_point(files, bytes_uploaded)
-            cumulative_bytes = sum(
-                file.stat().st_size for file in files[:start_file_idx]
-            )
-            last_progress_update = [time.time()]
-
-            for file_idx, file in enumerate(
-                files[start_file_idx:], start=start_file_idx
-            ):
-                cloud_filepath = f"{data_type.value}/{data_type_name}/{file.name}"
-                file_bytes_uploaded = file_offset if file_idx == start_file_idx else 0
-
-                progress_callback = self._make_progress_callback(
-                    trace_id, recording_id, cumulative_bytes, last_progress_update
-                )
-
-                logger.info(
-                    f"Uploading file {file_idx + 1}/{len(files)}: {file.name} "
-                    f"(offset={file_bytes_uploaded})"
-                )
-
-                success, file_total_bytes, error_message = await self._upload_file(
-                    file,
-                    cloud_filepath,
+        async def upload_files() -> bool:
+            try:
+                await self._update_data_trace(
                     recording_id,
-                    file_bytes_uploaded,
-                    progress_callback,
+                    trace_id,
+                    RecordingDataTraceStatus.UPLOAD_STARTED,
+                    uploaded_bytes=bytes_uploaded,
                 )
 
-                if not success:
-                    failed_bytes = cumulative_bytes + file_total_bytes
-                    error_code = (
-                        TraceErrorCode.NETWORK_ERROR
-                        if "Network" in (error_message or "")
-                        else TraceErrorCode.UPLOAD_FAILED
+                start_file_idx, file_offset = self._find_resume_point(
+                    files, bytes_uploaded
+                )
+                cumulative_bytes = sum(
+                    file.stat().st_size for file in files[:start_file_idx]
+                )
+                last_progress_update = [time.time()]
+
+                for file_idx, file in enumerate(
+                    files[start_file_idx:], start=start_file_idx
+                ):
+                    cloud_filepath = f"{data_type.value}/{data_type_name}/{file.name}"
+                    file_bytes_uploaded = (
+                        file_offset if file_idx == start_file_idx else 0
                     )
-                    self._emit_upload_failure(
-                        trace_id,
-                        failed_bytes,
-                        error_message or "Upload failed",
-                        status=TraceStatus.WRITTEN,
-                        error_code=error_code,
+
+                    progress_callback = self._make_progress_callback(
+                        trace_id, recording_id, cumulative_bytes, last_progress_update
                     )
-                    logger.warning(
-                        f"Upload failed for trace {trace_id} file {file.name}: "
-                        f"{error_message}"
+
+                    logger.info(
+                        f"Uploading file {file_idx + 1}/{len(files)}: {file.name} "
+                        f"(offset={file_bytes_uploaded})"
                     )
-                    return False
 
-                cumulative_bytes += file.stat().st_size
+                    success, file_total_bytes, error_message = await self._upload_file(
+                        file,
+                        cloud_filepath,
+                        recording_id,
+                        file_bytes_uploaded,
+                        progress_callback,
+                    )
 
-            await self._update_data_trace(
-                recording_id,
-                trace_id,
-                RecordingDataTraceStatus.UPLOAD_COMPLETE,
-                uploaded_bytes=cumulative_bytes,
-                total_bytes=cumulative_bytes,
-            )
-            self._emitter.emit(Emitter.UPLOAD_COMPLETE, trace_id)
-            logger.info(f"Upload successful for trace {trace_id}")
-            return True
+                    if not success:
+                        failed_bytes = cumulative_bytes + file_total_bytes
+                        error_code = (
+                            TraceErrorCode.NETWORK_ERROR
+                            if "Network" in (error_message or "")
+                            else TraceErrorCode.UPLOAD_FAILED
+                        )
+                        self._emit_upload_failure(
+                            trace_id,
+                            failed_bytes,
+                            error_message or "Upload failed",
+                            status=TraceStatus.WRITTEN,
+                            error_code=error_code,
+                        )
+                        logger.warning(
+                            f"Upload failed for trace {trace_id} file {file.name}: "
+                            f"{error_message}"
+                        )
+                        return False
 
-        except FileNotFoundError as e:
-            logger.error(f"File not found for trace {trace_id}: {e}")
-            self._emit_upload_failure(trace_id, bytes_uploaded, f"File not found: {e}")
-            return False
+                    cumulative_bytes += file.stat().st_size
 
-        except ValueError as e:
-            logger.error(f"Invalid path for trace {trace_id}: {e}")
-            self._emit_upload_failure(trace_id, bytes_uploaded, f"Invalid path: {e}")
-            return False
+                await self._update_data_trace(
+                    recording_id,
+                    trace_id,
+                    RecordingDataTraceStatus.UPLOAD_COMPLETE,
+                    uploaded_bytes=cumulative_bytes,
+                    total_bytes=cumulative_bytes,
+                )
+                self._emitter.emit(Emitter.UPLOAD_COMPLETE, trace_id)
+                logger.info(f"Upload successful for trace {trace_id}")
+                return True
 
-        except Exception as e:
-            logger.error(
-                f"Unexpected error uploading trace {trace_id}: {e}", exc_info=True
-            )
-            self._emit_upload_failure(trace_id, bytes_uploaded, f"Upload error: {e}")
-            return False
+            except FileNotFoundError as e:
+                logger.error(f"File not found for trace {trace_id}: {e}")
+                self._emit_upload_failure(
+                    trace_id, bytes_uploaded, f"File not found: {e}"
+                )
+                return False
+
+            except ValueError as e:
+                logger.error(f"Invalid path for trace {trace_id}: {e}")
+                self._emit_upload_failure(
+                    trace_id, bytes_uploaded, f"Invalid path: {e}"
+                )
+                return False
+
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error uploading trace {trace_id}: {e}", exc_info=True
+                )
+                self._emit_upload_failure(
+                    trace_id, bytes_uploaded, f"Upload error: {e}"
+                )
+                return False
+
+        if self._upload_semaphore is not None:
+            async with self._upload_semaphore:
+                return await upload_files()
+        else:
+            return await upload_files()
