@@ -19,12 +19,15 @@ from neuracore.data_daemon.config_manager.profiles import (
     ProfileManager,
     ProfileNotFound,
 )
+from neuracore.data_daemon.const import RECORDING_EVENTS_SOCKET_PATH, SOCKET_PATH
+from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
+from neuracore.data_daemon.lifecycle.daemon_lifecycle import shutdown
 
 profile_manager = ProfileManager()
 config_manager = ConfigManager(profile_manager)
 
 daemon_state_dir_path = Path.home() / ".neuracore"
-pid_file_path = daemon_state_dir_path / "daemon.pid"
+pid_file_path = get_daemon_pid_path()
 
 
 def add_common_config_args(parser: argparse.ArgumentParser) -> None:
@@ -115,7 +118,7 @@ def _ensure_daemon_state_dir_exists() -> None:
     Returns:
         None
     """
-    daemon_state_dir_path.mkdir(parents=True, exist_ok=True)
+    pid_file_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _read_pid_from_file(pid_path: Path) -> int | None:
@@ -175,6 +178,24 @@ def _terminate_pid(pid_value: int) -> bool:
     """
     try:
         os.kill(pid_value, signal.SIGTERM)
+        return True
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+
+
+def _force_kill(pid_value: int) -> bool:
+    """Forcefully terminate a process using SIGKILL.
+
+    Args:
+        pid_value: Process ID to terminate.
+
+    Returns:
+        True if the PID does not exist after the call, otherwise False.
+    """
+    try:
+        os.kill(pid_value, signal.SIGKILL)
         return True
     except ProcessLookupError:
         return True
@@ -265,14 +286,15 @@ def handle_launch(args: argparse.Namespace) -> None:
     Returns:
         None
     """
+    pid_path = pid_file_path
     _ensure_daemon_state_dir_exists()
-    existing_pid = _read_pid_from_file(pid_file_path)
+    existing_pid = _read_pid_from_file(pid_path)
     if existing_pid is not None:
         if _pid_is_running(existing_pid):
             print(f"Daemon already running (pid={existing_pid}).")
             sys.exit(1)
         try:
-            pid_file_path.unlink()
+            pid_path.unlink()
         except FileNotFoundError:
             pass
 
@@ -283,7 +305,7 @@ def handle_launch(args: argparse.Namespace) -> None:
     ]
 
     env = os.environ.copy()
-    env["NEURACORE_DAEMON_PID_PATH"] = str(pid_file_path)
+    env["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
     env["NEURACORE_DAEMON_MANAGE_PID"] = "0"
 
     daemon_process = subprocess.Popen(
@@ -301,32 +323,63 @@ def handle_launch(args: argparse.Namespace) -> None:
         print("Daemon failed to start.")
         sys.exit(1)
 
-    pid_file_path.write_text(str(spawned_daemon_pid), encoding="utf-8")
+    pid_path.write_text(str(spawned_daemon_pid), encoding="utf-8")
     print(f"Daemon launched (pid={spawned_daemon_pid}).")
 
 
 def handle_stop(args: argparse.Namespace) -> None:
     """Handle the ``stop`` CLI command.
 
-    Args:
-        args: Parsed CLI arguments for the command.
+    Stop the daemon if it is running.
 
     Returns:
         None
     """
-    pid_value = _read_pid_from_file(pid_file_path)
+    pid_path = pid_file_path
+    db_path = get_daemon_db_path()
+    pid_value = _read_pid_from_file(pid_path)
+
     if pid_value is None:
         print("Daemon is not running.")
         return
 
-    _terminate_pid(pid_value)
-    time.sleep(0.1)
+    # Stale process
     if not _pid_is_running(pid_value):
-        try:
-            pid_file_path.unlink()
-        except FileNotFoundError:
-            pass
+        shutdown(
+            pid_path=pid_path,
+            socket_paths=(SOCKET_PATH, RECORDING_EVENTS_SOCKET_PATH),
+            db_path=db_path,
+        )
         print("Daemon stopped.")
+        return
+
+    # Send sigterm
+    terminate_ok = _terminate_pid(pid_value)
+    if not terminate_ok:
+        print(f"Permission denied sending SIGTERM to pid={pid_value}.")
+        sys.exit(1)
+    if _wait_handler(pid_value, 10):
+        # Trigger socket cleanup, pid cleanup and db checkpointing
+        shutdown(
+            pid_path=pid_path,
+            socket_paths=(SOCKET_PATH, RECORDING_EVENTS_SOCKET_PATH),
+            db_path=db_path,
+        )
+        print("Daemon stopped.")
+        return
+
+    # Send sigkill instead
+    kill_ok = _force_kill(pid_value)
+    if not kill_ok:
+        print(f"Permission denied sending SIGKILL to pid={pid_value}.")
+        sys.exit(1)
+    if _wait_handler(pid_value, 5):
+        shutdown(
+            pid_path=pid_path,
+            socket_paths=(SOCKET_PATH, RECORDING_EVENTS_SOCKET_PATH),
+            db_path=db_path,
+        )
+        print("Daemon stopped (forced).")
         return
 
     print(f"Failed to stop daemon (pid={pid_value}).")
@@ -342,14 +395,15 @@ def handle_status(args: argparse.Namespace) -> None:
     Returns:
         None
     """
-    pid_value = _read_pid_from_file(pid_file_path)
+    pid_path = pid_file_path
+    pid_value = _read_pid_from_file(pid_path)
     if pid_value is None:
         print("Daemon not running.")
         return
 
     if not _pid_is_running(pid_value):
         try:
-            pid_file_path.unlink()
+            pid_path.unlink()
         except FileNotFoundError:
             pass
         print("Daemon not running.")
@@ -397,3 +451,21 @@ def handle_update(args: argparse.Namespace) -> None:
     )
 
     print(config_manager.resolve_effective_config(validated_updates))
+
+
+def _wait_handler(pid: int, timeout: int = 2) -> bool:
+    """Wait for a process to terminate, given its pid.
+
+    Args:
+        pid: Process ID to wait for.
+        timeout: Optional timeout in seconds to wait for the process to terminate.
+
+    Returns:
+        True if the process terminated within the given timeout, False otherwise.
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        if not _pid_is_running(pid):
+            return True
+        time.sleep(0.1)
+    return False

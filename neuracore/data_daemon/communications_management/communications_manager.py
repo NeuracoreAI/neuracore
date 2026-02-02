@@ -60,7 +60,9 @@ class CommunicationsManager:
         """
         if isinstance(BASE_DIR, Path):
             BASE_DIR.mkdir(parents=True, exist_ok=True)
-        self.consumer_socket = self.context.socket(zmq.PULL)
+
+        if not isinstance(self.consumer_socket, zmq.Socket):
+            self.consumer_socket = self.context.socket(zmq.PULL)
 
         endpoint = _build_endpoint(SOCKET_PATH)
 
