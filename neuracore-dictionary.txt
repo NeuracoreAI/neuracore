@@ -220,6 +220,7 @@ bigym
 secho
 xyzw
 wxyz
+widowx
 nans
 posinf
 neginf
