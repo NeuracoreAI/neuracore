@@ -2,14 +2,14 @@ input_dataset_name: lerobot/nyu_franka_play_dataset
 dataset_type: LEROBOT
 output_dataset:
   name: NYU_franka_play
-  tags: [unitree, humanoid, folding, clothes, manipulation]
+  tags: [franka, kitchen, play, cooking, manipulation]
   description: "This dataset contains images and sensor data collected from the LeRobot Unitree H1 robot while performing fold clothes tasks in an indoor environment."
 
 robot:
   name: nyu_franka
   mjcf_path: "panda.urdf"
 
-frequency: 50
+frequency: 5
 
 data_import_config: 
   RGB_IMAGES:
