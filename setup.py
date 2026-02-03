@@ -82,7 +82,6 @@ setup(
             "pre-commit",
         ],
         "import": [
-            "robot_descriptions @ git+https://github.com/stepjam/robot_descriptions.py.git@main",
             "lerobot==0.3.3",
             "huggingface-hub>0.34.0,<0.36.0",
             "tensorflow-datasets",
