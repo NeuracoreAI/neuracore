@@ -293,6 +293,18 @@ class TestValidateJointData:
         with pytest.raises(DataValidationWarning):
             importer._validate_joint_data(DataType.JOINT_POSITIONS, data, "joint1")
 
+    def test_validate_joint_positions_within_upper_tolerance(self, importer):
+        """Do not warn for tiny floating-point overshoot near upper limit."""
+        data = 1.0000005  # Within epsilon above upper limit 1.0
+
+        importer._validate_joint_data(DataType.JOINT_POSITIONS, data, "joint1")
+
+    def test_validate_joint_positions_within_lower_tolerance(self, importer):
+        """Do not warn for tiny floating-point undershoot near lower limit."""
+        data = -1.0000005  # Within epsilon below lower limit -1.0
+
+        importer._validate_joint_data(DataType.JOINT_POSITIONS, data, "joint1")
+
     def test_validate_joint_positions_joint_not_found(self, importer):
         """Test joint position validation with joint not in joint_info."""
         data = 0.5
