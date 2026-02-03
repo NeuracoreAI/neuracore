@@ -115,8 +115,5 @@ logs/
 examples/logs/
 *.log
 *.log.gz
-<<<<<<< HEAD
-=======
 
 .qodo/
->>>>>>> 1761fd2 (fix: inited producer within start_stream)
