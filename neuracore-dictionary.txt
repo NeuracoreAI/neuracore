@@ -251,8 +251,11 @@ nans
 posinf
 neginf
 rotvec
+roundoff
 dataconfig
 pbtxt
+tfrecord
+widowx
 calcsize
 EADDRINUSE
 metas
