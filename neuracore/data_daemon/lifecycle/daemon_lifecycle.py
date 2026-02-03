@@ -6,11 +6,15 @@ import logging
 import os
 import signal
 import sqlite3
+import subprocess
+import sys
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 from types import FrameType
 
+from neuracore.data_daemon.const import RECORDING_EVENTS_SOCKET_PATH, SOCKET_PATH
+from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
 from neuracore.data_daemon.models import TraceErrorCode, TraceStatus
 from neuracore.data_daemon.state_management.state_store import StateStore
 
@@ -21,7 +25,26 @@ class DaemonLifecycleError(RuntimeError):
     """Raised when daemon lifecycle checks fail."""
 
 
-def _pid_is_running(pid_value: int) -> bool:
+def read_pid_from_file(pid_path: Path) -> int | None:
+    """Read an integer PID from `pid_path`, returning None if missing/invalid."""
+    try:
+        pid_text = pid_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+
+    if not pid_text:
+        return None
+
+    try:
+        pid_value = int(pid_text)
+    except ValueError:
+        return None
+
+    return pid_value if pid_value > 0 else None
+
+
+def pid_is_running(pid_value: int) -> bool:
+    """Return True if `pid_value` exists (or cannot be checked due to permissions)."""
     try:
         os.kill(pid_value, 0)
         return True
@@ -31,18 +54,156 @@ def _pid_is_running(pid_value: int) -> bool:
         return True
 
 
-def _read_pid(pid_path: Path) -> int | None:
+def wait_for_socket_paths(
+    socket_paths: Sequence[str],
+    *,
+    timeout_s: float = 5.0,
+    poll_s: float = 0.05,
+    process: subprocess.Popen | None = None,
+) -> None:
+    """Wait for daemon socket files to be created.
+
+    Polls the filesystem until all `socket_paths` exist or the timeout elapses.
+    If `process` is provided, the wait fails fast if the process exits before
+    the sockets are created.
+
+    Args:
+        socket_paths: Paths that must exist before the daemon is considered ready.
+        timeout_s: Maximum seconds to wait before raising.
+        poll_s: Poll interval in seconds.
+        process: Optional subprocess handle for the daemon.
+
+    Raises:
+        RuntimeError: If the daemon process exits early (when `process` is given),
+            or if the sockets are not created within `timeout_s`.
+    """
+    deadline = time.time() + timeout_s
+
+    while time.time() < deadline:
+        if process is not None and process.poll() is not None:
+            raise RuntimeError("Data daemon exited before becoming ready.")
+
+        if all(Path(p).exists() for p in socket_paths):
+            return
+
+        time.sleep(poll_s)
+
+    raise RuntimeError(
+        "Data daemon did not become ready: expected sockets not created."
+    )
+
+
+def cleanup_stale_client_state(
+    *,
+    pid_path: Path,
+    db_path: Path,
+    socket_paths: Sequence[str],
+) -> None:
+    """Clean up stale pid/sockets/db state when no running daemon corresponds to it."""
+    existing_pid = read_pid_from_file(pid_path)
+    if existing_pid is not None and pid_is_running(existing_pid):
+        return
+
+    sockets_present = any(Path(p).exists() for p in socket_paths)
+    pid_file_present = pid_path.exists()
+
+    if existing_pid is None and not pid_file_present and not sockets_present:
+        return
+
+    shutdown(
+        pid_path=pid_path,
+        socket_paths=tuple(Path(p) for p in socket_paths),
+        db_path=db_path,
+    )
+
+
+def launch_daemon_subprocess(
+    *,
+    pid_path: Path,
+    db_path: Path,
+    timeout_s: float = 5.0,
+) -> int:
+    """Launch the daemon runner as a detached subprocess and wait for readiness.
+
+    Args:
+        pid_path: Path to write the daemon pid file.
+        db_path: Path to the daemon SQLite state database.
+        timeout_s: Max seconds to wait for sockets.
+
+    Returns:
+        Spawned daemon pid.
+
+    Raises:
+        RuntimeError: If the daemon fails to start or become ready.
+    """
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+
+    runner_command = [
+        sys.executable,
+        "-m",
+        "neuracore.data_daemon.runner_entry",
+    ]
+
+    env = os.environ.copy()
+    env["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
+    env["NEURACORE_DAEMON_DB_PATH"] = str(db_path)
+    env["NEURACORE_DAEMON_MANAGE_PID"] = "0"
+
     try:
-        pid_text = pid_path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return None
-    if not pid_text:
-        return None
-    try:
-        pid_value = int(pid_text)
-    except ValueError:
-        return None
-    return pid_value if pid_value > 0 else None
+        proc = subprocess.Popen(
+            runner_command,
+            start_new_session=True,
+            close_fds=True,
+            cwd=str(Path.cwd()),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"Failed to start daemon: {exc}") from exc
+
+    wait_for_socket_paths(
+        (str(SOCKET_PATH), str(RECORDING_EVENTS_SOCKET_PATH)),
+        timeout_s=timeout_s,
+        process=proc,
+    )
+
+    pid_path.write_text(str(proc.pid), encoding="utf-8")
+    return proc.pid
+
+
+def ensure_daemon_running(*, timeout_s: float = 5.0) -> int:
+    """Ensure the data daemon is running and ready to accept connections.
+
+    Returns:
+        Daemon pid (existing or newly spawned).
+
+    Raises:
+        RuntimeError: If the daemon cannot be started or becomes unhealthy.
+    """
+    pid_path = get_daemon_pid_path()
+    db_path = get_daemon_db_path()
+
+    os.environ.setdefault("NEURACORE_DAEMON_PID_PATH", str(pid_path))
+    os.environ.setdefault("NEURACORE_DAEMON_DB_PATH", str(db_path))
+
+    existing_pid = read_pid_from_file(pid_path)
+    if existing_pid is not None and pid_is_running(existing_pid):
+        wait_for_socket_paths(
+            (str(SOCKET_PATH), str(RECORDING_EVENTS_SOCKET_PATH)),
+            timeout_s=timeout_s,
+        )
+        return existing_pid
+
+    cleanup_stale_client_state(
+        pid_path=pid_path,
+        db_path=db_path,
+        socket_paths=(str(SOCKET_PATH), str(RECORDING_EVENTS_SOCKET_PATH)),
+    )
+    return launch_daemon_subprocess(
+        pid_path=pid_path, db_path=db_path, timeout_s=timeout_s
+    )
 
 
 def acquire_pid_file(pid_path: Path) -> bool:
@@ -51,8 +212,8 @@ def acquire_pid_file(pid_path: Path) -> bool:
     try:
         fd = os.open(pid_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError:
-        existing = _read_pid(pid_path)
-        if existing and _pid_is_running(existing):
+        existing = read_pid_from_file(pid_path)
+        if existing and pid_is_running(existing):
             raise DaemonLifecycleError(f"Daemon already running (pid={existing})")
         try:
             pid_path.unlink()
@@ -162,7 +323,6 @@ async def reconcile_state_with_filesystem(
                 status=TraceStatus.FAILED,
             )
             continue
-
         elif trace.status == TraceStatus.UPLOADING:
             await store.update_status(trace.trace_id, TraceStatus.PAUSED)
 
@@ -207,8 +367,8 @@ async def startup(
 ) -> None:
     """Run startup checks and cleanup."""
     if manage_pid:
-        existing = _read_pid(pid_path)
-        if existing and not _pid_is_running(existing):
+        existing = read_pid_from_file(pid_path)
+        if existing and not pid_is_running(existing):
             try:
                 pid_path.unlink()
             except FileNotFoundError:
@@ -230,7 +390,63 @@ def shutdown(
     socket_paths: Iterable[Path],
     db_path: Path,
 ) -> None:
-    """Run shutdown steps and cleanup, returning a report of actions taken."""
+    """Run shutdown steps and cleanup."""
     checkpoint_sqlite(db_path)
     cleanup_socket_files(socket_paths)
     remove_pid_file(pid_path)
+
+
+def terminate_pid(pid_value: int) -> bool:
+    """Send SIGTERM to the given PID.
+
+    Args:
+        pid_value: Process ID to terminate.
+
+    Returns:
+        True if the process does not exist or the signal was sent successfully.
+        False if the signal could not be sent due to permissions.
+    """
+    try:
+        os.kill(pid_value, signal.SIGTERM)
+        return True
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+
+
+def force_kill(pid_value: int) -> bool:
+    """Send SIGKILL to the given PID.
+
+    Args:
+        pid_value: Process ID to kill.
+
+    Returns:
+        True if the process does not exist or the signal was sent successfully.
+        False if the signal could not be sent due to permissions.
+    """
+    try:
+        os.kill(pid_value, signal.SIGKILL)
+        return True
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+
+
+def wait_for_exit(pid_value: int, *, timeout_s: float) -> bool:
+    """Wait for a PID to stop running until a timeout elapses.
+
+    Args:
+        pid_value: Process ID to wait on.
+        timeout_s: Maximum seconds to wait.
+
+    Returns:
+        True if the process exited within the timeout, otherwise False.
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if not pid_is_running(pid_value):
+            return True
+        time.sleep(0.1)
+    return False

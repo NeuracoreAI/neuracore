@@ -1,5 +1,4 @@
 import argparse
-import contextlib
 import logging
 import os
 import time
@@ -9,20 +8,9 @@ from common.rollout_utils import rollout_policy
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
 
 import neuracore as nc
+from neuracore.data_daemon.lifecycle.daemon_lifecycle import ensure_daemon_running
 
 logger = logging.getLogger(__name__)
-
-
-def _maybe_start_daemon() -> None:
-    """Start the data daemon if it's not already running."""
-
-    from neuracore.data_daemon.config_manager.args_handler import handle_launch
-
-    with open(os.devnull, "w", encoding="utf-8") as devnull:
-        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-            handle_launch(argparse.Namespace(background=True))
-    # Give the daemon a moment to bind the socket.
-    time.sleep(0.2)
 
 
 def main(args: dict) -> None:
@@ -51,8 +39,9 @@ def main(args: dict) -> None:
             description="This is an example dataset (data daemon logging)",
         )
         print("Created Dataset...")
-        _maybe_start_daemon()
 
+        # start daemon process
+        ensure_daemon_running()
     try:
         print("Starting!!!")
         for episode_idx in range(num_episodes):

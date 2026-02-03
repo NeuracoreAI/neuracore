@@ -1,7 +1,6 @@
 """Tests for nc-data-daemon CLI handlers."""
 
 import argparse
-import os
 from pathlib import Path
 from typing import Any
 
@@ -228,11 +227,11 @@ def test_handle_launch_writes_pid_file_and_prints_success(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    test_state_dir = tmp_path / ".neuracore"
-    test_pid_file = test_state_dir / "daemon.pid"
+    pid_path = tmp_path / "daemon.pid"
 
-    monkeypatch.setattr(args_handler, "daemon_state_dir_path", test_state_dir)
-    monkeypatch.setattr(args_handler, "pid_file_path", test_pid_file)
+    monkeypatch.setattr(args_handler, "get_daemon_pid_path", lambda: pid_path)
+    monkeypatch.setattr(args_handler, "read_pid_from_file", lambda _: None)
+    monkeypatch.setattr(args_handler, "pid_is_running", lambda _: False)
     monkeypatch.setattr(args_handler.time, "sleep", lambda _: None)
 
     monkeypatch.setattr(
@@ -244,7 +243,7 @@ def test_handle_launch_writes_pid_file_and_prints_success(
     args_handler.handle_launch(_ns(background=True))
     out = capsys.readouterr().out.strip()
 
-    assert test_pid_file.read_text(encoding="utf-8").strip() == "12345"
+    assert pid_path.read_text(encoding="utf-8").strip() == "12345"
     assert out == "Daemon launched (pid=12345)."
 
 
@@ -253,20 +252,21 @@ def test_handle_launch_rejects_running_pid(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    test_state_dir = tmp_path / ".neuracore"
-    test_pid_file = test_state_dir / "daemon.pid"
-    test_state_dir.mkdir(parents=True, exist_ok=True)
-    test_pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    pid_path = tmp_path / "daemon.pid"
+    db_path = tmp_path / "state.db"
 
-    monkeypatch.setattr(args_handler, "daemon_state_dir_path", test_state_dir)
-    monkeypatch.setattr(args_handler, "pid_file_path", test_pid_file)
+    monkeypatch.setattr(args_handler, "get_daemon_pid_path", lambda: pid_path)
+    monkeypatch.setattr(args_handler, "get_daemon_db_path", lambda: db_path)
+
+    monkeypatch.setattr(args_handler, "read_pid_from_file", lambda _: 999)
+    monkeypatch.setattr(args_handler, "pid_is_running", lambda _: True)
 
     with pytest.raises(SystemExit) as excinfo:
-        args_handler.handle_launch(_ns(background=True))
+        args_handler.handle_launch(_ns(background=False))
 
     out = capsys.readouterr().out.strip()
     assert excinfo.value.code == 1
-    assert out == f"Daemon already running (pid={os.getpid()})."
+    assert out == "Daemon already running (pid=999)."
 
 
 def test_handle_launch_clears_stale_pid_and_starts(
@@ -274,13 +274,13 @@ def test_handle_launch_clears_stale_pid_and_starts(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    test_state_dir = tmp_path / ".neuracore"
-    test_pid_file = test_state_dir / "daemon.pid"
-    test_state_dir.mkdir(parents=True, exist_ok=True)
-    test_pid_file.write_text("999999", encoding="utf-8")
+    pid_path = tmp_path / "daemon.pid"
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("999", encoding="utf-8")
 
-    monkeypatch.setattr(args_handler, "daemon_state_dir_path", test_state_dir)
-    monkeypatch.setattr(args_handler, "pid_file_path", test_pid_file)
+    monkeypatch.setattr(args_handler, "get_daemon_pid_path", lambda: pid_path)
+    monkeypatch.setattr(args_handler, "read_pid_from_file", lambda _: 999)
+    monkeypatch.setattr(args_handler, "pid_is_running", lambda _: False)
     monkeypatch.setattr(args_handler.time, "sleep", lambda _: None)
 
     monkeypatch.setattr(
@@ -292,7 +292,7 @@ def test_handle_launch_clears_stale_pid_and_starts(
     args_handler.handle_launch(_ns(background=True))
     out = capsys.readouterr().out.strip()
 
-    assert test_pid_file.read_text(encoding="utf-8").strip() == "12345"
+    assert pid_path.read_text(encoding="utf-8").strip() == "12345"
     assert out == "Daemon launched (pid=12345)."
 
 
@@ -301,11 +301,11 @@ def test_handle_launch_exits_and_does_not_write_pid_file_when_runner_exits_immed
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    test_state_dir = tmp_path / ".neuracore"
-    test_pid_file = test_state_dir / "daemon.pid"
+    pid_path = tmp_path / "daemon.pid"
 
-    monkeypatch.setattr(args_handler, "daemon_state_dir_path", test_state_dir)
-    monkeypatch.setattr(args_handler, "pid_file_path", test_pid_file)
+    monkeypatch.setattr(args_handler, "get_daemon_pid_path", lambda: pid_path)
+    monkeypatch.setattr(args_handler, "read_pid_from_file", lambda _: None)
+    monkeypatch.setattr(args_handler, "pid_is_running", lambda _: False)
     monkeypatch.setattr(args_handler.time, "sleep", lambda _: None)
 
     monkeypatch.setattr(
@@ -320,7 +320,7 @@ def test_handle_launch_exits_and_does_not_write_pid_file_when_runner_exits_immed
     out = capsys.readouterr().out.strip()
     assert excinfo.value.code == 1
     assert out == "Daemon failed to start."
-    assert not test_pid_file.exists()
+    assert not pid_path.exists()
 
 
 def test_handle_stop_removes_pid_file_when_process_is_not_running(
@@ -328,22 +328,29 @@ def test_handle_stop_removes_pid_file_when_process_is_not_running(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    test_state_dir = tmp_path / ".neuracore"
-    test_pid_file = test_state_dir / "daemon.pid"
-    test_state_dir.mkdir(parents=True, exist_ok=True)
-    test_pid_file.write_text("4242", encoding="utf-8")
+    pid_path = tmp_path / "daemon.pid"
+    db_path = tmp_path / "state.db"
 
-    monkeypatch.setattr(args_handler, "daemon_state_dir_path", test_state_dir)
-    monkeypatch.setattr(args_handler, "pid_file_path", test_pid_file)
-    monkeypatch.setattr(args_handler.time, "sleep", lambda _: None)
-    monkeypatch.setattr(args_handler, "_terminate_pid", lambda _: True)
-    monkeypatch.setattr(args_handler, "_pid_is_running", lambda _: False)
+    monkeypatch.setattr(args_handler, "get_daemon_pid_path", lambda: pid_path)
+    monkeypatch.setattr(args_handler, "get_daemon_db_path", lambda: db_path)
+
+    monkeypatch.setattr(args_handler, "read_pid_from_file", lambda _: 4242)
+    monkeypatch.setattr(args_handler, "pid_is_running", lambda _: False)
+
+    called: dict[str, object] = {}
+
+    def fake_shutdown(*, pid_path: Path, socket_paths, db_path: Path) -> None:
+        called["pid_path"] = pid_path
+        called["db_path"] = db_path
+
+    monkeypatch.setattr(args_handler, "shutdown", fake_shutdown)
 
     args_handler.handle_stop(_ns())
     out = capsys.readouterr().out.strip()
 
     assert out == "Daemon stopped."
-    assert not test_pid_file.exists()
+    assert called["pid_path"] == pid_path
+    assert called["db_path"] == db_path
 
 
 def test_handle_status_removes_stale_pid_file_and_prints_not_running(
@@ -351,20 +358,31 @@ def test_handle_status_removes_stale_pid_file_and_prints_not_running(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    test_state_dir = tmp_path / ".neuracore"
-    test_pid_file = test_state_dir / "daemon.pid"
-    test_state_dir.mkdir(parents=True, exist_ok=True)
-    test_pid_file.write_text("7777", encoding="utf-8")
+    pid_path = tmp_path / "daemon.pid"
+    db_path = tmp_path / "state.db"
 
-    monkeypatch.setattr(args_handler, "daemon_state_dir_path", test_state_dir)
-    monkeypatch.setattr(args_handler, "pid_file_path", test_pid_file)
-    monkeypatch.setattr(args_handler, "_pid_is_running", lambda _: False)
+    monkeypatch.setattr(args_handler, "get_daemon_pid_path", lambda: pid_path)
+    monkeypatch.setattr(args_handler, "get_daemon_db_path", lambda: db_path)
+
+    monkeypatch.setattr(args_handler, "read_pid_from_file", lambda _: 7777)
+    monkeypatch.setattr(args_handler, "pid_is_running", lambda _: False)
+
+    called = {"count": 0}
+
+    def fake_cleanup_stale_client_state(
+        *, pid_path: Path, db_path: Path, socket_paths
+    ) -> None:
+        called["count"] += 1
+
+    monkeypatch.setattr(
+        args_handler, "cleanup_stale_client_state", fake_cleanup_stale_client_state
+    )
 
     args_handler.handle_status(_ns())
     out = capsys.readouterr().out.strip()
 
     assert out == "Daemon not running."
-    assert not test_pid_file.exists()
+    assert called["count"] == 1
 
 
 def test_handle_update_calls_resolve_effective_config_and_prints_result(

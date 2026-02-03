@@ -21,13 +21,18 @@ from neuracore.data_daemon.config_manager.profiles import (
 )
 from neuracore.data_daemon.const import RECORDING_EVENTS_SOCKET_PATH, SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
-from neuracore.data_daemon.lifecycle.daemon_lifecycle import shutdown
+from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
+    cleanup_stale_client_state,
+    force_kill,
+    pid_is_running,
+    read_pid_from_file,
+    shutdown,
+    terminate_pid,
+    wait_for_exit,
+)
 
 profile_manager = ProfileManager()
 config_manager = ConfigManager(profile_manager)
-
-daemon_state_dir_path = Path.home() / ".neuracore"
-pid_file_path = get_daemon_pid_path()
 
 
 def add_common_config_args(parser: argparse.ArgumentParser) -> None:
@@ -109,117 +114,8 @@ def _extract_config_updates(args: argparse.Namespace) -> dict[str, Any]:
     return {k: v for k, v in raw.items() if k in allowed and v is not None}
 
 
-def _ensure_daemon_state_dir_exists() -> None:
-    """Ensure the daemon state directory exists.
-
-    Args:
-        args: Parsed CLI arguments for the command.
-
-    Returns:
-        None
-    """
-    pid_file_path.parent.mkdir(parents=True, exist_ok=True)
-
-
-def _read_pid_from_file(pid_path: Path) -> int | None:
-    """Read an integer PID from the pid file.
-
-    Args:
-        args: Parsed CLI arguments for the command.
-
-    Returns:
-        None
-    """
-    try:
-        pid_text = pid_path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return None
-
-    if not pid_text:
-        return None
-
-    try:
-        pid_value = int(pid_text)
-    except ValueError:
-        return None
-
-    if pid_value <= 0:
-        return None
-
-    return pid_value
-
-
-def _pid_is_running(pid_value: int) -> bool:
-    """Check whether a PID is running.
-
-    Args:
-        pid_value: Process ID to check.
-
-    Returns:
-        True if the process exists, otherwise False.
-    """
-    try:
-        if _pid_is_zombie(pid_value):
-            return False
-        os.kill(pid_value, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
-def _pid_is_zombie(pid_value: int) -> bool:
-    """Return True if the PID is a zombie process."""
-    stat_path = Path("/proc") / str(pid_value) / "stat"
-    try:
-        stat = stat_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return False
-    parts = stat.split()
-    if len(parts) < 3:
-        return False
-    return parts[2] == "Z"
-
-
-def _terminate_pid(pid_value: int) -> bool:
-    """Terminate a process using SIGTERM.
-
-    Args:
-        pid_value: Process ID to terminate.
-
-    Returns:
-        True if the PID does not exist after the call, otherwise False.
-    """
-    try:
-        os.kill(pid_value, signal.SIGTERM)
-        return True
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False
-
-
-def _force_kill(pid_value: int) -> bool:
-    """Forcefully terminate a process using SIGKILL.
-
-    Args:
-        pid_value: Process ID to terminate.
-
-    Returns:
-        True if the PID does not exist after the call, otherwise False.
-    """
-    try:
-        os.kill(pid_value, signal.SIGKILL)
-        return True
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False
-
-
 def handle_profile_create(args: argparse.Namespace) -> None:
-    """Handle the ``profile create`` CLI command.
+    """Handle the profile create CLI command.
 
     Args:
         args: Parsed CLI arguments containing the profile name.
@@ -235,7 +131,7 @@ def handle_profile_create(args: argparse.Namespace) -> None:
 
 
 def handle_profile_update(args: argparse.Namespace) -> None:
-    """Handle the ``profile update`` CLI command.
+    """Handle the profile update CLI command.
 
     Args:
         args: Parsed CLI arguments containing the profile name and any
@@ -257,7 +153,7 @@ def handle_profile_update(args: argparse.Namespace) -> None:
 
 
 def handle_profile_show(args: argparse.Namespace) -> None:
-    """Handle the ``profile show`` CLI command.
+    """Handle the profile show CLI command.
 
     Args:
         args: Parsed CLI arguments containing the profile name.
@@ -295,17 +191,16 @@ def handle_list_profile(args: argparse.Namespace) -> None:
 def handle_launch(args: argparse.Namespace) -> None:
     """Handle the ``launch`` CLI command.
 
-    Args:
-        args: Parsed CLI arguments for the command.
-
-    Returns:
-        None
+    Behaviour:
+        - If --background: ensure daemon is running (spawn if needed) and return.
+        - Otherwise: launch in foreground and wait, streaming logs.
     """
-    pid_path = pid_file_path
-    _ensure_daemon_state_dir_exists()
-    existing_pid = _read_pid_from_file(pid_path)
+    pid_path = get_daemon_pid_path()
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_pid = read_pid_from_file(pid_path)
     if existing_pid is not None:
-        if _pid_is_running(existing_pid):
+        if pid_is_running(existing_pid):
             print(f"Daemon already running (pid={existing_pid}).")
             sys.exit(1)
         try:
@@ -344,15 +239,16 @@ def handle_launch(args: argparse.Namespace) -> None:
             env=env,
         )
 
-    spawned_daemon_pid = daemon_process.pid
+    spawned_pid = daemon_process.pid
 
     time.sleep(0.1)
     if daemon_process.poll() is not None:
         print("Daemon failed to start.")
         sys.exit(1)
 
-    pid_path.write_text(str(spawned_daemon_pid), encoding="utf-8")
-    print(f"Daemon launched (pid={spawned_daemon_pid}).")
+    pid_path.write_text(str(spawned_pid), encoding="utf-8")
+    print(f"Daemon launched (pid={spawned_pid}).")
+
     if background:
         return
 
@@ -374,48 +270,51 @@ def handle_stop(args: argparse.Namespace) -> None:
     Returns:
         None
     """
-    pid_path = pid_file_path
+    pid_path = get_daemon_pid_path()
     db_path = get_daemon_db_path()
-    pid_value = _read_pid_from_file(pid_path)
 
+    pid_value = read_pid_from_file(pid_path)
     if pid_value is None:
         print("Daemon is not running.")
         return
 
-    # Stale process
-    if not _pid_is_running(pid_value):
+    if not pid_is_running(pid_value):
         shutdown(
             pid_path=pid_path,
-            socket_paths=(SOCKET_PATH, RECORDING_EVENTS_SOCKET_PATH),
+            socket_paths=(
+                Path(str(SOCKET_PATH)),
+                Path(str(RECORDING_EVENTS_SOCKET_PATH)),
+            ),
             db_path=db_path,
         )
         print("Daemon stopped.")
         return
 
-    # Send sigterm
-    terminate_ok = _terminate_pid(pid_value)
-    if not terminate_ok:
+    if not terminate_pid(pid_value):
         print(f"Permission denied sending SIGTERM to pid={pid_value}.")
         sys.exit(1)
-    if _wait_handler(pid_value, 10):
-        # Trigger socket cleanup, pid cleanup and db checkpointing
+    if wait_for_exit(pid_value, timeout_s=10.0):
         shutdown(
             pid_path=pid_path,
-            socket_paths=(SOCKET_PATH, RECORDING_EVENTS_SOCKET_PATH),
+            socket_paths=(
+                Path(str(SOCKET_PATH)),
+                Path(str(RECORDING_EVENTS_SOCKET_PATH)),
+            ),
             db_path=db_path,
         )
         print("Daemon stopped.")
         return
 
-    # Send sigkill instead
-    kill_ok = _force_kill(pid_value)
-    if not kill_ok:
+    if not force_kill(pid_value):
         print(f"Permission denied sending SIGKILL to pid={pid_value}.")
         sys.exit(1)
-    if _wait_handler(pid_value, 5):
+    if wait_for_exit(pid_value, timeout_s=5.0):
         shutdown(
             pid_path=pid_path,
-            socket_paths=(SOCKET_PATH, RECORDING_EVENTS_SOCKET_PATH),
+            socket_paths=(
+                Path(str(SOCKET_PATH)),
+                Path(str(RECORDING_EVENTS_SOCKET_PATH)),
+            ),
             db_path=db_path,
         )
         print("Daemon stopped (forced).")
@@ -426,25 +325,21 @@ def handle_stop(args: argparse.Namespace) -> None:
 
 
 def handle_status(args: argparse.Namespace) -> None:
-    """Handle the ``status`` CLI command.
+    """Handle the ``status`` CLI command."""
+    pid_path = get_daemon_pid_path()
+    db_path = get_daemon_db_path()
 
-    Args:
-        args: Parsed CLI arguments for the command.
-
-    Returns:
-        None
-    """
-    pid_path = pid_file_path
-    pid_value = _read_pid_from_file(pid_path)
+    pid_value = read_pid_from_file(pid_path)
     if pid_value is None:
         print("Daemon not running.")
         return
 
-    if not _pid_is_running(pid_value):
-        try:
-            pid_path.unlink()
-        except FileNotFoundError:
-            pass
+    if not pid_is_running(pid_value):
+        cleanup_stale_client_state(
+            pid_path=pid_path,
+            db_path=db_path,
+            socket_paths=(str(SOCKET_PATH), str(RECORDING_EVENTS_SOCKET_PATH)),
+        )
         print("Daemon not running.")
         return
 
@@ -490,21 +385,3 @@ def handle_update(args: argparse.Namespace) -> None:
     )
 
     print(config_manager.resolve_effective_config(validated_updates))
-
-
-def _wait_handler(pid: int, timeout: int = 2) -> bool:
-    """Wait for a process to terminate, given its pid.
-
-    Args:
-        pid: Process ID to wait for.
-        timeout: Optional timeout in seconds to wait for the process to terminate.
-
-    Returns:
-        True if the process terminated within the given timeout, False otherwise.
-    """
-    start = time.time()
-    while time.time() - start < timeout:
-        if not _pid_is_running(pid):
-            return True
-        time.sleep(0.1)
-    return False
