@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-import threading
 from collections.abc import Callable
 
+from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.models import get_content_type
 from neuracore.data_daemon.recording_encoding_disk_manager.encoding.json_trace import (
     JsonTrace,
@@ -25,28 +25,46 @@ class EncoderInitError(RuntimeError):
 
 
 class _EncoderManager:
-    """Create and manage encoder instances per trace with safe concurrency."""
+    """Create and manage encoder instances per trace.
+
+    Listens for TRACE_ABORTED events to cleanup encoders.
+    Owns its own encoder registry.
+    """
 
     def __init__(
         self,
         *,
         filesystem: _TraceFilesystem,
-        state_lock: threading.RLock,
-        encoders: dict[_TraceKey, JsonTrace | VideoTrace],
         abort_trace: Callable[[_TraceKey], None],
     ) -> None:
         """Initialise _EncoderManager.
 
         Args:
             filesystem: Filesystem helper for path resolution.
-            state_lock: Shared lock protecting encoder state.
-            encoders: Shared encoder registry keyed by trace.
             abort_trace: Callback used to abort traces on failure.
         """
         self._filesystem = filesystem
-        self._state_lock = state_lock
-        self._encoders = encoders
         self._abort_trace = abort_trace
+
+        self._encoders: dict[_TraceKey, JsonTrace | VideoTrace] = {}
+
+        self._emitter = get_emitter()
+        self._emitter.on(Emitter.TRACE_ABORTED, self._on_trace_aborted)
+
+    def _on_trace_aborted(self, trace_key: _TraceKey) -> None:
+        """Handle TRACE_ABORTED event.
+
+        Args:
+            trace_key: Trace key that was aborted.
+        """
+        encoder = self._encoders.pop(trace_key, None)
+        if encoder is not None:
+            try:
+                encoder.finish()
+            except Exception:
+                logger.exception(
+                    "Encoder finish failed during abort for trace %s", trace_key
+                )
 
     def _get_encoder(self, trace_key: _TraceKey) -> JsonTrace | VideoTrace:
         """Get or create the encoder instance for a trace.
@@ -57,26 +75,25 @@ class _EncoderManager:
         Returns:
             Encoder for the trace.
         """
-        with self._state_lock:
-            existing_encoder = self._encoders.get(trace_key)
-            if existing_encoder is not None:
-                return existing_encoder
+        existing_encoder = self._encoders.get(trace_key)
+        if existing_encoder is not None:
+            return existing_encoder
 
-            trace_dir = self._filesystem.trace_dir_for(trace_key)
-            content_kind = get_content_type(trace_key.data_type)
-            created_encoder: JsonTrace | VideoTrace
+        trace_dir = self._filesystem.trace_dir_for(trace_key)
+        content_kind = get_content_type(trace_key.data_type)
+        created_encoder: JsonTrace | VideoTrace
 
-            try:
-                if content_kind == "RGB":
-                    created_encoder = VideoTrace(output_dir=trace_dir)
-                else:
-                    created_encoder = JsonTrace(output_dir=trace_dir)
-            except Exception:
-                self._abort_trace(trace_key)
-                raise EncoderInitError(f"Failed to create encoder for {trace_key}")
+        try:
+            if content_kind == "RGB":
+                created_encoder = VideoTrace(output_dir=trace_dir)
+            else:
+                created_encoder = JsonTrace(output_dir=trace_dir)
+        except Exception:
+            self._abort_trace(trace_key)
+            raise EncoderInitError(f"Failed to create encoder for {trace_key}")
 
-            self._encoders[trace_key] = created_encoder
-            return created_encoder
+        self._encoders[trace_key] = created_encoder
+        return created_encoder
 
     def safe_get_encoder(self, trace_key: _TraceKey) -> JsonTrace | VideoTrace | None:
         """Get or create an encoder for a trace, converting failures into a trace abort.
@@ -102,8 +119,7 @@ class _EncoderManager:
         Returns:
             Encoder instance if present, otherwise None.
         """
-        with self._state_lock:
-            return self._encoders.pop(trace_key, None)
+        return self._encoders.pop(trace_key, None)
 
     def clear_all_encoders(self) -> list[tuple[_TraceKey, JsonTrace | VideoTrace]]:
         """Remove and return all active encoders.
@@ -111,7 +127,10 @@ class _EncoderManager:
         Returns:
             List of (trace_key, encoder) for all active encoders.
         """
-        with self._state_lock:
-            remaining = list(self._encoders.items())
-            self._encoders.clear()
+        remaining = list(self._encoders.items())
+        self._encoders.clear()
         return remaining
+
+    def cleanup(self) -> None:
+        """Remove event listeners during shutdown."""
+        self._emitter.remove_listener(Emitter.TRACE_ABORTED, self._on_trace_aborted)
