@@ -29,6 +29,7 @@ from neuracore.data_daemon.communications_management.producer import (
 )
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
+from neuracore.data_daemon.models import MessageEnvelope
 from neuracore.data_daemon.recording_encoding_disk_manager import (
     recording_disk_manager as rdm_module,
 )
@@ -70,11 +71,8 @@ def _run_daemon_loop(
 
     while not stop_event.is_set():
         daemon._finalize_pending_closes()
-        msg = None
-        try:
-            msg = comm.receive_message()
-        except zmq.Again:
-            msg = None
+        raw = comm.receive_raw()
+        msg = MessageEnvelope.from_bytes(raw) if raw else None
 
         if msg is not None:
             daemon.handle_message(msg)

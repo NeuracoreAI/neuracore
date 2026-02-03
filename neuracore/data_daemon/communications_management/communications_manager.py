@@ -98,17 +98,12 @@ class CommunicationsManager:
         self._consumer_endpoint = endpoint
         logger.info("Daemon (PULL) bound to %s", endpoint)
 
-    def receive_message(self) -> MessageEnvelope:
-        """Receive and deserialize a ManagementMessage."""
-        if self.consumer_socket is None:
-            raise RuntimeError("Consumer socket not initialized")
-        msg_bytes = self.consumer_socket.recv()
-        return MessageEnvelope.from_bytes(msg_bytes)
-
-    def receive_raw(self) -> bytes:
+    def receive_raw(self) -> bytes | None:
         """Receive a raw message from the consumer socket."""
         if self.consumer_socket is None:
             raise RuntimeError("Consumer socket not initialized")
+        if not self.consumer_socket.poll(timeout=10):
+            return None
         return self.consumer_socket.recv()
 
     def start_publisher(self) -> None:

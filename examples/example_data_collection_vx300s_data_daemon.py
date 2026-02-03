@@ -1,8 +1,7 @@
 import argparse
+import contextlib
 import logging
 import os
-import subprocess
-import sys
 import time
 
 import numpy as np
@@ -17,17 +16,11 @@ logger = logging.getLogger(__name__)
 def _maybe_start_daemon() -> None:
     """Start the data daemon if it's not already running."""
 
-    runner_command = [
-        sys.executable,
-        "-m",
-        "neuracore.data_daemon.runner_entry",
-    ]
-    subprocess.Popen(
-        runner_command,
-        start_new_session=True,
-        close_fds=True,
-        cwd=str(os.getcwd()),
-    )
+    from neuracore.data_daemon.config_manager.args_handler import handle_launch
+
+    with open(os.devnull, "w", encoding="utf-8") as devnull:
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            handle_launch(argparse.Namespace(background=True))
     # Give the daemon a moment to bind the socket.
     time.sleep(0.2)
 

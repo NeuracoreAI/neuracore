@@ -54,6 +54,11 @@ def main() -> None:
     show_parser.set_defaults(handler=handle_profile_show)
 
     launch_parser = subparsers.add_parser("launch", help="Launch the data daemon.")
+    launch_parser.add_argument(
+        "--background",
+        action="store_true",
+        help="Run the daemon in the background without terminal output.",
+    )
     launch_parser.set_defaults(handler=handle_launch)
 
     stop_parser = subparsers.add_parser("stop", help="Stop the data daemon.")

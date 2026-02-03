@@ -109,6 +109,7 @@ class Daemon:
 
         self._emitter = get_emitter()
         self._emitter.on(Emitter.TRACE_WRITTEN, self.cleanup_stopped_channels)
+        self._running = False
 
     def run(self) -> None:
         """Run the daemon main loop.
@@ -122,22 +123,35 @@ class Daemon:
         The loop will exit on a KeyboardInterrupt (e.g. Ctrl+C), and will then call
         `cleanup_daemon` on the communications manager to clean up resources.
         """
+        if self._running:
+            raise RuntimeError("Daemon is already running")
+
+        self._running = True
         self.comm.start_consumer()
         self.comm.start_publisher()
         logger.info("Daemon started and ready to receive messages...")
         try:
-            while True:
+            while self._running:
                 self._finalize_pending_closes()
                 raw = self.comm.receive_raw()
-                if not self.process_raw_message(raw):
-                    continue
+                if raw:
+                    self.process_raw_message(raw)
                 self._cleanup_expired_channels()
-                # Check for full messages from the ring buffer
                 self._drain_channel_messages()
         except KeyboardInterrupt:
             logger.info("Shutting down daemon...")
         finally:
             self.comm.cleanup_daemon()
+
+    def stop(
+        self,
+    ) -> None:
+        """Stop the daemon main loop.
+
+        Sets the `_running` flag to False, which will cause the daemon main loop
+        to exit on the next iteration.
+        """
+        self._running = False
 
     def process_raw_message(self, raw: bytes) -> bool:
         """Parse and handle a raw message payload.
