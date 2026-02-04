@@ -18,8 +18,10 @@ data_import_config:
     image_convention: CHANNELS_LAST
     order_of_channels: RGB
     mapping: 
-      - name: image
-      - name: wrist_image
+      - name: image_0
+      - name: image_1
+      - name: image_2
+      - name: image_3
 
   JOINT_POSITIONS: 
     source: observation.state
