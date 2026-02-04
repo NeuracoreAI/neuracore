@@ -1,13 +1,15 @@
 input_dataset_name: lerobot/unitreeh1_fold_clothes
 dataset_type: LEROBOT
+
 output_dataset:
-  name: lerobot_unitreeh1
+  name: unitreeh1_fold_clothes
   tags: [unitree, humanoid, folding, clothes, manipulation]
   description: "This dataset contains images and sensor data collected from the LeRobot Unitree H1 robot while performing fold clothes tasks in an indoor environment."
 
 robot:
-  name: lerobot_unitreeh1_robot
-  urdf_path: ""
+  name: unitreeh1
+  urdf_path: "robot.urdf"
+  overwrite_existing: True
 
 frequency: 50
 
@@ -47,6 +49,30 @@ data_import_config:
       - name: right_shoulder_roll_joint
       - name: right_shoulder_yaw_joint
       - name: right_elbow_joint
+    
+    JOINT_TARGET_POSITIONS: 
+      source: action
+      units: RADIANS
+      mapping: 
+        - name: left_hip_yaw_joint
+        - name: left_hip_roll_joint
+        - name: left_hip_pitch_joint
+        - name: left_knee_joint
+        - name: left_ankle_joint
+        - name: right_hip_yaw_joint
+        - name: right_hip_roll_joint
+        - name: right_hip_pitch_joint
+        - name: right_knee_joint
+        - name: right_ankle_joint
+        - name: torso_joint
+        - name: left_shoulder_pitch_joint
+        - name: left_shoulder_roll_joint
+        - name: left_shoulder_yaw_joint
+        - name: left_elbow_joint
+        - name: right_shoulder_pitch_joint
+        - name: right_shoulder_roll_joint
+        - name: right_shoulder_yaw_joint
+        - name: right_elbow_joint
 
   LANGUAGE:
     source: task
