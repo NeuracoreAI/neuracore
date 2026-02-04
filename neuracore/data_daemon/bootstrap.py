@@ -71,6 +71,7 @@ Encoder Loop:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -278,10 +279,14 @@ class DaemonBootstrap:
     def _resolve_configuration(self) -> DaemonConfig | None:
         """Resolve daemon configuration from profiles, env, and CLI."""
         try:
+            profile_name = os.environ.get("NEURACORE_DAEMON_PROFILE") or None
+
             profile_manager = ProfileManager()
-            config_manager = ConfigManager(profile_manager)
+            config_manager = ConfigManager(profile_manager, profile=profile_name)
+
             config = config_manager.resolve_effective_config()
-            logger.info("       Configuration resolved")
+
+            logger.info("Configuration resolved")
             return config
         except Exception:
             logger.exception("Failed to resolve configuration")

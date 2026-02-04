@@ -218,6 +218,15 @@ def handle_launch(args: argparse.Namespace) -> None:
     env["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
     env["NEURACORE_DAEMON_MANAGE_PID"] = "0"
 
+    profile_name = getattr(args, "profile", None)
+    if profile_name is not None:
+        try:
+            profile_manager.get_profile(profile_name)
+        except ProfileNotFound as exc:
+            print(exc)
+            sys.exit(1)
+        env["NEURACORE_DAEMON_PROFILE"] = profile_name
+
     background = getattr(args, "background", False)
     if background:
         daemon_process = subprocess.Popen(
