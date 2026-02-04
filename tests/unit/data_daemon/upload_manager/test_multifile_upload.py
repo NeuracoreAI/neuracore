@@ -822,6 +822,7 @@ class TestBackendApiConsistency:
 
             async def capture_update(*args, **kwargs):
                 update_trace_calls.append((args, kwargs))
+                return True
 
             mock_update.side_effect = capture_update
 
@@ -921,6 +922,7 @@ class TestBackendApiConsistency:
 
             async def capture_update(*args, **kwargs):
                 update_calls.append((args, kwargs))
+                return True
 
             mock_update.side_effect = capture_update
 
@@ -1028,6 +1030,7 @@ class TestBackendApiConsistency:
 
             async def capture_update(*args, **kwargs):
                 update_calls.append((args, kwargs))
+                return True
 
             mock_update.side_effect = capture_update
 
@@ -1138,6 +1141,7 @@ class TestBackendApiConsistency:
 
             async def capture_update(*args, **kwargs):
                 update_calls.append((args, kwargs))
+                return True
 
             mock_update.side_effect = capture_update
 

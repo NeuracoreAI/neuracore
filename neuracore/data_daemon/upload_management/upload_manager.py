@@ -340,9 +340,14 @@ class UploadManager(TraceManager):
             recording_id, data_type, UUID(trace_id)
         )
         if not registered:
-            error_msg = "Failed to register trace with backend"
             logger.error(f"Failed to register trace {trace_id} with backend")
-            self._emit_upload_failure(trace_id, bytes_uploaded, error_msg)
+            self._emit_upload_failure(
+                trace_id,
+                bytes_uploaded,
+                "Failed to register trace with backend",
+                status=TraceStatus.FAILED,
+                error_code=TraceErrorCode.NETWORK_ERROR,
+            )
             return False
 
         async def upload_files() -> bool:
@@ -409,13 +414,27 @@ class UploadManager(TraceManager):
 
                     cumulative_bytes += file.stat().st_size
 
-                await self._update_data_trace(
+                updated_trace = await self._update_data_trace(
                     recording_id,
                     trace_id,
                     RecordingDataTraceStatus.UPLOAD_COMPLETE,
                     uploaded_bytes=cumulative_bytes,
                     total_bytes=cumulative_bytes,
                 )
+                if not updated_trace:
+                    logger.warning(
+                        f"Failed to mark trace {trace_id} as complete on backend, "
+                        "will retry"
+                    )
+                    self._emit_upload_failure(
+                        trace_id,
+                        cumulative_bytes,
+                        "Failed to update trace status to complete",
+                        status=TraceStatus.FAILED,
+                        error_code=TraceErrorCode.NETWORK_ERROR,
+                    )
+                    return False
+
                 self._emitter.emit(Emitter.UPLOAD_COMPLETE, trace_id)
                 logger.info(f"Upload successful for trace {trace_id}")
                 return True
