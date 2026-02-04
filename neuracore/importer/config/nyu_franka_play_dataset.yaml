@@ -3,7 +3,7 @@ dataset_type: LEROBOT
 output_dataset:
   name: NYU_franka_play
   tags: [franka, kitchen, play, cooking, manipulation]
-  description: "This dataset contains images and sensor data collected from the LeRobot Unitree H1 robot while performing fold clothes tasks in an indoor environment."
+  description: "NYU_franka_play is a real-world robot manipulation dataset collected on a Franka Panda arm, consisting of diverse “play” (teleoperated exploratory) trajectories for learning general-purpose manipulation policies. It includes time-synced RGB observations with robot proprioception and action/control signals, suitable for imitation learning and offline RL."
 
 robot:
   name: nyu_franka
@@ -53,6 +53,37 @@ data_import_config:
         index: 7
       - name: panda_finger_joint2
         index: 7
+
+
+    VISUAL_JOINT_POSITIONS: 
+    source: observation.state
+    units: RADIANS
+    mapping:
+      - name: panda_joint1
+        index: 0
+      - name: panda_joint2
+        index: 1
+      - name: panda_joint3
+        index: 2
+      - name: panda_joint4
+        index: 3
+      - name: panda_joint5
+        index: 4
+      - name: panda_joint6
+        index: 5
+      - name: panda_joint7
+        index: 6
+      - name: panda_joint8
+        index: 7
+      - name: panda_hand_joint
+        index: 7
+      - name: panda_hand_tcp_joint
+        index: 7
+      - name: panda_finger_joint1
+        index: 7
+      - name: panda_finger_joint2
+        index: 7
+
 
   LANGUAGE:
     source: task
