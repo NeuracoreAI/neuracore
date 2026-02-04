@@ -113,7 +113,7 @@ def build_default_daemon_config(
         path_to_store_record=str(record_dir),
         num_threads=num_threads,
         keep_wakelock_while_upload=False,
-        offline=False,
+        offline=True,
         api_key=None,
         current_org_id=None,
     )

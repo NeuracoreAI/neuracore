@@ -55,6 +55,10 @@ def main() -> None:
 
     launch_parser = subparsers.add_parser("launch", help="Launch the data daemon.")
     launch_parser.add_argument(
+        "--profile",
+        help="Profile name to launch (from ~/.neuracore/data_daemon/profiles).",
+    )
+    launch_parser.add_argument(
         "--background",
         action="store_true",
         help="Run the daemon in the background without terminal output.",
