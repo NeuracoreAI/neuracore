@@ -147,8 +147,7 @@ class AlgorithmLoader:
     def get_all_files(self) -> list[Path]:
         """Get all Python files in the algorithm directory recursively.
 
-        Scans the algorithm directory and all subdirectories for Python files,
-        excluding __init__.py files which are handled separately.
+        Scans the algorithm directory and all subdirectories for Python files.
 
         Returns:
             List of Path objects representing all Python files found.
@@ -156,7 +155,7 @@ class AlgorithmLoader:
         files = []
         for root, _, filenames in os.walk(self.algorithm_dir):
             for filename in filenames:
-                if filename.endswith(".py") and filename != "__init__.py":
+                if filename.endswith(".py"):
                     files.append(Path(root) / filename)
         return files
 
