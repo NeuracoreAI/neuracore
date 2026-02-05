@@ -22,7 +22,7 @@ from neuracore_types import DataType
 
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
-from neuracore.data_daemon.models import TraceErrorCode, TraceStatus
+from neuracore.data_daemon.models import TraceErrorCode
 from neuracore.data_daemon.upload_management.upload_manager import UploadManager
 
 TEST_TIMEOUT_SECONDS = 60.0
@@ -362,7 +362,7 @@ class TestDirectoryUploadHandling:
             after files are written.
 
         Key Assertions:
-            - UPLOAD_FAILED emitted with status=FAILED
+            - UPLOAD_FAILED emitted with error_code=UPLOAD_FAILED
             - Error message contains "No files found"
             - UPLOAD_COMPLETE never emitted
             - ResumableFileUploader never instantiated
@@ -422,10 +422,10 @@ class TestDirectoryUploadHandling:
             failed_event[0] == "TEST_TRACE_ID_EMPTY"
         ), "Wrong trace_id in UPLOAD_FAILED"
         assert (
-            failed_event[2] == TraceStatus.FAILED
-        ), f"Expected status=FAILED, got {failed_event[2]}"
+            failed_event[2] == TraceErrorCode.UPLOAD_FAILED
+        ), f"Expected error_code=UPLOAD_FAILED, got {failed_event[2]}"
 
-        error_message = failed_event[4]
+        error_message = failed_event[3]
         assert (
             "Empty directory" in error_message or "empty" in error_message.lower()
         ), f"Expected 'Empty directory' in error message, got: {error_message}"
@@ -680,7 +680,7 @@ class TestRegistrationAndUploadFailures:
 
         Key Assertions:
             - UPLOAD_FAILED emitted with "Failed to register trace" message
-            - status = TraceStatus.FAILED
+            - error_code = TraceErrorCode.NETWORK_ERROR
             - ResumableFileUploader never instantiated
             - bytes_uploaded remains 0
         """
@@ -738,14 +738,14 @@ class TestRegistrationAndUploadFailures:
         failed_event = upload_failed_events[0]
         assert failed_event[0] == trace_id, f"Wrong trace_id: {failed_event[0]}"
 
-        error_message = failed_event[4]
+        error_message = failed_event[3]
         assert (
             "register" in error_message.lower() or "failed" in error_message.lower()
         ), f"Expected 'register' or 'failed' in error message, got: {error_message}"
 
         assert (
-            failed_event[2] == TraceStatus.FAILED
-        ), f"Expected status=TraceStatus.FAILED, got {failed_event[2]}"
+            failed_event[2] == TraceErrorCode.NETWORK_ERROR
+        ), f"Expected error_code=NETWORK_ERROR, got {failed_event[2]}"
 
         assert not uploader_instantiated[
             0
@@ -1338,7 +1338,7 @@ class TestResumeLogic:
         Key Assertions:
             - UPLOAD_FAILED emitted (not UPLOAD_COMPLETE)
             - bytes_uploaded = 120MB (100 + 20)
-            - status = TraceStatus.WRITTEN (retryable)
+            - error_code = TraceErrorCode.NETWORK_ERROR (retryable)
             - error_code = TraceErrorCode.NETWORK_ERROR
         """
         trace_dir = tmp_path / "trace-partial-fail"
@@ -1413,16 +1413,12 @@ class TestResumeLogic:
         ), f"Expected bytes_uploaded=120 (100+20), got {failed_event[1]}"
 
         assert (
-            failed_event[2] == TraceStatus.WRITTEN
-        ), f"Expected status=WRITTEN (retryable), got {failed_event[2]}"
+            failed_event[2] == TraceErrorCode.NETWORK_ERROR
+        ), f"Expected error_code=NETWORK_ERROR, got {failed_event[2]}"
 
         assert (
-            failed_event[3] == TraceErrorCode.NETWORK_ERROR
-        ), f"Expected error_code=NETWORK_ERROR, got {failed_event[3]}"
-
-        assert (
-            "Network" in failed_event[4] or "network" in failed_event[4].lower()
-        ), f"Error message should mention network: {failed_event[4]}"
+            "Network" in failed_event[3] or "network" in failed_event[3].lower()
+        ), f"Error message should mention network: {failed_event[3]}"
 
 
 class TestConcurrentUploads:

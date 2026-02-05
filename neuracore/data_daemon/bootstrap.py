@@ -181,6 +181,7 @@ async def bootstrap_async_services(
     state_store = SqliteStateStore(db_path)
     await state_store.init_async_store()
     logger.info("SqliteStateStore initialized at %s", db_path)
+    await state_store.reset_retrying_to_written()
 
     state_manager = StateManager(state_store)
     logger.info("StateManager initialized")
@@ -231,6 +232,7 @@ async def shutdown_async_services(services: AsyncServices) -> None:
         logger.exception("Error shutting down UploadManager")
 
     try:
+        await services.state_store.reset_retrying_to_written()
         await services.state_store.close()
         logger.debug("SqliteStateStore closed")
     except Exception:

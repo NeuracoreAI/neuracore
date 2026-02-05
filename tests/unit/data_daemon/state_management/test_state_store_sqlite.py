@@ -217,7 +217,7 @@ async def test_join_pattern_metadata_then_bytes_transitions_to_written(
 async def test_join_pattern_bytes_then_metadata_transitions_to_written(
     store: SqliteStateStore,
 ) -> None:
-    """Test PENDING_BYTES + metadata -> WRITTEN transition."""
+    """Test PENDING_METADATA + metadata -> WRITTEN transition."""
     trace = await store.upsert_trace_bytes(
         trace_id="trace-6c",
         recording_id="rec-6c",
