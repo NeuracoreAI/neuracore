@@ -110,7 +110,7 @@ class FakeStateStore:
 
         State transitions:
         - New trace: INITIALIZING
-        - PENDING_BYTES -> WRITTEN
+        - PENDING_METADATA -> WRITTEN
         """
         now = datetime.now(timezone.utc)
         existing = self._traces_by_id.get(trace_id)
@@ -173,7 +173,7 @@ class FakeStateStore:
         """Upsert trace with bytes from TRACE_WRITTEN.
 
         State transitions:
-        - New trace: PENDING_BYTES
+        - New trace: PENDING_METADATA
         - INITIALIZING -> WRITTEN
         """
         now = datetime.now(timezone.utc)
@@ -222,6 +222,7 @@ def _register_state_manager(manager: StateManager) -> None:
     emitter = get_emitter()
     emitter.on(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
     emitter.on(Emitter.START_TRACE, manager._handle_start_trace)
+    emitter.on(Emitter.UPLOAD_STARTED, manager.handle_upload_started)
     emitter.on(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
     emitter.on(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
     emitter.on(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
@@ -232,6 +233,7 @@ def _register_state_manager(manager: StateManager) -> None:
 def _cleanup_state_manager(manager: StateManager) -> None:
     get_emitter().remove_listener(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
     get_emitter().remove_listener(Emitter.START_TRACE, manager._handle_start_trace)
+    get_emitter().remove_listener(Emitter.UPLOAD_STARTED, manager.handle_upload_started)
     get_emitter().remove_listener(
         Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete
     )
@@ -407,7 +409,6 @@ async def test_upload_failed_does_not_record_error_in_event_suite(
             Emitter.UPLOAD_FAILED,
             "trace-4",
             12,
-            TraceStatus.FAILED,
             TraceErrorCode.NETWORK_ERROR,
             "lost connection",
         )
@@ -694,7 +695,6 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
             Emitter.UPLOAD_FAILED,
             "trace-a",
             0,
-            TraceStatus.WRITTEN,
             TraceErrorCode.DISK_FULL,
             "disk full",
         )
@@ -840,7 +840,6 @@ async def test_upload_failed_does_not_record_error_and_does_not_emit_ready_event
             Emitter.UPLOAD_FAILED,
             "trace-fail-payload",
             7,
-            TraceStatus.WRITTEN,
             TraceErrorCode.NETWORK_ERROR,
             "net down",
         )

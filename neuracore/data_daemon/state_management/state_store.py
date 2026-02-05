@@ -93,7 +93,7 @@ class StateStore(Protocol):
 
         State transitions:
         - If trace doesn't exist: creates with INITIALIZING status
-        - If trace exists with PENDING_BYTES: transitions to WRITTEN
+        - If trace exists with PENDING_METADATA: transitions to WRITTEN
         - If trace exists with other status: updates metadata only
 
         Returns the trace record after upsert.
@@ -109,7 +109,7 @@ class StateStore(Protocol):
         """Insert or update trace with bytes from TRACE_WRITTEN.
 
         State transitions:
-        - If trace doesn't exist: creates with PENDING_BYTES status
+        - If trace doesn't exist: creates with PENDING_METADATA status
         - If trace exists with INITIALIZING: transitions to WRITTEN
         - If trace exists with other status: updates bytes only
 
@@ -138,8 +138,6 @@ class StateStore(Protocol):
         """Mark retries exhausted and persist final failure details."""
         ...
 
-    async def find_traces_ready_for_reupload(
-        self, limit: int = 50
-    ) -> list[TraceRecord]:
-        """Return traces due for retry upload attempts."""
+    async def reset_retrying_to_written(self) -> int:
+        """Reset RETRYING/UPLOADING traces back to WRITTEN (preserve retry schedule)."""
         ...
