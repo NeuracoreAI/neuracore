@@ -95,7 +95,7 @@ class NeuracoreDatasetImporter(ABC):
         output_dataset_name: str,
         max_workers: int | None = 1,
         min_workers: int = 1,
-        continue_on_error: bool = True,
+        skip_on_error: str = "episode",
         progress_interval: int = 1,
         joint_info: dict[str, JointInfo] = {},
         dry_run: bool = False,
@@ -110,9 +110,12 @@ class NeuracoreDatasetImporter(ABC):
         self.frequency = dataset_config.frequency
         self.joint_info = joint_info
 
-        self.max_workers = max_workers
+        if skip_on_error not in {"episode", "step", "all"}:
+            raise ValueError("skip_on_error must be one of: 'episode', 'step', 'all'")
+
+        self.max_workers = 1
         self.min_workers = min_workers
-        self.continue_on_error = continue_on_error
+        self.skip_on_error = skip_on_error  # one of: "episode", "step", "all"
         self.progress_interval = max(1, progress_interval)
         self.dry_run = dry_run
         self.suppress_warnings = suppress_warnings
@@ -123,6 +126,7 @@ class NeuracoreDatasetImporter(ABC):
         )
         self._progress_queue: mp.Queue[ProgressUpdate] | None = None
         self._worker_id: int | None = None
+        self._error_queue: mp.Queue[WorkerError] | None = None
 
     @abstractmethod
     def build_work_items(self) -> Sequence[ImportItem]:
@@ -419,7 +423,7 @@ class NeuracoreDatasetImporter(ABC):
         self._report_process_status(processes)
         self._report_errors(self.worker_errors)
 
-        if self.worker_errors and not self.continue_on_error:
+        if self.worker_errors and self.skip_on_error == "all":
             raise UploaderError("Upload aborted due to worker errors.")
 
     def _resolve_worker_count(self, total_items: int) -> int:
@@ -508,11 +512,12 @@ class NeuracoreDatasetImporter(ABC):
         error_queue: mp.Queue,
     ) -> None:
         """Centralized step handler for progress and error capture."""
+        self._error_queue = error_queue
         try:
             self.upload(item)
         except Exception as exc:  # noqa: BLE001 - keep traceback for summary
             tb = traceback.format_exc()
-            if self.continue_on_error:
+            if self.skip_on_error == "episode":
                 error_queue.put(
                     WorkerError(
                         worker_id=worker_id,
