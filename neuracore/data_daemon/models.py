@@ -54,7 +54,7 @@ class TraceStatus(str, Enum):
     - PENDING_METADATA + START_TRACE  -> WRITTEN
     - WRITTEN -> UPLOADING -> UPLOADED
     - UPLOADING -> PAUSED -> UPLOADING (resume)
-    - UPLOADING -> WRITTEN (retry on failure)
+    - UPLOADING -> RETRYING -> WRITTEN (retry on failure)
     - Any -> FAILED (on error)
     """
 
@@ -62,6 +62,7 @@ class TraceStatus(str, Enum):
     PENDING_METADATA = "pending_metadata"
     WRITTEN = "written"
     UPLOADING = "uploading"
+    RETRYING = "retrying"
     PAUSED = "paused"
     UPLOADED = "uploaded"
     FAILED = "failed"
