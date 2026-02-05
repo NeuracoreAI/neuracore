@@ -106,10 +106,10 @@ class ResumableFileUploader:
             "content_type": self._content_type,
         }
 
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
         auth = get_auth()
-        headers = await loop.run_in_executor(None, auth.get_headers)
-        org_id = await loop.run_in_executor(None, get_current_org)
+        headers = auth.get_headers()
+        org_id = get_current_org()
 
         for attempt in range(2):
 
@@ -122,8 +122,8 @@ class ResumableFileUploader:
             ) as response:
                 if response.status == 401 and attempt == 0:
                     logger.info("Access token expired, refreshing token")
-                    await loop.run_in_executor(None, auth.login)
-                    headers = await loop.run_in_executor(None, auth.get_headers)
+                    auth.login()
+                    headers = auth.get_headers()
                     continue
 
                 response.raise_for_status()

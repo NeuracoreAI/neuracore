@@ -51,11 +51,11 @@ class TraceManager(ABC):
         try:
             loop = asyncio.get_running_loop()
             auth = get_auth()
-            org_id = await loop.run_in_executor(None, get_current_org)
+            auth.login()
+            org_id = get_current_org()
+            headers = auth.get_headers()
 
             for attempt in range(2):
-                headers = await loop.run_in_executor(None, auth.get_headers)
-
                 async with self.client_session.post(
                     f"{API_URL}/org/{org_id}/recording/{recording_id}/traces",
                     json={"data_type": data_type.value, "trace_id": str(trace_id)},
@@ -116,10 +116,10 @@ class TraceManager(ABC):
         try:
             loop = asyncio.get_running_loop()
             auth = get_auth()
-            org_id = await loop.run_in_executor(None, get_current_org)
+            org_id = get_current_org()
 
             for attempt in range(2):
-                headers = await loop.run_in_executor(None, auth.get_headers)
+                headers = auth.get_headers()
 
                 async with self.client_session.put(
                     f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/{trace_id}",
