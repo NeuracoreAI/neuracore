@@ -62,16 +62,6 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         self._dataset: LeRobotDataset | None = None
         self._episode_iter: Iterator[int] | None = None
 
-        self.logger.info(
-            "Initialized LeRobot importer for '%s' "
-            "(episodes=%s, cameras=%s, fps=%s, root=%s)",
-            self.dataset_name,
-            self.num_episodes,
-            self.camera_keys,
-            self.frequency,
-            self.dataset_root,
-        )
-
     def __getstate__(self) -> dict:
         """Drop worker-local handles when pickling for multiprocessing."""
         state = self.__dict__.copy()

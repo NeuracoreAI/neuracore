@@ -9,9 +9,11 @@ from pathlib import Path
 
 from neuracore_types.importer.config import DatasetTypeConfig
 from neuracore_types.nc_data import DatasetImportConfig
+from rich.logging import RichHandler
 
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
+from neuracore.importer.core.base import get_shared_console
 from neuracore.importer.core.dataset_detector import (
     DatasetDetector,
     iter_first_two_levels,
@@ -30,7 +32,7 @@ from neuracore.importer.core.validation import (
 from neuracore.importer.lerobot_importer import LeRobotDatasetImporter
 from neuracore.importer.rlds_importer import RLDSDatasetImporter
 
-LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+LOG_FORMAT = "%(message)s"
 logger = logging.getLogger(__name__)
 
 
@@ -39,9 +41,22 @@ def configure_logging(level: int = logging.INFO) -> None:
     if logging.getLogger().handlers:
         logging.getLogger().setLevel(level)
         return
-    handler = logging.StreamHandler()
+    handler = RichHandler(
+        rich_tracebacks=True,
+        markup=True,
+        show_path=False,
+        console=get_shared_console(),
+    )
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
     logging.basicConfig(level=level, handlers=[handler])
+
+
+def load_dataset_config(path: Path) -> DatasetImportConfig:
+    """Read the user-provided YAML/JSON into a strongly typed config."""
+    try:
+        return DatasetImportConfig.from_file(path)
+    except Exception as exc:  # noqa: BLE001 - show root cause to user
+        raise ConfigLoadError(f"Failed to load dataset config '{path}': {exc}") from exc
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,6 +113,21 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def load_or_detect_dataset_type(
+    dataconfig: DatasetImportConfig, dataset_dir: Path
+) -> DatasetTypeConfig:
+    """Prefer the explicit dataset type in config, otherwise auto-detect."""
+    if dataconfig.dataset_type:
+        return dataconfig.dataset_type
+
+    try:
+        detected = detect_dataset_type(dataset_dir)
+        logger.info("Detected dataset type: %s", detected.value.upper())
+        return detected
+    except Exception as exc:  # noqa: BLE001 - surface detection failure
+        raise DatasetDetectionError(str(exc)) from exc
+
+
 def cli_args_validation(args: argparse.Namespace) -> None:
     """Validate the provided arguments."""
     for path in [args.dataset_config, args.dataset_dir]:
@@ -122,7 +152,7 @@ def _resolve_robot_descriptions(
     config_mjcf_path: str | None,
     robot_dir: Path | None,
 ) -> tuple[str | None, str | None]:
-    """Pick the first matching URDF and MJCF files by extension."""
+    """Find URDF/MJCF files either from config paths or by scanning a folder."""
     urdf_path: str | None = None
     mjcf_path: str | None = None
     suffix_to_target = {".urdf": "urdf", ".xml": "mjcf", ".mjcf": "mjcf"}
@@ -173,30 +203,15 @@ def main() -> None:
         sys.exit(1)
 
     logger.info(
-        "Starting dataset import | dataset_config=%s | dataset_dir=%s | robot_dir=%s",
+        "Starting dataset import\n  config: %s\n  data:   %s\n  robot:  %s",
         args.dataset_config,
         args.dataset_dir,
         args.robot_dir,
     )
 
-    try:
-        dataconfig = DatasetImportConfig.from_file(args.dataset_config)
-    except Exception as exc:  # noqa: BLE001 - show root cause to user
-        raise ConfigLoadError(
-            f"Failed to load dataset config '{args.dataset_config}': {exc}"
-        ) from exc
+    dataconfig = load_dataset_config(args.dataset_config)
 
-    logger.info("Dataset config loaded.")
-
-    if dataconfig.dataset_type:
-        dataset_type = dataconfig.dataset_type
-        logger.info("Using dataset type from config: %s", dataset_type.value.upper())
-    else:
-        try:
-            dataset_type = detect_dataset_type(args.dataset_dir)
-            logger.info("Detected dataset type: %s", dataset_type.value.upper())
-        except Exception as exc:  # noqa: BLE001 - surface detection failure
-            raise DatasetDetectionError(str(exc)) from exc
+    dataset_type = load_or_detect_dataset_type(dataconfig, args.dataset_dir)
 
     output_dataset = dataconfig.output_dataset
     if not output_dataset or not output_dataset.name:
@@ -232,7 +247,6 @@ def main() -> None:
             description=dataconfig.output_dataset.description,
             tags=dataconfig.output_dataset.tags,
         )
-    logger.info("Output dataset ready: %s (id=%s)", dataset.name, dataset.id)
 
     robot_config = dataconfig.robot
     urdf_path, mjcf_path = _resolve_robot_descriptions(
