@@ -419,10 +419,20 @@ def test_unknown_command_logs_warning_and_continues(
 def test_garbage_messages_are_logged_and_daemon_survives(
     caplog: pytest.LogCaptureFixture,
     zmq_context: zmq.Context,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     daemon_comm = CommunicationsManager(context=zmq_context)
     daemon_comm.start_consumer()
     daemon = Daemon(comm_manager=daemon_comm, recording_disk_manager=CaptureRDM())
+    handled_messages: list[MessageEnvelope] = []
+
+    original_handle_message = daemon.handle_message
+
+    def _capture_handle_message(message: MessageEnvelope) -> None:
+        handled_messages.append(message)
+        original_handle_message(message)
+
+    monkeypatch.setattr(daemon, "handle_message", _capture_handle_message)
 
     sender = zmq_context.socket(zmq.PUSH)
     sender.connect(str(const_module.SOCKET_PATH))
@@ -430,16 +440,18 @@ def test_garbage_messages_are_logged_and_daemon_survives(
     with caplog.at_level(logging.ERROR):
         sender.send(b"{not-json")
         raw = daemon_comm.consumer_socket.recv()
-        assert daemon.process_raw_message(raw) is False
+        daemon.process_raw_message(raw)
         assert "Failed to parse incoming message bytes" in caplog.text
 
         sender.send(b'{"producer_id": "prod"}')
         raw = daemon_comm.consumer_socket.recv()
-        assert daemon.process_raw_message(raw) is False
+        daemon.process_raw_message(raw)
 
         sender.send(b'{"producer_id": "prod", "command": 123}')
         raw = daemon_comm.consumer_socket.recv()
-        assert daemon.process_raw_message(raw) is False
+        daemon.process_raw_message(raw)
+
+    assert handled_messages == []
 
     sender.send(
         MessageEnvelope(
@@ -449,7 +461,8 @@ def test_garbage_messages_are_logged_and_daemon_survives(
         ).to_bytes()
     )
     raw = daemon_comm.consumer_socket.recv()
-    assert daemon.process_raw_message(raw) is True
+    daemon.process_raw_message(raw)
+    assert len(handled_messages) == 1
     assert daemon.channels["prod"].ring_buffer is not None
 
     sender.close(0)

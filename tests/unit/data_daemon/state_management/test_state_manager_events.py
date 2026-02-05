@@ -53,6 +53,31 @@ class FakeStateStore:
     async def mark_recording_reported(self, recording_id: str) -> None:
         return None
 
+    async def find_failed_traces(self) -> list[TraceRecord]:
+        return [
+            trace
+            for trace in self._traces_by_id.values()
+            if trace.status == TraceStatus.FAILED
+        ]
+
+    async def reset_failed_trace_for_retry(self, trace_id: str) -> None:
+        trace = self._traces_by_id.get(trace_id)
+        if trace is None:
+            raise ValueError(f"Trace not found: {trace_id}")
+        now = datetime.now(timezone.utc)
+        updated = replace(
+            trace,
+            status=TraceStatus.WRITTEN,
+            error_code=None,
+            error_message=None,
+            next_retry_at=None,
+            num_upload_attempts=0,
+            bytes_uploaded=0,
+            last_updated=now,
+        )
+        self._traces_by_id[trace_id] = updated
+        self._update_trace_in_recording(updated, updated.recording_id)
+
     async def update_status(
         self, trace_id: str, status: TraceStatus, *, error_message=None
     ) -> bool:
@@ -226,6 +251,9 @@ def _register_state_manager(manager: StateManager) -> None:
     emitter.on(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
     emitter.on(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
     emitter.on(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
+    emitter.on(
+        Emitter.STOP_RECORDING_REQUESTED, manager.handle_stop_recording_requested
+    )
     emitter.on(Emitter.STOP_RECORDING, manager.handle_stop_recording)
     emitter.on(Emitter.IS_CONNECTED, manager.handle_is_connected)
 
@@ -239,6 +267,9 @@ def _cleanup_state_manager(manager: StateManager) -> None:
     )
     get_emitter().remove_listener(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
     get_emitter().remove_listener(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
+    get_emitter().remove_listener(
+        Emitter.STOP_RECORDING_REQUESTED, manager.handle_stop_recording_requested
+    )
     get_emitter().remove_listener(Emitter.STOP_RECORDING, manager.handle_stop_recording)
     get_emitter().remove_listener(Emitter.IS_CONNECTED, manager.handle_is_connected)
 
@@ -303,9 +334,13 @@ async def test_stop_recording_emits_stop_all_and_sets_stopped(state_manager) -> 
 
     get_emitter().on(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)
     try:
-        get_emitter().emit(Emitter.STOP_RECORDING, "rec-1")
+        get_emitter().emit(Emitter.STOP_RECORDING_REQUESTED, "rec-1")
         await asyncio.sleep(0.2)
         assert store.stopped == ["rec-1"]
+        assert received == []
+
+        get_emitter().emit(Emitter.STOP_RECORDING, "rec-1")
+        await asyncio.sleep(0.2)
         assert received == ["rec-1"]
     finally:
         get_emitter().remove_listener(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)

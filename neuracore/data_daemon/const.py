@@ -46,6 +46,8 @@ BYTES_PER_MIB = 1024 * 1024
 DEFAULT_RECORDING_ROOT_PATH = (
     pathlib.Path.home() / ".neuracore" / "data_daemon" / "recordings"
 )
+DEFAULT_DAEMON_DB_PATH = Path.home() / ".neuracore" / "data_daemon" / "state.db"
+
 DEFAULT_STORAGE_FREE_FRACTION = 0.5  # Use 50% of free disk space for local storage.
 DEFAULT_TARGET_DRAIN_HOURS = 12.0  # Aim to drain stored data within ~12 hours.
 DEFAULT_MIN_BANDWIDTH_MIB_S = 1.0  # Avoid too-slow uploads even on large disks.
