@@ -23,6 +23,7 @@ OUTPUT_PREDICTION_HORIZON = 1
 # Use cpu because the model takes a lot of vram
 DEVICE = torch.device("cpu")
 SKIP_TEST = os.environ.get("CI", "false").lower() == "true"
+IS_CI = SKIP_TEST or os.environ.get("GITHUB_ACTIONS", "false").lower() == "true"
 
 
 PI0_TEST_ARGS: dict[str, Any] = {
@@ -34,6 +35,14 @@ PI0_TEST_ARGS: dict[str, Any] = {
     "compile_model": False,
     "gradient_checkpointing": False,
 }
+
+
+@pytest.fixture(autouse=True)
+def _disable_torch_compile_in_ci(monkeypatch):
+    if not IS_CI:
+        return
+    if hasattr(torch, "compile"):
+        monkeypatch.setattr(torch, "compile", lambda fn, *args, **kwargs: fn)
 
 
 @pytest.fixture
