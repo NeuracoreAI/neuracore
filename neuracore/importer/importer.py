@@ -103,6 +103,18 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--skip-on-error",
+        choices=["episode", "step", "all"],
+        default="episode",
+        help=(
+            "Error handling strategy: "
+            "'episode' skips the failed episode; "
+            "'step' skips only the failing step; "
+            "'all' aborts on the first error."
+        ),
+    )
+
+    parser.add_argument(
         "--no-validation-warnings",
         action="store_true",
         help="Suppress warning messages from data validation.",
@@ -287,6 +299,7 @@ def main() -> None:
     logger.info("Setup complete; beginning import.")
 
     importer: RLDSDatasetImporter | LeRobotDatasetImporter | None = None
+    skip_on_error = args.skip_on_error
     if dataset_type == DatasetTypeConfig.TFDS:
         raise NotImplementedError("TFDS import not yet implemented.")
     elif dataset_type == DatasetTypeConfig.RLDS:
@@ -299,6 +312,7 @@ def main() -> None:
             joint_info=robot.joint_info,
             dry_run=args.dry_run,
             suppress_warnings=args.no_validation_warnings,
+            skip_on_error=skip_on_error,
         )
         importer.upload_all()
     elif dataset_type == DatasetTypeConfig.LEROBOT:
@@ -311,6 +325,7 @@ def main() -> None:
             joint_info=robot.joint_info,
             dry_run=args.dry_run,
             suppress_warnings=args.no_validation_warnings,
+            skip_on_error=skip_on_error,
         )
         importer.upload_all()
 
