@@ -17,6 +17,7 @@ from typing import Any
 from neuracore_types.importer.data_config import DataFormat
 from neuracore_types.nc_data import DatasetImportConfig, DataType
 from neuracore_types.nc_data.nc_data import MappingItem
+from rich.console import Console
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -76,6 +77,14 @@ class ProgressUpdate:
     episode_label: str | None = None
 
 
+_RICH_CONSOLE = Console(stderr=True, force_terminal=True)
+
+
+def get_shared_console() -> Console:
+    """Return the shared console used by logging and progress bars."""
+    return _RICH_CONSOLE
+
+
 class NeuracoreDatasetImporter(ABC):
     """Uploader workflow that manages workers and Neuracore session setup."""
 
@@ -101,13 +110,14 @@ class NeuracoreDatasetImporter(ABC):
         self.frequency = dataset_config.frequency
         self.joint_info = joint_info
 
-        self.max_workers = 1
+        self.max_workers = max_workers
         self.min_workers = min_workers
         self.continue_on_error = continue_on_error
         self.progress_interval = max(1, progress_interval)
         self.dry_run = dry_run
         self.suppress_warnings = suppress_warnings
         self.worker_errors: list[WorkerError] = []
+        self._logged_error_keys: set[tuple[int | None, int | None, str]] = set()
         self.logger = logging.getLogger(
             f"{self.__class__.__module__}.{self.__class__.__name__}"
         )
@@ -365,33 +375,22 @@ class NeuracoreDatasetImporter(ABC):
         nc.get_dataset(self.output_dataset_name)
 
     def upload_all(self) -> None:
-        """Run uploads across workers while aggregating errors."""
+        """Run uploads across workers while aggregating errors.
+
+        High-level flow:
+        1) Build the list of work items (episodes).
+        2) Decide how many worker processes to spawn.
+        3) Spin up workers and a progress queue.
+        4) Listen for progress updates while workers run.
+        5) Collect and summarize any errors.
+        """
         items = list(self.build_work_items())
         if not items:
             self.logger.info("No upload items found; nothing to do.")
             return
 
-        self.logger.info(
-            "Preparing import -> dataset=%s | source_dir=%s | items=%s | "
-            "continue_on_error=%s",
-            self.output_dataset_name,
-            self.dataset_dir,
-            len(items),
-            self.continue_on_error,
-        )
-
         worker_count = self._resolve_worker_count(len(items))
-        cpu_count = os.cpu_count()
-        self.logger.info(
-            "Scheduling %s items across %s worker(s) "
-            "(min=%s max=%s cpu=%s progress_interval=%s)",
-            len(items),
-            worker_count,
-            self.min_workers,
-            self.max_workers if self.max_workers is not None else "auto",
-            cpu_count if cpu_count is not None else "unknown",
-            self.progress_interval,
-        )
+        os.cpu_count()
 
         ctx = mp.get_context("spawn")
         error_queue: mp.Queue[WorkerError] = ctx.Queue()
@@ -468,16 +467,7 @@ class NeuracoreDatasetImporter(ABC):
                 self.prepare_worker(worker_id, chunk)
             else:
                 self.prepare_worker(worker_id)  # type: ignore[misc]
-            if chunk:
-                self.logger.info(
-                    "[worker %s] Starting chunk (%s items): %s → %s",
-                    worker_id,
-                    len(chunk),
-                    chunk[0].index,
-                    chunk[-1].index,
-                )
-            else:
-                self.logger.info("[worker %s] Starting with empty chunk.", worker_id)
+            # Progress bar will reflect work; keep startup quiet to reduce noise.
         except Exception as exc:  # noqa: BLE001 - propagate unexpected worker failures
             if error_queue:
                 tb = traceback.format_exc()
@@ -522,7 +512,6 @@ class NeuracoreDatasetImporter(ABC):
             self.upload(item)
         except Exception as exc:  # noqa: BLE001 - keep traceback for summary
             tb = traceback.format_exc()
-            self._log_worker_error(worker_id, item.index, str(exc))
             if self.continue_on_error:
                 error_queue.put(
                     WorkerError(
@@ -532,25 +521,13 @@ class NeuracoreDatasetImporter(ABC):
                         traceback=tb,
                     )
                 )
-                self.logger.warning(
-                    "[worker %s] Continuing after failure on item %s "
-                    "(continue_on_error=True).",
-                    worker_id,
-                    item.index,
-                )
+                # Defer logging to the post-run summary to avoid flickering
+                # and duplicate error lines while the progress bar is live.
                 return
+            self._log_worker_error(worker_id, item.index, str(exc))
             raise
 
-        if (local_index + 1) % self.progress_interval == 0 or (
-            local_index + 1 == chunk_length
-        ):
-            self.logger.info(
-                "[worker %s] processed %s/%s (item index=%s)",
-                worker_id,
-                local_index + 1,
-                chunk_length,
-                item.index,
-            )
+        # Progress bar already shows ongoing status; skip per-interval info logs.
 
     def _collect_errors(self, error_queue: mp.Queue) -> list[WorkerError]:
         """Drain the error queue after workers complete."""
@@ -580,15 +557,25 @@ class NeuracoreDatasetImporter(ABC):
             self.logger.info("All workers completed without reported errors.")
             return
 
-        self.logger.error("Completed with %s worker error(s).", len(errors))
+        deduped: dict[tuple[int | None, int | None, str], int] = {}
         for err in errors:
-            prefix = f"[worker {err.worker_id}"
-            if err.item_index is not None:
-                prefix += f" item {err.item_index}"
+            key = (err.worker_id, err.item_index, err.message)
+            deduped[key] = deduped.get(key, 0) + 1
+
+        self.logger.error(
+            "Completed with %s worker error event(s) (%s unique).",
+            len(errors),
+            len(deduped),
+        )
+
+        for (worker_id, item_index, message), count in deduped.items():
+            prefix = f"[worker {worker_id}"
+            if item_index is not None:
+                prefix += f" item {item_index}"
             prefix += "]"
-            self.logger.error("%s %s", prefix, err.message)
-            if err.traceback:
-                self.logger.debug(err.traceback)
+            suffix = f" (x{count})" if count > 1 else ""
+            self.logger.error("%s %s%s", prefix, message, suffix)
+
         self.logger.error(
             "Import finished with errors. Re-run with DEBUG logging for tracebacks "
             "or fix the reported issues above."
@@ -598,6 +585,11 @@ class NeuracoreDatasetImporter(ABC):
         self, worker_id: int, item_index: int | None, message: str
     ) -> None:
         """Log a worker error immediately while the process is running."""
+        key = (worker_id, item_index, message)
+        if key in self._logged_error_keys:
+            return
+        self._logged_error_keys.add(key)
+
         prefix = f"[worker {worker_id}"
         if item_index is not None:
             prefix += f" item {item_index}"
@@ -649,6 +641,7 @@ class NeuracoreDatasetImporter(ABC):
             TimeRemainingColumn(),
             refresh_per_second=10,
             transient=True,
+            console=get_shared_console(),
         ) as progress:
             while True:
                 any_alive = any(proc.is_alive() for proc in processes)

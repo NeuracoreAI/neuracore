@@ -67,8 +67,7 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
         self._episode_iter = None
 
         self.logger.info(
-            "Initialized RLDS importer for '%s' "
-            "(split=%s, episodes=%s, freq=%s, dir=%s)",
+            "Dataset ready: name=%s split=%s episodes=%s freq=%s dir=%s",
             self.dataset_name,
             self.split,
             self.num_episodes,
@@ -97,15 +96,6 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
         self._builder = self._load_builder()
         chunk_start = chunk[0].index if chunk else 0
         chunk_length = len(chunk) if chunk else None
-
-        self.logger.info(
-            "[worker %s] Loading split=%s (start=%s count=%s) from %s",
-            worker_id,
-            self.split,
-            chunk_start,
-            chunk_length if chunk_length is not None else "remainder",
-            self.builder_dir,
-        )
 
         dataset = self._load_dataset(self._builder, self.split)
         if chunk_start:
@@ -142,12 +132,11 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
             f"worker {self._worker_id}" if self._worker_id is not None else "worker 0"
         )
         self.logger.info(
-            "[%s] Importing %s (%s/%s, steps=%s)",
+            "[%s] Importing episode %s (%s/%s)",
             worker_label,
             episode_label,
             item.index + 1,
             self.num_episodes,
-            total_steps if total_steps is not None else "unknown",
         )
         self._emit_progress(
             item.index, step=0, total_steps=total_steps, episode_label=episode_label
@@ -162,7 +151,7 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
                 episode_label=episode_label,
             )
         nc.stop_recording(wait=True)
-        self.logger.info("[%s] Completed %s", worker_label, episode_label)
+        self.logger.info("[%s] Completed episode %s", worker_label, episode_label)
 
     def _resolve_builder_dir(self) -> Path:
         """Find the dataset version directory that contains dataset_info.json."""
