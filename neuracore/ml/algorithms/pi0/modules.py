@@ -248,12 +248,12 @@ class PI0Policy(nn.Module):
         return embs, pad_masks, att_masks_t
 
     def _embed_suffix(
-        self, state: Tensor, noisy_actions: Tensor, timestep: Tensor
+        self, state: Tensor | None, noisy_actions: Tensor, timestep: Tensor
     ) -> tuple[Tensor, Tensor, Tensor, None]:
         """Embed state, noisy actions, and timestep for the action expert.
 
         Args:
-            state: Proprioceptive state [B, state_dim]
+        state: Proprioceptive state [B, state_dim], or None to omit state input.
             noisy_actions: Noisy action sequence [B, chunk_size, action_dim]
             timestep: Diffusion timestep [B]
 
@@ -264,6 +264,13 @@ class PI0Policy(nn.Module):
         pad_masks = []
         att_masks = []
 
+        has_state = state is not None
+        if state is None:
+            bsize = noisy_actions.shape[0]
+            device = noisy_actions.device
+            state = torch.zeros(
+                bsize, self.config.max_state_dim, device=device, dtype=torch.float32
+            )
         if self.state_proj.weight.dtype == torch.float32:
             state = state.to(torch.float32)
 
@@ -275,9 +282,12 @@ class PI0Policy(nn.Module):
         bsize = state_emb.shape[0]
         device = state_emb.device
 
-        state_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
+        if has_state:
+            state_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
+        else:
+            state_mask = torch.zeros(bsize, 1, dtype=torch.bool, device=device)
         pad_masks.append(state_mask)
-        att_masks += [1]
+        att_masks += [1 if has_state else 0]
 
         time_emb = _create_sinusoidal_pos_embedding(
             timestep,
@@ -325,7 +335,7 @@ class PI0Policy(nn.Module):
         img_masks: list[Tensor],
         lang_tokens: Tensor,
         lang_masks: Tensor,
-        state: Tensor,
+        state: Tensor | None,
         actions: Tensor,
         noise: Tensor | None = None,
         time: Tensor | None = None,
@@ -337,7 +347,7 @@ class PI0Policy(nn.Module):
             img_masks: List of image masks [B] per camera
             lang_tokens: Language token IDs [B, L]
             lang_masks: Language attention mask [B, L]
-            state: Proprioceptive state [B, state_dim]
+            state: Proprioceptive state [B, state_dim], or None to omit state input.
             actions: Target action sequence [B, chunk_size, action_dim]
             noise: Optional pre-sampled noise
             time: Optional pre-sampled diffusion time
@@ -418,7 +428,7 @@ class PI0Policy(nn.Module):
         img_masks: list[Tensor],
         lang_tokens: Tensor,
         lang_masks: Tensor,
-        state: Tensor,
+        state: Tensor | None,
         noise: Tensor | None = None,
         num_steps: int | None = None,
     ) -> Tensor:
@@ -431,7 +441,7 @@ class PI0Policy(nn.Module):
             img_masks: List of image masks [B] per camera
             lang_tokens: Language token IDs [B, L]
             lang_masks: Language attention mask [B, L]
-            state: Proprioceptive state [B, state_dim]
+        state: Proprioceptive state [B, state_dim], or None to omit state input.
             noise: Optional initial noise
             num_steps: Number of Euler steps (default: config.num_inference_steps)
 
@@ -441,8 +451,12 @@ class PI0Policy(nn.Module):
         if num_steps is None:
             num_steps = self.config.num_inference_steps
 
-        bsize = state.shape[0]
-        device = state.device
+        if state is not None:
+            bsize = state.shape[0]
+            device = state.device
+        else:
+            bsize = lang_tokens.shape[0]
+            device = lang_tokens.device
 
         if noise is None:
             actions_shape = (
@@ -490,7 +504,7 @@ class PI0Policy(nn.Module):
 
     def _denoise_step(
         self,
-        state: Tensor,
+        state: Tensor | None,
         prefix_pad_masks: Tensor,
         past_key_values: list[torch.FloatTensor] | None,
         x_t: Tensor,

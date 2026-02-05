@@ -472,10 +472,12 @@ class Pi0(NeuracoreModel):
 
         return language_tokens, language_mask
 
-    def _build_inputs_from_batch(
-        self, batch: BatchedInferenceInputs
-    ) -> tuple[
-        list[torch.Tensor], list[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
+    def _build_inputs_from_batch(self, batch: BatchedInferenceInputs) -> tuple[
+        list[torch.Tensor],
+        list[torch.Tensor],
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
     ]:
         """Build model inputs from a batch of inference samples.
 
@@ -484,6 +486,7 @@ class Pi0(NeuracoreModel):
 
         Returns:
             Tuple of (images, image_masks, lang_tokens, lang_masks, proprios).
+            Proprios can be None if no proprioception inputs are available.
         """
         images, image_masks = self._prepare_rgb_images(batch)
         lang_tokens, lang_masks = self._process_language_tokens(batch)
