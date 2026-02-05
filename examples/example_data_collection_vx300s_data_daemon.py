@@ -43,7 +43,6 @@ def main(args: dict) -> None:
         # start daemon process
         ensure_daemon_running()
     try:
-        print("Starting!!!")
         for episode_idx in range(num_episodes):
             print(f"Starting episode {episode_idx}")
 
