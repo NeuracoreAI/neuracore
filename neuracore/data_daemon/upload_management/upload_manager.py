@@ -96,7 +96,15 @@ class UploadManager(TraceManager):
             data_type_name: Data type name
             bytes_uploaded: Starting offset for resume
         """
-        logger.info(f"Received READY_FOR_UPLOAD for trace {trace_id}")
+        logger.info(
+            "Received READY_FOR_UPLOAD for trace %s (recording=%s, path=%s, "
+            "data_type=%s, bytes_uploaded=%s)",
+            trace_id,
+            recording_id,
+            filepath,
+            data_type,
+            bytes_uploaded,
+        )
 
         loop = asyncio.get_running_loop()
         task = loop.create_task(
@@ -205,6 +213,7 @@ class UploadManager(TraceManager):
         trace_id: str,
         recording_id: str,
         base_bytes: int,
+        total_bytes: int,
         last_progress_update: list[float],
     ) -> Callable[[int], Awaitable[None]]:
         """Create a progress callback for tracking upload progress.
@@ -231,6 +240,7 @@ class UploadManager(TraceManager):
                     trace_id,
                     RecordingDataTraceStatus.UPLOAD_STARTED,
                     uploaded_bytes=total_bytes_uploaded,
+                    total_bytes=total_bytes,
                 )
                 last_progress_update[0] = now
 
@@ -291,18 +301,35 @@ class UploadManager(TraceManager):
         Returns:
             True if all files uploaded successfully, False otherwise.
         """
-        logger.info(f"Starting upload for trace {trace_id}")
+        logger.info(
+            "Starting upload for trace %s (recording=%s, path=%s)",
+            trace_id,
+            recording_id,
+            trace_dir_path,
+        )
 
         files, validation_error = self._validate_trace_directory(trace_dir_path)
         if validation_error or files is None:
             error_msg = validation_error or "No files found in trace directory"
-            logger.error(error_msg)
+            logger.error(
+                "Trace directory validation failed for trace %s: %s",
+                trace_id,
+                error_msg,
+            )
             self._emit_upload_failure(
                 trace_id=trace_id,
                 bytes_uploaded=bytes_uploaded,
                 error_message=error_msg,
             )
             return False
+
+        total_bytes = sum(file.stat().st_size for file in files)
+        logger.info(
+            "Validated trace directory for trace %s: %s files, %s total bytes",
+            trace_id,
+            len(files),
+            total_bytes,
+        )
 
         registered = await self._register_data_trace(
             recording_id, data_type, UUID(trace_id)
@@ -316,6 +343,12 @@ class UploadManager(TraceManager):
                 error_code=TraceErrorCode.NETWORK_ERROR,
             )
             return False
+        logger.info(
+            "Registered trace %s with backend (recording=%s, data_type=%s)",
+            trace_id,
+            recording_id,
+            data_type,
+        )
 
         async def upload_files() -> bool:
             try:
@@ -324,11 +357,18 @@ class UploadManager(TraceManager):
                     trace_id,
                     RecordingDataTraceStatus.UPLOAD_STARTED,
                     uploaded_bytes=bytes_uploaded,
+                    total_bytes=total_bytes,
                 )
                 self._emitter.emit(Emitter.UPLOAD_STARTED, trace_id)
 
                 start_file_idx, file_offset = self._find_resume_point(
                     files, bytes_uploaded
+                )
+                logger.info(
+                    "Resume point for trace %s: file_index=%s, file_offset=%s",
+                    trace_id,
+                    start_file_idx,
+                    file_offset,
                 )
                 cumulative_bytes = sum(
                     file.stat().st_size for file in files[:start_file_idx]
@@ -344,7 +384,11 @@ class UploadManager(TraceManager):
                     )
 
                     progress_callback = self._make_progress_callback(
-                        trace_id, recording_id, cumulative_bytes, last_progress_update
+                        trace_id,
+                        recording_id,
+                        cumulative_bytes,
+                        total_bytes,
+                        last_progress_update,
                     )
 
                     logger.info(
@@ -379,6 +423,12 @@ class UploadManager(TraceManager):
                         )
                         return False
 
+                    logger.info(
+                        "Uploaded file for trace %s: %s (%s bytes)",
+                        trace_id,
+                        file.name,
+                        file.stat().st_size,
+                    )
                     cumulative_bytes += file.stat().st_size
 
                 updated_trace = await self._update_data_trace(

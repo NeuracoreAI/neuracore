@@ -86,6 +86,14 @@ class _BatchEncoderWorker:
         Args:
             batch_job: The batch work item (trace_key, batch_path, trace_done).
         """
+        logger.info(
+            "BATCH_READY received (trace_id=%s, recording_id=%s, trace_done=%s, "
+            "path=%s)",
+            batch_job.trace_key.trace_id,
+            batch_job.trace_key.recording_id,
+            batch_job.trace_done,
+            batch_job.batch_path,
+        )
         self._in_flight_count += 1
         try:
             if batch_job.trace_key in self._aborted_traces:
@@ -237,6 +245,12 @@ class _BatchEncoderWorker:
             return
 
         bytes_written = self._filesystem.trace_bytes_on_disk(trace_key)
+        logger.info(
+            "Emitting TRACE_WRITTEN (trace_id=%s, recording_id=%s, bytes_written=%s)",
+            trace_key.trace_id,
+            trace_key.recording_id,
+            bytes_written,
+        )
         self._emitter.emit(
             Emitter.TRACE_WRITTEN,
             trace_key.trace_id,

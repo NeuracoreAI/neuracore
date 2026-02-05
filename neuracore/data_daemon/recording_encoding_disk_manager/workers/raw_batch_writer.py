@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -17,6 +18,8 @@ from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget i
 
 from ..core.trace_filesystem import _TraceFilesystem
 from ..core.types import _BatchJob, _TraceKey, _WriteState
+
+logger = logging.getLogger(__name__)
 
 
 class _RawBatchWriter:
@@ -77,6 +80,7 @@ class _RawBatchWriter:
         Args:
             trace_key: Trace key that was aborted.
         """
+        logger.warning("Trace aborted: %s", trace_key)
         self._aborted_traces.add(trace_key)
         self._closed_traces.add(trace_key)
         self._writer_states.pop(trace_key, None)
@@ -91,6 +95,7 @@ class _RawBatchWriter:
             recording_id: Recording that was stopped.
         """
         self._stopped_recordings.add(recording_id)
+        logger.info("Recording stopped: %s (flushing pending traces)", recording_id)
 
         writer_states_to_flush = [
             ws
@@ -99,6 +104,11 @@ class _RawBatchWriter:
         ]
 
         for writer_state in writer_states_to_flush:
+            logger.info(
+                "Flushing writer state on stop (trace_id=%s, recording_id=%s)",
+                writer_state.trace_key.trace_id,
+                writer_state.trace_key.recording_id,
+            )
             self._closed_traces.add(writer_state.trace_key)
             writer_state.trace_done = True
             await self._flush_state(writer_state)
@@ -127,10 +137,20 @@ class _RawBatchWriter:
         writer_state.buffer.clear()
 
         if not self._storage_budget.has_free_disk_for_write(buffered_bytes):
+            logger.warning(
+                "Insufficient disk for trace %s (buffered=%s bytes)",
+                trace_key,
+                buffered_bytes,
+            )
             self._abort_trace(trace_key)
             return
 
         if not self._storage_budget.reserve(buffered_bytes):
+            logger.warning(
+                "Failed to reserve disk for trace %s (buffered=%s bytes)",
+                trace_key,
+                buffered_bytes,
+            )
             self._abort_trace(trace_key)
             return
 
@@ -141,8 +161,21 @@ class _RawBatchWriter:
                 await f.write(payload_bytes)
         except Exception:
             self._storage_budget.release(buffered_bytes)
+            logger.exception(
+                "Failed to write batch for trace %s (path=%s, bytes=%s)",
+                trace_key,
+                batch_path,
+                buffered_bytes,
+            )
             self._abort_trace(trace_key)
             return
+        logger.debug(
+            "Wrote batch for trace %s (path=%s, bytes=%s, trace_done=%s)",
+            trace_key,
+            batch_path,
+            buffered_bytes,
+            trace_done,
+        )
 
         self._emitter.emit(
             Emitter.BATCH_READY,
@@ -151,6 +184,14 @@ class _RawBatchWriter:
                 batch_path=batch_path,
                 trace_done=trace_done,
             ),
+        )
+        logger.info(
+            "Emitted BATCH_READY (trace_id=%s, recording_id=%s, trace_done=%s, "
+            "bytes=%s)",
+            trace_key.trace_id,
+            trace_key.recording_id,
+            trace_done,
+            buffered_bytes,
         )
 
     async def worker(self) -> None:
@@ -223,6 +264,13 @@ class _RawBatchWriter:
                 self._writer_states[trace_key] = writer_state
 
             if is_new_trace:
+                logger.info(
+                    "Starting trace write: %s (recording=%s, data_type=%s, path=%s)",
+                    trace_key.trace_id,
+                    trace_key.recording_id,
+                    trace_key.data_type,
+                    trace_dir,
+                )
                 self._emitter.emit(
                     Emitter.START_TRACE,
                     trace_key.trace_id,
@@ -259,6 +307,11 @@ class _RawBatchWriter:
                 if writer_state.trace_done:
                     self._writer_states.pop(trace_key, None)
                     if raw_message.final_chunk:
+                        logger.info(
+                            "Trace write complete: %s (recording=%s)",
+                            trace_key.trace_id,
+                            trace_key.recording_id,
+                        )
                         self._closed_traces.add(trace_key)
 
             self.trace_message_queue.task_done()

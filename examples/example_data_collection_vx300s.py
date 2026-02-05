@@ -30,6 +30,8 @@ def main(args):
             description="This is an example dataset",
         )
         print("Created Dataset...")
+        # start daemon process
+        ensure_daemon_running()
 
         ensure_daemon_running()
 
@@ -83,7 +85,7 @@ def main(args):
             # Stop recording if enabled
             if record:
                 print("Finishing recording...")
-                nc.stop_recording()
+                nc.stop_recording(wait=True)
                 print("Finished recording!")
 
             print(f"Episode {episode_idx} done")

@@ -40,7 +40,7 @@ def main() -> None:
     db_path = get_daemon_db_path()
 
     try:
-        bootstrap = DaemonBootstrap()
+        bootstrap = DaemonBootstrap(db_path=db_path)
         context = bootstrap.start()
 
         if context is None:

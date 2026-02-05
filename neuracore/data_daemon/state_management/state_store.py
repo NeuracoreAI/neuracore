@@ -48,6 +48,14 @@ class StateStore(Protocol):
         """Mark a recording as progress-reported."""
         ...
 
+    async def find_failed_traces(self) -> list[TraceRecord]:
+        """Return all traces marked as FAILED."""
+        ...
+
+    async def reset_failed_trace_for_retry(self, trace_id: str) -> None:
+        """Reset a failed trace back to WRITTEN for retry."""
+        ...
+
     async def update_status(
         self,
         trace_id: str,
