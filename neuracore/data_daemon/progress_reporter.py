@@ -50,10 +50,10 @@ class ProgressReporter:
 
         body = TracesMetadataRequest(traces=trace_map)
 
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
         auth = get_auth()
-        org_id = await loop.run_in_executor(None, get_current_org)
-        headers = await loop.run_in_executor(None, auth.get_headers)
+        org_id = get_current_org()
+        headers = auth.get_headers()
         recording_id = traces[0].recording_id
         last_error: str | None = None
 
@@ -72,8 +72,8 @@ class ProgressReporter:
                         return
                     if response.status == 401:
                         logger.info("Access token expired, refreshing token")
-                        await loop.run_in_executor(None, auth.login)
-                        headers = await loop.run_in_executor(None, auth.get_headers)
+                        auth.login()
+                        headers = auth.get_headers()
                         continue
                     error_text = await response.text()
                     last_error = f"HTTP {response.status}: {error_text}"
