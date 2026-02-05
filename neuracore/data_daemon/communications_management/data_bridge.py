@@ -316,6 +316,8 @@ class Daemon:
         :param recording_id: The recording ID (from immutable _trace_recordings).
         :param final_chunk: Whether this is the final chunk for the trace.
         """
+        if final_chunk:
+            logger.info(f"RECEIVED FINAL CHUNK FOR {trace_id}")
         metadata = self._trace_metadata.get(trace_id, {})
         robot_instance = int(metadata.get("robot_instance") or 0)
         try:
@@ -607,7 +609,16 @@ class Daemon:
                 message.producer_id,
             )
             return
+        logger.info(
+            "RECORDING_STOPPED received (recording_id=%s, producer_id=%s)",
+            recording_id,
+            message.producer_id,
+        )
         self._pending_close_recordings.add(str(recording_id))
+        logger.info(
+            "Emitting STOP_RECORDING (recording_id=%s)",
+            recording_id,
+        )
         self._emitter.emit(Emitter.STOP_RECORDING, recording_id)
 
     def _finalize_pending_closes(self) -> None:
@@ -646,6 +657,11 @@ class Daemon:
 
         recording_id = self._trace_recordings.get(trace_id)
         if recording_id:
+            logger.info(
+                "Cleaning up stopped channel (trace_id=%s, recording_id=%s)",
+                trace_id,
+                recording_id,
+            )
             self._remove_trace(str(recording_id), str(trace_id))
 
         channel.trace_id = None

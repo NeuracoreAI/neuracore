@@ -53,6 +53,31 @@ class FakeStateStore:
     async def mark_recording_reported(self, recording_id: str) -> None:
         return None
 
+    async def find_failed_traces(self) -> list[TraceRecord]:
+        return [
+            trace
+            for trace in self._traces_by_id.values()
+            if trace.status == TraceStatus.FAILED
+        ]
+
+    async def reset_failed_trace_for_retry(self, trace_id: str) -> None:
+        trace = self._traces_by_id.get(trace_id)
+        if trace is None:
+            raise ValueError(f"Trace not found: {trace_id}")
+        now = datetime.now(timezone.utc)
+        updated = replace(
+            trace,
+            status=TraceStatus.WRITTEN,
+            error_code=None,
+            error_message=None,
+            next_retry_at=None,
+            num_upload_attempts=0,
+            bytes_uploaded=0,
+            last_updated=now,
+        )
+        self._traces_by_id[trace_id] = updated
+        self._update_trace_in_recording(updated, updated.recording_id)
+
     async def update_status(
         self, trace_id: str, status: TraceStatus, *, error_message=None
     ) -> bool:

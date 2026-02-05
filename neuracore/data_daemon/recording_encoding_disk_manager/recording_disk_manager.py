@@ -10,7 +10,6 @@ from typing import Any
 from neuracore.data_daemon.config_manager.helpers import calculate_storage_limit
 from neuracore.data_daemon.const import (
     DEFAULT_FLUSH_BYTES,
-    DEFAULT_RECORDING_ROOT_PATH,
     DEFAULT_STORAGE_FREE_FRACTION,
     MIN_FREE_DISK_BYTES,
     SENTINEL,
@@ -18,6 +17,7 @@ from neuracore.data_daemon.const import (
 )
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
+from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
 from neuracore.data_daemon.models import CompleteMessage, parse_data_type
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
     StorageBudget,
@@ -87,7 +87,9 @@ class RecordingDiskManager:
         Returns:
             None
         """
-        root_value = self._recordings_root_value or str(DEFAULT_RECORDING_ROOT_PATH)
+        root_value = self._recordings_root_value or str(
+            get_daemon_recordings_root_path()
+        )
         self.recordings_root = pathlib.Path(root_value)
         self.recordings_root.mkdir(parents=True, exist_ok=True)
 

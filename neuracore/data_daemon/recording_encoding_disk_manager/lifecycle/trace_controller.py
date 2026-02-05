@@ -55,6 +55,7 @@ class _TraceController:
         Returns:
             None
         """
+        logger.warning("Aborting trace due to storage limits: %s", trace_key)
         self._emitter.emit(Emitter.TRACE_ABORTED, trace_key)
 
         trace_dir = self._filesystem.trace_dir_for(trace_key)
@@ -65,6 +66,9 @@ class _TraceController:
             reclaimed_bytes = 0
         shutil.rmtree(trace_dir, ignore_errors=True)
         self._storage_budget.release(reclaimed_bytes)
+        logger.info(
+            "Trace storage reclaimed: %s bytes for %s", reclaimed_bytes, trace_key
+        )
 
         self._emitter.emit(
             Emitter.TRACE_WRITTEN, trace_key.trace_id, trace_key.recording_id, 0
@@ -82,6 +86,11 @@ class _TraceController:
         Returns:
             None
         """
+        logger.info("Stopping all traces for recording %s", recording_id)
+        logger.info(
+            "Emitting RECORDING_STOPPED for recording %s",
+            recording_id,
+        )
         self._emitter.emit(Emitter.RECORDING_STOPPED, str(recording_id))
 
     def delete_trace(
@@ -103,6 +112,7 @@ class _TraceController:
             data_type=data_type,
         )
 
+        logger.info("Deleting trace %s (recording=%s)", trace_id, recording_id)
         self._emitter.emit(Emitter.TRACE_ABORTED, trace_key)
 
         recording_entry = self.recording_traces.get(trace_key.recording_id)
@@ -120,6 +130,9 @@ class _TraceController:
 
         shutil.rmtree(trace_dir_path, ignore_errors=True)
         self._storage_budget.release(reclaimed_bytes)
+        logger.info(
+            "Trace delete reclaimed: %s bytes for %s", reclaimed_bytes, trace_key
+        )
 
     def delete_recording(self, recording_id: str) -> None:
         """Delete a recording by deleting all known traces plus the recording directory.
@@ -132,6 +145,7 @@ class _TraceController:
         """
         recording_id_value = str(recording_id)
 
+        logger.info("Deleting recording %s", recording_id_value)
         self._emitter.emit(Emitter.RECORDING_STOPPED, recording_id_value)
 
         self.recording_traces.pop(recording_id_value, None)
