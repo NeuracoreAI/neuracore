@@ -59,6 +59,7 @@ class StateManager:
         robot_name: str | None,
         robot_id: str | None,
         path: str,
+        total_bytes: int | None = None,
     ) -> None:
         """Handle START_TRACE event - upsert trace metadata.
 
@@ -78,6 +79,7 @@ class StateManager:
             robot_id=robot_id,
             robot_instance=robot_instance,
             path=path,
+            total_bytes=total_bytes,
         )
         if trace.status == TraceStatus.WRITTEN:
             await self._finalize_trace(trace)

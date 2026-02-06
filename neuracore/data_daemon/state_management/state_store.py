@@ -88,6 +88,7 @@ class StateStore(Protocol):
         dataset_name: str | None = None,
         robot_name: str | None = None,
         robot_id: str | None = None,
+        total_bytes: int | None = None,
     ) -> TraceRecord:
         """Insert or update trace with metadata from START_TRACE.
 

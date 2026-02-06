@@ -110,6 +110,7 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
         None,
         None,
         path="/tmp/trace-1.bin",
+        total_bytes=10,
     )
     await manager._handle_start_trace(
         "trace-2",
@@ -122,6 +123,7 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
         None,
         None,
         path="/tmp/trace-2.bin",
+        total_bytes=10,
     )
     await _set_created_at(store, "trace-1", created_early)
     await _set_created_at(store, "trace-2", created_late)
@@ -442,6 +444,7 @@ async def test_simultaneous_recordings_emit_progress_reports(manager_store) -> N
             None,
             None,
             path=f"/tmp/{trace_id}.bin",
+            total_bytes=10,
         )
 
     progress_event = asyncio.Event()
@@ -492,6 +495,7 @@ async def test_encoder_crash_does_not_block_other_recordings(manager_store) -> N
         None,
         None,
         path="/tmp/trace-a.bin",
+        total_bytes=10,
     )
     await manager._handle_start_trace(
         "trace-b",
@@ -504,6 +508,7 @@ async def test_encoder_crash_does_not_block_other_recordings(manager_store) -> N
         None,
         None,
         path="/tmp/trace-b.bin",
+        total_bytes=10,
     )
 
     ready_events: list[tuple] = []
@@ -574,6 +579,7 @@ async def test_status_is_uploading_during_active_upload(manager_store) -> None:
         None,
         None,
         path="/tmp/trace-upload-status.bin",
+        total_bytes=64,
     )
 
     ready_event = asyncio.Event()
@@ -648,6 +654,7 @@ async def test_two_traces_same_recording_sequential_completion(manager_store) ->
         None,
         None,
         path="/tmp/trace-seq-1.bin",
+        total_bytes=32,
     )
     await manager._handle_start_trace(
         "trace-seq-2",
@@ -660,6 +667,7 @@ async def test_two_traces_same_recording_sequential_completion(manager_store) ->
         None,
         None,
         path="/tmp/trace-seq-2.bin",
+        total_bytes=48,
     )
 
     both_ready = asyncio.Event()
@@ -739,6 +747,7 @@ async def test_two_traces_staggered_completion(manager_store) -> None:
         None,
         None,
         path="/tmp/trace-stag-a.bin",
+        total_bytes=32,
     )
     await manager._handle_start_trace(
         "trace-stag-b",
@@ -751,6 +760,7 @@ async def test_two_traces_staggered_completion(manager_store) -> None:
         None,
         None,
         path="/tmp/trace-stag-b.bin",
+        total_bytes=64,
     )
 
     trace_a_ready = asyncio.Event()
@@ -832,6 +842,7 @@ async def test_upload_failed_schedules_retry_increments_attempts_sets_next_retry
         None,
         None,
         path="/tmp/trace-retry-1.bin",
+        total_bytes=10,
     )
 
     await manager.update_status("trace-retry-1", TraceStatus.INITIALIZING)
@@ -919,6 +930,7 @@ async def test_upload_failed_backoff_caps_at_max(manager_store, monkeypatch) -> 
         None,
         None,
         path="/tmp/trace-retry-cap.bin",
+        total_bytes=10,
     )
 
     await manager.update_status("trace-retry-cap", TraceStatus.INITIALIZING)
@@ -1003,6 +1015,7 @@ async def test_upload_failed_after_max_retries_marks_failed_and_no_ready_emitted
         None,
         None,
         path="/tmp/trace-exhaust.bin",
+        total_bytes=10,
     )
 
     await manager.update_status("trace-exhaust", TraceStatus.INITIALIZING)
@@ -1062,6 +1075,7 @@ async def test_is_connected_emits_due_retry_only_once(manager_store) -> None:
         None,
         None,
         path="/tmp/trace-due.bin",
+        total_bytes=10,
     )
 
     await manager.update_status("trace-due", TraceStatus.INITIALIZING)
@@ -1110,6 +1124,7 @@ async def test_retry_emit_does_not_emit_before_next_retry_at(
         None,
         None,
         path="/tmp/trace-not-due.bin",
+        total_bytes=10,
     )
 
     await manager.update_status("trace-not-due", TraceStatus.INITIALIZING)

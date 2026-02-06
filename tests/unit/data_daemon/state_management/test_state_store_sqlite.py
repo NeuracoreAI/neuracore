@@ -46,6 +46,7 @@ async def test_upsert_trace_metadata_inserts_row(store: SqliteStateStore) -> Non
         data_type=PRIMARY_DATA_TYPE,
         data_type_name="primary",
         path="/tmp/trace-1.bin",
+        total_bytes=128,
         robot_instance=ROBOT_INSTANCE,
     )
 
@@ -56,7 +57,7 @@ async def test_upsert_trace_metadata_inserts_row(store: SqliteStateStore) -> Non
     assert row["recording_id"] == "rec-1"
     assert row["data_type"] == PRIMARY_DATA_TYPE
     assert row["path"] == "/tmp/trace-1.bin"
-    assert row["total_bytes"] is None
+    assert row["total_bytes"] == 128
     assert row["status"] == TraceStatus.INITIALIZING
     assert row["bytes_written"] is None
     assert row["bytes_uploaded"] == 0
@@ -73,6 +74,7 @@ async def test_upsert_trace_metadata_updates_existing(store: SqliteStateStore) -
         data_type=PRIMARY_DATA_TYPE,
         data_type_name="primary",
         path="/tmp/trace-2.bin",
+        total_bytes=10,
         robot_instance=ROBOT_INSTANCE,
     )
     trace = await store.upsert_trace_metadata(
@@ -81,6 +83,7 @@ async def test_upsert_trace_metadata_updates_existing(store: SqliteStateStore) -
         data_type=SECONDARY_DATA_TYPE,
         data_type_name="secondary",
         path="/tmp/trace-2.mp4",
+        total_bytes=20,
         robot_instance=ROBOT_INSTANCE,
     )
 
@@ -90,7 +93,7 @@ async def test_upsert_trace_metadata_updates_existing(store: SqliteStateStore) -
     assert row["recording_id"] == "rec-1"
     assert row["data_type"] == SECONDARY_DATA_TYPE
     assert row["path"] == "/tmp/trace-2.mp4"
-    assert row["total_bytes"] is None
+    assert row["total_bytes"] == 20
     assert row["status"] == TraceStatus.INITIALIZING
 
 
@@ -102,14 +105,14 @@ async def test_upsert_trace_bytes_inserts_row(store: SqliteStateStore) -> None:
         bytes_written=64,
     )
 
-    assert trace.status == TraceStatus.PENDING_METADATA
+    assert trace.status == TraceStatus.PENDING_BYTES
     row = await _get_trace_row(store, "trace-bytes-1")
     assert row is not None
     assert row["trace_id"] == "trace-bytes-1"
     assert row["recording_id"] == "rec-bytes-1"
     assert row["bytes_written"] == 64
     assert row["total_bytes"] == 64
-    assert row["status"] == TraceStatus.PENDING_METADATA
+    assert row["status"] == TraceStatus.PENDING_BYTES
     assert row["bytes_uploaded"] == 0
 
 
@@ -223,7 +226,7 @@ async def test_join_pattern_bytes_then_metadata_transitions_to_written(
         recording_id="rec-6c",
         bytes_written=128,
     )
-    assert trace.status == TraceStatus.PENDING_METADATA
+    assert trace.status == TraceStatus.PENDING_BYTES
 
     trace = await store.upsert_trace_metadata(
         trace_id="trace-6c",

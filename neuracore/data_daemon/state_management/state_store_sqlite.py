@@ -30,7 +30,7 @@ def _utc_now() -> datetime:
 
 
 _ALLOWED_PREVIOUS_STATUSES: dict[TraceStatus, set[TraceStatus]] = {
-    TraceStatus.WRITTEN: {TraceStatus.INITIALIZING, TraceStatus.PENDING_METADATA},
+    TraceStatus.WRITTEN: {TraceStatus.INITIALIZING, TraceStatus.PENDING_BYTES},
     TraceStatus.UPLOADING: {TraceStatus.WRITTEN, TraceStatus.PAUSED},
     TraceStatus.UPLOADED: {TraceStatus.UPLOADING},
     TraceStatus.PAUSED: {TraceStatus.UPLOADING},
@@ -333,6 +333,7 @@ class SqliteStateStore(StateStore):
         dataset_name: str | None = None,
         robot_name: str | None = None,
         robot_id: str | None = None,
+        total_bytes: int | None = None,
     ) -> TraceRecord:
         """Insert or update trace with metadata from START_TRACE.
 
@@ -355,7 +356,7 @@ class SqliteStateStore(StateStore):
             robot_id=robot_id,
             robot_instance=robot_instance,
             path=path,
-            total_bytes=None,
+            total_bytes=total_bytes,
             status=TraceStatus.INITIALIZING,
             bytes_uploaded=0,
             progress_reported=ProgressReportStatus.PENDING,
@@ -372,17 +373,16 @@ class SqliteStateStore(StateStore):
             "robot_instance": robot_instance,
             "path": path,
             "last_updated": now,
-            # If trace_written received before metadata,
-            # and entry exists, set status to WRITTEN
             "status": case(
                 (
-                    traces.c.status == TraceStatus.PENDING_METADATA,
+                    traces.c.status == TraceStatus.PENDING_BYTES,
                     TraceStatus.WRITTEN,
                 ),
                 else_=traces.c.status,
             ),
         }
-
+        if total_bytes is not None:
+            update_set["total_bytes"] = total_bytes
         stmt = stmt.on_conflict_do_update(
             index_elements=["trace_id"],
             set_=update_set,
@@ -421,7 +421,7 @@ class SqliteStateStore(StateStore):
             recording_id=recording_id,
             bytes_written=bytes_written,
             total_bytes=bytes_written,
-            status=TraceStatus.PENDING_METADATA,
+            status=TraceStatus.PENDING_BYTES,
             bytes_uploaded=0,
             progress_reported=ProgressReportStatus.PENDING,
             created_at=now,
