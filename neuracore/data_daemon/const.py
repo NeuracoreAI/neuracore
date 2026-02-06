@@ -6,7 +6,6 @@ import struct
 from pathlib import Path
 
 HEARTBEAT_TIMEOUT_SECS = 10
-NEVER_OPENED_TIMEOUT_SECS = 20
 API_URL = os.getenv("NEURACORE_API_URL", "https://api.neuracore.app/api")
 
 TRACE_ID_FIELD_SIZE = 36  # bytes allocated for the trace_id string in chunk headers
