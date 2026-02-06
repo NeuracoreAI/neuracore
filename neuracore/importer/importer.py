@@ -239,7 +239,7 @@ def _run_import(
         validate_dataset_config_against_robot_model(dataconfig, robot.joint_info)
         dataconfig = populate_robot_info(dataconfig, robot.joint_info)
 
-    ik = None
+    ik_urdf_path = None
     if urdf_path:
         if DataType.JOINT_POSITIONS in dataconfig.data_import_config:
             if (
@@ -248,8 +248,10 @@ def _run_import(
                 ].format.joint_position_type
                 == JointPositionTypeConfig.TCP
             ):
+                ik_urdf_path = urdf_path
                 try:
-                    ik = InverseKinematics(urdf_path, os.path.dirname(urdf_path))
+                    ik_packages_dir = os.path.dirname(urdf_path)
+                    InverseKinematics(ik_urdf_path, ik_packages_dir)
                 except Exception as exc:
                     raise ConfigLoadError(
                         f"Failed to initialize Inverse Kinematics: {exc}"
@@ -269,7 +271,7 @@ def _run_import(
             dataset_dir=dataset_dir,
             dataset_config=dataconfig,
             joint_info=robot.joint_info,
-            ik=ik,
+            ik_urdf_path=ik_urdf_path,
             dry_run=args.dry_run,
             suppress_warnings=args.no_validation_warnings,
             skip_on_error=skip_on_error,
@@ -283,7 +285,7 @@ def _run_import(
             dataset_dir=dataset_dir,
             dataset_config=dataconfig,
             joint_info=robot.joint_info,
-            ik=ik,
+            ik_urdf_path=ik_urdf_path,
             dry_run=args.dry_run,
             suppress_warnings=args.no_validation_warnings,
             skip_on_error=skip_on_error,

@@ -100,7 +100,7 @@ class NeuracoreDatasetImporter(ABC):
         skip_on_error: str = "episode",
         progress_interval: int = 1,
         joint_info: dict[str, JointInfo] = {},
-        ik: InverseKinematics | None = None,
+        ik_urdf_path: str | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
     ) -> None:
@@ -112,7 +112,8 @@ class NeuracoreDatasetImporter(ABC):
         self.robot_name = dataset_config.robot.name
         self.frequency = dataset_config.frequency
         self.joint_info = joint_info
-        self.ik = ik
+        self.ik_urdf_path = ik_urdf_path
+        self.ik: InverseKinematics | None = None
         self.prev_ik_solution: dict[str, float] | None = None
 
         if skip_on_error not in {"episode", "step", "all"}:
@@ -420,6 +421,9 @@ class NeuracoreDatasetImporter(ABC):
         nc.login()
         nc.connect_robot(self.robot_name, instance=worker_id)
         nc.get_dataset(self.output_dataset_name)
+        if self.ik_urdf_path is not None:
+            ik_packages_dir = os.path.dirname(self.ik_urdf_path)
+            self.ik = InverseKinematics(self.ik_urdf_path, ik_packages_dir)
 
     def upload_all(self) -> None:
         """Run uploads across workers while aggregating errors.

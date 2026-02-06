@@ -20,7 +20,6 @@ from neuracore.importer.core.base import (
     WorkerError,
 )
 from neuracore.importer.core.exceptions import ImportError
-from neuracore.importer.core.inverse_kinematics import InverseKinematics
 
 # Suppress TensorFlow informational messages (e.g., "End of sequence")
 # 0 = all logs, 1 = no INFO, 2 = no WARNING, 3 = no ERROR
@@ -37,7 +36,7 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
         dataset_dir: Path,
         dataset_config: DatasetImportConfig,
         joint_info: dict[str, JointInfo] = {},
-        ik: InverseKinematics | None = None,
+        ik_urdf_path: str | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
         skip_on_error: str = "episode",
@@ -50,7 +49,7 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
             dataset_dir: Directory containing the dataset.
             dataset_config: Dataset configuration.
             joint_info: Joint info to use for validation.
-            ik: Inverse kinematics to use for TCP to joint position conversion.
+            ik_urdf_path: URDF path for IK (used to recreate IK in worker processes).
             dry_run: If True, skip actual logging (validation only).
             suppress_warnings: If True, suppress warning messages.
             skip_on_error: "episode" to skip a failed episode; "step" to skip only
@@ -62,7 +61,7 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
             output_dataset_name=output_dataset_name,
             max_workers=1,
             joint_info=joint_info,
-            ik=ik,
+            ik_urdf_path=ik_urdf_path,
             dry_run=dry_run,
             suppress_warnings=suppress_warnings,
             skip_on_error=skip_on_error,
