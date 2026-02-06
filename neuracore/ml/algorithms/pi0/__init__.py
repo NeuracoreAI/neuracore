@@ -12,6 +12,7 @@ The patching includes:
 """
 
 # cspell:ignore adarms
+import importlib
 import logging
 import shutil
 from pathlib import Path
@@ -23,19 +24,28 @@ def check_whether_transformers_replace_is_installed_correctly() -> bool:
     """Check whether transformers has been patched with PI0 modifications.
 
     Verifies that the installed `transformers` library has been patched by checking
-    for custom attributes and functions that are not present in upstream.
+    for PI0-specific symbols in the installed source files.
 
     Returns:
         True if patches are detected, False otherwise.
     """
     try:
-        from transformers.models.gemma import modeling_gemma
-        from transformers.models.gemma.configuration_gemma import GemmaConfig
+        import transformers
 
-        cfg = GemmaConfig()
-        if not hasattr(cfg, "use_adarms"):
+        dst = Path(transformers.__file__).parent
+        gemma_cfg_path = dst / "models" / "gemma" / "configuration_gemma.py"
+        gemma_model_path = dst / "models" / "gemma" / "modeling_gemma.py"
+        if not gemma_cfg_path.exists() or not gemma_model_path.exists():
             return False
-        if not hasattr(modeling_gemma, "_gated_residual"):
+
+        gemma_cfg_text = gemma_cfg_path.read_text(encoding="utf-8")
+        gemma_model_text = gemma_model_path.read_text(encoding="utf-8")
+
+        if "use_adarms" not in gemma_cfg_text:
+            return False
+        if "_gated_residual" not in gemma_model_text:
+            return False
+        if "adarms_cond" not in gemma_model_text:
             return False
         return True
     except Exception:
@@ -110,6 +120,7 @@ def _patch_transformers() -> None:
                 target = dst / f.relative_to(src)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(f, target)
+        importlib.invalidate_caches()
     except Exception:
         raise ValueError("Failed to patch transformers because of permission issues")
 
