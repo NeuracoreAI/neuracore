@@ -20,7 +20,6 @@ def _register_state_manager(manager: StateManager) -> None:
     emitter = get_emitter()
     emitter.on(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
     emitter.on(Emitter.START_TRACE, manager._handle_start_trace)
-    emitter.on(Emitter.UPLOAD_STARTED, manager.handle_upload_started)
     emitter.on(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
     emitter.on(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
     emitter.on(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
@@ -32,7 +31,6 @@ def _cleanup_state_manager(manager: StateManager) -> None:
     emitter = get_emitter()
     emitter.remove_listener(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
     emitter.remove_listener(Emitter.START_TRACE, manager._handle_start_trace)
-    emitter.remove_listener(Emitter.UPLOAD_STARTED, manager.handle_upload_started)
     emitter.remove_listener(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
     emitter.remove_listener(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
     emitter.remove_listener(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
@@ -353,7 +351,6 @@ async def test_race_conditions_on_rapid_state_changes(tmp_path, caplog) -> None:
             path="/tmp/trace-race.bin",
         )
         await manager_one._handle_trace_written("trace-race", "rec-race", 64)
-        await manager_one.update_status("trace-race", TraceStatus.UPLOADING)
 
         errors: list[str] = []
 
@@ -399,7 +396,7 @@ async def test_state_recovery_after_restart(tmp_path) -> None:
             path="/tmp/trace-recover.bin",
         )
         # Emit TRACE_WRITTEN which completes the join pattern
-        # (metadata from START_TRACE + bytes from TRACE_WRITTEN -> WRITTEN)
+        # (metadata from START_TRACE + bytes from TRACE_WRITTEN -> WRITTEN -> UPLOADING)
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-recover", "rec-recover", 8)
         await asyncio.sleep(0.1)
     finally:
@@ -411,12 +408,11 @@ async def test_state_recovery_after_restart(tmp_path) -> None:
     try:
         recovered_trace = await recovered_store.get_trace("trace-recover")
         assert recovered_trace is not None
-        assert recovered_trace.status == TraceStatus.WRITTEN
+        assert recovered_trace.status == TraceStatus.UPLOADING
 
         ready = await recovered_store.find_ready_traces()
-        assert [trace.trace_id for trace in ready] == ["trace-recover"]
+        assert ready == []
 
-        await recovered_store.update_status("trace-recover", TraceStatus.UPLOADING)
         await recovered_store.update_status("trace-recover", TraceStatus.UPLOADED)
         updated = await recovered_store.get_trace("trace-recover")
         assert updated is not None
@@ -526,6 +522,7 @@ async def test_encoder_crash_does_not_block_other_recordings(manager_store) -> N
             Emitter.UPLOAD_FAILED,
             "trace-a",
             0,
+            TraceStatus.WRITTEN,
             TraceErrorCode.ENCODE_FAILED,
             "encoder crashed",
         )
@@ -541,27 +538,26 @@ async def test_encoder_crash_does_not_block_other_recordings(manager_store) -> N
 
 @pytest.mark.asyncio
 async def test_status_is_uploading_during_active_upload(manager_store) -> None:
-    """Verify trace status is UPLOADING after UPLOAD_STARTED.
+    """Verify trace status is UPLOADING between TRACE_WRITTEN and UPLOAD_COMPLETE.
 
     The Story:
     A single trace completes writing. The state machine should transition
-    the trace to UPLOADING status once the uploader starts, and
+    the trace to UPLOADING status before emitting READY_FOR_UPLOAD, and
     the trace should remain in UPLOADING status until upload completes.
 
     The Flow:
     1. Create a trace in INITIALIZING state (via START_TRACE)
     2. Emit IS_CONNECTED to enable online mode
     3. Emit TRACE_WRITTEN to signal writing is complete
-    4. Emit UPLOAD_STARTED (uploader begins)
-    5. Capture the trace status from DB before UPLOAD_COMPLETE
-    6. Verify status is UPLOADING (not WRITTEN)
+    4. Capture the trace status from DB before UPLOAD_COMPLETE
+    5. Verify status is UPLOADING (not WRITTEN)
 
     Why This Matters:
     Without proper UPLOADING transition, the same trace could be picked up
     by multiple uploaders causing duplicate uploads and wasted bandwidth.
 
     Key Assertions:
-    - Status is UPLOADING after UPLOAD_STARTED event is processed
+    - Status is UPLOADING after TRACE_WRITTEN event is processed
     - READY_FOR_UPLOAD event is emitted with correct trace data
     """
     manager, store = manager_store
@@ -596,8 +592,6 @@ async def test_status_is_uploading_during_active_upload(manager_store) -> None:
         )
 
         await asyncio.wait_for(ready_event.wait(), timeout=2.0)
-        emitter.emit(Emitter.UPLOAD_STARTED, "trace-upload-status")
-        await asyncio.sleep(0.1)
 
         status = await _get_trace_status(store, "trace-upload-status")
         assert status == TraceStatus.UPLOADING, f"Expected UPLOADING, got {status}"
@@ -688,10 +682,6 @@ async def test_two_traces_same_recording_sequential_completion(manager_store) ->
 
         await asyncio.wait_for(both_ready.wait(), timeout=2.0)
 
-        emitter.emit(Emitter.UPLOAD_STARTED, "trace-seq-1")
-        emitter.emit(Emitter.UPLOAD_STARTED, "trace-seq-2")
-        await asyncio.sleep(0.1)
-
         status_1 = await _get_trace_status(store, "trace-seq-1")
         status_2 = await _get_trace_status(store, "trace-seq-2")
         assert (
@@ -721,12 +711,10 @@ async def test_two_traces_staggered_completion(manager_store) -> None:
     1. Create two traces for the same recording
     2. Emit IS_CONNECTED to enable online mode
     3. Emit TRACE_WRITTEN for trace-A only
-    4. Emit UPLOAD_STARTED for trace-A
-    5. Verify trace-A transitions to UPLOADING and READY_FOR_UPLOAD emits
-    6. Verify trace-B remains in INITIALIZING status (still writing)
-    7. Emit TRACE_WRITTEN for trace-B
-    8. Emit UPLOAD_STARTED for trace-B
-    9. Verify trace-B transitions to UPLOADING independently
+    4. Verify trace-A transitions to UPLOADING and READY_FOR_UPLOAD emits
+    5. Verify trace-B remains in INITIALIZING status (still writing)
+    6. Emit TRACE_WRITTEN for trace-B
+    7. Verify trace-B transitions to UPLOADING independently
 
     Why This Matters:
     Different data types have different write durations. A 10-second video
@@ -783,8 +771,6 @@ async def test_two_traces_staggered_completion(manager_store) -> None:
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-stag-a", "rec-stag", 32)
 
         await asyncio.wait_for(trace_a_ready.wait(), timeout=2.0)
-        emitter.emit(Emitter.UPLOAD_STARTED, "trace-stag-a")
-        await asyncio.sleep(0.1)
 
         status_a = await _get_trace_status(store, "trace-stag-a")
         status_b = await _get_trace_status(store, "trace-stag-b")
@@ -798,8 +784,6 @@ async def test_two_traces_staggered_completion(manager_store) -> None:
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-stag-b", "rec-stag", 64)
 
         await asyncio.wait_for(trace_b_ready.wait(), timeout=2.0)
-        emitter.emit(Emitter.UPLOAD_STARTED, "trace-stag-b")
-        await asyncio.sleep(0.1)
 
         status_b_after = await _get_trace_status(store, "trace-stag-b")
         assert (
@@ -876,6 +860,7 @@ async def test_upload_failed_schedules_retry_increments_attempts_sets_next_retry
         Emitter.UPLOAD_FAILED,
         "trace-retry-1",
         7,
+        TraceStatus.WRITTEN,
         TraceErrorCode.NETWORK_ERROR,
         "net down",
     )
@@ -897,7 +882,7 @@ async def test_upload_failed_schedules_retry_increments_attempts_sets_next_retry
 
     row = await wait_row()
 
-    assert row["status"] == TraceStatus.RETRYING.value
+    assert row["status"] == TraceStatus.WRITTEN.value
     assert int(row["bytes_uploaded"]) == 7
     assert row["error_code"] == TraceErrorCode.NETWORK_ERROR.value
     assert row["error_message"] == "net down"
@@ -970,6 +955,7 @@ async def test_upload_failed_backoff_caps_at_max(manager_store, monkeypatch) -> 
         Emitter.UPLOAD_FAILED,
         "trace-retry-cap",
         0,
+        TraceStatus.WRITTEN,
         TraceErrorCode.NETWORK_ERROR,
         "net",
     )
@@ -994,7 +980,7 @@ async def test_upload_failed_backoff_caps_at_max(manager_store, monkeypatch) -> 
 
     row = await wait_row()
 
-    assert row["status"] == TraceStatus.RETRYING.value
+    assert row["status"] == TraceStatus.WRITTEN.value
     assert int(row["num_upload_attempts"]) == cap_attempts + 1
     assert row["next_retry_at"] is not None
 
@@ -1041,6 +1027,7 @@ async def test_upload_failed_after_max_retries_marks_failed_and_no_ready_emitted
             Emitter.UPLOAD_FAILED,
             "trace-exhaust",
             3,
+            TraceStatus.FAILED,
             TraceErrorCode.NETWORK_ERROR,
             "final fail",
         )
@@ -1130,12 +1117,6 @@ async def test_retry_emit_does_not_emit_before_next_retry_at(
 
     future = dt.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=60)
     await _set_attempts_and_retry_at(store, "trace-not-due", 1, future)
-    async with store._engine.begin() as conn:
-        await conn.execute(
-            update(traces)
-            .where(traces.c.trace_id == "trace-not-due")
-            .values(status=TraceStatus.RETRYING)
-        )
 
     ready_events: list[tuple] = []
 

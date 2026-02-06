@@ -49,16 +49,12 @@ class Emitter(AsyncIOEventEmitter):
     # (recording_id:str, error_message:str)
 
     # Uploader -> State manager
-    UPLOAD_STARTED = "UPLOAD_STARTED"
-    # (trace_id)
-
-    # Uploader -> State manager
     UPLOAD_COMPLETE = "UPLOAD_COMPLETE"
     # (trace_id)
 
     # Uploader -> state manager
     UPLOAD_FAILED = "UPLOAD_FAILED"
-    # (Trace_id, bytes_uploaded, error_code, error_message)
+    # (Trace_id, bytes_uploaded, status, error_code, error_message)
 
     # State manager -> RDM
     DELETE_TRACE = "DELETE_TRACE"
