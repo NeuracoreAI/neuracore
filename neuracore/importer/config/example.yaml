@@ -58,6 +58,22 @@ data_import_config:
         offset: 0.0
         inverted: false
         index: 5
+  
+  JOINT_POSITIONS: 
+    source: observation.pose
+    format:
+      joint_position_type: TCP # TCP | CUSTOM, When using TCP, we will use the inverse kinematics to convert the end effector pose to joint positions.
+      ik_init_config: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # initial joint configuration for the inverse kinematics
+      pose_type: POSITION_ORIENTATION # POSITION_ORIENTATION | MATRIX
+      orientation:
+        type: QUATERNION # QUATERNION | EULER | MATRIX | AXIS_ANGLE
+        quaternion_order: XYZW # XYZW | WXYZ
+        angle_units: RADIANS # RADIANS | DEGREES
+    mapping:
+      - name: end_effector
+        index_range:
+          start: 0
+          end: 7
 
   JOINT_VELOCITIES:
     source: observation.state_vel # path to the data in the input dataset

@@ -32,6 +32,8 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         dataset_dir: Path,
         dataset_config: DatasetImportConfig,
         joint_info: dict[str, JointInfo] = {},
+        ik_urdf_path: str | None = None,
+        ik_init_config: list[float] | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
         skip_on_error: str = "episode",
@@ -44,6 +46,8 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             dataset_dir: Directory containing the dataset.
             dataset_config: Dataset configuration.
             joint_info: Joint info to use for validation.
+            ik_urdf_path: URDF path for IK (used to recreate IK in worker processes).
+            ik_init_config: Initial joint configuration for IK.
             dry_run: If True, skip actual logging (validation only).
             suppress_warnings: If True, suppress warning messages.
             skip_on_error: "episode" to skip a failed episode; "step" to skip only
@@ -55,6 +59,8 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             output_dataset_name=output_dataset_name,
             max_workers=1,
             joint_info=joint_info,
+            ik_urdf_path=ik_urdf_path,
+            ik_init_config=ik_init_config,
             dry_run=dry_run,
             suppress_warnings=suppress_warnings,
             skip_on_error=skip_on_error,
@@ -95,6 +101,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
 
     def import_item(self, item: ImportItem) -> None:
         """Import a single episode to the dataset importer."""
+        self._reset_episode_state()
         if self._dataset is None or self._episode_iter is None:
             raise ImportError("Worker dataset was not initialized.")
 
@@ -220,14 +227,14 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             source_path = import_config.source
 
             for item in import_config.mapping:
-                if item.source_name is not None:
-                    source_data = step_data[".".join([source_path, item.source_name])]
-                elif item.index is not None:
+                if item.index is not None:
                     source_data = step_data[source_path][item.index]
                 elif item.index_range is not None:
                     source_data = step_data[source_path][
                         item.index_range.start : item.index_range.end
                     ]
+                elif item.source_name is not None:
+                    source_data = step_data[".".join([source_path, item.source_name])]
                 else:
                     source_data = step_data[source_path]
 
