@@ -14,7 +14,10 @@ from pathlib import Path
 from queue import Empty
 from typing import Any
 
+from neuracore_types.importer.data_config import DataFormat
 from neuracore_types.nc_data import DatasetImportConfig, DataType
+from neuracore_types.nc_data.nc_data import MappingItem
+from rich.console import Console
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -27,8 +30,20 @@ from rich.progress import (
 )
 
 import neuracore as nc
+from neuracore.core.robot import JointInfo
+from neuracore.importer.core.validation import (
+    JOINT_DATA_TYPES,
+    validate_depth_images,
+    validate_joint_positions,
+    validate_joint_torques,
+    validate_joint_velocities,
+    validate_language,
+    validate_point_clouds,
+    validate_poses,
+    validate_rgb_images,
+)
 
-from .exceptions import UploaderError
+from .exceptions import DataValidationError, DataValidationWarning, UploaderError
 
 
 @dataclass(frozen=True)
@@ -62,6 +77,14 @@ class ProgressUpdate:
     episode_label: str | None = None
 
 
+_RICH_CONSOLE = Console(stderr=True, force_terminal=True)
+
+
+def get_shared_console() -> Console:
+    """Return the shared console used by logging and progress bars."""
+    return _RICH_CONSOLE
+
+
 class NeuracoreDatasetImporter(ABC):
     """Uploader workflow that manages workers and Neuracore session setup."""
 
@@ -72,8 +95,11 @@ class NeuracoreDatasetImporter(ABC):
         output_dataset_name: str,
         max_workers: int | None = 1,
         min_workers: int = 1,
-        continue_on_error: bool = True,
+        skip_on_error: str = "episode",
         progress_interval: int = 1,
+        joint_info: dict[str, JointInfo] = {},
+        dry_run: bool = False,
+        suppress_warnings: bool = False,
     ) -> None:
         """Initialize the base dataset uploader."""
         self.dataset_dir = Path(dataset_dir)
@@ -82,17 +108,25 @@ class NeuracoreDatasetImporter(ABC):
         self.output_dataset_name = output_dataset_name
         self.robot_name = dataset_config.robot.name
         self.frequency = dataset_config.frequency
+        self.joint_info = joint_info
+
+        if skip_on_error not in {"episode", "step", "all"}:
+            raise ValueError("skip_on_error must be one of: 'episode', 'step', 'all'")
 
         self.max_workers = 1
         self.min_workers = min_workers
-        self.continue_on_error = continue_on_error
+        self.skip_on_error = skip_on_error  # one of: "episode", "step", "all"
         self.progress_interval = max(1, progress_interval)
+        self.dry_run = dry_run
+        self.suppress_warnings = suppress_warnings
         self.worker_errors: list[WorkerError] = []
+        self._logged_error_keys: set[tuple[int | None, int | None, str]] = set()
         self.logger = logging.getLogger(
             f"{self.__class__.__module__}.{self.__class__.__name__}"
         )
         self._progress_queue: mp.Queue[ProgressUpdate] | None = None
         self._worker_id: int | None = None
+        self._error_queue: mp.Queue[WorkerError] | None = None
 
     @abstractmethod
     def build_work_items(self) -> Sequence[ImportItem]:
@@ -106,107 +140,234 @@ class NeuracoreDatasetImporter(ABC):
     def _record_step(self, step: dict, timestamp: float) -> None:
         """Record a single step of the dataset."""
 
+    def _validate_input_data(
+        self, data_type: DataType, data: Any, format: DataFormat
+    ) -> None:
+        """Validate input data based on the data type and format.
+
+        Args:
+            data_type: The type of data to validate.
+            data: The data to validate.
+            format: The data format configuration.
+
+        Raises:
+            DataValidationError: If the data does not match the expected format.
+        """
+        if data_type == DataType.RGB_IMAGES:
+            validate_rgb_images(data, format)
+        elif data_type == DataType.DEPTH_IMAGES:
+            validate_depth_images(data)
+        elif data_type == DataType.POINT_CLOUDS:
+            validate_point_clouds(data)
+        elif data_type == DataType.LANGUAGE:
+            validate_language(data, format)
+        elif data_type == DataType.POSES or data_type == DataType.END_EFFECTOR_POSES:
+            validate_poses(data, format)
+
+    def _validate_joint_data(self, data_type: DataType, data: Any, name: str) -> None:
+        """Validate joint data based on the data type and joint name.
+
+        Args:
+            data_type: The type of data to validate.
+            data: The data to validate.
+            name: The name of the joint.
+
+        Raises:
+            DataValidationError: If the data does not match the expected format.
+        """
+        if data_type == DataType.JOINT_POSITIONS:
+            validate_joint_positions(data, name, self.joint_info)
+        elif data_type == DataType.JOINT_VELOCITIES:
+            validate_joint_velocities(data, name, self.joint_info)
+        elif data_type == DataType.JOINT_TORQUES:
+            validate_joint_torques(data, name, self.joint_info)
+        elif data_type == DataType.JOINT_TARGET_POSITIONS:
+            validate_joint_positions(data, name, self.joint_info)
+        elif data_type == DataType.VISUAL_JOINT_POSITIONS:
+            validate_joint_positions(data, name, self.joint_info)
+
     def _log_data(
-        self, data_type: DataType, name: str, data: Any, timestamp: float
+        self,
+        data_type: DataType,
+        source_data: Any,
+        item: MappingItem,
+        format: DataFormat,
+        timestamp: float,
     ) -> None:
         """Log a single data point to Neuracore.
 
+        This method validates the source data, transforms it if necessary,
+        and logs it to Neuracore. Transformed joint data is validated
+        against the joint limits.
+
         Args:
             data_type: The type of data to import.
-            name: The name of the data.
-            data: The data to log.
+            source_data: The source data from the dataset.
+            item: The mapping item to use for naming and transformation.
+            format: The data format to use for validation.
             timestamp: Time when the data was logged.
+        """
+        try:
+            self._validate_input_data(data_type, source_data, format)
+        except DataValidationWarning as w:
+            if not self.suppress_warnings:
+                self.logger.warning("[WARNING] %s (%s): %s", data_type, item.name, w)
+        except DataValidationError as e:
+            self.logger.error(
+                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
+            )
+            raise
+
+        try:
+            transformed_data = item.transforms(source_data)
+            if data_type in JOINT_DATA_TYPES and self.joint_info:
+                self._validate_joint_data(data_type, transformed_data, item.name)
+        except DataValidationWarning as w:
+            if not self.suppress_warnings:
+                self.logger.warning("[WARNING] %s (%s): %s", data_type, item.name, w)
+        except DataValidationError as e:
+            self.logger.error(
+                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
+            )
+            raise
+        except Exception as e:
+            self.logger.error(
+                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
+            )
+            raise
+
+        try:
+            self._log_transformed_data(
+                data_type, transformed_data, item.name, timestamp
+            )
+        except Exception as e:
+            self.logger.error(
+                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
+            )
+            raise
+
+    def _log_transformed_data(
+        self, data_type: DataType, transformed_data: Any, name: str, timestamp: float
+    ) -> None:
+        """Log transformed data to Neuracore.
+
+        Args:
+            data_type: The type of data to log.
+            transformed_data: The transformed data to log.
+            name: The name of the data.
+            timestamp: The timestamp of the data.
         """
         if data_type == DataType.RGB_IMAGES:
             nc.log_rgb(
                 name=name,
-                rgb=data,
+                rgb=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.DEPTH_IMAGES:
             nc.log_depth(
                 name=name,
-                depth=data,
+                depth=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.POINT_CLOUDS:
             nc.log_point_cloud(
                 name=name,
-                points=data,
+                points=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.LANGUAGE:
             nc.log_language(
                 name=name,
-                language=data,
+                language=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.JOINT_POSITIONS:
             nc.log_joint_position(
                 name=name,
-                position=data,
+                position=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.JOINT_VELOCITIES:
             nc.log_joint_velocity(
                 name=name,
-                velocity=data,
+                velocity=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.JOINT_TORQUES:
             nc.log_joint_torque(
                 name=name,
-                torque=data,
+                torque=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.JOINT_TARGET_POSITIONS:
             nc.log_joint_target_position(
                 name=name,
-                target_position=data,
+                target_position=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
+            )
+        elif data_type == DataType.VISUAL_JOINT_POSITIONS:
+            nc.log_visual_joint_position(
+                name=name,
+                position=transformed_data,
+                robot_name=self.dataset_config.robot.name,
+                timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
             nc.log_parallel_gripper_open_amount(
                 name=name,
-                value=data,
+                value=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
             nc.log_parallel_gripper_target_open_amount(
                 name=name,
-                value=data,
+                value=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.END_EFFECTOR_POSES:
             nc.log_end_effector_pose(
                 name=name,
-                pose=data,
+                pose=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.POSES:
             nc.log_pose(
                 name=name,
-                pose=data,
+                pose=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
         elif data_type == DataType.CUSTOM_1D:
             nc.log_custom_1d(
                 name=name,
-                data=data,
+                data=transformed_data,
                 robot_name=self.dataset_config.robot.name,
                 timestamp=timestamp,
+                dry_run=self.dry_run,
             )
 
     def prepare_worker(
@@ -218,33 +379,22 @@ class NeuracoreDatasetImporter(ABC):
         nc.get_dataset(self.output_dataset_name)
 
     def upload_all(self) -> None:
-        """Run uploads across workers while aggregating errors."""
+        """Run uploads across workers while aggregating errors.
+
+        High-level flow:
+        1) Build the list of work items (episodes).
+        2) Decide how many worker processes to spawn.
+        3) Spin up workers and a progress queue.
+        4) Listen for progress updates while workers run.
+        5) Collect and summarize any errors.
+        """
         items = list(self.build_work_items())
         if not items:
             self.logger.info("No upload items found; nothing to do.")
             return
 
-        self.logger.info(
-            "Preparing import -> dataset=%s | source_dir=%s | items=%s | "
-            "continue_on_error=%s",
-            self.output_dataset_name,
-            self.dataset_dir,
-            len(items),
-            self.continue_on_error,
-        )
-
         worker_count = self._resolve_worker_count(len(items))
-        cpu_count = os.cpu_count()
-        self.logger.info(
-            "Scheduling %s items across %s worker(s) "
-            "(min=%s max=%s cpu=%s progress_interval=%s)",
-            len(items),
-            worker_count,
-            self.min_workers,
-            self.max_workers if self.max_workers is not None else "auto",
-            cpu_count if cpu_count is not None else "unknown",
-            self.progress_interval,
-        )
+        os.cpu_count()
 
         ctx = mp.get_context("spawn")
         error_queue: mp.Queue[WorkerError] = ctx.Queue()
@@ -273,7 +423,7 @@ class NeuracoreDatasetImporter(ABC):
         self._report_process_status(processes)
         self._report_errors(self.worker_errors)
 
-        if self.worker_errors and not self.continue_on_error:
+        if self.worker_errors and self.skip_on_error == "all":
             raise UploaderError("Upload aborted due to worker errors.")
 
     def _resolve_worker_count(self, total_items: int) -> int:
@@ -321,16 +471,7 @@ class NeuracoreDatasetImporter(ABC):
                 self.prepare_worker(worker_id, chunk)
             else:
                 self.prepare_worker(worker_id)  # type: ignore[misc]
-            if chunk:
-                self.logger.info(
-                    "[worker %s] Starting chunk (%s items): %s → %s",
-                    worker_id,
-                    len(chunk),
-                    chunk[0].index,
-                    chunk[-1].index,
-                )
-            else:
-                self.logger.info("[worker %s] Starting with empty chunk.", worker_id)
+            # Progress bar will reflect work; keep startup quiet to reduce noise.
         except Exception as exc:  # noqa: BLE001 - propagate unexpected worker failures
             if error_queue:
                 tb = traceback.format_exc()
@@ -371,12 +512,12 @@ class NeuracoreDatasetImporter(ABC):
         error_queue: mp.Queue,
     ) -> None:
         """Centralized step handler for progress and error capture."""
+        self._error_queue = error_queue
         try:
             self.upload(item)
         except Exception as exc:  # noqa: BLE001 - keep traceback for summary
             tb = traceback.format_exc()
-            self._log_worker_error(worker_id, item.index, str(exc))
-            if self.continue_on_error:
+            if self.skip_on_error == "episode":
                 error_queue.put(
                     WorkerError(
                         worker_id=worker_id,
@@ -385,25 +526,13 @@ class NeuracoreDatasetImporter(ABC):
                         traceback=tb,
                     )
                 )
-                self.logger.warning(
-                    "[worker %s] Continuing after failure on item %s "
-                    "(continue_on_error=True).",
-                    worker_id,
-                    item.index,
-                )
+                # Defer logging to the post-run summary to avoid flickering
+                # and duplicate error lines while the progress bar is live.
                 return
+            self._log_worker_error(worker_id, item.index, str(exc))
             raise
 
-        if (local_index + 1) % self.progress_interval == 0 or (
-            local_index + 1 == chunk_length
-        ):
-            self.logger.info(
-                "[worker %s] processed %s/%s (item index=%s)",
-                worker_id,
-                local_index + 1,
-                chunk_length,
-                item.index,
-            )
+        # Progress bar already shows ongoing status; skip per-interval info logs.
 
     def _collect_errors(self, error_queue: mp.Queue) -> list[WorkerError]:
         """Drain the error queue after workers complete."""
@@ -433,15 +562,25 @@ class NeuracoreDatasetImporter(ABC):
             self.logger.info("All workers completed without reported errors.")
             return
 
-        self.logger.error("Completed with %s worker error(s).", len(errors))
+        deduped: dict[tuple[int | None, int | None, str], int] = {}
         for err in errors:
-            prefix = f"[worker {err.worker_id}"
-            if err.item_index is not None:
-                prefix += f" item {err.item_index}"
+            key = (err.worker_id, err.item_index, err.message)
+            deduped[key] = deduped.get(key, 0) + 1
+
+        self.logger.error(
+            "Completed with %s worker error event(s) (%s unique).",
+            len(errors),
+            len(deduped),
+        )
+
+        for (worker_id, item_index, message), count in deduped.items():
+            prefix = f"[worker {worker_id}"
+            if item_index is not None:
+                prefix += f" item {item_index}"
             prefix += "]"
-            self.logger.error("%s %s", prefix, err.message)
-            if err.traceback:
-                self.logger.debug(err.traceback)
+            suffix = f" (x{count})" if count > 1 else ""
+            self.logger.error("%s %s%s", prefix, message, suffix)
+
         self.logger.error(
             "Import finished with errors. Re-run with DEBUG logging for tracebacks "
             "or fix the reported issues above."
@@ -451,6 +590,11 @@ class NeuracoreDatasetImporter(ABC):
         self, worker_id: int, item_index: int | None, message: str
     ) -> None:
         """Log a worker error immediately while the process is running."""
+        key = (worker_id, item_index, message)
+        if key in self._logged_error_keys:
+            return
+        self._logged_error_keys.add(key)
+
         prefix = f"[worker {worker_id}"
         if item_index is not None:
             prefix += f" item {item_index}"
@@ -502,6 +646,7 @@ class NeuracoreDatasetImporter(ABC):
             TimeRemainingColumn(),
             refresh_per_second=10,
             transient=True,
+            console=get_shared_console(),
         ) as progress:
             while True:
                 any_alive = any(proc.is_alive() for proc in processes)

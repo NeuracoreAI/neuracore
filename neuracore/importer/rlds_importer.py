@@ -2,6 +2,7 @@
 
 import os
 import time
+import traceback
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,12 @@ from neuracore_types.importer.config import LanguageConfig
 from neuracore_types.nc_data import DatasetImportConfig
 
 import neuracore as nc
-from neuracore.importer.core.base import ImportItem, NeuracoreDatasetImporter
+from neuracore.core.robot import JointInfo
+from neuracore.importer.core.base import (
+    ImportItem,
+    NeuracoreDatasetImporter,
+    WorkerError,
+)
 from neuracore.importer.core.exceptions import ImportError
 
 # Suppress TensorFlow informational messages (e.g., "End of sequence")
@@ -29,6 +35,10 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
         output_dataset_name: str,
         dataset_dir: Path,
         dataset_config: DatasetImportConfig,
+        joint_info: dict[str, JointInfo] = {},
+        dry_run: bool = False,
+        suppress_warnings: bool = False,
+        skip_on_error: str = "episode",
     ):
         """Initialize the RLDS/TFDS dataset importer.
 
@@ -37,12 +47,21 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
             output_dataset_name: Name of the dataset to create.
             dataset_dir: Directory containing the dataset.
             dataset_config: Dataset configuration.
+            joint_info: Joint info to use for validation.
+            dry_run: If True, skip actual logging (validation only).
+            suppress_warnings: If True, suppress warning messages.
+            skip_on_error: "episode" to skip a failed episode; "step" to skip only
+                failing steps; "all" to abort on the first error.
         """
         super().__init__(
             dataset_dir=dataset_dir,
             dataset_config=dataset_config,
             output_dataset_name=output_dataset_name,
             max_workers=1,
+            joint_info=joint_info,
+            dry_run=dry_run,
+            suppress_warnings=suppress_warnings,
+            skip_on_error=skip_on_error,
         )
         self.dataset_name = input_dataset_name
         self.builder_dir = self._resolve_builder_dir()
@@ -57,8 +76,7 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
         self._episode_iter = None
 
         self.logger.info(
-            "Initialized RLDS importer for '%s' "
-            "(split=%s, episodes=%s, freq=%s, dir=%s)",
+            "Dataset ready: name=%s split=%s episodes=%s freq=%s dir=%s",
             self.dataset_name,
             self.split,
             self.num_episodes,
@@ -87,15 +105,6 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
         self._builder = self._load_builder()
         chunk_start = chunk[0].index if chunk else 0
         chunk_length = len(chunk) if chunk else None
-
-        self.logger.info(
-            "[worker %s] Loading split=%s (start=%s count=%s) from %s",
-            worker_id,
-            self.split,
-            chunk_start,
-            chunk_length if chunk_length is not None else "remainder",
-            self.builder_dir,
-        )
 
         dataset = self._load_dataset(self._builder, self.split)
         if chunk_start:
@@ -132,19 +141,35 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
             f"worker {self._worker_id}" if self._worker_id is not None else "worker 0"
         )
         self.logger.info(
-            "[%s] Importing %s (%s/%s, steps=%s)",
+            "[%s] Importing episode %s (%s/%s)",
             worker_label,
             episode_label,
             item.index + 1,
             self.num_episodes,
-            total_steps if total_steps is not None else "unknown",
         )
         self._emit_progress(
             item.index, step=0, total_steps=total_steps, episode_label=episode_label
         )
         for idx, step in enumerate(steps, start=1):
             timestamp = base_time + (idx / self.frequency)
-            self._record_step(step, timestamp)
+            try:
+                self._record_step(step, timestamp)
+            except Exception as exc:  # noqa: BLE001
+                if self.skip_on_error == "step":
+                    if self._error_queue is not None:
+                        self._error_queue.put(
+                            WorkerError(
+                                worker_id=self._worker_id or 0,
+                                item_index=item.index,
+                                message=f"Step {idx}: {exc}",
+                                traceback=traceback.format_exc(),
+                            )
+                        )
+                    self._log_worker_error(
+                        self._worker_id or 0, item.index, f"Step {idx}: {exc}"
+                    )
+                    continue
+                raise
             self._emit_progress(
                 item.index,
                 step=idx,
@@ -152,7 +177,7 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
                 episode_label=episode_label,
             )
         nc.stop_recording(wait=True)
-        self.logger.info("[%s] Completed %s", worker_label, episode_label)
+        self.logger.info("[%s] Completed episode %s", worker_label, episode_label)
 
     def _resolve_builder_dir(self) -> Path:
         """Find the dataset version directory that contains dataset_info.json."""
@@ -282,11 +307,12 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
                 else:
                     source_data = source
 
-                if (
+                if not (
                     data_type == DataType.LANGUAGE
                     and import_config.format.language_type == LanguageConfig.STRING
                 ):
-                    transformed_data = source_data
-                else:
-                    transformed_data = item.transforms(source_data.numpy())
-                self._log_data(data_type, item.name, transformed_data, timestamp)
+                    source_data = source_data.numpy()
+
+                self._log_data(
+                    data_type, source_data, item, import_config.format, timestamp
+                )

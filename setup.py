@@ -48,7 +48,7 @@ setup(
         "fastapi",
         "psutil",
         "typer>=0.20.0",
-        "neuracore-types>=6.1.0,<7.0.0",
+        "neuracore-types>=6.0.1,<7.0.0",
         "ordered_set",
         "pyzmq==27.1.0",
         "sqlalchemy>=2.0.0",
@@ -89,7 +89,6 @@ setup(
             "types-aiofiles",
         ],
         "import": [
-            "robot_descriptions @ git+https://github.com/stepjam/robot_descriptions.py.git@main",
             "lerobot==0.3.3",
             "huggingface-hub>0.34.0,<0.36.0",
             "tensorflow-datasets",

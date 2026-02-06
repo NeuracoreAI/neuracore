@@ -96,6 +96,18 @@ data_import_config:
         index: 6
         inverted: false
 
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state # path to the data in the input dataset
+    format:
+      visual_joint_type: GRIPPER
+    mapping:
+      - name: finger_joint1
+        index: 6
+        inverted: true
+        offset: -0.7853981633974483
+      - name: finger_joint2
+        index: 6
+
   END_EFFECTOR_POSES:
     source: observation.state # path to the data in the input dataset
     format:
