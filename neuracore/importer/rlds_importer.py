@@ -20,6 +20,7 @@ from neuracore.importer.core.base import (
     WorkerError,
 )
 from neuracore.importer.core.exceptions import ImportError
+from neuracore.importer.core.inverse_kinematics import InverseKinematics
 
 # Suppress TensorFlow informational messages (e.g., "End of sequence")
 # 0 = all logs, 1 = no INFO, 2 = no WARNING, 3 = no ERROR
@@ -36,6 +37,7 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
         dataset_dir: Path,
         dataset_config: DatasetImportConfig,
         joint_info: dict[str, JointInfo] = {},
+        ik: InverseKinematics | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
         skip_on_error: str = "episode",
@@ -48,6 +50,7 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
             dataset_dir: Directory containing the dataset.
             dataset_config: Dataset configuration.
             joint_info: Joint info to use for validation.
+            ik: Inverse kinematics to use for TCP to joint position conversion.
             dry_run: If True, skip actual logging (validation only).
             suppress_warnings: If True, suppress warning messages.
             skip_on_error: "episode" to skip a failed episode; "step" to skip only
@@ -59,6 +62,7 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
             output_dataset_name=output_dataset_name,
             max_workers=1,
             joint_info=joint_info,
+            ik=ik,
             dry_run=dry_run,
             suppress_warnings=suppress_warnings,
             skip_on_error=skip_on_error,
@@ -115,6 +119,7 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
 
     def upload(self, item: ImportItem) -> None:
         """Import a single episode to the dataset importer."""
+        self._reset_episode_state()
         if self._episode_iter is None:
             raise ImportError("Worker dataset iterator was not initialized.")
 
@@ -298,12 +303,12 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
                 source = source[path]
 
             for item in import_config.mapping:
-                if item.source_name is not None:
-                    source_data = source[item.source_name]
-                elif item.index is not None:
+                if item.index is not None:
                     source_data = source[item.index]
                 elif item.index_range is not None:
                     source_data = source[item.index_range.start : item.index_range.end]
+                elif item.source_name is not None:
+                    source_data = source[item.source_name]
                 else:
                     source_data = source
 

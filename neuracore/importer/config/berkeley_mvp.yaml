@@ -1,0 +1,48 @@
+input_dataset_name: berkeley_mvp_converted_externally_to_rlds
+
+output_dataset:
+  name: berkeley_mvp
+  tags: [panda, berkeley, manipulation]
+  description: "This dataset contains images and sensor data collected from the Berkeley MVP robot in an indoor environment."
+
+robot: 
+  name: berkeley_mvp_robot
+  urdf_path: "panda.urdf"
+  override_existing: true
+
+frequency: 5.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    image_convention: CHANNELS_LAST
+    order_of_channels: RGB
+    mapping: 
+      - name: hand_image
+        source_name: hand_image
+
+  JOINT_POSITIONS: 
+    source: observation.pose
+    format:
+      joint_position_type: TCP
+      pose_type: POSITION_ORIENTATION
+      orientation:
+        type: QUATERNION
+        quaternion_order: XYZW
+        angle_units: RADIANS
+    mapping:
+      - name: link7
+        index_range:
+          start: 0
+          end: 7
+
+  # END_EFFECTOR_POSES:
+  #   source: observation.state
+  #   format:
+  #     pose_type: MATRIX
+  #   mapping:
+  #     - name: end_effector_pose
+  #       index_range: 
+  #         start: 8
+  #         end: 24
+
