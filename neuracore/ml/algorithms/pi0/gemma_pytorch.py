@@ -14,6 +14,15 @@ from transformers.models.paligemma.modeling_paligemma import (
 )
 
 
+def _unpack_norm_output(
+    norm_output: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None],
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Normalize RMSNorm return values across patched/unpatched transformers."""
+    if isinstance(norm_output, tuple):
+        return norm_output
+    return norm_output, None
+
+
 def compute_shared_attention_layer(
     layer_idx: int,
     inputs_embeds: list[torch.Tensor],
@@ -56,12 +65,10 @@ def compute_shared_attention_layer(
     for i, hidden_states in enumerate(inputs_embeds):
         layer = models[i].layers[layer_idx]
         if adarms_cond[i] is None:
-            hidden_states = layer.input_layernorm(hidden_states)[0]  # noqa: PLW2901
-            gate = None
+            norm_output = layer.input_layernorm(hidden_states)
         else:
-            hidden_states, gate = layer.input_layernorm(
-                hidden_states, cond=adarms_cond[i]
-            )  # noqa: PLW2901
+            norm_output = layer.input_layernorm(hidden_states, cond=adarms_cond[i])
+        hidden_states, gate = _unpack_norm_output(norm_output)  # noqa: PLW2901
         gates.append(gate)
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
@@ -117,10 +124,10 @@ def compute_shared_attention_layer(
         out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])
         after_first_residual = out_emb.clone()
         if adarms_cond[i] is None:
-            out_emb = layer.post_attention_layernorm(out_emb)[0]
-            gate = None
+            norm_output = layer.post_attention_layernorm(out_emb)
         else:
-            out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
+            norm_output = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
+        out_emb, gate = _unpack_norm_output(norm_output)
         if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
             out_emb = out_emb.to(dtype=torch.bfloat16)
         out_emb = layer.mlp(out_emb)
