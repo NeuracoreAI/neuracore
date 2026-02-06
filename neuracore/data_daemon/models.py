@@ -49,9 +49,9 @@ class TraceStatus(str, Enum):
 
     State transitions:
     - (none) + START_TRACE    -> INITIALIZING
-    - (none) + TRACE_WRITTEN  -> PENDING_METADATA
+    - (none) + TRACE_WRITTEN  -> PENDING_BYTES
     - INITIALIZING + TRACE_WRITTEN -> WRITTEN
-    - PENDING_METADATA + START_TRACE  -> WRITTEN
+    - PENDING_BYTES + START_TRACE  -> WRITTEN
     - WRITTEN -> UPLOADING -> UPLOADED
     - UPLOADING -> PAUSED -> UPLOADING (resume)
     - UPLOADING -> WRITTEN (retry on failure)
@@ -59,7 +59,7 @@ class TraceStatus(str, Enum):
     """
 
     INITIALIZING = "initializing"
-    PENDING_METADATA = "pending_metadata"
+    PENDING_BYTES = "pending_bytes"
     WRITTEN = "written"
     UPLOADING = "uploading"
     PAUSED = "paused"
