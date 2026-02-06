@@ -80,4 +80,3 @@ traces = Table(
 
 Index("idx_traces_trace_id", traces.c.trace_id)
 Index("idx_traces_status", traces.c.status)
-Index("idx_traces_next_retry_at", traces.c.next_retry_at)
