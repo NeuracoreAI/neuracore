@@ -1,5 +1,8 @@
 """Tests for training run utilities."""
 
+import builtins
+import sys
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
@@ -7,7 +10,9 @@ import requests
 from neuracore_types import TrainingJobStatus
 
 import neuracore as nc
-from neuracore.core.cli.training_runs_cloud import (
+from neuracore.core.const import API_URL
+from neuracore.core.exceptions import TrainingRunError
+from neuracore.ml.cli.training_runs_cloud import (
     _format_duration,
     _format_robot_data_spec,
     _format_timestamp,
@@ -15,8 +20,6 @@ from neuracore.core.cli.training_runs_cloud import (
     get_training_run,
     list_training_runs,
 )
-from neuracore.core.const import API_URL
-from neuracore.core.exceptions import TrainingRunError
 
 MOCKED_ORG_ID = "test-org-id"
 
@@ -319,3 +322,76 @@ class TestLibraryFunctions:
 
             with pytest.raises(TrainingRunError, match="connect"):
                 list_training_runs()
+
+
+def drop_cached(modules: list[str]) -> dict[str, ModuleType]:
+    """Drop cached modules and return the ones that were removed."""
+    cached: dict[str, ModuleType] = {}
+
+    for key in modules:
+        mod = sys.modules.pop(key, None)
+        if mod is not None:
+            cached[key] = mod
+
+    return cached
+
+
+class TestDependencyBoundaries:
+    """Ensure optional ML deps don't break core CLI or pull heavy deps."""
+
+    def test_cli_app_handles_missing_ml_dependencies(self, monkeypatch):
+        """Import core CLI even when ML/omegaconf is absent."""
+
+        # Force import failure for omegaconf to simulate missing ml extras.
+        real_import = builtins.__import__
+
+        # Drop cached modules so import path runs with the patched importer.
+        cached = drop_cached([
+            "neuracore.core.cli.training_commands",
+            "neuracore.core.cli.app",
+        ])
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "omegaconf":
+                raise ModuleNotFoundError("No module named 'omegaconf'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        try:
+            import neuracore.core.cli.app as app
+
+            assert app._training_app is None
+            assert app._training_import_error is not None
+            assert any(cmd.name == "training" for cmd in app.app.registered_commands)
+
+            with pytest.raises(SystemExit):
+                app.training_placeholder()
+        finally:
+            # Remove modules created during the test if they weren't present before.
+            if "neuracore.core.cli.app" not in cached:
+                sys.modules.pop("neuracore.core.cli.app", None)
+            if "neuracore.core.cli.training_commands" not in cached:
+                sys.modules.pop("neuracore.core.cli.training_commands", None)
+            # Restore any cached modules we removed to avoid affecting other tests.
+            sys.modules.update(cached)
+
+    def test_ml_training_runs_cli_does_not_pull_torch(self, monkeypatch):
+        """Guard against torch becoming an import-time dependency of the CLI."""
+
+        real_import = builtins.__import__
+
+        drop_cached(["neuracore.ml.cli.training_runs_cloud"])
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "torch":
+                raise AssertionError("torch should not be imported by CLI utilities")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        # Reload module under patched importer to catch accidental torch imports.
+        import neuracore.ml.cli.training_runs_cloud as ml_mod
+
+        # Basic sanity check to ensure module still loaded.
+        assert hasattr(ml_mod, "list_training_runs")

@@ -4,16 +4,31 @@
 
 <div align="center">
 
-[![Downloads](https://img.shields.io/pypi/dm/neuracore.svg)](https://pypi.org/project/neuracore/)
+[![Downloads](https://static.pepy.tech/badge/neuracore)](https://pepy.tech/project/neuracore)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyPI - Version](https://img.shields.io/pypi/v/neuracore)](https://pypi.org/project/neuracore/)
-[![Discord](https://img.shields.io/badge/Discord-join%20chat-7289da.svg)](https://discord.gg/DF5m8V6nbD)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Last Commit](https://img.shields.io/github/last-commit/NeuracoreAI/neuracore)](https://github.com/NeuracoreAI/neuracore/commits/main)
 
 </br> 
 
 
 </div>
+
+<p align="center">
+  Join our community!
+</p>
+<p align="center">
+  <a target="_blank" href="https://discord.gg/DF5m8V6nbD"><img src="https://dcbadge.limes.pink/api/server/DF5m8V6nbD" alt="Discord" /></a>
+</p>
+
+<div align="center">
+
+</br>
+
+
+</div>
+
 
 # 🤖 What is Neuracore
 ✨ **Neuracore** is a powerful robot learning library that enables **data collection and visualization, model training, deployment, and real-time inference with support for custom data types.** Get started with Neuracore today, [sign up for a Neuracore account](https://www.neuracore.com/)!

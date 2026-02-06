@@ -1,0 +1,103 @@
+input_dataset_name: lerobot/berkeley_rpt
+dataset_type: LEROBOT
+output_dataset:
+  name: Berkeley_rpt
+  tags: [franka, berkeley, table-top, manipulation]
+  description: "This dataset contains images and sensor data collected from the berkeley franka robot on a table top"
+
+robot:
+  name: berkeley_rpt
+  mjcf_path: "panda.urdf"
+
+frequency: 30
+
+data_import_config: 
+  RGB_IMAGES:
+    source: observation.images
+    format:
+      image_convention: CHANNELS_FIRST
+      order_of_channels: RGB
+      normalized_pixel_values: True
+    mapping: 
+      - name: hand_image
+        source_name: hand_image
+
+  VISUAL_JOINT_POSITIONS: 
+    source: observation.state
+    units: RADIANS
+    mapping:
+      - name: panda_joint1
+        index: 0
+      - name: panda_joint2
+        index: 1
+      - name: panda_joint3
+        index: 2
+      - name: panda_joint4
+        index: 3
+      - name: panda_joint5
+        index: 4
+      - name: panda_joint6
+        index: 5
+      - name: panda_joint7
+        index: 6
+      - name: panda_joint8
+        index: 7
+      - name: panda_hand_joint
+        index: 7
+        offset: 1
+        inverted: True
+      - name: panda_hand_tcp_joint
+        index: 7
+        inverted: True
+        offset: 1
+      - name: panda_finger_joint1
+        index: 7
+        inverted: True
+        offset: 1
+      - name: panda_finger_joint2
+        index: 7
+        inverted: True
+        offset: 1
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state
+    units: RADIANS
+    mapping:
+      - name: panda_joint1
+        index: 0
+      - name: panda_joint2
+        index: 1
+      - name: panda_joint3
+        index: 2
+      - name: panda_joint4
+        index: 3
+      - name: panda_joint5
+        index: 4
+      - name: panda_joint6
+        index: 5
+      - name: panda_joint7
+        index: 6
+      - name: panda_joint8
+        index: 7
+      - name: panda_hand_joint
+        index: 7
+        offset: 1
+        inverted: True
+      - name: panda_hand_tcp_joint
+        index: 7
+        inverted: True
+        offset: 1
+      - name: panda_finger_joint1
+        index: 7
+        inverted: True
+        offset: 1
+      - name: panda_finger_joint2
+        index: 7
+        inverted: True
+        offset: 1
+
+  LANGUAGE:
+    source: task
+    format:
+      language_type: STRING
+    mapping:
+      - name: instruction

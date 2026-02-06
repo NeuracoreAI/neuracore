@@ -146,6 +146,10 @@ class Robot:
             self.urdf_path = os.path.join(self._temp_dir.name, "model.urdf")
             convert(mjcf_path, Path(self.urdf_path), asset_file_prefix="meshes/")
 
+        self.joint_info: dict[str, JointInfo] = {}
+        if self.urdf_path:
+            self.joint_info = self.get_joint_info()
+
     def init(self) -> None:
         """Initialize the robot on the Neuracore server.
 
