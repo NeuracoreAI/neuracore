@@ -93,6 +93,7 @@ setup(
             "huggingface-hub>0.34.0,<0.36.0",
             "tensorflow-datasets",
             "tensorflow",
+            "pin-pink",
         ],
     },
     entry_points={

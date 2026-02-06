@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from neuracore_types.importer.config import DatasetTypeConfig
+from neuracore_types import DataType
+from neuracore_types.importer.config import DatasetTypeConfig, JointPositionTypeConfig
 from neuracore_types.nc_data import DatasetImportConfig
 
 import neuracore as nc
@@ -23,6 +25,7 @@ from neuracore.importer.core.exceptions import (
     DatasetOperationError,
     ImporterError,
 )
+from neuracore.importer.core.inverse_kinematics import InverseKinematics
 from neuracore.importer.core.utils import populate_robot_info
 from neuracore.importer.core.validation import (
     validate_dataset_config_against_robot_model,
@@ -218,11 +221,33 @@ def _run_import(
         mjcf_path=mjcf_path,
         overwrite=robot_config.overwrite_existing,
     )
+    urdf_path = robot.urdf_path
     logger.info("Using robot model: %s (id=%s)", robot.name, robot.id)
 
     if robot.joint_info:
         validate_dataset_config_against_robot_model(dataconfig, robot.joint_info)
         dataconfig = populate_robot_info(dataconfig, robot.joint_info)
+
+    ik_urdf_path = None
+    ik_init_config = None
+    if urdf_path:
+        if DataType.JOINT_POSITIONS in dataconfig.data_import_config:
+            format_config = dataconfig.data_import_config[
+                DataType.JOINT_POSITIONS
+            ].format
+            if (
+                format_config.joint_position_type
+                == JointPositionTypeConfig.END_EFFECTOR
+            ):
+                ik_urdf_path = urdf_path
+                ik_init_config = format_config.ik_init_config
+                try:
+                    ik_packages_dir = os.path.dirname(urdf_path)
+                    InverseKinematics(ik_urdf_path, ik_packages_dir)
+                except Exception as exc:
+                    raise ConfigLoadError(
+                        f"Failed to initialize Inverse Kinematics: {exc}"
+                    ) from exc
 
     logger.info("Setup complete; beginning import.")
 
@@ -238,6 +263,8 @@ def _run_import(
             dataset_dir=dataset_dir,
             dataset_config=dataconfig,
             joint_info=robot.joint_info,
+            ik_urdf_path=ik_urdf_path,
+            ik_init_config=ik_init_config,
             dry_run=args.dry_run,
             suppress_warnings=args.no_validation_warnings,
             skip_on_error=skip_on_error,
@@ -251,6 +278,8 @@ def _run_import(
             dataset_dir=dataset_dir,
             dataset_config=dataconfig,
             joint_info=robot.joint_info,
+            ik_urdf_path=ik_urdf_path,
+            ik_init_config=ik_init_config,
             dry_run=args.dry_run,
             suppress_warnings=args.no_validation_warnings,
             skip_on_error=skip_on_error,

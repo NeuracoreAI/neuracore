@@ -62,7 +62,7 @@ data_import_config:
   JOINT_POSITIONS: 
     source: observation.pose
     format:
-      joint_position_type: TCP # TCP | CUSTOM, When using TCP, we will use the inverse kinematics to convert the end effector pose to joint positions.
+      joint_position_type: END_EFFECTOR # END_EFFECTOR | CUSTOM, When using END_EFFECTOR, we will use the inverse kinematics to convert the end effector pose to joint positions.
       ik_init_config: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # initial joint configuration for the inverse kinematics
       pose_type: POSITION_ORIENTATION # POSITION_ORIENTATION | MATRIX
       orientation:
