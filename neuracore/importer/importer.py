@@ -1,19 +1,17 @@
-"""Dataset import script for processing and importing datasets to Neuracore."""
+"""Dataset import utilities for processing and importing datasets to Neuracore."""
 
 from __future__ import annotations
 
-import argparse
 import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from neuracore_types.importer.config import DatasetTypeConfig
 from neuracore_types.nc_data import DatasetImportConfig
-from rich.logging import RichHandler
 
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
-from neuracore.importer.core.base import get_shared_console
 from neuracore.importer.core.dataset_detector import (
     DatasetDetector,
     iter_first_two_levels,
@@ -32,7 +30,7 @@ from neuracore.importer.core.validation import (
 from neuracore.importer.lerobot_importer import LeRobotDatasetImporter
 from neuracore.importer.rlds_importer import RLDSDatasetImporter
 
-LOG_FORMAT = "%(message)s"
+LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 logger = logging.getLogger(__name__)
 
 
@@ -41,12 +39,7 @@ def configure_logging(level: int = logging.INFO) -> None:
     if logging.getLogger().handlers:
         logging.getLogger().setLevel(level)
         return
-    handler = RichHandler(
-        rich_tracebacks=True,
-        markup=True,
-        show_path=False,
-        console=get_shared_console(),
-    )
+    handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
     logging.basicConfig(level=level, handlers=[handler])
 
@@ -57,72 +50,6 @@ def load_dataset_config(path: Path) -> DatasetImportConfig:
         return DatasetImportConfig.from_file(path)
     except Exception as exc:  # noqa: BLE001 - show root cause to user
         raise ConfigLoadError(f"Failed to load dataset config '{path}': {exc}") from exc
-
-
-def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for dataset import.
-
-    Returns:
-        Parsed command-line arguments.
-    """
-    parser = argparse.ArgumentParser(
-        description="Run dataset processing with a dataset config and robot model."
-    )
-
-    parser.add_argument(
-        "--dataset-config",
-        type=Path,
-        required=True,
-        help="Path to dataset configuration file (e.g. YAML or JSON)",
-    )
-
-    parser.add_argument(
-        "--dataset-dir",
-        type=Path,
-        required=True,
-        help="Path to the dataset directory",
-    )
-
-    parser.add_argument(
-        "--robot-dir",
-        type=Path,
-        required=True,
-        help="Path to directory containing robot description files (.urdf/.xml/.mjcf)",
-    )
-
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Delete the dataset before importing if it already exists.",
-    )
-
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Perform a dry run without actually logging data to Neuracore.",
-    )
-
-    parser.add_argument(
-        "--skip-on-error",
-        choices=["episode", "step", "all"],
-        default="episode",
-        help=(
-            "Error handling strategy: "
-            "'episode' skips the failed episode; "
-            "'step' skips only the failing step; "
-            "'all' aborts on the first error."
-        ),
-    )
-
-    parser.add_argument(
-        "--no-validation-warnings",
-        action="store_true",
-        help="Suppress warning messages from data validation.",
-    )
-
-    args = parser.parse_args()
-
-    return args
 
 
 def load_or_detect_dataset_type(
@@ -140,7 +67,7 @@ def load_or_detect_dataset_type(
         raise DatasetDetectionError(str(exc)) from exc
 
 
-def cli_args_validation(args: argparse.Namespace) -> None:
+def cli_args_validation(args: SimpleNamespace) -> None:
     """Validate the provided arguments."""
     for path in [args.dataset_config, args.dataset_dir]:
         if not path.exists():
@@ -164,7 +91,7 @@ def _resolve_robot_descriptions(
     config_mjcf_path: str | None,
     robot_dir: Path | None,
 ) -> tuple[str | None, str | None]:
-    """Find URDF/MJCF files either from config paths or by scanning a folder."""
+    """Pick the first matching URDF and MJCF files by extension."""
     urdf_path: str | None = None
     mjcf_path: str | None = None
     suffix_to_target = {".urdf": "urdf", ".xml": "mjcf", ".mjcf": "mjcf"}
@@ -203,27 +130,38 @@ def _resolve_robot_descriptions(
     return urdf_path, mjcf_path
 
 
-def main() -> None:
-    """Main entry point for dataset import script."""
-    configure_logging()
-    args = parse_args()
+def _run_import(
+    dataset_config: Path,
+    dataset_dir: Path,
+    robot_dir: Path,
+    overwrite: bool = False,
+    dry_run: bool = False,
+    skip_on_error: str = "episode",
+    suppress_validation_warnings: bool = False,
+) -> None:
+    """Execute the dataset import workflow."""
+    args = SimpleNamespace(
+        dataset_config=dataset_config,
+        dataset_dir=dataset_dir,
+        robot_dir=robot_dir,
+        overwrite=overwrite,
+        dry_run=dry_run,
+        skip_on_error=skip_on_error,
+        no_validation_warnings=suppress_validation_warnings,
+    )
 
-    try:
-        cli_args_validation(args)
-    except CLIError as exc:
-        logger.error("Argument validation failed: %s", exc)
-        sys.exit(1)
+    cli_args_validation(args)
 
     logger.info(
-        "Starting dataset import\n  config: %s\n  data:   %s\n  robot:  %s",
+        "Starting dataset import | dataset_config=%s | dataset_dir=%s | robot_dir=%s",
         args.dataset_config,
         args.dataset_dir,
         args.robot_dir,
     )
 
-    dataconfig = load_dataset_config(args.dataset_config)
+    dataconfig = load_dataset_config(dataset_config)
 
-    dataset_type = load_or_detect_dataset_type(dataconfig, args.dataset_dir)
+    dataset_type = load_or_detect_dataset_type(dataconfig, dataset_dir)
 
     output_dataset = dataconfig.output_dataset
     if not output_dataset or not output_dataset.name:
@@ -259,6 +197,7 @@ def main() -> None:
             description=dataconfig.output_dataset.description,
             tags=dataconfig.output_dataset.tags,
         )
+    logger.info("Output dataset ready: %s (id=%s)", dataset.name, dataset.id)
 
     robot_config = dataconfig.robot
     urdf_path, mjcf_path = _resolve_robot_descriptions(
@@ -307,7 +246,7 @@ def main() -> None:
         importer = RLDSDatasetImporter(
             input_dataset_name=dataconfig.input_dataset_name,
             output_dataset_name=dataconfig.output_dataset.name,
-            dataset_dir=args.dataset_dir,
+            dataset_dir=dataset_dir,
             dataset_config=dataconfig,
             joint_info=robot.joint_info,
             dry_run=args.dry_run,
@@ -320,7 +259,7 @@ def main() -> None:
         importer = LeRobotDatasetImporter(
             input_dataset_name=dataconfig.input_dataset_name,
             output_dataset_name=dataconfig.output_dataset.name,
-            dataset_dir=args.dataset_dir,
+            dataset_dir=dataset_dir,
             dataset_config=dataconfig,
             joint_info=robot.joint_info,
             dry_run=args.dry_run,
@@ -330,6 +269,14 @@ def main() -> None:
         importer.upload_all()
 
     logger.info("Finished importing dataset.")
+
+
+def main() -> None:
+    """Delegate to the Typer CLI app located in neuracore.importer.CLI.app."""
+    # Import locally to keep importer.py free of Typer dependency for library use
+    from neuracore.importer.CLI.app import main as cli_main
+
+    cli_main()
 
 
 if __name__ == "__main__":

@@ -16,6 +16,13 @@ try:
 except Exception as exc:  # pragma: no cover - defensive guard for optional deps
     _training_import_error = exc
 
+importer_app: typer.Typer | None = None
+_importer_import_error: Exception | None = None
+try:
+    from neuracore.importer.cli.app import app as importer_app
+except Exception as exc:  # pragma: no cover - defensive guard for optional deps
+    _importer_import_error = exc
+
 
 def _version_callback(value: bool) -> bool:
     if value:
@@ -43,6 +50,23 @@ def callback(
 app.command("login")(login)
 app.command("select-org")(select_org)
 app.command("launch-server")(launch_server)
+
+if importer_app is not None:
+    app.add_typer(importer_app, name="importer")
+else:
+
+    @app.command("importer")
+    def importer_placeholder() -> None:
+        """Missing dependencies to use this tool."""
+        typer.echo(
+            "Importer commands require optional dataset import dependencies. "
+            "Install neuracore[import] to enable them.",
+            err=True,
+        )
+        if _importer_import_error:
+            typer.echo(f"Import error: {_importer_import_error}", err=True)
+        raise SystemExit(1)
+
 
 if _training_app is not None:
     app.add_typer(_training_app, name="training")
