@@ -171,11 +171,15 @@ data_import_config:
           end: 6
 
   LANGUAGE:
-    source: language_instruction # path to the data in the input dataset
     format:
       language_type: BYTES # STRING | BYTES
     mapping:
       - name: instruction # name in neuracore
+        source_name: language_instruction # name in input dataset
+      - name: instruction2
+        source_name: language_instruction_2
+      - name: instruction3
+        source_name: language_instruction_3
 
   DEPTH_IMAGES:
     source: observation # path to the data in the input dataset
