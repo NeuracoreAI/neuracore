@@ -320,51 +320,55 @@ If you encounter issues with your algorithm:
 
 ## Release Process
 
+### Branch Strategy
+
+- **`develop`**: Primary development branch - target most PRs here
+- **`main`**: Production releases - synced via release workflow or manual PRs
+
 ### Creating PRs
 
-All PRs must follow these conventions:
+All PRs to `develop` must have a version label:
 
-1. **Version Label**: Add exactly one version label to your PR:
-   - `version:major` - Breaking changes
-   - `version:minor` - New features
-   - `version:patch` - Bug fixes
-   - `version:none` - No release (docs, chores, etc.)
+- `version:major` - Breaking changes
+- `version:minor` - New features
+- `version:patch` - Bug fixes
+- `version:none` - No release needed (docs, chores, CI)
 
-2. **Commit Format**: PR title and all commits must use conventional commit format:
-   ```
-   <prefix>: <description>
-   ```
-   Valid prefixes: `feat`, `fix`, `chore`, `docs`, `ci`, `test`, `refactor`, `style`, `perf`
-
-   Examples:
-   - `feat: add multi-GPU training support`
-   - `fix: resolve memory leak in streaming`
-   - `chore: update dependencies`
+**Commit Format**: Use conventional commits:
+```
+<prefix>: <description>
+```
+Valid prefixes: `feat`, `fix`, `chore`, `docs`, `ci`, `test`, `refactor`, `style`, `perf`
 
 ### Pending Changelog
 
-For significant changes (`version:major` or `version:minor`), update `changelogs/pending-changelog.md`:
-
+For significant changes, optionally update `changelogs/pending-changelog.md`:
 ```markdown
 ## Summary
 
-This release adds support for multi-GPU training and improves streaming performance by 40%.
+This release adds multi-GPU training and improves streaming performance by 40%.
 ```
 
-Simply append your summary to the existing content. This will appear at the top of the release notes.
+### Creating a Release
 
-### Triggering a Release
+**Step 1: Prepare Release** (on `develop` branch)
 
-Releases are manual and triggered via GitHub Actions:
+1. Go to **Actions** → **Prepare Release** → **Run workflow**
+2. Select branch: `develop`
+3. Check **dry_run** to preview (recommended)
+4. Review the summary, then run again without dry_run
+5. The workflow will:
+   - Analyze PRs merged to `develop` since last release
+   - Bump version on `develop`
+   - Generate changelog
+   - Create PR: `develop` → `main`
 
-1. Go to **Actions** → **Release Package** → **Run workflow**
-2. Optional: Check **dry_run** to preview without publishing
-3. The workflow will:
-   - Analyze all PRs since last release
-   - Determine version bump (highest priority across all PRs)
-   - Generate changelog with all PRs grouped by type
-   - Bump version and create git tag
-   - Publish to PyPI
-   - Create GitHub release
+**Step 2: Review and Merge**
 
-**Dry run** shows what would happen without making any changes - useful for testing before a real release.
+1. Review the automated release PR
+2. Merge the PR 
+3. The **Publish Release** workflow triggers automatically:
+   - Publishes to PyPI
+   - Creates GitHub release with changelog
+   - Tags the release
+
