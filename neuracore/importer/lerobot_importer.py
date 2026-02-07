@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import traceback
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 
@@ -12,7 +13,12 @@ from neuracore_types.importer.config import LanguageConfig
 from neuracore_types.nc_data import DatasetImportConfig
 
 import neuracore as nc
-from neuracore.importer.core.base import ImportItem, NeuracoreDatasetImporter
+from neuracore.core.robot import JointInfo
+from neuracore.importer.core.base import (
+    ImportItem,
+    NeuracoreDatasetImporter,
+    WorkerError,
+)
 from neuracore.importer.core.exceptions import ImportError
 
 
@@ -25,6 +31,10 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         output_dataset_name: str,
         dataset_dir: Path,
         dataset_config: DatasetImportConfig,
+        joint_info: dict[str, JointInfo] = {},
+        dry_run: bool = False,
+        suppress_warnings: bool = False,
+        skip_on_error: str = "episode",
     ) -> None:
         """Initialize the LeRobot dataset importer.
 
@@ -33,12 +43,21 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             output_dataset_name: Name of the dataset to create.
             dataset_dir: Directory containing the dataset.
             dataset_config: Dataset configuration.
+            joint_info: Joint info to use for validation.
+            dry_run: If True, skip actual logging (validation only).
+            suppress_warnings: If True, suppress warning messages.
+            skip_on_error: "episode" to skip a failed episode; "step" to skip only
+                failing steps; "all" to abort on the first error.
         """
         super().__init__(
             dataset_dir=dataset_dir,
             dataset_config=dataset_config,
             output_dataset_name=output_dataset_name,
             max_workers=1,
+            joint_info=joint_info,
+            dry_run=dry_run,
+            suppress_warnings=suppress_warnings,
+            skip_on_error=skip_on_error,
         )
         self.dataset_name = input_dataset_name
         self.dataset_dir = Path(dataset_dir)
@@ -51,16 +70,6 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
 
         self._dataset: LeRobotDataset | None = None
         self._episode_iter: Iterator[int] | None = None
-
-        self.logger.info(
-            "Initialized LeRobot importer for '%s' "
-            "(episodes=%s, cameras=%s, fps=%s, root=%s)",
-            self.dataset_name,
-            self.num_episodes,
-            self.camera_keys,
-            self.frequency,
-            self.dataset_root,
-        )
 
     def __getstate__(self) -> dict:
         """Drop worker-local handles when pickling for multiprocessing."""
@@ -117,7 +126,24 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         )
         for step_idx, step_data in enumerate(step_iter, start=1):
             timestamp = base_time + (step_idx / self.frequency)
-            self._record_step(step_data, timestamp)
+            try:
+                self._record_step(step_data, timestamp)
+            except Exception as exc:  # noqa: BLE001
+                if self.skip_on_error == "step":
+                    if self._error_queue is not None:
+                        self._error_queue.put(
+                            WorkerError(
+                                worker_id=self._worker_id or 0,
+                                item_index=item.index,
+                                message=f"Step {step_idx}: {exc}",
+                                traceback=traceback.format_exc(),
+                            )
+                        )
+                    self._log_worker_error(
+                        self._worker_id or 0, item.index, f"Step {step_idx}: {exc}"
+                    )
+                    continue
+                raise
             self._emit_progress(
                 item.index,
                 step=step_idx,
@@ -205,11 +231,12 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 else:
                     source_data = step_data[source_path]
 
-                if (
+                if not (
                     data_type == DataType.LANGUAGE
                     and import_config.format.language_type == LanguageConfig.STRING
                 ):
-                    transformed_data = source_data
-                else:
-                    transformed_data = item.transforms(source_data.numpy())
-                self._log_data(data_type, item.name, transformed_data, timestamp)
+                    source_data = source_data.numpy()
+
+                self._log_data(
+                    data_type, source_data, item, import_config.format, timestamp
+                )

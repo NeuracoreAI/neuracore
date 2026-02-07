@@ -131,7 +131,12 @@ def start_stream(robot: Robot, data_stream: DataStream) -> None:
 
 
 def _log_single_joint_data(
-    data_type: DataType, name: str, value: float, robot: Robot, timestamp: float
+    data_type: DataType,
+    name: str,
+    value: float,
+    robot: Robot,
+    timestamp: float,
+    dry_run: bool = False,
 ) -> None:
     """Log single joint data for a robot.
 
@@ -141,7 +146,11 @@ def _log_single_joint_data(
         value: Joint data value
         robot: Robot instance
         timestamp: Timestamp of the data
+        dry_run: If True, skip actual logging (validation only)
     """
+    if dry_run:
+        return
+
     storage_name = validate_safe_name(name)
     str_id = f"{data_type.value}:{name}"
     joint_stream = robot.get_data_stream(str_id)
@@ -159,10 +168,14 @@ def _log_single_joint_data(
         joint_stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
     joint_stream.log(data=data)
-
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
 
+    StreamManagerOrchestrator().get_provider_manager(
+        robot.id, robot.instance
+    ).get_json_source(str_id, data_type, sensor_key=str_id).publish(
+        data.model_dump(mode="json")
+    )
     _publish_json_to_p2p(robot, str_id, data_type, data)
 
 
@@ -172,6 +185,7 @@ def _log_group_of_joint_data(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log joint data for a robot.
 
@@ -182,6 +196,7 @@ def _log_group_of_joint_data(
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -194,9 +209,12 @@ def _log_group_of_joint_data(
         if not isinstance(value, float):
             raise ValueError(f"Joint data must be floats. {key} is not a float.")
 
+    if dry_run:
+        return
+
     robot = _get_robot(robot_name, instance)
     for key, value in joint_data.items():
-        _log_single_joint_data(data_type, key, value, robot, timestamp)
+        _log_single_joint_data(data_type, key, value, robot, timestamp, dry_run)
 
 
 def _validate_extrinsics_intrinsics(
@@ -232,6 +250,7 @@ def _log_camera_data(
     name: str,
     robot_name: str | None = None,
     instance: int = 0,
+    dry_run: bool = False,
 ) -> None:
     """Log camera data for a robot.
 
@@ -243,6 +262,7 @@ def _log_camera_data(
         name: Unique identifier for the camera
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -253,8 +273,11 @@ def _log_camera_data(
         DataType.DEPTH_IMAGES,
     ), "Unsupported camera type"
 
-    robot = _get_robot(robot_name, instance)
     storage_name = validate_safe_name(name)
+    if dry_run:
+        return
+
+    robot = _get_robot(robot_name, instance)
     str_id = f"{camera_type.value}:{name}"
 
     # data streaming for bucket storage (lossless and lossy)
@@ -292,6 +315,7 @@ def log_custom_1d(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log arbitrary data for a robot.
 
@@ -301,6 +325,7 @@ def log_custom_1d(
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -311,8 +336,12 @@ def log_custom_1d(
     if data.ndim != 1:
         raise ValueError("Data must be a 1D numpy ndarray")
     timestamp = timestamp or time.time()
-    robot = _get_robot(robot_name, instance)
+
     storage_name = validate_safe_name(name)
+    if dry_run:
+        return
+
+    robot = _get_robot(robot_name, instance)
     str_id = f"{DataType.CUSTOM_1D.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
@@ -337,6 +366,7 @@ def log_joint_positions(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log joint positions for a robot.
 
@@ -346,6 +376,7 @@ def log_joint_positions(
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -357,6 +388,7 @@ def log_joint_positions(
         robot_name,
         instance,
         timestamp,
+        dry_run,
     )
 
 
@@ -366,6 +398,7 @@ def log_joint_position(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log joint positions for a robot.
 
@@ -375,6 +408,7 @@ def log_joint_position(
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -386,6 +420,7 @@ def log_joint_position(
         robot_name,
         instance,
         timestamp,
+        dry_run,
     )
 
 
@@ -394,6 +429,7 @@ def log_joint_target_positions(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log joint target positions for a robot.
 
@@ -404,6 +440,7 @@ def log_joint_target_positions(
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -415,6 +452,7 @@ def log_joint_target_positions(
         robot_name,
         instance,
         timestamp,
+        dry_run,
     )
 
 
@@ -424,6 +462,7 @@ def log_joint_target_position(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log joint target position for a robot.
 
@@ -434,6 +473,7 @@ def log_joint_target_position(
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -445,6 +485,7 @@ def log_joint_target_position(
         robot_name,
         instance,
         timestamp,
+        dry_run,
     )
 
 
@@ -453,6 +494,7 @@ def log_joint_velocities(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log joint velocities for a robot.
 
@@ -462,6 +504,7 @@ def log_joint_velocities(
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -473,6 +516,7 @@ def log_joint_velocities(
         robot_name,
         instance,
         timestamp,
+        dry_run,
     )
 
 
@@ -482,6 +526,7 @@ def log_joint_velocity(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log joint velocity for a robot.
 
@@ -492,6 +537,7 @@ def log_joint_velocity(
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -503,6 +549,7 @@ def log_joint_velocity(
         robot_name,
         instance,
         timestamp,
+        dry_run,
     )
 
 
@@ -511,6 +558,7 @@ def log_joint_torques(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log joint torques for a robot.
 
@@ -520,6 +568,7 @@ def log_joint_torques(
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -531,6 +580,7 @@ def log_joint_torques(
         robot_name,
         instance,
         timestamp,
+        dry_run,
     )
 
 
@@ -540,6 +590,7 @@ def log_joint_torque(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log joint torque for a robot.
 
@@ -550,6 +601,7 @@ def log_joint_torque(
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -561,6 +613,79 @@ def log_joint_torque(
         robot_name,
         instance,
         timestamp,
+        dry_run,
+    )
+
+
+def log_visual_joint_positions(
+    positions: dict[str, float],
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Log visual joint positions for a robot.
+
+    Visual joint positions are joint positions that are required for URDF
+    visualisation but not used during training (e.g. individual finger
+    joints in a gripper).
+
+    Args:
+        positions: Dictionary mapping joint names to positions (in radians)
+        robot_name: Optional robot name.
+            If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+        ValueError: If positions is not a dictionary of floats
+    """
+    _log_group_of_joint_data(
+        DataType.VISUAL_JOINT_POSITIONS,
+        positions,
+        robot_name,
+        instance,
+        timestamp,
+        dry_run,
+    )
+
+
+def log_visual_joint_position(
+    name: str,
+    position: float,
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Log visual joint position for a robot.
+
+    Visual joint positions are joint positions that are required for URDF
+    visualisation but not used during training (e.g. individual finger
+    joints in a gripper).
+
+    Args:
+        name: Name of the joint
+        position: Position of the joint (in radians)
+        robot_name: Optional robot name.
+            If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+        ValueError: If position is not a float
+    """
+    _log_group_of_joint_data(
+        DataType.VISUAL_JOINT_POSITIONS,
+        {name: position},
+        robot_name,
+        instance,
+        timestamp,
+        dry_run,
     )
 
 
@@ -570,6 +695,7 @@ def log_pose(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log pose data for a robot.
 
@@ -580,6 +706,7 @@ def log_pose(
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -595,8 +722,12 @@ def log_pose(
             f"Pose must be a numpy array of length 7, got length {len(pose)} for "
             f"'{name}'."
         )
-    robot = _get_robot(robot_name, instance)
+
     storage_name = validate_safe_name(name)
+    if dry_run:
+        return
+
+    robot = _get_robot(robot_name, instance)
     str_id = f"{DataType.POSES.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
@@ -619,6 +750,7 @@ def log_end_effector_pose(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log end-effector pose data for a robot.
 
@@ -628,6 +760,7 @@ def log_end_effector_pose(
         robot_name: Optional robot ID
         instance: Optional instance number
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
     """
     timestamp = timestamp or time.time()
 
@@ -652,8 +785,11 @@ def log_end_effector_pose(
             f"{orientation} is not a valid unit quaternion."
         )
 
-    robot = _get_robot(robot_name, instance)
     storage_name = validate_safe_name(name)
+    if dry_run:
+        return
+
+    robot = _get_robot(robot_name, instance)
     str_id = f"{DataType.END_EFFECTOR_POSES.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
@@ -676,6 +812,7 @@ def log_parallel_gripper_open_amount(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log parallel gripper open amount data for a robot.
 
@@ -685,6 +822,7 @@ def log_parallel_gripper_open_amount(
         robot_name: Optional robot ID
         instance: Optional instance number
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
     """
     timestamp = timestamp or time.time()
     if not isinstance(name, str):
@@ -698,8 +836,11 @@ def log_parallel_gripper_open_amount(
     if value < 0.0 or value > 1.0:
         raise ValueError("Parallel gripper open amounts must be between 0.0 and 1.0.")
 
-    robot = _get_robot(robot_name, instance)
     storage_name = validate_safe_name(name)
+    if dry_run:
+        return
+
+    robot = _get_robot(robot_name, instance)
     str_id = f"{DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
@@ -729,6 +870,7 @@ def log_parallel_gripper_open_amounts(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log parallel gripper open amount data for a robot.
 
@@ -738,6 +880,7 @@ def log_parallel_gripper_open_amounts(
         robot_name: Optional robot ID
         instance: Optional instance number
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
     """
     timestamp = timestamp or time.time()
     for name, value in values.items():
@@ -747,6 +890,7 @@ def log_parallel_gripper_open_amounts(
             robot_name=robot_name,
             instance=instance,
             timestamp=timestamp,
+            dry_run=dry_run,
         )
 
 
@@ -756,6 +900,7 @@ def log_parallel_gripper_target_open_amount(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log parallel gripper target open amount data for a robot.
 
@@ -768,6 +913,7 @@ def log_parallel_gripper_target_open_amount(
         robot_name: Optional robot ID
         instance: Optional instance number
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
     """
     timestamp = timestamp or time.time()
     if not isinstance(name, str):
@@ -784,8 +930,11 @@ def log_parallel_gripper_target_open_amount(
             "Parallel gripper target open amounts must be between 0.0 and 1.0."
         )
 
-    robot = _get_robot(robot_name, instance)
     storage_name = validate_safe_name(name)
+    if dry_run:
+        return
+
+    robot = _get_robot(robot_name, instance)
     str_id = f"{DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
@@ -815,6 +964,7 @@ def log_parallel_gripper_target_open_amounts(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log parallel gripper target open amount data for a robot.
 
@@ -827,6 +977,7 @@ def log_parallel_gripper_target_open_amounts(
         robot_name: Optional robot ID
         instance: Optional instance number
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
     """
     timestamp = timestamp or time.time()
     for name, value in values.items():
@@ -836,6 +987,7 @@ def log_parallel_gripper_target_open_amounts(
             robot_name=robot_name,
             instance=instance,
             timestamp=timestamp,
+            dry_run=dry_run,
         )
 
 
@@ -845,6 +997,7 @@ def log_language(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log language annotation for a robot.
 
@@ -854,6 +1007,7 @@ def log_language(
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -862,8 +1016,12 @@ def log_language(
     timestamp = timestamp or time.time()
     if not isinstance(language, str):
         raise ValueError("Language must be a string")
-    robot = _get_robot(robot_name, instance)
+
     storage_name = validate_safe_name(name)
+    if dry_run:
+        return
+
+    robot = _get_robot(robot_name, instance)
     str_id = f"{DataType.LANGUAGE.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
@@ -889,6 +1047,7 @@ def log_rgb(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log RGB image from a camera.
 
@@ -900,6 +1059,7 @@ def log_rgb(
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -924,6 +1084,7 @@ def log_rgb(
         name,
         robot_name,
         instance,
+        dry_run,
     )
 
 
@@ -935,6 +1096,7 @@ def log_depth(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log depth image from a camera.
 
@@ -946,6 +1108,7 @@ def log_depth(
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -978,6 +1141,7 @@ def log_depth(
         name,
         robot_name,
         instance,
+        dry_run,
     )
 
 
@@ -990,6 +1154,7 @@ def log_point_cloud(
     robot_name: str | None = None,
     instance: int = 0,
     timestamp: float | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Log point cloud data from a camera.
 
@@ -1002,6 +1167,7 @@ def log_point_cloud(
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
@@ -1033,9 +1199,12 @@ def log_point_cloud(
         if rgb_points.shape[1] != 3:
             raise ValueError("RGB point cloud must have 3 columns")
 
+    storage_name = validate_safe_name(name)
+    if dry_run:
+        return
+
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
     robot = _get_robot(robot_name, instance)
-    storage_name = validate_safe_name(name)
     str_id = f"{DataType.POINT_CLOUDS.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:

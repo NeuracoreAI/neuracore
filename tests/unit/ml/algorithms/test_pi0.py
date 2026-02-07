@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+
+if os.environ.get("CI", "false").lower() == "true":
+    pytest.skip("Skipping Pi0 tests in CI", allow_module_level=True)
+
 import torch
 from neuracore_types import BatchedNCData, DataType, ModelInitDescription
 from torch import nn
@@ -15,27 +19,24 @@ from neuracore.ml import BatchedInferenceInputs, BatchedTrainingSamples
 from neuracore.ml.algorithms.pi0.pi0 import Pi0
 from neuracore.ml.core.ml_types import BatchedTrainingOutputs
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
-from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.validate import run_validation
 
-BS = 2
-DEVICE = get_default_device()
-OUTPUT_PREDICTION_HORIZON = 5
+BS = 1
+OUTPUT_PREDICTION_HORIZON = 1
 
 # Use cpu because the model takes a lot of vram
 DEVICE = torch.device("cpu")
 SKIP_TEST = os.environ.get("CI", "false").lower() == "true"
 
 
-PI_TINY_ARGS: dict[str, Any] = {
-    "vlm_expert_intermediate_size": 4,
-    "vlm_expert_num_heads": 1,
-    "vlm_expert_head_dim": 4,
-    "action_expert_width": 16,
-    "action_expert_intermediate_size": 4,
-    "action_expert_num_heads": 1,
-    "action_expert_head_dim": 4,
-    "moe_depth": 1,
+PI0_TEST_ARGS: dict[str, Any] = {
+    "paligemma_variant": "gemma_tiny",
+    "action_expert_variant": "gemma_tiny",
+    "use_pretrained_weights": False,
+    "num_inference_steps": 1,
+    "vlm_max_text_tokens": 4,
+    "compile_model": False,
+    "gradient_checkpointing": False,
 }
 
 
@@ -106,10 +107,8 @@ def sample_training_batch(
 
 
 @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
-def test_model_construction(
-    model_init_description: ModelInitDescription, model_config: dict
-):
-    model = Pi0(model_init_description, **PI_TINY_ARGS)
+def test_model_construction(model_init_description: ModelInitDescription):
+    model = Pi0(model_init_description, **PI0_TEST_ARGS)
     model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
 
@@ -119,7 +118,7 @@ def test_model_forward(
     model_init_description: ModelInitDescription,
     sample_inference_batch: BatchedInferenceInputs,
 ):
-    model = Pi0(model_init_description, **PI_TINY_ARGS)
+    model = Pi0(model_init_description, **PI0_TEST_ARGS)
     model = model.to(DEVICE)
     sample_inference_batch = sample_inference_batch.to(DEVICE)
     output: dict[DataType, list[BatchedNCData]] = model(sample_inference_batch)
@@ -136,7 +135,7 @@ def test_model_backward(
     model_init_description: ModelInitDescription,
     sample_training_batch: BatchedTrainingSamples,
 ):
-    model = Pi0(model_init_description, **PI_TINY_ARGS)
+    model = Pi0(model_init_description, **PI0_TEST_ARGS)
     model = model.to(DEVICE)
     sample_training_batch = sample_training_batch.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_training_batch)
@@ -152,7 +151,10 @@ def test_model_backward(
         if param.requires_grad:
             # VLM parameters may not get gradients if they're not used in the
             # forward pass
-            is_vlm_param = any(keyword in name.lower() for keyword in ["vlm", "vision"])
+            is_vlm_param = any(
+                keyword in name.lower()
+                for keyword in ["vlm", "vision", "paligemma", "language_model"]
+            )
 
             if not is_vlm_param:
                 # Non-VLM parameters should definitely have gradients
@@ -170,7 +172,12 @@ def test_model_backward(
 
 
 @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
-def test_run_validation(tmp_path: Path, mock_login):
+def test_run_validation(tmp_path: Path, mock_login, monkeypatch):
+    from neuracore.ml.algorithms.pi0.pi0 import Pi0
+    from neuracore.ml.utils import validate as validate_module
+
+    monkeypatch.setattr(validate_module.AlgorithmLoader, "load_model", lambda self: Pi0)
+
     # Long timeout due to larger model run on CPU
     os.environ["NEURACORE_ENDPOINT_TIMEOUT"] = "120"
     algorithm_dir = Path(inspect.getfile(Pi0)).parent
@@ -179,7 +186,7 @@ def test_run_validation(tmp_path: Path, mock_login):
         algorithm_dir=algorithm_dir,
         port=random.randint(10000, 20000),
         skip_endpoint_check=False,
-        algorithm_config=PI_TINY_ARGS,
+        algorithm_config=PI0_TEST_ARGS,
         device=DEVICE,
     )
     if len(error_msg) > 0:

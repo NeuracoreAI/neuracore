@@ -146,6 +146,10 @@ class Robot:
             self.urdf_path = os.path.join(self._temp_dir.name, "model.urdf")
             convert(mjcf_path, Path(self.urdf_path), asset_file_prefix="meshes/")
 
+        self.joint_info: dict[str, JointInfo] = {}
+        if self.urdf_path:
+            self.joint_info = self._get_joint_info()
+
     def init(self) -> None:
         """Initialize the robot on the Neuracore server.
 
@@ -571,7 +575,7 @@ class Robot:
         except Exception as e:
             raise RobotError(f"Error preparing URDF package: {str(e)}")
 
-    def get_joint_info(self) -> dict[str, JointInfo]:
+    def _get_joint_info(self) -> dict[str, JointInfo]:
         """Return metadata for all joints defined in the robot URDF.
 
         Returns:
@@ -586,9 +590,10 @@ class Robot:
         joint_info: dict[str, JointInfo] = {}
         for joint in root.iter("joint"):
             name = joint.get("name")
-            if not name:
+            joint_type = joint.get("type")
+            if not name or not joint_type:
                 continue
-            info = JointInfo(type=joint.get("type"))
+            info = JointInfo(type=joint_type)
             limits = info.limits
 
             parent = joint.find("parent")
@@ -620,8 +625,6 @@ class Robot:
 
             joint_info[name] = info
 
-        if not joint_info:
-            raise RobotError("No joints found in the robot URDF.")
         return joint_info
 
     def cancel_recording(self, recording_id: str) -> None:

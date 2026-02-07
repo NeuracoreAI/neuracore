@@ -1,0 +1,82 @@
+input_dataset_name: lerobot/unitreeh1_fold_clothes
+dataset_type: LEROBOT
+
+output_dataset:
+  name: unitreeh1_fold_clothes
+  tags: [unitree, humanoid, folding, clothes, manipulation]
+  description: "This dataset contains images and sensor data collected from the LeRobot Unitree H1 robot while performing fold clothes tasks in an indoor environment."
+
+robot:
+  name: unitreeh1
+  urdf_path: "robot.urdf"
+  overwrite_existing: True
+
+frequency: 50
+
+data_import_config: 
+  RGB_IMAGES:
+    source: observation.images
+    format:
+      image_convention: CHANNELS_FIRST
+      order_of_channels: RGB
+      normalized_pixel_values: TRUE
+    mapping: 
+      - name: cam_left
+        source_name: cam_left
+      - name: cam_right
+        source_name: cam_right
+
+  JOINT_POSITIONS:
+    source: observation.state
+    units: RADIANS
+    mapping:
+      - name: left_hip_yaw_joint
+      - name: left_hip_roll_joint
+      - name: left_hip_pitch_joint
+      - name: left_knee_joint
+      - name: left_ankle_joint
+      - name: right_hip_yaw_joint
+      - name: right_hip_roll_joint
+      - name: right_hip_pitch_joint
+      - name: right_knee_joint
+      - name: right_ankle_joint
+      - name: torso_joint
+      - name: left_shoulder_pitch_joint
+      - name: left_shoulder_roll_joint
+      - name: left_shoulder_yaw_joint
+      - name: left_elbow_joint
+      - name: right_shoulder_pitch_joint
+      - name: right_shoulder_roll_joint
+      - name: right_shoulder_yaw_joint
+      - name: right_elbow_joint
+    
+    JOINT_TARGET_POSITIONS: 
+      source: action
+      units: RADIANS
+      mapping: 
+        - name: left_hip_yaw_joint
+        - name: left_hip_roll_joint
+        - name: left_hip_pitch_joint
+        - name: left_knee_joint
+        - name: left_ankle_joint
+        - name: right_hip_yaw_joint
+        - name: right_hip_roll_joint
+        - name: right_hip_pitch_joint
+        - name: right_knee_joint
+        - name: right_ankle_joint
+        - name: torso_joint
+        - name: left_shoulder_pitch_joint
+        - name: left_shoulder_roll_joint
+        - name: left_shoulder_yaw_joint
+        - name: left_elbow_joint
+        - name: right_shoulder_pitch_joint
+        - name: right_shoulder_roll_joint
+        - name: right_shoulder_yaw_joint
+        - name: right_elbow_joint
+
+  LANGUAGE:
+    source: task
+    format:
+      language_type: STRING
+    mapping:
+      - name: instruction

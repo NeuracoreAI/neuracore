@@ -111,9 +111,10 @@ The importer supports the following data types:
 - **JOINT_POSITIONS**: Robot joint positions
 - **JOINT_VELOCITIES**: Robot joint velocities
 - **JOINT_TORQUES**: Robot joint torques
-- **JOINT_TARGET_POSITIONS**: Target joint positions
+- **JOINT_TARGET_POSITIONS**: Target joint positions issued to the robot
+- **VISUAL_JOINT_POSITIONS**: Joint positions for URDF visualisation but not for training (can be populated from PARALLEL_GRIPPER_OPEN_AMOUNTS)
 - **PARALLEL_GRIPPER_OPEN_AMOUNTS**: Gripper open amounts
-- **PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS**: Target gripper open amounts
+- **PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS**: Target gripper open amounts issued to the robot
 - **END_EFFECTOR_POSES**: End-effector poses
 - **POSES**: General 6D poses
 - **LANGUAGE**: Language instructions
