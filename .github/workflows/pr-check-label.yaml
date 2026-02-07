@@ -3,7 +3,6 @@ name: PR Check Label
 on:
   pull_request:
     branches:
-      - main
       - develop
     types:
       - opened
