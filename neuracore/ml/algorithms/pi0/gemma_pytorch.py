@@ -1,6 +1,7 @@
 """Minimal Gemma/PaliGemma helpers for PI0."""
 
 # cspell:ignore adarms layernorm
+import logging
 from dataclasses import dataclass
 from typing import Literal
 
@@ -12,6 +13,71 @@ from transformers.models.gemma.modeling_gemma import GemmaForCausalLM
 from transformers.models.paligemma.modeling_paligemma import (
     PaliGemmaForConditionalGeneration,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _validate_shared_attention_shapes(
+    layer_idx: int,
+    query_states: list[torch.Tensor],
+    key_states: list[torch.Tensor],
+    value_states: list[torch.Tensor],
+    inputs_embeds: list[torch.Tensor],
+    attention_mask: torch.Tensor,
+    position_ids: torch.Tensor,
+    models: list[nn.Module],
+) -> None:
+    if len(query_states) < 2:
+        return
+
+    def _shape_mismatch(states: list[torch.Tensor]) -> bool:
+        expected = states[0].shape
+        return any(
+            s.shape[0] != expected[0]
+            or s.shape[1] != expected[1]
+            or s.shape[3] != expected[3]
+            for s in states[1:]
+        )
+
+    if not (
+        _shape_mismatch(query_states)
+        or _shape_mismatch(key_states)
+        or _shape_mismatch(value_states)
+    ):
+        return
+
+    def _attn_meta(model: nn.Module) -> dict[str, int | str]:
+        layer = model.layers[layer_idx]
+        return {
+            "hidden_size": getattr(layer.self_attn.config, "hidden_size", "unknown"),
+            "num_attention_heads": getattr(
+                layer.self_attn.config, "num_attention_heads", "unknown"
+            ),
+            "head_dim": getattr(layer.self_attn, "head_dim", "unknown"),
+        }
+
+    logger.error(
+        "Shared attention mismatch at layer %s: "
+        "query_states=%s key_states=%s value_states=%s inputs_embeds=%s "
+        "attention_mask=%s position_ids=%s meta=%s",
+        layer_idx,
+        [t.shape for t in query_states],
+        [t.shape for t in key_states],
+        [t.shape for t in value_states],
+        [t.shape for t in inputs_embeds],
+        attention_mask.shape,
+        position_ids.shape,
+        [_attn_meta(models[0]), _attn_meta(models[1])],
+    )
+    raise RuntimeError(
+        "Shared attention mismatch at layer "
+        f"{layer_idx}: query_states={[t.shape for t in query_states]} "
+        f"key_states={[t.shape for t in key_states]} "
+        f"value_states={[t.shape for t in value_states]} "
+        f"inputs_embeds={[t.shape for t in inputs_embeds]} "
+        f"attention_mask={attention_mask.shape} "
+        f"position_ids={position_ids.shape}"
+    )
 
 
 def compute_shared_attention_layer(
@@ -77,6 +143,16 @@ def compute_shared_attention_layer(
         query_states.append(query_state)
         key_states.append(key_state)
         value_states.append(value_state)
+    _validate_shared_attention_shapes(
+        layer_idx,
+        query_states,
+        key_states,
+        value_states,
+        inputs_embeds,
+        attention_mask,
+        position_ids,
+        models,
+    )
     query_states = torch.cat(query_states, dim=2)
     key_states = torch.cat(key_states, dim=2)
     value_states = torch.cat(value_states, dim=2)
@@ -102,9 +178,12 @@ def compute_shared_attention_layer(
         scaling,
     )
     head_dim = paligemma.language_model.layers[layer_idx].self_attn.head_dim
-    num_heads = paligemma.language_model.layers[
-        layer_idx
-    ].self_attn.config.num_attention_heads
+    if getattr(paligemma.config.text_config, "_pi0_variant", None) == "gemma_tiny":
+        num_heads = paligemma.language_model.layers[
+            layer_idx
+        ].self_attn.config.num_attention_heads
+    else:
+        num_heads = 8
     att_output = att_output.reshape(batch_size, -1, num_heads * head_dim)
     outputs_embeds = []
     start_pos = 0
@@ -248,6 +327,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         paligemma_config.text_config.hidden_activation = "gelu_pytorch_tanh"
         paligemma_config.text_config.torch_dtype = "float32"
         paligemma_config.text_config.vocab_size = 257152
+        paligemma_config.text_config._pi0_variant = vlm_config.variant
         paligemma_config.text_config.use_adarms = use_adarms[0]
         paligemma_config.text_config.adarms_cond_dim = (
             vlm_config.width if use_adarms[0] else None
