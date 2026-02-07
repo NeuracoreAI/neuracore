@@ -3,75 +3,125 @@
 This module provides abstract and concrete data stream implementations for
 recording various types of robot sensor data including JSON events, RGB video,
 and depth data. All streams support recording lifecycle management and
-cloud upload functionality.
+daemon-based data persistence.
 """
 
+import json
 import logging
+import struct
 import threading
 from abc import ABC
+from dataclasses import dataclass
 
 import numpy as np
 from neuracore_types import CameraData, DataType, NCData
 
-from neuracore.core.streaming.bucket_uploaders.streaming_file_uploader import (
-    StreamingJsonUploader,
+from neuracore.data_daemon.communications_management.management_channel import (
+    ManagementChannel,
 )
-from neuracore.core.streaming.bucket_uploaders.streaming_video_uploader import (
-    StreamingVideoUploader,
-)
-
-from ..utils.depth_utils import depth_to_rgb
+from neuracore.data_daemon.communications_management.producer import Producer
 
 logger = logging.getLogger(__name__)
 
-LOSSY_VIDEO_NAME = "lossy.mp4"
-LOSSLESS_VIDEO_NAME = "lossless.mp4"
+
+@dataclass
+class DataRecordingContext:
+    """Context information needed for recording data to the daemon.
+
+    Contains all identifiers needed to associate recorded data with the
+    correct robot, dataset, and recording session.
+    """
+
+    recording_id: str
+    robot_id: str | None
+    robot_name: str
+    robot_instance: int
+    dataset_id: str | None
+    dataset_name: str | None
 
 
 class DataStream(ABC):
     """Base class for data streams.
 
     Provides common functionality for managing recording state and data
-    storage across different types of sensor data streams.
+    storage across different types of sensor data streams. Each stream
+    has its own Producer for sending data to the daemon.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, data_type: DataType, stream_name: str) -> None:
         """Initialize the data stream.
 
-        This must be kept lightweight and not perform any blocking operations.
-        """
-        self._recording = False
-        self._recording_id: str | None = None
-        self._latest_data: NCData | None = None
-        self.lock = threading.Lock()
-
-    def start_recording(self, recording_id: str) -> None:
-        """Start recording data.
-
         Args:
-            recording_id: Unique identifier for the recording session
+            data_type: The type of data this stream handles.
+            stream_name: Unique name for this stream (used as producer ID).
 
         Note:
             This must be kept lightweight and not perform any blocking operations.
         """
+        self._recording = False
+        self._context: DataRecordingContext | None = None
+        self._latest_data: NCData | None = None
+        self._data_type = data_type
+        self._stream_name = stream_name
+        self._producer: Producer | None = None
+        self.lock = threading.Lock()
+        self._management_channel = ManagementChannel()
+
+    def start_recording(self, context: DataRecordingContext) -> None:
+        """Start recording data for this stream.
+
+        If the stream is already recording, stop it first. Then, set the
+        recording state to True and store the recording context. Finally,
+        ensure a producer is available for this stream and start a new trace.
+
+        Args:
+            context: Recording context containing identifiers for the recording
+                session, robot, and dataset.
+
+        Returns:
+            None
+        """
         if self.is_recording():
             self.stop_recording()
         self._recording = True
-        self._recording_id = recording_id
+        self._context = context
+        self._handle_ensure_producer(context)
+
+    def _handle_ensure_producer(self, context: DataRecordingContext) -> None:
+        """Ensures a producer is available for this data stream.
+
+        If the producer does not exist, it is created with the given context.
+        If the producer already exists, its recording ID is updated if necessary.
+        Finally, a new trace is started for this producer.
+
+        Args:
+            context: Recording context containing identifiers for
+                the recording session, robot, and dataset.
+        """
+        if self._producer is None:
+            producer_id = f"{self._data_type.value}:{self._stream_name}"
+            self._producer = self._management_channel.get_nc_context(
+                producer_id=producer_id, recording_id=context.recording_id
+            )
+            self._producer.initialize_new_producer()
+            return
+        if (
+            self._producer.recording_id is None
+            or self._producer.recording_id != context.recording_id
+        ):
+            self._producer.set_recording_id(context.recording_id)
+
+        self._producer.start_new_trace()
 
     def stop_recording(self) -> list[threading.Thread]:
-        """Stop recording data.
+        """Stop recording data and end trace if producer exists.
 
         Returns:
-            List[threading.Thread]: List of upload threads for cleanup
-
-        Raises:
-            ValueError: If not currently recording
+            List[threading.Thread]: Empty list (no upload threads needed with daemon).
         """
-        if not self.is_recording():
-            raise ValueError("Not recording")
         self._recording = False
-        self._recording_id = None
+        if isinstance(self._producer, Producer) and self._producer.trace_id:
+            self._producer.cleanup_producer()
         return []
 
     def is_recording(self) -> bool:
@@ -90,12 +140,31 @@ class DataStream(ABC):
         """
         return self._latest_data
 
+    def _send_to_daemon(self, data: bytes) -> None:
+        """Send data to the daemon via the producer.
+
+        Args:
+            data: Serialized data bytes to send.
+        """
+        if self._producer is None or self._context is None:
+            return
+        self._producer.send_data(
+            data=data,
+            data_type=self._data_type,
+            robot_instance=self._context.robot_instance,
+            data_type_name=self._stream_name,
+            robot_id=self._context.robot_id,
+            robot_name=self._context.robot_name,
+            dataset_id=self._context.dataset_id,
+            dataset_name=self._context.dataset_name,
+        )
+
 
 class JsonDataStream(DataStream):
-    """Stream that logs and uploads structured JSON data.
+    """Stream that logs and sends structured JSON data to the daemon.
 
-    Records arbitrary structured data as JSON files and uploads them
-    to cloud storage during recording sessions.
+    Records arbitrary structured data as JSON and sends it to the daemon
+    for persistence during recording sessions.
     """
 
     def __init__(self, data_type: DataType, data_type_name: str):
@@ -105,36 +174,7 @@ class JsonDataStream(DataStream):
             data_type: Type of data being recorded (e.g., JSON events)
             data_type_name: Name of the JSON data stream
         """
-        super().__init__()
-        self.data_type = data_type
-        self.data_type_name = data_type_name
-        self._streamer: StreamingJsonUploader | None = None
-
-    def start_recording(self, recording_id: str) -> None:
-        """Start JSON data recording.
-
-        Args:
-            recording_id: Unique identifier for the recording session
-        """
-        super().start_recording(recording_id)
-        self._streamer = StreamingJsonUploader(
-            recording_id=recording_id,
-            data_type=self.data_type,
-            data_type_name=self.data_type_name,
-        )
-
-    def stop_recording(self) -> list[threading.Thread]:
-        """Stop JSON recording and finalize upload.
-
-        Returns:
-            List[threading.Thread]: Upload thread for cleanup
-        """
-        super().stop_recording()
-        if self._streamer is None:
-            raise TypeError("Streamer is None")
-        upload_thread = self._streamer.finish()
-        self._streamer = None
-        return [upload_thread]
+        super().__init__(data_type=data_type, stream_name=data_type_name)
 
     def log(self, data: NCData) -> None:
         """Log structured data as JSON.
@@ -143,57 +183,37 @@ class JsonDataStream(DataStream):
             data: Data object implementing NCData interface
         """
         self._latest_data = data
-        if not self.is_recording() or self._streamer is None:
+        if not self.is_recording():
             return
-        self._streamer.add_frame(data.model_dump(mode="json"))
+
+        # Serialize to JSON bytes and send to daemon
+        json_bytes = json.dumps(data.model_dump(mode="json")).encode("utf-8")
+        self._send_to_daemon(json_bytes)
 
 
 class VideoDataStream(DataStream):
-    """Stream that encodes and uploads video data.
+    """Stream that sends video frame data to the daemon.
 
-    Base class for video streams that provides dual encoding (lossless and lossy)
-    for optimal storage and streaming performance.
+    Base class for video streams. Frame data is sent raw to the daemon
+    which handles storage. Video encoding is done by the loader when
+    uploading to the backend.
     """
 
-    def __init__(self, camera_id: str, width: int = 640, height: int = 480):
+    def __init__(
+        self, data_type: DataType, camera_id: str, width: int = 640, height: int = 480
+    ):
         """Initialize the video data stream.
 
         Args:
+            data_type: Type of video data (RGB_IMAGES or DEPTH_IMAGES)
             camera_id: Unique identifier for the camera
             width: Video frame width in pixels
             height: Video frame height in pixels
         """
-        super().__init__()
+        super().__init__(data_type=data_type, stream_name=camera_id)
         self.camera_id = camera_id
         self.width = width
         self.height = height
-        self._lossless_encoder: StreamingVideoUploader | None = None
-        self._lossy_encoder: StreamingVideoUploader | None = None
-
-    def start_recording(self, recording_id: str) -> None:
-        """Start video recording.
-
-        Args:
-            recording_id: Unique identifier for the recording session
-        """
-        super().start_recording(recording_id)
-
-    def stop_recording(self) -> list[threading.Thread]:
-        """Stop video recording and finalize encoding.
-
-        Returns:
-            List[threading.Thread]: Upload threads for both lossless and lossy encoders
-        """
-        super().stop_recording()
-        if self._lossless_encoder is None:
-            raise TypeError("_lossless_encoder is None")
-        lossless_upload_thread = self._lossless_encoder.finish()
-        if self._lossy_encoder is None:
-            raise TypeError("_lossy_encoder is None")
-        lossy_upload_thread = self._lossy_encoder.finish()
-        self._lossless_encoder = None
-        self._lossy_encoder = None
-        return [lossless_upload_thread, lossy_upload_thread]
 
     def log(self, metadata: CameraData, frame: np.ndarray) -> None:
         """Log video frame data.
@@ -204,89 +224,64 @@ class VideoDataStream(DataStream):
         """
         metadata.frame = frame
         self._latest_data = metadata
-        if (
-            not self.is_recording()
-            or self._lossless_encoder is None
-            or self._lossy_encoder is None
-        ):
+        if not self.is_recording():
             return
-        self._lossless_encoder.add_frame(metadata, frame)
-        self._lossy_encoder.add_frame(metadata, frame)
+
+        # Serialize metadata and frame to bytes
+        # Frame is sent as raw numpy bytes with metadata as JSON header
+        metadata_dict = metadata.model_dump(mode="json", exclude={"frame"})
+        metadata_dict["width"] = self.width
+        metadata_dict["height"] = self.height
+        metadata_json = json.dumps(metadata_dict).encode("utf-8")
+
+        # Pack: [metadata_len (4 bytes)] [metadata_json] [frame_bytes]
+        frame_bytes = frame.tobytes()
+        header = struct.pack("<I", len(metadata_json))
+        data = header + metadata_json + frame_bytes
+        self._send_to_daemon(data)
 
 
 class DepthDataStream(VideoDataStream):
-    """Stream that encodes and uploads depth data as video.
+    """Stream that sends depth data to the daemon.
 
-    Converts depth data to RGB representation for video encoding while
-    maintaining both lossless and lossy variants for different use cases.
+    Handles depth camera data. The raw depth data is sent to the daemon
+    for storage and later processing by the loader.
     """
 
-    def start_recording(self, recording_id: str) -> None:
-        """Start depth video recording.
-
-        Initializes both lossless (for accuracy) and lossy (for bandwidth)
-        encoders with appropriate codec settings for depth data.
+    def __init__(self, camera_id: str, width: int = 640, height: int = 480):
+        """Initialize the depth data stream.
 
         Args:
-            recording_id: Unique identifier for the recording session
+            camera_id: Unique identifier for the camera
+            width: Video frame width in pixels
+            height: Video frame height in pixels
         """
-        super().start_recording(recording_id)
-        self._lossless_encoder = StreamingVideoUploader(
-            recording_id=recording_id,
+        super().__init__(
             data_type=DataType.DEPTH_IMAGES,
-            data_type_name=self.camera_id,
-            width=self.width,
-            height=self.height,
-            video_name=LOSSLESS_VIDEO_NAME,
-            transform_frame=depth_to_rgb,
-            codec_context_options={"qp": "0", "preset": "ultrafast"},
-        )
-        self._lossy_encoder = StreamingVideoUploader(
-            recording_id=recording_id,
-            data_type=DataType.DEPTH_IMAGES,
-            data_type_name=self.camera_id,
-            width=self.width,
-            height=self.height,
-            video_name=LOSSY_VIDEO_NAME,
-            transform_frame=depth_to_rgb,
-            pixel_format="yuv420p",
-            codec="libx264",
+            camera_id=camera_id,
+            width=width,
+            height=height,
         )
 
 
 class RGBDataStream(VideoDataStream):
-    """Stream that encodes and uploads RGB video data.
+    """Stream that sends RGB video data to the daemon.
 
-    Handles RGB camera data with dual encoding for both archival quality
-    (lossless) and streaming efficiency (lossy) use cases.
+    Handles RGB camera data. The raw frame data is sent to the daemon
+    for storage and later processing by the loader.
     """
 
-    def start_recording(self, recording_id: str) -> None:
-        """Start RGB video recording.
-
-        Initializes both lossless and lossy encoders with appropriate
-        settings for RGB video data.
+    def __init__(self, camera_id: str, width: int = 640, height: int = 480):
+        """Initialize the RGB data stream.
 
         Args:
-            recording_id: Unique identifier for the recording session
+            camera_id: Unique identifier for the camera
+            width: Video frame width in pixels
+            height: Video frame height in pixels
         """
-        super().start_recording(recording_id)
-        self._lossless_encoder = StreamingVideoUploader(
-            recording_id=recording_id,
+        super().__init__(
             data_type=DataType.RGB_IMAGES,
-            data_type_name=self.camera_id,
-            width=self.width,
-            height=self.height,
-            video_name=LOSSLESS_VIDEO_NAME,
-            codec_context_options={"qp": "0", "preset": "ultrafast"},
-        )
-        self._lossy_encoder = StreamingVideoUploader(
-            recording_id=recording_id,
-            data_type=DataType.RGB_IMAGES,
-            data_type_name=self.camera_id,
-            width=self.width,
-            height=self.height,
-            video_name=LOSSY_VIDEO_NAME,
-            pixel_format="yuv420p",
-            codec="libx264",
+            camera_id=camera_id,
+            width=width,
+            height=height,
         )
