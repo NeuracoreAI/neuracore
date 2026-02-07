@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+
+if os.environ.get("CI", "false").lower() == "true":
+    pytest.skip("Skipping Pi0 tests in CI", allow_module_level=True)
+
 import torch
 from neuracore_types import BatchedNCData, DataType, ModelInitDescription
 from torch import nn

@@ -91,7 +91,7 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         """Get the current recording ID for a robot instance.
 
         Args:
-            robot_id: Unique identifier for the robot
+            robot_id: Robot ID
             instance: Instance number of the robot
 
         Returns:
@@ -106,7 +106,7 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         """Check if a robot instance is currently recording.
 
         Args:
-            robot_id: Unique identifier for the robot
+            robot_id: Robot ID
             instance: Instance number of the robot
 
         Returns:
@@ -137,7 +137,7 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         was already recording with a different ID, stops the previous recording first.
 
         Args:
-            robot_id: Unique identifier for the robot
+            robot_id: Robot ID
             instance: Instance number of the robot
             recording_id: Unique identifier for the recording session
         """
@@ -152,7 +152,6 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
             self.recording_stopped(robot_id, instance, previous_recording_id)
 
         self.recording_robot_instances[instance_key] = recording_id
-
         self._schedule_recording_timers(
             robot_id=robot_id,
             instance=instance,
@@ -229,7 +228,7 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         the stop if the recording ID matches the current recording.
 
         Args:
-            robot_id: Unique identifier for the robot
+            robot_id: Robot ID
             instance: Instance number of the robot
             recording_id: Unique identifier for the recording session
         """
@@ -265,12 +264,12 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         recording_id = details.recording_id
 
         previous_recording_id = self.recording_robot_instances.get(
-            RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance), None
+            RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance),
+            None,
         )
         was_recording = previous_recording_id is not None
 
         if was_recording == is_recording and previous_recording_id == recording_id:
-            # no change
             return
 
         if is_recording:
