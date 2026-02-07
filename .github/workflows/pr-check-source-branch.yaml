@@ -1,0 +1,51 @@
+name: Check PR Source Branch
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  check-source-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if PR is from dev/develop branch
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const sourceBranch = pr.head.ref;
+            const targetBranch = pr.base.ref;
+            const allowedBranches = ['develop'];
+
+            console.log(`PR #${pr.number}: ${sourceBranch} -> ${targetBranch}`);
+
+            if (targetBranch === 'main' && !allowedBranches.includes(sourceBranch)) {
+              const errorMessage = `❌ **Invalid PR Source Branch**
+
+              PRs to \`main\` can only come from the \`develop\` branch.
+
+              **Current PR:**
+              - Source: \`${sourceBranch}\`
+              - Target: \`${targetBranch}\`
+
+              **Required workflow:**
+              1. Merge your feature branch into \`develop\`
+              2. Once ready for release, create a PR from \`develop\` to \`main\`
+
+              Please close this PR and follow the correct branching workflow.`;
+
+              core.setFailed(errorMessage);
+
+              // Post comment on PR
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body: errorMessage
+              });
+            } else {
+              console.log('✅ Source branch is valid');
+              core.summary.addRaw(`✅ PR source branch \`${sourceBranch}\` is allowed for target \`${targetBranch}\``);
+              await core.summary.write();
+            }
