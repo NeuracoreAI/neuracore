@@ -8,6 +8,8 @@ on:
 jobs:
   check-source-branch:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     steps:
       - name: Check if PR is from dev/develop branch
         uses: actions/github-script@v7
