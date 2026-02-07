@@ -11,7 +11,6 @@ import time
 from neuracore_types import DataType, JointData, SynchronizedPoint
 
 from neuracore.api.globals import GlobalSingleton
-from neuracore.core.exceptions import RobotError
 from neuracore.core.robot import Robot
 from neuracore.core.streaming.p2p.consumer.org_nodes_manager import (
     get_org_nodes_manager,
@@ -52,7 +51,6 @@ def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
 
     Always false if live data is disabled.
 
-
     Args:
         robot: The robot instance.
         num_remote_nodes: The number of remote nodes expected to be connected.
@@ -67,6 +65,8 @@ def check_remote_nodes_connected(robot: Robot, num_remote_nodes: int) -> bool:
         return False
 
     if robot.id is None:
+        from neuracore.core.exceptions import RobotError
+
         raise RobotError("Robot not initialized. Call init() first.")
 
     org_node_manager = get_org_nodes_manager(robot.org_id)
@@ -113,6 +113,8 @@ def get_latest_sync_point(
         return sync_point
 
     if robot.id is None:
+        from neuracore.core.exceptions import RobotError
+
         raise RobotError("Robot not initialized. Call init() first.")
 
     org_node_manager = get_org_nodes_manager(robot.org_id)

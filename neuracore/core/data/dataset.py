@@ -270,36 +270,42 @@ class Dataset:
         Args:
             name: Name of the dataset to retrieve.
             non_exist_ok: If True, returns None when dataset is not found
-                instead of raising an exception.
+                or when connection fails, instead of raising an exception.
 
         Returns:
             The Dataset instance if found, or None if non_exist_ok is True
-            and the dataset doesn't exist.
+            and the dataset doesn't exist or connection failed.
 
         Raises:
-            DatasetError: If the dataset is not found and non_exist_ok is False.
+            DatasetError: If the dataset is not found and non_exist_ok is False,
+                or if connection fails and non_exist_ok is False.
         """
         auth: Auth = get_auth()
         org_id = get_current_org()
-        response = requests.get(
-            f"{API_URL}/org/{org_id}/datasets/search/by-name",
-            params={"name": name},
-            headers=auth.get_headers(),
-        )
-        if response.status_code != 200:
+        try:
+            response = requests.get(
+                f"{API_URL}/org/{org_id}/datasets/search/by-name",
+                params={"name": name},
+                headers=auth.get_headers(),
+            )
+            if response.status_code != 200:
+                if non_exist_ok:
+                    return None
+                raise DatasetError(f"Dataset '{name}' not found.")
+            dataset_model = DatasetModel.model_validate(response.json())
+            return Dataset(
+                id=dataset_model.id,
+                org_id=org_id,
+                name=dataset_model.name,
+                size_bytes=dataset_model.size_bytes,
+                tags=dataset_model.tags,
+                is_shared=dataset_model.is_shared,
+                data_types=list(dataset_model.all_data_types.keys()),
+            )
+        except requests.exceptions.ConnectionError:
             if non_exist_ok:
                 return None
-            raise DatasetError(f"Dataset '{name}' not found.")
-        dataset_model = DatasetModel.model_validate(response.json())
-        return Dataset(
-            id=dataset_model.id,
-            org_id=org_id,
-            name=dataset_model.name,
-            size_bytes=dataset_model.size_bytes,
-            tags=dataset_model.tags,
-            is_shared=dataset_model.is_shared,
-            data_types=list(dataset_model.all_data_types.keys()),
-        )
+            raise DatasetError("Failed to connect to server to retrieve dataset.")
 
     @staticmethod
     def create(

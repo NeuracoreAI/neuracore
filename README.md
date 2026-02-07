@@ -126,6 +126,7 @@ predictions = policy.predict(timeout=5)
 - [Dataset Importer](./docs/dataset_importer.md)
 - [Environment Variables](./docs/enironment_variable.md)
 - [Contribution Guide](./docs/contribution_guide.md)
+- [Data Daemon](./docs/data_daemon.md)
 
 # 💬 Community
 

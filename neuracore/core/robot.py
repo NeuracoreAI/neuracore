@@ -14,7 +14,6 @@ import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Lock
 from warnings import warn
 
 import requests
@@ -22,11 +21,11 @@ from neuracore_types import RobotInstanceIdentifier
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
-from neuracore.core.streaming.recording_state_manager import (
-    RecordingStateManager,
-    get_recording_state_manager,
-)
+from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.robot_mapping import RobotMapping
+from neuracore.data_daemon.communications_management.producer import (
+    RecordingContext as DaemonRecordingContext,
+)
 
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
@@ -107,12 +106,6 @@ class Robot:
         self._auth: Auth = get_auth()
         self._temp_dir = None
         self._data_streams: dict[str, DataStream] = dict()
-
-        self._recording_manager = get_recording_state_manager()
-        self._recording_manager.add_listener(
-            RecordingStateManager.RECORDING_STOPPED, self._recording_stopped
-        )
-        self._stop_streams_lock = Lock()
 
         self.org_id = org_id or get_current_org()
 
@@ -276,6 +269,7 @@ class Robot:
                     "robot_id": self.id,
                     "instance": self.instance,
                     "dataset_id": dataset_id,
+                    "upload_method": "data_daemon",
                 },
             )
             response.raise_for_status()
@@ -321,6 +315,9 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
+        DaemonRecordingContext(recording_id=recording_id).stop_recording()
+        self._stop_all_streams()
+
         try:
             response = requests.post(
                 f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}",
@@ -346,25 +343,13 @@ class Robot:
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to stop recording: {str(e)}")
 
-    def _recording_stopped(
-        self, robot_id: str, instance: int, recording_id: str
-    ) -> None:
-        """Handle recording stopped events from the recording state manager.
-
-        Internal callback that stops data collection from all streams when
-        a recording session ends.
-
-        Args:
-            robot_id: ID of the robot whose recording stopped.
-            instance: Instance number of the robot.
-            recording_id: ID of the recording that stopped.
-        """
-        if self.id != robot_id or self.instance != instance:
-            return
-        with self._stop_streams_lock:
-            for data_stream in self._data_streams.values():
-                if data_stream.is_recording():
-                    data_stream.stop_recording()
+    def _stop_all_streams(self) -> None:
+        """Stop recording on all data streams for this robot instance."""
+        for stream_id, stream in self._data_streams.items():
+            try:
+                stream.stop_recording()
+            except Exception:
+                logger.exception("Failed to stop data stream %s", stream_id)
 
     def is_recording(self) -> bool:
         """Check if the robot is currently recording data.
@@ -650,6 +635,8 @@ class Robot:
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
+
+        DaemonRecordingContext(recording_id=recording_id).stop_recording()
 
         try:
             response = requests.post(
