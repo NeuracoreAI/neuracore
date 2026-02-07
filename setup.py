@@ -50,6 +50,12 @@ setup(
         "typer>=0.20.0",
         "neuracore-types>=6.0.1,<7.0.0",
         "ordered_set",
+        "pyzmq==27.1.0",
+        "sqlalchemy>=2.0.0",
+        "aiosqlite>=0.19.0",
+        "aiohttp>=3.9.0",
+        "aiofiles>=23.0.0",
+        "pyee==13.0.0",
     ],
     extras_require={
         "examples": [
@@ -80,6 +86,7 @@ setup(
             "twine>=3.4.2",
             "requests-mock>=1.9.3",
             "pre-commit",
+            "types-aiofiles",
         ],
         "import": [
             "lerobot==0.3.3",
@@ -91,6 +98,7 @@ setup(
     entry_points={
         "console_scripts": [
             "neuracore = neuracore.core.cli.app:main",
+            "nc-data-daemon = neuracore.data_daemon.main:main",
         ]
     },
     keywords="robotics machine-learning ai client-library",

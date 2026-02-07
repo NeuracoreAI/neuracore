@@ -86,9 +86,8 @@ class ResumableUpload:
             Exception: If there's a mismatch between local and server upload positions.
         """
         if len(data) == 0 and not is_final:
-            return True  # Nothing to upload
+            return True
 
-        # First, check if the session is still valid and get current uploaded bytes
         actual_uploaded_bytes = self.check_status()
         if actual_uploaded_bytes != self.total_bytes_uploaded:
             raise Exception(
@@ -96,26 +95,21 @@ class ResumableUpload:
                 f"Local={self.total_bytes_uploaded}, Server={actual_uploaded_bytes}"
             )
 
-        # Prepare headers
         headers = {
             "Content-Length": str(len(data)),
         }
 
-        # Set content range header
         chunk_first_byte = self.total_bytes_uploaded
         chunk_last_byte = self.total_bytes_uploaded + len(data) - 1
 
         if is_final:
-            # Final chunk, include total size
             total_size = self.total_bytes_uploaded + len(data)
             headers["Content-Range"] = (
                 f"bytes {chunk_first_byte}-{chunk_last_byte}/{total_size}"
             )
         else:
-            # Not final chunk, use '*' for total size
             headers["Content-Range"] = f"bytes {chunk_first_byte}-{chunk_last_byte}/*"
 
-        # Attempt the upload with retries
         for attempt in range(self.max_retries):
             try:
                 response = requests.put(self.session_uri, headers=headers, data=data)
@@ -125,20 +119,18 @@ class ResumableUpload:
                     self.total_bytes_uploaded += len(data)
                     return True
                 elif status_code == 308:
-                    # Resume Incomplete, more data expected
                     self.total_bytes_uploaded += len(data)
                     return True
                 else:
-                    # Error occurred
                     if attempt < self.max_retries - 1:
-                        time.sleep(2**attempt)  # Exponential backoff
+                        time.sleep(2**attempt)
 
             except Exception:
                 logger.error(
                     f"Exception during upload (attempt {attempt+1})", exc_info=True
                 )
                 if attempt < self.max_retries - 1:
-                    time.sleep(2**attempt)  # Exponential backoff
+                    time.sleep(2**attempt)
 
         return False
 
