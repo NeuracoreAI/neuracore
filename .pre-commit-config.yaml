@@ -50,10 +50,8 @@ repos:
     rev: v9.2.0
     hooks:
       - id: cspell # Spell check changed files
-        language_version: 20.18.0
       - id: cspell # Spell check the commit message
         name: check commit message spelling
-        language_version: 20.18.0
         args:
           - --no-must-find-files
           - --no-progress
