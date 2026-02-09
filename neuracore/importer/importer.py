@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from neuracore_types.nc_data import DatasetImportConfig
 
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
+from neuracore.importer.core.base import get_shared_console
 from neuracore.importer.core.dataset_detector import (
     DatasetDetector,
     iter_first_two_levels,
@@ -30,17 +32,61 @@ from neuracore.importer.core.validation import (
 from neuracore.importer.lerobot_importer import LeRobotDatasetImporter
 from neuracore.importer.rlds_importer import RLDSDatasetImporter
 
+try:
+    from rich.logging import RichHandler
+
+    _HAS_RICH = True
+except Exception:  # noqa: BLE001
+    RichHandler = None  # type: ignore[assignment]
+    _HAS_RICH = False
+
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 logger = logging.getLogger(__name__)
 
 
+class CenteredFormatter(logging.Formatter):
+    """Formatter that centers the log level name."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Format log records with a centered level token."""
+        record.levelname = record.levelname.center(8)
+        return super().format(record)
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def configure_logging(level: int = logging.INFO) -> None:
-    """Configure root logging with a concise, consistent format."""
-    if logging.getLogger().handlers:
-        logging.getLogger().setLevel(level)
+    """Configure root logging for importer runs.
+
+    Defaults to Rich logging when available, and falls back to the
+    previous stream formatter otherwise.
+    """
+    root_logger = logging.getLogger()
+    if root_logger.handlers:
+        root_logger.setLevel(level)
         return
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+
+    use_rich_logging = _env_truthy("NEURACORE_IMPORT_USE_RICH_LOGGING", default=True)
+    if use_rich_logging and _HAS_RICH and RichHandler is not None:
+        handler = RichHandler(
+            console=get_shared_console(),
+            show_time=True,
+            show_level=True,
+            show_path=False,
+            rich_tracebacks=True,
+            markup=False,
+            omit_repeated_times=False,
+        )
+        handler.setFormatter(logging.Formatter("%(name)s | %(message)s"))
+    else:
+        handler = logging.StreamHandler()
+        handler.setFormatter(CenteredFormatter(LOG_FORMAT))
+
     logging.basicConfig(level=level, handlers=[handler])
 
 
@@ -140,6 +186,8 @@ def _run_import(
     suppress_validation_warnings: bool = False,
 ) -> None:
     """Execute the dataset import workflow."""
+    configure_logging()
+
     args = SimpleNamespace(
         dataset_config=dataset_config,
         dataset_dir=dataset_dir,
