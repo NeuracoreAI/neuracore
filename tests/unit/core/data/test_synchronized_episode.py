@@ -47,6 +47,7 @@ class TestSynchronizedRecording:
         return SynchronizedRecording(
             dataset=dataset_mock,
             recording_id="rec1",
+            recording_name="recording1",
             robot_id="robot1",
             instance=1,
             frequency=30,
@@ -76,6 +77,7 @@ class TestSynchronizedRecording:
         synced = SynchronizedRecording(
             dataset=dataset_mock,
             recording_id="rec1",
+            recording_name="recording1",
             robot_id="robot1",
             instance=1,
             frequency=30,
@@ -170,6 +172,7 @@ class TestSynchronizedRecording:
         synced = SynchronizedRecording(
             dataset=dataset_mock,
             recording_id="rec1",
+            recording_name="recording1",
             robot_id="robot1",
             instance=1,
             frequency=30,
@@ -246,6 +249,7 @@ class TestSynchronizedRecording:
         synced = SynchronizedRecording(
             dataset=dataset_mock,
             recording_id="rec1",
+            recording_name="recording1",
             robot_id="robot1",
             instance=1,
             frequency=30,
@@ -265,6 +269,7 @@ class TestSynchronizedRecording:
         synced = SynchronizedRecording(
             dataset=dataset_mock,
             recording_id="rec1",
+            recording_name="recording1",
             robot_id="robot1",
             instance=1,
             frequency=30,
@@ -281,6 +286,7 @@ class TestSynchronizedRecording:
             SynchronizedRecording(
                 dataset=dataset_mock,
                 recording_id="rec1",
+                recording_name="recording1",
                 robot_id="robot1",
                 instance=1,
                 frequency=30,
@@ -340,6 +346,7 @@ class TestSynchronizedRecording:
         synced_30 = SynchronizedRecording(
             dataset=dataset_mock,
             recording_id="rec1",
+            recording_name="recording1",
             robot_id="robot1",
             instance=1,
             frequency=30,
@@ -349,6 +356,7 @@ class TestSynchronizedRecording:
         synced_60 = SynchronizedRecording(
             dataset=dataset_mock,
             recording_id="rec1",
+            recording_name="recording1",
             robot_id="robot1",
             instance=1,
             frequency=60,

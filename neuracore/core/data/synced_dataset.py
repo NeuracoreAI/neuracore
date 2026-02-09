@@ -143,6 +143,7 @@ class SynchronizedDataset:
                     rec = cast(Recording, self.dataset[idx])
                     synced_recording = SynchronizedRecording(
                         recording_id=rec.id,
+                        recording_name=rec.name,
                         dataset=self.dataset,
                         robot_id=rec.robot_id,
                         instance=rec.instance,
@@ -173,6 +174,7 @@ class SynchronizedDataset:
             if self._recording_idx not in self._synced_recording_cache:
                 s = SynchronizedRecording(
                     recording_id=recording.id,
+                    recording_name=recording.name,
                     dataset=self.dataset,
                     robot_id=recording.robot_id,
                     instance=recording.instance,
