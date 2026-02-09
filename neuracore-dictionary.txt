@@ -269,3 +269,11 @@ checkpointed
 CREAT
 getpid
 WRONLY
+bgra
+bigendian
+byteswap
+elems
+itemsize
+mcap
+MCAP
+newbyteorder

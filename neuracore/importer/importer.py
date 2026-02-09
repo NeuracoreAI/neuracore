@@ -28,6 +28,7 @@ from neuracore.importer.core.validation import (
     validate_dataset_config_against_robot_model,
 )
 from neuracore.importer.lerobot_importer import LeRobotDatasetImporter
+from neuracore.importer.mcap_importer import MCAPDatasetImporter
 from neuracore.importer.rlds_importer import RLDSDatasetImporter
 
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
@@ -77,7 +78,7 @@ def cli_args_validation(args: SimpleNamespace) -> None:
 
 
 def detect_dataset_type(dataset_dir: Path) -> DatasetTypeConfig:
-    """Detect whether the dataset is TFDS, RLDS, or LeRobot."""
+    """Detect whether the dataset is MCAP, TFDS, RLDS, or LeRobot."""
     detector = DatasetDetector()
     try:
         return detector.detect(dataset_dir)
@@ -218,9 +219,10 @@ def _run_import(
         searched_locations = (
             ", ".join(search_hints) if search_hints else "none provided"
         )
-        raise CLIError(
-            "Could not find a robot description file (.urdf or .xml/.mjcf). "
-            f"Searched: {searched_locations}."
+        logger.warning(
+            "No robot description files found. Searched: %s. "
+            "Robot information will not be populated in the dataset.",
+            searched_locations,
         )
 
     robot = nc.connect_robot(
@@ -237,10 +239,25 @@ def _run_import(
 
     logger.info("Setup complete; beginning import.")
 
-    importer: RLDSDatasetImporter | LeRobotDatasetImporter | None = None
+    importer: (
+        RLDSDatasetImporter | LeRobotDatasetImporter | MCAPDatasetImporter | None
+    ) = None
     skip_on_error = args.skip_on_error
     if dataset_type == DatasetTypeConfig.TFDS:
         raise NotImplementedError("TFDS import not yet implemented.")
+    elif dataset_type == DatasetTypeConfig.MCAP:
+        logger.info("Starting MCAP dataset import from %s", args.dataset_dir)
+        importer = MCAPDatasetImporter(
+            input_dataset_name=dataconfig.input_dataset_name,
+            output_dataset_name=dataconfig.output_dataset.name,
+            dataset_dir=args.dataset_dir,
+            dataset_config=dataconfig,
+            joint_info=robot.joint_info,
+            dry_run=args.dry_run,
+            suppress_warnings=args.no_validation_warnings,
+            skip_on_error=skip_on_error,
+        )
+        importer.upload_all()
     elif dataset_type == DatasetTypeConfig.RLDS:
         logger.info("Starting RLDS dataset import from %s", args.dataset_dir)
         importer = RLDSDatasetImporter(
@@ -274,7 +291,7 @@ def _run_import(
 def main() -> None:
     """Delegate to the Typer CLI app located in neuracore.importer.CLI.app."""
     # Import locally to keep importer.py free of Typer dependency for library use
-    from neuracore.importer.CLI.app import main as cli_main
+    from neuracore.importer.cli.app import main as cli_main
 
     cli_main()
 
