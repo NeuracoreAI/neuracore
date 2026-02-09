@@ -104,13 +104,24 @@ data_import_config:
   PARALLEL_GRIPPER_OPEN_AMOUNTS:
     source: observation.state # path to the data in the input dataset
     format:
+      invert_gripper_amount: true # convert from close amount to open amount
       normalize: # normalize the data to be between 0 and 1
-        min: 0.0
-        max: 1.0
+        min: -3.2
+        max: 3.2
     mapping:
       - name: gripper
         index: 6
-        inverted: false
+  
+  PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+    source: observation.state # path to the data in the input dataset
+    format:
+      invert_gripper_amount: true # convert from close amount to open amount
+      normalize: # normalize the data to be between 0 and 1
+        min: -3.2
+        max: 3.2
+    mapping:
+      - name: gripper
+        index: 6
 
   VISUAL_JOINT_POSITIONS:
     source: observation.state # path to the data in the input dataset
@@ -123,6 +134,18 @@ data_import_config:
         offset: -0.7853981633974483
       - name: finger_joint2
         index: 6
+  
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state # path to the data in the input dataset
+    format:
+      visual_joint_type: CUSTOM
+    mapping:
+      - name: finger_joint1
+        index: 8
+        offset: 0.0
+      - name: finger_joint2
+        index: 9
+        offset: 0.0
 
   END_EFFECTOR_POSES:
     source: observation.state # path to the data in the input dataset
