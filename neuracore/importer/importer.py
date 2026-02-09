@@ -21,7 +21,7 @@ from neuracore.importer.core.exceptions import (
     ConfigLoadError,
     DatasetDetectionError,
     DatasetOperationError,
-    UploaderError,
+    ImporterError,
 )
 from neuracore.importer.core.utils import populate_robot_info
 from neuracore.importer.core.validation import (
@@ -253,7 +253,7 @@ def _run_import(
             suppress_warnings=args.no_validation_warnings,
             skip_on_error=skip_on_error,
         )
-        importer.upload_all()
+        importer.import_all()
     elif dataset_type == DatasetTypeConfig.LEROBOT:
         logger.info("Starting LeRobot dataset import from %s", args.dataset_dir)
         importer = LeRobotDatasetImporter(
@@ -266,7 +266,7 @@ def _run_import(
             suppress_warnings=args.no_validation_warnings,
             skip_on_error=skip_on_error,
         )
-        importer.upload_all()
+        importer.import_all()
 
     logger.info("Finished importing dataset.")
 
@@ -282,7 +282,7 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except UploaderError as exc:
+    except ImporterError as exc:
         logger.error("%s", exc)
         sys.exit(1)
     except Exception:  # noqa: BLE001 - unexpected crash; show stack

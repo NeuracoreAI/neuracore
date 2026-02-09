@@ -113,7 +113,7 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
             dataset = dataset.take(chunk_length)
         self._episode_iter = iter(dataset)
 
-    def upload(self, item: ImportItem) -> None:
+    def import_item(self, item: ImportItem) -> None:
         """Import a single episode to the dataset importer."""
         if self._episode_iter is None:
             raise ImportError("Worker dataset iterator was not initialized.")
