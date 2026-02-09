@@ -4,7 +4,6 @@ import gc
 import logging
 import os
 import re
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -80,15 +79,9 @@ def _resolve_output_dir(run_name: str | None = None) -> str:
     else:
         run_name = _sanitize_run_name(str(run_name))
 
-    # Generate timestamp
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-    # Create directory name: run_name_timestamp
-    run_dir_name = f"{run_name}_{timestamp}"
-
     # Build full path
     base_dir = Path(os.environ.get("HOME", "~")) / ".neuracore" / "training" / "runs"
-    return str(base_dir / run_dir_name)
+    return str(base_dir / run_name)
 
 
 def _sanitize_run_name(name: str) -> str:
