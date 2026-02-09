@@ -53,7 +53,7 @@ The main entry point is the `importer.py` script:
 python -m neuracore.importer.importer \
     --dataset-config path/to/config.yaml \
     --dataset-dir path/to/dataset \
-    --robot-dir path/to/robot/description/files \
+    [--robot-dir path/to/robot/description/files] \
     [--overwrite]
 ```
 
@@ -61,10 +61,10 @@ python -m neuracore.importer.importer \
 
 - `--dataset-config`: Path to the dataset configuration YAML file
 - `--dataset-dir`: Path to the directory containing the dataset
-- `--robot-dir`: Path to robot description files (URDF/MJCF)
 
 #### Optional Arguments
 
+- `--robot-dir`: Path to robot description files (URDF/MJCF)
 - `--overwrite`: Delete existing dataset before uploading if it already exists
 
 ### Configuration File
@@ -141,4 +141,3 @@ Each data type mapping supports:
 3. **Prepare robot description**: Have URDF or MJCF files ready
 4. **Run importer**: Execute the CLI command with appropriate arguments
 5. **Monitor progress**: Check logs for upload progress and any errors
-

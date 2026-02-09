@@ -22,9 +22,6 @@ def test_import_command_invokes_run_import_with_defaults(monkeypatch, tmp_path):
     config_path.touch()
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()
-    robot_dir = tmp_path / "robot"
-    robot_dir.mkdir()
-
     cli_module = importlib.import_module("neuracore.importer.cli.app")
     monkeypatch.setattr(cli_module, "_run_import", fake_run_import)
 
@@ -35,8 +32,6 @@ def test_import_command_invokes_run_import_with_defaults(monkeypatch, tmp_path):
             str(config_path),
             "--dataset-dir",
             str(dataset_dir),
-            "--robot-dir",
-            str(robot_dir),
         ],
         env={"TERM": "dumb", "NO_COLOR": "1"},
     )
@@ -44,7 +39,7 @@ def test_import_command_invokes_run_import_with_defaults(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert called["dataset_config"] == config_path
     assert called["dataset_dir"] == dataset_dir
-    assert called["robot_dir"] == robot_dir
+    assert called["robot_dir"] is None
     assert called["overwrite"] is False
     assert called["dry_run"] is False
     assert called["skip_on_error"] == "episode"
@@ -61,9 +56,6 @@ def test_import_command_propagates_flags(monkeypatch, tmp_path):
     config_path.touch()
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()
-    robot_dir = tmp_path / "robot"
-    robot_dir.mkdir()
-
     cli_module = importlib.import_module("neuracore.importer.cli.app")
     monkeypatch.setattr(cli_module, "_run_import", fake_run_import)
 
@@ -74,8 +66,6 @@ def test_import_command_propagates_flags(monkeypatch, tmp_path):
             str(config_path),
             "--dataset-dir",
             str(dataset_dir),
-            "--robot-dir",
-            str(robot_dir),
             "--overwrite",
             "--dry-run",
             "--skip-on-error",
@@ -90,6 +80,7 @@ def test_import_command_propagates_flags(monkeypatch, tmp_path):
     assert captured["dry_run"] is True
     assert captured["skip_on_error"] == "step"
     assert captured["suppress_validation_warnings"] is True
+    assert captured["robot_dir"] is None
 
 
 def test_import_command_handles_cli_error(monkeypatch, tmp_path, caplog):
@@ -97,9 +88,6 @@ def test_import_command_handles_cli_error(monkeypatch, tmp_path, caplog):
     config_path.touch()
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()
-    robot_dir = tmp_path / "robot"
-    robot_dir.mkdir()
-
     cli_module = importlib.import_module("neuracore.importer.cli.app")
     monkeypatch.setattr(
         cli_module,
@@ -115,8 +103,6 @@ def test_import_command_handles_cli_error(monkeypatch, tmp_path, caplog):
                 str(config_path),
                 "--dataset-dir",
                 str(dataset_dir),
-                "--robot-dir",
-                str(robot_dir),
             ],
             env={"TERM": "dumb", "NO_COLOR": "1"},
         )
@@ -129,9 +115,6 @@ def test_import_command_validates_paths_with_click(tmp_path):
     missing_config = tmp_path / "missing.yaml"
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()
-    robot_dir = tmp_path / "robot"
-    robot_dir.mkdir()
-
     result = runner.invoke(
         app,
         [
@@ -139,8 +122,6 @@ def test_import_command_validates_paths_with_click(tmp_path):
             str(missing_config),
             "--dataset-dir",
             str(dataset_dir),
-            "--robot-dir",
-            str(robot_dir),
         ],
         env={"TERM": "dumb", "NO_COLOR": "1"},
     )
@@ -156,7 +137,7 @@ def test_cli_args_validation_missing_dataset_config(tmp_path):
     args = argparse.Namespace(
         dataset_config=tmp_path / "missing_config.yaml",
         dataset_dir=dataset_dir,
-        robot_dir=tmp_path / "robot_dir",
+        robot_dir=None,
     )
 
     with pytest.raises(CLIError) as excinfo:
@@ -172,7 +153,7 @@ def test_cli_args_validation_missing_dataset_dir(tmp_path):
     args = argparse.Namespace(
         dataset_config=config_path,
         dataset_dir=tmp_path / "missing_dataset",
-        robot_dir=tmp_path / "robot_dir",
+        robot_dir=None,
     )
 
     with pytest.raises(CLIError) as excinfo:
@@ -181,7 +162,7 @@ def test_cli_args_validation_missing_dataset_dir(tmp_path):
     assert f"Path does not exist: {args.dataset_dir}" in str(excinfo.value)
 
 
-def test_cli_args_validation_missing_robot_dir(tmp_path):
+def test_cli_args_validation_missing_robot_dir_when_provided(tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.touch()
     dataset_dir = tmp_path / "dataset_dir"
@@ -197,6 +178,22 @@ def test_cli_args_validation_missing_robot_dir(tmp_path):
         cli_args_validation(args)
 
     assert "Robot description directory does not exist" in str(excinfo.value)
+
+
+def test_cli_args_validation_none_robot_dir_is_allowed(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.touch()
+    dataset_dir = tmp_path / "dataset_dir"
+    dataset_dir.mkdir()
+
+    args = argparse.Namespace(
+        dataset_config=config_path,
+        dataset_dir=dataset_dir,
+        robot_dir=None,
+    )
+
+    # Should not raise any exception
+    cli_args_validation(args)
 
 
 def test_cli_args_validation_valid_args(tmp_path):

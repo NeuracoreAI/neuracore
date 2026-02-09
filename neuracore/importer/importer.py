@@ -133,7 +133,7 @@ def _resolve_robot_descriptions(
 def _run_import(
     dataset_config: Path,
     dataset_dir: Path,
-    robot_dir: Path,
+    robot_dir: Path | None = None,
     overwrite: bool = False,
     dry_run: bool = False,
     skip_on_error: str = "episode",
@@ -201,16 +201,16 @@ def _run_import(
 
     robot_config = dataconfig.robot
     urdf_path, mjcf_path = _resolve_robot_descriptions(
-        robot_config.urdf_path,
-        robot_config.mjcf_path,
+        getattr(robot_config, "urdf_path", None),
+        getattr(robot_config, "mjcf_path", None),
         args.robot_dir,
     )
     if urdf_path is None and mjcf_path is None:
         search_hints = [
             str(p)
             for p in (
-                robot_config.urdf_path,
-                robot_config.mjcf_path,
+                getattr(robot_config, "urdf_path", None),
+                getattr(robot_config, "mjcf_path", None),
                 args.robot_dir,
             )
             if p
@@ -218,17 +218,30 @@ def _run_import(
         searched_locations = (
             ", ".join(search_hints) if search_hints else "none provided"
         )
-        raise CLIError(
-            "Could not find a robot description file (.urdf or .xml/.mjcf). "
+        logger.warning(
+            f"Could not find a robot description file (.urdf or .xml/.mjcf). "
             f"Searched: {searched_locations}."
+            f"Proceeding without robot model. Robot body visualization won't "
+            f"be available on the Dataset viewer."
         )
-
-    robot = nc.connect_robot(
-        robot_name=robot_config.name,
-        urdf_path=urdf_path,
-        mjcf_path=mjcf_path,
-        overwrite=robot_config.overwrite_existing,
-    )
+        robot = nc.connect_robot(
+            robot_name=robot_config.name,
+            overwrite=robot_config.overwrite_existing,
+        )
+    elif urdf_path and not mjcf_path:
+        logger.info("Using URDF robot description at: %s", urdf_path)
+        robot = nc.connect_robot(
+            robot_name=robot_config.name,
+            urdf_path=urdf_path,
+            overwrite=robot_config.overwrite_existing,
+        )
+    elif mjcf_path and not urdf_path:
+        logger.info("Using MJCF robot description at: %s", mjcf_path)
+        robot = nc.connect_robot(
+            robot_name=robot_config.name,
+            mjcf_path=mjcf_path,
+            overwrite=robot_config.overwrite_existing,
+        )
     logger.info("Using robot model: %s (id=%s)", robot.name, robot.id)
 
     if robot.joint_info:
