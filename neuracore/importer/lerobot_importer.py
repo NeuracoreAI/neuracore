@@ -93,8 +93,8 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         end = start + len(chunk) if chunk else len(episode_ids)
         self._episode_iter = iter(episode_ids[start:end])
 
-    def upload(self, item: ImportItem) -> None:
-        """Upload a single episode to the dataset importer."""
+    def import_item(self, item: ImportItem) -> None:
+        """Import a single episode to the dataset importer."""
         if self._dataset is None or self._episode_iter is None:
             raise ImportError("Worker dataset was not initialized.")
 

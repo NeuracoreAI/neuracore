@@ -1,4 +1,4 @@
-"""Shared uploader framework for dataset ingestion workflows."""
+"""Shared importer framework for dataset ingestion workflows."""
 
 from __future__ import annotations
 
@@ -43,12 +43,12 @@ from neuracore.importer.core.validation import (
     validate_rgb_images,
 )
 
-from .exceptions import DataValidationError, DataValidationWarning, UploaderError
+from .exceptions import DataValidationError, DataValidationWarning, ImporterError
 
 
 @dataclass(frozen=True)
 class ImportItem:
-    """Unit of upload work (typically one episode)."""
+    """Unit of import work (typically one episode)."""
 
     index: int
     split: str | None = None
@@ -86,7 +86,7 @@ def get_shared_console() -> Console:
 
 
 class NeuracoreDatasetImporter(ABC):
-    """Uploader workflow that manages workers and Neuracore session setup."""
+    """Importer workflow that manages workers and Neuracore session setup."""
 
     def __init__(
         self,
@@ -101,7 +101,7 @@ class NeuracoreDatasetImporter(ABC):
         dry_run: bool = False,
         suppress_warnings: bool = False,
     ) -> None:
-        """Initialize the base dataset uploader."""
+        """Initialize the base dataset importer."""
         self.dataset_dir = Path(dataset_dir)
         self.dataset_config = dataset_config
         self.data_config = dataset_config  # Backwards-compat alias used by callers
@@ -130,11 +130,11 @@ class NeuracoreDatasetImporter(ABC):
 
     @abstractmethod
     def build_work_items(self) -> Sequence[ImportItem]:
-        """Enumerate uploadable units in deterministic order."""
+        """Enumerate importable units in deterministic order."""
 
     @abstractmethod
-    def upload(self, item: ImportItem) -> None:
-        """Perform the dataset-specific upload for a single item."""
+    def import_item(self, item: ImportItem) -> None:
+        """Perform the dataset-specific import for a single item."""
 
     @abstractmethod
     def _record_step(self, step: dict, timestamp: float) -> None:
@@ -378,8 +378,8 @@ class NeuracoreDatasetImporter(ABC):
         nc.connect_robot(self.robot_name, instance=worker_id)
         nc.get_dataset(self.output_dataset_name)
 
-    def upload_all(self) -> None:
-        """Run uploads across workers while aggregating errors.
+    def import_all(self) -> None:
+        """Run imports across workers while aggregating errors.
 
         High-level flow:
         1) Build the list of work items (episodes).
@@ -390,7 +390,7 @@ class NeuracoreDatasetImporter(ABC):
         """
         items = list(self.build_work_items())
         if not items:
-            self.logger.info("No upload items found; nothing to do.")
+            self.logger.info("No import items found; nothing to do.")
             return
 
         worker_count = self._resolve_worker_count(len(items))
@@ -424,7 +424,7 @@ class NeuracoreDatasetImporter(ABC):
         self._report_errors(self.worker_errors)
 
         if self.worker_errors and self.skip_on_error == "all":
-            raise UploaderError("Upload aborted due to worker errors.")
+            raise ImporterError("Import aborted due to worker errors.")
 
     def _resolve_worker_count(self, total_items: int) -> int:
         """Pick a worker count similar to the archived scripts."""
@@ -462,7 +462,7 @@ class NeuracoreDatasetImporter(ABC):
         error_queue: mp.Queue,
         progress_queue: mp.Queue | None,
     ) -> None:
-        """Worker body that wraps upload with error capture."""
+        """Worker body that wraps import with error capture."""
         self._worker_id = worker_id
         self._progress_queue = progress_queue
         try:
@@ -514,7 +514,7 @@ class NeuracoreDatasetImporter(ABC):
         """Centralized step handler for progress and error capture."""
         self._error_queue = error_queue
         try:
-            self.upload(item)
+            self.import_item(item)
         except Exception as exc:  # noqa: BLE001 - keep traceback for summary
             tb = traceback.format_exc()
             if self.skip_on_error == "episode":

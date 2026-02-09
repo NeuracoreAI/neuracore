@@ -1,1 +1,1 @@
-"""Expose uploader configuration models."""
+"""Expose importer configuration models."""
