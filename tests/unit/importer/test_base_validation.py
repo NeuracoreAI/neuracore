@@ -30,7 +30,7 @@ class ConcreteTestImporter(NeuracoreDatasetImporter):
         """Dummy implementation."""
         return []
 
-    def upload(self, item):
+    def import_item(self, item):
         """Dummy implementation."""
         pass
 
