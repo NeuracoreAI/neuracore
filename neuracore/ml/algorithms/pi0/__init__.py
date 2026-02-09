@@ -15,6 +15,7 @@ The patching includes:
 import importlib
 import logging
 import shutil
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,7 @@ def _patch_transformers() -> None:
         ValueError: If patching fails due to permission issues.
     """
     if check_whether_transformers_replace_is_installed_correctly():
+        _reload_transformers_modules()
         return  # Already patched
     else:
         logger.info("Transformers not patched; attempting to patch now.")
@@ -120,9 +122,29 @@ def _patch_transformers() -> None:
                 target = dst / f.relative_to(src)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(f, target)
-        importlib.invalidate_caches()
+            _reload_transformers_modules()
     except Exception:
         raise ValueError("Failed to patch transformers because of permission issues")
+
+
+def _reload_transformers_modules() -> None:
+    """Reload patched transformers modules if they were already imported.
+
+    `check_whether_transformers_replace_is_installed_correctly()` imports Gemma
+    modules before patching. If patching is needed, those stale module objects
+    remain in `sys.modules` and hide copied updates unless reloaded.
+    """
+    importlib.invalidate_caches()
+    module_names = [
+        "transformers.models.gemma.configuration_gemma",
+        "transformers.models.gemma.modeling_gemma",
+        "transformers.models.paligemma.modeling_paligemma",
+        "transformers.models.siglip.modeling_siglip",
+    ]
+    for module_name in module_names:
+        module = sys.modules.get(module_name)
+        if module is not None:
+            importlib.reload(module)
 
 
 _patch_transformers()
