@@ -2,7 +2,7 @@
 # cspell:ignore bfloat checkpointing finetune
 algorithm:
   _target_: neuracore.ml.algorithms.pi0.pi0.Pi0
-  vlm_max_text_tokens: 48
+  vlm_max_text_tokens: 16
   num_inference_steps: 10
   dtype: "bfloat16"
   paligemma_variant: "gemma_2b"

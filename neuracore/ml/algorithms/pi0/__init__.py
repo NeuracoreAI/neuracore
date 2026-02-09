@@ -11,8 +11,10 @@ The patching includes:
 - Python 3.10 UnionType annotation support for transformers docs
 """
 
-# cspell:ignore adarms
 import importlib
+
+# cspell:ignore adarms
+import inspect
 import logging
 import shutil
 import sys
@@ -25,28 +27,33 @@ def check_whether_transformers_replace_is_installed_correctly() -> bool:
     """Check whether transformers has been patched with PI0 modifications.
 
     Verifies that the installed `transformers` library has been patched by checking
-    for PI0-specific symbols in the installed source files.
+    runtime symbols and call signatures that are added by PI0.
 
     Returns:
         True if patches are detected, False otherwise.
     """
     try:
-        import transformers
+        from transformers.models.gemma import modeling_gemma
+        from transformers.models.gemma.configuration_gemma import GemmaConfig
+        from transformers.models.gemma.modeling_gemma import GemmaDecoderLayer
 
-        dst = Path(transformers.__file__).parent
-        gemma_cfg_path = dst / "models" / "gemma" / "configuration_gemma.py"
-        gemma_model_path = dst / "models" / "gemma" / "modeling_gemma.py"
-        if not gemma_cfg_path.exists() or not gemma_model_path.exists():
+        cfg_init_params = inspect.signature(GemmaConfig.__init__).parameters
+        if "use_adarms" not in cfg_init_params:
+            return False
+        if "adarms_cond_dim" not in cfg_init_params:
             return False
 
-        gemma_cfg_text = gemma_cfg_path.read_text(encoding="utf-8")
-        gemma_model_text = gemma_model_path.read_text(encoding="utf-8")
+        cfg = GemmaConfig(use_adarms=True)
+        if not getattr(cfg, "use_adarms", False):
+            return False
+        if getattr(cfg, "adarms_cond_dim", None) is None:
+            return False
 
-        if "use_adarms" not in gemma_cfg_text:
+        if not callable(getattr(modeling_gemma, "_gated_residual", None)):
             return False
-        if "_gated_residual" not in gemma_model_text:
-            return False
-        if "adarms_cond" not in gemma_model_text:
+
+        decoder_forward_params = inspect.signature(GemmaDecoderLayer.forward).parameters
+        if "adarms_cond" not in decoder_forward_params:
             return False
         return True
     except Exception:
