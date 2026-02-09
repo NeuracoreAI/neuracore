@@ -12,7 +12,7 @@ from neuracore.importer.core.exceptions import (
     ConfigLoadError,
     DatasetDetectionError,
     DatasetOperationError,
-    UploaderError,
+    ImporterError,
 )
 from neuracore.importer.importer import _run_import
 
@@ -94,7 +94,7 @@ def import_dataset(
     ) as exc:
         logging.getLogger(__name__).error("%s", exc)
         raise typer.Exit(code=1) from exc
-    except UploaderError as exc:
+    except ImporterError as exc:
         logging.getLogger(__name__).error("%s", exc)
         raise typer.Exit(code=1) from exc
     except Exception:
