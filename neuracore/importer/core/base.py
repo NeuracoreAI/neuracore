@@ -207,6 +207,31 @@ class NeuracoreDatasetImporter(ABC):
             format: The data format to use for validation.
             timestamp: Time when the data was logged.
         """
+        transformed_data = self._prepare_log_data(
+            data_type=data_type,
+            source_data=source_data,
+            item=item,
+            format=format,
+        )
+
+        try:
+            self._log_transformed_data(
+                data_type, transformed_data, item.name, timestamp
+            )
+        except Exception as e:
+            self.logger.error(
+                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
+            )
+            raise
+
+    def _prepare_log_data(
+        self,
+        data_type: DataType,
+        source_data: Any,
+        item: MappingItem,
+        format: DataFormat,
+    ) -> Any:
+        """Validate and transform source data into a log-ready payload."""
         try:
             self._validate_input_data(data_type, source_data, format)
         except DataValidationWarning as w:
@@ -222,24 +247,18 @@ class NeuracoreDatasetImporter(ABC):
             transformed_data = item.transforms(source_data)
             if data_type in JOINT_DATA_TYPES and self.joint_info:
                 self._validate_joint_data(data_type, transformed_data, item.name)
+            return transformed_data
         except DataValidationWarning as w:
             if not self.suppress_warnings:
                 self.logger.warning("[WARNING] %s (%s): %s", data_type, item.name, w)
+            if "transformed_data" in locals():
+                return transformed_data
+            raise
         except DataValidationError as e:
             self.logger.error(
                 "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
             )
             raise
-        except Exception as e:
-            self.logger.error(
-                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
-            )
-            raise
-
-        try:
-            self._log_transformed_data(
-                data_type, transformed_data, item.name, timestamp
-            )
         except Exception as e:
             self.logger.error(
                 "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
@@ -398,7 +417,9 @@ class NeuracoreDatasetImporter(ABC):
 
         ctx = mp.get_context("spawn")
         error_queue: mp.Queue[WorkerError] = ctx.Queue()
-        progress_queue: mp.Queue[ProgressUpdate] = ctx.Queue()
+        # Keep progress updates bounded so high-frequency workers can't grow
+        # unbounded IPC buffers and pressure system memory.
+        progress_queue: mp.Queue[ProgressUpdate] = ctx.Queue(maxsize=2048)
         chunks = self._partition(items, worker_count)
         processes: list[mp.context.SpawnProcess] = []
 
@@ -635,17 +656,18 @@ class NeuracoreDatasetImporter(ABC):
 
         task_map: dict[int, TaskID] = {}
         current_items: dict[int, int] = {}
+        current_labels: dict[int, str] = {}
 
         with Progress(
             SpinnerColumn(style="cyan"),
             TextColumn("[bold blue]Worker {task.fields[worker]}"),
-            TextColumn("| Episode {task.fields[episode]}"),
+            TextColumn("| Episode {task.fields[episode]}", markup=False),
             BarColumn(bar_width=None, complete_style="green", pulse_style="cyan"),
             MofNCompleteColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
             refresh_per_second=10,
-            transient=True,
+            transient=False,
             console=get_shared_console(),
         ) as progress:
             while True:
@@ -658,7 +680,7 @@ class NeuracoreDatasetImporter(ABC):
 
                 if update is not None:
                     self._apply_progress_update(
-                        progress, task_map, current_items, update
+                        progress, task_map, current_items, current_labels, update
                     )
 
                 if not any_alive:
@@ -669,7 +691,7 @@ class NeuracoreDatasetImporter(ABC):
                         except Empty:
                             return
                         self._apply_progress_update(
-                            progress, task_map, current_items, update
+                            progress, task_map, current_items, current_labels, update
                         )
 
     def _apply_progress_update(
@@ -677,6 +699,7 @@ class NeuracoreDatasetImporter(ABC):
         progress: Progress,
         task_map: dict[int, TaskID],
         current_items: dict[int, int],
+        current_labels: dict[int, str],
         update: ProgressUpdate,
     ) -> None:
         """Update or create the progress task for a worker."""
@@ -693,18 +716,24 @@ class NeuracoreDatasetImporter(ABC):
             )
             task_map[update.worker_id] = task_id
             current_items[update.worker_id] = update.item_index
+            current_labels[update.worker_id] = desc
             return
 
-        if current_items.get(update.worker_id) != update.item_index:
+        # Reset the task clock when item or phase label changes so ETA stays accurate.
+        if (
+            current_items.get(update.worker_id) != update.item_index
+            or current_labels.get(update.worker_id) != desc
+        ):
             current_items[update.worker_id] = update.item_index
-            progress.update(
+            current_labels[update.worker_id] = desc
+            progress.reset(
                 task_id,
+                start=True,
                 total=update.total_steps,
                 completed=update.step,
                 description=f"Episode {desc}",
                 worker=update.worker_id,
                 episode=desc,
-                refresh=True,
             )
             return
 

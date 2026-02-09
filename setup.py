@@ -93,6 +93,13 @@ setup(
             "huggingface-hub>0.34.0,<0.36.0",
             "tensorflow-datasets",
             "tensorflow",
+            "mcap",
+            "mcap-protobuf-support",
+            "mcap-ros1-support",
+            "mcap-ros2-support",
+            "pillow>=10.0.0",
+            "protobuf<=6.32.0",
+            "msgpack>=1.0.8",
         ],
     },
     entry_points={
