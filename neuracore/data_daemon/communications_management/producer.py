@@ -33,7 +33,7 @@ class RecordingContext:
         if self.socket is None:
             raise RuntimeError(
                 "RecordingContext could not connect to daemon. "
-                "Start the daemon with `nc-daemon start` before recording. "
+                "Start the daemon with `nc-data-daemon launch` before recording. "
                 "Data cannot be captured without a running daemon."
             )
 
@@ -78,7 +78,7 @@ class Producer:
         if self.socket is None:
             raise RuntimeError(
                 "Producer could not connect to daemon. "
-                "Start the daemon with `nc-daemon start` before logging data. "
+                "Start the daemon with `nc-data-daemon launch` before logging data. "
                 "Data cannot be captured without a running daemon."
             )
 

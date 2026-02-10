@@ -6,7 +6,6 @@ from common.rollout_utils import rollout_policy
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
 
 import neuracore as nc
-from neuracore.data_daemon.lifecycle.daemon_lifecycle import ensure_daemon_running
 
 
 def main(args):
@@ -30,9 +29,6 @@ def main(args):
             description="This is an example dataset",
         )
         print("Created Dataset...")
-
-        # start daemon process
-        ensure_daemon_running()
 
     try:
         for episode_idx in range(num_episodes):
