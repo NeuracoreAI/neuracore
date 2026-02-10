@@ -102,9 +102,15 @@ def compute_shared_attention_layer(
         scaling,
     )
     head_dim = paligemma.language_model.layers[layer_idx].self_attn.head_dim
-    num_heads = paligemma.language_model.layers[
-        layer_idx
-    ].self_attn.config.num_attention_heads
+    # For the "gemma_tiny" variant we read the actual number of attention heads
+    # from the underlying language model layer.
+    if getattr(paligemma.config.text_config, "_pi0_variant", None) == "gemma_tiny":
+        num_heads = paligemma.language_model.layers[
+            layer_idx
+        ].self_attn.config.num_attention_heads
+    # For all other variants, we currently assume an 8‑head configuration.
+    else:
+        num_heads = 8
     att_output = att_output.reshape(batch_size, -1, num_heads * head_dim)
     outputs_embeds = []
     start_pos = 0
@@ -248,6 +254,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         paligemma_config.text_config.hidden_activation = "gelu_pytorch_tanh"
         paligemma_config.text_config.torch_dtype = "float32"
         paligemma_config.text_config.vocab_size = 257152
+        paligemma_config.text_config._pi0_variant = vlm_config.variant
         paligemma_config.text_config.use_adarms = use_adarms[0]
         paligemma_config.text_config.adarms_cond_dim = (
             vlm_config.width if use_adarms[0] else None

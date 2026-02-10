@@ -89,6 +89,7 @@ class PI0Policy(nn.Module):
         )
 
         self.gradient_checkpointing_enabled = False
+        self.compile_enabled = False
 
         if config.gradient_checkpointing:
             self.gradient_checkpointing_enable()
@@ -117,6 +118,8 @@ class PI0Policy(nn.Module):
 
     def compile_model_enable(self) -> None:
         """Enable model compilation."""
+        if self.compile_enabled:
+            return
         torch.set_float32_matmul_precision("high")
         self.sample_actions = torch.compile(  # type: ignore[method-assign]
             self.sample_actions, mode=self.config.compile_mode
@@ -124,6 +127,7 @@ class PI0Policy(nn.Module):
         self.forward = torch.compile(  # type: ignore[method-assign]
             self.forward, mode=self.config.compile_mode
         )
+        self.compile_enabled = True
         logging.info("Enabled model compilation for PI0Pytorch model")
 
     def _apply_checkpoint(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:

@@ -11,9 +11,13 @@ The patching includes:
 - Python 3.10 UnionType annotation support for transformers docs
 """
 
+import importlib
+
 # cspell:ignore adarms
+import inspect
 import logging
 import shutil
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -23,7 +27,7 @@ def check_whether_transformers_replace_is_installed_correctly() -> bool:
     """Check whether transformers has been patched with PI0 modifications.
 
     Verifies that the installed `transformers` library has been patched by checking
-    for custom attributes and functions that are not present in upstream.
+    runtime symbols and call signatures that are added by PI0.
 
     Returns:
         True if patches are detected, False otherwise.
@@ -31,11 +35,25 @@ def check_whether_transformers_replace_is_installed_correctly() -> bool:
     try:
         from transformers.models.gemma import modeling_gemma
         from transformers.models.gemma.configuration_gemma import GemmaConfig
+        from transformers.models.gemma.modeling_gemma import GemmaDecoderLayer
 
-        cfg = GemmaConfig()
-        if not hasattr(cfg, "use_adarms"):
+        cfg_init_params = inspect.signature(GemmaConfig.__init__).parameters
+        if "use_adarms" not in cfg_init_params:
             return False
-        if not hasattr(modeling_gemma, "_gated_residual"):
+        if "adarms_cond_dim" not in cfg_init_params:
+            return False
+
+        cfg = GemmaConfig(use_adarms=True)
+        if not getattr(cfg, "use_adarms", False):
+            return False
+        if getattr(cfg, "adarms_cond_dim", None) is None:
+            return False
+
+        if not callable(getattr(modeling_gemma, "_gated_residual", None)):
+            return False
+
+        decoder_forward_params = inspect.signature(GemmaDecoderLayer.forward).parameters
+        if "adarms_cond" not in decoder_forward_params:
             return False
         return True
     except Exception:
@@ -93,9 +111,13 @@ def _patch_transformers() -> None:
     across different installation methods.
 
     Raises:
-        ValueError: If patching fails due to permission issues.
+        ValueError: If patching/reloading transformers fails.
     """
+    # Must be applied before importing/reloading Gemma modules on Python 3.10.
+    _patch_transformers_args_doc()
+
     if check_whether_transformers_replace_is_installed_correctly():
+        _reload_transformers_modules()
         return  # Already patched
     else:
         logger.info("Transformers not patched; attempting to patch now.")
@@ -110,9 +132,29 @@ def _patch_transformers() -> None:
                 target = dst / f.relative_to(src)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(f, target)
-    except Exception:
-        raise ValueError("Failed to patch transformers because of permission issues")
+            _reload_transformers_modules()
+    except Exception as e:
+        raise ValueError(f"Failed to patch/reload transformers: {e}") from e
+
+
+def _reload_transformers_modules() -> None:
+    """Reload patched transformers modules if they were already imported.
+
+    `check_whether_transformers_replace_is_installed_correctly()` imports Gemma
+    modules before patching. If patching is needed, those stale module objects
+    remain in `sys.modules` and hide copied updates unless reloaded.
+    """
+    importlib.invalidate_caches()
+    module_names = [
+        "transformers.models.gemma.configuration_gemma",
+        "transformers.models.gemma.modeling_gemma",
+        "transformers.models.paligemma.modeling_paligemma",
+        "transformers.models.siglip.modeling_siglip",
+    ]
+    for module_name in module_names:
+        module = sys.modules.get(module_name)
+        if module is not None:
+            importlib.reload(module)
 
 
 _patch_transformers()
-_patch_transformers_args_doc()

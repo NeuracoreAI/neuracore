@@ -269,3 +269,5 @@ checkpointed
 CREAT
 getpid
 WRONLY
+rels
+huggingface
