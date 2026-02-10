@@ -150,9 +150,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         DataItemStats.count encountered from the cached dataset statistics.
         """
         for stats_list in self._dataset_statistics.values():
-            if not stats_list:
-                continue
-
             first_stats = stats_list[0]
             count = next(
                 (
