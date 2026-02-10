@@ -29,6 +29,7 @@ class Recording:
         instance: int,
         start_time: float,
         end_time: float,
+        recording_name: str | None = None,
     ):
         """Initialize episode iterator for a specific recording.
 
@@ -40,6 +41,7 @@ class Recording:
             instance: The instance of the robot that created this recording.
             start_time: Unix timestamp when recording started.
             end_time: Unix timestamp when recording ended.
+            recording_name: Name of the recording
         """
         self.dataset = dataset
         self.id = recording_id
@@ -48,6 +50,8 @@ class Recording:
         self.instance = instance
         self.start_time = start_time
         self.end_time = end_time
+        # Store human-friendly recording name when available.
+        self.name = recording_name or recording_id
         self._raw = {
             "id": recording_id,
             "total_bytes": total_bytes,
@@ -109,6 +113,7 @@ class Recording:
         return SynchronizedRecording(
             dataset=self.dataset,
             recording_id=self.id,
+            recording_name=self.name,
             robot_id=self.robot_id,
             instance=self.instance,
             frequency=frequency,

@@ -259,6 +259,15 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         """
         episode_indices = []
         for recording_idx, recording in enumerate(self.synchronized_dataset):
+            # Each recording must have at least 2 timesteps because we drop the
+            # last frame from training. Otherwise alignment with per-recording
+            # metadata breaks (zero samples contributed).
+            if len(recording) <= 1:
+                raise ValueError(
+                    "Synchronized recording "
+                    f"'{recording.name}' has only {len(recording)} frame(s); "
+                    "need >= 2 frames to generate training samples."
+                )
             episode_indices.extend([recording_idx] * (len(recording) - 1))
 
         return episode_indices
