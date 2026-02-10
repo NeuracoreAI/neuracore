@@ -552,7 +552,8 @@ class Pi0(NeuracoreModel):
         """
         self.model.eval()
         self.model.gradient_checkpointing_disable()
-        self.model.compile_model_enable()
+        if self.compile_model:
+            self.model.compile_model_enable()
 
         actions = self._predict_action(batch)
         predictions = self.action_normalizer.unnormalize(actions)

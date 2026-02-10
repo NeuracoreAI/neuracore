@@ -1,14 +1,12 @@
 import inspect
 import os
 import random
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
-
-if os.environ.get("CI", "false").lower() == "true":
-    pytest.skip("Skipping Pi0 tests in CI", allow_module_level=True)
-
 import torch
 from neuracore_types import BatchedNCData, DataType, ModelInitDescription
 from torch import nn
@@ -16,17 +14,73 @@ from torch.utils.data import DataLoader
 
 from neuracore.core.utils.robot_data_spec_utils import extract_data_types
 from neuracore.ml import BatchedInferenceInputs, BatchedTrainingSamples
-from neuracore.ml.algorithms.pi0.pi0 import Pi0
 from neuracore.ml.core.ml_types import BatchedTrainingOutputs
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
 from neuracore.ml.utils.validate import run_validation
+
+PI0_DEP_PACKAGES = ["transformers", "tokenizers", "huggingface-hub"]
+
+
+# This is a workaround to avoid the issue of different versions of transformers being
+# installed. For tests we will have pi0 use a separate subprocess and install the
+# specific requirements.
+def _resolve_pi0_requirements_file() -> Path:
+    repo_root = Path(__file__).resolve().parents[4]
+
+    requirements_file = repo_root / "neuracore/ml/algorithms/pi0/requirements.txt"
+
+    if not requirements_file.exists():
+        raise FileNotFoundError(
+            f"Could not find pi0 requirements.txt at {requirements_file}"
+        )
+    return requirements_file
+
+
+def _pip_uninstall_packages(packages: list[str]) -> None:
+    # Best-effort cleanup to avoid mixed package files across version switches.
+    subprocess.run(
+        [sys.executable, "-m", "pip", "uninstall", "-y", *packages],
+        check=False,
+    )
+
+
+def install_pi0_requirements() -> None:
+    """Install requirements.txt from the pi0 folder."""
+    requirements_file = _resolve_pi0_requirements_file()
+    _pip_uninstall_packages(PI0_DEP_PACKAGES)
+
+    # Force a clean reinstall to avoid mixed transformers files from previous versions.
+    subprocess.check_call([
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-cache-dir",
+        "--upgrade",
+        "--force-reinstall",
+        "--ignore-installed",
+        "-r",
+        str(requirements_file),
+    ])
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _pi0_env():
+    install_pi0_requirements()
+
+
+@pytest.fixture(scope="module")
+def Pi0(_pi0_env):  # noqa: N802
+    from neuracore.ml.algorithms.pi0.pi0 import Pi0 as Pi0Model
+
+    return Pi0Model
+
 
 BS = 1
 OUTPUT_PREDICTION_HORIZON = 1
 
 # Use cpu because the model takes a lot of vram
 DEVICE = torch.device("cpu")
-SKIP_TEST = os.environ.get("CI", "false").lower() == "true"
 
 
 PI0_TEST_ARGS: dict[str, Any] = {
@@ -41,7 +95,7 @@ PI0_TEST_ARGS: dict[str, Any] = {
 
 
 @pytest.fixture
-def pytorch_dummy_dataset() -> PytorchDummyDataset:
+def pytorch_dummy_dataset(Pi0) -> PytorchDummyDataset:  # noqa: N803
     input_data_types = Pi0.get_supported_input_data_types()
     output_data_types = Pi0.get_supported_output_data_types()
     input_robot_data_spec = {
@@ -106,17 +160,18 @@ def sample_training_batch(
     return sample
 
 
-@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
-def test_model_construction(model_init_description: ModelInitDescription):
+def test_model_construction(
+    model_init_description: ModelInitDescription, Pi0
+):  # noqa: N803
     model = Pi0(model_init_description, **PI0_TEST_ARGS)
     model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
 
 
-@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
 def test_model_forward(
     model_init_description: ModelInitDescription,
     sample_inference_batch: BatchedInferenceInputs,
+    Pi0,  # noqa: N803
 ):
     model = Pi0(model_init_description, **PI0_TEST_ARGS)
     model = model.to(DEVICE)
@@ -130,10 +185,10 @@ def test_model_forward(
             assert isinstance(tensor, BatchedNCData)
 
 
-@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
 def test_model_backward(
     model_init_description: ModelInitDescription,
     sample_training_batch: BatchedTrainingSamples,
+    Pi0,  # noqa: N803
 ):
     model = Pi0(model_init_description, **PI0_TEST_ARGS)
     model = model.to(DEVICE)
@@ -171,9 +226,7 @@ def test_model_backward(
                 ).all(), f"Parameter {name} has non-finite gradients"
 
 
-@pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
-def test_run_validation(tmp_path: Path, mock_login, monkeypatch):
-    from neuracore.ml.algorithms.pi0.pi0 import Pi0
+def test_run_validation(tmp_path: Path, mock_login, monkeypatch, Pi0):  # noqa: N803
     from neuracore.ml.utils import validate as validate_module
 
     monkeypatch.setattr(validate_module.AlgorithmLoader, "load_model", lambda self: Pi0)
