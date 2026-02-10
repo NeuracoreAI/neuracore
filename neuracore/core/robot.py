@@ -26,6 +26,7 @@ from neuracore.core.utils.robot_mapping import RobotMapping
 from neuracore.data_daemon.communications_management.producer import (
     RecordingContext as DaemonRecordingContext,
 )
+from neuracore.data_daemon.lifecycle.daemon_lifecycle import ensure_daemon_running
 
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
@@ -259,6 +260,9 @@ class Robot:
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
+
+        # Start daemon process
+        ensure_daemon_running()
 
         try:
 
