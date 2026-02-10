@@ -125,6 +125,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             max_ram_utilization=0.8, max_gpu_utilization=1.0, gpu_id=None
         )
         self._mem_check_counter = 0
+        breakpoint()
         self._num_samples_excluding_last = self._get_num_training_observations() - len(
             self.synchronized_dataset
         )
@@ -143,14 +144,27 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         self._fallback_robot_data_spec: RobotDataSpec = {}
 
     def _get_num_training_observations(self) -> int:
-        # The count attribute of the stats should give total number of training
-        # observations and should be same across all data types
-        first_data_type = next(iter(self._dataset_statistics))
-        data_stats_of_unknown_nc_data = self._dataset_statistics[first_data_type][0]
-        # Loop over all attributes until we find one of type DataItemStats
-        for attr_name, attr_value in vars(data_stats_of_unknown_nc_data).items():
-            if isinstance(attr_value, DataItemStats):
-                return attr_value.count.item()
+        """Return the total number of training observations across all episodes.
+
+        Assumes each data type reports the same count, so it pulls the first
+        DataItemStats.count encountered from the cached dataset statistics.
+        """
+        for stats_list in self._dataset_statistics.values():
+            if not stats_list:
+                continue
+
+            first_stats = stats_list[0]
+            count = next(
+                (
+                    attr.count.item()
+                    for attr in vars(first_stats).values()
+                    if isinstance(attr, DataItemStats)
+                ),
+                None,
+            )
+            if count is not None:
+                return count
+
         raise ValueError(
             "Could not find DataItemStats in dataset "
             "statistics to get number of training observations."
