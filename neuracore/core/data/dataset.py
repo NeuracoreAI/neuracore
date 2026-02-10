@@ -124,6 +124,7 @@ class Dataset:
             instance=recording_model.instance,
             start_time=recording_model.start_time,
             end_time=recording_model.end_time,
+            recording_name=getattr(recording_model.metadata, "name", None),
         )
 
     def _initialize_num_recordings(self) -> None:

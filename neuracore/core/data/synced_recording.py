@@ -39,6 +39,7 @@ class SynchronizedRecording:
         self,
         dataset: "Dataset",
         recording_id: str,
+        recording_name: str | None,
         robot_id: str,
         instance: int,
         frequency: int = 0,
@@ -50,6 +51,7 @@ class SynchronizedRecording:
         Args:
             dataset: Parent Dataset instance.
             recording_id: Recording ID string.
+            recording_name: Recording Name string.
             robot_id: The robot that created this recording.
             instance: The instance of the robot that created this recording.
             frequency: Frequency at which to synchronize the recording.
@@ -58,6 +60,7 @@ class SynchronizedRecording:
         """
         self.dataset = dataset
         self.id = recording_id
+        self.name = recording_name
         self.frequency = frequency
         self.robot_data_spec = robot_data_spec
         self.cache_dir: Path = dataset.cache_dir
