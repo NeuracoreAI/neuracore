@@ -16,7 +16,7 @@
   Join our community!
 </p>
 <p align="center">
-  <a target="_blank" href="https://discord.gg/DF5m8V6nbD"><img src="https://dcbadge.limes.pink/api/server/DF5m8V6nbD" alt="Discord" /></a>
+  <a target="_blank" href="https://discord.gg/DF5m8V6nbD"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
 </p>
 
 <div align="center">
