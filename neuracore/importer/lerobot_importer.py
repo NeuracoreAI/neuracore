@@ -220,16 +220,25 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             source_path = import_config.source
 
             for item in import_config.mapping:
-                if item.source_name is not None:
-                    source_data = step_data[".".join([source_path, item.source_name])]
-                elif item.index is not None:
-                    source_data = step_data[source_path][item.index]
+                if not source_path:
+                    if item.source_name is not None:
+                        source_data = step_data[item.source_name]
+                    else:
+                        source_data = step_data
+                else:
+                    if item.source_name is not None:
+                        source_data = step_data[
+                            ".".join([source_path, item.source_name])
+                        ]
+                    else:
+                        source_data = step_data[source_path]
+
+                if item.index is not None:
+                    source_data = source_data[item.index]
                 elif item.index_range is not None:
-                    source_data = step_data[source_path][
+                    source_data = source_data[
                         item.index_range.start : item.index_range.end
                     ]
-                else:
-                    source_data = step_data[source_path]
 
                 if not (
                     data_type == DataType.LANGUAGE

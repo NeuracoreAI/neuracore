@@ -83,7 +83,7 @@ Each data type mapping supports:
   **Note**: Not all format options apply to all data types. See the data type examples below for specific usage. For simple data types like `CUSTOM_1D`, the format block may be omitted entirely.
 - `mapping`: Configuration specific to each item of a data type
   - `name`: Name to be saved in Neuracore (required).
-  - `source_name`: The key or field name in the source dataset used to extract the specific data item. In hierarchical sources (like RLDS), this is usually the key within the specified `source` dictionary. For flat (column-based) datasets like LeRobot, this refers to the column name within the relevant Arrow table.
+  - `source_name`: The key or field name in the source dataset used to extract the mapping specific data item. In hierarchical sources (like RLDS), this is usually the key within the specified `source` dictionary. For flat (column-based) datasets like LeRobot, this refers to the column name within the relevant Arrow table.
 
     - **RLDS:** Data is typically stored as dictionaries within each step or episode. Use `source_name` to specify the key in these dictionaries. For example, if step data looks like `{'observation': {'image': ...}}`, using `source: observation` and `source_name: image` will access the desired value.
 
@@ -383,7 +383,7 @@ The importer supports the following data types:
 - **LANGUAGE**: Language instructions (STRING or BYTES format)
   
   ```yaml
-  # Example 1: String format
+  # Example 1: Single instruction
   LANGUAGE:
     source: language_instruction
     format:
@@ -391,13 +391,17 @@ The importer supports the following data types:
     mapping:
       - name: instruction
   
-  # Example 2: Bytes format
+  # Example 2: Multiple instructions with different source
   LANGUAGE:
-    source: language_instruction
     format:
       language_type: BYTES
     mapping:
-      - name: instruction
+      - name: instruction # name in neuracore
+        source_name: language_instruction # name in input dataset
+      - name: instruction2
+        source_name: language_instruction_2
+      - name: instruction3
+        source_name: language_instruction_3
   ```
 
 - **CUSTOM_1D**: Custom 1D data arrays

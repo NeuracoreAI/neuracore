@@ -292,20 +292,26 @@ class RLDSDatasetImporter(NeuracoreDatasetImporter):
         """Record a single step to Neuracore."""
         for data_type, import_config in self.dataset_config.data_import_config.items():
             # Get the data based on the source path
-            source_path = import_config.source.split(".")
-            source = step_data
-            for path in source_path:
-                source = source[path]
+            if not import_config.source:
+                source = step_data
+            else:
+                source_path = import_config.source.split(".")
+                source = step_data
+                for path in source_path:
+                    source = source[path]
 
             for item in import_config.mapping:
                 if item.source_name is not None:
                     source_data = source[item.source_name]
-                elif item.index is not None:
-                    source_data = source[item.index]
-                elif item.index_range is not None:
-                    source_data = source[item.index_range.start : item.index_range.end]
                 else:
                     source_data = source
+
+                if item.index is not None:
+                    source_data = source_data[item.index]
+                elif item.index_range is not None:
+                    source_data = source_data[
+                        item.index_range.start : item.index_range.end
+                    ]
 
                 if not (
                     data_type == DataType.LANGUAGE
