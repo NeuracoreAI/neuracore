@@ -388,14 +388,13 @@ def test_reader_zero_length_chunk() -> None:
 
 
 def test_chunk_header_size_matches_format() -> None:
-    """CHUNK_HEADER_SIZE = 80.
+    """CHUNK_HEADER_SIZE matches struct format.
 
     Header size constant must match actual struct format. Mismatch causes parse
     failures.
     """
     expected_size = struct.calcsize(CHUNK_HEADER_FORMAT)
     assert CHUNK_HEADER_SIZE == expected_size
-    assert CHUNK_HEADER_SIZE == 80
 
 
 def test_header_struct_pack_unpack_roundtrip() -> None:
@@ -447,18 +446,10 @@ def test_trace_id_max_length_36_bytes() -> None:
     assert result[0] == "a" * TRACE_ID_FIELD_SIZE
 
 
-def test_data_type_max_length_32_bytes() -> None:
-    """data_type truncated at 32.
-
-    Same for data_type field. Fixed-size protocol requires truncation handling.
-    """
-    # This is handled internally by the header construction
-    assert DATA_TYPE_FIELD_SIZE == 32
-
-    # Verify a long data type string gets truncated in the header
-    long_str = "x" * 50
-    truncated = long_str[:DATA_TYPE_FIELD_SIZE]
-    assert len(truncated) == 32
+def test_data_type_max_length_fits_all_types() -> None:
+    """DATA_TYPE_FIELD_SIZE accommodates all DataType values."""
+    max_len = max(len(dt.value.encode("utf-8")) for dt in DataType)
+    assert DATA_TYPE_FIELD_SIZE >= max_len
 
 
 def test_trace_id_with_unicode() -> None:

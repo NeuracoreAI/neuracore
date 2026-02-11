@@ -97,13 +97,9 @@ class ChannelMessageReader:
         try:
             data_type = DataType(data_type_str)
         except ValueError:
-            logger.warning(
-                "Unknown data_type '%s' for trace_id=%s; defaulting to %s",
-                data_type_str,
-                trace_id,
-                DataType.CUSTOM_1D.value,
+            raise ValueError(
+                f"Unknown data_type '{data_type_str}' for trace_id={trace_id}. "
             )
-            data_type = DataType.CUSTOM_1D
 
         # Now check if we have header + the full chunk
         required = CHUNK_HEADER_SIZE + chunk_len
