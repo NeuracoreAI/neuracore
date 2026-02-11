@@ -3,6 +3,7 @@ ADARMS
 addfinalizer
 aiolimiter
 aiortc
+agentview
 allclose
 altclip
 attns
@@ -26,6 +27,7 @@ childbody
 childinertia
 chonk
 CLIPMLP
+closedness
 cnnmlp
 CNNMLP
 CNNMLPP
