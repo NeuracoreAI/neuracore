@@ -1,0 +1,118 @@
+# VIOLA dataset sources:
+# TFDS: https://www.tensorflow.org/datasets/catalog/viola
+
+input_dataset_name: viola
+dataset_type: RLDS
+
+output_dataset:
+  name: viola_tfds
+  tags: [franka, kitchen, viola, imitation, tfds]
+  description: "VIOLA dataset in TFDS/RLDS format (Open X-Embodiment)."
+
+robot:
+  name: franka_panda
+  urdf_path: "panda.urdf"
+  overwrite_existing: true
+
+# TFDS metadata does not expose an explicit control frequency; 20Hz aligns with the
+# corresponding LeRobot conversion metadata.
+frequency: 20.0
+
+data_import_config:
+  # TFDS observation.{agentview_rgb, eye_in_hand_rgb}
+  # - agentview_rgb: workspace camera (global scene)
+  # - eye_in_hand_rgb: wrist camera (close manipulation view)
+  RGB_IMAGES:
+    source: observation
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping:
+      - name: agentview_rgb
+        source_name: agentview_rgb
+      - name: eye_in_hand_rgb
+        source_name: eye_in_hand_rgb
+
+  # TFDS observation.joint_states (7-D Franka arm joint vector)
+  JOINT_POSITIONS:
+    source: observation.joint_states
+    format:
+      angle_units: RADIANS
+    mapping:
+      - name: panda_joint1
+        index: 0
+      - name: panda_joint2
+        index: 1
+      - name: panda_joint3
+        index: 2
+      - name: panda_joint4
+        index: 3
+      - name: panda_joint5
+        index: 4
+      - name: panda_joint6
+        index: 5
+      - name: panda_joint7
+        index: 6
+
+  # TFDS observation.gripper_states (shape [1], Franka gripper width in meters)
+  # Convert width from [0.0, 0.08] m to open amount [0, 1].
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.gripper_states
+    format:
+      normalize:
+        min: 0.0
+        max: 0.08
+    mapping:
+      - name: gripper
+        index: 0
+
+  # TFDS action.gripper_closedness_action
+  # Open-X uses: -1=open, +1=close. Convert to target-open amount [0, 1].
+  # Formula implemented by config transforms: (1 - x) / 2
+  PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+    source: action
+    format:
+      normalize:
+        min: -1.0
+        max: 1.0
+    mapping:
+      - name: gripper
+        source_name: gripper_closedness_action
+        inverted: true
+        offset: 1.0
+
+  # TFDS observation.ee_states (4x4 homogeneous transform, flattened to 16 values).
+  # Importer converts MATRIX pose to standard [x, y, z, qx, qy, qz, qw].
+  END_EFFECTOR_POSES:
+    source: observation.ee_states
+    format:
+      pose_type: MATRIX
+    mapping:
+      - name: panda_hand_pose
+        index_range:
+          start: 0
+          end: 16
+
+  # TFDS observation.natural_language_instruction (string tensor)
+  # RLDS importer reads bytes from tf.Tensor.numpy(), then decodes to UTF-8.
+  LANGUAGE:
+    source: observation
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction
+        source_name: natural_language_instruction
+
+  # TFDS fields logged as custom vectors/scalars:
+  # - action.world_vector (3)
+  # - action.rotation_delta (3)
+  # - action.terminate_episode (scalar)
+  CUSTOM_1D:
+    source: action
+    mapping:
+      - name: action_world_vector
+        source_name: world_vector
+      - name: action_rotation_delta
+        source_name: rotation_delta
+      - name: action_terminate_episode
+        source_name: terminate_episode
