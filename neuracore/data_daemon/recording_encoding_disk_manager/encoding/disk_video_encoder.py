@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import pathlib
+import threading
 import time
 from fractions import Fraction
 
@@ -91,6 +92,8 @@ class DiskVideoEncoder:
         self.upload_buffer = bytearray()
         self.last_write_position = 0
         self._last_progress_update_timer = 0.0
+        self._lock = threading.Lock()
+        self._finished = False
 
     def add_frame(self, *, timestamp: float, np_frame: np.ndarray) -> None:
         """Encode a single frame at the provided timestamp.
@@ -102,16 +105,20 @@ class DiskVideoEncoder:
         Returns:
             None
         """
-        pts = self._compute_pts(timestamp=timestamp)
+        with self._lock:
+            if self._finished:
+                return
 
-        frame = self._av.VideoFrame.from_ndarray(np_frame, format="rgb24")
-        frame = frame.reformat(format=self.pixel_format)
-        frame.pts = pts
+            pts = self._compute_pts(timestamp=timestamp)
 
-        for packet in self.stream.encode(frame):
-            self.container.mux(packet)
+            frame = self._av.VideoFrame.from_ndarray(np_frame, format="rgb24")
+            frame = frame.reformat(format=self.pixel_format)
+            frame.pts = pts
 
-        self._stage_and_flush_if_needed()
+            for packet in self.stream.encode(frame):
+                self.container.mux(packet)
+
+            self._stage_and_flush_if_needed()
 
     def _compute_pts(self, *, timestamp: float) -> int:
         """Compute monotonic PTS for a timestamp.
@@ -214,22 +221,27 @@ class DiskVideoEncoder:
         Returns:
             None
         """
-        for packet in self.stream.encode(None):
-            self.container.mux(packet)
+        with self._lock:
+            if self._finished:
+                return
+            self._finished = True
 
-        self.container.close()
+            for packet in self.stream.encode(None):
+                self.container.mux(packet)
 
-        current_position = self.buffer.tell()
-        pending_bytes = current_position - self.last_write_position
-        if pending_bytes > 0:
-            self._stage_pending_bytes(
-                current_position=current_position,
-                pending_bytes=pending_bytes,
-            )
+            self.container.close()
 
-        if self.upload_buffer:
-            self._fh.write(bytes(self.upload_buffer))
-            self.upload_buffer = bytearray()
+            current_position = self.buffer.tell()
+            pending_bytes = current_position - self.last_write_position
+            if pending_bytes > 0:
+                self._stage_pending_bytes(
+                    current_position=current_position,
+                    pending_bytes=pending_bytes,
+                )
 
-        self._fh.flush()
-        self._fh.close()
+            if self.upload_buffer:
+                self._fh.write(bytes(self.upload_buffer))
+                self.upload_buffer = bytearray()
+
+            self._fh.flush()
+            self._fh.close()
