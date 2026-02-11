@@ -35,6 +35,7 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
 from neuracore.ml.train import (
+    _resolve_output_dir,
     determine_optimal_batch_size,
     get_model_and_algorithm_config,
     main,
@@ -431,6 +432,40 @@ class TestSetupLogging:
 
         assert new_dir.exists()
         assert (new_dir / "train.log").exists()
+
+
+class TestResolveOutputDir:
+    """Tests for local output directory resolver behavior."""
+
+    def test_resolve_output_dir_raises_when_exact_named_run_already_exists(
+        self, monkeypatch, tmp_path
+    ):
+        run_name = "duplicate-run"
+        base_dir = tmp_path / ".neuracore" / "training" / "runs"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        (base_dir / run_name).mkdir()
+
+        monkeypatch.setattr(
+            "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
+        )
+
+        with pytest.raises(ValueError, match="already exists"):
+            _resolve_output_dir(run_name)
+
+    def test_resolve_output_dir_raises_when_named_run_already_exists(
+        self, monkeypatch, tmp_path
+    ):
+        run_name = "duplicate-run"
+        base_dir = tmp_path / ".neuracore" / "training" / "runs"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        (base_dir / f"{run_name}_2025-01-01_00-00-00").mkdir()
+
+        monkeypatch.setattr(
+            "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
+        )
+
+        with pytest.raises(ValueError, match="already exists"):
+            _resolve_output_dir(run_name)
 
 
 class TestGetModelAndAlgorithmConfig:
