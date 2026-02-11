@@ -548,9 +548,11 @@ class Daemon:
             try:
                 data_type = DataType(data_type_str)
             except ValueError:
-                data_type = DataType.CUSTOM_1D
+                raise ValueError(
+                    f"Unknown data_type '{data_type_str}' for trace_id={trace_id}."
+                )
         else:
-            data_type = DataType.CUSTOM_1D
+            raise ValueError(f"Missing data_type in metadata for trace_id={trace_id}.")
 
         # Send final_chunk=True message to RDM to signal trace end
         self._on_complete_message(

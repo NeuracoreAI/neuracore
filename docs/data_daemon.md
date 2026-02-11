@@ -63,32 +63,28 @@ nc-data-daemon stop
 
 ## Run your script without launching the daemon first
 
-You do not have to use `nc-data-daemon launch` if your script calls `ensure_daemon_running()`.
+You do not have to use `nc-data-daemon launch` beforehand. The daemon will automatically start in the background if it is not already running when your script needs it.
 
-This helper will:
+It will:
 - check if the daemon is already running
 - start it in the background if it is not running
-- wait until it is ready before returning
+- wait until it is ready before continuing
 
 Example:
 
 ```python
-from neuracore.data_daemon.lifecycle.daemon_lifecycle import ensure_daemon_running
 import neuracore as nc
 
 def main():
     nc.login()
 
-    # Start the daemon automatically if needed
-    ensure_daemon_running()
-
-    # Now use nc.log_* and recording APIs as normal
+    # The daemon starts automatically when needed
     nc.start_recording()
     # ...
     nc.stop_recording()
 ```
 
-Choosing a profile when using `ensure_daemon_running()`:
+Choosing a profile when using auto-start:
 
 ```bash
 export NEURACORE_DAEMON_PROFILE=recording
@@ -97,7 +93,7 @@ python your_script.py --record
 
 When to use which approach:
 - Use **CLI launch** if you want to start the daemon once and then run many scripts.
-- Use **ensure_daemon_running()** if you want each script to be self contained.
+- Use **auto-start** if you want each script to be self contained.
 
 ---
 

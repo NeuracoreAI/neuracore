@@ -9,7 +9,7 @@ HEARTBEAT_TIMEOUT_SECS = 10
 API_URL = os.getenv("NEURACORE_API_URL", "https://api.neuracore.app/api")
 
 TRACE_ID_FIELD_SIZE = 36  # bytes allocated for the trace_id string in chunk headers
-DATA_TYPE_FIELD_SIZE = 32  # bytes allocated for the data_type string in chunk headers
+DATA_TYPE_FIELD_SIZE = 64  # bytes allocated for the data_type string in chunk headers
 CHUNK_HEADER_FORMAT = f"!{TRACE_ID_FIELD_SIZE}s{DATA_TYPE_FIELD_SIZE}sIII"
 # trace_id as fixed-length UTF-8 bytes, data_type as fixed-length UTF-8 bytes,
 # uint32 chunk_index,
