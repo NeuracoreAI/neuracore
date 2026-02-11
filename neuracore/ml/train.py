@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 import neuracore as nc
 from neuracore.api.training import _get_algorithms
+from neuracore.core.data.dataset import DEFAULT_CACHE_DIR
 from neuracore.core.utils.robot_data_spec_utils import (
     convert_robot_data_spec_names_to_ids,
     convert_str_to_robot_data_spec,
@@ -68,6 +69,13 @@ def _resolve_output_dir(run_name: str | None = None) -> str:
     Returns:
         Full path to the output directory.
     """
+    # Hydra/OmegaConf may pass YAML null to resolvers as the literal string "null".
+    explicit_run_name = bool(
+        run_name
+        and run_name != "null"
+        and not (isinstance(run_name, str) and run_name.strip() == "")
+    )
+
     # Handle None, empty string, or string "null"
     if (
         not run_name
@@ -79,8 +87,25 @@ def _resolve_output_dir(run_name: str | None = None) -> str:
     else:
         run_name = _sanitize_run_name(str(run_name))
 
+    base_dir = DEFAULT_CACHE_DIR / "runs"
+
+    # Prevent starting another local run with the same explicit name.
+    has_conflicting_run_dir = (
+        base_dir.exists()
+        and run_name is not None
+        and any(
+            run_path.is_dir()
+            and (run_path.name == run_name or run_path.name.startswith(f"{run_name}_"))
+            for run_path in base_dir.iterdir()
+        )
+    )
+    if explicit_run_name and has_conflicting_run_dir:
+        raise ValueError(
+            f"A local training run with name '{run_name}' already exists. "
+            "Choose a different run_name."
+        )
+
     # Build full path
-    base_dir = Path(os.environ.get("HOME", "~")) / ".neuracore" / "training" / "runs"
     return str(base_dir / run_name)
 
 
