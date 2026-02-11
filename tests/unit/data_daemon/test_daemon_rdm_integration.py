@@ -252,8 +252,8 @@ class TestHandleEndTrace:
         assert msg.data_type == DataType.JOINT_POSITIONS
         assert msg.data == ""
 
-    def test_handle_end_trace_uses_custom_1d_for_unknown_data_type(self) -> None:
-        """_handle_end_trace should default to CUSTOM_1D for unknown data_type."""
+    def test_handle_end_trace_raises_for_unknown_data_type(self) -> None:
+        """_handle_end_trace should raise ValueError for unknown data_type."""
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -283,14 +283,11 @@ class TestHandleEndTrace:
             },
         )
 
-        daemon._handle_end_trace(channel, message)
+        with pytest.raises(ValueError, match="Unknown data_type"):
+            daemon._handle_end_trace(channel, message)
 
-        assert len(mock_rdm.enqueued) == 1
-        msg = mock_rdm.enqueued[0]
-        assert msg.data_type == DataType.CUSTOM_1D
-
-    def test_handle_end_trace_uses_custom_1d_for_missing_metadata(self) -> None:
-        """_handle_end_trace should default to CUSTOM_1D if no metadata exists."""
+    def test_handle_end_trace_raises_for_missing_metadata(self) -> None:
+        """_handle_end_trace should raise ValueError if no metadata exists."""
         mock_comm = MockComm()
         mock_rdm = MockRDM()
 
@@ -317,11 +314,8 @@ class TestHandleEndTrace:
             },
         )
 
-        daemon._handle_end_trace(channel, message)
-
-        assert len(mock_rdm.enqueued) == 1
-        msg = mock_rdm.enqueued[0]
-        assert msg.data_type == DataType.CUSTOM_1D
+        with pytest.raises(ValueError, match="Missing data_type"):
+            daemon._handle_end_trace(channel, message)
 
     def test_handle_end_trace_removes_trace_after_sending(self) -> None:
         """_handle_end_trace should remove trace from internal state after sending."""
