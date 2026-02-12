@@ -153,16 +153,17 @@ class SqliteStateStore(StateStore):
             )
         return [TraceRecord.from_row(dict(row)) for row in rows]
 
-    def list_traces(self) -> list[TraceRecord]:
+    async def list_traces(self) -> list[TraceRecord]:
         """Return all trace records."""
-        with self._engine.begin() as conn:
-            rows = conn.execute(select(traces)).mappings().all()
+        async with self._engine.begin() as conn:
+            rows = (await conn.execute(select(traces))).mappings().all()
         return [TraceRecord.from_row(dict(row)) for row in rows]
 
     async def update_status(
         self,
         trace_id: str,
         status: TraceStatus,
+        *,
         error_message: str | None = None,
     ) -> bool:
         """Update the status and optional error message for a trace.
@@ -431,7 +432,13 @@ class SqliteStateStore(StateStore):
             index_elements=["trace_id"],
             set_={
                 "bytes_written": bytes_written,
-                "total_bytes": bytes_written,
+                "total_bytes": case(
+                    (
+                        traces.c.total_bytes.is_(None),
+                        bytes_written,
+                    ),
+                    else_=traces.c.total_bytes,
+                ),
                 "last_updated": now,
                 "status": case(
                     (

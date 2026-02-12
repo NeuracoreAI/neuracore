@@ -148,7 +148,7 @@ class ResumableFileUploader:
             FileNotFoundError: If the local file does not exist.
         """
         logger.info(
-            f"Starting upload for {self._recording_id}/{self._filepath}: "
+            f"Starting upload for {self._recording_id} at{self._filepath}: "
             f"{self._bytes_uploaded} bytes already uploaded"
         )
 
@@ -181,13 +181,13 @@ class ResumableFileUploader:
                 )
                 return (False, self._bytes_uploaded, checksum_error)
             logger.info(
-                f"Upload complete for {self._recording_id}/{self._filepath}: "
+                f"Upload complete for {self._recording_id} at {self._filepath}: "
                 f"{self._total_bytes} bytes"
             )
             return (True, self._bytes_uploaded, None)
         else:
             logger.warning(
-                f"Upload failed for {self._recording_id}/{self._filepath} "
+                f"Upload failed for {self._recording_id} at {self._filepath} "
                 f"at offset {self._bytes_uploaded}/{self._total_bytes}: {error_message}"
             )
             return (False, self._bytes_uploaded, error_message)

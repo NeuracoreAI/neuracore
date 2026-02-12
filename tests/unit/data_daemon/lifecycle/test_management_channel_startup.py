@@ -25,7 +25,7 @@ class _DummyBootstrap:
 
 
 class _DummyStore:
-    def list_traces(self):
+    async def list_traces(self):
         return []
 
 

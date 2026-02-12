@@ -1,6 +1,7 @@
 """Helper functions for the data daemon."""
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -50,3 +51,8 @@ def get_daemon_recordings_root_path() -> Path:
             str(default_root),
         )
     )
+
+
+def utc_now() -> datetime:
+    """Return the current time as a Unix timestamp or datetime object."""
+    return datetime.now(timezone.utc)
