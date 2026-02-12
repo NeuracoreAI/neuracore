@@ -22,6 +22,7 @@ from neuracore.data_daemon.const import (
     DATA_TYPE_FIELD_SIZE,
     DEFAULT_RING_BUFFER_SIZE,
     HEARTBEAT_TIMEOUT_SECS,
+    NEVER_OPENED_TIMEOUT_SECS,
     TRACE_ID_FIELD_SIZE,
 )
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
@@ -58,6 +59,8 @@ class ChannelState:
     last_heartbeat: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     reader: ChannelMessageReader | None = None
     trace_id: str | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_sequence_number: int = 0
 
     def touch(self) -> None:
         """Update the last heartbeat time for the channel.
@@ -68,6 +71,14 @@ class ChannelState:
 
 
 CommandHandler = Callable[[ChannelState, MessageEnvelope], None]
+
+
+@dataclass
+class RecordingClosingState:
+    """Recording-level stop/drain state."""
+
+    producer_stop_sequence_numbers: dict[str, int]
+    stop_requested_at: datetime
 
 
 class Daemon:
@@ -94,34 +105,37 @@ class Daemon:
         self.comm = comm_manager or CommunicationsManager()
         self.recording_disk_manager = recording_disk_manager
         self.channels: dict[str, ChannelState] = {}
+        self._closed_producers: set[str] = set()
         self._recording_traces: dict[str, set[str]] = {}
         self._trace_recordings: dict[str, str] = {}
         self._trace_metadata: dict[str, dict[str, str | int | None]] = {}
         self._closed_recordings: set[str] = set()
-        self._pending_close_recordings: set[str] = set()
+        self._pending_close_recordings: dict[str, dict[str, int]] = {}
+        self._closing_recordings: dict[str, RecordingClosingState] = {}
         self._command_handlers: dict[CommandType, CommandHandler] = {
             CommandType.OPEN_RING_BUFFER: self._handle_open_ring_buffer,
             CommandType.DATA_CHUNK: self._handle_write_data_chunk,
             CommandType.HEARTBEAT: self._handle_heartbeat,
             CommandType.TRACE_END: self._handle_end_trace,
-            CommandType.RECORDING_STOPPED: self._handle_recording_stopped,
         }
 
         self._emitter = get_emitter()
-        self._emitter.on(Emitter.TRACE_WRITTEN, self.cleanup_stopped_channels)
         self._running = False
+        self._emitter.on(Emitter.TRACE_WRITTEN, self.cleanup_channel_on_trace_written)
 
     def run(self) -> None:
-        """Run the daemon main loop.
+        """Starts the daemon and begins accepting messages from producers.
 
-        This starts the consumer socket, and then enters an infinite loop where it:
-        - Receives ManagementMessages from producers over ZMQ
-        - Handles messages from producers using the `handle_message` function
-        - Cleans up expired channels using the `_cleanup_expired_channels` function
-        - Drains channel messages using the `_drain_channel_messages` function
+        This function blocks until the daemon is shutdown via Ctrl-C.
 
-        The loop will exit on a KeyboardInterrupt (e.g. Ctrl+C), and will then call
-        `cleanup_daemon` on the communications manager to clean up resources.
+        It is responsible for:
+
+        - Starting the ZMQ consumer and publisher sockets.
+        - Receiving and processing management messages from producers.
+        - Periodically cleaning up expired channels.
+        - Draining full messages from the ring buffer.
+
+        :return: None
         """
         if self._running:
             raise RuntimeError("Daemon is already running")
@@ -185,23 +199,53 @@ class Daemon:
         cmd = message.command
 
         if producer_id is None:
+            # Stop recording commands are sent without a producer_id / channel
             if cmd != CommandType.RECORDING_STOPPED:
                 logger.warning("Missing producer_id for command %s", cmd)
                 return
-            channel = ChannelState(producer_id="recording-context")
-        else:
-            existing = self.channels.get(producer_id)
-            if existing is None:
-                existing = ChannelState(producer_id=producer_id)
-                self.channels[producer_id] = existing
-                logger.info("Created new channel for producer_id=%s", producer_id)
-            channel = existing
+            self._handle_recording_stopped(message)
+            return
+
+        if (
+            producer_id in self._closed_producers
+            and cmd != CommandType.OPEN_RING_BUFFER
+        ):
+            logger.warning(
+                "Ignoring command %s from closed producer_id=%s",
+                cmd,
+                producer_id,
+            )
+            return
+
+        if (
+            cmd == CommandType.OPEN_RING_BUFFER
+            and producer_id in self._closed_producers
+        ):
+            self._closed_producers.discard(producer_id)
+
+        existing = self.channels.get(producer_id)
+        if existing is None:
+            existing = ChannelState(producer_id=producer_id)
+            self.channels[producer_id] = existing
+            logger.info("Created new channel for producer_id=%s", producer_id)
+        channel = existing
         channel.touch()
 
         handler = self._command_handlers.get(cmd)
         if handler is None:
             logger.warning("Unknown command %s from producer_id=%s", cmd, producer_id)
             return
+
+        if message.sequence_number is not None:
+            if message.sequence_number > channel.last_sequence_number:
+                channel.last_sequence_number = message.sequence_number
+            else:
+                logger.debug(
+                    "Non-monotonic sequence_number=%s for producer_id=%s (last=%s)",
+                    message.sequence_number,
+                    producer_id,
+                    channel.last_sequence_number,
+                )
         try:
             handler(channel, message)
         except Exception:
@@ -250,6 +294,7 @@ class Daemon:
     def _drain_channel_messages(self) -> None:
         """Poll all channels for completed messages and handle them."""
         for channel in self.channels.values():
+            # guard against uninitialised channels
             if channel.reader is None or channel.ring_buffer is None:
                 continue
             # Loop to receive full message
@@ -455,6 +500,40 @@ class Daemon:
             )
             return
 
+        closing_state = self._closing_recordings.get(recording_id)
+        if closing_state is not None and closing_state.producer_stop_sequence_numbers:
+            cutoff_sequence_number = closing_state.producer_stop_sequence_numbers.get(
+                channel.producer_id
+            )
+            if cutoff_sequence_number is None:
+                logger.warning(
+                    "Dropping data from producer_id=%s while "
+                    "recording_id=%s is closing "
+                    "(missing stop sequence number)",
+                    channel.producer_id,
+                    recording_id,
+                )
+                return
+            if message.sequence_number is None:
+                logger.warning(
+                    "Dropping data for producer_id=%s recording_id=%s "
+                    "without sequence_number "
+                    "while recording is closing",
+                    channel.producer_id,
+                    recording_id,
+                )
+                return
+            if message.sequence_number > cutoff_sequence_number:
+                logger.warning(
+                    "Dropping post-stop data for producer_id=%s recording_id=%s "
+                    "(sequence_number=%s, cutoff_sequence_number=%s)",
+                    channel.producer_id,
+                    recording_id,
+                    message.sequence_number,
+                    cutoff_sequence_number,
+                )
+                return
+
         trace_id = data_chunk.trace_id
         if recording_id:
             self._register_trace(recording_id, trace_id)
@@ -566,9 +645,7 @@ class Daemon:
 
         self._remove_trace(str(recording_id), str(trace_id))
 
-    def _handle_recording_stopped(
-        self, _: ChannelState, message: MessageEnvelope
-    ) -> None:
+    def _handle_recording_stopped(self, message: MessageEnvelope) -> None:
         """Handle a RECORDING_STOPPED message from a producer.
 
         This function is called when a producer sends a RECORDING_STOPPED message to
@@ -587,21 +664,74 @@ class Daemon:
                 message.producer_id,
             )
             return
-        self._pending_close_recordings.add(str(recording_id))
+        producer_stop_sequence_numbers_raw = payload.get(
+            "producer_stop_sequence_numbers", {}
+        )
+        producer_stop_sequence_numbers: dict[str, int] = {}
+        if isinstance(producer_stop_sequence_numbers_raw, dict):
+            for (
+                producer_id,
+                sequence_number,
+            ) in producer_stop_sequence_numbers_raw.items():
+                try:
+                    producer_stop_sequence_numbers[str(producer_id)] = int(
+                        sequence_number
+                    )
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Ignoring invalid stop sequence number for producer_id=%s: %r",
+                        producer_id,
+                        sequence_number,
+                    )
+        else:
+            logger.warning(
+                "recording_stopped.producer_stop_sequence_numbers must be a dict"
+            )
+
+        self._pending_close_recordings[str(recording_id)] = (
+            producer_stop_sequence_numbers
+        )
         self._emitter.emit(Emitter.STOP_RECORDING, recording_id)
 
     def _finalize_pending_closes(self) -> None:
-        """Move pending close recordings to closed set.
+        """Transition pending close recordings into closing state.
 
-        Called at the start of each main loop iteration to ensure any
-        DATA_CHUNK messages that arrived before RECORDING_STOPPED (but
-        were interleaved in ZMQ) get processed first.
+        Also finalize recordings that are done draining.
         """
+        now = datetime.now(timezone.utc)
+
         if self._pending_close_recordings:
-            self._closed_recordings.update(self._pending_close_recordings)
+            for (
+                recording_id,
+                producer_stop_sequence_numbers,
+            ) in self._pending_close_recordings.items():
+                self._closing_recordings[recording_id] = RecordingClosingState(
+                    producer_stop_sequence_numbers=producer_stop_sequence_numbers,
+                    stop_requested_at=now,
+                )
             self._pending_close_recordings.clear()
 
-    def cleanup_stopped_channels(
+        close_timeout = timedelta(seconds=10)
+        to_close: list[str] = []
+        for recording_id, closing_state in self._closing_recordings.items():
+            traces = self._recording_traces.get(recording_id, set())
+            if not traces:
+                to_close.append(recording_id)
+                continue
+            if now - closing_state.stop_requested_at >= close_timeout:
+                logger.warning(
+                    "Force-closing recording_id=%s after timeout "
+                    "with %d trace(s) still open",
+                    recording_id,
+                    len(traces),
+                )
+                to_close.append(recording_id)
+
+        for recording_id in to_close:
+            self._closing_recordings.pop(recording_id, None)
+            self._closed_recordings.add(recording_id)
+
+    def cleanup_channel_on_trace_written(
         self,
         trace_id: str,
         _: str | None = None,
@@ -633,12 +763,16 @@ class Daemon:
     def _cleanup_expired_channels(self) -> None:
         """Remove channels whose heartbeat has not been seen within the timeout."""
         now = datetime.now(timezone.utc)
-        timeout = timedelta(seconds=HEARTBEAT_TIMEOUT_SECS)
+        heartbeat_timeout = timedelta(seconds=HEARTBEAT_TIMEOUT_SECS)
+        never_opened_timeout = timedelta(seconds=NEVER_OPENED_TIMEOUT_SECS)
 
         to_remove = [
             producer_id
             for producer_id, state in self.channels.items()
-            if now - state.last_heartbeat > timeout
+            # Missed heart beat
+            if (now - state.last_heartbeat > heartbeat_timeout)
+            # Never opened and timed out
+            or (now - state.created_at > never_opened_timeout)
         ]
 
         for producer_id in to_remove:
@@ -663,5 +797,5 @@ class Daemon:
                         },
                     ),
                 )
-            # Here is where you would also clean up any shared memory segments.
             del self.channels[producer_id]
+            self._closed_producers.add(producer_id)

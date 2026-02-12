@@ -117,6 +117,60 @@ async def test_upsert_trace_bytes_inserts_row(store: SqliteStateStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_upsert_trace_bytes_preserves_existing_total_bytes(
+    store: SqliteStateStore,
+) -> None:
+    await store.upsert_trace_metadata(
+        trace_id="trace-bytes-preserve-total",
+        recording_id="rec-bytes-preserve-total",
+        data_type=PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-bytes-preserve-total.bin",
+        total_bytes=256,
+        robot_instance=ROBOT_INSTANCE,
+    )
+
+    trace = await store.upsert_trace_bytes(
+        trace_id="trace-bytes-preserve-total",
+        recording_id="rec-bytes-preserve-total",
+        bytes_written=64,
+    )
+
+    assert trace.status == TraceStatus.WRITTEN
+    row = await _get_trace_row(store, "trace-bytes-preserve-total")
+    assert row is not None
+    assert row["bytes_written"] == 64
+    assert row["total_bytes"] == 256
+
+
+@pytest.mark.asyncio
+async def test_upsert_trace_bytes_backfills_missing_total_bytes(
+    store: SqliteStateStore,
+) -> None:
+    await store.upsert_trace_metadata(
+        trace_id="trace-bytes-backfill-total",
+        recording_id="rec-bytes-backfill-total",
+        data_type=PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-bytes-backfill-total.bin",
+        total_bytes=None,
+        robot_instance=ROBOT_INSTANCE,
+    )
+
+    trace = await store.upsert_trace_bytes(
+        trace_id="trace-bytes-backfill-total",
+        recording_id="rec-bytes-backfill-total",
+        bytes_written=96,
+    )
+
+    assert trace.status == TraceStatus.WRITTEN
+    row = await _get_trace_row(store, "trace-bytes-backfill-total")
+    assert row is not None
+    assert row["bytes_written"] == 96
+    assert row["total_bytes"] == 96
+
+
+@pytest.mark.asyncio
 async def test_update_bytes_uploaded_sets_value(store: SqliteStateStore) -> None:
     await store.upsert_trace_metadata(
         trace_id="trace-3",
