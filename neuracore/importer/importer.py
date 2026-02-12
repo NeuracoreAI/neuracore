@@ -30,18 +30,7 @@ from neuracore.importer.core.validation import (
 from neuracore.importer.lerobot_importer import LeRobotDatasetImporter
 from neuracore.importer.rlds_importer import RLDSDatasetImporter
 
-LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 logger = logging.getLogger(__name__)
-
-
-def configure_logging(level: int = logging.INFO) -> None:
-    """Configure root logging with a concise, consistent format."""
-    if logging.getLogger().handlers:
-        logging.getLogger().setLevel(level)
-        return
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter(LOG_FORMAT))
-    logging.basicConfig(level=level, handlers=[handler])
 
 
 def load_dataset_config(path: Path) -> DatasetImportConfig:
