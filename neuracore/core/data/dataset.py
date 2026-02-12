@@ -4,7 +4,6 @@ import logging
 import sys
 import time
 from collections.abc import Generator, Iterator
-from pathlib import Path
 from typing import Optional, Union
 
 import requests
@@ -29,12 +28,10 @@ from neuracore.core.utils.robot_data_spec_utils import (
 from neuracore.core.utils.robot_mapping import RobotMapping
 
 from ..auth import Auth, get_auth
-from ..const import API_URL
+from ..const import API_URL, DEFAULT_RECORDING_CACHE_DIR
 from ..exceptions import DatasetError
 from ..utils.http_errors import extract_error_detail
 
-DEFAULT_CACHE_DIR = Path.home() / ".neuracore" / "training"
-DEFAULT_RECORDING_CACHE_DIR = DEFAULT_CACHE_DIR / "recording_cache"
 PAGE_SIZE = 30
 
 logger = logging.getLogger(__name__)

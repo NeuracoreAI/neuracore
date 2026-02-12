@@ -23,7 +23,7 @@ from neuracore.core.cli.training_display import (
     RunDisplayRow,
     print_run_table,
 )
-from neuracore.core.data.dataset import DEFAULT_CACHE_DIR
+from neuracore.core.const import DEFAULT_CACHE_DIR
 from neuracore.core.exceptions import AuthenticationError, ConfigError, TrainingRunError
 from neuracore.ml.cli import training_runs_cloud as training_runs
 
