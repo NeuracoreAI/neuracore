@@ -33,7 +33,6 @@ def get_daemon_db_path() -> Path:
     if env_override:
         return Path(env_override)
 
-
     return Path(Path.home() / ".neuracore" / "data_daemon" / "state.db")
 
 

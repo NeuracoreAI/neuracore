@@ -19,6 +19,7 @@ class StateStore(Protocol):
     async def set_stopped_ats(self, recording_id: str) -> None:
         """Set the end time for all traces for a recording."""
         ...
+
     async def find_retry_scheduled_traces(self) -> list[TraceRecord]:
         """Return WRITTEN traces with a persisted next_retry_at schedule."""
         ...

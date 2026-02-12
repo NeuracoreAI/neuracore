@@ -321,7 +321,6 @@ class StateManager:
         )
         self._retry_emit_handles[trace_id] = handle
 
-
     async def restore_retry_schedules(self) -> None:
         """Restore persisted retry timers into in-memory loop scheduling."""
         traces = await self._store.find_retry_scheduled_traces()
@@ -556,23 +555,25 @@ class StateManager:
         self, traces: list[TraceRecord]
     ) -> None:
         """Check if all traces are ready for progress reporting and emit a progress report.
-        
+
         If the traces are from the same recording, check if they are all WRITTEN or COMPLETE.
         If so, add the recording to the reporting recordings list and schedule a progress report.
         """
         if not traces:
             return
-        
+
         recording_id = traces[0].recording_id
 
         if not self._validate_traces_ready_for_reporting(traces, recording_id):
             return
-        
+
         self._reporting_recordings.add(recording_id)
         start_time, end_time = self._find_recording_start_and_end(traces)
         asyncio.create_task(self._emit_progress_report(start_time, end_time, traces))
 
-    def _validate_traces_ready_for_reporting(self, traces: list[TraceRecord], recording_id:str) -> bool:
+    def _validate_traces_ready_for_reporting(
+        self, traces: list[TraceRecord], recording_id: str
+    ) -> bool:
         """Validate that all traces are ready for progress reporting."""
         # Currently reporting
         if recording_id in self._reporting_recordings:
@@ -581,13 +582,19 @@ class StateManager:
         if all(
             trace.progress_reported == ProgressReportStatus.REPORTED for trace in traces
         ):
-            logger.warning("Progress already reported for recording %s, despite trace finalizing later, skipping report", recording_id, exc_info=True)
+            logger.warning(
+                "Progress already reported for recording %s, despite trace finalizing later, skipping report",
+                recording_id,
+                exc_info=True,
+            )
             return False
-    
-        if not all( trace.stopped_at is not None for trace in traces):
-            logger.warning("Not all traces have stopped at, skipping report", exc_info=True)
+
+        if not all(trace.stopped_at is not None for trace in traces):
+            logger.warning(
+                "Not all traces have stopped at, skipping report", exc_info=True
+            )
             return False
-        
+
         return True
 
     async def _emit_progress_report(
@@ -725,7 +732,6 @@ class StateManager:
 
         logger.info("Retrying upload for trace %s", trace_id)
         await self._emit_ready_for_upload_from_trace(trace)
-
 
     async def handle_progress_report_error(
         self, recording_id: str, error_message: str
