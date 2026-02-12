@@ -5,8 +5,8 @@ import json
 import logging
 import os
 import re
-from pathlib import Path
 import time
+from pathlib import Path
 from typing import Any
 
 import hydra
@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 import neuracore as nc
 from neuracore.api.training import _get_algorithms
-from neuracore.core.const import DEFAULT_CACHE_DIR
+from neuracore.core.const import DEFAULT_CACHE_DIR, DEFAULT_RECORDING_CACHE_DIR
 from neuracore.core.utils.robot_data_spec_utils import (
     convert_robot_data_spec_names_to_ids,
     convert_str_to_robot_data_spec,
@@ -56,6 +56,14 @@ os.environ["PJRT_DEVICE"] = "GPU"
 logger = logging.getLogger(__name__)
 
 MAX_AUTOTUNE_SAMPLE_CANDIDATES = 1000
+
+
+def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
+    """Resolve recording cache directory for synchronized dataset downloads."""
+    configured_dir = cfg.get("recording_cache_dir")
+    if configured_dir is None:
+        return DEFAULT_RECORDING_CACHE_DIR
+    return Path(str(configured_dir)).expanduser()
 
 
 def _resolve_output_dir(run_name: str | None = None) -> str:
@@ -598,6 +606,8 @@ def main(cfg: DictConfig) -> None:
         dataset = nc.get_dataset(name=cfg.dataset_name)
     else:
         raise ValueError("Either 'dataset_id' or 'dataset_name' must be provided.")
+    dataset.cache_dir = _resolve_recording_cache_dir(cfg)
+    dataset.cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Sort out data specs
     if cfg.input_robot_data_spec is not None:

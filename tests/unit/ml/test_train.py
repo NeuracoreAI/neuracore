@@ -28,6 +28,7 @@ from neuracore_types import (
 )
 from omegaconf import DictConfig, OmegaConf
 
+from neuracore.core.const import DEFAULT_RECORDING_CACHE_DIR
 from neuracore.core.utils.robot_data_spec_utils import extract_data_types
 from neuracore.core.utils.robot_mapping import RobotMapping
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
@@ -37,6 +38,7 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
 )
 from neuracore.ml.train import (
     _resolve_output_dir,
+    _resolve_recording_cache_dir,
     determine_optimal_batch_size,
     get_model_and_algorithm_config,
     main,
@@ -467,6 +469,17 @@ class TestResolveOutputDir:
 
         with pytest.raises(ValueError, match="already exists"):
             _resolve_output_dir(run_name)
+
+
+class TestResolveRecordingCacheDir:
+    def test_resolve_recording_cache_dir_uses_default_when_unset(self):
+        cfg = OmegaConf.create({})
+        assert _resolve_recording_cache_dir(cfg) == DEFAULT_RECORDING_CACHE_DIR
+
+    def test_resolve_recording_cache_dir_uses_custom_path(self, tmp_path):
+        custom_dir = tmp_path / "recordings"
+        cfg = OmegaConf.create({"recording_cache_dir": str(custom_dir)})
+        assert _resolve_recording_cache_dir(cfg) == custom_dir
 
 
 class TestGetModelAndAlgorithmConfig:
@@ -1677,6 +1690,57 @@ class TestMain:
         ]
         data_spec = cast(RobotDataSpec, call_kwargs["robot_data_spec"])
         assert set(extract_data_types(data_spec)) == set(expected_data_types)
+
+    def test_main_uses_default_recording_cache_dir(self, monkeypatch, temp_output_dir):
+        cfg = OmegaConf.create({
+            "algorithm_id": "test-algorithm-id",
+            "dataset_id": "test-dataset-id",
+            "dataset_name": None,
+            "org_id": None,
+            "device": None,
+            "local_output_dir": str(temp_output_dir),
+            "batch_size": 8,
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "output_prediction_horizon": 5,
+            "frequency": 30,
+            "algorithm_params": None,
+            "max_prefetch_workers": 4,
+            "recording_cache_dir": None,
+        })
+
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+
+        main(cfg)
+
+        assert setup.mock_dataset.cache_dir == DEFAULT_RECORDING_CACHE_DIR
+
+    def test_main_uses_custom_recording_cache_dir(self, monkeypatch, temp_output_dir):
+        custom_cache_dir = temp_output_dir / "custom-recording-cache"
+        cfg = OmegaConf.create({
+            "algorithm_id": "test-algorithm-id",
+            "dataset_id": "test-dataset-id",
+            "dataset_name": None,
+            "org_id": None,
+            "device": None,
+            "local_output_dir": str(temp_output_dir),
+            "batch_size": 8,
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "output_prediction_horizon": 5,
+            "frequency": 30,
+            "algorithm_params": None,
+            "max_prefetch_workers": 4,
+            "recording_cache_dir": str(custom_cache_dir),
+        })
+
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+
+        main(cfg)
+
+        assert setup.mock_dataset.cache_dir == custom_cache_dir
 
     def test_main_uses_autotuning_when_batch_size_is_auto(
         self, monkeypatch, temp_output_dir, model_init_description, mock_model_class
