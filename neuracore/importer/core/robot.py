@@ -52,13 +52,6 @@ class RobotType(Enum):
     UNITREE_H1 = ("Unitree H1", "h1_description")
 
 
-class StateType(Enum):
-    """Robot state type enumeration."""
-
-    JOINT_POSITIONS = "joint_positions"
-    TCP_POSE = "tcp_pose"
-
-
 class Robot:
     """Robot utility class for processing robot information and kinematics."""
 
