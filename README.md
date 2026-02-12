@@ -41,35 +41,98 @@
 
 
 # 🛠️ Installation
-To install the basic package for data logging and visualization:
+Neuracore is published on PyPI and supports UV-first installs plus pip/conda workflows.
+
+Quick start:
 
 ```bash
+uv pip install neuracore
+# or
 pip install neuracore
 ```
 
-**Note:** for faster video decoding, installing `ffmpeg` via `sudo apt-get install ffmpeg` (for Linux) is recommended. 
+<details>
+<summary><strong>Show all neuracore install methods (uv, pip, conda)</strong></summary>
 
-For training and ML development:
+### A) `uv add` (project managed by `pyproject.toml`)
+
 ```bash
-pip install neuracore[ml]
+uv add neuracore
+uv add "neuracore[ml]"
+uv add "neuracore[import]"
+uv add "neuracore[examples]"
+uv add "neuracore[mjcf]"
 ```
 
-For bulk importing datasets:
+### B) `uv pip install` (existing environment)
+
 ```bash
-pip install neuracore[import]
+uv pip install neuracore
+uv pip install "neuracore[ml]"
+uv pip install "neuracore[import]"
+uv pip install "neuracore[examples]"
+uv pip install "neuracore[mjcf]"
 ```
 
-To run our examples:
+### C) `uv tool install` (global CLI install)
+
 ```bash
-pip install neuracore[examples]
+uv tool install neuracore
 ```
 
-**Note:** The `main` branch is considered a development branch. For production use, we recommend installing from PyPI (as shown above) or using the latest tagged commit.
+### D) Standard `venv` + `pip`
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install neuracore
+```
+
+Install extras when needed:
+
+```bash
+pip install "neuracore[ml]"
+pip install "neuracore[import]"
+pip install "neuracore[examples]"
+pip install "neuracore[mjcf]"
+```
+
+### E) Conda + `pip` from PyPI
+
+```bash
+conda create -n neuracore python=3.11 -y
+conda activate neuracore
+pip install neuracore
+```
+
+Install extras when needed:
+
+```bash
+pip install "neuracore[ml]"
+pip install "neuracore[import]"
+pip install "neuracore[examples]"
+pip install "neuracore[mjcf]"
+```
+
+</details>
+
+Verify installation:
+
+```bash
+python -c "import neuracore as nc; print(nc.__version__)"
+neuracore --help
+```
+
+Notes:
+- Extras: `ml`, `import`, `examples`, `mjcf`.
+- `examples` and `mjcf` currently conflict due to different Mujoco major versions, so avoid combining them in one install.
+- For faster video decoding on Linux, install `ffmpeg` (`sudo apt-get install ffmpeg`).
+- The `main` branch is a development branch. For production use, install from PyPI or a tagged release.
 
 # 🍰 A Short Taste
 Here is a short taste on what neuracore can do, for a detailed walk-through, please refer to the [tutorial](./docs/tutorial.md) and [documentation](#documentation).
 ```python
-import neuracore as nc # pip install neuracore
+import neuracore as nc
 import time
 
 # ensure you have an account at neuracore.com

@@ -2,6 +2,8 @@
 
 The `neuracore` command helps you authenticate, choose an organization, monitor training runs (cloud and local), and launch a local policy server for quick validation. It does not yet create datasets or start training jobs—use the SDK for those and come back here to monitor.
 
+Install options are documented in [Installation](../README.md#installation).
+
 ## Configure once
 - Login and save an API key:  
   `neuracore login`  

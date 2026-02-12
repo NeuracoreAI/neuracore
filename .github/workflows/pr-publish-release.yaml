@@ -25,11 +25,21 @@ jobs:
     - name: Pull latest changes
       run: git pull --tags
 
-    - name: Extract version from .bumpversion.cfg
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - uses: astral-sh/setup-uv@v4
+
+    - name: Check lockfile
+      run: uv lock --check
+
+    - name: Extract version from pyproject.toml
       id: extract_version
       run: |
-        VERSION=$(grep '^current_version = ' .bumpversion.cfg | cut -d'=' -f2 | tr -d ' ')
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        VERSION=$(uv version --short)
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
         echo "Current version in repo: $VERSION"
 
     - name: Check PyPI for existing version
@@ -37,7 +47,7 @@ jobs:
       run: |
         # Query PyPI API for the latest version
         PYPI_VERSION=$(curl -s https://pypi.org/pypi/neuracore/json | jq -r '.info.version' || echo "none")
-        echo "pypi_version=$PYPI_VERSION" >> $GITHUB_OUTPUT
+        echo "pypi_version=$PYPI_VERSION" >> "$GITHUB_OUTPUT"
         echo "Latest version on PyPI: $PYPI_VERSION"
 
     - name: Determine if we should publish
@@ -52,10 +62,10 @@ jobs:
 
         if [ "$CURRENT_VERSION" = "$PYPI_VERSION" ]; then
           echo "✗ Versions match - no publish needed"
-          echo "should_publish=false" >> $GITHUB_OUTPUT
+          echo "should_publish=false" >> "$GITHUB_OUTPUT"
         else
           echo "✓ Version changed - will publish"
-          echo "should_publish=true" >> $GITHUB_OUTPUT
+          echo "should_publish=true" >> "$GITHUB_OUTPUT"
         fi
 
   publish-python:
@@ -76,21 +86,21 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: "3.11"
 
-    - name: Install build tools
-      run: |
-        pip install --upgrade pip
-        pip install build twine
+    - uses: astral-sh/setup-uv@v4
+
+    - name: Check lockfile
+      run: uv lock --check
 
     - name: Build Python package
-      run: python -m build
+      run: uv build
 
     - name: Publish to PyPI
       env:
-        TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
-        TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
-      run: twine upload --skip-existing dist/*
+        UV_PUBLISH_USERNAME: ${{ secrets.PYPI_USERNAME }}
+        UV_PUBLISH_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+      run: uv publish --check-url https://pypi.org/simple --trusted-publishing never dist/*
 
   create-release:
     needs: [check-if-release, publish-python]
@@ -122,7 +132,7 @@ jobs:
 
         # Read changelog content and escape for JSON
         CHANGELOG_CONTENT=$(cat "$CHANGELOG_PATH" | jq -Rs .)
-        echo "changelog_content=$CHANGELOG_CONTENT" >> $GITHUB_OUTPUT
+        echo "changelog_content=$CHANGELOG_CONTENT" >> "$GITHUB_OUTPUT"
 
         echo "Read changelog from: $CHANGELOG_PATH"
 
@@ -232,6 +242,8 @@ jobs:
               summary += `- 📝 [Changelog](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/changelogs/${currentVersion}-changelog.md)\n\n`;
               summary += '### Installation\n\n';
               summary += '```bash\n';
+              summary += `uv pip install neuracore==${currentVersion}\n`;
+              summary += '# or\n';
               summary += `pip install neuracore==${currentVersion}\n`;
               summary += '```\n';
             } else {

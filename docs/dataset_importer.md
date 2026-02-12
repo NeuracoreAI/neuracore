@@ -13,9 +13,14 @@ This module enables you to:
 
 ## Installation
 
-To use the importer module, you need to install `neuracore` with the `[import]` extra, which includes the required dependencies for dataset import:
+To use the importer module, install `neuracore` with the `[import]` extra.
+The full installation matrix is documented in [Installation](../README.md#installation).
 
 ```bash
+# UV-first
+uv pip install "neuracore[import]"
+
+# or pip
 pip install neuracore[import]
 ```
 

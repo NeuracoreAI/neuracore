@@ -5,7 +5,9 @@
         "*.Dockerfile",
         "docker-compose.yml",
         "requirements*.txt",
-        "*.sh"
+        "*.sh",
+        "pyproject.toml",
+        "uv.lock"
     ],
     "dictionaryDefinitions": [
         {
