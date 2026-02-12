@@ -8,11 +8,11 @@ from neuracore.data_daemon.const import (
     BYTES_PER_MIB,
     DEFAULT_MAX_BANDWIDTH_MIB_S,
     DEFAULT_MIN_BANDWIDTH_MIB_S,
-    DEFAULT_RECORDING_ROOT_PATH,
     DEFAULT_STORAGE_FREE_FRACTION,
     DEFAULT_TARGET_DRAIN_HOURS,
     SECONDS_PER_HOUR,
 )
+from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
 
 
 def parse_bytes(value: int | str) -> int:
@@ -98,7 +98,7 @@ def build_default_daemon_config(
     Returns:
         A DaemonConfig populated with computed limits and the default recordings path.
     """
-    record_dir = DEFAULT_RECORDING_ROOT_PATH
+    record_dir = get_daemon_recordings_root_path()
     record_dir.mkdir(parents=True, exist_ok=True)
     storage_limit = calculate_storage_limit(record_dir, storage_free_fraction)
 

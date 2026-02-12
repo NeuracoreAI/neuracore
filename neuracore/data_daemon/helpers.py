@@ -35,3 +35,18 @@ def get_daemon_db_path() -> Path:
             str(Path.home() / ".neuracore" / "data_daemon" / "state.db"),
         )
     )
+
+
+def get_daemon_recordings_root_path() -> Path:
+    """Return the root directory used to store recording trace files.
+
+    This path is determined by NEURACORE_DAEMON_RECORDINGS_ROOT. If not set,
+    it defaults to a sibling of the DB path: <db_dir>/recordings.
+    """
+    default_root = get_daemon_db_path().parent / "recordings"
+    return Path(
+        os.environ.get(
+            "NEURACORE_DAEMON_RECORDINGS_ROOT",
+            str(default_root),
+        )
+    )
