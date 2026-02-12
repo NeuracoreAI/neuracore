@@ -1,10 +1,10 @@
-input_dataset_name: droid_dataset
+input_dataset_name: stanford_hydra_dataset_converted_externally_to_rlds
 dataset_type: RLDS
 
 output_dataset:
-  name: DROID
-  tags: [panda, in-the-wild, manipulation, table-top, kitchen]
-  description: "DROID is a large-scale, open-source robot manipulation dataset featuring 76k trajectories across diverse, real-world scenes to improve robotic policy generalization."
+  name: Stanford Hydra
+  tags: [panda, manipulation, kitchen, long-horizon, imitation-learning, waypoints]
+  description: "HYDRA dataset from Stanford containing expert demonstration trajectories for long-horizon manipulation tasks on a Franka Panda robot. The dataset includes real-world tasks such as making coffee and toasting bread, with mode labels and waypoint annotations for hybrid action representations across 7 challenging environments."
 
 robot: 
   name: franka_panda
@@ -42,52 +42,34 @@ data_import_config:
         index: 15
       - name: panda_joint7
         index: 16
-    
-  # JOINT_TARGET_POSITIONS:
-  #   source: action_dict.joint_position
-  #   mapping:
-  #     - name: panda_joint1
-  #     - name: panda_joint2
-  #     - name: panda_joint3
-  #     - name: panda_joint4
-  #     - name: panda_joint5
-  #     - name: panda_joint6
-  #     - name: panda_joint7
 
-  # PARALLEL_GRIPPER_OPEN_AMOUNTS:
-  #   source: observation.gripper_position
-  #   format:
-  #     invert_gripper_amount: true
-  #   mapping:
-  #     - name: gripper
-  #       index: 0
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.state
+    mapping:
+      - name: gripper
+        index: 25
   
-  # PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
-  #   source: action_dict.gripper_position
-  #   format:
-  #     invert_gripper_amount: true
-  #   mapping:
-  #     - name: gripper
-  #       index: 0
+  PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+    source: action
+    format:
+      invert_gripper_amount: true
+    mapping:
+      - name: gripper
+        index: 6
 
-  # VISUAL_JOINT_POSITIONS:
-  #   source: observation.gripper_position
-  #   format:
-  #     visual_joint_type: GRIPPER
-  #     invert_gripper_amount: true
-  #   mapping:
-  #     - name: panda_finger_joint1
-  #       index: 0
-  #     - name: panda_finger_joint2
-  #       index: 0
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state
+    format:
+      visual_joint_type: GRIPPER
+    mapping:
+      - name: panda_finger_joint1
+        index: 25
+      - name: panda_finger_joint2
+        index: 25
 
-  # LANGUAGE:
-  #   format:
-  #     language_type: BYTES
-  #   mapping:
-  #     - name: instruction1
-  #       source_name: language_instruction
-  #     - name: instruction2
-  #       source_name: language_instruction_2
-  #     - name: instruction3
-  #       source_name: language_instruction_3
+  LANGUAGE:
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction
+        source_name: language_instruction
