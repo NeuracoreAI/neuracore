@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, cast
 
 import aiofiles
@@ -17,6 +18,11 @@ from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget i
 
 from ..core.trace_filesystem import _TraceFilesystem
 from ..core.types import _BatchJob, _TraceKey, _WriteState
+
+
+@dataclass(frozen=True)
+class _StopRecording:
+    recording_id: str
 
 
 class _RawBatchWriter:
@@ -90,19 +96,7 @@ class _RawBatchWriter:
         Args:
             recording_id: Recording that was stopped.
         """
-        self._stopped_recordings.add(recording_id)
-
-        writer_states_to_flush = [
-            ws
-            for ws in self._writer_states.values()
-            if ws.trace_key.recording_id == recording_id
-        ]
-
-        for writer_state in writer_states_to_flush:
-            self._closed_traces.add(writer_state.trace_key)
-            writer_state.trace_done = True
-            await self._flush_state(writer_state)
-            self._writer_states.pop(writer_state.trace_key, None)
+        await self.trace_message_queue.put(_StopRecording(recording_id))
 
     async def _flush_state(self, writer_state: _WriteState) -> None:
         """Flush buffered data to a raw batch file and emit BATCH_READY.
@@ -181,6 +175,25 @@ class _RawBatchWriter:
                 self.trace_message_queue.task_done()
                 break
 
+            if isinstance(queue_item, _StopRecording):
+                recording_id = queue_item.recording_id
+                self._stopped_recordings.add(recording_id)
+
+                writer_states_to_flush = [
+                    ws
+                    for ws in self._writer_states.values()
+                    if ws.trace_key.recording_id == recording_id
+                ]
+
+                for ws in writer_states_to_flush:
+                    self._closed_traces.add(ws.trace_key)
+                    ws.trace_done = True
+                    await self._flush_state(ws)
+                    self._writer_states.pop(ws.trace_key, None)
+
+                self.trace_message_queue.task_done()
+                continue
+
             raw_message = cast(CompleteMessage, queue_item)
             recording_id_value = str(raw_message.recording_id)
 
@@ -234,7 +247,7 @@ class _RawBatchWriter:
                     raw_message.dataset_name,
                     raw_message.robot_name,
                     raw_message.robot_id,
-                    str(trace_dir),  # path as positional arg
+                    str(trace_dir),
                 )
 
             if writer_state is None:
