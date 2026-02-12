@@ -1,6 +1,7 @@
 """Configuration constants for Neuracore client behavior."""
 
 import os
+from pathlib import Path
 from warnings import warn
 
 API_URL = (os.getenv("NEURACORE_API_URL") or "https://api.neuracore.com/api").strip()
@@ -16,6 +17,8 @@ if API_URL not in STANDARD_API_URLS:
 
 
 API_URL = os.getenv("NEURACORE_API_URL", "https://api.neuracore.com/api")
+DEFAULT_CACHE_DIR = Path.home() / ".neuracore" / "training"
+DEFAULT_RECORDING_CACHE_DIR = DEFAULT_CACHE_DIR / "recording_cache"
 MAX_DATA_STREAMS = 300
 MAX_INPUT_ATTEMPTS = 3
 

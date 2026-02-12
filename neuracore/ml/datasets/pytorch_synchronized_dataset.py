@@ -19,7 +19,7 @@ from neuracore_types import (
 from neuracore_types.nc_data.nc_data import DataItemStats
 
 import neuracore as nc
-from neuracore.core.data.dataset import DEFAULT_CACHE_DIR
+from neuracore.core.const import DEFAULT_CACHE_DIR
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
 from neuracore.ml import BatchedTrainingSamples
