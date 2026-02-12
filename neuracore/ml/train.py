@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 import neuracore as nc
 from neuracore.api.training import _get_algorithms
-from neuracore.core.data.dataset import DEFAULT_CACHE_DIR
+from neuracore.core.const import DEFAULT_CACHE_DIR
 from neuracore.core.utils.robot_data_spec_utils import (
     convert_robot_data_spec_names_to_ids,
     convert_str_to_robot_data_spec,
