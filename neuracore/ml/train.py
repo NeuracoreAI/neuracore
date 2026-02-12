@@ -1,10 +1,12 @@
 """Hydra-based training script for Neuracore models."""
 
 import gc
+import json
 import logging
 import os
 import re
 from pathlib import Path
+import time
 from typing import Any
 
 import hydra
@@ -178,6 +180,66 @@ def _select_worst_case_sample(
     )
 
     return heaviest_sample.to(device)
+
+
+def _serialize_robot_data_spec(
+    robot_data_spec: dict[str, dict[DataType, list[str]]],
+) -> dict[str, dict[str, list[str]]]:
+    """Convert robot data spec to JSON-serializable form."""
+    serializable: dict[str, dict[str, list[str]]] = {}
+    for robot_id, data_types in robot_data_spec.items():
+        serializable[robot_id] = {}
+        for data_type, names in data_types.items():
+            key = data_type.name if hasattr(data_type, "name") else str(data_type)
+            serializable[robot_id][key] = list(names)
+    return serializable
+
+
+def _save_local_training_metadata(
+    cfg: DictConfig,
+    algorithm_name: str,
+    input_robot_data_spec: dict[str, dict[DataType, list[str]]],
+    output_robot_data_spec: dict[str, dict[DataType, list[str]]],
+) -> None:
+    """Persist basic training run metadata locally for local runs."""
+    training_id = getattr(cfg, "training_id", None)
+    if training_id is not None:
+        # Cloud run metadata is stored remotely; skip local save.
+        return
+
+    output_dir = Path(getattr(cfg, "local_output_dir", "."))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_id = output_dir.name
+
+    metadata = {
+        "id": run_id,
+        "name": run_id,
+        "status": "RUNNING",
+        "algorithm": algorithm_name,
+        "algorithm_id": getattr(cfg, "algorithm_id", None),
+        "dataset_id": getattr(cfg, "dataset_id", None),
+        "dataset_name": getattr(cfg, "dataset_name", None),
+        "launch_time": time.time(),
+        "local_output_dir": str(output_dir),
+        "org_id": getattr(cfg, "org_id", None),
+        "input_robot_data_spec": _serialize_robot_data_spec(input_robot_data_spec),
+        "output_robot_data_spec": _serialize_robot_data_spec(output_robot_data_spec),
+        "frequency": getattr(cfg, "frequency", None),
+        "output_prediction_horizon": getattr(cfg, "output_prediction_horizon", None),
+        # Align with cloud run schema for inspect output
+        "epoch": -1,
+        "step": -1,
+        "gpu_type": None,
+        "num_gpus": None,
+        "synchronization_details": {
+            "frequency": getattr(cfg, "frequency", None),
+            "allow_duplicates": None,
+            "max_delay_s": None,
+        },
+    }
+
+    metadata_path = output_dir / "training_run.json"
+    metadata_path.write_text(json.dumps(metadata, indent=2))
 
 
 def setup_logging(output_dir: str, rank: int = 0) -> None:
@@ -550,10 +612,13 @@ def main(cfg: DictConfig) -> None:
         )
     else:
         input_data_types = [DataType(data_type) for data_type in cfg.input_data_types]
-        input_robot_data_spec = {
-            robot_id: {data_type: [] for data_type in input_data_types}
-            for robot_id in dataset.robot_ids
-        }
+        input_robot_data_spec = {}
+        for robot_id in dataset.robot_ids:
+            robot_full_spec = dataset.get_full_data_spec(robot_id)
+            input_robot_data_spec[robot_id] = {
+                data_type: list(robot_full_spec.get(data_type.value, []))
+                for data_type in input_data_types
+            }
     if cfg.output_robot_data_spec is not None:
         if not isinstance(cfg.output_robot_data_spec, DictConfig):
             raise ValueError(
@@ -565,10 +630,13 @@ def main(cfg: DictConfig) -> None:
         )
     else:
         output_data_types = [DataType(data_type) for data_type in cfg.output_data_types]
-        output_robot_data_spec = {
-            robot_id: {data_type: [] for data_type in output_data_types}
-            for robot_id in dataset.robot_ids
-        }
+        output_robot_data_spec = {}
+        for robot_id in dataset.robot_ids:
+            robot_full_spec = dataset.get_full_data_spec(robot_id)
+            output_robot_data_spec[robot_id] = {
+                data_type: list(robot_full_spec.get(data_type.value, []))
+                for data_type in output_data_types
+            }
 
     input_robot_data_spec_with_id = convert_robot_data_spec_names_to_ids(
         input_robot_data_spec,
@@ -602,6 +670,14 @@ def main(cfg: DictConfig) -> None:
     # Prepare data types for synchronization
     robot_data_spec = merge_robot_data_spec(
         input_robot_data_spec_with_id, output_robot_data_spec_with_id
+    )
+
+    # Save local metadata so CLI can inspect local runs without cloud access
+    _save_local_training_metadata(
+        cfg=cfg,
+        algorithm_name=algorithm_name,
+        input_robot_data_spec=input_robot_data_spec,
+        output_robot_data_spec=output_robot_data_spec,
     )
 
     synchronized_dataset = dataset.synchronize(
