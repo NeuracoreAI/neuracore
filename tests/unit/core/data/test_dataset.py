@@ -10,8 +10,8 @@ from neuracore_types import DataType
 
 import neuracore as nc
 from neuracore.api.globals import GlobalSingleton
-from neuracore.core.const import API_URL
-from neuracore.core.data.dataset import DEFAULT_RECORDING_CACHE_DIR, Dataset
+from neuracore.core.const import API_URL, DEFAULT_RECORDING_CACHE_DIR
+from neuracore.core.data.dataset import Dataset
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.exceptions import DatasetError
