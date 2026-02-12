@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import pathlib
 from concurrent.futures import Future
+from pathlib import Path
 from typing import Any
 
 from neuracore.data_daemon.config_manager.helpers import calculate_storage_limit
 from neuracore.data_daemon.const import (
     DEFAULT_FLUSH_BYTES,
-    DEFAULT_RECORDING_ROOT_PATH,
     DEFAULT_STORAGE_FREE_FRACTION,
     MIN_FREE_DISK_BYTES,
     SENTINEL,
@@ -18,6 +17,7 @@ from neuracore.data_daemon.const import (
 )
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
+from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
 from neuracore.data_daemon.models import CompleteMessage, parse_data_type
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
     StorageBudget,
@@ -56,8 +56,11 @@ class RecordingDiskManager:
         """
         self.flush_bytes = flush_bytes or DEFAULT_FLUSH_BYTES
         self.storage_limit_bytes = storage_limit_bytes
-        self._recordings_root_value = recordings_root
-        self.recordings_root: pathlib.Path
+        self._recordings_root = (
+            Path(recordings_root)
+            if recordings_root
+            else get_daemon_recordings_root_path()
+        )
 
         self.trace_message_queue: asyncio.Queue[CompleteMessage | object] = (
             asyncio.Queue()
@@ -87,17 +90,15 @@ class RecordingDiskManager:
         Returns:
             None
         """
-        root_value = self._recordings_root_value or str(DEFAULT_RECORDING_ROOT_PATH)
-        self.recordings_root = pathlib.Path(root_value)
-        self.recordings_root.mkdir(parents=True, exist_ok=True)
+        self._recordings_root.mkdir(parents=True, exist_ok=True)
 
         if self.storage_limit_bytes is None:
             self.storage_limit_bytes = calculate_storage_limit(
-                self.recordings_root, DEFAULT_STORAGE_FREE_FRACTION
+                self._recordings_root, DEFAULT_STORAGE_FREE_FRACTION
             )
 
         self._storage_budget = StorageBudget(
-            recordings_root=self.recordings_root,
+            recordings_root=self._recordings_root,
             policy=StoragePolicy(
                 storage_limit_bytes=self.storage_limit_bytes,
                 min_free_disk_bytes=MIN_FREE_DISK_BYTES,
@@ -105,7 +106,7 @@ class RecordingDiskManager:
             ),
         )
 
-        self._filesystem = _TraceFilesystem(self.recordings_root)
+        self._filesystem = _TraceFilesystem(self._recordings_root)
 
         self._controller = _TraceController(
             filesystem=self._filesystem,

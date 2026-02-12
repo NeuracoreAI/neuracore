@@ -4,50 +4,93 @@ on:
   pull_request:
     branches:
       - main
+      - develop
+    types: [opened, synchronize, reopened, edited]
 
 jobs:
   check-source-branch:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
+      issues: write
+      contents: read
+
     steps:
-      - name: Check if PR is from dev/develop branch
+      - name: Validate PR source vs target
         uses: actions/github-script@v7
         with:
           script: |
             const pr = context.payload.pull_request;
             const sourceBranch = pr.head.ref;
             const targetBranch = pr.base.ref;
-            const allowedBranches = ['develop'];
+
+            const allowedSourceForMain = ['develop'];
+            const marker = '<!-- pr-source-branch-check -->';
 
             console.log(`PR #${pr.number}: ${sourceBranch} -> ${targetBranch}`);
 
-            if (targetBranch === 'main' && !allowedBranches.includes(sourceBranch)) {
-              const errorMessage = `❌ **Invalid PR Source Branch**
-
-              PRs to \`main\` can only come from the \`develop\` branch.
-
-              **Current PR:**
-              - Source: \`${sourceBranch}\`
-              - Target: \`${targetBranch}\`
-
-              **Required workflow:**
-              1. Merge your feature branch into \`develop\`
-              2. Once ready for release, create a PR from \`develop\` to \`main\`
-
-              Please close this PR and follow the correct branching workflow.`;
-
-              core.setFailed(errorMessage);
-
-              // Post comment on PR
-              await github.rest.issues.createComment({
+            // Helper: create/update a single bot comment instead of spamming
+            async function upsertComment(body) {
+              const { data: comments } = await github.rest.issues.listComments({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: pr.number,
-                body: errorMessage
+                per_page: 100,
               });
-            } else {
-              console.log('✅ Source branch is valid');
-              core.summary.addRaw(`✅ PR source branch \`${sourceBranch}\` is allowed for target \`${targetBranch}\``);
-              await core.summary.write();
+
+              const existing = comments.find(c =>
+                c.user?.type === 'Bot' &&
+                typeof c.body === 'string' &&
+                c.body.includes(marker)
+              );
+
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  body,
+                });
+              }
             }
+
+            // RULE: Only enforce when targeting main
+            if (targetBranch === 'main' && !allowedSourceForMain.includes(sourceBranch)) {
+              const errorMessage = `${marker}
+            ❌ **Invalid PR Source Branch forcing to main**
+
+            PRs to \`main\` can only come from the \`develop\` branch.
+
+            **Current PR:**
+            - Source: \`${sourceBranch}\`
+            - Target: \`${targetBranch}\`
+
+            **Required workflow:**
+            1. Merge your feature branch into \`develop\`
+            2. Once ready for release, create a PR from \`develop\` to \`main\``;
+
+              await upsertComment(errorMessage);
+              core.setFailed(errorMessage);
+              return;
+            }
+
+            // If not targeting main, or source is develop, it's valid
+            const okMessage = `${marker}
+            ✅ **PR source branch is valid**
+
+            - Source: \`${sourceBranch}\`
+            - Target: \`${targetBranch}\``;
+
+            // Optional: update comment to green status when user retargets to develop
+            await upsertComment(okMessage);
+
+            core.summary.addRaw(okMessage);
+            await core.summary.write();
+            console.log('✅ Source branch is valid');
