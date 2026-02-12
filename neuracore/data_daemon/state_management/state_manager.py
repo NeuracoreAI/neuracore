@@ -62,6 +62,7 @@ class StateManager:
             ]
         ] = asyncio.Queue()
         self._start_trace_retry_task: asyncio.Task | None = None
+        self._retry_emit_handles: dict[str, asyncio.Handle] = {}
 
         self._emitter = get_emitter()
 
@@ -301,11 +302,40 @@ class StateManager:
             return
 
         await self._reconcile_failed_traces()
-
+        await self.restore_retry_schedules()
         traces = await self._store.find_ready_traces()
         logger.info("Connection restored, %s traces ready for upload", len(traces))
         for trace in traces:
             await self._emit_ready_for_upload_from_trace(trace)
+
+    def _schedule_retry_emit(self, trace_id: str, delay_s: float) -> None:
+        """Schedule (or reschedule) retry emission for a trace."""
+        existing = self._retry_emit_handles.pop(trace_id, None)
+        if existing is not None and not existing.cancelled():
+            existing.cancel()
+
+        loop = asyncio.get_running_loop()
+        handle = loop.call_later(
+            float(delay_s),
+            lambda: asyncio.create_task(self._retry_emit(trace_id)),
+        )
+        self._retry_emit_handles[trace_id] = handle
+
+
+    async def restore_retry_schedules(self) -> None:
+        """Restore persisted retry timers into in-memory loop scheduling."""
+        traces = await self._store.find_retry_scheduled_traces()
+        if not traces:
+            return
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        for trace in traces:
+            if trace.next_retry_at is None:
+                continue
+            delay_s = (trace.next_retry_at - now).total_seconds()
+            if delay_s <= 0:
+                continue
+            self._schedule_retry_emit(trace.trace_id, delay_s)
 
     async def _emit_ready_for_upload_from_trace(self, trace: TraceRecord) -> None:
         logger.info(
@@ -525,28 +555,40 @@ class StateManager:
     async def _emit_progress_report_if_recording_stopped(
         self, traces: list[TraceRecord]
     ) -> None:
+        """Check if all traces are ready for progress reporting and emit a progress report.
+        
+        If the traces are from the same recording, check if they are all WRITTEN or COMPLETE.
+        If so, add the recording to the reporting recordings list and schedule a progress report.
+        """
         if not traces:
             return
-
+        
         recording_id = traces[0].recording_id
 
-        if recording_id in self._reporting_recordings:
+        if not self._validate_traces_ready_for_reporting(traces, recording_id):
             return
-
-        if any(
-            trace.progress_reported == ProgressReportStatus.REPORTED for trace in traces
-        ):
-            return
-
-        if not all(
-            trace.data_type is not None and trace.bytes_written is not None
-            for trace in traces
-        ):
-            return
-
+        
         self._reporting_recordings.add(recording_id)
         start_time, end_time = self._find_recording_start_and_end(traces)
         asyncio.create_task(self._emit_progress_report(start_time, end_time, traces))
+
+    def _validate_traces_ready_for_reporting(self, traces: list[TraceRecord], recording_id:str) -> bool:
+        """Validate that all traces are ready for progress reporting."""
+        # Currently reporting
+        if recording_id in self._reporting_recordings:
+            return False
+        # Already reported
+        if all(
+            trace.progress_reported == ProgressReportStatus.REPORTED for trace in traces
+        ):
+            logger.warning("Progress already reported for recording %s, despite trace finalizing later, skipping report", recording_id, exc_info=True)
+            return False
+    
+        if not all( trace.stopped_at is not None for trace in traces):
+            logger.warning("Not all traces have stopped at, skipping report", exc_info=True)
+            return False
+        
+        return True
 
     async def _emit_progress_report(
         self, start_time: float, end_time: float, traces: list[TraceRecord]
@@ -665,23 +707,25 @@ class StateManager:
 
     async def _retry_emit(self, trace_id: str) -> None:
         """Emit READY_FOR_UPLOAD when a trace is due for retry."""
+        self._retry_emit_handles.pop(trace_id, None)
+
         trace = await self._store.get_trace(trace_id)
         if trace is None:
             return
-        if trace.status != TraceStatus.RETRYING:
+
+        if trace.status not in {TraceStatus.RETRYING, TraceStatus.WRITTEN}:
             return
+
         if trace.next_retry_at is not None:
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             if trace.next_retry_at > now:
                 delay = (trace.next_retry_at - now).total_seconds()
-                loop = asyncio.get_running_loop()
-                loop.call_later(
-                    float(delay),
-                    lambda: asyncio.create_task(self._retry_emit(trace_id)),
-                )
+                self._schedule_retry_emit(trace_id, float(delay))
                 return
+
         logger.info("Retrying upload for trace %s", trace_id)
         await self._emit_ready_for_upload_from_trace(trace)
+
 
     async def handle_progress_report_error(
         self, recording_id: str, error_message: str

@@ -33,10 +33,6 @@ def get_daemon_db_path() -> Path:
     if env_override:
         return Path(env_override)
 
-    # Prefer a host-mounted workspace path if present (outside the container home).
-    host_default = Path("/home/steven/Documents/neuracore/state.db")
-    if host_default.parent.exists():
-        return host_default
 
     return Path(Path.home() / ".neuracore" / "data_daemon" / "state.db")
 

@@ -83,6 +83,23 @@ class SqliteStateStore(StateStore):
         async with self._engine.begin() as conn:
             await conn.run_sync(metadata.create_all)
 
+    async def find_retry_scheduled_traces(self) -> list[TraceRecord]:
+        """Return WRITTEN traces with persisted next_retry_at values."""
+        async with self._engine.begin() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        select(traces)
+                        .where(traces.c.status == TraceStatus.WRITTEN)
+                        .where(traces.c.next_retry_at.is_not(None))
+                        .order_by(traces.c.next_retry_at.asc())
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [TraceRecord.from_row(dict(row)) for row in rows]
+
     async def set_stopped_ats(self, recording_id: str) -> None:
         """Set the end stopped_at for all traces associated with a recording.
 

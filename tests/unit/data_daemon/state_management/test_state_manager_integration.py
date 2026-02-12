@@ -1169,3 +1169,134 @@ async def test_retry_emit_does_not_emit_before_next_retry_at(
         assert scheduled[0] >= 30.0
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+
+@pytest.mark.asyncio
+async def test_restore_retry_schedules_only_schedules_future_traces(
+    manager_store, monkeypatch
+) -> None:
+    manager, store = manager_store
+
+    await manager._handle_start_trace(
+        "trace-future",
+        "rec-restore",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-future.bin",
+    )
+    await manager.update_status("trace-future", TraceStatus.INITIALIZING)
+    await manager.update_status("trace-future", TraceStatus.WRITTEN)
+
+    await manager._handle_start_trace(
+        "trace-past",
+        "rec-restore",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-past.bin",
+    )
+    await manager.update_status("trace-past", TraceStatus.INITIALIZING)
+    await manager.update_status("trace-past", TraceStatus.WRITTEN)
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    await _set_attempts_and_retry_at(
+        store, "trace-future", 1, now + timedelta(seconds=30)
+    )
+    await _set_attempts_and_retry_at(
+        store, "trace-past", 1, now - timedelta(seconds=30)
+    )
+
+    scheduled: list[tuple[str, float]] = []
+
+    def capture_schedule(trace_id: str, delay_s: float) -> None:
+        scheduled.append((trace_id, float(delay_s)))
+
+    monkeypatch.setattr(manager, "_schedule_retry_emit", capture_schedule)
+
+    await manager.restore_retry_schedules()
+
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == "trace-future"
+    assert scheduled[0][1] > 0
+
+
+@pytest.mark.asyncio
+async def test_retry_emit_emits_for_written_trace_when_due(manager_store) -> None:
+    manager, store = manager_store
+    emitter = get_emitter()
+
+    await manager._handle_start_trace(
+        "trace-written-due",
+        "rec-written-due",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-written-due.bin",
+    )
+    await manager.update_status("trace-written-due", TraceStatus.INITIALIZING)
+    await manager.update_status("trace-written-due", TraceStatus.WRITTEN)
+    past = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=5)
+    await _set_attempts_and_retry_at(store, "trace-written-due", 1, past)
+
+    ready_events: list[tuple] = []
+    ready_evt = asyncio.Event()
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+        ready_evt.set()
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        await manager._retry_emit("trace-written-due")
+        await asyncio.wait_for(ready_evt.wait(), timeout=2.0)
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+    assert len(ready_events) == 1
+    assert ready_events[0][0] == "trace-written-due"
+
+
+@pytest.mark.asyncio
+async def test_schedule_retry_emit_replaces_existing_handle(
+    manager_store, monkeypatch
+) -> None:
+    manager, _ = manager_store
+
+    class DummyHandle:
+        def __init__(self) -> None:
+            self._cancelled = False
+
+        def cancel(self) -> None:
+            self._cancelled = True
+
+        def cancelled(self) -> bool:
+            return self._cancelled
+
+    old_handle = DummyHandle()
+    new_handle = DummyHandle()
+    manager._retry_emit_handles["trace-handle"] = old_handle
+
+    loop = asyncio.get_running_loop()
+
+    def fake_call_later(delay, callback, *args, **kwargs):
+        return new_handle
+
+    monkeypatch.setattr(loop, "call_later", fake_call_later)
+
+    manager._schedule_retry_emit("trace-handle", 1.0)
+
+    assert old_handle.cancelled()
+    assert manager._retry_emit_handles["trace-handle"] is new_handle

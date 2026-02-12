@@ -123,6 +123,7 @@ class TraceRecord:
     last_updated: datetime
     num_upload_attempts: int
     next_retry_at: datetime | None
+    stopped_at: datetime | None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "TraceRecord":
@@ -178,8 +179,8 @@ class TraceRecord:
             last_updated=row["last_updated"],
             num_upload_attempts=int(row.get("num_upload_attempts", 0)),
             next_retry_at=row.get("next_retry_at"),
+            stopped_at=row.get("stopped_at"), 
         )
-
 
 class OpenRingBufferModel(BaseModel):
     """Model for the OPEN_RING_BUFFER command."""
