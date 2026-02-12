@@ -124,7 +124,7 @@ predictions = policy.predict(timeout=5)
 - [Training](./docs/training.md)
 - [Command Line Tools](./docs/commandline.md)
 - [Dataset Importer](./docs/dataset_importer.md)
-- [Environment Variables](./docs/enironment_variable.md)
+- [Environment Variables](./docs/environment_variable.md)
 - [Contribution Guide](./docs/contribution_guide.md)
 - [Data Daemon](./docs/data_daemon.md)
 
