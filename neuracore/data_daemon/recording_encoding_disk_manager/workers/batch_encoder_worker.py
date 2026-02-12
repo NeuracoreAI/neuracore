@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -62,6 +63,15 @@ class _BatchEncoderWorker:
         self._emitter = get_emitter()
 
         self._aborted_traces: set[_TraceKey] = set()
+        self._finalised_traces: set[_TraceKey] = set()
+        self._trace_done_seen: set[_TraceKey] = set()
+
+        self._trace_locks: dict[_TraceKey, asyncio.Lock] = {}
+        self._trace_buffers: dict[_TraceKey, dict[int, _BatchJob]] = {}
+        self._trace_next_index: dict[_TraceKey, int] = {}
+
+        self._trace_pending: dict[_TraceKey, int] = {}
+
         self._in_flight_count: int = 0
 
         self._emitter.on(Emitter.BATCH_READY, self._on_batch_ready)
@@ -79,6 +89,9 @@ class _BatchEncoderWorker:
             trace_key: Trace key that was aborted.
         """
         self._aborted_traces.add(trace_key)
+        self._trace_done_seen.discard(trace_key)
+        self._trace_pending.pop(trace_key, None)
+        self._finalised_traces.add(trace_key)
 
     async def _on_batch_ready(self, batch_job: _BatchJob) -> None:
         """Handle BATCH_READY event.
@@ -87,25 +100,52 @@ class _BatchEncoderWorker:
             batch_job: The batch work item (trace_key, batch_path, trace_done).
         """
         self._in_flight_count += 1
+        key = batch_job.trace_key
+
+        # track per-trace pending first, so finally always balances it.
+        self._trace_pending[key] = self._trace_pending.get(key, 0) + 1
+        if batch_job.trace_done:
+            self._trace_done_seen.add(key)
+
         try:
-            if batch_job.trace_key in self._aborted_traces:
+            if key in self._aborted_traces or key in self._finalised_traces:
                 await self._remove_file(batch_job.batch_path)
                 return
 
-            encoder = self._encoder_manager.safe_get_encoder(batch_job.trace_key)
+            encoder = self._encoder_manager.safe_get_encoder(key)
             if encoder is None:
                 await self._remove_file(batch_job.batch_path)
+                self._aborted_traces.add(key)
                 return
 
             ok = await self._process_batch_into_encoder(batch_job, encoder)
             await self._remove_file(batch_job.batch_path)
+
             if not ok:
+                self._aborted_traces.add(key)
                 return
 
-            if batch_job.trace_done:
-                self._finalise_trace_encoder(batch_job.trace_key, encoder)
         finally:
             self._in_flight_count -= 1
+
+            pending = self._trace_pending.get(key, 0) - 1
+            if pending <= 0:
+                self._trace_pending.pop(key, None)
+            else:
+                self._trace_pending[key] = pending
+
+            if (
+                key in self._trace_done_seen
+                and key not in self._trace_pending
+                and key not in self._finalised_traces
+                and key not in self._aborted_traces
+            ):
+                enc = self._encoder_manager.pop_encoder(key)
+                if enc is not None:
+                    self._finalise_trace_encoder(key, enc)
+
+                self._finalised_traces.add(key)
+                self._trace_done_seen.discard(key)
 
     @staticmethod
     async def _remove_file(path: Path) -> None:
@@ -116,6 +156,11 @@ class _BatchEncoderWorker:
             pass
         except OSError:
             logger.warning("Failed to remove batch file: %s", path, exc_info=True)
+
+    @staticmethod
+    def _batch_index(path: Path) -> int:
+        stem = path.stem
+        return int(stem.split("_")[1])
 
     def shutdown(self) -> None:
         """Finalize remaining encoders and cleanup event listeners."""
@@ -226,11 +271,8 @@ class _BatchEncoderWorker:
             encoder.finish()
         except Exception:
             logger.exception("Encoder finish failed for trace %s", trace_key)
-            self._encoder_manager.pop_encoder(trace_key)
             self._abort_trace(trace_key)
             return
-
-        self._encoder_manager.pop_encoder(trace_key)
 
         if self._storage_budget.is_over_limit():
             self._abort_trace(trace_key)
