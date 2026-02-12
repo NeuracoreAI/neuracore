@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 
 import zmq
 
@@ -15,9 +14,11 @@ from neuracore.data_daemon.communications_management.communications_manager impo
 )
 from neuracore.data_daemon.communications_management.data_bridge import Daemon
 from neuracore.data_daemon.communications_management.producer import Producer
-from neuracore.data_daemon.const import (
-    DEFAULT_RECORDING_ROOT_PATH,
-    RECORDING_EVENTS_SOCKET_PATH,
+from neuracore.data_daemon.const import RECORDING_EVENTS_SOCKET_PATH
+from neuracore.data_daemon.helpers import (
+    get_daemon_db_path,
+    get_daemon_pid_path,
+    get_daemon_recordings_root_path,
 )
 from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
     DaemonLifecycleError,
@@ -69,24 +70,10 @@ class ManagementChannel:
         Returns:
             Daemon instance if successful, None if already running or failed.
         """
-        pid_path = Path(
-            os.environ.get(
-                "NEURACORE_DAEMON_PID_PATH",
-                str(Path.home() / ".neuracore" / "daemon.pid"),
-            )
-        )
-        db_path = Path(
-            os.environ.get(
-                "NEURACORE_DAEMON_DB_PATH",
-                str(Path.home() / ".neuracore" / "data_daemon" / "state.db"),
-            )
-        )
-        recordings_root = Path(
-            os.environ.get(
-                "NEURACORE_DAEMON_RECORDINGS_ROOT",
-                str(DEFAULT_RECORDING_ROOT_PATH),
-            )
-        )
+        pid_path = get_daemon_pid_path()
+        db_path = get_daemon_db_path()
+        recordings_root = get_daemon_recordings_root_path()
+
         manage_pid = os.environ.get("NEURACORE_DAEMON_MANAGE_PID", "1") != "0"
 
         if SOCKET_PATH.exists() and pid_path.exists():
