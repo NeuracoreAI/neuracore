@@ -218,16 +218,6 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
 
     payload = json.dumps({"seq": 1}).encode("utf-8")
     active_trace_id = producer.trace_id
-    producer.send_data(
-        payload,
-        data_type=DataType.CUSTOM_1D,
-        data_type_name="custom",
-        robot_instance=1,
-        robot_id="robot-1",
-        dataset_id="dataset-1",
-    )
-    producer.end_trace()
-
     trace_written: list[int] = []
 
     def on_trace_written(trace_id: str, _: str, bytes_written: int) -> None:
@@ -236,6 +226,18 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
 
     get_emitter().on(Emitter.TRACE_WRITTEN, on_trace_written)
     try:
+        producer.send_data(
+            payload,
+            data_type=DataType.CUSTOM_1D,
+            data_type_name="custom",
+            robot_instance=1,
+            robot_id="robot-1",
+            dataset_id="dataset-1",
+        )
+        assert _wait_for(
+            lambda: active_trace_id in daemon._trace_recordings, timeout=0.5
+        )
+        producer.end_trace()
         assert _wait_for(lambda: trace_written, timeout=1)
     finally:
         get_emitter().remove_listener(Emitter.TRACE_WRITTEN, on_trace_written)
@@ -420,7 +422,7 @@ def test_deferred_close_honors_zmq_buffer_data(loop_manager: EventLoopManager) -
         assert recording_id not in daemon._pending_close_recordings
         assert recording_id not in daemon._closed_recordings
 
-        daemon._handle_recording_stopped(None, msg)
+        daemon._handle_recording_stopped(msg)
 
         assert recording_id in daemon._pending_close_recordings
         assert recording_id not in daemon._closed_recordings

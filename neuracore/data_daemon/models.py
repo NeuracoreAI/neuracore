@@ -285,6 +285,7 @@ class MessageEnvelope:
     producer_id: str | None
     command: CommandType
     payload: dict = field(default_factory=dict)
+    sequence_number: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "MessageEnvelope":
@@ -303,6 +304,11 @@ class MessageEnvelope:
             producer_id=str(producer_id) if producer_id is not None else None,
             command=CommandType(data["command"]),
             payload=dict(data.get("payload") or {}),
+            sequence_number=(
+                int(data["sequence_number"])
+                if data.get("sequence_number") is not None
+                else None
+            ),
         )
 
     @classmethod
@@ -330,6 +336,7 @@ class MessageEnvelope:
             "producer_id": self.producer_id,
             "command": self.command.value,
             "payload": self.payload,
+            "sequence_number": self.sequence_number,
         }).encode("utf-8")
 
 

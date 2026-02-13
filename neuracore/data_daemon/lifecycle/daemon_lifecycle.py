@@ -310,7 +310,7 @@ async def reconcile_state_with_filesystem(
     store: StateStore, recordings_root: Path
 ) -> None:
     """Sync stored traces with disk contents, cleaning orphans and flagging gaps."""
-    traces = store.list_traces()
+    traces = await store.list_traces()
     trace_paths = {Path(str(trace.path)) for trace in traces}
 
     for trace in traces:
