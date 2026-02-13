@@ -5,6 +5,7 @@ from typing import Any
 from neuracore_types import JointData
 from neuracore_types.importer.config import (
     ImageConventionConfig,
+    JointPositionTypeConfig,
     LanguageConfig,
     PoseConfig,
     RotationConfig,
@@ -133,7 +134,7 @@ def validate_joint_positions(
         joint_info: The joint info to validate against.
     """
     if name not in joint_info:
-        raise DataValidationError("Joint not found in robot model.")
+        raise DataValidationError(f"Joint {name} not found in robot model.")
 
     if (
         joint_info[name].limits.lower is not None
@@ -162,7 +163,7 @@ def validate_joint_velocities(
         joint_info: The joint info to validate against.
     """
     if name not in joint_info:
-        raise DataValidationError("Joint not found in robot model.")
+        raise DataValidationError(f"Joint {name} not found in robot model.")
 
     if joint_info[name].limits.velocity is not None:
         if abs(data) > joint_info[name].limits.velocity:
@@ -183,7 +184,7 @@ def validate_joint_torques(
         joint_info: The joint info to validate against.
     """
     if name not in joint_info:
-        raise DataValidationError("Joint not found in robot model.")
+        raise DataValidationError(f"Joint {name} not found in robot model.")
 
     if joint_info[name].limits.effort is not None:
         if abs(data) > joint_info[name].limits.effort:
@@ -252,9 +253,14 @@ def validate_dataset_config_against_robot_model(
     """
     for data_type, import_config in dataset_config.data_import_config.items():
         if data_type in JOINT_DATA_TYPES:
-            for item in import_config.mapping:
-                if item.name is not None:
-                    if item.name not in joint_info:
-                        raise ConfigValidationError(
-                            f"Joint {item.name} not found in robot model."
-                        )
+            # No need to check joint names if converting from end effector
+            if (
+                import_config.format.joint_position_type
+                == JointPositionTypeConfig.CUSTOM
+            ):
+                for item in import_config.mapping:
+                    if item.name is not None:
+                        if item.name not in joint_info:
+                            raise ConfigValidationError(
+                                f"Joint {item.name} not found in robot model."
+                            )

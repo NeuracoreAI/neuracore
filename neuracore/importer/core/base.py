@@ -14,6 +14,7 @@ from pathlib import Path
 from queue import Empty
 from typing import Any
 
+from neuracore_types.importer.config import JointPositionTypeConfig
 from neuracore_types.importer.data_config import DataFormat
 from neuracore_types.nc_data import DatasetImportConfig, DataType
 from neuracore_types.nc_data.nc_data import MappingItem
@@ -31,6 +32,7 @@ from rich.progress import (
 
 import neuracore as nc
 from neuracore.core.robot import JointInfo
+from neuracore.importer.core.inverse_kinematics import InverseKinematics
 from neuracore.importer.core.validation import (
     JOINT_DATA_TYPES,
     validate_depth_images,
@@ -98,6 +100,8 @@ class NeuracoreDatasetImporter(ABC):
         skip_on_error: str = "episode",
         progress_interval: int = 1,
         joint_info: dict[str, JointInfo] = {},
+        ik_urdf_path: str | None = None,
+        ik_init_config: list[float] | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
     ) -> None:
@@ -109,6 +113,10 @@ class NeuracoreDatasetImporter(ABC):
         self.robot_name = dataset_config.robot.name
         self.frequency = dataset_config.frequency
         self.joint_info = joint_info
+        self.ik_urdf_path = ik_urdf_path
+        self.ik_init_config = ik_init_config
+        self.ik: InverseKinematics | None = None
+        self.prev_ik_solution: list[float] | None = None
 
         if skip_on_error not in {"episode", "step", "all"}:
             raise ValueError("skip_on_error must be one of: 'episode', 'step', 'all'")
@@ -139,6 +147,10 @@ class NeuracoreDatasetImporter(ABC):
     @abstractmethod
     def _record_step(self, step: dict, timestamp: float) -> None:
         """Record a single step of the dataset."""
+
+    def _reset_episode_state(self) -> None:
+        """Reset episode-specific state at the start of each episode."""
+        self.prev_ik_solution = self.ik_init_config
 
     def _validate_input_data(
         self, data_type: DataType, data: Any, format: DataFormat
@@ -208,7 +220,13 @@ class NeuracoreDatasetImporter(ABC):
             timestamp: Time when the data was logged.
         """
         try:
-            self._validate_input_data(data_type, source_data, format)
+            if (
+                data_type == DataType.JOINT_POSITIONS
+                and format.joint_position_type == JointPositionTypeConfig.END_EFFECTOR
+            ):
+                self._validate_input_data(DataType.POSES, source_data, format)
+            else:
+                self._validate_input_data(data_type, source_data, format)
         except DataValidationWarning as w:
             if not self.suppress_warnings:
                 self.logger.warning("[WARNING] %s (%s): %s", data_type, item.name, w)
@@ -220,8 +238,24 @@ class NeuracoreDatasetImporter(ABC):
 
         try:
             transformed_data = item.transforms(source_data)
-            if data_type in JOINT_DATA_TYPES and self.joint_info:
-                self._validate_joint_data(data_type, transformed_data, item.name)
+            if (
+                data_type == DataType.JOINT_POSITIONS
+                and format.joint_position_type == JointPositionTypeConfig.END_EFFECTOR
+            ):
+                if self.ik is None:
+                    raise ImporterError(
+                        "Failed to convert end effector pose to joint positions: "
+                        "Inverse Kinematics is not initialized"
+                    )
+                transformed_data = self.ik.end_effector_to_joint_positions(
+                    transformed_data, item.name, self.prev_ik_solution
+                )
+                self.prev_ik_solution = list(transformed_data.values())
+                for name, position in transformed_data.items():
+                    self._validate_joint_data(data_type, position, name)
+            else:
+                if data_type in JOINT_DATA_TYPES and self.joint_info:
+                    self._validate_joint_data(data_type, transformed_data, item.name)
         except DataValidationWarning as w:
             if not self.suppress_warnings:
                 self.logger.warning("[WARNING] %s (%s): %s", data_type, item.name, w)
@@ -237,9 +271,21 @@ class NeuracoreDatasetImporter(ABC):
             raise
 
         try:
-            self._log_transformed_data(
-                data_type, transformed_data, item.name, timestamp
-            )
+            if (
+                data_type == DataType.JOINT_POSITIONS
+                and format.joint_position_type == JointPositionTypeConfig.END_EFFECTOR
+            ):
+                for name, position in transformed_data.items():
+                    self._log_transformed_data(
+                        DataType.JOINT_POSITIONS,
+                        position,
+                        name,
+                        timestamp,
+                    )
+            else:
+                self._log_transformed_data(
+                    data_type, transformed_data, item.name, timestamp
+                )
         except Exception as e:
             self.logger.error(
                 "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
@@ -377,6 +423,9 @@ class NeuracoreDatasetImporter(ABC):
         nc.login()
         nc.connect_robot(self.robot_name, instance=worker_id)
         nc.get_dataset(self.output_dataset_name)
+        if self.ik_urdf_path is not None:
+            ik_packages_dir = os.path.dirname(self.ik_urdf_path)
+            self.ik = InverseKinematics(self.ik_urdf_path, ik_packages_dir)
 
     def import_all(self) -> None:
         """Run imports across workers while aggregating errors.
