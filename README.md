@@ -64,8 +64,6 @@ To run our examples:
 pip install neuracore[examples]
 ```
 
-**Note:** The `main` branch is considered a development branch. For production use, we recommend installing from PyPI (as shown above) or using the latest tagged commit.
-
 # 🍰 A Short Taste
 Here is a short taste on what neuracore can do, for a detailed walk-through, please refer to the [tutorial](./docs/tutorial.md) and [documentation](#documentation).
 ```python
