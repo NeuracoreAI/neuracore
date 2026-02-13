@@ -7,23 +7,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from neuracore_types import DataType
+from neuracore_types import DATA_TYPE_CONTENT_MAPPING, DataType
 from pydantic import BaseModel
-
-DATA_TYPE_CONTENT_MAPPING: dict[DataType, str] = {
-    DataType.RGB_IMAGES: "RGB",
-    DataType.DEPTH_IMAGES: "RGB",
-    DataType.JOINT_POSITIONS: "JSON",
-    DataType.JOINT_VELOCITIES: "JSON",
-    DataType.JOINT_TORQUES: "JSON",
-    DataType.JOINT_TARGET_POSITIONS: "JSON",
-    DataType.END_EFFECTOR_POSES: "JSON",
-    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: "JSON",
-    DataType.POINT_CLOUDS: "JSON",
-    DataType.POSES: "JSON",
-    DataType.LANGUAGE: "JSON",
-    DataType.CUSTOM_1D: "JSON",
-}
 
 
 def get_content_type(data_type: DataType) -> str:
