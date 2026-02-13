@@ -65,14 +65,14 @@ Each data type mapping supports:
   - `angle_units`: `RADIANS` (default) | `DEGREES` - Angle unit conversion (for joint data, poses)
   - `torque_units`: `NM` (default) | `NCM` - Torque unit conversion (for JOINT_TORQUES)
   - `distance_units`: `M` (default) | `MM` - Distance unit conversion (for DEPTH_IMAGES, POINT_CLOUDS)
-  - `pose_type`: `MATRIX` (default) | `POSITION_ORIENTATION` - Pose representation format (for POSES, END_EFFECTOR_POSES, JOINT_POSITIONS with TCP)
+  - `pose_type`: `MATRIX` (default) | `POSITION_ORIENTATION` - Pose representation format (for POSES, END_EFFECTOR_POSES, JOINT_POSITIONS with end effector)
   - `orientation`: Configuration object (required when `pose_type: POSITION_ORIENTATION`):
     - `type`: `QUATERNION` (default) | `EULER` | `MATRIX` | `AXIS_ANGLE` - Orientation representation
     - `quaternion_order`: `XYZW` (default) | `WXYZ` - Quaternion component order (when `type: QUATERNION`)
     - `euler_order`: `XYZ` (default) | `ZYX` | `YXZ` | `XZY` | `YZX` | `ZXY` - Euler angle order (when `type: EULER`)
     - `angle_units`: `RADIANS` (default) | `DEGREES` - Angle unit for orientation
-  - `joint_position_type`: `CUSTOM` (default) | `TCP` - Use custom joint positions or convert from TCP pose via IK (for JOINT_POSITIONS)
-  - `ik_init_config`: `list[float] | None` - Initial joint configuration for inverse kinematics (can be provided when `joint_position_type: TCP`)
+  - `joint_position_type`: `CUSTOM` (default) | `END_EFFECTOR` - Use custom joint positions or convert from end effector pose via IK (for JOINT_POSITIONS)
+  - `ik_init_config`: `list[float] | None` - Initial joint configuration for inverse kinematics (can be provided when `joint_position_type: END_EFFECTOR`)
   - `visual_joint_type`: `CUSTOM` (default) | `GRIPPER` - Use custom visual joints or populate from gripper open amounts (for VISUAL_JOINT_POSITIONS)
   - `invert_gripper_amount`: `false` (default) | `true` - Convert from close amount to open amount (for PARALLEL_GRIPPER_OPEN_AMOUNTS, PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS)
   - `normalize`: Configuration object (optional, for PARALLEL_GRIPPER_OPEN_AMOUNTS, PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS):
@@ -191,11 +191,11 @@ The importer supports the following data types:
         offset: -1.5707963267948966  # -π/2
         inverted: true
   
-  # Example 2: Joint positions from TCP pose using inverse kinematics
+  # Example 2: Joint positions from end effector pose using inverse kinematics
   JOINT_POSITIONS:
     source: observation.pose
     format:
-      joint_position_type: TCP  # Use IK to convert pose to joint positions
+      joint_position_type: END_EFFECTOR  # Use IK to convert pose to joint positions
       ik_init_config: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
       pose_type: POSITION_ORIENTATION
       orientation:
@@ -437,7 +437,7 @@ Poses can be represented in multiple formats:
   
 **Inverse Kinematics (IK) for Joint Positions**
 
-When `joint_position_type: TCP` is specified, the importer uses inverse kinematics to convert end-effector poses to joint positions. This requires:
+When `joint_position_type: END_EFFECTOR` is specified, the importer uses inverse kinematics to convert end-effector poses to joint positions. This requires:
 
 - A valid URDF or MJCF file with the robot model
 - An end-effector frame name (obtained from mapping `name`)
@@ -447,7 +447,7 @@ When `joint_position_type: TCP` is specified, the importer uses inverse kinemati
 JOINT_POSITIONS:
   source: observation.pose
   format:
-    joint_position_type: TCP  # Use IK to convert pose to joint positions
+    joint_position_type: END_EFFECTOR  # Use IK to convert pose to joint positions
     ik_init_config: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # Initial joint config
     pose_type: POSITION_ORIENTATION
     orientation:
