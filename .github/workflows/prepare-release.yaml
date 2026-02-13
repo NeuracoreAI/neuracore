@@ -197,44 +197,36 @@ jobs:
         ref: develop
         fetch-depth: 0
 
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - uses: astral-sh/setup-uv@v4
+
+    - name: Check lockfile
+      run: uv lock --check
+
     - name: Calculate new version
       id: calc_version
       run: |
-        # Read current version from .bumpversion.cfg
-        CURRENT_VERSION=$(grep '^current_version = ' .bumpversion.cfg | cut -d'=' -f2 | tr -d ' ')
         BUMP_TYPE="${{ needs.analyze-changes.outputs.bump_type }}"
+
+        # Read current version from pyproject.toml via uv
+        CURRENT_VERSION=$(uv version --short)
 
         echo "Current version: $CURRENT_VERSION"
         echo "Bump type: $BUMP_TYPE"
 
-        # Parse version
-        IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+        # Parse version and bump handling are delegated to `uv version`.
+        # Bump version in dry-run mode to compute the next release version
+        if [ "$BUMP_TYPE" = "none" ]; then
+          # Keep current version
+          NEW_VERSION="$CURRENT_VERSION"
+        else
+          NEW_VERSION=$(uv version --short --bump "$BUMP_TYPE" --dry-run --frozen)
+        fi
 
-        # Bump version
-        case $BUMP_TYPE in
-          major)
-            MAJOR=$((MAJOR + 1))
-            MINOR=0
-            PATCH=0
-            ;;
-          minor)
-            MINOR=$((MINOR + 1))
-            PATCH=0
-            ;;
-          patch)
-            PATCH=$((PATCH + 1))
-            ;;
-          none)
-            echo "No version bump (type: none)"
-            # Keep current version
-            ;;
-          *)
-            echo "ERROR: Invalid bump type: $BUMP_TYPE"
-            exit 1
-            ;;
-        esac
-
-        NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
         echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
         if [ "$BUMP_TYPE" = "none" ]; then
@@ -356,7 +348,7 @@ jobs:
 
           // Add footer
           changelog += `---\n\n`;
-          changelog += `**Installation:**\n\`\`\`bash\npip install neuracore==${version}\n\`\`\`\n\n`;
+          changelog += `**Installation:**\n\`\`\`bash\nuv pip install neuracore==${version}\n# or\npip install neuracore==${version}\n\`\`\`\n\n`;
           changelog += `**Links:**\n`;
           changelog += `- PyPI: https://pypi.org/project/neuracore/${version}/\n`;
           changelog += `- GitHub Release: https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/v${version}\n`;
@@ -412,8 +404,10 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: Install bump2version
-      run: pip install bump2version
+    - uses: astral-sh/setup-uv@v4
+
+    - name: Check lockfile
+      run: uv lock --check
 
     - name: Bump version
       run: |
@@ -425,10 +419,11 @@ jobs:
         git config user.email "github-actions[bot]@users.noreply.github.com"
         git config user.name "github-actions[bot]"
 
-        # Use bump2version to bump the version (without committing)
-        bump2version $BUMP_TYPE --allow-dirty --no-commit --no-tag
+        # Use uv to bump the version (without creating a commit/tag) and refresh lockfile
+        uv version --bump "$BUMP_TYPE" --frozen
+        uv lock
 
-        NEW_VERSION=$(grep -m 1 '^current_version = ' .bumpversion.cfg | cut -d'=' -f2 | tr -d ' ')
+        NEW_VERSION=$(uv version --short)
         echo "Bumped to version: $NEW_VERSION"
 
     - name: Reset pending changelog
@@ -455,7 +450,7 @@ jobs:
         NEW_VERSION="${{ needs.generate-changelog.outputs.new_version }}"
 
         # Add all changed files
-        git add .bumpversion.cfg neuracore/__init__.py changelogs/
+        git add pyproject.toml uv.lock changelogs/
 
         # Create commit
         git commit -m "Bump version to ${NEW_VERSION} [skip ci]"
@@ -597,7 +592,8 @@ jobs:
             summary += '**⚠️ This was a DRY RUN** - no changes were made\n\n';
             summary += '## What Would Happen\n\n';
             summary += `- **Version Bump:** \`${bumpType}\` → \`${newVersion}\`\n`;
-            summary += `- ✅ Version updated in \`.bumpversion.cfg\` and \`neuracore/__init__.py\`\n`;
+            summary += `- ✅ Version updated in \`pyproject.toml\`\n`;
+            summary += `- ✅ Lockfile updated in \`uv.lock\`\n`;
             summary += `- ✅ Changelog created at \`changelogs/${newVersion}-changelog.md\`\n`;
             summary += `- ✅ Pending changelog reset to template\n`;
             summary += `- ✅ Changes committed to \`develop\` branch\n`;

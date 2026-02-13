@@ -24,11 +24,17 @@ It does not explain internal implementation details.
 
 ## Quick start
 
-### 1) Install (from repo root)
+### 1) Install
 
 ```bash
-pip install -e .
+# UV-first
+uv pip install neuracore
+
+# or pip
+pip install neuracore
 ```
+
+For all supported installation paths (`uv add`, `uv tool install`, `venv + pip`, `conda + pip`), see [Installation](../README.md#installation).
 
 ### 2) Launch the daemon
 
@@ -151,16 +157,16 @@ If you do not use a profile, the daemon runs with defaults.
 
 These are the supported settings:
 
-| Field | What it controls |
-|---|---|
-| `storage_limit` | Maximum local disk space the daemon should use for recordings (bytes). |
-| `bandwidth_limit` | Maximum upload speed the daemon should use (bytes per second). |
-| `path_to_store_record` | Folder where recordings are stored. |
-| `num_threads` | Number of worker threads used by the daemon. |
-| `keep_wakelock_while_upload` | Whether to keep the machine awake during uploads (where supported). |
-| `offline` | If enabled, uploading is disabled and data is only stored locally. |
-| `api_key` | API key used for authenticating the daemon. |
-| `current_org_id` | Which organisation the daemon should operate under. |
+| Field                        | What it controls                                                       |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| `storage_limit`              | Maximum local disk space the daemon should use for recordings (bytes). |
+| `bandwidth_limit`            | Maximum upload speed the daemon should use (bytes per second).         |
+| `path_to_store_record`       | Folder where recordings are stored.                                    |
+| `num_threads`                | Number of worker threads used by the daemon.                           |
+| `keep_wakelock_while_upload` | Whether to keep the machine awake during uploads (where supported).    |
+| `offline`                    | If enabled, uploading is disabled and data is only stored locally.     |
+| `api_key`                    | API key used for authenticating the daemon.                            |
+| `current_org_id`             | Which organisation the daemon should operate under.                    |
 
 ---
 
@@ -201,16 +207,16 @@ You can override settings using environment variables. This is useful in CI, con
 
 Supported environment variables:
 
-| Setting | Environment variable |
-|---|---|
-| `storage_limit` | `NCD_STORAGE_LIMIT` |
-| `bandwidth_limit` | `NCD_BANDWIDTH_LIMIT` |
-| `path_to_store_record` | `NCD_PATH_TO_STORE_RECORD` |
-| `num_threads` | `NCD_NUM_THREADS` |
+| Setting                      | Environment variable             |
+| ---------------------------- | -------------------------------- |
+| `storage_limit`              | `NCD_STORAGE_LIMIT`              |
+| `bandwidth_limit`            | `NCD_BANDWIDTH_LIMIT`            |
+| `path_to_store_record`       | `NCD_PATH_TO_STORE_RECORD`       |
+| `num_threads`                | `NCD_NUM_THREADS`                |
 | `keep_wakelock_while_upload` | `NCD_KEEP_WAKELOCK_WHILE_UPLOAD` |
-| `offline` | `NCD_OFFLINE` |
-| `api_key` | `NCD_API_KEY` |
-| `current_org_id` | `NCD_CURRENT_ORG_ID` |
+| `offline`                    | `NCD_OFFLINE`                    |
+| `api_key`                    | `NCD_API_KEY`                    |
+| `current_org_id`             | `NCD_CURRENT_ORG_ID`             |
 
 Boolean values treat these as true:
 - 1, true, yes, y (case insensitive)

@@ -276,8 +276,37 @@ To setup the development environment:
 ```bash
 git clone https://github.com/neuracoreai/neuracore
 cd neuracore
-pip install -e .[dev,ml]
+uv sync --locked --group dev --extra ml
 ```
+
+To run tests locally:
+
+```bash
+uv run pytest
+```
+
+### Dependency Management (Maintainers)
+
+All dependency changes should be made through UV commands so `pyproject.toml` and `uv.lock` stay in sync.
+
+```bash
+# add runtime dependency
+uv add <pkg>
+
+# add optional dependency
+uv add --optional <extra_name> <pkg>
+
+# add dev dependency group
+uv add --group dev <pkg>
+
+# remove dependency
+uv remove <pkg>
+
+# refresh lock after edits
+uv lock
+```
+
+Do not manually edit `uv.lock`.
 
 ### Adding Your Algorithm to Neuracore
 
@@ -371,4 +400,3 @@ This release adds multi-GPU training and improves streaming performance by 40%.
    - Publishes to PyPI
    - Creates GitHub release with changelog
    - Tags the release
-

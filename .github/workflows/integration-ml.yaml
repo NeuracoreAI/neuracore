@@ -10,10 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - uses: actions/setup-python@v4
+    - uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
-    - uses: pre-commit/action@v3.0.1
+        python-version: "3.11"
+    - uses: astral-sh/setup-uv@v4
+    - name: Check lockfile
+      run: uv lock --check
+    - name: Run pre-commit
+      run: |
+        # Use the locked dev environment so local and CI hooks run with the same toolchain.
+        uv sync --locked --group dev
+        uv run pre-commit run --all-files
 
   test:
     needs: pre-commit
@@ -21,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.11']
+        python-version: ["3.11"]
         environment: [staging, production]
 
     steps:
@@ -37,33 +44,45 @@ jobs:
 
     - name: Checkout code
       uses: actions/checkout@v4
+
     - name: Pull LFS objects
       run: git lfs pull
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
-        cache: 'pip'
+
+    - uses: astral-sh/setup-uv@v4
+
+    - name: Check lockfile
+      run: uv lock --check
 
     - name: Install Python dependencies
       run: |
-        python -m pip install --no-cache-dir --upgrade pip
+        # Install dev tooling (pytest, etc.) from the locked local project config.
+        uv sync --locked --only-group dev
+
+        # Keep install source parity with previous behavior:
+        # - staging: install local package from this checkout
+        # - production: install published package from PyPI
         if [ "${{ matrix.environment }}" = "production" ]; then
-          pip install --no-cache-dir "neuracore[dev,ml,examples]"
+          uv pip install "neuracore[ml,examples]"
         else
-          pip install --no-cache-dir ".[dev,ml,examples]"
+          uv pip install ".[ml,examples]"
         fi
 
     - name: Run Integration Test
       env:
+        # Run the same test against both staging and production using matrix-selected credentials/URL.
         NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
         NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
         NEURACORE_ENDPOINT_TIMEOUT: 30
         DISPLAY: :0
       run: |
+        # ML integration tests require an X display and system GL/XML dependencies.
         sudo apt-get update
         sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1-mesa-glx libosmesa6-dev
         Xvfb $DISPLAY -screen 0 1280x1024x24 &
-        pytest -o log_cli=true --log-cli-level=INFO -v -n 8 tests/integration/test_algorithm.py
+        uv run pytest -o log_cli=true --log-cli-level=INFO -v -n 8 tests/integration/test_algorithm.py

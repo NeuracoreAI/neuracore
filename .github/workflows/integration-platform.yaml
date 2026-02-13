@@ -10,10 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - uses: actions/setup-python@v4
+    - uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
-    - uses: pre-commit/action@v3.0.1
+        python-version: "3.11"
+    - uses: astral-sh/setup-uv@v4
+    - name: Check lockfile
+      run: uv lock --check
+    - name: Run pre-commit
+      run: |
+        # Use the locked dev environment so hook behavior is deterministic in CI.
+        uv sync --locked --group dev
+        uv run pre-commit run --all-files
 
   test:
     needs: pre-commit
@@ -21,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.11']
+        python-version: ["3.11"]
         environment: [staging, production]
 
     steps:
@@ -39,19 +46,24 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
-        cache: 'pip'
+
+    - uses: astral-sh/setup-uv@v4
+
+    - name: Check lockfile
+      run: uv lock --check
 
     - name: Install Python dependencies
       run: |
-        python -m pip install --no-cache-dir --upgrade pip
-        pip install --no-cache-dir ".[dev,ml]"
+        # Install dev tooling plus the ML extra required by the platform integration test.
+        uv sync --locked --group dev --extra ml
 
     - name: Run Integration Test
       env:
+        # Run the same platform integration test against staging and production endpoints.
         NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
         NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
-      run: pytest -o log_cli=true --log-cli-level=INFO tests/integration/test_consume_stream.py::test_get_latest_data_from_multiple_nodes
+      run: uv run pytest -o log_cli=true --log-cli-level=INFO tests/integration/test_consume_stream.py::test_get_latest_data_from_multiple_nodes

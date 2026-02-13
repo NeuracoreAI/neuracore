@@ -10,10 +10,22 @@ This contains examples for using Neuracore with simulated robot environments. We
 **NOTE:** You will need Git LFS to run examples.
 
 ```bash
-conda create -n neuracore_examples python=3.10
+# UV-first
+uv pip install "neuracore[examples]"
+
+# or pip
+pip install "neuracore[examples]"
+```
+
+You can also use conda + pip from PyPI:
+
+```bash
+conda create -n neuracore_examples python=3.11 -y
 conda activate neuracore_examples
 pip install "neuracore[examples]"
 ```
+
+For all install options (`uv add`, `uv tool install`, `venv + pip`), see [Installation](../README.md#installation).
 
 Make sure you have an account on [neuracore.com](https://neuracore.com).
 

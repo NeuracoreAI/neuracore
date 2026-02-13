@@ -238,6 +238,9 @@ Llava
 triu
 gptj
 GPTJ
+pyproject
+venv
+torchmetrics
 erfinv
 lecun
 CLIPMLP
