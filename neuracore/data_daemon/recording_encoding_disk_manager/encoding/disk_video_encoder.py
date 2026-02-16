@@ -197,8 +197,9 @@ class DiskVideoEncoder:
     def _compact_buffer_if_needed(self) -> None:
         """Compact the in-memory container buffer to avoid unbounded growth.
 
-        Returns:
-            None
+        NOTE: Must compact in place: the container holds a reference to this buffer
+        and keeps writing to it. Replacing self.buffer would orphan that output and
+        drop all subsequent frames (lossless hits this often → fewer frames).
         """
         if self.last_write_position <= 0:
             return
@@ -208,10 +209,9 @@ class DiskVideoEncoder:
 
         self.buffer.seek(self.last_write_position)
         remaining = self.buffer.read()
-
-        self.buffer = io.BytesIO()
+        self.buffer.seek(0)
         self.buffer.write(remaining)
-
+        self.buffer.truncate(len(remaining))
         self.last_write_position = 0
         self.buffer.seek(len(remaining))
 
