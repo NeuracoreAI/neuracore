@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import queue
 import threading
 import uuid
 
@@ -74,6 +75,8 @@ class Producer:
         self.id = id or str(uuid.uuid4())
         self._heartbeat_interval = 1.0
         self._heartbeat_thread: threading.Thread | None = None
+        self._send_queue: queue.Queue[MessageEnvelope | None] = queue.Queue()
+        self._sender_thread: threading.Thread | None = None
 
         if self.socket is None:
             raise RuntimeError(
@@ -81,6 +84,30 @@ class Producer:
                 "Start the daemon with `nc-data-daemon launch` before logging data. "
                 "Data cannot be captured without a running daemon."
             )
+
+        self._sender_thread = threading.Thread(
+            target=self._sender_loop, name="producer-sender", daemon=True
+        )
+        self._sender_thread.start()
+
+    def _sender_loop(self) -> None:
+        """Single thread that owns the ZMQ socket; drains queue and sends.
+
+        Only this thread may call send_message/close on the socket (ZMQ is not
+        thread-safe). Other threads enqueue MessageEnvelopes.
+        """
+        while True:
+            envelope = self._send_queue.get()
+            if envelope is None:
+                break
+            if self.socket is not None:
+                try:
+                    self._comm.send_message(self.socket, envelope)
+                except Exception as exc:
+                    logger.warning("Send failed: %s", exc)
+        if self.socket is not None:
+            self.socket.close(0)
+            self.socket = None
 
     def start_producer(self) -> None:
         """Starts the producer's heartbeat loop.
@@ -118,7 +145,8 @@ class Producer:
     def heartbeat(self) -> None:
         """Send a heartbeat message to the daemon.
 
-        This message is used by the daemon to detect whether a producer is still alive.
+        This message is used by the daemon to detect whether
+        a producer is still alive.
         If the daemon does not receive a heartbeat message
         from a producer within a certain
         timeout period, it will assume that the producer has stopped and will clean up
@@ -169,11 +197,13 @@ class Producer:
     def stop_producer(self) -> None:
         """Stops the producer and cleans up any associated resources."""
         self._stop_event.set()
+        self._send_queue.put(None)  # poison pill: sender thread closes socket and exits
+        if self._sender_thread is not None:
+            self._sender_thread.join(timeout=2)
+            self._sender_thread = None
         if self._heartbeat_thread is not None:
             self._heartbeat_thread.join(timeout=1)
-        if self.socket is not None:
-            self.socket.close(0)
-            self.socket = None
+            self._heartbeat_thread = None
         self._comm.cleanup_producer()
 
     def _send(self, command: CommandType, payload: dict | None = None) -> None:
@@ -197,7 +227,7 @@ class Producer:
             command=command,
             payload=payload or {},
         )
-        self._comm.send_message(self.socket, envelope)
+        self._send_queue.put(envelope)
 
     def has_consumer(self) -> bool:
         """Check if the producer has a consumer.
