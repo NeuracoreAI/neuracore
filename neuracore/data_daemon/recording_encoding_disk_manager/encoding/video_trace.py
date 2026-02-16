@@ -190,7 +190,7 @@ class VideoTrace:
                 height=self.height,
                 codec="libx264",
                 pixel_format="yuv420p",
-                codec_context_options=None,
+                codec_context_options={"qp": "23", "preset": "ultrafast"},
                 chunk_size=self.chunk_size,
             )
 
