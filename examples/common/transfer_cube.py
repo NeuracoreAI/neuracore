@@ -21,9 +21,16 @@ BIMANUAL_VIPERX_URDF_PATH = VX300S_DIR / "bimanual_viperx_transfer_cube.urdf"
 class TransferCubeTask(BimanualViperXTask):
     """Transfer cube task with joint position control."""
 
-    def __init__(self) -> None:
-        """Initialize joint control transfer cube task."""
-        super().__init__(str(BIMANUAL_VIPERX_MJCF_PATH))
+    def __init__(self, seed: int | None = None) -> None:
+        """Initialize joint control transfer cube task.
+
+        Args:
+            seed: Optional random seed for reproducibility. When set, numpy's
+                RNG is seeded so initial cube positions are deterministic.
+        """
+        super().__init__(
+            str(BIMANUAL_VIPERX_MJCF_PATH), random=np.random.default_rng(seed)
+        )
 
     def before_step(self, action: np.ndarray) -> None:
         """Process joint control action before stepping.
@@ -276,13 +283,16 @@ class TransferCubeEETask(BimanualViperXTask):
         return contact_pairs
 
 
-def make_sim_env() -> TransferCubeTask:
+def make_sim_env(seed: int | None = None) -> TransferCubeTask:
     """Create joint control transfer cube environment.
+
+    Args:
+        seed: Optional random seed for reproducibility.
 
     Returns:
         Configured TransferCubeTask instance.
     """
-    return TransferCubeTask()
+    return TransferCubeTask(seed=seed)
 
 
 def make_ee_sim_env() -> TransferCubeEETask:
