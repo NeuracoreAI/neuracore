@@ -1,28 +1,26 @@
 # Model Construction
 
-In robotics, the primary bottleneck is rarely model optimization. It is representation alignment across embodiments.
+## The Problem
 
-A Franka Emika Panda and a KUKA arm differ in joint count, kinematic structure, sensor topology, and naming conventions. Cameras may vary in count and placement, grippers may expose different control signals, and joints may not have one-to-one semantic matches.
+It usually begins with a single robot. You train a model on a Franka Emika Panda, define the input tensors, fix the output dimensionality, and everything works as expected. The model converges, inference is stable, and the system feels clean and well-structured. At this stage, the architecture appears robot-agnostic — but in reality, it is tightly coupled to one embodiment.
 
-Without a principled construction layer, each new robot requires:
-- Custom tensor wiring
-- Ad-hoc preprocessing pipelines
-- Model-specific reshaping logic
-- Fragile, robot-dependent inference code
+Then a second dataset is introduced, perhaps from a KUKA LBR iiwa. On the surface, the robots are similar: both are 7-DoF manipulators with grippers and RGB inputs. But under the hood, the differences begin to surface. Joint names differ. One robot has an extra joint. Camera placements are not identical. The ordering of data points in the logs does not match. Even gripper data may be represented differently.
 
-This does not scale. It creates brittle systems where architecture assumptions leak into application logic.
+At first, the solution is incremental. You reorder tensors. You insert padding. You add a mapping layer. You write conditionals in the inference code. The pipeline still runs. But now structure has started leaking. The model input definition is no longer cleanly separated from embodiment logic.
 
-Neuracore eliminates per-robot model wiring by auto-constructing model input and output dimensions from the training data specification.
+When a third robot arrives, the fragility becomes obvious. Tensor shapes change again. Camera counts differ. The inference pipeline grows conditional branches. Assumptions that were once implicit become scattered across preprocessing scripts and model wrappers. What was intended to be a general system slowly becomes a collection of embodiment-specific patches.
 
-Instead of hard-coding tensor shapes into model definitions, Neuracore derives them from a declarative robot data spec. That spec becomes the source of truth for:
-- Input dimensionality
-- Output dimensionality
-- Cross-embodiment alignment
-- Padding and masking behavior
+The true bottleneck was never model capacity or optimization strategy. It was representation alignment.
 
-At a high level, this enables easy cross-embodiment training: one model pipeline that can ingest data from heterogeneous robot morphologies without bespoke architectural changes.
+## What Neuracore Changes
 
-This document explains how model construction works and why this spec-driven approach is required for stable multi-robot training and inference.
+Neuracore addresses this problem by making structure explicit and declarative. Instead of allowing each robot to implicitly define tensor layout, Neuracore requires a specification that formally defines how data points map into a shared index space. That specification becomes the single source of truth for model construction.
+
+Rather than hard-coding tensor dimensions into model definitions, Neuracore derives input and output dimensionality directly from the declared robot data specification. The specification defines index positions, and index positions define semantic meaning. Once defined, this layout becomes fixed for the lifetime of the model.
+
+Model shape is therefore spec-driven, not robot-driven.
+
+This shift is subtle but fundamental. The model architecture no longer depends on whichever robot happened to be used first. It depends on a stable, cross-embodiment description.
 
 > [!IMPORTANT]
 > **Model shape is spec-driven, not robot-driven.** The training spec defines the fixed tensor layout used for both training and inference.
@@ -30,17 +28,17 @@ This document explains how model construction works and why this spec-driven app
 ## Starting a Training Job
 
 When launching a training job in Neuracore, you define:
-- Input Robot Data Spec
-- Output Robot Data Spec
+- Input Cross-Embodiment Description
+- Output Cross-Embodiment Description
 
 Other parameters exist (optimizer, architecture, dataset, etc.), but these two specs determine the model input and output dimensionality.
 
 The model shape is not hard-coded. It is constructed deterministically from the specification.
 
 > [!NOTE]
-> **Input/Output Robot Data Specs are the dimensionality contract** for the model.
+> **Input/Output Embodiment Descriptions control the are the dimensionality** for the model.
 
-## What Is a Robot Data Spec?
+## What Is a Cross Embodiment Description?
 
 ```python
 EmbodimentDescription = dict[DataType, dict[int, str]]
@@ -59,10 +57,11 @@ This distinction matters because model construction operates across embodiments,
 > Keep this distinction clear:
 > - `EmbodimentDescription` = one robot
 > - `CrossEmbodimentDescription` = many robots
+> Even for a single robot, you must provide a CrossEmbodimentDescription — it will simply contain one robot (Embodiment) entry.
 
 ### EmbodimentDescription
 
-An `EmbodimentDescription` defines what signals exist for one robot and where each signal lives in index space.
+An `EmbodimentDescription` defines what data points exist for one robot and where each datapoint lives in index space.
 
 Each `DataType` (for example `JOINTS`, `RGB_IMAGES`, `GRIPPER_OPEN_AMOUNT`) maps to:
 
@@ -118,11 +117,10 @@ Why this is necessary:
 
 The `CrossEmbodimentDescription` lets Neuracore:
 - Compute maximum dimensionality per `DataType`
-- Define canonical index ranges
+- Define index ranges
 - Apply deterministic zero-padding
 - Guarantee fixed input/output tensor shapes
 
-Without this cross-embodiment layer, model dimensions are undefined.
 
 > [!IMPORTANT]
 > A shared cross-embodiment index space is what allows one model to train across heterogeneous robots.
@@ -243,13 +241,10 @@ In this example, input and output specs are the same, so model heads have identi
 
 For inference, define model input/output order using an `EmbodimentDescription` that directly matches the robot being controlled.
 
-> [!IMPORTANT]
-> Inference must use the **same global positional conventions** learned at training time.
-
 For example, if you trained on `franka` and `kuka` data and want inference on `kuka`:
 
 ```python
-model_input_data_spec: EmbodimentDescription = {
+model_input_embodiment_description: EmbodimentDescription = {
     JOINTS: {
         0: "iiwa_joint_1",
         1: "iiwa_joint_2",
@@ -263,7 +258,7 @@ model_input_data_spec: EmbodimentDescription = {
     },
 }
 
-# model_input_data_spec follows the JOINTS/RGB_IMAGES order from input_cross_embodiment_spec["kuka"]
+# model_input_embodiment_description follows the JOINTS/RGB_IMAGES order from input_cross_embodiment_spec["kuka"]
 ```
 
 For inference on `franka`, keep the same shared index space and skip index `4` (it will be zero-padded):
@@ -290,7 +285,7 @@ Suppose a new inference-time robot `ur5` has:
 
 `[ur5_shoulder_pan, ur5_shoulder_lift, ur5_gripper]`
 
-Since this robot only has two joints plus a gripper, we should semantically align those signals with the trained index layout and keep the gripper at the same index used during training:
+Since this robot only has two joints plus a gripper, we should semantically align those datapoints with the trained index layout and keep the gripper at the same index used during training:
 
 | Robot  | 0                 | 1                  | 2             | 3             | 4            | 5               |
 | ------ | ----------------- | ------------------ | ------------- | ------------- | ------------ | --------------- |
@@ -324,9 +319,6 @@ where:
 then that ordering becomes part of the model’s learned structure.
 
 If, at inference time, a new robot only has a single RGB camera mounted overhead, we must place that image in index 1, not index 0, because the model has learned that index 1 corresponds to the overhead viewpoint.
-
-> [!WARNING]
-> Do not remap camera indices opportunistically at inference time. Positional drift changes feature meaning.
 
 
 ![Model ordering diagram](assets/model_ordering.png)
