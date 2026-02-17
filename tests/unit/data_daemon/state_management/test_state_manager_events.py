@@ -105,7 +105,6 @@ class FakeStateStore:
         dataset_name: str | None = None,
         robot_name: str | None = None,
         robot_id: str | None = None,
-        total_bytes: int | None = None,
     ) -> TraceRecord:
         """Upsert trace with metadata from START_TRACE.
 
@@ -118,7 +117,7 @@ class FakeStateStore:
         if existing:
             new_status = (
                 TraceStatus.WRITTEN
-                if existing.status == TraceStatus.PENDING_BYTES
+                if existing.status == TraceStatus.PENDING_METADATA
                 else existing.status
             )
             trace = replace(
@@ -132,7 +131,7 @@ class FakeStateStore:
                 robot_id=robot_id,
                 robot_instance=robot_instance,
                 path=path,
-                total_bytes=total_bytes,
+                total_bytes=existing.total_bytes,
                 last_updated=now,
                 num_upload_attempts=0,
                 next_retry_at=None,
@@ -150,7 +149,7 @@ class FakeStateStore:
                 robot_id=robot_id,
                 robot_instance=robot_instance,
                 path=path,
-                total_bytes=total_bytes,
+                total_bytes=None,
                 bytes_written=None,
                 bytes_uploaded=0,
                 progress_reported=ProgressReportStatus.PENDING,
@@ -196,7 +195,7 @@ class FakeStateStore:
             trace = TraceRecord(
                 trace_id=trace_id,
                 recording_id=recording_id,
-                status=TraceStatus.PENDING_BYTES,
+                status=TraceStatus.PENDING_METADATA,
                 data_type=None,
                 data_type_name=None,
                 dataset_id=None,
@@ -326,7 +325,6 @@ async def test_start_trace_creates_trace(state_manager) -> None:
         None,
         None,
         "/tmp/trace-1.bin",
-        128,
     )
     await asyncio.sleep(0.2)
 
@@ -338,7 +336,7 @@ async def test_start_trace_creates_trace(state_manager) -> None:
     assert trace.data_type == DataType.CUSTOM_1D
     assert trace.data_type_name == "custom"
     assert trace.path == "/tmp/trace-1.bin"
-    assert trace.total_bytes == 128
+    assert trace.total_bytes is None
     assert trace.status == TraceStatus.INITIALIZING
     assert trace.bytes_written is None  # Not complete yet
 
@@ -447,7 +445,6 @@ async def test_trace_written_emits_ready_for_upload_when_connected(
             None,
             None,
             "/tmp/trace-5.bin",
-            64,
         )
         await asyncio.sleep(0.2)
 
@@ -504,7 +501,6 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
             None,
             None,
             "/tmp/trace-1.bin",
-            10,
         )
         get_emitter().emit(
             Emitter.START_TRACE,
@@ -518,7 +514,6 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
             None,
             None,
             "/tmp/trace-2.bin",
-            10,
         )
         await asyncio.sleep(0.2)
 
