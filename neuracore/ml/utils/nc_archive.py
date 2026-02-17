@@ -10,6 +10,7 @@ import json
 import logging
 import tempfile
 import zipfile
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,28 @@ from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.device_utils import get_default_device
 
 logger = logging.getLogger(__name__)
+
+
+def _build_archive_metadata() -> dict[str, str | None]:
+    """Build archive metadata with installed package versions."""
+    try:
+        nc_types_version = version("neuracore-types")
+    except PackageNotFoundError:
+        logger.warning(
+            "Could not determine installed version for package 'neuracore-types'."
+        )
+        nc_types_version = None
+
+    try:
+        nc_version = version("neuracore")
+    except PackageNotFoundError:
+        logger.warning("Could not determine installed version for package 'neuracore'.")
+        nc_version = None
+
+    return {
+        "neuracore_version": nc_version,
+        "neuracore_types_version": nc_types_version,
+    }
 
 
 def create_nc_archive(
@@ -67,6 +90,10 @@ def create_nc_archive(
         with open(temp_path / "algorithm_config.json", "w") as f:
             json.dump(algorithm_config, f, indent=2)
 
+        # Save archive metadata
+        with open(temp_path / "metadata", "w") as f:
+            json.dump(_build_archive_metadata(), f, indent=2)
+
         # Create the ZIP archive
         with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
             zip_file.write(
@@ -80,6 +107,9 @@ def create_nc_archive(
 
             # Add algorithm config (always present)
             zip_file.write(temp_path / "algorithm_config.json", "algorithm_config.json")
+
+            # Add archive metadata
+            zip_file.write(temp_path / "metadata", "metadata")
 
             # Add all algorithm files
             for algo_file in algo_files:
@@ -136,6 +166,8 @@ def extract_nc_archive(archive_file: Path, output_dir: Path) -> dict[str, Path]:
                 extracted_files["model_init_description"] = file_path
             elif file_info.filename == "algorithm_config.json":
                 extracted_files["algorithm_config"] = file_path
+            elif file_info.filename == "metadata":
+                extracted_files["metadata"] = file_path
             elif file_info.filename == "requirements.txt":
                 extracted_files["requirements"] = file_path
             elif file_info.filename.startswith("algorithm/"):
