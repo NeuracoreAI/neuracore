@@ -27,21 +27,21 @@ class TestSynchronizedRecording:
         return dataset
 
     @pytest.fixture
-    def mock_synced_api(self, mock_auth_requests, synced_data, mocked_org_id):
+    def mock_synced_api(self, mock_data_requests, synced_data, mocked_org_id):
         """Set up mocks for synchronization API endpoints."""
         # Mock sync endpoint
-        mock_auth_requests.post(
+        mock_data_requests.post(
             re.compile(
                 f"{API_URL}/org/{mocked_org_id}/synchronize/synchronize-recording"
             ),
             json=synced_data.model_dump(mode="json"),
             status_code=200,
         )
-        yield mock_auth_requests
+        yield mock_data_requests
 
     @pytest.fixture
     def synced_recording(
-        self, dataset_mock, mock_auth_requests
+        self, dataset_mock, mock_data_requests
     ) -> SynchronizedRecording:
         """Create a SynchronizedRecording instance for testing."""
         return SynchronizedRecording(
@@ -64,7 +64,7 @@ class TestSynchronizedRecording:
         assert synced_recording.robot_data_spec is None
         assert synced_recording._iter_idx == 0
 
-    def test_init_with_data_types(self, dataset_mock, mock_auth_requests):
+    def test_init_with_data_types(self, dataset_mock, mock_data_requests):
         """Test initialization with specific data types."""
         from neuracore_types import DataType
 
@@ -155,13 +155,13 @@ class TestSynchronizedRecording:
     def test_getitem_slice_with_step(
         self,
         dataset_mock,
-        mock_auth_requests,
+        mock_data_requests,
         mock_wget_download,
         synced_data_multiple_frames,
     ):
         """Test slicing with step parameter."""
         # Mock the API to return more frames
-        mock_auth_requests.post(
+        mock_data_requests.post(
             re.compile(
                 f"{API_URL}/org/{dataset_mock.org_id}/synchronize/synchronize-recording"
             ),
@@ -229,7 +229,7 @@ class TestSynchronizedRecording:
         assert cache_path.exists()
 
     def test_video_cache_reuse(
-        self, dataset_mock, mock_auth_requests, mock_wget_download, tmp_path
+        self, dataset_mock, mock_data_requests, mock_wget_download, tmp_path
     ):
         """Test that cached videos are reused on subsequent access."""
         # Create cache directory and add a fake cached frame
@@ -263,7 +263,7 @@ class TestSynchronizedRecording:
         assert "cam1" in sync_point.data[DataType.RGB_IMAGES]
 
     def test_prefetch_videos_skip_if_cached(
-        self, dataset_mock, mock_auth_requests, mock_wget_download
+        self, dataset_mock, mock_data_requests, mock_wget_download
     ):
         """Test that prefetch_videos parameter triggers video download on init."""
         synced = SynchronizedRecording(
@@ -340,7 +340,7 @@ class TestSynchronizedRecording:
         assert synced_recording._suppress_wget_progress is True
 
     def test_different_frequencies_different_cache(
-        self, dataset_mock, mock_auth_requests, mock_wget_download
+        self, dataset_mock, mock_data_requests, mock_wget_download
     ):
         """Test that different frequencies use different cache directories."""
         synced_30 = SynchronizedRecording(

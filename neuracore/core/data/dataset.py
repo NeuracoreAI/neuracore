@@ -8,7 +8,7 @@ from typing import Optional, Union
 
 import requests
 from neuracore_types import Dataset as DatasetModel
-from neuracore_types import DataSpec, DataType
+from neuracore_types import DatasetUpdateRequest, DataSpec, DataType
 from neuracore_types import Recording as RecordingModel
 from neuracore_types import (
     RobotDataSpec,
@@ -29,7 +29,7 @@ from neuracore.core.utils.robot_mapping import RobotMapping
 
 from ..auth import Auth, get_auth
 from ..const import API_URL, DEFAULT_RECORDING_CACHE_DIR
-from ..exceptions import DatasetError
+from ..exceptions import AuthenticationError, DatasetError
 from ..utils.http_errors import extract_error_detail
 
 PAGE_SIZE = 30
@@ -49,6 +49,7 @@ class Dataset:
         tags: list[str],
         data_types: list[DataType],
         is_shared: bool,
+        description: str | None = None,
         recordings: list[dict] | list[Recording] | None = None,
     ):
         """Initialize a Dataset instance.
@@ -61,6 +62,7 @@ class Dataset:
             tags: List of tags associated with the dataset.
             data_types: List of data types present in the dataset.
             is_shared: Whether the dataset is shared.
+            description: Description of the dataset.
             recordings: List of recording dictionaries.
             If not provided, the dataset will be fetched from the Neuracore API.
 
@@ -78,6 +80,7 @@ class Dataset:
         self.size_bytes = size_bytes
         self.tags = tags
         self.is_shared = is_shared
+        self.description = description
         self.data_types = data_types or []
 
         self.cache_dir = DEFAULT_RECORDING_CACHE_DIR
@@ -121,7 +124,7 @@ class Dataset:
             instance=recording_model.instance,
             start_time=recording_model.start_time,
             end_time=recording_model.end_time,
-            recording_name=getattr(recording_model.metadata, "name", None),
+            metadata=recording_model.metadata,
         )
 
     def _initialize_num_recordings(self) -> None:
@@ -258,6 +261,7 @@ class Dataset:
             size_bytes=dataset_model.size_bytes,
             tags=dataset_model.tags,
             is_shared=dataset_model.is_shared,
+            description=dataset_model.description,
             data_types=list(dataset_model.all_data_types.keys()),
         )
 
@@ -298,6 +302,7 @@ class Dataset:
                 size_bytes=dataset_model.size_bytes,
                 tags=dataset_model.tags,
                 is_shared=dataset_model.is_shared,
+                description=dataset_model.description,
                 data_types=list(dataset_model.all_data_types.keys()),
             )
         except requests.exceptions.ConnectionError:
@@ -385,6 +390,7 @@ class Dataset:
             size_bytes=dataset_model.size_bytes,
             tags=dataset_model.tags,
             is_shared=dataset_model.is_shared,
+            description=dataset_model.description,
             data_types=list(dataset_model.all_data_types.keys()),
         )
 
@@ -612,6 +618,7 @@ class Dataset:
                 tags=self.tags,
                 size_bytes=self.size_bytes,
                 is_shared=self.is_shared,
+                description=self.description,
                 data_types=self.data_types,
                 recordings=self._recordings_cache[start:stop:step],
             )
@@ -631,3 +638,143 @@ class Dataset:
         if self._num_recordings is None:
             self._initialize_num_recordings()
         return self._num_recordings or 0
+
+    def _refresh_dataset_metadata(self) -> None:
+        """Refresh the dataset metadata from the cloud.
+
+        Ideally we should implement If-Match & Etag header.
+        """
+        auth = get_auth()
+        org_id = get_current_org()
+        try:
+            req = requests.get(
+                f"{API_URL}/org/{org_id}/datasets/{self.id}",
+                headers=auth.get_headers(),
+            )
+            req.raise_for_status()
+            dataset_model = DatasetModel.model_validate(req.json())
+            assert dataset_model.id == self.id
+
+            self.name = dataset_model.name
+            self.size_bytes = dataset_model.size_bytes
+            self.tags = dataset_model.tags
+            self.description = dataset_model.description
+            self.is_shared = dataset_model.is_shared
+            self.data_types = list(dataset_model.all_data_types.keys())
+
+        except AuthenticationError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Error fetching dataset metadata: {e}")
+
+    def _update_metadata(self, dataset_metadata: DatasetUpdateRequest) -> None:
+        """Update the metadata of a dataset.
+
+        Args:
+            dataset_metadata: The metadata to update the dataset with
+
+        Raises:
+            RuntimeError: Rases if there is an error updating the metadata in the cloud.
+            ConfigError: If there is an error trying to get the config
+            AuthenticationError: If there is an error with authentication
+        """
+        auth = get_auth()
+        org_id = get_current_org()
+        try:
+            response = requests.put(
+                f"{API_URL}/org/{org_id}/datasets/{self.id}",
+                headers=auth.get_headers(),
+                json=dataset_metadata.model_dump(mode="json"),
+            )
+            response.raise_for_status()
+            if dataset_metadata.name is not None:
+                self.name = dataset_metadata.name
+            if dataset_metadata.description is not None:
+                self.description = dataset_metadata.description
+            if dataset_metadata.tags is not None:
+                self.tags = dataset_metadata.tags
+
+        except AuthenticationError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Error updating recording metadata: {e}")
+
+    def set_name(self, name: str) -> None:
+        """Update a dataset name programmatically.
+
+        This call is blocking.
+
+        Args:
+            name: The name to update the dataset with.
+
+        Raises:
+            RuntimeError: Rases if there is an error updating the metadata in the cloud.
+            ConfigError: If there is an error trying to get the config
+            AuthenticationError: If there is an error with authentication
+        """
+        self._refresh_dataset_metadata()
+        self._update_metadata(
+            DatasetUpdateRequest(
+                name=name, description=self.description, tags=self.tags
+            )
+        )
+
+    def set_description(self, description: str) -> None:
+        """Update a dataset description programmatically.
+
+        This call is blocking.
+
+        Args:
+            description: The description to update the dataset with.
+
+        Raises:
+            RuntimeError: Rases if there is an error updating the metadata in the cloud.
+            ConfigError: If there is an error trying to get the config
+            AuthenticationError: If there is an error with authentication
+        """
+        self._refresh_dataset_metadata()
+        self._update_metadata(
+            DatasetUpdateRequest(
+                name=self.name, description=description, tags=self.tags
+            )
+        )
+
+    def set_tags(self, tags: list[str]) -> None:
+        """Update a dataset tags programmatically.
+
+        This call is blocking.
+
+        Args:
+            tags: The tags to update the dataset with.
+
+        Raises:
+            RuntimeError: Rases if there is an error updating the metadata in the cloud.
+            ConfigError: If there is an error trying to get the config
+            AuthenticationError: If there is an error with authentication
+        """
+        self._refresh_dataset_metadata()
+        self._update_metadata(
+            DatasetUpdateRequest(
+                name=self.name, description=self.description, tags=tags
+            )
+        )
+
+    def add_tag(self, tag: str) -> None:
+        """Add a tag to a dataset programmatically.
+
+        This call is blocking.
+
+        Args:
+            tag: The tag to add to the dataset.
+
+        Raises:
+            RuntimeError: Rases if there is an error updating the metadata in the cloud.
+            ConfigError: If there is an error trying to get the config
+            AuthenticationError: If there is an error with authentication
+        """
+        self._refresh_dataset_metadata()
+        self._update_metadata(
+            DatasetUpdateRequest(
+                name=self.name, description=self.description, tags=self.tags + [tag]
+            )
+        )

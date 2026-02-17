@@ -131,5 +131,21 @@ python example_view_dataset.py
 
 If you want to just view your data, then the best way is via the [web interface](https://www.neuracore.com/dashboard/datasets).
 
+
+### Edit Dataset metadata
+
+This example shows you how to:
+- Edit Dataset metadata:
+  - Its name
+  - Description
+  - Tags 
+- Edit Recording metadata
+  - Its Notes
+  - Its Status e.g. flagged
+
+```bash
+python example_flag_data.py
+```
+
 ### Work with your own robot
 If you want to get your own robot working with neuracore, please refer to and also [tutorial](../docs/tutorial.md) and use the example files as a reference.
