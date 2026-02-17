@@ -1294,18 +1294,9 @@ class TestMain:
             (
                 {
                     "algorithm_id": "test-algorithm-id",
-                    "dataset_id": None,
                     "dataset_name": None,
                 },
-                "Either 'dataset_id' or 'dataset_name' must be provided",
-            ),
-            (
-                {
-                    "algorithm_id": "test-algorithm-id",
-                    "dataset_id": "test-dataset-id",
-                    "dataset_name": "test-dataset-name",
-                },
-                "Both 'dataset_id' and 'dataset_name' are provided",
+                "'dataset_name' must be provided",
             ),
         ],
     )
@@ -1314,7 +1305,7 @@ class TestMain:
     ):
         base_cfg = {
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
+            "dataset_name": "test-dataset-name",
             "local_output_dir": "/tmp/test",
             "batch_size": 8,
             "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
@@ -1336,7 +1327,6 @@ class TestMain:
     ):
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": None,
             "dataset_name": "test-dataset-name",
             "org_id": None,
             "device": None,
@@ -1363,8 +1353,7 @@ class TestMain:
     ):
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": "test-org-id",
             "device": None,
             "local_output_dir": str(temp_output_dir),
@@ -1383,7 +1372,7 @@ class TestMain:
         main(cfg)
 
         setup.mock_set_organization.assert_called_once_with("test-org-id")
-        setup.mock_get_dataset.assert_called_once_with(id="test-dataset-id")
+        setup.mock_get_dataset.assert_called_once_with(name="test-dataset-name")
 
     def test_main_uses_algorithm_config_when_algorithm_provided_instead_of_algorithm_id(
         self, monkeypatch, temp_output_dir
@@ -1393,8 +1382,7 @@ class TestMain:
                 "_target_": "tests.unit.ml.test_train.mock_model_class",
             },
             "algorithm_id": None,
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": None,
             "device": None,
             "local_output_dir": str(temp_output_dir),
@@ -1418,8 +1406,7 @@ class TestMain:
     ):
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": None,
             "device": None,
             "local_output_dir": str(temp_output_dir),
@@ -1445,8 +1432,7 @@ class TestMain:
     ):
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": None,
             "device": "cuda:1",
             "local_output_dir": str(temp_output_dir),
@@ -1474,8 +1460,7 @@ class TestMain:
     ):
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": None,
             "device": None,
             "local_output_dir": str(temp_output_dir),
@@ -1501,8 +1486,7 @@ class TestMain:
     ):
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": None,
             "device": None,
             "local_output_dir": str(temp_output_dir),
@@ -1529,39 +1513,12 @@ class TestMain:
             extract_dir=expected_extract_dir
         )
 
-    def test_main_loads_dataset_by_id_when_dataset_id_provided_but_dataset_name_none(
-        self, monkeypatch, temp_output_dir
-    ):
-        cfg = OmegaConf.create({
-            "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
-            "org_id": None,
-            "device": None,
-            "local_output_dir": str(temp_output_dir),
-            "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
-            "output_prediction_horizon": 5,
-            "frequency": 30,
-            "algorithm_params": None,
-            "max_prefetch_workers": 4,
-        })
-
-        setup = MainTestSetup(monkeypatch)
-        setup.setup_mocks()
-
-        main(cfg)
-
-        setup.mock_get_dataset.assert_called_once_with(id="test-dataset-id")
-
     def test_main_converts_string_batch_size_to_int_when_not_auto(
         self, monkeypatch, temp_output_dir
     ):
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": None,
             "device": None,
             "local_output_dir": str(temp_output_dir),
@@ -1594,8 +1551,7 @@ class TestMain:
     ):
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": None,
             "device": None,
             "local_output_dir": str(temp_output_dir),
@@ -1634,8 +1590,7 @@ class TestMain:
     def test_main_calls_setup_logging(self, monkeypatch, temp_output_dir):
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": None,
             "device": None,
             "local_output_dir": str(temp_output_dir),
@@ -1663,8 +1618,7 @@ class TestMain:
     ):
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": "test-org",
             "device": None,
             "local_output_dir": str(temp_output_dir),
@@ -1686,7 +1640,7 @@ class TestMain:
         assert metadata_path.exists()
         metadata = json.loads(metadata_path.read_text())
         assert metadata["algorithm"] == "test-algorithm"
-        assert metadata["dataset_id"] == "test-dataset-id"
+        assert metadata["dataset_name"] == "test-dataset-name"
         assert metadata["status"] == "RUNNING"
         assert "JOINT_POSITIONS" in metadata["input_robot_data_spec"]["robot-id-1"]
 
@@ -1695,8 +1649,7 @@ class TestMain:
     ):
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": None,
             "device": None,
             "local_output_dir": str(temp_output_dir),
@@ -1731,8 +1684,7 @@ class TestMain:
     def test_main_uses_default_recording_cache_dir(self, monkeypatch, temp_output_dir):
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": None,
             "device": None,
             "local_output_dir": str(temp_output_dir),
@@ -1757,8 +1709,7 @@ class TestMain:
         custom_cache_dir = temp_output_dir / "custom-recording-cache"
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": None,
             "device": None,
             "local_output_dir": str(temp_output_dir),
@@ -1784,8 +1735,7 @@ class TestMain:
     ):
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
-            "dataset_id": "test-dataset-id",
-            "dataset_name": None,
+            "dataset_name": "test-dataset-name",
             "org_id": None,
             "device": None,
             "local_output_dir": str(temp_output_dir),
