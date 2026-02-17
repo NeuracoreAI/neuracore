@@ -132,7 +132,7 @@ Each robot is an `EmbodimentDescription`, and the full mapping is a `CrossEmbodi
 
 For clarity, input and output specs are identical here. In practice, output specs often represent target data (for example target joints, torques, or end-effector pose) and may differ from input specs.
 
-```python{8,25}
+```python {8,25}
 input_cross_embodiment_spec: CrossEmbodimentDescription = {
     "franka": {
         JOINTS: {
@@ -291,7 +291,7 @@ Since this robot only has two joints plus a wrist joint, we should semantically 
 | kuka   | iiwa_joint_1      | iiwa_joint_2       | iiwa_joint_3  | iiwa_joint_4  | iiwa_joint_5 | kuka_wrist_joint    |
 | ur5    | ur5_shoulder_pan  | ur5_shoulder_lift  | **0**         | **0**         | **0**        | ur5_wrist_joint     |
 
-```python{5,8}
+```python {5,8}
 ur5_embodiment_spec: EmbodimentDescription = {
     JOINTS: {
         0: "ur5_shoulder_pan",
