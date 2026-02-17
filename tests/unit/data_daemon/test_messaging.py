@@ -1,5 +1,6 @@
 import base64
 import struct
+import time
 from datetime import datetime, timedelta, timezone
 
 from neuracore_types import DataType
@@ -147,12 +148,23 @@ class DummyComm:
         self.cleaned = True
 
 
+def _wait_for_messages(comm: DummyComm, expected: int, timeout: float = 1.0) -> None:
+    """Wait for Producer's sender thread to flush messages to DummyComm."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if len(comm.messages) >= expected:
+            return
+        time.sleep(0.02)
+    return
+
+
 def test_producer_open_ring_buffer_sends_payload() -> None:
     comm = DummyComm()
     producer = Producer(comm_manager=comm)
 
     assert comm.socket_requested is True
     producer.open_ring_buffer(size=2048)
+    _wait_for_messages(comm, 1)
 
     assert len(comm.messages) == 1
     envelope = comm.messages[0]
@@ -176,6 +188,7 @@ def test_producer_send_data_chunks_and_base64() -> None:
         dataset_id="dataset-1",
         dataset_name="dataset",
     )
+    _wait_for_messages(comm, 2)
 
     assert len(comm.messages) == 2
     for idx, envelope in enumerate(comm.messages):

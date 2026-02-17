@@ -288,6 +288,15 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
         robot_id="robot-1",
         dataset_id="dataset-1",
     )
+    # Producer uses a sender thread; ensure daemon received DATA_CHUNK before we
+    # simulate crash (otherwise _trace_recordings stays empty and no TRACE_WRITTEN).
+    assert _wait_for(
+        lambda: (
+            producer.producer_id in daemon.channels
+            and daemon.channels[producer.producer_id].trace_id is not None
+        ),
+        timeout=1,
+    )
 
     trace_written: list[int] = []
     active_trace_id = producer.trace_id
@@ -309,7 +318,8 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
         )
         elapsed = time.monotonic() - start
         assert elapsed <= TEST_HEARTBEAT_TIMEOUT_SECS + 1
-        assert _wait_for(lambda: trace_written, timeout=1)
+        # RDM finalizes trace asynchronously (worker); allow time for TRACE_WRITTEN
+        assert _wait_for(lambda: trace_written, timeout=3)
     finally:
         get_emitter().remove_listener(Emitter.TRACE_WRITTEN, on_trace_written)
 

@@ -240,35 +240,47 @@ def test_rdm_delete_trace_event_deletes_trace_dir(
     trace_id = "elbow_joint"
 
     emitter = get_emitter()
+    trace_written = threading.Event()
 
-    rdm.enqueue(
-        CompleteMessage.from_bytes(
-            producer_id="p",
-            recording_id=recording_id,
-            trace_id=trace_id,
-            data_type=DataType.JOINT_POSITIONS,
-            data_type_name="joint_position",
-            robot_instance=0,
-            data=_json_bytes({"x": 1}),
-            final_chunk=False,
+    @emitter.on(Emitter.TRACE_WRITTEN)
+    def _on_trace_written(tid: str, _rid: str, _bytes: int) -> None:
+        if tid == trace_id:
+            trace_written.set()
+
+    try:
+        rdm.enqueue(
+            CompleteMessage.from_bytes(
+                producer_id="p",
+                recording_id=recording_id,
+                trace_id=trace_id,
+                data_type=DataType.JOINT_POSITIONS,
+                data_type_name="joint_position",
+                robot_instance=0,
+                data=_json_bytes({"x": 1}),
+                final_chunk=False,
+            )
         )
-    )
 
-    # Wait for message to be processed
-    time.sleep(0.1)
-    emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
+        # Wait for message to be processed
+        time.sleep(0.1)
+        emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
 
-    trace_dir = recordings_root / recording_id / "JOINT_POSITIONS" / trace_id
-    assert _wait_for(lambda: trace_dir.exists(), timeout=5.0) is True
+        trace_dir = recordings_root / recording_id / "JOINT_POSITIONS" / trace_id
+        assert _wait_for(lambda: trace_dir.exists(), timeout=5.0) is True
 
-    emitter.emit(
-        Emitter.DELETE_TRACE,
-        recording_id,
-        trace_id,
-        DataType.JOINT_POSITIONS.value,
-    )
+        # Wait for encoder to finish (TRACE_WRITTEN) so no files are open when we delete
+        assert trace_written.wait(timeout=5.0) is True
 
-    assert _wait_for(lambda: not trace_dir.exists(), timeout=5.0) is True
+        emitter.emit(
+            Emitter.DELETE_TRACE,
+            recording_id,
+            trace_id,
+            DataType.JOINT_POSITIONS.value,
+        )
+
+        assert _wait_for(lambda: not trace_dir.exists(), timeout=5.0) is True
+    finally:
+        emitter.remove_listener(Emitter.TRACE_WRITTEN, _on_trace_written)
 
 
 def test_rdm_storage_limit_aborts_trace_and_emits_trace_written_zero(
