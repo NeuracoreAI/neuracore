@@ -111,6 +111,10 @@ class DataStream(ABC):
         ):
             self._producer.set_recording_id(context.recording_id)
 
+        # Reopen producer channel state for each new recording in case
+        # the daemon expired the channel while this producer object was idle.
+        self._producer.start_producer()
+        self._producer.open_ring_buffer()
         self._producer.start_new_trace()
 
     def stop_recording(self) -> list[threading.Thread]:
@@ -232,6 +236,7 @@ class VideoDataStream(DataStream):
         metadata_dict = metadata.model_dump(mode="json", exclude={"frame"})
         metadata_dict["width"] = self.width
         metadata_dict["height"] = self.height
+        metadata_dict["frame_nbytes"] = int(frame.size * frame.itemsize)
         metadata_json = json.dumps(metadata_dict).encode("utf-8")
 
         # Pack: [metadata_len (4 bytes)] [metadata_json] [frame_bytes]

@@ -33,7 +33,7 @@ class _InMemoryStore:
     def __init__(self, traces: list[TraceRecord]) -> None:
         self._traces = {trace.trace_id: trace for trace in traces}
 
-    def list_traces(self) -> list[TraceRecord]:
+    async def list_traces(self) -> list[TraceRecord]:
         return list(self._traces.values())
 
     async def record_error(

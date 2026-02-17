@@ -23,6 +23,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.robot_mapping import RobotMapping
+from neuracore.data_daemon.communications_management.producer import Producer
 from neuracore.data_daemon.communications_management.producer import (
     RecordingContext as DaemonRecordingContext,
 )
@@ -107,6 +108,7 @@ class Robot:
         self._auth: Auth = get_auth()
         self._temp_dir = None
         self._data_streams: dict[str, DataStream] = dict()
+        self._daemon_recording_context: DaemonRecordingContext | None = None
 
         self.org_id = org_id or get_current_org()
 
@@ -319,8 +321,11 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        DaemonRecordingContext(recording_id=recording_id).stop_recording()
-        self._stop_all_streams()
+        producer_stop_sequence_numbers = self._stop_all_streams()
+        self._get_daemon_recording_context().stop_recording(
+            recording_id=recording_id,
+            producer_stop_sequence_numbers=producer_stop_sequence_numbers,
+        )
 
         try:
             response = requests.post(
@@ -347,13 +352,20 @@ class Robot:
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to stop recording: {str(e)}")
 
-    def _stop_all_streams(self) -> None:
+    def _stop_all_streams(self) -> dict[str, int]:
         """Stop recording on all data streams for this robot instance."""
+        producer_stop_sequence_numbers: dict[str, int] = {}
         for stream_id, stream in self._data_streams.items():
             try:
                 stream.stop_recording()
+                producer = getattr(stream, "_producer", None)
+                if isinstance(producer, Producer):
+                    producer_stop_sequence_numbers[producer.producer_id] = (
+                        producer.get_last_sent_sequence_number()
+                    )
             except Exception:
                 logger.exception("Failed to stop data stream %s", stream_id)
+        return producer_stop_sequence_numbers
 
     def is_recording(self) -> bool:
         """Check if the robot is currently recording data.
@@ -640,7 +652,7 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        DaemonRecordingContext(recording_id=recording_id).stop_recording()
+        self._get_daemon_recording_context().stop_recording(recording_id=recording_id)
 
         try:
             response = requests.post(
@@ -662,6 +674,34 @@ class Robot:
             )
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to cancel recording: {str(e)}")
+
+    def _get_daemon_recording_context(self) -> DaemonRecordingContext:
+        """Return a reusable daemon recording context, creating it lazily."""
+        if self._daemon_recording_context is None:
+            self._daemon_recording_context = DaemonRecordingContext()
+        return self._daemon_recording_context
+
+    def _cleanup_daemon_recording_context(self) -> None:
+        """Release daemon recording context resources."""
+        if self._daemon_recording_context is None:
+            return
+        try:
+            self._daemon_recording_context.close()
+        except Exception:
+            logger.exception("Failed to cleanup daemon recording context")
+        finally:
+            self._daemon_recording_context = None
+
+    def close(self) -> None:
+        """Release local resources owned by this Robot instance."""
+        self._cleanup_daemon_recording_context()
+        if self._temp_dir is not None:
+            self._temp_dir.cleanup()
+            self._temp_dir = None
+
+    def __del__(self) -> None:
+        """Best-effort cleanup for daemon recording resources."""
+        self.close()
 
 
 # Global robot registry
