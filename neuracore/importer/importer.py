@@ -290,9 +290,9 @@ def _run_import(
 
 
 def main() -> None:
-    """Delegate to the Typer CLI app located in neuracore.importer.CLI.app."""
+    """Delegate to the Typer cli app located in neuracore.importer.cli.app."""
     # Import locally to keep importer.py free of Typer dependency for library use
-    from neuracore.importer.CLI.app import main as cli_main
+    from neuracore.importer.cli.app import main as cli_main
 
     cli_main()
 
