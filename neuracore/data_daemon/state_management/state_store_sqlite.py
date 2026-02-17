@@ -30,8 +30,16 @@ def _utc_now() -> datetime:
 
 
 _ALLOWED_PREVIOUS_STATUSES: dict[TraceStatus, set[TraceStatus]] = {
-    TraceStatus.WRITTEN: {TraceStatus.INITIALIZING, TraceStatus.PENDING_METADATA},
-    TraceStatus.UPLOADING: {TraceStatus.WRITTEN, TraceStatus.PAUSED},
+    TraceStatus.WRITTEN: {
+        TraceStatus.INITIALIZING,
+        TraceStatus.PENDING_METADATA,
+        TraceStatus.RETRYING,
+    },
+    TraceStatus.UPLOADING: {
+        TraceStatus.WRITTEN,
+        TraceStatus.PAUSED,
+        TraceStatus.RETRYING,
+    },
     TraceStatus.UPLOADED: {TraceStatus.UPLOADING},
     TraceStatus.PAUSED: {TraceStatus.UPLOADING},
 }
@@ -281,7 +289,9 @@ class SqliteStateStore(StateStore):
                         .where(traces.c.status == TraceStatus.WRITTEN)
                         .where(
                             or_(
+                                # First time trying to upload
                                 traces.c.next_retry_at.is_(None),
+                                # Retry upload
                                 traces.c.next_retry_at <= now,
                             )
                         )
@@ -339,7 +349,7 @@ class SqliteStateStore(StateStore):
 
         State transitions:
         - If trace doesn't exist: creates with INITIALIZING status
-        - If trace exists with PENDING_BYTES: transitions to WRITTEN
+        - If trace exists with PENDING_METADATA: transitions to WRITTEN
         - If trace exists with other status: updates metadata only
 
         Returns the trace record after upsert.
@@ -383,7 +393,6 @@ class SqliteStateStore(StateStore):
                 else_=traces.c.status,
             ),
         }
-
         stmt = stmt.on_conflict_do_update(
             index_elements=["trace_id"],
             set_=update_set,
@@ -410,7 +419,7 @@ class SqliteStateStore(StateStore):
         """Insert or update trace with bytes from TRACE_WRITTEN.
 
         State transitions:
-        - If trace doesn't exist: creates with PENDING_BYTES status
+        - If trace doesn't exist: creates with PENDING_METADATA status
         - If trace exists with INITIALIZING: transitions to WRITTEN
         - If trace exists with other status: updates bytes only
 
@@ -490,7 +499,7 @@ class SqliteStateStore(StateStore):
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
                 .values(
-                    status=TraceStatus.WRITTEN,
+                    status=TraceStatus.RETRYING,
                     error_code=error_code.value,
                     error_message=error_message,
                     next_retry_at=next_retry_at,
@@ -554,34 +563,18 @@ class SqliteStateStore(StateStore):
             raise ValueError(f"Trace not found: {trace_id}")
         return int(attempts)
 
-    async def find_traces_ready_for_reupload(
-        self, limit: int = 50
-    ) -> list[TraceRecord]:
-        """Return traces due for a retry upload attempt.
-
-        Args:
-            limit: Maximum number of traces to return.
-
-        Returns:
-            list[TraceRecord]: Traces eligible for re-upload.
-        """
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+    async def reset_retrying_to_written(self) -> int:
+        """Reset RETRYING/UPLOADING traces back to WRITTEN (preserve retry schedule)."""
+        now = _utc_now()
         async with self._engine.begin() as conn:
-            rows = (
-                (
-                    await conn.execute(
-                        select(traces)
-                        .where(traces.c.status == TraceStatus.WRITTEN)
-                        .where(traces.c.next_retry_at.is_not(None))
-                        .where(traces.c.next_retry_at <= now)
-                        .order_by(traces.c.next_retry_at.asc())
-                        .limit(int(limit))
-                    )
+            result = await conn.execute(
+                update(traces)
+                .where(
+                    traces.c.status.in_((TraceStatus.RETRYING, TraceStatus.UPLOADING))
                 )
-                .mappings()
-                .all()
+                .values(status=TraceStatus.WRITTEN, last_updated=now)
             )
-        return [TraceRecord.from_row(dict(row)) for row in rows]
+        return int(result.rowcount or 0)
 
     async def close(self) -> None:
         """Close the database connection and dispose of the engine.
