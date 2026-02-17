@@ -55,6 +55,7 @@ class PolicyInference:
         self.org_id = org_id
         self.job_id = job_id
         self.model = load_model_from_nc_archive(model_file, device=device)
+        self.model.eval()
         self.dataset_statistics = self.model.model_init_description.dataset_statistics
         self.device = torch.device(device) if device else get_default_device()
         self.model_input_order = model_input_order

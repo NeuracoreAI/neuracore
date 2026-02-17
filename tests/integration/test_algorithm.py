@@ -44,7 +44,7 @@ NUM_GPUS = 1
 FREQUENCY = 50
 BATCH_SIZE = 64
 OUTPUT_PREDICTION_HORIZON = 100
-NUM_ROLLOUTS = 10
+NUM_ROLLOUTS = 20
 ONSCREEN_RENDER = False
 TRAINING_TIMEOUT_MINUTES = 360
 
@@ -313,7 +313,7 @@ class TestAlgorithm:
 
         try:
             policy = nc.policy_remote_server(endpoint_name)
-            env = make_sim_env()
+            env = make_sim_env(seed=42)
             success_rate = eval_model(
                 policy=policy,
                 env=env,
