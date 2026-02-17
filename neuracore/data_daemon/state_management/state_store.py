@@ -28,7 +28,7 @@ class StateStore(Protocol):
         """Return all traces for a given recording ID."""
         ...
 
-    def list_traces(self) -> list[TraceRecord]:
+    async def list_traces(self) -> list[TraceRecord]:
         """Return all trace records."""
         ...
 

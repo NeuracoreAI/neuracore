@@ -23,7 +23,7 @@ class RecordingContext:
 
     def __init__(
         self,
-        recording_id: str,
+        recording_id: str | None = None,
         comm_manager: CommunicationsManager | None = None,
     ) -> None:
         """Initialize the recording context."""
@@ -38,14 +38,51 @@ class RecordingContext:
                 "Data cannot be captured without a running daemon."
             )
 
-    def stop_recording(self) -> None:
+    def set_recording_id(self, recording_id: str | None) -> None:
+        """Set or clear the recording identifier for this context."""
+        self.recording_id = recording_id
+
+    def stop_recording(
+        self,
+        recording_id: str | None = None,
+        producer_stop_sequence_numbers: dict[str, int] | None = None,
+    ) -> None:
         """Send a recording-stopped control message."""
+        effective_recording_id = recording_id or self.recording_id
+        if not effective_recording_id:
+            raise ValueError("recording_id is required to stop a recording.")
+
+        recording_stopped_payload: dict[str, object] = {
+            "recording_id": effective_recording_id
+        }
+        if producer_stop_sequence_numbers:
+            recording_stopped_payload["producer_stop_sequence_numbers"] = (
+                producer_stop_sequence_numbers
+            )
         self._send(
             CommandType.RECORDING_STOPPED,
-            {"recording_stopped": {"recording_id": self.recording_id}},
+            {"recording_stopped": recording_stopped_payload},
         )
+        self.recording_id = effective_recording_id
+
+    def close(self) -> None:
+        """Close sockets and cleanup context resources owned by this instance."""
+        if self.socket is not None:
+            self.socket.close(0)
+            self.socket = None
+        self._comm.cleanup_producer()
 
     def _send(self, command: CommandType, payload: dict | None = None) -> None:
+        """Send a management message to the daemon.
+
+        Args:
+            command: The CommandType to send to the daemon.
+            payload: A dictionary containing any additional data required by the daemon
+                to process the message.
+
+        Returns:
+            None
+        """
         envelope = MessageEnvelope(
             producer_id=None,
             command=command,
@@ -77,6 +114,8 @@ class Producer:
         self._heartbeat_thread: threading.Thread | None = None
         self._send_queue: queue.Queue[MessageEnvelope | None] = queue.Queue()
         self._sender_thread: threading.Thread | None = None
+        self._next_sequence_number = 1
+        self._last_sent_sequence_number = 0
 
         if self.socket is None:
             raise RuntimeError(
@@ -222,12 +261,20 @@ class Producer:
         Returns:
             None
         """
+        sequence_number = self._next_sequence_number
+        self._next_sequence_number += 1
+        self._last_sent_sequence_number = sequence_number
         envelope = MessageEnvelope(
             producer_id=self.producer_id,
             command=command,
             payload=payload or {},
+            sequence_number=sequence_number,
         )
         self._send_queue.put(envelope)
+
+    def get_last_sent_sequence_number(self) -> int:
+        """Return the most recent message sequence number sent by this producer."""
+        return self._last_sent_sequence_number
 
     def has_consumer(self) -> bool:
         """Check if the producer has a consumer.
