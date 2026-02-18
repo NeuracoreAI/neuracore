@@ -36,7 +36,7 @@ Other parameters exist (optimizer, architecture, dataset, etc.), but these two s
 The model shape is not hard-coded. It is constructed deterministically from the specification.
 
 > [!NOTE]
-> **Input/Output Embodiment Descriptions control the are the dimensionality** for the model.
+> **Input/Output Embodiment Descriptions control the dimensionality** for the model.
 
 ## What Is a Cross Embodiment Description?
 
