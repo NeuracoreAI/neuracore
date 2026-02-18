@@ -71,7 +71,7 @@ class TestSynchronizedDataset:
         assert result is synced_dataset
         assert synced_dataset._recording_idx == 0
 
-    def test_getitem_single_index(self, synced_dataset, mock_auth_requests):
+    def test_getitem_single_index(self, synced_dataset, mock_data_requests):
         """Test accessing a single recording by index."""
         recording = synced_dataset[0]
 
@@ -80,7 +80,7 @@ class TestSynchronizedDataset:
         assert recording.robot_id == "robot1"
         assert recording.frequency == 30
 
-    def test_getitem_second_recording(self, synced_dataset, mock_auth_requests):
+    def test_getitem_second_recording(self, synced_dataset, mock_data_requests):
         """Test accessing the second recording."""
         recording = synced_dataset[1]
 
@@ -88,14 +88,14 @@ class TestSynchronizedDataset:
         assert recording.id == "rec2"
         assert recording.robot_id == "robot2"
 
-    def test_getitem_negative_index(self, synced_dataset, mock_auth_requests):
+    def test_getitem_negative_index(self, synced_dataset, mock_data_requests):
         """Test accessing recordings with negative indices."""
         recording = synced_dataset[-1]
 
         assert isinstance(recording, SynchronizedRecording)
         assert recording.id == "rec2"
 
-    def test_getitem_negative_first(self, synced_dataset, mock_auth_requests):
+    def test_getitem_negative_first(self, synced_dataset, mock_data_requests):
         """Test accessing first recording with negative index."""
         recording = synced_dataset[-2]
 
@@ -112,7 +112,7 @@ class TestSynchronizedDataset:
         with pytest.raises(IndexError, match="Dataset index out of range"):
             _ = synced_dataset[-10]
 
-    def test_getitem_invalid_type(self, mock_auth_requests, synced_dataset):
+    def test_getitem_invalid_type(self, mock_data_requests, synced_dataset):
         """Test that non-integer/slice index raises TypeError."""
         nc.login()
         with pytest.raises(
@@ -120,7 +120,7 @@ class TestSynchronizedDataset:
         ):
             _ = synced_dataset["invalid"]
 
-    def test_getitem_slice(self, synced_dataset, mock_auth_requests):
+    def test_getitem_slice(self, synced_dataset, mock_data_requests):
         """Test slicing synchronized dataset."""
         nc.login()
         sliced = synced_dataset[0:1]
@@ -128,7 +128,7 @@ class TestSynchronizedDataset:
         assert isinstance(sliced, SynchronizedDataset)
         assert len(sliced) == 1
 
-    def test_getitem_slice_full(self, synced_dataset, mock_auth_requests):
+    def test_getitem_slice_full(self, synced_dataset, mock_data_requests):
         """Test slicing entire dataset."""
 
         sliced = synced_dataset[0:2]
@@ -136,7 +136,7 @@ class TestSynchronizedDataset:
         assert isinstance(sliced, SynchronizedDataset)
         assert len(sliced) == 2
 
-    def test_getitem_slice_with_step(self, synced_dataset, mock_auth_requests):
+    def test_getitem_slice_with_step(self, synced_dataset, mock_data_requests):
         """Test slicing with step parameter."""
         sliced = synced_dataset[0:2:1]
 
@@ -144,7 +144,7 @@ class TestSynchronizedDataset:
         assert len(sliced) == 2
 
     def test_getitem_slice_preserves_properties(
-        self, synced_dataset, mock_auth_requests
+        self, synced_dataset, mock_data_requests
     ):
         """Test that slicing preserves dataset properties."""
         sliced = synced_dataset[0:1]
@@ -152,7 +152,7 @@ class TestSynchronizedDataset:
         assert sliced.frequency == synced_dataset.frequency
         assert sliced.robot_data_spec == synced_dataset.robot_data_spec
 
-    def test_iteration(self, synced_dataset, mock_auth_requests):
+    def test_iteration(self, synced_dataset, mock_data_requests):
         """Test iterating through synchronized dataset."""
         recordings = list(synced_dataset)
 
@@ -161,7 +161,7 @@ class TestSynchronizedDataset:
         assert recordings[0].id == "rec1"
         assert recordings[1].id == "rec2"
 
-    def test_iteration_multiple_times(self, synced_dataset, mock_auth_requests):
+    def test_iteration_multiple_times(self, synced_dataset, mock_data_requests):
         """Test that the dataset can be iterated multiple times."""
         recordings1 = list(synced_dataset)
         recordings2 = list(synced_dataset)
@@ -169,7 +169,7 @@ class TestSynchronizedDataset:
         assert len(recordings1) == len(recordings2)
         assert recordings1[0].id == recordings2[0].id
 
-    def test_next_stop_iteration(self, synced_dataset, mock_auth_requests):
+    def test_next_stop_iteration(self, synced_dataset, mock_data_requests):
         """Test that __next__ raises StopIteration when exhausted."""
         iter(synced_dataset)
 
@@ -180,7 +180,7 @@ class TestSynchronizedDataset:
         with pytest.raises(StopIteration):
             next(synced_dataset)
 
-    def test_caching_on_access(self, synced_dataset, mock_auth_requests):
+    def test_caching_on_access(self, synced_dataset, mock_data_requests):
         """Test that recordings are cached after first access."""
         # First access
         recording1 = synced_dataset[0]
@@ -193,7 +193,7 @@ class TestSynchronizedDataset:
         recording2 = synced_dataset[0]
         assert recording2 is recording1
 
-    def test_caching_during_iteration(self, synced_dataset, mock_auth_requests):
+    def test_caching_during_iteration(self, synced_dataset, mock_data_requests):
         """Test that recordings are cached during iteration."""
         # Iterate through dataset
         recordings = list(synced_dataset)
@@ -222,7 +222,7 @@ class TestSynchronizedDataset:
             mock_prefetch.assert_called_once()
         assert synced_dataset._prefetch_videos_needed is False
 
-    def test_prefetch_videos_enabled_no_cache(self, dataset_mock, mock_auth_requests):
+    def test_prefetch_videos_enabled_no_cache(self, dataset_mock, mock_data_requests):
         """Test that prefetch_videos=True triggers prefetch when no cache exists."""
         with patch.object(
             SynchronizedDataset, "_perform_synced_data_prefetch"
@@ -239,7 +239,7 @@ class TestSynchronizedDataset:
         assert synced_dataset._prefetch_videos_needed is True
 
     def test_prefetch_videos_enabled_with_cache(
-        self, dataset_mock, mock_auth_requests, tmp_path
+        self, dataset_mock, mock_data_requests, tmp_path
     ):
         """Test that prefetch is skipped when cache exists."""
         # Create cache directories for all recordings with at least one file
@@ -265,7 +265,7 @@ class TestSynchronizedDataset:
         assert synced_dataset._prefetch_videos_needed is False
 
     def test_prefetch_videos_partial_cache(
-        self, dataset_mock, mock_auth_requests, tmp_path
+        self, dataset_mock, mock_data_requests, tmp_path
     ):
         """Test that prefetch runs if only some recordings are cached."""
         # Create cache for only first recording with at least one file
@@ -305,14 +305,14 @@ class TestSynchronizedDataset:
             mock_prefetch.assert_called_once_with(max_prefetch_workers=8)
         assert synced_dataset._prefetch_videos_needed is True
 
-    def test_slice_does_not_prefetch(self, synced_dataset, mock_auth_requests):
+    def test_slice_does_not_prefetch(self, synced_dataset, mock_data_requests):
         """Test that slicing creates a new dataset without prefetching."""
         sliced = synced_dataset[0:1]
 
         # The sliced dataset should not have prefetch_videos enabled
         assert sliced._prefetch_videos_needed is False
 
-    def test_getitem_with_instance_info(self, synced_dataset, mock_auth_requests):
+    def test_getitem_with_instance_info(self, synced_dataset, mock_data_requests):
         """Test that getitem preserves instance information."""
         recording = synced_dataset[0]
 
@@ -320,7 +320,7 @@ class TestSynchronizedDataset:
         assert recording.robot_id == "robot1"
 
     def test_nested_iteration(
-        self, synced_dataset, mock_auth_requests, mock_wget_download
+        self, synced_dataset, mock_data_requests, mock_wget_download
     ):
         """Test nested iteration through dataset and recordings."""
         total_frames = 0
@@ -332,7 +332,7 @@ class TestSynchronizedDataset:
         # Each recording has 2 frames
         assert total_frames == 4
 
-    def test_mixed_access_patterns(self, synced_dataset, mock_auth_requests):
+    def test_mixed_access_patterns(self, synced_dataset, mock_data_requests):
         """Test mixing iteration and indexing."""
         # Access by index
         rec0 = synced_dataset[0]
@@ -387,7 +387,7 @@ class TestSynchronizedDataset:
         assert synced.robot_data_spec == robot_data_spec
 
     def test_cache_independence_between_instances(
-        self, dataset_mock, mock_auth_requests
+        self, dataset_mock, mock_data_requests
     ):
         """Test that different SynchronizedDataset instances have independent caches."""
         with patch.object(
