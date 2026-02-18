@@ -6,6 +6,7 @@ from common.rollout_utils import rollout_policy
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
 
 import neuracore as nc
+from neuracore.core.exceptions import DatasetError
 
 
 def main(args):
@@ -24,11 +25,14 @@ def main(args):
     num_episodes = args["num_episodes"]
 
     if record:
-        nc.create_dataset(
-            name="My Example Dataset",
-            description="This is an example dataset",
-        )
-        print("Created Dataset...")
+        try:
+            nc.create_dataset(
+                name="My Example Dataset",
+                description="This is an example dataset",
+            )
+        except DatasetError as e:
+            print(f"{e}")
+            return
 
     try:
         for episode_idx in range(num_episodes):

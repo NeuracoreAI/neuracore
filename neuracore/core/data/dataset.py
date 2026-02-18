@@ -254,6 +254,13 @@ class Dataset:
                 return None
             raise DatasetError(f"Dataset with ID '{id}' not found.")
         dataset_model = DatasetModel.model_validate(req.json())
+
+        if dataset_model.deleted:
+            raise DatasetError(
+                f"Dataset '{dataset_model.name}' is marked as deleted. "
+                "Try again later or use a different name."
+            )
+
         return Dataset(
             id=dataset_model.id,
             org_id=org_id,
@@ -295,6 +302,13 @@ class Dataset:
                     return None
                 raise DatasetError(f"Dataset '{name}' not found.")
             dataset_model = DatasetModel.model_validate(response.json())
+
+            if dataset_model.deleted:
+                raise DatasetError(
+                    f"Dataset '{name}' is marked as deleted. "
+                    "Try again later or use a different name."
+                )
+
             return Dataset(
                 id=dataset_model.id,
                 org_id=org_id,
