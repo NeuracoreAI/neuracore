@@ -1,9 +1,13 @@
 """Tests for Recording class."""
 
 import pytest
+import requests_mock
 from neuracore_types import DataType
+from neuracore_types import Recording as RecordingModel
+from neuracore_types import RecordingMetadata, RecordingStatus
 
 import neuracore as nc
+from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_recording import SynchronizedRecording
@@ -15,7 +19,7 @@ class TestRecording:
 
     @pytest.fixture
     def dataset_mock(
-        self, dataset_dict, recordings_list, mock_auth_requests
+        self, dataset_dict, recordings_list, mock_data_requests
     ) -> Dataset:
         """Create a mock dataset object."""
         nc.login("test_api_key")
@@ -23,17 +27,27 @@ class TestRecording:
         return Dataset(**dataset_dict, recordings=recordings_list)
 
     @pytest.fixture
-    def recording(self, dataset_mock) -> Recording:
-        """Create a Recording instance for testing."""
-        return Recording(
-            dataset=dataset_mock,
-            recording_id="rec1",
+    def recording_model(self, mocked_org_id) -> RecordingModel:
+        """Create a mock recording metadata."""
+        return RecordingModel(
+            id="rec1",
+            org_id=mocked_org_id,
             total_bytes=512,
             robot_id="robot1",
             instance=1,
             start_time=0,
             end_time=10,
+            metadata=RecordingMetadata(
+                name="recording1",
+                org_id="test-org-id",
+                created_at="2023-01-01T00:00:00Z",
+            ),
         )
+
+    @pytest.fixture
+    def recording(self, dataset_mock: Dataset, recording_model) -> Recording:
+        """Create a Recording instance for testing."""
+        return dataset_mock._wrap_raw_recording(recording_model)
 
     def test_init(self, recording: Recording, dataset_mock: Dataset):
         """Test Recording initialization."""
@@ -129,3 +143,59 @@ class TestRecording:
         assert synced1 is not synced2
         assert synced1.frequency == 30
         assert synced2.frequency == 60
+
+    def test_set_status(
+        self,
+        recording: Recording,
+        recording_model: RecordingModel,
+        mock_data_requests: requests_mock.Mocker,
+        mocked_org_id: str,
+    ):
+        mock_data_requests.get(
+            f"{API_URL}/org/{mocked_org_id}/recording/{recording.id}",
+            json=recording_model.model_dump(mode="json"),
+            status_code=200,
+        )
+
+        recording_clone = recording_model.model_copy(deep=True)
+        recording_clone.metadata.status = RecordingStatus.FLAGGED
+
+        mock_data_requests.put(
+            f"{API_URL}/org/{mocked_org_id}/recording/{recording.id}/metadata",
+            json=recording_clone.model_dump(mode="json"),
+            status_code=200,
+        )
+
+        assert recording.metadata.status == RecordingStatus.NORMAL
+        recording.set_status(RecordingStatus.FLAGGED)
+        assert mock_data_requests.request_history[-1].json().get("status") == "FLAGGED"
+        assert recording.metadata.status == RecordingStatus.FLAGGED
+
+    def test_set_notes(
+        self,
+        recording: Recording,
+        recording_model: RecordingModel,
+        mock_data_requests: requests_mock.Mocker,
+        mocked_org_id: str,
+    ):
+        mock_data_requests.get(
+            f"{API_URL}/org/{mocked_org_id}/recording/{recording.id}",
+            json=recording_model.model_dump(mode="json"),
+            status_code=200,
+        )
+
+        recording_clone = recording_model.model_copy(deep=True)
+        recording_clone.metadata.notes = "Test notes"
+
+        mock_data_requests.put(
+            f"{API_URL}/org/{mocked_org_id}/recording/{recording.id}/metadata",
+            json=recording_clone.model_dump(mode="json"),
+            status_code=200,
+        )
+
+        assert recording.metadata.notes == ""
+        recording.set_notes("Test notes")
+        assert (
+            mock_data_requests.request_history[-1].json().get("notes") == "Test notes"
+        )
+        assert recording.metadata.notes == "Test notes"

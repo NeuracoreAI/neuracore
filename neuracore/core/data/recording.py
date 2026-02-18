@@ -2,12 +2,17 @@
 
 from typing import TYPE_CHECKING
 
-from neuracore_types import DataSpec, DataType, RobotDataSpec
+import requests
+from neuracore_types import DataSpec, DataType
+from neuracore_types import Recording as RecordingModel
+from neuracore_types import RecordingMetadata, RecordingStatus, RobotDataSpec
 
+from neuracore.core.auth import get_auth
+from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.const import API_URL
 from neuracore.core.data.synced_recording import SynchronizedRecording
+from neuracore.core.exceptions import AuthenticationError, SynchronizationError
 from neuracore.core.utils.robot_data_spec_utils import extract_data_types
-
-from ..exceptions import SynchronizationError
 
 if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset
@@ -29,7 +34,7 @@ class Recording:
         instance: int,
         start_time: float,
         end_time: float,
-        recording_name: str | None = None,
+        metadata: RecordingMetadata,
     ):
         """Initialize episode iterator for a specific recording.
 
@@ -41,7 +46,7 @@ class Recording:
             instance: The instance of the robot that created this recording.
             start_time: Unix timestamp when recording started.
             end_time: Unix timestamp when recording ended.
-            recording_name: Name of the recording
+            metadata: Metadata associated with the recording.
         """
         self.dataset = dataset
         self.id = recording_id
@@ -51,7 +56,8 @@ class Recording:
         self.start_time = start_time
         self.end_time = end_time
         # Store human-friendly recording name when available.
-        self.name = recording_name or recording_id
+        self.name = getattr(metadata, "name", None) or recording_id
+        self.metadata = metadata
         self._raw = {
             "id": recording_id,
             "total_bytes": total_bytes,
@@ -131,3 +137,87 @@ class Recording:
             "Only synchronized recordings can be iterated over. "
             "Use the synchronize method to create a synchronized recording."
         )
+
+    def _refresh_recording_metadata(self) -> None:
+        """Refresh the recording metadata from the cloud.
+
+        Ideally we should implement If-Match & Etag header as well.
+        """
+        auth = get_auth()
+        org_id = get_current_org()
+        try:
+            response = requests.get(
+                f"{API_URL}/org/{org_id}/recording/{self.id}",
+                headers=auth.get_headers(),
+            )
+            response.raise_for_status()
+            updated_recording = RecordingModel.model_validate(response.json())
+            self.metadata = updated_recording.metadata
+        except AuthenticationError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Error fetching recording metadata: {e}")
+
+    def _update_metadata(self, recording_metadata: RecordingMetadata) -> None:
+        """Update the metadata of a recording.
+
+        Args:
+            recording_metadata: The metadata to update the recording with
+
+        Raises:
+            RuntimeError: Rases if there is an error updating the metadata in the cloud.
+            ConfigError: If there is an error trying to get the config
+            AuthenticationError: If there is an error with authentication
+        """
+        auth = get_auth()
+        org_id = get_current_org()
+        try:
+
+            response = requests.put(
+                f"{API_URL}/org/{org_id}/recording/{self.id}/metadata",
+                headers=auth.get_headers(),
+                json=recording_metadata.model_dump(mode="json"),
+            )
+            response.raise_for_status()
+            updated_recording = RecordingModel.model_validate(response.json())
+            self.metadata = updated_recording.metadata
+        except AuthenticationError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Error updating recording metadata: {e}")
+
+    def set_status(self, status: RecordingStatus) -> None:
+        """Mark a recording with a specific status programmatically.
+
+        This call is blocking.
+
+        Args:
+            status: The status to set the recording to e.g. `RecordingStatus.FLAGGED`
+
+        Raises:
+            RuntimeError: Rases if there is an error updating the metadata in the cloud.
+            ConfigError: If there is an error trying to get the config
+            AuthenticationError: If there is an error with authentication
+        """
+        self._refresh_recording_metadata()
+        new_metadata = self.metadata.model_copy()
+        new_metadata.status = status
+        self._update_metadata(new_metadata)
+
+    def set_notes(self, notes: str) -> None:
+        """Update a recordings notes programmatically.
+
+        This call is blocking.
+
+        Args:
+            notes: The notes to update the recording with.
+
+        Raises:
+            RuntimeError: Rases if there is an error updating the metadata in the cloud.
+            ConfigError: If there is an error trying to get the config
+            AuthenticationError: If there is an error with authentication
+        """
+        self._refresh_recording_metadata()
+        new_metadata = self.metadata.model_copy()
+        new_metadata.notes = notes
+        self._update_metadata(new_metadata)
