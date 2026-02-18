@@ -1,0 +1,82 @@
+input_dataset_name: austin_sailor_dataset_converted_externally_to_rlds
+
+output_dataset:
+  name: austin_sailor
+  tags: [panda, austin, manipulation, kitchen, franka]
+  description: "Manipulation demos (breakfast, cooking, table setup) in a kitchen environment with the franka panda robot."
+
+robot: 
+  name: franka_panda
+  urdf_path: "panda.urdf"
+  override_existing: true
+
+frequency: 20.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    image_convention: CHANNELS_LAST
+    order_of_channels: RGB
+    mapping: 
+      - name: image
+        source_name: image
+      - name: wrist_image
+        source_name: wrist_image
+
+  JOINT_POSITIONS:
+    source: observation.state_joint
+    units: RADIANS
+    mapping:
+      - name: panda_joint1
+        index: 0
+      - name: panda_joint2
+        index: 1
+      - name: panda_joint3
+        index: 2
+      - name: panda_joint4
+        index: 3
+      - name: panda_joint5
+        index: 4
+      - name: panda_joint6
+        index: 5
+      - name: panda_joint7
+        index: 6
+
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.state_gripper
+    format:
+      normalize:
+        min: 0.0
+        max: 0.077
+    mapping:
+      - name: gripper_open_amount
+  
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state_gripper
+    format:
+      visual_joint_type: GRIPPER
+      normalize:
+        min: 0.0
+        max: 0.077
+    mapping:
+      - name: panda_finger_joint1
+        index: 0
+      - name: panda_finger_joint2
+        index: 0
+
+  END_EFFECTOR_POSES:
+    source: observation.state_ee
+    format:
+      pose_type: MATRIX
+    mapping:
+      - name: end_effector_pose
+        index_range: 
+          start: 0
+          end: 17
+
+  LANGUAGE:
+    source: language_instruction
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction
