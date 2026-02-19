@@ -31,7 +31,10 @@ from neuracore.importer.core.validation import (
     validate_dataset_config_against_robot_model,
 )
 from neuracore.importer.lerobot_importer import LeRobotDatasetImporter
-from neuracore.importer.rlds_importer import RLDSDatasetImporter
+from neuracore.importer.rlds_tfds_importer import (
+    RLDSDatasetImporter,
+    TFDSDatasetImporter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -251,10 +254,22 @@ def _run_import(
 
     logger.info("Setup complete; beginning import.")
 
-    importer: RLDSDatasetImporter | LeRobotDatasetImporter | None = None
     skip_on_error = args.skip_on_error
+    importer: TFDSDatasetImporter | RLDSDatasetImporter | LeRobotDatasetImporter
     if dataset_type == DatasetTypeConfig.TFDS:
-        raise NotImplementedError("TFDS import not yet implemented.")
+        logger.info("Starting TFDS dataset import from %s", args.dataset_dir)
+        importer = TFDSDatasetImporter(
+            input_dataset_name=dataconfig.input_dataset_name,
+            output_dataset_name=dataconfig.output_dataset.name,
+            dataset_dir=args.dataset_dir,
+            dataset_config=dataconfig,
+            joint_info=robot.joint_info,
+            ik_urdf_path=ik_urdf_path,
+            ik_init_config=ik_init_config,
+            dry_run=args.dry_run,
+            suppress_warnings=args.no_validation_warnings,
+        )
+        importer.import_all()
     elif dataset_type == DatasetTypeConfig.RLDS:
         logger.info("Starting RLDS dataset import from %s", args.dataset_dir)
         importer = RLDSDatasetImporter(
@@ -285,6 +300,8 @@ def _run_import(
             skip_on_error=skip_on_error,
         )
         importer.import_all()
+    else:
+        raise DatasetOperationError(f"Unsupported dataset type: {dataset_type}")
 
     logger.info("Finished importing dataset.")
 
