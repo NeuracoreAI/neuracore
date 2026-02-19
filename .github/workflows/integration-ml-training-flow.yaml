@@ -1,4 +1,4 @@
-name: Integration Platform
+name: Integration ML Algorithm Performance
 
 on:
   schedule:
@@ -17,7 +17,7 @@ jobs:
 
   test:
     needs: pre-commit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
@@ -37,6 +37,10 @@ jobs:
 
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        ref: ${{ matrix.environment == 'staging' && 'develop' || github.ref }}
+    - name: Pull LFS objects
+      run: git lfs pull
 
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v4
@@ -47,11 +51,21 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --no-cache-dir --upgrade pip
-        pip install --no-cache-dir ".[dev,ml]"
+        if [ "${{ matrix.environment }}" = "production" ]; then
+          pip install --no-cache-dir "neuracore[dev,ml,examples]"
+        else
+          pip install --no-cache-dir ".[dev,ml,examples]"
+        fi
 
     - name: Run Integration Test
       env:
         NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
         NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
-      run: pytest -o log_cli=true --log-cli-level=INFO tests/integration/platform
+        NEURACORE_ENDPOINT_TIMEOUT: 30
+        DISPLAY: :0
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1-mesa-glx libosmesa6-dev
+        Xvfb $DISPLAY -screen 0 1280x1024x24 &
+        pytest -o log_cli=true --log-cli-level=INFO -v -n 8 tests/integration/ml/test_training_flow.py

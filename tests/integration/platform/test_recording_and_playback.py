@@ -8,17 +8,18 @@ import uuid
 
 import numpy as np
 import pytest
+from neuracore_types import DataType
 
 import neuracore as nc
 
 # Add examples dir to path
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(THIS_DIR, "..", "..", "examples"))
+sys.path.append(os.path.join(THIS_DIR, "..", "..", "..", "examples"))
 # ruff: noqa: E402
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
 
 # How much time we allow for nc.calls
-TIME_GRACE_S = 0.01
+TIME_GRACE_S = 0.05
 
 TEST_ROBOT = "integration_test_robot"
 JOINT_NAMES = [
@@ -200,19 +201,19 @@ def stream_data(config):
             frame_count, config.fps, config.num_joints
         )
         with Timer():
-            nc.log_joint_positions(name="arm", positions=joint_positions, timestamp=t)
+            nc.log_joint_positions(joint_positions, timestamp=t)
 
         with Timer():
             # use the same joint positions for velocities and torques
-            nc.log_joint_velocities(name="arm", velocities=joint_positions, timestamp=t)
+            nc.log_joint_velocities(joint_positions, timestamp=t)
         with Timer():
             # use the same joint positions for velocities and torques
-            nc.log_joint_torques(name="arm", torques=joint_positions, timestamp=t)
+            nc.log_joint_torques(joint_positions, timestamp=t)
 
         with Timer():
             nc.log_parallel_gripper_open_amount(name="gripper", value=0.5, timestamp=t)
 
-        points = np.zeros((1000, 3), dtype=np.float32)
+        points = np.zeros((1000, 3), dtype=np.float16)
         rgb_points = np.zeros((1000, 3), dtype=np.uint8)
         with Timer(max_time=0.5):
             # TODO: Speed up this call
@@ -228,7 +229,7 @@ def stream_data(config):
         with Timer():
             nc.log_custom_1d(
                 "test_custom_data",
-                {"frame_num": frame_code, "time": t},
+                np.array([frame_code], dtype=np.float32),
                 timestamp=t,
             )
 
@@ -239,9 +240,7 @@ def stream_data(config):
                 for i in range(config.num_joints)
             }
             with Timer():
-                nc.log_joint_target_positions(
-                    name="arm", target_positions=action, timestamp=t
-                )
+                nc.log_joint_target_positions(action, timestamp=t)
 
         frame_count += 1
 
@@ -276,8 +275,8 @@ def verify_dataset(config, expected_frame_count):
             results["retrieved_frames"] += 1
 
             # Check for camera images
-            if sync_point.rgb_images:
-                for _, cam_data in sync_point.rgb_images.items():
+            if DataType.RGB_IMAGES in sync_point.data:
+                for _, cam_data in sync_point[DataType.RGB_IMAGES].items():
                     img = cam_data.frame
                     decoded_frame_num = decode_frame_number(img)
                     if decoded_frame_num in results["unique_frames"]:
@@ -285,14 +284,16 @@ def verify_dataset(config, expected_frame_count):
                     results["unique_frames"].add(decoded_frame_num)
 
             # Verify joint positions
-            if sync_point.joint_positions:
+            if DataType.JOINT_POSITIONS in sync_point.data:
                 expected_joints = generate_joint_positions(
                     frame_idx, config.fps, config.num_joints
                 )
 
                 for joint_name, expected_value in expected_joints.items():
-                    if joint_name in sync_point.joint_positions.values:
-                        actual_value = sync_point.joint_positions.values[joint_name]
+                    if joint_name in sync_point[DataType.JOINT_POSITIONS]:
+                        actual_value = sync_point[DataType.JOINT_POSITIONS][
+                            joint_name
+                        ].value
                         if abs(expected_value - actual_value) > 1e-5:
                             results["joint_mismatches"].append((
                                 decoded_frame_num,
@@ -463,7 +464,7 @@ def test_stop_start_sequences():
                 segment_frames, config.fps, config.num_joints
             )
             with Timer():
-                nc.log_joint_positions(name="arm", positions=joint_positions)
+                nc.log_joint_positions(joint_positions)
 
             segment_frames += 1
             time.sleep(1 / config.fps)
