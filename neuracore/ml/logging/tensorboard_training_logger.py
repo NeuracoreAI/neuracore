@@ -54,16 +54,6 @@ class TensorboardTrainingLogger(TrainingLogger):
         """
         self.writer.add_scalar(name, value, step)
 
-    def log_scalars(self, scalars: dict[str, float], step: int) -> None:
-        """Log multiple scalar metrics at once.
-
-        Args:
-            scalars: Dictionary of metric name -> value.
-            step: Training step.
-        """
-        for name, value in scalars.items():
-            self.writer.add_scalar(name, value, step)
-
     def log_image(
         self,
         name: str,
