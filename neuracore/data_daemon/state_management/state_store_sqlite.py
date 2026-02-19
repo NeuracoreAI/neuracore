@@ -320,6 +320,20 @@ class SqliteStateStore(StateStore):
             )
         return [TraceRecord.from_row(dict(row)) for row in rows]
 
+    async def find_failed_traces(self) -> list[TraceRecord]:
+        """Return all traces marked as FAILED."""
+        async with self._engine.begin() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        select(traces).where(traces.c.status == TraceStatus.FAILED)
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [TraceRecord.from_row(dict(row)) for row in rows]
+
     async def mark_recording_reported(self, recording_id: str) -> None:
         """Mark a recording as progress-reported."""
         now = _utc_now()
@@ -329,6 +343,24 @@ class SqliteStateStore(StateStore):
                 .where(traces.c.recording_id == recording_id)
                 .values(
                     progress_reported=ProgressReportStatus.REPORTED, last_updated=now
+                )
+            )
+
+    async def reset_failed_trace_for_retry(self, trace_id: str) -> None:
+        """Reset a failed trace back to WRITTEN for retry."""
+        now = _utc_now()
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                update(traces)
+                .where(traces.c.trace_id == trace_id)
+                .values(
+                    status=TraceStatus.WRITTEN,
+                    error_code=None,
+                    error_message=None,
+                    next_retry_at=None,
+                    num_upload_attempts=0,
+                    bytes_uploaded=0,
+                    last_updated=now,
                 )
             )
 

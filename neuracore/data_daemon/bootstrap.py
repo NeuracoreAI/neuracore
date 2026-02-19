@@ -76,28 +76,6 @@ async def bootstrap_async_services(
     This coroutine MUST be scheduled on the General Loop via:
         loop_manager.schedule_on_general_loop(bootstrap_async_services(...))
 
-    Initialization order (dependencies flow downward):
-
-        aiohttp.ClientSession
-              │
-              ├──────────────────┬─────────────────┐
-              ▼                  ▼                 ▼
-        ConnectionManager  UploadManager  ProgressReporter
-              │                  │
-              └────────┬─────────┘
-                       ▼
-              SqliteStateStore
-                       │
-                       ▼
-                 StateManager
-                       │
-                       └── Registers event listeners:
-                           • TRACE_WRITTEN → update state, emit READY_FOR_UPLOAD
-                           • UPLOAD_COMPLETE → mark trace uploaded
-                           • STOP_RECORDING → finalize recording
-                           • IS_CONNECTED → track connectivity
-                           • PROGRESS_REPORTED → mark as reported
-
     Args:
         config: Daemon configuration.
         db_path: Path to SQLite database.
