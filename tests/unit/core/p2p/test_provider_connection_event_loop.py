@@ -216,6 +216,31 @@ def test_add_video_source_from_thread_with_own_loop(
 
 
 @pytest.mark.asyncio
+async def test_add_video_and_event_source_from_connection_loop(
+    provider_connection, video_source, json_source, nc_loop
+):
+    """
+    Call add_video_source and add_event_source from a coroutine on the
+    connection's loop (same-loop). Must complete without deadlock; connection
+    schedules the work and send_offer (or awaiting _pending_add_futures) waits
+    for it. Regression for create_new_connection calling add_* with no await.
+    """
+
+    async def add_sources_on_connection_loop():
+        provider_connection.add_video_source(video_source)
+        provider_connection.add_event_source(json_source)
+        if provider_connection._pending_add_futures:
+            await asyncio.gather(*provider_connection._pending_add_futures)
+
+    future = asyncio.run_coroutine_threadsafe(add_sources_on_connection_loop(), nc_loop)
+    await asyncio.wait_for(asyncio.wrap_future(future), timeout=2.0)
+
+    senders = provider_connection.connection.getSenders()
+    assert len(senders) >= 1, "Video track should be added to peer connection"
+    assert json_source in provider_connection.event_sources
+
+
+@pytest.mark.asyncio
 async def test_connection_uses_provided_loop(nc_loop):
     """
     Connection must use the loop passed in, not the calling thread's loop.
