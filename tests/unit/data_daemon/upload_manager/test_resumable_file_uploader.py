@@ -935,15 +935,27 @@ async def test_uploader_session_preserved_on_retry(
 
 
 class TestBandwidthThrottling:
-    """Tests for bandwidth throttling."""
+    """Tests for bandwidth throttling via BandwidthLimiter."""
 
     @pytest.mark.asyncio
-    async def test_throttle_adds_delay_when_upload_fast(
+    async def test_acquire_called_per_chunk(
         self, test_file: Path, mock_auth, client_session: aiohttp.ClientSession
     ) -> None:
-        """Test that throttling adds delay when upload is faster than limit."""
+        """Test that should call bandwidth_limiter.acquire for each chunk."""
+        from neuracore.data_daemon.upload_management.bandwidth_limiter import (
+            BandwidthLimiter,
+        )
+
         md5_b64 = _compute_file_md5_b64(test_file)
-        file_size = 5 * 1024 * 1024  # 5MB
+        file_size = 5 * 1024 * 1024
+
+        limiter = BandwidthLimiter(1 * 1024 * 1024)
+        acquire_calls: list[int] = []
+
+        async def mock_acquire(n_bytes: int) -> None:
+            acquire_calls.append(n_bytes)
+
+        limiter.acquire = mock_acquire
 
         uploader = ResumableFileUploader(
             recording_id="rec-123",
@@ -951,13 +963,8 @@ class TestBandwidthThrottling:
             cloud_filepath="RGB_IMAGES/camera/trace.mp4",
             content_type="video/mp4",
             client_session=client_session,
-            bandwidth_limit=1 * 1024 * 1024,  # 1MB/s
+            bandwidth_limiter=limiter,
         )
-
-        sleep_calls: list[float] = []
-
-        async def capture_sleep(duration: float) -> None:
-            sleep_calls.append(duration)
 
         with patch.object(
             uploader._session,
@@ -976,22 +983,17 @@ class TestBandwidthThrottling:
                     ),
                 ],
             ):
-                with patch("asyncio.sleep", side_effect=capture_sleep):
-                    success, _, _ = await uploader.upload()
+                success, _, _ = await uploader.upload()
 
         assert success is True
-
-        total_throttle = sum(sleep_calls)
-        expected_min = file_size / (1 * 1024 * 1024) * 0.9  # 4.5 seconds
-        assert (
-            total_throttle >= expected_min
-        ), f"Expected at least {expected_min}s throttle delay, got {total_throttle}s"
+        assert len(acquire_calls) == 1
+        assert acquire_calls[0] == file_size
 
     @pytest.mark.asyncio
-    async def test_no_throttle_when_limit_none(
+    async def test_no_throttle_when_limiter_none(
         self, test_file: Path, mock_auth, client_session: aiohttp.ClientSession
     ) -> None:
-        """Test that no throttling occurs when bandwidth_limit is None."""
+        """Test that no throttling occurs when bandwidth_limiter is None."""
         md5_b64 = _compute_file_md5_b64(test_file)
 
         uploader = ResumableFileUploader(
@@ -1000,7 +1002,7 @@ class TestBandwidthThrottling:
             cloud_filepath="RGB_IMAGES/camera/trace.mp4",
             content_type="video/mp4",
             client_session=client_session,
-            bandwidth_limit=None,
+            bandwidth_limiter=None,
         )
 
         sleep_calls: list[float] = []
@@ -1025,57 +1027,75 @@ class TestBandwidthThrottling:
                     ),
                 ],
             ):
-                with patch("asyncio.sleep", side_effect=capture_sleep):
+                with patch(
+                    "neuracore.data_daemon.upload_management"
+                    ".bandwidth_limiter.asyncio.sleep",
+                    side_effect=capture_sleep,
+                ):
                     success, _, _ = await uploader.upload()
 
         assert success is True
         assert len(sleep_calls) == 0
 
     @pytest.mark.asyncio
-    async def test_throttle_calculates_correct_delay(
-        self, test_file: Path, mock_auth, client_session: aiohttp.ClientSession
-    ) -> None:
-        """Test that throttling calculates the correct delay."""
-        uploader = ResumableFileUploader(
-            recording_id="rec-123",
-            filepath=str(test_file),
-            cloud_filepath="RGB_IMAGES/camera/trace.mp4",
-            content_type="video/mp4",
-            client_session=client_session,
-            bandwidth_limit=1000,
+    async def test_throttle_calculates_correct_delay(self) -> None:
+        """Test that BandwidthLimiter.acquire sleeps for the correct duration."""
+        import time as real_time
+
+        from neuracore.data_daemon.upload_management.bandwidth_limiter import (
+            BandwidthLimiter,
         )
 
+        bandwidth = 1000  # bytes/sec
         sleep_calls: list[float] = []
+        monotonic_time = [real_time.monotonic()]
 
-        async def capture_sleep(duration: float) -> None:
-            sleep_calls.append(duration)
+        def fake_monotonic() -> float:
+            return monotonic_time[0]
 
-        with patch("asyncio.sleep", side_effect=capture_sleep):
-            await uploader._apply_bandwidth_limit(chunk_size=2000, elapsed=0.5)
+        async def fake_sleep(duration: float) -> None:
+            if duration > 0:
+                monotonic_time[0] += duration
+                sleep_calls.append(duration)
+
+        with (
+            patch(
+                "neuracore.data_daemon.upload_management"
+                ".bandwidth_limiter.time.monotonic",
+                new=fake_monotonic,
+            ),
+            patch(
+                "neuracore.data_daemon.upload_management"
+                ".bandwidth_limiter.asyncio.sleep",
+                new=fake_sleep,
+            ),
+        ):
+            limiter = BandwidthLimiter(bandwidth)
+            await limiter.acquire(2000)
 
         assert len(sleep_calls) == 1
-        assert abs(sleep_calls[0] - 1.5) < 0.01
+        assert abs(sleep_calls[0] - 1.0) < 0.01
 
     @pytest.mark.asyncio
-    async def test_throttle_no_delay_when_upload_slow(
-        self, test_file: Path, mock_auth, client_session: aiohttp.ClientSession
-    ) -> None:
-        """Test that no delay is added when actual upload is slower than limit."""
-        uploader = ResumableFileUploader(
-            recording_id="rec-123",
-            filepath=str(test_file),
-            cloud_filepath="RGB_IMAGES/camera/trace.mp4",
-            content_type="video/mp4",
-            client_session=client_session,
-            bandwidth_limit=1000,
+    async def test_throttle_no_delay_when_tokens_available(self) -> None:
+        """Test that no delay is added when the token bucket has sufficient tokens."""
+        from neuracore.data_daemon.upload_management.bandwidth_limiter import (
+            BandwidthLimiter,
         )
 
+        bandwidth = 1000
         sleep_calls: list[float] = []
 
-        async def capture_sleep(duration: float) -> None:
-            sleep_calls.append(duration)
+        async def fake_sleep(duration: float) -> None:
+            if duration > 0:
+                sleep_calls.append(duration)
 
-        with patch("asyncio.sleep", side_effect=capture_sleep):
-            await uploader._apply_bandwidth_limit(chunk_size=1000, elapsed=2.0)
+        with patch(
+            "neuracore.data_daemon.upload_management"
+            ".bandwidth_limiter.asyncio.sleep",
+            new=fake_sleep,
+        ):
+            limiter = BandwidthLimiter(bandwidth)
+            await limiter.acquire(500)
 
         assert len(sleep_calls) == 0
