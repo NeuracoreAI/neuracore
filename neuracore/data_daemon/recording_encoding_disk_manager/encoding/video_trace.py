@@ -227,10 +227,10 @@ class VideoTrace:
             )
 
     def _handle_frame_bytes(self, frame_bytes: bytes) -> None:
-        """Validate and encode a raw RGB frame payload.
+        """Validate and encode a raw frame payload.
 
         Args:
-            frame_bytes: Raw RGB frame bytes.
+            frame_bytes: Raw frame bytes.
 
         Returns:
             None
@@ -246,17 +246,40 @@ class VideoTrace:
                 "VideoTrace encoders unexpectedly None after initialisation"
             )
 
-        expected_size = self.width * self.height * 3
-        if len(frame_bytes) != expected_size:
-            raise ValueError(
-                f"Unexpected frame size: got={len(frame_bytes)} "
-                f"expected={expected_size}"
-            )
-        self._expected_raw_frame_bytes_total += expected_size
+        pixels = self.width * self.height
+        rgb_size = pixels * 3
+        depth_f16_size = pixels * 2
+        depth_f32_size = pixels * 4
 
-        np_frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
-            (self.height, self.width, 3)
-        )
+        if len(frame_bytes) == rgb_size:
+            np_frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
+                (self.height, self.width, 3)
+            )
+        elif len(frame_bytes) in (depth_f16_size, depth_f32_size):
+            depth_dtype = (
+                np.float16 if len(frame_bytes) == depth_f16_size else np.float32
+            )
+            depth_frame = np.frombuffer(frame_bytes, dtype=depth_dtype).reshape(
+                (self.height, self.width)
+            )
+            # Depth streams are single-channel float images. Convert to an RGB8
+            # grayscale frame so they can pass through the same MP4 encoder path.
+            depth_frame = np.nan_to_num(depth_frame, nan=0.0, posinf=0.0, neginf=0.0)
+            depth_max = float(np.max(depth_frame))
+            if depth_max > 0.0:
+                normalized = np.clip(depth_frame / depth_max, 0.0, 1.0)
+            else:
+                normalized = np.zeros_like(depth_frame, dtype=np.float32)
+            depth_u8 = (normalized * 255.0).astype(np.uint8)
+            np_frame = np.stack((depth_u8, depth_u8, depth_u8), axis=-1)
+        else:
+            raise ValueError(
+                "Unexpected frame size: "
+                f"got={len(frame_bytes)} expected_rgb={rgb_size} "
+                f"expected_depth_f16={depth_f16_size} "
+                f"expected_depth_f32={depth_f32_size}"
+            )
+        self._expected_raw_frame_bytes_total += len(frame_bytes)
 
         timestamp_value = self._get_frame_timestamp()
         self._lossless_encoder.add_frame(timestamp=timestamp_value, np_frame=np_frame)

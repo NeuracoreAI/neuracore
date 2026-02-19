@@ -217,6 +217,45 @@ def get_training_job_status(job_id: str) -> str:
         raise ValueError(f"Error accessing job: {e}")
 
 
+def get_training_job_logs(
+    job_id: str,
+    max_entries: int = 1000,
+    severity_filter: str | None = None,
+) -> dict:
+    """Retrieve logs for a training job.
+
+    Args:
+        job_id: The ID of the training job
+        max_entries: Maximum number of log entries to retrieve (default 100)
+        severity_filter: Optional severity level to filter logs
+            (e.g., "ERROR", "WARNING", "INFO", "DEBUG")
+
+    Returns:
+        dict: Log data including job_id, logs list, total_entries, retrieved_at
+
+    Raises:
+        ValueError: If there is an error accessing the logs
+        requests.exceptions.HTTPError: If the API request returns an error code
+        requests.exceptions.RequestException: If there is a problem with the request
+        ConfigError: If there is an error trying to get the current org
+    """
+    auth = get_auth()
+    org_id = get_current_org()
+    params: dict = {"max_entries": max_entries}
+    if severity_filter is not None:
+        params["severity_filter"] = severity_filter
+    try:
+        response = requests.get(
+            f"{API_URL}/org/{org_id}/training/jobs/{job_id}/logs",
+            headers=auth.get_headers(),
+            params=params,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        raise ValueError(f"Error accessing training job logs: {e}")
+
+
 def delete_training_job(job_id: str) -> None:
     """Delete a training job and free its resources.
 

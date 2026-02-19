@@ -20,7 +20,7 @@ import neuracore as nc
 from neuracore.core.endpoint import Policy
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(THIS_DIR, "..", "..", "examples"))
+sys.path.append(os.path.join(THIS_DIR, "..", "..", "..", "examples"))
 # ruff: noqa: E402
 from common.transfer_cube import (
     BOX_POSE,

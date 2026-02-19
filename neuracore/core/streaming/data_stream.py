@@ -10,6 +10,7 @@ import json
 import logging
 import struct
 import threading
+import uuid
 from abc import ABC
 from dataclasses import dataclass
 
@@ -99,7 +100,8 @@ class DataStream(ABC):
                 the recording session, robot, and dataset.
         """
         if self._producer is None:
-            producer_id = f"{self._data_type.value}:{self._stream_name}"
+            producer_id = f"{self._data_type.value}:\
+            {self._stream_name}:{uuid.uuid4().hex[:8]}"
             self._producer = self._management_channel.get_nc_context(
                 producer_id=producer_id, recording_id=context.recording_id
             )

@@ -354,7 +354,7 @@ class StateManager:
         traces = await self._store.find_traces_by_recording_id(
             trace_record.recording_id
         )
-
+       
         if any(
             trace.progress_reported == ProgressReportStatus.REPORTED for trace in traces
         ):
@@ -362,6 +362,8 @@ class StateManager:
                 if uploaded_trace.status != TraceStatus.UPLOADED:
                     continue
                 await self._store.delete_trace(uploaded_trace.trace_id)
+
+
 
     async def _handle_trace_written(
         self, trace_id: str, recording_id: str, bytes_written: int
