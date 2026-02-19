@@ -382,9 +382,9 @@ def test_deferred_close_honors_zmq_buffer_data(loop_manager: EventLoopManager) -
         2. Call `daemon._handle_recording_stopped(msg)`
         3. Assert: "rec-123" is in `_pending_close_recordings`
         4. Assert: "rec-123" is NOT in `_closed_recordings`
-        5. Assert: STOP_RECORDING event was emitted (via event listener)
+        5. Assert: STOP_RECORDING_REQUESTED event was emitted immediately
         6. Call `daemon._finalize_pending_closes()`
-        7. Assert: "rec-123" is now in `_closed_recordings`
+        7. Assert: "rec-123" is now in `_closed_recordings` and STOP_RECORDING emitted
         8. Assert: `_pending_close_recordings` is empty
 
     Why This Matters:
@@ -396,7 +396,8 @@ def test_deferred_close_honors_zmq_buffer_data(loop_manager: EventLoopManager) -
 
     Key Assertions:
         - After _handle_recording_stopped: recording_id IN pending, NOT IN closed
-        - STOP_RECORDING event emitted exactly once with correct recording_id
+        - STOP_RECORDING_REQUESTED emitted exactly once after stop message
+        - STOP_RECORDING emitted exactly once after close finalization
         - After _finalize_pending_closes: recording_id IN closed
         - _pending_close_recordings is empty after finalization
         - State transitions are deterministic (no race conditions)
@@ -414,12 +415,17 @@ def test_deferred_close_honors_zmq_buffer_data(loop_manager: EventLoopManager) -
 
     recording_id = "rec-123"
 
-    stop_events_received: list[str] = []
+    stop_requested_events: list[str] = []
+    stop_committed_events: list[str] = []
+
+    def on_stop_recording_requested(rec_id: str) -> None:
+        stop_requested_events.append(rec_id)
 
     def on_stop_recording(rec_id: str) -> None:
-        stop_events_received.append(rec_id)
+        stop_committed_events.append(rec_id)
 
     emitter = get_emitter()
+    emitter.on(Emitter.STOP_RECORDING_REQUESTED, on_stop_recording_requested)
     emitter.on(Emitter.STOP_RECORDING, on_stop_recording)
 
     try:
@@ -437,21 +443,26 @@ def test_deferred_close_honors_zmq_buffer_data(loop_manager: EventLoopManager) -
         assert recording_id in daemon._pending_close_recordings
         assert recording_id not in daemon._closed_recordings
 
-        assert len(stop_events_received) == 1
-        assert stop_events_received[0] == recording_id
+        assert stop_requested_events == [recording_id]
+        assert stop_committed_events == []
 
         daemon._finalize_pending_closes()
 
         assert recording_id in daemon._closed_recordings
+        assert stop_committed_events == [recording_id]
 
         assert len(daemon._pending_close_recordings) == 0
 
         daemon._finalize_pending_closes()
         assert recording_id in daemon._closed_recordings
         assert len(daemon._pending_close_recordings) == 0
-        assert len(stop_events_received) == 1
+        assert len(stop_requested_events) == 1
+        assert len(stop_committed_events) == 1
 
     finally:
+        emitter.remove_listener(
+            Emitter.STOP_RECORDING_REQUESTED, on_stop_recording_requested
+        )
         emitter.remove_listener(Emitter.STOP_RECORDING, on_stop_recording)
 
 
@@ -573,6 +584,79 @@ def test_data_blocked_after_recording_closed(
 
     finally:
         emitter.remove_listener(Emitter.TRACE_WRITTEN, on_trace_written)
+
+
+def test_close_waits_for_sequence_cutoff_before_committing_stop(
+    loop_manager: EventLoopManager,
+) -> None:
+    """Recording close waits until producer sequence cutoff has been observed."""
+    from unittest.mock import MagicMock
+
+    from neuracore.data_daemon.communications_management.communications_manager import (
+        MessageEnvelope,
+    )
+    from neuracore.data_daemon.models import CommandType
+
+    mock_comm = MagicMock()
+    mock_rdm = MagicMock()
+    daemon = Daemon(comm_manager=mock_comm, recording_disk_manager=mock_rdm)
+
+    recording_id = "rec-cutoff"
+    producer_id = "producer-cutoff"
+    stop_events_received: list[str] = []
+
+    def on_stop_recording(rec_id: str) -> None:
+        stop_events_received.append(rec_id)
+
+    emitter = get_emitter()
+    emitter.on(Emitter.STOP_RECORDING, on_stop_recording)
+    try:
+        daemon._handle_recording_stopped(
+            MessageEnvelope(
+                producer_id=None,
+                command=CommandType.RECORDING_STOPPED,
+                payload={
+                    "recording_stopped": {
+                        "recording_id": recording_id,
+                        "producer_stop_sequence_numbers": {producer_id: 5},
+                    }
+                },
+            )
+        )
+
+        daemon._finalize_pending_closes()
+        assert recording_id in daemon._closing_recordings
+        assert recording_id not in daemon._closed_recordings
+        assert stop_events_received == []
+
+        # Observe a sequence below cutoff: should still not close.
+        daemon.handle_message(
+            MessageEnvelope(
+                producer_id=producer_id,
+                command=CommandType.HEARTBEAT,
+                payload={},
+                sequence_number=4,
+            )
+        )
+        daemon._finalize_pending_closes()
+        assert recording_id in daemon._closing_recordings
+        assert recording_id not in daemon._closed_recordings
+        assert stop_events_received == []
+
+        # Observe cutoff sequence: now close can commit.
+        daemon.handle_message(
+            MessageEnvelope(
+                producer_id=producer_id,
+                command=CommandType.HEARTBEAT,
+                payload={},
+                sequence_number=5,
+            )
+        )
+        daemon._finalize_pending_closes()
+        assert recording_id in daemon._closed_recordings
+        assert stop_events_received == [recording_id]
+    finally:
+        emitter.remove_listener(Emitter.STOP_RECORDING, on_stop_recording)
 
 
 def test_channel_expires_after_timeout_without_recording_stopped(

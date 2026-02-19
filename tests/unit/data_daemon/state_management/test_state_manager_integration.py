@@ -24,6 +24,9 @@ def _register_state_manager(manager: StateManager) -> None:
     emitter.on(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
     emitter.on(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
     emitter.on(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
+    emitter.on(
+        Emitter.STOP_RECORDING_REQUESTED, manager.handle_stop_recording_requested
+    )
     emitter.on(Emitter.STOP_RECORDING, manager.handle_stop_recording)
     emitter.on(Emitter.IS_CONNECTED, manager.handle_is_connected)
 
@@ -36,6 +39,9 @@ def _cleanup_state_manager(manager: StateManager) -> None:
     emitter.remove_listener(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
     emitter.remove_listener(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
     emitter.remove_listener(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
+    emitter.remove_listener(
+        Emitter.STOP_RECORDING_REQUESTED, manager.handle_stop_recording_requested
+    )
     emitter.remove_listener(Emitter.STOP_RECORDING, manager.handle_stop_recording)
     emitter.remove_listener(Emitter.IS_CONNECTED, manager.handle_is_connected)
 

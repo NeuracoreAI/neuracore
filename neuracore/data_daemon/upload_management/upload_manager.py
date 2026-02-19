@@ -96,8 +96,6 @@ class UploadManager(TraceManager):
             data_type_name: Data type name
             bytes_uploaded: Starting offset for resume
         """
-        logger.info(f"Received READY_FOR_UPLOAD for trace {trace_id}")
-
         loop = asyncio.get_running_loop()
         task = loop.create_task(
             self._upload_single_trace(
@@ -205,6 +203,7 @@ class UploadManager(TraceManager):
         trace_id: str,
         recording_id: str,
         base_bytes: int,
+        total_bytes: int,
         last_progress_update: list[float],
     ) -> Callable[[int], Awaitable[None]]:
         """Create a progress callback for tracking upload progress.
@@ -231,6 +230,7 @@ class UploadManager(TraceManager):
                     trace_id,
                     RecordingDataTraceStatus.UPLOAD_STARTED,
                     uploaded_bytes=total_bytes_uploaded,
+                    total_bytes=total_bytes,
                 )
                 last_progress_update[0] = now
 
@@ -291,18 +291,17 @@ class UploadManager(TraceManager):
         Returns:
             True if all files uploaded successfully, False otherwise.
         """
-        logger.info(f"Starting upload for trace {trace_id}")
-
         files, validation_error = self._validate_trace_directory(trace_dir_path)
         if validation_error or files is None:
             error_msg = validation_error or "No files found in trace directory"
-            logger.error(error_msg)
             self._emit_upload_failure(
                 trace_id=trace_id,
                 bytes_uploaded=bytes_uploaded,
                 error_message=error_msg,
             )
             return False
+
+        total_bytes = sum(file.stat().st_size for file in files)
 
         registered = await self._register_data_trace(
             recording_id, data_type, UUID(trace_id)
@@ -324,6 +323,7 @@ class UploadManager(TraceManager):
                     trace_id,
                     RecordingDataTraceStatus.UPLOAD_STARTED,
                     uploaded_bytes=bytes_uploaded,
+                    total_bytes=total_bytes,
                 )
                 self._emitter.emit(Emitter.UPLOAD_STARTED, trace_id)
 
@@ -344,7 +344,11 @@ class UploadManager(TraceManager):
                     )
 
                     progress_callback = self._make_progress_callback(
-                        trace_id, recording_id, cumulative_bytes, last_progress_update
+                        trace_id,
+                        recording_id,
+                        cumulative_bytes,
+                        total_bytes,
+                        last_progress_update,
                     )
 
                     logger.info(

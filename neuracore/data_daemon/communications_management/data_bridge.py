@@ -175,6 +175,7 @@ class Daemon:
         self._closed_recordings: set[str] = set()
         self._pending_close_recordings: dict[str, dict[str, int]] = {}
         self._closing_recordings: dict[str, RecordingClosingState] = {}
+        self._producer_last_sequence_numbers: dict[str, int] = {}
         self._command_handlers: dict[CommandType, CommandHandler] = {
             CommandType.OPEN_RING_BUFFER: self._handle_open_ring_buffer,
             CommandType.DATA_CHUNK: self._handle_write_data_chunk,
@@ -230,19 +231,23 @@ class Daemon:
         """
         self._running = False
 
-    def process_raw_message(self, raw: bytes) -> bool:
-        """Parse and handle a raw message payload.
+    def process_raw_message(self, raw: bytes) -> None:
+        """Process a raw message from a producer.
 
-        Returns True if the message was successfully parsed (even if the command
-        is ignored), False if parsing failed.
+        This function will attempt to parse the raw bytes into a ManagementMessage.
+        If the parsing fails, it will log an exception and return without handling
+        the message.
+
+        :param raw: The raw bytes of a message from a producer.
+        :type raw: bytes
+        :return: None
         """
         try:
             message = MessageEnvelope.from_bytes(raw)
         except Exception:
             logger.exception("Failed to parse incoming message bytes")
-            return False
+            return
         self.handle_message(message)
-        return True
 
     # Producer
     def handle_message(self, message: MessageEnvelope) -> None:
@@ -302,6 +307,9 @@ class Daemon:
         if message.sequence_number is not None:
             if message.sequence_number > channel.last_sequence_number:
                 channel.last_sequence_number = message.sequence_number
+                self._producer_last_sequence_numbers[producer_id] = (
+                    channel.last_sequence_number
+                )
             else:
                 logger.debug(
                     "Non-monotonic sequence_number=%s for producer_id=%s (last=%s)",
@@ -717,8 +725,8 @@ class Daemon:
         """Handle a RECORDING_STOPPED message from a producer.
 
         This function is called when a producer sends a RECORDING_STOPPED message to
-        the daemon. It will mark the recording as stopped and emit a STOP_RECORDING
-        event to the event emitter.
+        the daemon. It will mark the recording as pending-close and emit a
+        STOP_RECORDING_REQUESTED event immediately.
 
         :param message: message envelope containing the recording_id of the stopped
             recording
@@ -759,7 +767,8 @@ class Daemon:
         self._pending_close_recordings[str(recording_id)] = (
             producer_stop_sequence_numbers
         )
-        self._emitter.emit(Emitter.STOP_RECORDING, recording_id)
+
+        self._emitter.emit(Emitter.STOP_RECORDING_REQUESTED, recording_id)
 
     def _finalize_pending_closes(self) -> None:
         """Transition pending close recordings into closing state.
@@ -778,25 +787,39 @@ class Daemon:
                 )
             self._pending_close_recordings.clear()
 
-        close_timeout = timedelta(seconds=10)
         to_close: list[str] = []
         for recording_id, closing_state in self._closing_recordings.items():
+            if not self._has_reached_sequence_cutoffs(closing_state):
+                continue
+
             traces = self._recording_traces.get(recording_id, set())
             if not traces:
-                to_close.append(recording_id)
-                continue
-            if now - closing_state.stop_requested_at >= close_timeout:
-                logger.warning(
-                    "Force-closing recording_id=%s after timeout "
-                    "with %d trace(s) still open",
-                    recording_id,
-                    len(traces),
-                )
                 to_close.append(recording_id)
 
         for recording_id in to_close:
             self._closing_recordings.pop(recording_id, None)
             self._closed_recordings.add(recording_id)
+            self._emitter.emit(Emitter.STOP_RECORDING, recording_id)
+
+    def _has_reached_sequence_cutoffs(
+        self, closing_state: RecordingClosingState
+    ) -> bool:
+        """Return True when all producer sequence cutoffs have been observed.
+
+        If no cutoff map was provided (legacy producer behavior), this returns True.
+        """
+        stop_cutoffs = closing_state.producer_stop_sequence_numbers
+        if not stop_cutoffs:
+            return True
+
+        for producer_id, cutoff_sequence_number in stop_cutoffs.items():
+            last_sequence_number = self._producer_last_sequence_numbers.get(producer_id)
+            if (
+                last_sequence_number is None
+                or last_sequence_number < cutoff_sequence_number
+            ):
+                return False
+        return True
 
     def cleanup_channel_on_trace_written(
         self,
@@ -813,19 +836,16 @@ class Daemon:
         :param trace_id: ID of the trace to clean up
         :param bytes_written: total number of bytes written for the trace (unused)
         """
-        channel = next(
-            (ch for ch in self.channels.values() if ch.trace_id == trace_id),
-            None,
-        )
-
-        if channel is None:
-            return
-
         recording_id = self._trace_recordings.get(trace_id)
         if recording_id:
             self._remove_trace(str(recording_id), str(trace_id))
 
-        channel.trace_id = None
+        channel = next(
+            (ch for ch in self.channels.values() if ch.trace_id == trace_id),
+            None,
+        )
+        if channel is not None:
+            channel.trace_id = None
 
     def _cleanup_expired_channels(self) -> None:
         """Remove channels whose heartbeat has not been seen within the timeout."""
@@ -856,6 +876,10 @@ class Daemon:
                             }
                         },
                     ),
+                )
+                self._producer_last_sequence_numbers[channel.producer_id] = max(
+                    self._producer_last_sequence_numbers.get(channel.producer_id, 0),
+                    channel.last_sequence_number,
                 )
             del self.channels[producer_id]
             self._closed_producers.add(producer_id)
