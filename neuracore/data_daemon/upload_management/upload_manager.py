@@ -28,6 +28,7 @@ CONTENT_TYPE_MAPPING = {
     "RGB": "video/mp4",
     "JSON": "application/json",
 }
+MAX_CONCURRENT_UPLOADS = 4
 
 
 class UploadManager(TraceManager):
@@ -49,6 +50,11 @@ class UploadManager(TraceManager):
 
         self._emitter = get_emitter()
         self._emitter.on(Emitter.READY_FOR_UPLOAD, self._on_ready_for_upload)
+
+        # Semaphore to serialize uploads when bandwidth limiting is enabled
+        self._upload_semaphore: asyncio.Semaphore | None = None
+        if config.bandwidth_limit is not None and config.bandwidth_limit > 0:
+            self._upload_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
 
         logger.info("UploadManager initialized")
 
@@ -355,13 +361,27 @@ class UploadManager(TraceManager):
                         f"(offset={file_bytes_uploaded})"
                     )
 
-                    success, file_total_bytes, error_message = await self._upload_file(
-                        file,
-                        cloud_filepath,
-                        recording_id,
-                        file_bytes_uploaded,
-                        progress_callback,
-                    )
+                    if self._upload_semaphore is not None:
+                        async with self._upload_semaphore:
+                            success, file_total_bytes, error_message = (
+                                await self._upload_file(
+                                    file,
+                                    cloud_filepath,
+                                    recording_id,
+                                    file_bytes_uploaded,
+                                    progress_callback,
+                                )
+                            )
+                    else:
+                        success, file_total_bytes, error_message = (
+                            await self._upload_file(
+                                file,
+                                cloud_filepath,
+                                recording_id,
+                                file_bytes_uploaded,
+                                progress_callback,
+                            )
+                        )
 
                     if not success:
                         failed_bytes = cumulative_bytes + file_total_bytes
