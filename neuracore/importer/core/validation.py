@@ -26,6 +26,10 @@ JOINT_DATA_TYPES = [
     if DATA_TYPE_TO_NC_DATA_CLASS[dt] == JointData
 ]
 
+# Small absolute tolerance for floating point comparisons against joint limits.
+# This avoids false-positive warnings caused by float32/float64 roundoff.
+JOINT_LIMIT_EPSILON = 1e-6
+
 
 def validate_rgb_images(data: Any, format: DataFormat) -> None:
     """Validate RGB image data.
@@ -136,17 +140,13 @@ def validate_joint_positions(
     if name not in joint_info:
         raise DataValidationError(f"Joint {name} not found in robot model.")
 
-    if (
-        joint_info[name].limits.lower is not None
-        and data < joint_info[name].limits.lower
-    ):
+    lower_limit = joint_info[name].limits.lower
+    if lower_limit is not None and data < lower_limit - JOINT_LIMIT_EPSILON:
         raise DataValidationWarning(
-            f"Position {data} is below the lower limit {joint_info[name].limits.lower}."
+            f"Position {data} is below the lower limit {lower_limit}."
         )
-    if (
-        joint_info[name].limits.upper is not None
-        and data > joint_info[name].limits.upper
-    ):
+    upper_limit = joint_info[name].limits.upper
+    if upper_limit is not None and data > upper_limit + JOINT_LIMIT_EPSILON:
         raise DataValidationWarning(
             f"Position {data} is above the upper limit {joint_info[name].limits.upper}."
         )

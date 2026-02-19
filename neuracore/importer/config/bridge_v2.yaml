@@ -1,0 +1,78 @@
+input_dataset_name: bridge_v2_dataset_converted_externally_to_tfds
+
+output_dataset:
+  name: bridge_v2
+  tags: [widowx, bridge_v2, manipulation]
+  description: "BridgeData V2 is a large and diverse dataset of robotic manipulation 
+  behaviors designed to facilitate research in scalable robot learning. The dataset is 
+  compatible with open-vocabulary, multi-task learning methods conditioned on goal 
+  images or natural language instructions. Skills learned from the data generalize to 
+  novel objects and environments, as well as across institutions.
+
+. Dataset source: https://rail-berkeley.github.io/bridgedata/"
+
+robot: 
+  name: widowx
+  urdf_path: "neuracore/neuracore/importer/config/widowx.urdf"
+  override_existing: true
+
+frequency: 5.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    image_convention: CHANNELS_LAST
+    order_of_channels: RGB
+    mapping: 
+      - name: image_0
+        source_name: image_0
+      - name: image_1
+        source_name: image_1
+      - name: image_2
+        source_name: image_2
+      - name: image_3
+        source_name: image_3
+
+  JOINT_POSITIONS: 
+    source: observation.state
+    units: RADIANS
+    mapping:
+      - name: joint_1
+        index: 0
+      - name: joint_2
+        index: 1
+      - name: joint_3
+        index: 2
+      - name: joint_4
+        index: 3
+      - name: joint_5
+        index: 4
+      - name: gripper_revolute_joint
+        index: 5
+
+
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.state
+    inverted: false
+    mapping:
+      - name: gripper_open_amount
+        index: 6
+
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state # path to the data in the input dataset
+    format:
+      visual_joint_type: GRIPPER
+    mapping:
+      - name: gripper_prismatic_joint_1
+        index: 6
+        inverted: false
+        offset: 0.0
+      - name: gripper_prismatic_joint_2
+        index: 6
+
+  LANGUAGE:
+    source: language_instruction
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction
