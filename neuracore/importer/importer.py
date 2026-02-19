@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from neuracore_types import DataType
 from neuracore_types.importer.config import DatasetTypeConfig, JointPositionTypeConfig
 from neuracore_types.nc_data import DatasetImportConfig
+from rich.logging import RichHandler
 
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
@@ -37,6 +38,15 @@ from neuracore.importer.rlds_tfds_importer import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Setup rich handler for colorful logging output in the importer module
+importer_logger = logging.getLogger("neuracore.importer")
+if not any(isinstance(handler, RichHandler) for handler in importer_logger.handlers):
+    rich_handler = RichHandler(rich_tracebacks=True, markup=False)
+    rich_handler.setFormatter(logging.Formatter("%(message)s"))
+    importer_logger.addHandler(rich_handler)
+importer_logger.setLevel(logging.INFO)
+importer_logger.propagate = True
 
 
 def load_dataset_config(path: Path) -> DatasetImportConfig:
