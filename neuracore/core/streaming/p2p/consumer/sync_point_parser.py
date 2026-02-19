@@ -33,6 +33,8 @@ def parse_sync_point(
     try:
         data_type: DataType = track_details.data_type
         label: str = track_details.label
+        data_type_name, name_of_sensor_data = label.split(":", 1)
+        del data_type_name  # unused
 
         # Get the appropriate data class from the mapping
         data_class: type[NCData] | None = DATA_TYPE_TO_NC_DATA_CLASS.get(data_type)
@@ -49,7 +51,7 @@ def parse_sync_point(
 
         return SynchronizedPoint(
             timestamp=data.timestamp,
-            data={data_type: {label: data}},
+            data={data_type: {name_of_sensor_data: data}},
         )
 
     except ValidationError:
