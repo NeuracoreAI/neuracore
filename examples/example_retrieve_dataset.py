@@ -106,38 +106,44 @@ def visualize_episode(
     plt.show()
 
 
-nc.login()
-# CMU Play Fusion is one of the many public/shared datasets you have access to
-dataset = nc.get_dataset("ASU Table Top")
-data_types_to_synchronize = [DataType.JOINT_POSITIONS, DataType.RGB_IMAGES]
+def main():
+    nc.login()
 
-robot_data_spec: RobotDataSpec = {}
-robot_ids_dataset = dataset.robot_ids
-for robot_id in robot_ids_dataset:
-    data_type_to_names = dataset.get_full_data_spec(robot_id)
-    robot_data_spec[robot_id] = {
-        data_type: data_type_to_names[data_type]
-        for data_type in data_types_to_synchronize
-    }
+    # ASU Table Top is one of the many public/shared datasets you have access to
+    dataset = nc.get_dataset("ASU Table Top")
+    data_types_to_synchronize = [DataType.JOINT_POSITIONS, DataType.RGB_IMAGES]
 
-synced_dataset = dataset.synchronize(
-    frequency=1,
-    robot_data_spec=robot_data_spec,
-)
-print(f"Number of episodes: {len(dataset)}")
-joint_positions = []
-camera_data = []
-timestamps = []
-for episode in synced_dataset[:1]:
-    print(f"Episode length is {len(episode)}")
-    for step in episode:
-        step = cast(SynchronizedPoint, step)
-        joint_positions.append(step[DataType.JOINT_POSITIONS])
-        camera_data.append(step[DataType.RGB_IMAGES])
-        timestamps.append(step.timestamp)
+    robot_data_spec: RobotDataSpec = {}
+    robot_ids_dataset = dataset.robot_ids
+    for robot_id in robot_ids_dataset:
+        data_type_to_names = dataset.get_full_data_spec(robot_id)
+        robot_data_spec[robot_id] = {
+            data_type: data_type_to_names[data_type]
+            for data_type in data_types_to_synchronize
+        }
+
+    synced_dataset = dataset.synchronize(
+        frequency=1,
+        robot_data_spec=robot_data_spec,
+    )
+    print(f"Number of episodes: {len(dataset)}")
+    joint_positions = []
+    camera_data = []
+    timestamps = []
+
+    print("Streaming first episode from dataset")
+    for episode in synced_dataset[:1]:
+        for step in episode:
+            step = cast(SynchronizedPoint, step)
+            joint_positions.append(step[DataType.JOINT_POSITIONS])
+            camera_data.append(step[DataType.RGB_IMAGES])
+            timestamps.append(step.timestamp)
+
+    print(f"Episode length t: {episode.end_time - episode.start_time} seconds")
+    visualize_episode(
+        joint_positions, camera_data, timestamps, episode.start_time, episode.end_time
+    )
 
 
-print(f"Episode length t: {episode.end_time - episode.start_time} seconds")
-visualize_episode(
-    joint_positions, camera_data, timestamps, episode.start_time, episode.end_time
-)
+if __name__ == "__main__":
+    main()

@@ -121,12 +121,16 @@ python example_server_endpoint.py
 Unlike the previous example ([Local Model Deployment](#local-model-deployment)), this endpoint runs on our servers. 
 
 
-### View Dataset
+### Retrieve and Visualize Dataset
 This example shows you how to:
 - Stream data from neuracore to your python application (for saving or training)
+- Pull a dataset from Neuracore and **synchronize** joint positions and camera streams at a chosen frequency
+- **Play back** a single episode locally
+
+Run it to replay the first episode of the ASU Table Top shared dataset:
 
 ```bash
-python example_view_dataset.py
+python example_retrieve_dataset.py
 ```
 
 If you want to just view your data, then the best way is via the [web interface](https://www.neuracore.com/dashboard/datasets).
