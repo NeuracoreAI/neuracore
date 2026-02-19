@@ -322,6 +322,10 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         producer_stop_sequence_numbers = self._stop_all_streams()
+
+        get_recording_state_manager().recording_stopped(
+            robot_id=self.id, instance=self.instance, recording_id=recording_id
+        )
         self._get_daemon_recording_context().stop_recording(
             recording_id=recording_id,
             producer_stop_sequence_numbers=producer_stop_sequence_numbers,
@@ -341,9 +345,6 @@ class Robot:
             if response.json() == "UsageLimitExceeded":
                 raise RobotError("Storage limit exceeded. Please upgrade your plan.")
 
-            get_recording_state_manager().recording_stopped(
-                robot_id=self.id, instance=self.instance, recording_id=recording_id
-            )
         except requests.exceptions.ConnectionError:
             raise RobotError(
                 "Failed to connect to neuracore server, "
