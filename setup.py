@@ -57,6 +57,7 @@ setup(
         "aiofiles>=23.0.0",
         "aiolimiter",
         "pyee==13.0.0",
+        "greenlet",
     ],
     extras_require={
         "examples": [
