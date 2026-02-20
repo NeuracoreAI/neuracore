@@ -119,7 +119,7 @@ def create_nc_archive(
 
             # Add requirements file if it exists
             if requirements_file_path.exists():
-                zip_file.write(requirements_file_path, "requirements.txt")
+                zip_file.write(requirements_file_path, "algorithm/requirements.txt")
 
     archive_size_mb = archive_path.stat().st_size / (1024 * 1024)
     logger.info(
@@ -168,8 +168,8 @@ def extract_nc_archive(archive_file: Path, output_dir: Path) -> dict[str, Path]:
                 extracted_files["algorithm_config"] = file_path
             elif file_info.filename == "metadata":
                 extracted_files["metadata"] = file_path
-            elif file_info.filename == "requirements.txt":
-                extracted_files["requirements"] = file_path
+            elif file_info.filename == "algorithm/requirements.txt":
+                extracted_files["algorithm_requirements"] = file_path
             elif file_info.filename.startswith("algorithm/"):
                 extracted_files.setdefault("algorithm_files", []).append(file_path)
             else:
@@ -232,7 +232,6 @@ def load_model_from_nc_archive(
 
         # Load the algorithm using AlgorithmLoader
         algorithm_loader = AlgorithmLoader(algorithm_dir)
-        algorithm_loader.install_requirements()
         model_class = algorithm_loader.load_model()
 
         # Create model instance
