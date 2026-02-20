@@ -1551,206 +1551,17 @@ class TestBandwidthThrottling:
     """Tests for bandwidth throttling integration with UploadManager."""
 
     @pytest.mark.asyncio
-    async def test_semaphore_serializes_uploads_when_bandwidth_limited(
-        self,
-        tmp_path: Path,
-        mock_auth,
-        client_session: aiohttp.ClientSession,
-    ) -> None:
-        """Test that uploads are serialized when bandwidth_limit is set.
-
-        When bandwidth_limit is configured, uploads should execute one at a time
-        via the semaphore, not in parallel.
-        """
-        trace_dir1 = tmp_path / "trace-1"
-        trace_dir1.mkdir()
-        (trace_dir1 / "file.mp4").write_bytes(b"X" * 1000)
-
-        trace_dir2 = tmp_path / "trace-2"
-        trace_dir2.mkdir()
-        (trace_dir2 / "file.mp4").write_bytes(b"Y" * 1000)
-
-        config = DaemonConfig(num_threads=2, bandwidth_limit=1024 * 1024)
-        manager = UploadManager(config=config, client_session=client_session)
-
-        upload_timeline: list[tuple[str, str]] = []
-        upload_complete_events: list[str] = []
-        all_done = asyncio.Event()
-
-        emitter = get_emitter()
-
-        def on_complete(trace_id: str) -> None:
-            upload_timeline.append((trace_id, "end"))
-            upload_complete_events.append(trace_id)
-            if len(upload_complete_events) >= 2:
-                all_done.set()
-
-        emitter.on(Emitter.UPLOAD_COMPLETE, on_complete)
-
-        try:
-            with (
-                patch(
-                    "neuracore.data_daemon.upload_management.upload_manager"
-                    ".ResumableFileUploader"
-                ) as MockUploader,
-                patch.object(
-                    manager, "_register_data_trace", new_callable=AsyncMock
-                ) as mock_register,
-                patch.object(manager, "_update_data_trace", new_callable=AsyncMock),
-            ):
-                mock_register.return_value = "backend-trace-id"
-
-                def create_uploader(**kwargs):
-                    filepath = kwargs.get("filepath", "")
-                    trace_id = (
-                        TEST_TRACE_ID if TEST_TRACE_ID in filepath else TEST_TRACE_ID_2
-                    )
-                    mock_instance = MagicMock()
-
-                    async def mock_upload():
-                        upload_timeline.append((trace_id, "start"))
-                        await asyncio.sleep(0.01)
-                        return (True, 1000, None)
-
-                    mock_instance.upload = mock_upload
-                    return mock_instance
-
-                MockUploader.side_effect = create_uploader
-
-                emitter.emit(
-                    Emitter.READY_FOR_UPLOAD,
-                    TEST_TRACE_ID,
-                    "rec-1",
-                    str(trace_dir1),
-                    DataType.RGB_IMAGES,
-                    "camera_0",
-                    0,
-                )
-                emitter.emit(
-                    Emitter.READY_FOR_UPLOAD,
-                    TEST_TRACE_ID_2,
-                    "rec-2",
-                    str(trace_dir2),
-                    DataType.RGB_IMAGES,
-                    "camera_0",
-                    0,
-                )
-
-                await asyncio.wait_for(all_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
-
-        finally:
-            emitter.remove_listener(Emitter.UPLOAD_COMPLETE, on_complete)
-            await manager.shutdown(wait=False)
-
-        assert len(upload_timeline) == 4
-
-        starts = [i for i, (_, event) in enumerate(upload_timeline) if event == "start"]
-        ends = [i for i, (_, event) in enumerate(upload_timeline) if event == "end"]
-
-        assert (
-            ends[0] < starts[1]
-        ), f"Expected serialized uploads but got interleaved: {upload_timeline}"
-
-    @pytest.mark.asyncio
-    async def test_no_semaphore_when_bandwidth_limit_none(
-        self,
-        tmp_path: Path,
-        mock_auth,
-        client_session: aiohttp.ClientSession,
-    ) -> None:
-        """Test that uploads run in parallel when bandwidth_limit is None."""
-        trace_dir1 = tmp_path / "trace-1"
-        trace_dir1.mkdir()
-        (trace_dir1 / "file.mp4").write_bytes(b"X" * 1000)
-
-        trace_dir2 = tmp_path / "trace-2"
-        trace_dir2.mkdir()
-        (trace_dir2 / "file.mp4").write_bytes(b"Y" * 1000)
-
-        config = DaemonConfig(num_threads=2, bandwidth_limit=None)
-        manager = UploadManager(config=config, client_session=client_session)
-
-        concurrent_count = [0]
-        max_concurrent = [0]
-        upload_complete_events: list[str] = []
-        all_done = asyncio.Event()
-
-        emitter = get_emitter()
-
-        def on_complete(trace_id: str) -> None:
-            upload_complete_events.append(trace_id)
-            if len(upload_complete_events) >= 2:
-                all_done.set()
-
-        emitter.on(Emitter.UPLOAD_COMPLETE, on_complete)
-
-        try:
-            with (
-                patch(
-                    "neuracore.data_daemon.upload_management.upload_manager"
-                    ".ResumableFileUploader"
-                ) as MockUploader,
-                patch.object(
-                    manager, "_register_data_trace", new_callable=AsyncMock
-                ) as mock_register,
-                patch.object(manager, "_update_data_trace", new_callable=AsyncMock),
-            ):
-                mock_register.return_value = "backend-trace-id"
-
-                def create_uploader(**kwargs):
-                    mock_instance = MagicMock()
-
-                    async def mock_upload():
-                        concurrent_count[0] += 1
-                        max_concurrent[0] = max(max_concurrent[0], concurrent_count[0])
-                        await asyncio.sleep(0.05)
-                        concurrent_count[0] -= 1
-                        return (True, 1000, None)
-
-                    mock_instance.upload = mock_upload
-                    return mock_instance
-
-                MockUploader.side_effect = create_uploader
-
-                # Emit both upload events simultaneously
-                emitter.emit(
-                    Emitter.READY_FOR_UPLOAD,
-                    TEST_TRACE_ID,
-                    "rec-1",
-                    str(trace_dir1),
-                    DataType.RGB_IMAGES,
-                    "camera_0",
-                    0,
-                )
-                emitter.emit(
-                    Emitter.READY_FOR_UPLOAD,
-                    TEST_TRACE_ID_2,
-                    "rec-2",
-                    str(trace_dir2),
-                    DataType.RGB_IMAGES,
-                    "camera_0",
-                    0,
-                )
-
-                await asyncio.wait_for(all_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
-
-        finally:
-            emitter.remove_listener(Emitter.UPLOAD_COMPLETE, on_complete)
-            await manager.shutdown(wait=False)
-
-        assert max_concurrent[0] == 2, (
-            f"Expected 2 concurrent uploads without bandwidth limit, "
-            f"got max {max_concurrent[0]}"
-        )
-
-    @pytest.mark.asyncio
     async def test_bandwidth_limit_passed_to_uploader(
         self,
         tmp_path: Path,
         mock_auth,
         client_session: aiohttp.ClientSession,
     ) -> None:
-        """Test that bandwidth_limit from config is passed to ResumableFileUploader."""
+        """Test that config creates a BandwidthLimiter."""
+        from neuracore.data_daemon.upload_management.bandwidth_limiter import (
+            BandwidthLimiter,
+        )
+
         trace_dir = tmp_path / "trace-bandwidth"
         trace_dir.mkdir()
         (trace_dir / "file.mp4").write_bytes(b"X" * 1000)
@@ -1811,7 +1622,9 @@ class TestBandwidthThrottling:
             await manager.shutdown(wait=False)
 
         assert len(uploader_kwargs) == 1
-        assert uploader_kwargs[0]["bandwidth_limit"] == bandwidth_limit
+        limiter = uploader_kwargs[0]["bandwidth_limiter"]
+        assert isinstance(limiter, BandwidthLimiter)
+        assert limiter._rate == bandwidth_limit
 
     @pytest.mark.asyncio
     async def test_no_bandwidth_limit_passed_when_config_none(
@@ -1820,7 +1633,7 @@ class TestBandwidthThrottling:
         mock_auth,
         client_session: aiohttp.ClientSession,
     ) -> None:
-        """Test that bandwidth_limit=None is passed when not configured."""
+        """Test that bandwidth_limiter=None is passed when not configured."""
         trace_dir = tmp_path / "trace-no-limit"
         trace_dir.mkdir()
         (trace_dir / "file.mp4").write_bytes(b"X" * 1000)
@@ -1880,4 +1693,147 @@ class TestBandwidthThrottling:
             await manager.shutdown(wait=False)
 
         assert len(uploader_kwargs) == 1
-        assert uploader_kwargs[0]["bandwidth_limit"] is None
+        assert uploader_kwargs[0]["bandwidth_limiter"] is None
+
+    @pytest.mark.asyncio
+    async def test_bandwidth_limit_sleeps_after_chunk(
+        self,
+        tmp_path: Path,
+        mock_auth,
+        client_session: aiohttp.ClientSession,
+    ) -> None:
+        """Test that BandwidthLimiter.acquire sleeps to throttle upload speed."""
+        import base64
+        import hashlib
+        import time as real_time
+
+        file_data = b"X" * 1000
+        bandwidth_limit = 500  # bytes/sec
+
+        trace_dir = tmp_path / "trace-throttle"
+        trace_dir.mkdir()
+        (trace_dir / "file.mp4").write_bytes(file_data)
+
+        # Compute MD5 so checksum verification passes
+        md5_b64 = base64.b64encode(hashlib.md5(file_data).digest()).decode()
+
+        sleep_calls: list[float] = []
+        upload_done = asyncio.Event()
+        emitter = get_emitter()
+
+        def on_complete(trace_id: str) -> None:
+            upload_done.set()
+
+        emitter.on(Emitter.UPLOAD_COMPLETE, on_complete)
+
+        def make_response(status: int, headers: dict | None = None, json_body=None):
+            resp = AsyncMock()
+            resp.status = status
+            resp.headers = headers or {}
+            resp.raise_for_status = MagicMock()
+            resp.json = (
+                AsyncMock(return_value=json_body)
+                if json_body is not None
+                else AsyncMock(side_effect=Exception("no json"))
+            )
+            cm = MagicMock()
+            cm.__aenter__ = AsyncMock(return_value=resp)
+            cm.__aexit__ = AsyncMock(return_value=False)
+            return cm
+
+        put_calls = [0]
+
+        def put_side_effect(*args, **kwargs):
+            put_calls[0] += 1
+            if put_calls[0] == 1:
+                return make_response(308)
+            return make_response(200, headers={"x-goog-hash": f"md5={md5_b64}"})
+
+        monotonic_time = [real_time.monotonic()]
+
+        def fake_monotonic() -> float:
+            return monotonic_time[0]
+
+        async def fake_sleep(duration: float) -> None:
+            if duration > 0:
+                monotonic_time[0] += duration
+                sleep_calls.append(duration)
+
+        manager = None
+        try:
+            with (
+                patch(
+                    "neuracore.data_daemon.upload_management"
+                    ".bandwidth_limiter.asyncio.sleep",
+                    new=fake_sleep,
+                ),
+                patch(
+                    "neuracore.data_daemon.upload_management"
+                    ".bandwidth_limiter.time.monotonic",
+                    new=fake_monotonic,
+                ),
+                patch(
+                    "neuracore.data_daemon.upload_management"
+                    ".resumable_file_uploader.get_auth"
+                ) as mock_rfu_auth,
+                patch(
+                    "neuracore.data_daemon.upload_management"
+                    ".resumable_file_uploader.get_current_org",
+                    return_value="test-org",
+                ),
+            ):
+                config = DaemonConfig(num_threads=2, bandwidth_limit=bandwidth_limit)
+                manager = UploadManager(config=config, client_session=client_session)
+
+                rfu_auth = MagicMock()
+                rfu_auth.get_headers.return_value = {"Authorization": "Bearer test"}
+                mock_rfu_auth.return_value = rfu_auth
+
+                with (
+                    patch.object(
+                        manager, "_register_data_trace", new_callable=AsyncMock
+                    ) as mock_register,
+                    patch.object(manager, "_update_data_trace", new_callable=AsyncMock),
+                ):
+                    mock_register.return_value = "backend-trace-id"
+
+                    client_session.get = MagicMock(  # type: ignore[method-assign]
+                        return_value=make_response(
+                            200, json_body={"url": "https://fake-gcs-uri"}
+                        )
+                    )
+                    client_session.put = MagicMock(  # type: ignore[method-assign]
+                        side_effect=put_side_effect
+                    )
+
+                    emitter.emit(
+                        Emitter.READY_FOR_UPLOAD,
+                        TEST_TRACE_ID,
+                        "rec-throttle",
+                        str(trace_dir),
+                        DataType.RGB_IMAGES,
+                        "camera_0",
+                        0,
+                    )
+
+                    await asyncio.wait_for(
+                        upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS
+                    )
+
+        finally:
+            emitter.remove_listener(Emitter.UPLOAD_COMPLETE, on_complete)
+            if manager is not None:
+                await manager.shutdown(wait=False)
+
+        assert (
+            len(sleep_calls) > 0
+        ), "Expected asyncio.sleep to be called for bandwidth throttling"
+        total_sleep = sum(sleep_calls)
+        # The token bucket starts pre-filled with bandwidth_limit tokens, so the
+        # first bandwidth_limit bytes are "free". Sleep is only needed to accumulate
+        # tokens for the remaining bytes.
+        expected_min_sleep = (len(file_data) - bandwidth_limit) / bandwidth_limit
+        assert total_sleep >= expected_min_sleep * 0.9, (
+            f"Expected ~{expected_min_sleep:.2f}s of sleep for bandwidth throttling, "
+            f"got {total_sleep:.2f}s"
+        )

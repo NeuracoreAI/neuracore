@@ -19,6 +19,7 @@ from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.models import TraceErrorCode
 from neuracore.data_daemon.upload_management.trace_manager import TraceManager
 
+from .bandwidth_limiter import BandwidthLimiter
 from .resumable_file_uploader import ResumableFileUploader
 
 logger = logging.getLogger(__name__)
@@ -41,15 +42,13 @@ class UploadManager(TraceManager):
         self._config = config
         self._active_uploads: set[asyncio.Task] = set()
         self._client_session = client_session
+        self._bandwidth_limiter = (
+            BandwidthLimiter(config.bandwidth_limit) if config.bandwidth_limit else None
+        )
         super().__init__(client_session)
 
         self._emitter = get_emitter()
         self._emitter.on(Emitter.READY_FOR_UPLOAD, self._on_ready_for_upload)
-
-        # Semaphore to serialize uploads when bandwidth limiting is enabled
-        self._upload_semaphore: asyncio.Semaphore | None = None
-        if config.bandwidth_limit is not None and config.bandwidth_limit > 0:
-            self._upload_semaphore = asyncio.Semaphore(1)
 
         logger.info("UploadManager initialized")
 
@@ -265,7 +264,7 @@ class UploadManager(TraceManager):
             client_session=self._client_session,
             bytes_uploaded=file_bytes_uploaded,
             progress_callback=progress_callback,
-            bandwidth_limit=self._config.bandwidth_limit,
+            bandwidth_limiter=self._bandwidth_limiter,
         )
         return await uploader.upload()
 
@@ -438,8 +437,4 @@ class UploadManager(TraceManager):
                 )
                 return False
 
-        if self._upload_semaphore is not None:
-            async with self._upload_semaphore:
-                return await upload_files()
-        else:
-            return await upload_files()
+        return await upload_files()
