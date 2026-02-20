@@ -52,10 +52,9 @@ class AlgorithmCheck(BaseModel):
 
 
 def setup_logging(output_dir: Path) -> None:
-    """Configure logging for validation process with file and console output.
+    """Configure logging for validation process with file output only.
 
-    Sets up logging to capture validation progress and errors both in the
-    console and in a log file for debugging purposes.
+    Sets up logging to capture validation progress and errors in a log file.
 
     Args:
         output_dir: Directory where the validation log file will be created.
@@ -63,10 +62,8 @@ def setup_logging(output_dir: Path) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(output_dir / "validate.log"),
-        ],
+        handlers=[logging.FileHandler(output_dir / "validate.log")],
+        force=True,
     )
 
 

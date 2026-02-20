@@ -16,10 +16,10 @@ import venv
 from pathlib import Path
 
 import neuracore as nc
+from neuracore.ml.logging.algorithm_log_streamer import AlgorithmLogStreamer
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
 from neuracore.ml.utils.validate import AlgorithmCheck
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Define the markers used in the validation script
@@ -44,6 +44,11 @@ def run_in_venv(
     """
     with tempfile.TemporaryDirectory(prefix="nc-validate-venv-") as temp_dir:
         venv_path = Path(temp_dir) / "venv"
+        validation_output_dir = Path(temp_dir) / "validation-output"
+        validation_output_dir.mkdir(parents=True, exist_ok=True)
+        log_streamer: AlgorithmLogStreamer | None = None
+        algo_check = AlgorithmCheck()
+        error_msg = ""
 
         # Create virtual environment
         venv.create(venv_path, with_pip=True)
@@ -75,13 +80,12 @@ def run_in_venv(
 import sys
 import json
 from pathlib import Path
-import tempfile
 from neuracore.ml.utils.validate import run_validation
 
 try:
     algorithm_folder = Path(r"{algorithm_folder.absolute()}")
     algo_check, error_msg = run_validation(
-        output_dir=Path(tempfile.TemporaryDirectory(prefix="nc-validate-").name),
+        output_dir=Path(r"{validation_output_dir}"),
         algorithm_dir=algorithm_folder,
         port=8080,
         skip_endpoint_check=True,
@@ -112,6 +116,13 @@ sys.exit(0 if success else 1)
 
             script_path = Path(temp_dir) / "validate.py"
             script_path.write_text(validation_script)
+
+            if storage_handler is not None:
+                log_streamer = AlgorithmLogStreamer(
+                    storage_handler=storage_handler,
+                    output_dir=validation_output_dir,
+                )
+                log_streamer.start()
 
             # Run validation in virtual environment
             logger.info("Validating algorithm...")
@@ -147,6 +158,9 @@ sys.exit(0 if success else 1)
                     checklist=AlgorithmCheck(),
                     error_message=error_msg,
                 )
+        finally:
+            if log_streamer is not None:
+                log_streamer.close()
     return algo_check, error_msg
 
 

@@ -3,6 +3,7 @@
 import logging
 import zipfile
 from pathlib import Path
+from typing import IO
 
 import requests
 import wget
@@ -10,12 +11,13 @@ import wget
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
+from neuracore.ml.utils.upload_storage_mixin import UploadStorageMixin
 from neuracore.ml.utils.validate import AlgorithmCheck
 
 logger = logging.getLogger(__name__)
 
 
-class AlgorithmStorageHandler:
+class AlgorithmStorageHandler(UploadStorageMixin):
     """Handles storage operations for algorithms."""
 
     def __init__(self, algorithm_id: str | None = None):
@@ -112,3 +114,32 @@ class AlgorithmStorageHandler:
             logger.error(f"Failed to save algorithm validation check: {response.text}")
         else:
             logger.info("Algorithm validation check saved successfully.")
+
+    def _get_upload_url(self, filepath: str, content_type: str) -> str:
+        """Get a signed upload URL for algorithm artifacts/logs."""
+        assert self.algorithm_id is not None, "Algorithm ID not provided"
+        response = requests.get(
+            f"{API_URL}/org/{self.org_id}/algorithms/{self.algorithm_id}/upload-url",
+            headers=get_auth().get_headers(),
+            params={
+                "filepath": filepath,
+                "content_type": content_type,
+            },
+        )
+        if response.status_code != 200:
+            raise ValueError(
+                f"Failed to get upload URL for {filepath}: {response.text}"
+            )
+        return response.json()["url"]
+
+    def _execute_upload(
+        self,
+        upload_url: str,
+        data: bytes | IO[bytes],
+        content_type: str,
+    ) -> requests.Response:
+        return requests.put(
+            upload_url,
+            data=data,
+            headers={"Content-Type": content_type},
+        )
