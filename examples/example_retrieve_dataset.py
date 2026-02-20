@@ -1,3 +1,6 @@
+"""This example demonstrates how you can retrieve a dataset
+from the Neuracore platform and visualize it."""
+
 from typing import cast
 
 import matplotlib.animation as animation

@@ -1,23 +1,18 @@
+"""This example demonstrates how you can run a local policy rollout
+in a VX300s environment using Neuracore."""
+
 from typing import cast
 
 import matplotlib.pyplot as plt
 import torch
 from common.base_env import BimanualViperXTask
-from common.transfer_cube import BOX_POSE, make_sim_env
-from neuracore_types import (
-    BatchedJointData,
-    BatchedNCData,
-    DataSpec,
-    DataType,
-    JointData,
-    RGBCameraData,
-    SynchronizedPoint,
-)
+from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, BOX_POSE, make_sim_env
+from neuracore_types import BatchedJointData, BatchedNCData, DataSpec, DataType
 
 import neuracore as nc
 
 TRAINING_JOB_NAME = "MyTrainingJob"
-ROBOT_NAME = "Mujoco VX300s"
+
 CAMERA_NAMES = ["angle"]
 
 # Specification of the order that will be fed into the model
@@ -37,13 +32,32 @@ MODEL_OUTPUT_ORDER: DataSpec = {
 
 
 def main():
-    # If you know the path to the local model.nc.zip file
-    # you can use it directly without connecting to a robot
+    nc.login()
+    nc.connect_robot(
+        robot_name="Mujoco VX300s",
+        urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
+        overwrite=False,
+    )
+    # If you have a train run name, you can use it to connect to a local. E.g.:
     policy = nc.policy(
-        model_file="PATH/TO/MODEL.nc.zip",
+        train_run_name=TRAINING_JOB_NAME,
         model_input_order=MODEL_INPUT_ORDER,
         model_output_order=MODEL_OUTPUT_ORDER,
     )
+
+    # If you know the path to the local model.nc.zip file, you can use it directly as:
+    # policy = nc.policy(
+    #     model_file="PATH/TO/MODEL.nc.zip",
+    #     model_input_order=MODEL_INPUT_ORDER,
+    #     model_output_order=MODEL_OUTPUT_ORDER,
+    # )
+
+    # Alternatively, you can connect to a local endpoint that has been started
+    # policy = nc.policy_local_server(
+    #     train_run_name=TRAINING_JOB_NAME,
+    #     model_input_order=MODEL_INPUT_ORDER,
+    #     model_output_order=MODEL_OUTPUT_ORDER,
+    # )
 
     # Optional. Set the checkpoint to the last epoch.
     # Note by default, model is loaded from the last epoch.
@@ -71,19 +85,12 @@ def main():
         horizon = 1
         # Run episode
         for i in range(400):
-            # Create a sync point manually without logging data to the robot
-            SynchronizedPoint(
-                data={
-                    DataType.JOINT_POSITIONS: {
-                        k: JointData(value=v) for k, v in obs.qpos.items()
-                    },
-                    DataType.RGB_IMAGES: {
-                        render_cam_name: RGBCameraData(
-                            frame=obs.cameras[render_cam_name].rgb
-                        ),
-                    },
-                }
-            )
+
+            nc.log_joint_positions(positions=obs.qpos)
+
+            for key, value in obs.cameras.items():
+                if key in CAMERA_NAMES:
+                    nc.log_rgb(key, value.rgb)
 
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
@@ -126,8 +133,7 @@ def main():
                 mj_action = batched_action[0]
                 horizon = len(mj_action)
 
-            a = mj_action[idx_in_horizon]
-            obs, reward, done = env.step(a)
+            obs, reward, done = env.step(mj_action[idx_in_horizon])
 
             if onscreen_render:
                 plt_img.set_data(obs.cameras[render_cam_name].rgb)
