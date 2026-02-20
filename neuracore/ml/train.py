@@ -81,7 +81,7 @@ def _resolve_output_dir(run_name: str | None = None) -> str:
         Full path to the output directory.
     """
     # Hydra/OmegaConf may pass YAML null to resolvers as the literal string "null".
-    explicit_run_name = bool(
+    bool(
         run_name
         and run_name != "null"
         and not (isinstance(run_name, str) and run_name.strip() == "")
@@ -100,24 +100,27 @@ def _resolve_output_dir(run_name: str | None = None) -> str:
 
     base_dir = DEFAULT_CACHE_DIR / "runs"
 
-    # Prevent starting another local run with the same explicit name.
-    has_conflicting_run_dir = (
-        base_dir.exists()
-        and run_name is not None
-        and any(
-            run_path.is_dir()
-            and (run_path.name == run_name or run_path.name.startswith(f"{run_name}_"))
-            for run_path in base_dir.iterdir()
-        )
-    )
-    if explicit_run_name and has_conflicting_run_dir:
-        raise ValueError(
-            f"A local training run with name '{run_name}' already exists. "
-            "Choose a different run_name."
-        )
+    # If an explicit run name is used and that directory (or name_N) already exists,
+    # append a numeric suffix so the run can proceed without overwriting.
+    final_run_name = run_name
+    if base_dir.exists():
+        taken = {
+            p.name
+            for p in base_dir.iterdir()
+            if p.is_dir() and (p.name == run_name or p.name.startswith(f"{run_name}_"))
+        }
+        if run_name in taken:
+            suffix = 1
+            while f"{run_name}_{suffix}" in taken:
+                suffix += 1
+            final_run_name = f"{run_name}_{suffix}"
+            logger.warning(
+                f"A run named {run_name} already exists. "
+                f"Using {final_run_name} for this run."
+            )
 
     # Build full path
-    return str(base_dir / run_name)
+    return str(base_dir / final_run_name)
 
 
 def _sanitize_run_name(name: str) -> str:
