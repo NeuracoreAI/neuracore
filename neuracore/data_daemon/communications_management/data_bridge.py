@@ -173,7 +173,6 @@ class Daemon:
         self._trace_recordings: dict[str, str] = {}
         self._trace_metadata: dict[str, dict[str, str | int | None]] = {}
         self._closed_recordings: set[str] = set()
-        self._pending_close_recordings: dict[str, dict[str, int]] = {}
         self._closing_recordings: dict[str, RecordingClosingState] = {}
         self._producer_last_sequence_numbers: dict[str, int] = {}
         self._command_handlers: dict[CommandType, CommandHandler] = {
@@ -210,7 +209,7 @@ class Daemon:
         logger.info("Daemon started and ready to receive messages...")
         try:
             while self._running:
-                self._finalize_pending_closes()
+                self._finalize_closing_recordings()
                 raw = self.comm.receive_raw()
                 if raw:
                     self.process_raw_message(raw)
@@ -764,38 +763,34 @@ class Daemon:
                 "recording_stopped.producer_stop_sequence_numbers must be a dict"
             )
 
-        self._pending_close_recordings[str(recording_id)] = (
-            producer_stop_sequence_numbers
+        self._closing_recordings[recording_id] = RecordingClosingState(
+            producer_stop_sequence_numbers=producer_stop_sequence_numbers,
+            stop_requested_at=utc_now(),
         )
 
         self._emitter.emit(Emitter.STOP_RECORDING_REQUESTED, recording_id)
 
-    def _finalize_pending_closes(self) -> None:
-        """Transition pending close recordings into closing state.
+    def _finalize_closing_recordings(self) -> None:
+        """Finalize recordings that have reached the stop sequence number.
 
-        Also finalize recordings that are done draining.
+        This function is called periodically by the daemon to finalize recordings
+        that have reached the stop sequence number. It will emit a STOP_RECORDING
+        event for each finalized recording.
+
+        :return: None
         """
-        now = utc_now()
-        if self._pending_close_recordings:
-            for (
-                recording_id,
-                producer_stop_sequence_numbers,
-            ) in self._pending_close_recordings.items():
-                self._closing_recordings[recording_id] = RecordingClosingState(
-                    producer_stop_sequence_numbers=producer_stop_sequence_numbers,
-                    stop_requested_at=now,
-                )
-            self._pending_close_recordings.clear()
-
         to_close: list[str] = []
         for recording_id, closing_state in self._closing_recordings.items():
+            # Not processed all chunks up to stop yet
             if not self._has_reached_sequence_cutoffs(closing_state):
                 continue
 
             traces = self._recording_traces.get(recording_id, set())
+            # traces have been processed and removed
             if not traces:
                 to_close.append(recording_id)
 
+        # Only stop recording (signal flush RDM) when all traces have been processed
         for recording_id in to_close:
             self._closing_recordings.pop(recording_id, None)
             self._closed_recordings.add(recording_id)
