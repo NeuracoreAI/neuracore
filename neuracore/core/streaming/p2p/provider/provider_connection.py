@@ -97,6 +97,7 @@ class PierToPierProviderConnection:
 
         self.event_sources: set[JSONSource] = set()
         self.data_channel_callback: dict[str, Callable] = dict()
+        self._pending_add_futures: list[asyncio.Future[None]] = []
 
         @self.connection.on("connectionstatechange")
         def on_connectionstatechange() -> None:
@@ -161,15 +162,25 @@ class PierToPierProviderConnection:
                     }),
                 )
 
+    def _running_on_connection_loop(self) -> bool:
+        """True if called from a coroutine running on this connection's loop."""
+        try:
+            return asyncio.get_running_loop() is self.loop
+        except RuntimeError:
+            return False
+
     def add_video_source(self, source: VideoSource) -> None:
         """Add a video source to the connection.
-
-        Schedules the add on the connection's event loop so it is safe to call
-        from any thread (including one with no event loop). Blocks until done.
 
         Args:
             source: Video source containing the track to be streamed
         """
+        if self._running_on_connection_loop():
+            fut = asyncio.ensure_future(
+                self._add_video_source_impl(source), loop=self.loop
+            )
+            self._pending_add_futures.append(fut)
+            return
         future = asyncio.run_coroutine_threadsafe(
             self._add_video_source_impl(source), self.loop
         )
@@ -183,14 +194,15 @@ class PierToPierProviderConnection:
     def add_event_source(self, source: JSONSource) -> None:
         """Add a JSON event source to the connection via data channel.
 
-        Creates a data channel for the source and sets up listeners to
-        send state updates when the data channel is open. Schedules the
-        work on the connection's event loop so it is safe to call from any
-        thread (including one with no event loop). Blocks until done.
-
         Args:
             source: JSON source for streaming structured data
         """
+        if self._running_on_connection_loop():
+            fut = asyncio.ensure_future(
+                self._add_event_source_impl(source), loop=self.loop
+            )
+            self._pending_add_futures.append(fut)
+            return
         future = asyncio.run_coroutine_threadsafe(
             self._add_event_source_impl(source), self.loop
         )
@@ -335,6 +347,11 @@ class PierToPierProviderConnection:
             if self.connection.signalingState != "stable":
                 logger.warning("Not ready to send offer")
                 return
+
+            # Wait for any add_*_source calls made from this loop (no deadlock)
+            if self._pending_add_futures:
+                await asyncio.gather(*self._pending_add_futures)
+                self._pending_add_futures.clear()
 
             self.fix_mid_ordering("before offer")
             try:
