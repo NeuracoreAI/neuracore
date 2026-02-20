@@ -1,0 +1,123 @@
+input_dataset_name: mobile_aloha_dataset
+dataset_type: RLDS
+
+output_dataset:
+  name: Mobile ALOHA
+  tags: [aloha, bimanual, mobile-manipulation, teleoperation, kitchen, in-the-wild]
+  description: "Mobile ALOHA dataset of bimanual mobile manipulation collected via low-cost whole-body teleoperation. Tasks include cooking (e.g. sauteing and serving shrimp), opening two-door wall cabinets to store heavy pots, calling and entering an elevator, and rinsing pans at a kitchen faucet. Environments are real-world indoor settings such as kitchens (counters, stoves, cabinets, faucets) and building spaces (elevators). Data emphasizes mobility and dexterity beyond table-top manipulation."
+
+robot: 
+  name: mobile_aloha
+  urdf_path: "mobile_aloha.urdf"
+  override_existing: true
+
+frequency: 50.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping: 
+      - name: cam_left_wrist
+        source_name: cam_left_wrist
+      - name: cam_right_wrist
+        source_name: cam_right_wrist
+      - name: cam_high
+        source_name: cam_high
+
+  JOINT_POSITIONS: 
+    source: observation.state
+    mapping:
+      - name: fl_waist
+        index: 0
+      - name: fl_shoulder
+        index: 1
+      - name: fl_elbow
+        index: 2
+      - name: fl_forearm_roll
+        index: 3
+      - name: fl_wrist_angle
+        index: 4
+      - name: fl_wrist_rotate
+        index: 5
+      - name: fr_waist
+        index: 7
+      - name: fr_shoulder
+        index: 8
+      - name: fr_elbow
+        index: 9
+      - name: fr_forearm_roll
+        index: 10
+      - name: fr_wrist_angle
+        index: 11
+      - name: fr_wrist_rotate
+        index: 12
+    
+  JOINT_TARGET_POSITIONS:
+    source: action
+    mapping:
+      - name: fl_waist
+        index: 0
+      - name: fl_shoulder
+        index: 1
+      - name: fl_elbow
+        index: 2
+      - name: fl_forearm_roll
+        index: 3
+      - name: fl_wrist_angle
+        index: 4
+      - name: fl_wrist_rotate
+        index: 5
+      - name: fr_waist
+        index: 7
+      - name: fr_shoulder
+        index: 8
+      - name: fr_elbow
+        index: 9
+      - name: fr_forearm_roll
+        index: 10
+      - name: fr_wrist_angle
+        index: 11
+      - name: fr_wrist_rotate
+        index: 12
+
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.state
+    mapping:
+      - name: fl_gripper
+        index: 6
+      - name: fr_gripper
+        index: 13
+  
+  PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+    source: action
+    format:
+      invert_gripper_amount: true
+    mapping:
+      - name: fl_gripper
+        index: 6
+      - name: fr_gripper
+        index: 13
+
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state
+    format:
+      visual_joint_type: GRIPPER
+    mapping:
+      - name: fl_left_finger
+        index: 6
+      - name: fl_right_finger
+        index: 6
+      - name: fr_left_finger
+        index: 13
+      - name: fr_right_finger
+        index: 13
+
+  LANGUAGE:
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction
+        source_name: language_instruction
