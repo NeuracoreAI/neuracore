@@ -9,6 +9,8 @@ import time
 from multiprocessing.synchronize import Event
 
 import numpy as np
+import pytest
+from neuracore_types import DataType
 
 import neuracore as nc
 
@@ -46,8 +48,10 @@ def remote_node_logger(robot_name: str, instance: int, ready_event: Event):
         nc_remote.log_rgb(
             "cam_from_remote", rgb_test_image, robot_name=robot_name, instance=instance
         )
-        nc_remote.log_custom_1d("custom_data_from_remote", {"key": "value"})
-        nc_remote.log_parallel_gripper_open_amount(
+        nc_remote.log_custom_1d(
+            "custom_data_from_remote", np.array([42.0], dtype=np.float32)
+        )
+        nc_remote.log_parallel_gripper_open_amounts(
             {"left_gripper": 0.5, "right_gripper": 0.5}
         )
         nc_remote.log_joint_target_positions({"joint_from_remote": 0.5})
@@ -65,7 +69,9 @@ def remote_node_logger(robot_name: str, instance: int, ready_event: Event):
         # Don't set the event, so the main test will time out and fail.
 
 
-def test_get_latest_data_from_multiple_nodes():
+# This test can be flaky, so run it multiple times to increase confidence in stability.s
+@pytest.mark.parametrize("execution_number", range(10))
+def test_get_latest_data_from_multiple_nodes(execution_number: int):
     """
     Tests that get_latest_data correctly aggregates data logged from multiple
     processes (nodes) for the same robot instance.
@@ -74,7 +80,7 @@ def test_get_latest_data_from_multiple_nodes():
     instance = 0
     nc.login()
     # The main process creates/connects to the robot.
-    nc.connect_robot(robot_name, instance=instance, overwrite=True)
+    nc.connect_robot(robot_name, instance=instance, overwrite=False)
 
     # 2. Launch remote node: Start a separate process to log data.
     ctx = multiprocessing.get_context("spawn")
@@ -120,47 +126,50 @@ def test_get_latest_data_from_multiple_nodes():
 
         # --- Verify data from the main process ---
         assert (
-            sync_point.joint_velocities is not None
+            DataType.JOINT_VELOCITIES in sync_point.data
         ), "Joint velocities from main process not found"
-        assert "j_vel_from_main" in sync_point.joint_velocities.values
-        assert sync_point.joint_velocities.values["j_vel_from_main"] == -0.5
+        assert "j_vel_from_main" in sync_point[DataType.JOINT_VELOCITIES]
+        assert sync_point[DataType.JOINT_VELOCITIES]["j_vel_from_main"].value == -0.5
 
         # --- Verify data from the remote process ---
         assert (
-            sync_point.joint_positions is not None
+            DataType.JOINT_POSITIONS in sync_point.data
         ), "Joint positions from remote process not found"
-        assert "joint_from_remote" in sync_point.joint_positions.values
-        assert sync_point.joint_positions.values["joint_from_remote"] == 0.5
+        assert "joint_from_remote" in sync_point[DataType.JOINT_POSITIONS]
+        assert sync_point[DataType.JOINT_POSITIONS]["joint_from_remote"].value == 0.5
 
         assert (
-            sync_point.rgb_images is not None
+            DataType.RGB_IMAGES in sync_point.data
         ), "RGB image from remote process not found"
 
-        assert "rgb_cam_from_remote" in sync_point.rgb_images
-        remote_image_data = sync_point.rgb_images["rgb_cam_from_remote"]
+        assert "cam_from_remote" in sync_point[DataType.RGB_IMAGES]
+        remote_image_data = sync_point[DataType.RGB_IMAGES]["cam_from_remote"]
         assert isinstance(remote_image_data.frame, np.ndarray)
         np.testing.assert_array_equal(remote_image_data.frame, rgb_test_image)
 
         assert (
-            sync_point.custom_data is not None
+            DataType.CUSTOM_1D in sync_point.data
         ), "Custom data from remote process not found"
-        assert "custom_data_from_remote" in sync_point.custom_data
-        assert (
-            sync_point.custom_data["custom_data_from_remote"].data.get("key", None)
-            == "value"
+        assert "custom_data_from_remote" in sync_point[DataType.CUSTOM_1D]
+        np.testing.assert_array_equal(
+            sync_point[DataType.CUSTOM_1D]["custom_data_from_remote"].data,
+            np.array([42.0], dtype=np.float32),
         )
 
         assert (
-            sync_point.joint_target_positions is not None
+            DataType.JOINT_TARGET_POSITIONS in sync_point.data
         ), "Joint target positions from remote process not found"
-        assert "joint_from_remote" in sync_point.joint_target_positions.values
-        assert sync_point.joint_target_positions.values["joint_from_remote"] == 0.5
+        assert "joint_from_remote" in sync_point[DataType.JOINT_TARGET_POSITIONS]
+        assert (
+            sync_point[DataType.JOINT_TARGET_POSITIONS]["joint_from_remote"].value
+            == 0.5
+        )
 
         assert (
-            sync_point.joint_torques is not None
+            DataType.JOINT_TORQUES in sync_point.data
         ), "Joint torques from remote process not found"
-        assert "joint_from_remote" in sync_point.joint_torques.values
-        assert sync_point.joint_torques.values["joint_from_remote"] == 0.5
+        assert "joint_from_remote" in sync_point[DataType.JOINT_TORQUES]
+        assert sync_point[DataType.JOINT_TORQUES]["joint_from_remote"].value == 0.5
 
     finally:
         # 6. Teardown: Clean up the remote process.

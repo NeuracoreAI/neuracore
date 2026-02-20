@@ -56,6 +56,7 @@ setup(
         "aiohttp>=3.9.0",
         "aiofiles>=23.0.0",
         "pyee==13.0.0",
+        "greenlet",
     ],
     extras_require={
         "examples": [

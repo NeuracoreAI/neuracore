@@ -81,7 +81,10 @@ def wait_for_socket_paths(
 
     while time.time() < deadline:
         if process is not None and process.poll() is not None:
-            raise RuntimeError("Data daemon exited before becoming ready.")
+            raise RuntimeError(
+                "Data daemon exited before becoming ready. To get full error trace, "
+                "run daemon directly with `nc-data-daemon launch`."
+            )
 
         if all(Path(p).exists() for p in socket_paths):
             return

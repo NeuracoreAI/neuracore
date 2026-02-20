@@ -306,7 +306,7 @@ def _log_camera_data(
     # camera_data_without_frame object to avoid serializing the frame to JSON
     # or having to make two copies for streaming and bucket storage.
     stream.log(camera_data_without_frame, frame=image)
-    _publish_video_to_p2p(robot, name, camera_type, camera_data_without_frame, image)
+    _publish_video_to_p2p(robot, str_id, camera_type, camera_data_without_frame, image)
 
 
 def log_custom_1d(

@@ -1,4 +1,4 @@
-name: Integration ML
+name: Integration ML Algorithm Performance
 
 on:
   schedule:
@@ -68,4 +68,4 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1-mesa-glx libosmesa6-dev
         Xvfb $DISPLAY -screen 0 1280x1024x24 &
-        pytest -o log_cli=true --log-cli-level=INFO -v -n 8 tests/integration/test_algorithm.py
+        pytest -o log_cli=true --log-cli-level=INFO -v -n 8 tests/integration/ml/test_algorithm_performance.py
