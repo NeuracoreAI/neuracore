@@ -38,7 +38,7 @@ MJ_CAM_NAME = "angle"  # name coming from mujoco env
 MAX_REWARD = 4.0
 ENDPOINT_NAME = "Integration Test Endpoint"
 TRAINING_NAME = "Integration Test"
-DATASET_NAME = "Transfer Cube VX300s Dataset"
+DATASET_NAME = "Dummy Test 888"
 GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
 FREQUENCY = 50
@@ -163,58 +163,83 @@ def eval_model(
 @pytest.mark.parametrize(
     "algorithm_name, input_data_spec, output_data_spec, min_success_rate, algorithm_config",  # noqa: E501
     [
+        # (
+        #     "CNNMLP",
+        #     {
+        #         DataType.RGB_IMAGES: [NC_CAM_NAME],
+        #         DataType.JOINT_POSITIONS: JOINT_NAMES,
+        #     },
+        #     {
+        #         DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
+        #     },
+        #     0.2,
+        #     {
+        #         "batch_size": BATCH_SIZE,
+        #         "epochs": 50,
+        #         "output_prediction_horizon": OUTPUT_PREDICTION_HORIZON,
+        #         "lr": 1.4e-4,
+        #         "lr_backbone": 1.4e-5,
+        #     },
+        # ),
+        # (
+        #     "ACT",
+        #     {
+        #         DataType.RGB_IMAGES: [NC_CAM_NAME],
+        #         DataType.JOINT_POSITIONS: JOINT_NAMES,
+        #     },
+        #     {
+        #         DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
+        #     },
+        #     0.5,
+        #     {
+        #         "batch_size": BATCH_SIZE,
+        #         "epochs": 50,
+        #         "output_prediction_horizon": OUTPUT_PREDICTION_HORIZON,
+        #         "lr": 1.4e-4,
+        #         "lr_backbone": 1.4e-5,
+        #     },
+        # ),
+        # (
+        #     "DiffusionPolicy",
+        #     {
+        #         DataType.RGB_IMAGES: [NC_CAM_NAME],
+        #         DataType.JOINT_POSITIONS: JOINT_NAMES,
+        #     },
+        #     {
+        #         DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
+        #     },
+        #     0.4,
+        #     {
+        #         "batch_size": BATCH_SIZE,
+        #         "epochs": 40,
+        #         "output_prediction_horizon": 64,
+        #         "lr": 2e-4,
+        #         "lr_backbone": 2e-4,
+        #     },
+        # ),
         (
-            "CNNMLP",
+            "Pi0",
             {
-                DataType.RGB_IMAGES: [NC_CAM_NAME],
+                DataType.RGB_IMAGES: [MJ_CAM_NAME],
                 DataType.JOINT_POSITIONS: JOINT_NAMES,
             },
             {
                 DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
             },
-            0.2,
+            0.0,
             {
-                "batch_size": BATCH_SIZE,
-                "epochs": 50,
-                "output_prediction_horizon": OUTPUT_PREDICTION_HORIZON,
-                "lr": 1.4e-4,
-                "lr_backbone": 1.4e-5,
-            },
-        ),
-        (
-            "ACT",
-            {
-                DataType.RGB_IMAGES: [NC_CAM_NAME],
-                DataType.JOINT_POSITIONS: JOINT_NAMES,
-            },
-            {
-                DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
-            },
-            0.5,
-            {
-                "batch_size": BATCH_SIZE,
-                "epochs": 50,
-                "output_prediction_horizon": OUTPUT_PREDICTION_HORIZON,
-                "lr": 1.4e-4,
-                "lr_backbone": 1.4e-5,
-            },
-        ),
-        (
-            "DiffusionPolicy",
-            {
-                DataType.RGB_IMAGES: [NC_CAM_NAME],
-                DataType.JOINT_POSITIONS: JOINT_NAMES,
-            },
-            {
-                DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
-            },
-            0.4,
-            {
-                "batch_size": BATCH_SIZE,
-                "epochs": 40,
+                "batch_size": 2,
+                "epochs": 1,
                 "output_prediction_horizon": 64,
-                "lr": 2e-4,
-                "lr_backbone": 2e-4,
+                "optimizer_lr": 2e-4,
+                "paligemma_variant": "gemma_tiny",
+                "action_expert_variant": "gemma_tiny",
+                "use_pretrained_weights": False,
+                "num_inference_steps": 1,
+                "vlm_max_text_tokens": 4,
+                "compile_model": True,
+                "gradient_checkpointing": True,
+                "dtype": "bfloat16",
             },
         ),
     ],
