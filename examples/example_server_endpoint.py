@@ -1,3 +1,6 @@
+"""This example demonstrates how you can start an endpoint on the cloud
+and locally run the robot using the endpoint."""
+
 import sys
 from typing import cast
 

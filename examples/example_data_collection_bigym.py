@@ -1,3 +1,6 @@
+"""This example demonstrates how you can collect data from a Bigym environment
+and record it to Neuracore."""
+
 import argparse
 import time
 

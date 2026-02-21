@@ -1,3 +1,6 @@
+"""This example demonstrates how you can run a local policy rollout
+in a Bigym environment using Neuracore."""
+
 import argparse
 import time
 from typing import Any, cast
