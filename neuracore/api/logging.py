@@ -1080,7 +1080,7 @@ def log_rgb(
         ValueError: If image format is invalid
     """
     if not isinstance(rgb, np.ndarray):
-        raise ValueError("Image image must be a numpy array")
+        raise ValueError("Image must be a numpy array")
     if rgb.dtype != np.uint8:
         raise ValueError("Image must be uint8 with range 0-255")
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
