@@ -107,7 +107,7 @@ def logout() -> None:
 
 
 def set_organization(id_or_name: str) -> None:
-    """Set the current organization based upon it's name or or id.
+    """Set the current organization based upon its name or id.
 
     this value may be overridden by the `NEURACORE_ORG_ID` environment variable.
 
