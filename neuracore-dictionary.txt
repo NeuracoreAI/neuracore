@@ -45,6 +45,8 @@ Colormaps
 colwise
 conaffinity
 condim
+conq
+Conq
 connectionstatechange
 contype
 Conv
@@ -98,6 +100,8 @@ frictionloss
 fromarray
 frombuffer
 fromlist
+frontleft
+frontright
 gdown
 gelu
 geomadr
@@ -307,6 +311,7 @@ unnormalization
 upserts
 URDF
 usefixtures
+utaustin
 Vaswani
 vertadr
 vertnum

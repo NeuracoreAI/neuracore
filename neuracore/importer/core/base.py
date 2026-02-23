@@ -39,6 +39,7 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from scipy.spatial.transform import Rotation as R
 
 import neuracore as nc
 from neuracore.core.robot import JointInfo
@@ -472,7 +473,20 @@ class NeuracoreDatasetImporter(ABC):
                             f"End effector pose {item.name} not found in "
                             "current end effector poses"
                         )
-                    transformed_data += self.curr_end_effector_poses[item.name]
+                    # Convert action in EE frame to goal pose in world frame
+                    current_pose = np.eye(4)
+                    current_pose[:3, :3] = R.from_quat(
+                        self.curr_end_effector_poses[item.name][3:7]
+                    ).as_matrix()
+                    current_pose[:3, 3] = self.curr_end_effector_poses[item.name][:3]
+                    delta_pose = np.eye(4)
+                    delta_pose[:3, :3] = R.from_quat(transformed_data[3:7]).as_matrix()
+                    delta_pose[:3, 3] = transformed_data[:3]
+                    next_pose = current_pose @ delta_pose
+                    next_position = next_pose[:3, 3]
+                    next_orientation = R.from_matrix(next_pose[:3, :3]).as_quat()
+                    transformed_data = np.concatenate([next_position, next_orientation])
+                    transformed_data.copy()
                     # Get joint positions using IK from the end effector pose
                     if self.robot_utils is None:
                         raise ImporterError(
@@ -484,9 +498,10 @@ class NeuracoreDatasetImporter(ABC):
                     )
                     self.prev_ik_solution = list(transformed_data.values())
                     for name, position in transformed_data.items():
-                        self._validate_joint_data(
-                            DataType.JOINT_POSITIONS, position, name
-                        )
+                        if name in self.curr_joint_positions:
+                            self._validate_joint_data(
+                                DataType.JOINT_POSITIONS, position, name
+                            )
                 elif format.action_space == ActionSpaceConfig.JOINT:
                     if item.name not in self.curr_joint_positions:
                         raise DataValidationError(
@@ -513,7 +528,7 @@ class NeuracoreDatasetImporter(ABC):
             raise
 
         try:
-            if ik_requested or format.action_space == ActionSpaceConfig.END_EFFECTOR:
+            if ik_requested:
                 for name, position in transformed_data.items():
                     self._log_transformed_data(
                         DataType.JOINT_POSITIONS,
@@ -521,6 +536,17 @@ class NeuracoreDatasetImporter(ABC):
                         name,
                         timestamp,
                     )
+            elif format.action_space == ActionSpaceConfig.END_EFFECTOR and (
+                absolute_action_requested or relative_action_requested
+            ):
+                for name, position in transformed_data.items():
+                    if name in self.curr_joint_positions:
+                        self._log_transformed_data(
+                            DataType.JOINT_TARGET_POSITIONS,
+                            position,
+                            name,
+                            timestamp,
+                        )
             else:
                 self._log_transformed_data(
                     data_type,
