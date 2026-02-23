@@ -1,0 +1,103 @@
+input_dataset_name: conq_hose_manipulation_dataset
+dataset_type: RLDS
+
+output_dataset:
+  name: Conq Hose Manipulation
+  tags: [mobile-manipulation, quadruped, teleoperation, hose-manipulation, spot]
+  description: "VR-teleoperated mobile hose manipulation, collected on a quadruped robot (Spot) with one arm."
+
+robot: 
+  name: spot_with_arm
+  urdf_path: "spot_with_arm.urdf"
+  override_existing: true
+
+frequency: 30.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping: 
+      - name: hand_color_image
+        source_name: hand_color_image
+      - name: frontleft_fisheye_image
+        source_name: frontleft_fisheye_image
+      - name: frontright_fisheye_image
+        source_name: frontright_fisheye_image
+
+  JOINT_POSITIONS: 
+    source: observation.state
+    mapping:
+      - name: fl.hx
+        index: 0
+      - name: fl.hy
+        index: 1
+      - name: fl.kn
+        index: 2
+      - name: fr.hx
+        index: 3
+      - name: fr.hy
+        index: 4
+      - name: fr.kn
+        index: 5
+      - name: hl.hx
+        index: 6
+      - name: hl.hy
+        index: 7
+      - name: hl.kn
+        index: 8
+      - name: hr.hx
+        index: 9
+      - name: hr.hy
+        index: 10
+      - name: hr.kn
+        index: 11
+      - name: arm0.sh0
+        index: 12
+      - name: arm0.sh1
+        index: 13
+      - name: arm0.el0
+        index: 15
+      - name: arm0.el1
+        index: 16
+      - name: arm0.wr0
+        index: 17
+      - name: arm0.wr1
+        index: 18
+
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.state
+    format:
+      invert_gripper_amount: true
+      normalize:
+        min: -1.5708
+        max: 0
+    mapping:
+      - name: gripper
+        index: 19
+  
+  PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+    source: action
+    mapping:
+      - name: gripper
+        index: 6
+
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state
+    format:
+      visual_joint_type: GRIPPER
+      normalize:
+        min: -1.5708
+        max: 0
+    mapping:
+      - name: arm0.f1x
+        index: 19
+
+  LANGUAGE:
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction
+        source_name: language_instruction
