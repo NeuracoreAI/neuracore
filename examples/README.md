@@ -17,10 +17,11 @@ pip install "neuracore[examples]"
 
 Make sure you have an account on [neuracore.com](https://neuracore.com).
 
-### Installing Bi Gym
-To run Bi Gym examples please install it using the following commands: 
+### Installing BiGym
+To run BiGym examples please install it using the following commands: 
 ```bash
 git clone https://github.com/chernyadev/bigym.git
+cd bigym
 pip install . 
 ```
 
