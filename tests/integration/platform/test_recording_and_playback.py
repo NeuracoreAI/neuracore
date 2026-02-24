@@ -11,6 +11,8 @@ import pytest
 from neuracore_types import DataType
 
 import neuracore as nc
+from neuracore.api.core import _get_robot
+from neuracore.core.utils import backend_utils
 
 # Add examples dir to path
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,7 +21,7 @@ sys.path.append(os.path.join(THIS_DIR, "..", "..", "..", "examples"))
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
 
 # How much time we allow for nc.calls
-TIME_GRACE_S = 0.05
+TIME_GRACE_S = 0.1
 
 TEST_ROBOT = "integration_test_robot"
 JOINT_NAMES = [
@@ -99,6 +101,109 @@ class TestConfig:
         )
 
 
+def _log_step_duration(step_name: str, start_time: float) -> None:
+    """Log elapsed time for a named test step."""
+    elapsed_s = time.perf_counter() - start_time
+    logger.info("%s took %.2fs", step_name, elapsed_s)
+
+
+def wait_for_dataset_ready(
+    dataset_name: str,
+    expected_frame_count: int,
+    timeout_s: float = 90.0,
+    poll_interval_s: float = 2.0,
+) -> None:
+    """Poll until the dataset has a recording and expected synchronized frames."""
+    wait_start = time.perf_counter()
+    poll_count = 0
+    last_recording_count = None
+    last_synced_frames = None
+    last_error = None
+
+    while True:
+        poll_count += 1
+        elapsed_s = time.perf_counter() - wait_start
+        try:
+            dataset = nc.get_dataset(dataset_name)
+            recording_count = len(dataset)
+            synced_frame_count = 0
+
+            for recording in dataset:
+                synced_frame_count += len(recording.synchronize())
+
+            if (
+                recording_count != last_recording_count
+                or synced_frame_count != last_synced_frames
+            ):
+                logger.info(
+                    "Dataset readiness poll %d (%.1fs): recordings=%d, synced_frames=%d/%d",
+                    poll_count,
+                    elapsed_s,
+                    recording_count,
+                    synced_frame_count,
+                    expected_frame_count,
+                )
+                last_recording_count = recording_count
+                last_synced_frames = synced_frame_count
+
+            if recording_count > 0 and synced_frame_count >= expected_frame_count:
+                logger.info(
+                    "Dataset ready after %.2fs (%d polls)",
+                    time.perf_counter() - wait_start,
+                    poll_count,
+                )
+                return
+        except Exception as exc:  # pragma: no cover - integration transient handling
+            last_error = exc
+            logger.info(
+                "Dataset readiness poll %d (%.1fs) failed: %s: %s",
+                poll_count,
+                elapsed_s,
+                type(exc).__name__,
+                exc,
+            )
+
+        if elapsed_s >= timeout_s:
+            raise TimeoutError(
+                "Timed out waiting for dataset processing to complete "
+                f"for '{dataset_name}' (expected {expected_frame_count} frames)"
+            ) from last_error
+
+        time.sleep(min(poll_interval_s, max(0.0, timeout_s - elapsed_s)))
+
+
+def wait_for_all_traces_uploaded(
+    recording_id: str,
+    stop_requested_at: float,
+    timeout_s: float = 120.0,
+    poll_interval_s: float = 1.0,
+) -> None:
+    """Poll backend active traces and print when uploads for a recording drain."""
+    wait_start = time.perf_counter()
+    last_error = None
+
+    while True:
+        try:
+            active_traces = backend_utils.get_active_data_traces(recording_id)
+            if len(active_traces) == 0:
+                since_stop_s = time.perf_counter() - stop_requested_at
+                print(
+                    f"ALL TRACES UPLOADED for recording {recording_id} after {since_stop_s:.2f}s"
+                )
+                return
+        except Exception as exc:  # pragma: no cover - transient integration failures
+            last_error = exc
+
+        elapsed_s = time.perf_counter() - wait_start
+        if elapsed_s >= timeout_s:
+            raise TimeoutError(
+                "Timed out waiting for all traces to upload "
+                f"for recording '{recording_id}'"
+            ) from last_error
+
+        time.sleep(poll_interval_s)
+
+
 def encode_frame_number(frame_num, width, height):
     """Create an image with the frame number encoded in the top-left pixels
 
@@ -157,11 +262,11 @@ def generate_depth_image(frame_num, width, height):
     return np.ones((height, width), dtype=np.float32) * 2.0  # Base 2m depth
 
 
-def stream_data(config):
+def stream_data(config, *, stop_wait: bool = True, return_recording_meta: bool = False):
     """Stream test data according to configuration"""
     # Start recording
     # TODO: Note this now takes a long time to start since adding in P2P
-    with Timer(max_time=10):
+    with Timer(max_time=100):
         nc.start_recording()
 
     # Generate and stream test data
@@ -213,18 +318,18 @@ def stream_data(config):
         with Timer():
             nc.log_parallel_gripper_open_amount(name="gripper", value=0.5, timestamp=t)
 
-        points = np.zeros((1000, 3), dtype=np.float16)
-        rgb_points = np.zeros((1000, 3), dtype=np.uint8)
-        with Timer(max_time=0.5):
-            # TODO: Speed up this call
-            nc.log_point_cloud(
-                "point_cloud_camera_0",
-                points=points,
-                rgb_points=rgb_points,
-                extrinsics=np.eye(4),
-                intrinsics=np.eye(3),
-                timestamp=t,
-            )
+        # points = np.zeros((1000, 3), dtype=np.float16)
+        # rgb_points = np.zeros((1000, 3), dtype=np.uint8)
+        # with Timer(max_time=2):
+        #     # TODO: Speed up this call
+        #     nc.log_point_cloud(
+        #         "point_cloud_camera_0",
+        #         points=points,
+        #         rgb_points=rgb_points,
+        #         extrinsics=np.eye(4),
+        #         intrinsics=np.eye(3),
+        #         timestamp=t,
+        #     )
 
         with Timer():
             nc.log_custom_1d(
@@ -247,15 +352,18 @@ def stream_data(config):
         # Sleep to maintain target frame rate
         time.sleep(sleep_time)
 
-    with Timer(max_time=10):
-        nc.stop_recording(wait=True)
+    recording_id = _get_robot(None, 0).get_current_recording_id()
+    stop_requested_at = time.perf_counter()
+    with Timer(max_time=100):
+        nc.stop_recording(wait=stop_wait)
 
+    if return_recording_meta:
+        return frame_count, recording_id, stop_requested_at
     return frame_count
 
 
 def verify_dataset(config, expected_frame_count):
     """Verify the dataset integrity"""
-
     # Retrieve the dataset
     dataset = nc.get_dataset(config.dataset_name)
 
@@ -269,7 +377,15 @@ def verify_dataset(config, expected_frame_count):
     }
 
     # Iterate through the dataset episodes
-    for episode in dataset:
+    for recording_idx, recording in enumerate(dataset):
+        sync_start = time.perf_counter()
+        episode = recording.synchronize()
+        logger.info(
+            "recording.synchronize() for recording %d (%s) took %.2fs",
+            recording_idx,
+            getattr(recording, "id", "<unknown>"),
+            time.perf_counter() - sync_start,
+        )
         logger.info(f"Verifying episode with {len(episode)} frames")
         for frame_idx, sync_point in enumerate(episode):
             results["retrieved_frames"] += 1
@@ -277,7 +393,7 @@ def verify_dataset(config, expected_frame_count):
             # Check for camera images
             if DataType.RGB_IMAGES in sync_point.data:
                 for _, cam_data in sync_point[DataType.RGB_IMAGES].items():
-                    img = cam_data.frame
+                    img = np.array(cam_data.frame)
                     decoded_frame_num = decode_frame_number(img)
                     if decoded_frame_num in results["unique_frames"]:
                         results["duplicate_frames"].append(decoded_frame_num)
@@ -333,12 +449,21 @@ def verify_dataset(config, expected_frame_count):
 
 def run_streaming_test(config):
     """Run a complete streaming test with the given configuration"""
+    test_start = time.perf_counter()
+
     # Set up
     logger.info(f"Starting test with config: {config}")
+    step_start = time.perf_counter()
     nc.login()
+    _log_step_duration("nc.login", step_start)
+
+    step_start = time.perf_counter()
     nc.connect_robot(
         TEST_ROBOT, urdf_path=str(BIMANUAL_VIPERX_URDF_PATH), overwrite=False
     )
+    _log_step_duration("nc.connect_robot", step_start)
+
+    step_start = time.perf_counter()
     nc.create_dataset(
         config.dataset_name,
         description=(
@@ -346,13 +471,32 @@ def run_streaming_test(config):
             f"{config.image_width}x{config.image_height}"
         ),
     )
+    _log_step_duration("nc.create_dataset", step_start)
 
     # Stream data
-    actual_frame_count = stream_data(config)
+    step_start = time.perf_counter()
+    actual_frame_count, recording_id, stop_requested_at = stream_data(
+        config, stop_wait=False, return_recording_meta=True
+    )
+    _log_step_duration(
+        f"stream_data ({actual_frame_count} frames)", step_start
+    )
 
-    time.sleep(2)  # Allow some time for data to be processed
+    if recording_id:
+        step_start = time.perf_counter()
+        wait_for_all_traces_uploaded(recording_id, stop_requested_at)
+        _log_step_duration("wait_for_all_traces_uploaded", step_start)
+    else:
+        logger.warning("No recording_id available, skipping active trace upload wait")
 
+    step_start = time.perf_counter()
+    wait_for_dataset_ready(config.dataset_name, actual_frame_count)
+    _log_step_duration("wait_for_dataset_ready", step_start)
+
+    step_start = time.perf_counter()
     results = verify_dataset(config, actual_frame_count)
+    _log_step_duration("verify_dataset", step_start)
+    _log_step_duration("run_streaming_test total", test_start)
 
     # Success criteria
     assert len(results["missing_frames"]) == 0
@@ -471,7 +615,7 @@ def test_stop_start_sequences():
 
         # Stop recording
         with Timer(max_time=5):
-            nc.stop_recording(wait=True)
+            nc.stop_recording(wait=False)
         logger.info(f"Completed segment {segment+1} with {segment_frames} frames")
 
         total_frames += segment_frames

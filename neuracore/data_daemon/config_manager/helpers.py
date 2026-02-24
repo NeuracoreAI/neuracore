@@ -103,9 +103,12 @@ def build_default_daemon_config(
     storage_limit = calculate_storage_limit(record_dir, storage_free_fraction)
 
     bandwidth_limit = int(storage_limit / (target_drain_hours * SECONDS_PER_HOUR))
+
+
     min_bw = int(min_bandwidth_mib_s * BYTES_PER_MIB)
     max_bw = int(max_bandwidth_mib_s * BYTES_PER_MIB)
     bandwidth_limit = max(min_bw, min(bandwidth_limit, max_bw))
+    print(f"Bandwidth limit: {bandwidth_limit / BYTES_PER_MIB:.2f} MiB/s")
 
     return DaemonConfig(
         storage_limit=storage_limit,
