@@ -52,17 +52,10 @@ class CloudTrainingLogger(TrainingLogger):
             value: Scalar value to log.
             step: Training step.
         """
+        self._store_scalar(name, value, step)
+
+    def _store_scalar(self, name: str, value: float, step: int) -> None:
         self._store.setdefault(name, {})[step] = value
-
-    def log_scalars(self, scalars: dict[str, float], step: int) -> None:
-        """Log multiple scalar metrics at once.
-
-        Args:
-            scalars: Dictionary of metric name -> value.
-            step: Training step.
-        """
-        for name, value in scalars.items():
-            self._store.setdefault(name, {})[step] = value
 
     def log_image(
         self,

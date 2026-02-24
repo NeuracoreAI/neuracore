@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import requests
 import torch
@@ -13,11 +13,12 @@ from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.ml.utils.nc_archive import create_nc_archive
+from neuracore.ml.utils.upload_storage_mixin import UploadStorageMixin
 
 logger = logging.getLogger(__name__)
 
 
-class TrainingStorageHandler:
+class TrainingStorageHandler(UploadStorageMixin):
     """Handles storage operations for both local and GCS."""
 
     def __init__(
@@ -243,6 +244,18 @@ class TrainingStorageHandler:
                     logger.error(
                         f"Failed to save artifact {file_path} to cloud: {response.text}"
                     )
+
+    def _execute_upload(
+        self,
+        upload_url: str,
+        data: bytes | IO[bytes],
+        content_type: str,
+    ) -> requests.Response:
+        return self._put_request(
+            upload_url,
+            data=data,
+            headers={"Content-Type": content_type},
+        )
 
     def update_training_metadata(
         self, epoch: int, step: int, error: str | None = None

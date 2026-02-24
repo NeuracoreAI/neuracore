@@ -24,7 +24,6 @@ class TrainingLogger(ABC):
         """
         pass
 
-    @abstractmethod
     def log_scalars(self, scalars: dict[str, float], step: int) -> None:
         """Log multiple scalar metrics.
 
@@ -33,7 +32,8 @@ class TrainingLogger(ABC):
                 names and values are the metric values.
             step: Training step.
         """
-        pass
+        for name, value in scalars.items():
+            self.log_scalar(name, value, step)
 
     @abstractmethod
     def log_image(
