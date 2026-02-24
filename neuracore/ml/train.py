@@ -38,6 +38,7 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
 )
 from neuracore.ml.logging.cloud_log_streamer import CloudLogStreamer
 from neuracore.ml.logging.cloud_training_logger import CloudTrainingLogger
+from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 from neuracore.ml.logging.tensorboard_training_logger import TensorboardTrainingLogger
 from neuracore.ml.trainers.batch_autotuner import find_optimal_batch_size
 from neuracore.ml.trainers.distributed_trainer import (
@@ -277,20 +278,20 @@ def setup_logging(output_dir: str, rank: int = 0) -> None:
     output_path.mkdir(parents=True, exist_ok=True)
 
     if rank == 0:
-        handlers: list[logging.Handler] = [
-            logging.FileHandler(output_path / "train.log")
-        ]
+        file_handler = logging.FileHandler(output_path / "train.log")
+        file_handler.setFormatter(JsonLineLogFormatter())
+        handlers: list[logging.Handler] = [file_handler]
         logging.basicConfig(
             level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
             handlers=handlers,
             force=True,
         )
     else:
-        handlers = [logging.FileHandler(output_path / f"train-rank{rank}.log")]
+        file_handler = logging.FileHandler(output_path / f"train-rank{rank}.log")
+        file_handler.setFormatter(JsonLineLogFormatter())
+        handlers = [file_handler]
         logging.basicConfig(
             level=logging.INFO,
-            format=f"[Rank {rank}] %(asctime)s - %(levelname)s - %(message)s",
             handlers=handlers,
             force=True,
         )
