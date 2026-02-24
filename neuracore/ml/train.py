@@ -36,6 +36,7 @@ from neuracore.ml.datasets.pytorch_single_sample_dataset import SingleSampleData
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
+from neuracore.ml.logging.cloud_log_streamer import CloudLogStreamer
 from neuracore.ml.logging.cloud_training_logger import CloudTrainingLogger
 from neuracore.ml.logging.tensorboard_training_logger import TensorboardTrainingLogger
 from neuracore.ml.trainers.batch_autotuner import find_optimal_batch_size
@@ -252,23 +253,26 @@ def _save_local_training_metadata(
 
 def setup_logging(output_dir: str, rank: int = 0) -> None:
     """Setup logging configuration."""
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
     if rank == 0:
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
+        handlers: list[logging.Handler] = [
+            logging.FileHandler(output_path / "train.log")
+        ]
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(levelname)s - %(message)s",
-            handlers=[
-                logging.StreamHandler(),
-                logging.FileHandler(output_path / "train.log"),
-            ],
+            handlers=handlers,
+            force=True,
         )
     else:
-        # For other ranks, only log to console
+        handlers = [logging.FileHandler(output_path / f"train-rank{rank}.log")]
         logging.basicConfig(
             level=logging.INFO,
             format=f"[Rank {rank}] %(asctime)s - %(levelname)s - %(message)s",
-            handlers=[logging.StreamHandler()],
+            handlers=handlers,
+            force=True,
         )
 
 
@@ -390,6 +394,8 @@ def run_training(
     device: torch.device | None = None,
 ) -> None:
     """Run the training process for a single GPU."""
+    log_streamer: CloudLogStreamer | None = None
+
     # Setup for distributed training
     if world_size > 1:
         nc.login()  # Ensure Neuracore is logged in on this process
@@ -503,6 +509,16 @@ def run_training(
             algorithm_config=algorithm_config,
         )
 
+        # Only start log streamer on rank 0 to avoid multiple processes
+        # uploading the same logs
+        # and only if this is a cloud run (training_id is not None)
+        if rank == 0 and cfg.training_id is not None:
+            log_streamer = CloudLogStreamer(
+                storage_handler=training_storage_handler,
+                output_dir=Path(cfg.local_output_dir),
+            )
+            log_streamer.start()
+
         logger.info(
             f"Created model with "
             f"{sum(p.numel() for p in model.parameters()):,} parameters"
@@ -554,6 +570,8 @@ def run_training(
             raise
 
     finally:
+        if log_streamer is not None:
+            log_streamer.close()
         # Clean up distributed process group
         if world_size > 1:
             cleanup_distributed()
