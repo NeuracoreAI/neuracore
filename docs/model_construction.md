@@ -25,6 +25,9 @@ This shift is subtle but fundamental. The model architecture no longer depends o
 > [!IMPORTANT]
 > **Model shape is spec-driven, not robot-driven.** The training spec defines the fixed tensor layout used for both training and inference.
 
+
+![Cross Embodiment diagram](assets/cross_embodiment.png)
+
 ## Starting a Training Job
 
 When launching a training job in Neuracore, you define:
@@ -137,26 +140,26 @@ For clarity, input and output specs are identical here. In practice, output spec
 input_cross_embodiment_description: CrossEmbodimentDescription = {
     "franka": {
         JOINT_POSITIONS: {
-            0: "panda_joint_1",
-            1: "panda_joint_2",
-            2: "panda_joint_3",
-            3: "panda_joint_4",
-            4: "panda_joint_5",
-            5: "panda_joint_6",
-            6: "panda_wrist_joint",
+            0: "f_base",
+            1: "f_joint_1",
+            2: "f_joint_2",
+            3: "f_joint_3",
+            4: "f_joint_4",
+            5: "f_joint_5",
+            6: "f_wrist",
         },
         RGB_IMAGES: {
-            0: "franka_wrist_camera",
-            1: "franka_overhead_camera",
+            0: "f_wrist_camera",
+            1: "f_overhead_camera",
         },
     },
     "ur5": {
         JOINT_POSITIONS: {
-            0: "ur5_shoulder_pan_joint",
-            1: "ur5_shoulder_lift_joint",
-            2: "ur5_elbow_joint",
-            3: "ur5_pitch",
-            4: "ur5_roll",
+            0: "ur5_base",
+            1: "ur5_1",
+            2: "ur5_2",
+            3: "ur5_3",
+            4: "ur5_4",
             #  Missing Index 5 to make sure wrist is at index 6
             6: "ur5_wrist",
         },
@@ -206,16 +209,16 @@ Reading the table:
 - Each column is one joint-position slot
 - Missing joints are zero-padded
 
-| Recording ID | Joint ID 0             | Joint ID 1              | Joint ID 2      | Joint ID 3        | Joint ID 4        | Joint ID 5        | Joint ID 6   |
-| ------------ | ---------------------- | ----------------------- | --------------- | ----------------- | ----------------- | ----------------- | ------------ |
-| 1            | panda_joint_1          | panda_joint_2           | panda_joint_3   | panda_joint_4     | panda_joint_5     | panda_joint_6     | panda_wrist_joint |
-| 2            | ur5_shoulder_pan_joint | ur5_shoulder_lift_joint | ur5_elbow_joint | ur5_pitch         | ur5_roll          | **0**             | ur5_wrist    |
-| 3            | panda_joint_1          | panda_joint_2           | panda_joint_3   | panda_joint_4     | panda_joint_5     | panda_joint_6     | panda_wrist_joint |
-| 4            | panda_joint_1          | panda_joint_2           | panda_joint_3   | panda_joint_4     | panda_joint_5     | panda_joint_6     | panda_wrist_joint |
-| 5            | panda_joint_1          | panda_joint_2           | panda_joint_3   | panda_joint_4     | panda_joint_5     | panda_joint_6     | panda_wrist_joint |
-| 6            | ur5_shoulder_pan_joint | ur5_shoulder_lift_joint | ur5_elbow_joint | ur5_pitch         | ur5_roll          | **0**             | ur5_wrist    |
-| 7            | ur5_shoulder_pan_joint | ur5_shoulder_lift_joint | ur5_elbow_joint | ur5_pitch         | ur5_roll          | **0**             | ur5_wrist    |
-| 8            | ur5_shoulder_pan_joint | ur5_shoulder_lift_joint | ur5_elbow_joint | ur5_pitch         | ur5_roll          | **0**             | ur5_wrist    |
+| Recording ID | Joint ID 0 | Joint ID 1 | Joint ID 2 | Joint ID 3 | Joint ID 4 | Joint ID 5 | Joint ID 6 |
+| ------------ | ---------- | ---------- | ---------- | ---------- | ---------- | ---------- | ---------- |
+| 1            | f_base     | f_joint_1  | f_joint_2  | f_joint_3  | f_joint_4  | f_joint_5  | f_wrist    |
+| 2            | ur5_base   | ur5_1      | ur5_2      | ur5_3      | ur5_4      | **0**      | ur5_wrist  |
+| 3            | f_base     | f_joint_1  | f_joint_2  | f_joint_3  | f_joint_4  | f_joint_5  | f_wrist    |
+| 4            | f_base     | f_joint_1  | f_joint_2  | f_joint_3  | f_joint_4  | f_joint_5  | f_wrist    |
+| 5            | f_base     | f_joint_1  | f_joint_2  | f_joint_3  | f_joint_4  | f_joint_5  | f_wrist    |
+| 6            | ur5_base   | ur5_1      | ur5_2      | ur5_3      | ur5_4      | **0**      | ur5_wrist  |
+| 7            | ur5_base   | ur5_1      | ur5_2      | ur5_3      | ur5_4      | **0**      | ur5_wrist  |
+| 8            | ur5_base   | ur5_1      | ur5_2      | ur5_3      | ur5_4      | **0**      | ur5_wrist  |
 
 The same strategy applies to other data types, including image channels.
 
@@ -248,20 +251,18 @@ For example, if you trained on `franka` and `ur5` data and want inference on `ur
 
 ```python
 model_input_embodiment_description: EmbodimentDescription = {
-    "ur5": {
-        JOINT_POSITIONS: {
-            0: "ur5_shoulder_pan_joint",
-            1: "ur5_shoulder_lift_joint",
-            2: "ur5_elbow_joint",
-            3: "ur5_pitch",
-            4: "ur5_roll",
-            #  Missing Index 5 to make sure wrist is at index 6
-            6: "ur5_wrist",
-        },
-        RGB_IMAGES: {
-            # Index 0 is missing as there is no wrist camera
-            1: "ur5_overhead_camera", 
-        },
+    JOINT_POSITIONS: {
+        0: "ur5_base",
+        1: "ur5_1",
+        2: "ur5_2",
+        3: "ur5_3",
+        4: "ur5_4",
+        #  Missing Index 5 to make sure wrist is at index 6
+        6: "ur5_wrist",
+    },
+    RGB_IMAGES: {
+        # Index 0 is missing as there is no wrist camera
+        1: "ur5_overhead_camera", 
     },
 }
 
@@ -276,20 +277,20 @@ Suppose a new inference-time robot `so100` (SO-100, 5 joints) has:
 
 Since this robot has fewer joints than both Franka (7) and UR5 (6), we semantically align what exists and leave the remaining indices zero-padded:
 
-| Robot  | Joint ID 0             | Joint ID 1              | Joint ID 2       | Joint ID 3         | Joint ID 4         | Joint ID 5         | Joint ID 6   |
-| ------ | ---------------------- | ----------------------- | ---------------- | ------------------ | ------------------ | ------------------ | ------------ |
-| franka | panda_joint_1          | panda_joint_2           | panda_joint_3    | panda_joint_4      | panda_joint_5      | panda_joint_6      | panda_joint_7 |
-| ur5    | ur5_shoulder_pan_joint | ur5_shoulder_lift_joint | ur5_elbow_joint  | ur5_wrist_1_joint  | ur5_wrist_2_joint  | ur5_wrist_3_joint  | **0**        |
-| so100  | so100_joint_1          | so100_joint_2           | so100_joint_3    | so100_joint_4      |  **0**     | **0**              |   so100_joint_5      |
+| Robot  | Joint ID 0 | Joint ID 1 | Joint ID 2 | Joint ID 3 | Joint ID 4 | Joint ID 5 | Joint ID 6 |
+| ------ | ---------- | ---------- | ---------- | ---------- | ---------- | ---------- | ---------- |
+| franka | f_base     | f_joint_1  | f_joint_2  | f_joint_3  | f_joint_4  | f_joint_5  | f_wrist    |
+| ur5    | ur5_base   | ur5_1      | ur5_2      | ur5_3      | ur5_4      | **0**      | ur5_wrist  |
+| so100  | joint_1    | joint_2    | joint_3    | joint_4    | **0**      | **0**      | wrist    |
 
 ```python {5,8}
 so100_embodiment_description: EmbodimentDescription = {
     JOINT_POSITIONS: {
-        0: "so100_joint_1",
-        1: "so100_joint_2",
-        2: "so100_joint_3",
-        3: "so100_joint_4",
-        6: "so100_joint_5",
+        0: "joint_1",
+        1: "joint_2",
+        2: "joint_3",
+        3: "joint_4",
+        6: "wrist",
     },
     RGB_IMAGES: {
         1: "so100_overhead_camera",
