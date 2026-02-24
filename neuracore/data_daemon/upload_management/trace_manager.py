@@ -51,11 +51,12 @@ class TraceManager(ABC):
         try:
             loop = asyncio.get_running_loop()
             auth = get_auth()
-            org_id = await loop.run_in_executor(None, get_current_org)
+            org_id, headers = await asyncio.gather(
+                loop.run_in_executor(None, get_current_org),
+                loop.run_in_executor(None, auth.get_headers),
+            )
 
             for attempt in range(2):
-                headers = await loop.run_in_executor(None, auth.get_headers)
-
                 async with self.client_session.post(
                     f"{API_URL}/org/{org_id}/recording/{recording_id}/traces",
                     json={"data_type": data_type.value, "trace_id": str(trace_id)},
@@ -65,6 +66,7 @@ class TraceManager(ABC):
                     if response.status == 401 and attempt == 0:
                         logger.info("Access token expired, refreshing token")
                         await loop.run_in_executor(None, auth.login)
+                        headers = await loop.run_in_executor(None, auth.get_headers)
                         continue
 
                     if response.status >= 400:
@@ -116,11 +118,12 @@ class TraceManager(ABC):
         try:
             loop = asyncio.get_running_loop()
             auth = get_auth()
-            org_id = await loop.run_in_executor(None, get_current_org)
+            org_id, headers = await asyncio.gather(
+                loop.run_in_executor(None, get_current_org),
+                loop.run_in_executor(None, auth.get_headers),
+            )
 
             for attempt in range(2):
-                headers = await loop.run_in_executor(None, auth.get_headers)
-
                 async with self.client_session.put(
                     f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/{trace_id}",
                     json=data_trace_payload,
@@ -130,6 +133,7 @@ class TraceManager(ABC):
                     if response.status == 401 and attempt == 0:
                         logger.info("Access token expired, refreshing token")
                         await loop.run_in_executor(None, auth.login)
+                        headers = await loop.run_in_executor(None, auth.get_headers)
                         continue
 
                     if response.status >= 400:
