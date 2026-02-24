@@ -1,0 +1,71 @@
+input_dataset_name: cmu_play_fusion_dataset
+dataset_type: RLDS
+
+output_dataset:
+  name: CMU PlayFusion
+  tags: [manipulation, teleoperation, language-annotated, kitchen, in-the-wild]
+  description: "Language-annotated play data collected via teleoperation across 7 environments including 3 real-world settings: grill/BBQ (toasters, pans), table setting (plates, cups, utensils), and dishwashing (sinks, dishwashers) using a 7-DOF arm with gripper."
+
+robot: 
+  name: franka_panda
+  urdf_path: "panda.urdf"
+  override_existing: true
+
+frequency: 30.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping: 
+      - name: image
+        source_name: image
+
+  JOINT_POSITIONS: 
+    source: observation.state
+    mapping:
+      - name: panda_joint1
+      - name: panda_joint2
+      - name: panda_joint3
+      - name: panda_joint4
+      - name: panda_joint5
+      - name: panda_joint6
+      - name: panda_joint7
+
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.state
+    format:
+      normalize:
+        min: 0
+        max: 0.085
+    mapping:
+      - name: gripper
+        index: 7
+  
+  PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+    source: action
+    mapping:
+      - name: gripper
+        index: 7
+
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state
+    format:
+      visual_joint_type: GRIPPER
+      normalize:
+        min: 0
+        max: 0.085
+    mapping:
+      - name: panda_finger_joint1
+        index: 7
+      - name: panda_finger_joint2
+        index: 7
+
+  LANGUAGE:
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction
+        source_name: language_instruction
