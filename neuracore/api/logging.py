@@ -22,6 +22,7 @@ from neuracore_types import (
     PointCloudData,
     PoseData,
     RGBCameraData,
+    RobotInstanceIdentifier,
 )
 from neuracore_types.utils import validate_safe_name
 
@@ -40,6 +41,7 @@ from neuracore.core.streaming.data_stream import (
 from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
+from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.depth_utils import MAX_DEPTH
 
 logger = logging.getLogger(__name__)
@@ -119,12 +121,24 @@ def start_stream(robot: Robot, data_stream: DataStream) -> None:
     """
     current_recording = robot.get_current_recording_id()
     if current_recording is not None and not data_stream.is_recording():
+        instance_key = RobotInstanceIdentifier(
+            robot_id=robot.id,
+            robot_instance=robot.instance,
+        )
+        dataset_id = get_recording_state_manager().active_dataset_ids.get(instance_key)
+        if dataset_id is None:
+            dataset_id = GlobalSingleton()._active_dataset_id
+            logger.debug(
+                "start_stream: falling back to global dataset_id=%s recording_id=%s",
+                dataset_id,
+                current_recording,
+            )
         context = DataRecordingContext(
             recording_id=current_recording,
             robot_id=robot.id,
             robot_name=robot.name,
             robot_instance=robot.instance,
-            dataset_id=GlobalSingleton()._active_dataset_id,
+            dataset_id=dataset_id,
             dataset_name=None,
         )
         data_stream.start_recording(context)
