@@ -8,7 +8,6 @@ import asyncio
 import base64
 import hashlib
 import logging
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +15,7 @@ from typing import Any
 
 import aiofiles
 import aiohttp
+from aiolimiter import AsyncLimiter
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -63,7 +63,7 @@ class ResumableFileUploader:
         client_session: aiohttp.ClientSession,
         bytes_uploaded: int = 0,
         progress_callback: Callable[[int], Awaitable[None]] | None = None,
-        bandwidth_limit: int | None = None,
+        bandwidth_limiter: AsyncLimiter | None = None,
     ) -> None:
         """Initialize the file uploader.
 
@@ -75,7 +75,7 @@ class ResumableFileUploader:
             client_session: aiohttp ClientSession for HTTP requests
             bytes_uploaded: Starting offset for resume
             progress_callback: Called after each chunk to report progress
-            bandwidth_limit: bandwidth limit in bytes/second
+            bandwidth_limiter: Shared token-bucket limiter; None means unlimited.
         """
         self._recording_id = recording_id
         self._filepath = filepath
@@ -84,7 +84,7 @@ class ResumableFileUploader:
         self._session = client_session
         self._bytes_uploaded = bytes_uploaded
         self._progress_callback = progress_callback
-        self._bandwidth_limit = bandwidth_limit
+        self._bandwidth_limiter = bandwidth_limiter
 
         self._session_uri: str | None = None
         self._total_bytes = 0
@@ -108,8 +108,10 @@ class ResumableFileUploader:
 
         loop = asyncio.get_running_loop()
         auth = get_auth()
-        headers = await loop.run_in_executor(None, auth.get_headers)
-        org_id = await loop.run_in_executor(None, get_current_org)
+        headers, org_id = await asyncio.gather(
+            loop.run_in_executor(None, auth.get_headers),
+            loop.run_in_executor(None, get_current_org),
+        )
 
         for attempt in range(2):
 
@@ -218,7 +220,14 @@ class ResumableFileUploader:
                     if not chunk:
                         break
 
-                    chunk_start_time = time.monotonic()
+                    if self._bandwidth_limiter is not None:
+                        remaining = len(chunk)
+                        max_acquire = int(self._bandwidth_limiter.max_rate)
+                        while remaining > 0:
+                            await self._bandwidth_limiter.acquire(
+                                min(remaining, max_acquire)
+                            )
+                            remaining -= max_acquire
 
                     chunk_start = self._bytes_uploaded
                     chunk_end = chunk_start + len(chunk) - 1
@@ -236,9 +245,6 @@ class ResumableFileUploader:
 
                     if self._progress_callback:
                         await self._progress_callback(chunk_size)
-
-                    elapsed = time.monotonic() - chunk_start_time
-                    await self._apply_bandwidth_limit(chunk_size, elapsed)
 
                     logger.debug(
                         f"Uploaded chunk: {self._bytes_uploaded}/"
@@ -384,19 +390,6 @@ class ResumableFileUploader:
         """Sleep with exponential backoff, capped at MAX_BACKOFF_SECONDS."""
         delay = min(2**attempt, self.MAX_BACKOFF_SECONDS)
         await asyncio.sleep(delay)
-
-    async def _apply_bandwidth_limit(self, chunk_size: int, elapsed: float) -> None:
-        """Sleep if chunk uploaded faster than bandwidth limit allows.
-
-        Args:
-            chunk_size: Number of bytes uploaded in this chunk.
-            elapsed: Time in seconds taken to upload the chunk.
-        """
-        if self._bandwidth_limit is None or self._bandwidth_limit <= 0:
-            return
-        expected = chunk_size / self._bandwidth_limit
-        if elapsed < expected:
-            await asyncio.sleep(expected - elapsed)
 
     async def _is_signed_url_expired(self, response: aiohttp.ClientResponse) -> bool:
         """Detect signed URL expiration from response headers/body."""

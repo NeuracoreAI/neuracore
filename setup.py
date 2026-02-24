@@ -55,6 +55,7 @@ setup(
         "aiosqlite>=0.19.0",
         "aiohttp>=3.9.0",
         "aiofiles>=23.0.0",
+        "aiolimiter",
         "pyee==13.0.0",
     ],
     extras_require={
