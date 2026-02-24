@@ -1,0 +1,88 @@
+input_dataset_name: utaustin_mutex
+
+output_dataset:
+  name: MUTEX
+  tags: [panda, manipulation, real-world, multimodal, austin]
+  description: "50 real-world table-top tasks with Franka Panda robot such as putting bread on a plate taking out a tray from the oven"
+
+robot: 
+  name: franka_panda
+  urdf_path: "panda.urdf"
+  override_existing: true
+
+frequency: 20.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: BGR
+    mapping: 
+      - name: image
+        source_name: image
+      - name: wrist_image
+        source_name: wrist_image
+
+  JOINT_POSITIONS:
+    source: observation.state
+    units: RADIANS
+    mapping:
+      - name: panda_joint1
+      - name: panda_joint2
+      - name: panda_joint3
+      - name: panda_joint4
+      - name: panda_joint5
+      - name: panda_joint6
+      - name: panda_joint7
+
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.state
+    format:
+      normalize:
+        min: 0.0
+        max: 0.077
+    mapping:
+      - name: gripper
+        index: 7
+  
+  PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+    source: action
+    format:
+      invert_gripper_amount: true
+      normalize:
+        min: -1.0
+        max: 1.0
+    mapping:
+      - name: gripper
+        index: 6
+
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state
+    format:
+      visual_joint_type: GRIPPER
+      normalize:
+        min: 0.0
+        max: 0.077
+    mapping:
+      - name: panda_finger_joint1
+        index: 7
+      - name: panda_finger_joint2
+        index: 7
+
+  END_EFFECTOR_POSES:
+    source: observation.state
+    format:
+      pose_type: MATRIX
+    mapping:
+      - name: end_effector_pose
+        index_range:
+          start: 8
+          end: 24
+
+  LANGUAGE:
+    source: language_instruction
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction
