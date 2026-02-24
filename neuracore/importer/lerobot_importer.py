@@ -6,6 +6,7 @@ import time
 import traceback
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
+from typing import Any
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from neuracore_types import DataType
@@ -220,38 +221,86 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             return (ds[i] for i in indices), total_steps
         return (ep_rows[i] for i in range(total_steps)), total_steps
 
+    def _extract_source_data(
+        self,
+        source: Any,
+        item: Any,
+        import_source_path: str,
+        data_type: DataType,
+    ) -> Any:
+        if not import_source_path:
+            if item.source_name is not None:
+                source_data = source[item.source_name]
+            else:
+                source_data = source
+        else:
+            if item.source_name is not None:
+                source_data = source[".".join([import_source_path, item.source_name])]
+            else:
+                source_data = source[import_source_path]
+
+        try:
+
+            if item.index is not None:
+                source_data = source_data[item.index]
+            elif item.index_range is not None:
+                source_data = source_data[item.index_range.start : item.index_range.end]
+        except Exception as exc:
+            shape_str = (
+                f" with shape {source_data.shape}"
+                if hasattr(source_data, "shape")
+                else ""
+            )
+            raise ImportError(
+                f"Cannot index or slice for '{data_type.value}'. "
+                f"Source path '{import_source_path}' resolved to a "
+                f"{type(source_data)}{shape_str}, not an indexable tensor. "
+                f"Check your dataset config. {exc}"
+            )
+
+        return source_data
+
+    def _convert_source_data(
+        self,
+        source_data: Any,
+        data_type: DataType,
+        language_type: LanguageConfig,
+        item_name: str | None,
+        import_source_path: str,
+    ) -> Any:
+        if data_type == DataType.LANGUAGE and language_type == LanguageConfig.STRING:
+            return source_data
+
+        try:
+            return source_data.numpy()
+        except Exception as exc:
+            suffix = f".{item_name}" if item_name else ""
+            raise ImportError(
+                f"Failed to convert data to numpy array for "
+                f"{data_type.value}{suffix}: {exc}."
+            )
+
     def _record_step(self, step_data: dict, timestamp: float) -> None:
         """Record a single step to Neuracore."""
         for data_type, import_config in self.dataset_config.data_import_config.items():
             # Get the data based on the source path
-            source_path = import_config.source
 
             for item in import_config.mapping:
-                if not source_path:
-                    if item.source_name is not None:
-                        source_data = step_data[item.source_name]
-                    else:
-                        source_data = step_data
-                else:
-                    if item.source_name is not None:
-                        source_data = step_data[
-                            ".".join([source_path, item.source_name])
-                        ]
-                    else:
-                        source_data = step_data[source_path]
 
-                if item.index is not None:
-                    source_data = source_data[item.index]
-                elif item.index_range is not None:
-                    source_data = source_data[
-                        item.index_range.start : item.index_range.end
-                    ]
+                source_data = self._extract_source_data(
+                    source=step_data,
+                    item=item,
+                    import_source_path=import_config.source,
+                    data_type=data_type,
+                )
 
-                if not (
-                    data_type == DataType.LANGUAGE
-                    and import_config.format.language_type == LanguageConfig.STRING
-                ):
-                    source_data = source_data.numpy()
+                source_data = self._convert_source_data(
+                    source_data=source_data,
+                    data_type=data_type,
+                    language_type=import_config.format.language_type,
+                    item_name=item.name,
+                    import_source_path=import_config.source,
+                )
 
                 self._log_data(
                     data_type, source_data, item, import_config.format, timestamp
