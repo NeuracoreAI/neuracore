@@ -29,8 +29,7 @@ jobs:
 
             console.log(`PR #${pr.number}: ${sourceBranch} -> ${targetBranch}`);
 
-            // Helper: create/update a single bot comment instead of spamming
-            async function upsertComment(body) {
+            async function findExistingComment() {
               const { data: comments } = await github.rest.issues.listComments({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -38,12 +37,14 @@ jobs:
                 per_page: 100,
               });
 
-              const existing = comments.find(c =>
+              return comments.find(c =>
                 c.user?.type === 'Bot' &&
                 typeof c.body === 'string' &&
                 c.body.includes(marker)
               );
+            }
 
+            async function upsertComment(body, existing) {
               if (existing) {
                 await github.rest.issues.updateComment({
                   owner: context.repo.owner,
@@ -60,6 +61,7 @@ jobs:
                 });
               }
             }
+            const existingComment = await findExistingComment();
 
             // RULE: Only enforce when targeting main
             if (targetBranch === 'main' && !allowedSourceForMain.includes(sourceBranch)) {
@@ -76,7 +78,7 @@ jobs:
             1. Merge your feature branch into \`develop\`
             2. Once ready for release, create a PR from \`develop\` to \`main\``;
 
-              await upsertComment(errorMessage);
+              await upsertComment(errorMessage, existingComment);
               core.setFailed(errorMessage);
               return;
             }
@@ -87,10 +89,10 @@ jobs:
 
             - Source: \`${sourceBranch}\`
             - Target: \`${targetBranch}\``;
-
             // Optional: update comment to green status when user retargets to develop
-            await upsertComment(okMessage);
-
+            if (existingComment) {
+              await upsertComment(okMessage, existingComment);
+            }
             core.summary.addRaw(okMessage);
             await core.summary.write();
             console.log('✅ Source branch is valid');
