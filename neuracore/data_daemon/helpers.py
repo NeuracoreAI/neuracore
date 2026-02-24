@@ -1,7 +1,10 @@
 """Helper functions for the data daemon."""
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
+
+from neuracore.data_daemon.const import DEFAULT_DAEMON_DB_PATH
 
 
 def get_daemon_pid_path() -> Path:
@@ -21,20 +24,16 @@ def get_daemon_pid_path() -> Path:
 
 
 def get_daemon_db_path() -> Path:
-    """Return the path to the SQLite database file used by the data daemon.
+    """Return the SQLite DB path for the data daemon.
 
-    This path is determined by the environment variable NEURACORE_DAEMON_DB_PATH.
-    If this variable is not set, the path defaults to
-    ~/.neuracore/data_daemon/state.db.
-
-    :return: Path to the SQLite database file
+    Uses `NEURACORE_DAEMON_DB_PATH` if set; otherwise defaults to
+    `~/.neuracore/data_daemon/state.db`.
     """
-    return Path(
-        os.environ.get(
-            "NEURACORE_DAEMON_DB_PATH",
-            str(Path.home() / ".neuracore" / "data_daemon" / "state.db"),
-        )
-    )
+    env_path = os.getenv("NEURACORE_DAEMON_DB_PATH")
+    if env_path:
+        return Path(env_path).expanduser()
+
+    return DEFAULT_DAEMON_DB_PATH
 
 
 def get_daemon_recordings_root_path() -> Path:
@@ -50,3 +49,8 @@ def get_daemon_recordings_root_path() -> Path:
             str(default_root),
         )
     )
+
+
+def utc_now() -> datetime:
+    """Return the current time as a Unix timestamp or datetime object."""
+    return datetime.now(timezone.utc)

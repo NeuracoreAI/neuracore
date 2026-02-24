@@ -34,19 +34,20 @@ class TraceStatus(str, Enum):
 
     State transitions:
     - (none) + START_TRACE    -> INITIALIZING
-    - (none) + TRACE_WRITTEN  -> PENDING_BYTES
+    - (none) + TRACE_WRITTEN  -> PENDING_METADATA
     - INITIALIZING + TRACE_WRITTEN -> WRITTEN
-    - PENDING_BYTES + START_TRACE  -> WRITTEN
+    - PENDING_METADATA + START_TRACE  -> WRITTEN
     - WRITTEN -> UPLOADING -> UPLOADED
     - UPLOADING -> PAUSED -> UPLOADING (resume)
-    - UPLOADING -> WRITTEN (retry on failure)
+    - UPLOADING -> RETRYING -> WRITTEN (retry on failure)
     - Any -> FAILED (on error)
     """
 
     INITIALIZING = "initializing"
-    PENDING_BYTES = "pending_bytes"
+    PENDING_METADATA = "pending_metadata"
     WRITTEN = "written"
     UPLOADING = "uploading"
+    RETRYING = "retrying"
     PAUSED = "paused"
     UPLOADED = "uploaded"
     FAILED = "failed"
@@ -285,6 +286,7 @@ class MessageEnvelope:
     producer_id: str | None
     command: CommandType
     payload: dict = field(default_factory=dict)
+    sequence_number: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "MessageEnvelope":
@@ -303,6 +305,11 @@ class MessageEnvelope:
             producer_id=str(producer_id) if producer_id is not None else None,
             command=CommandType(data["command"]),
             payload=dict(data.get("payload") or {}),
+            sequence_number=(
+                int(data["sequence_number"])
+                if data.get("sequence_number") is not None
+                else None
+            ),
         )
 
     @classmethod
@@ -330,6 +337,7 @@ class MessageEnvelope:
             "producer_id": self.producer_id,
             "command": self.command.value,
             "payload": self.payload,
+            "sequence_number": self.sequence_number,
         }).encode("utf-8")
 
 

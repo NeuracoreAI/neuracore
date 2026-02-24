@@ -46,7 +46,6 @@ async def test_upsert_trace_metadata_inserts_row(store: SqliteStateStore) -> Non
         data_type=PRIMARY_DATA_TYPE,
         data_type_name="primary",
         path="/tmp/trace-1.bin",
-        total_bytes=128,
         robot_instance=ROBOT_INSTANCE,
     )
 
@@ -57,7 +56,7 @@ async def test_upsert_trace_metadata_inserts_row(store: SqliteStateStore) -> Non
     assert row["recording_id"] == "rec-1"
     assert row["data_type"] == PRIMARY_DATA_TYPE
     assert row["path"] == "/tmp/trace-1.bin"
-    assert row["total_bytes"] == 128
+    assert row["total_bytes"] is None
     assert row["status"] == TraceStatus.INITIALIZING
     assert row["bytes_written"] is None
     assert row["bytes_uploaded"] == 0
@@ -74,7 +73,6 @@ async def test_upsert_trace_metadata_updates_existing(store: SqliteStateStore) -
         data_type=PRIMARY_DATA_TYPE,
         data_type_name="primary",
         path="/tmp/trace-2.bin",
-        total_bytes=10,
         robot_instance=ROBOT_INSTANCE,
     )
     trace = await store.upsert_trace_metadata(
@@ -83,7 +81,6 @@ async def test_upsert_trace_metadata_updates_existing(store: SqliteStateStore) -
         data_type=SECONDARY_DATA_TYPE,
         data_type_name="secondary",
         path="/tmp/trace-2.mp4",
-        total_bytes=20,
         robot_instance=ROBOT_INSTANCE,
     )
 
@@ -93,7 +90,7 @@ async def test_upsert_trace_metadata_updates_existing(store: SqliteStateStore) -
     assert row["recording_id"] == "rec-1"
     assert row["data_type"] == SECONDARY_DATA_TYPE
     assert row["path"] == "/tmp/trace-2.mp4"
-    assert row["total_bytes"] == 20
+    assert row["total_bytes"] is None
     assert row["status"] == TraceStatus.INITIALIZING
 
 
@@ -105,15 +102,65 @@ async def test_upsert_trace_bytes_inserts_row(store: SqliteStateStore) -> None:
         bytes_written=64,
     )
 
-    assert trace.status == TraceStatus.PENDING_BYTES
+    assert trace.status == TraceStatus.PENDING_METADATA
     row = await _get_trace_row(store, "trace-bytes-1")
     assert row is not None
     assert row["trace_id"] == "trace-bytes-1"
     assert row["recording_id"] == "rec-bytes-1"
     assert row["bytes_written"] == 64
     assert row["total_bytes"] == 64
-    assert row["status"] == TraceStatus.PENDING_BYTES
+    assert row["status"] == TraceStatus.PENDING_METADATA
     assert row["bytes_uploaded"] == 0
+
+
+@pytest.mark.asyncio
+async def test_upsert_trace_bytes_preserves_existing_total_bytes(
+    store: SqliteStateStore,
+) -> None:
+    await store.upsert_trace_metadata(
+        trace_id="trace-bytes-preserve-total",
+        recording_id="rec-bytes-preserve-total",
+        data_type=PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-bytes-preserve-total.bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+
+    trace = await store.upsert_trace_bytes(
+        trace_id="trace-bytes-preserve-total",
+        recording_id="rec-bytes-preserve-total",
+        bytes_written=64,
+    )
+
+    assert trace.status == TraceStatus.WRITTEN
+    row = await _get_trace_row(store, "trace-bytes-preserve-total")
+    assert row is not None
+    assert row["bytes_written"] == 64
+
+
+@pytest.mark.asyncio
+async def test_upsert_trace_bytes_backfills_missing_total_bytes(
+    store: SqliteStateStore,
+) -> None:
+    await store.upsert_trace_metadata(
+        trace_id="trace-bytes-backfill-total",
+        recording_id="rec-bytes-backfill-total",
+        data_type=PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-bytes-backfill-total.bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+
+    trace = await store.upsert_trace_bytes(
+        trace_id="trace-bytes-backfill-total",
+        recording_id="rec-bytes-backfill-total",
+        bytes_written=96,
+    )
+
+    assert trace.status == TraceStatus.WRITTEN
+    row = await _get_trace_row(store, "trace-bytes-backfill-total")
+    assert row is not None
+    assert row["bytes_written"] == 96
 
 
 @pytest.mark.asyncio
@@ -220,13 +267,13 @@ async def test_join_pattern_metadata_then_bytes_transitions_to_written(
 async def test_join_pattern_bytes_then_metadata_transitions_to_written(
     store: SqliteStateStore,
 ) -> None:
-    """Test PENDING_BYTES + metadata -> WRITTEN transition."""
+    """Test PENDING_METADATA + metadata -> WRITTEN transition."""
     trace = await store.upsert_trace_bytes(
         trace_id="trace-6c",
         recording_id="rec-6c",
         bytes_written=128,
     )
-    assert trace.status == TraceStatus.PENDING_BYTES
+    assert trace.status == TraceStatus.PENDING_METADATA
 
     trace = await store.upsert_trace_metadata(
         trace_id="trace-6c",

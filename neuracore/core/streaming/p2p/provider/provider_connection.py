@@ -164,9 +164,19 @@ class PierToPierProviderConnection:
     def add_video_source(self, source: VideoSource) -> None:
         """Add a video source to the connection.
 
+        Schedules the add on the connection's event loop so it is safe to call
+        from any thread (including one with no event loop). Blocks until done.
+
         Args:
             source: Video source containing the track to be streamed
         """
+        future = asyncio.run_coroutine_threadsafe(
+            self._add_video_source_impl(source), self.loop
+        )
+        future.result(timeout=5.0)
+
+    async def _add_video_source_impl(self, source: VideoSource) -> None:
+        """Run on the connection loop: add track to the peer connection."""
         track = source.get_video_track()
         self.connection.addTrack(track)
 
@@ -174,11 +184,20 @@ class PierToPierProviderConnection:
         """Add a JSON event source to the connection via data channel.
 
         Creates a data channel for the source and sets up listeners to
-        send state updates when the data channel is open.
+        send state updates when the data channel is open. Schedules the
+        work on the connection's event loop so it is safe to call from any
+        thread (including one with no event loop). Blocks until done.
 
         Args:
             source: JSON source for streaming structured data
         """
+        future = asyncio.run_coroutine_threadsafe(
+            self._add_event_source_impl(source), self.loop
+        )
+        future.result(timeout=5.0)
+
+    async def _add_event_source_impl(self, source: JSONSource) -> None:
+        """Run on the connection loop: create data channel and wire listeners."""
         data_channel = self.connection.createDataChannel(source.mid)
 
         async def on_update(state: str) -> None:

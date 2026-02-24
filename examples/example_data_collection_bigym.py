@@ -1,18 +1,32 @@
+"""This example demonstrates how you can collect data from a Bigym environment
+and record it to Neuracore."""
+
 import argparse
 import time
+from pathlib import Path
 
 import numpy as np
-from bigym_utils.utils import (
-    FREQUENCY,
-    JOINT_ACTUATORS,
-    JOINT_NAMES,
-    action_to_joint_action_dict,
-    make_env,
-    obs_to_imgs,
-    obs_to_joint_dict,
-)
-from demonstrations.demo_store import DemoStore
-from demonstrations.utils import Metadata
+
+try:
+    import bigym
+    from bigym_utils.utils import (
+        FREQUENCY,
+        JOINT_ACTUATORS,
+        JOINT_NAMES,
+        action_to_joint_action_dict,
+        make_env,
+        obs_to_imgs,
+        obs_to_joint_dict,
+    )
+    from demonstrations.demo_store import DemoStore
+    from demonstrations.utils import Metadata
+except ImportError:
+    raise ImportError(
+        "bigym is not installed and required to run this example. "
+        "Please follow the instructions in the README.md file to install it "
+        "from the Github repository."
+    )
+
 
 import neuracore as nc
 
@@ -27,7 +41,7 @@ def run_episode(
     """Run one demonstration episode and optionally record it."""
     print(f"\n=== Starting Episode {episode_idx} ===")
 
-    env = make_env()
+    env = make_env()  # Create ReachTarget Bigym environment
     metadata = Metadata.from_env(env)
 
     # Get a single demo trajectory at the correct frequency
@@ -116,10 +130,13 @@ def run_episode(
 def main(num_episodes: int, record: bool, recording_name: str) -> None:
     nc.login()
 
-    # Connect to virtual robot
+    # Connect to virtual robot (Get MJCF path from installed bigym package)
+    # Update path as needed
+    mjcf_path = Path(bigym.__file__).parent / "envs" / "xmls" / "h1" / "h1.xml"
+
     robot = nc.connect_robot(
         robot_name="Mujoco UnitreeH1 Example",
-        mjcf_path="bigym/bigym/envs/xmls/h1/h1.xml",  # Update path as needed
+        mjcf_path=str(mjcf_path),
         overwrite=True,
     )
 
@@ -127,9 +144,10 @@ def main(num_episodes: int, record: bool, recording_name: str) -> None:
     print(f"Organisation ID: {nc.get_current_org()}")
 
     if record:
+        # Create a dataset to start recording episodes into
         nc.create_dataset(
             name=recording_name,
-            description="Example ReachTarget data collection",
+            description="Example Bigym data collection on the ReachTarget environment",
         )
         print("Created dataset.")
 
@@ -161,7 +179,7 @@ def main(num_episodes: int, record: bool, recording_name: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run ReachTarget demo logging into neuracore."
+        description="Run Bigym demo logging into neuracore."
     )
     parser.add_argument(
         "--num_episodes", type=int, default=50, help="Number of episodes to run."
@@ -175,7 +193,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--recording_name",
         type=str,
-        default="Example ReachTarget Data Collection",
+        default="Example Bigym Data Collection",
         help="Dataset name when recording.",
     )
 

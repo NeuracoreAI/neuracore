@@ -112,7 +112,31 @@ class VideoTrace:
 
         self._handle_metadata(parsed)
 
-        frame_bytes = payload[4 + metadata_len :]
+        frame_start = 4 + metadata_len
+        frame_nbytes: int | None = None
+        if isinstance(parsed, dict):
+            frame_nbytes_raw = parsed.get("frame_nbytes")
+            if isinstance(frame_nbytes_raw, int) and frame_nbytes_raw >= 0:
+                frame_nbytes = frame_nbytes_raw
+
+        if frame_nbytes is None:
+            frame_bytes = payload[frame_start:]
+        else:
+            frame_end = frame_start + frame_nbytes
+            if frame_end > len(payload):
+                raise ValueError(
+                    "Combined packet shorter than declared frame_nbytes: "
+                    f"frame_start={frame_start} frame_nbytes={frame_nbytes} "
+                    f"payload_len={len(payload)}"
+                )
+            if frame_end != len(payload):
+                raise ValueError(
+                    "Combined packet has trailing bytes after frame payload: "
+                    f"declared_frame_nbytes={frame_nbytes} "
+                    f"trailing_bytes={len(payload) - frame_end}"
+                )
+            frame_bytes = payload[frame_start:frame_end]
+
         if len(frame_bytes) > 0:
             self._handle_frame_bytes(frame_bytes)
 

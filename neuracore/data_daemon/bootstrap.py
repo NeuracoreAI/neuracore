@@ -1,72 +1,4 @@
-"""Daemon bootstrap and lifecycle management.
-
-This module provides a clean, modular initialization sequence for the
-data daemon. It coordinates the startup of all subsystems in the correct
-order across the three execution contexts.
-
-INITIALIZATION SEQUENCE
-=======================
-
-    DaemonBootstrap.start()
-         │
-         ├─[1] Configuration
-         │     └── ProfileManager → ConfigManager → DaemonConfig
-         │
-         ├─[2] Authentication
-         │     └── Auth.login(api_key) - Initialize Auth singleton
-         │
-         ├─[3] Event Loops (EventLoopManager)
-         │     ├── General Loop Thread started
-         │     ├── Encoder Loop Thread started
-         │     └── init_emitter(loop=general_loop)
-         │
-         ├─[4] Async Services (on General Loop)
-         │     ├── aiohttp.ClientSession
-         │     ├── SqliteStateStore + init_async_store()
-         │     ├── StateManager (registers event listeners)
-         │     ├── UploadManager (listens for READY_FOR_UPLOAD)
-         │     ├── ConnectionManager + start() (monitors API)
-         │     └── ProgressReporter (listens for PROGRESS_REPORT)
-         │
-         ├─[5] Recording & Encoding (RecordingDiskManager)
-         │     ├── _TraceFilesystem (path management)
-         │     ├── _TraceController (trace lifecycle)
-         │     ├── _EncoderManager (encoder factory)
-         │     ├── StorageBudget (disk space tracking)
-         │     ├── _RawBatchWriter → schedule_on_general_loop()
-         │     └── _BatchEncoderWorker → schedule_on_encoder_loop()
-         │
-         ├─[6] ZMQ Communications
-         │     └── CommunicationsManager
-         │
-         └─[7] Return DaemonContext
-               └── Daemon created with context, calls run()
-
-
-MODULE REGISTRY
-===============
-
-Main Thread:
-    EventLoopManager     - DaemonBootstrap       - Manages async loops
-    CommunicationsManager- DaemonBootstrap       - ZMQ sockets
-    Daemon               - runner_entry          - Message loop
-
-General Loop:
-    Emitter              - EventLoopManager      - Event coordination
-    AuthManager          - bootstrap_async  - API auth (singleton)
-    SqliteStateStore     - bootstrap_async  - Trace state persistence
-    StateManager         - bootstrap_async  - State coordination
-    UploadManager        - bootstrap_async  - Cloud uploads
-    ConnectionManager    - bootstrap_async  - API monitoring
-    ProgressReporter     - bootstrap_async  - Progress reporting
-    _RawBatchWriter      - RecordingDiskManager  - Raw file I/O
-
-Encoder Loop:
-    _BatchEncoderWorker  - RecordingDiskManager  - Video/JSON encoding
-    VideoTrace           - _EncoderManager       - H.264 encoding
-    JsonTrace            - _EncoderManager       - JSON encoding
-
-"""
+"""Daemon bootstrap and lifecycle management."""
 
 from __future__ import annotations
 
@@ -144,28 +76,6 @@ async def bootstrap_async_services(
     This coroutine MUST be scheduled on the General Loop via:
         loop_manager.schedule_on_general_loop(bootstrap_async_services(...))
 
-    Initialization order (dependencies flow downward):
-
-        aiohttp.ClientSession
-              │
-              ├──────────────────┬─────────────────┐
-              ▼                  ▼                 ▼
-        ConnectionManager  UploadManager  ProgressReporter
-              │                  │
-              └────────┬─────────┘
-                       ▼
-              SqliteStateStore
-                       │
-                       ▼
-                 StateManager
-                       │
-                       └── Registers event listeners:
-                           • TRACE_WRITTEN → update state, emit READY_FOR_UPLOAD
-                           • UPLOAD_COMPLETE → mark trace uploaded
-                           • STOP_RECORDING → finalize recording
-                           • IS_CONNECTED → track connectivity
-                           • PROGRESS_REPORTED → mark as reported
-
     Args:
         config: Daemon configuration.
         db_path: Path to SQLite database.
@@ -181,6 +91,7 @@ async def bootstrap_async_services(
     state_store = SqliteStateStore(db_path)
     await state_store.init_async_store()
     logger.info("SqliteStateStore initialized at %s", db_path)
+    await state_store.reset_retrying_to_written()
 
     state_manager = StateManager(state_store)
     logger.info("StateManager initialized")
@@ -231,6 +142,7 @@ async def shutdown_async_services(services: AsyncServices) -> None:
         logger.exception("Error shutting down UploadManager")
 
     try:
+        await services.state_store.reset_retrying_to_written()
         await services.state_store.close()
         logger.debug("SqliteStateStore closed")
     except Exception:

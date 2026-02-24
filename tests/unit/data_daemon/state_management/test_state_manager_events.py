@@ -53,6 +53,31 @@ class FakeStateStore:
     async def mark_recording_reported(self, recording_id: str) -> None:
         return None
 
+    async def find_failed_traces(self) -> list[TraceRecord]:
+        return [
+            trace
+            for trace in self._traces_by_id.values()
+            if trace.status == TraceStatus.FAILED
+        ]
+
+    async def reset_failed_trace_for_retry(self, trace_id: str) -> None:
+        trace = self._traces_by_id.get(trace_id)
+        if trace is None:
+            raise ValueError(f"Trace not found: {trace_id}")
+        now = datetime.now(timezone.utc)
+        updated = replace(
+            trace,
+            status=TraceStatus.WRITTEN,
+            error_code=None,
+            error_message=None,
+            next_retry_at=None,
+            num_upload_attempts=0,
+            bytes_uploaded=0,
+            last_updated=now,
+        )
+        self._traces_by_id[trace_id] = updated
+        self._update_trace_in_recording(updated, updated.recording_id)
+
     async def update_status(
         self, trace_id: str, status: TraceStatus, *, error_message=None
     ) -> bool:
@@ -105,20 +130,19 @@ class FakeStateStore:
         dataset_name: str | None = None,
         robot_name: str | None = None,
         robot_id: str | None = None,
-        total_bytes: int | None = None,
     ) -> TraceRecord:
         """Upsert trace with metadata from START_TRACE.
 
         State transitions:
         - New trace: INITIALIZING
-        - PENDING_BYTES -> WRITTEN
+        - PENDING_METADATA -> WRITTEN
         """
         now = datetime.now(timezone.utc)
         existing = self._traces_by_id.get(trace_id)
         if existing:
             new_status = (
                 TraceStatus.WRITTEN
-                if existing.status == TraceStatus.PENDING_BYTES
+                if existing.status == TraceStatus.PENDING_METADATA
                 else existing.status
             )
             trace = replace(
@@ -132,7 +156,7 @@ class FakeStateStore:
                 robot_id=robot_id,
                 robot_instance=robot_instance,
                 path=path,
-                total_bytes=total_bytes,
+                total_bytes=existing.total_bytes,
                 last_updated=now,
                 num_upload_attempts=0,
                 next_retry_at=None,
@@ -150,7 +174,7 @@ class FakeStateStore:
                 robot_id=robot_id,
                 robot_instance=robot_instance,
                 path=path,
-                total_bytes=total_bytes,
+                total_bytes=None,
                 bytes_written=None,
                 bytes_uploaded=0,
                 progress_reported=ProgressReportStatus.PENDING,
@@ -174,7 +198,7 @@ class FakeStateStore:
         """Upsert trace with bytes from TRACE_WRITTEN.
 
         State transitions:
-        - New trace: PENDING_BYTES
+        - New trace: PENDING_METADATA
         - INITIALIZING -> WRITTEN
         """
         now = datetime.now(timezone.utc)
@@ -196,7 +220,7 @@ class FakeStateStore:
             trace = TraceRecord(
                 trace_id=trace_id,
                 recording_id=recording_id,
-                status=TraceStatus.PENDING_BYTES,
+                status=TraceStatus.PENDING_METADATA,
                 data_type=None,
                 data_type_name=None,
                 dataset_id=None,
@@ -223,9 +247,13 @@ def _register_state_manager(manager: StateManager) -> None:
     emitter = get_emitter()
     emitter.on(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
     emitter.on(Emitter.START_TRACE, manager._handle_start_trace)
+    emitter.on(Emitter.UPLOAD_STARTED, manager.handle_upload_started)
     emitter.on(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
     emitter.on(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
     emitter.on(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
+    emitter.on(
+        Emitter.STOP_RECORDING_REQUESTED, manager.handle_stop_recording_requested
+    )
     emitter.on(Emitter.STOP_RECORDING, manager.handle_stop_recording)
     emitter.on(Emitter.IS_CONNECTED, manager.handle_is_connected)
 
@@ -233,11 +261,15 @@ def _register_state_manager(manager: StateManager) -> None:
 def _cleanup_state_manager(manager: StateManager) -> None:
     get_emitter().remove_listener(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
     get_emitter().remove_listener(Emitter.START_TRACE, manager._handle_start_trace)
+    get_emitter().remove_listener(Emitter.UPLOAD_STARTED, manager.handle_upload_started)
     get_emitter().remove_listener(
         Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete
     )
     get_emitter().remove_listener(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
     get_emitter().remove_listener(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
+    get_emitter().remove_listener(
+        Emitter.STOP_RECORDING_REQUESTED, manager.handle_stop_recording_requested
+    )
     get_emitter().remove_listener(Emitter.STOP_RECORDING, manager.handle_stop_recording)
     get_emitter().remove_listener(Emitter.IS_CONNECTED, manager.handle_is_connected)
 
@@ -302,9 +334,13 @@ async def test_stop_recording_emits_stop_all_and_sets_stopped(state_manager) -> 
 
     get_emitter().on(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)
     try:
-        get_emitter().emit(Emitter.STOP_RECORDING, "rec-1")
+        get_emitter().emit(Emitter.STOP_RECORDING_REQUESTED, "rec-1")
         await asyncio.sleep(0.2)
         assert store.stopped == ["rec-1"]
+        assert received == []
+
+        get_emitter().emit(Emitter.STOP_RECORDING, "rec-1")
+        await asyncio.sleep(0.2)
         assert received == ["rec-1"]
     finally:
         get_emitter().remove_listener(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)
@@ -326,7 +362,6 @@ async def test_start_trace_creates_trace(state_manager) -> None:
         None,
         None,
         "/tmp/trace-1.bin",
-        128,
     )
     await asyncio.sleep(0.2)
 
@@ -338,7 +373,7 @@ async def test_start_trace_creates_trace(state_manager) -> None:
     assert trace.data_type == DataType.CUSTOM_1D
     assert trace.data_type_name == "custom"
     assert trace.path == "/tmp/trace-1.bin"
-    assert trace.total_bytes == 128
+    assert trace.total_bytes is None
     assert trace.status == TraceStatus.INITIALIZING
     assert trace.bytes_written is None  # Not complete yet
 
@@ -409,7 +444,6 @@ async def test_upload_failed_does_not_record_error_in_event_suite(
             Emitter.UPLOAD_FAILED,
             "trace-4",
             12,
-            TraceStatus.FAILED,
             TraceErrorCode.NETWORK_ERROR,
             "lost connection",
         )
@@ -447,7 +481,6 @@ async def test_trace_written_emits_ready_for_upload_when_connected(
             None,
             None,
             "/tmp/trace-5.bin",
-            64,
         )
         await asyncio.sleep(0.2)
 
@@ -504,7 +537,6 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
             None,
             None,
             "/tmp/trace-1.bin",
-            10,
         )
         get_emitter().emit(
             Emitter.START_TRACE,
@@ -518,7 +550,6 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
             None,
             None,
             "/tmp/trace-2.bin",
-            10,
         )
         await asyncio.sleep(0.2)
 
@@ -699,7 +730,6 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
             Emitter.UPLOAD_FAILED,
             "trace-a",
             0,
-            TraceStatus.WRITTEN,
             TraceErrorCode.DISK_FULL,
             "disk full",
         )
@@ -845,7 +875,6 @@ async def test_upload_failed_does_not_record_error_and_does_not_emit_ready_event
             Emitter.UPLOAD_FAILED,
             "trace-fail-payload",
             7,
-            TraceStatus.WRITTEN,
             TraceErrorCode.NETWORK_ERROR,
             "net down",
         )

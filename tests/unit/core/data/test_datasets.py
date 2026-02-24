@@ -1,13 +1,15 @@
 """Tests for the Dataset class."""
 
 import pytest
+import requests_mock
 
+from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 
 
-@pytest.mark.usefixtures("mock_auth_requests")
+@pytest.mark.usefixtures("mock_data_requests")
 @pytest.mark.usefixtures("mock_login")
 class TestDataset:
 
@@ -56,3 +58,91 @@ class TestDataset:
     def test_lazy_loading_of_recordings(self, dataset_dict):
         dataset = Dataset(**dataset_dict)
         assert len(dataset) == dataset._num_recordings
+
+    def test_set_name(
+        self,
+        dataset_dict,
+        mock_data_requests: requests_mock.Mocker,
+        mocked_org_id: str,
+    ):
+        # Setup
+        dataset = Dataset(**dataset_dict)
+
+        mock_data_requests.put(
+            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset.id}",
+            status_code=200,
+        )
+
+        assert dataset.name == dataset_dict["name"]
+
+        # Execute
+        dataset.set_name("new_name")
+
+        # Verify
+        assert dataset.name == "new_name"
+
+    def test_set_description(
+        self,
+        dataset_dict,
+        mock_data_requests: requests_mock.Mocker,
+        mocked_org_id: str,
+    ):
+        # Setup
+        dataset = Dataset(**dataset_dict)
+
+        mock_data_requests.put(
+            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset.id}",
+            status_code=200,
+        )
+
+        assert dataset.description == dataset_dict["description"]
+
+        # Execute
+        dataset.set_description("new_description")
+
+        # Verify
+        assert dataset.description == "new_description"
+
+    def test_set_tags(
+        self,
+        dataset_dict,
+        mock_data_requests: requests_mock.Mocker,
+        mocked_org_id: str,
+    ):
+        # Setup
+        dataset = Dataset(**dataset_dict)
+
+        mock_data_requests.put(
+            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset.id}",
+            status_code=200,
+        )
+
+        assert dataset.tags == dataset_dict["tags"]
+
+        # Execute
+        dataset.set_tags(["new_tag1", "new_tag2"])
+
+        # Verify
+        assert dataset.tags == ["new_tag1", "new_tag2"]
+
+    def test_add_tag(
+        self,
+        dataset_dict,
+        mock_data_requests: requests_mock.Mocker,
+        mocked_org_id: str,
+    ):
+        # Setup
+        dataset = Dataset(**dataset_dict)
+
+        mock_data_requests.put(
+            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset.id}",
+            status_code=200,
+        )
+
+        assert dataset.tags == dataset_dict["tags"]
+
+        # Execute
+        dataset.add_tag("new_tag")
+
+        # Verify
+        assert dataset.tags == dataset_dict["tags"] + ["new_tag"]

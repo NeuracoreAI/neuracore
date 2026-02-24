@@ -28,7 +28,7 @@ class StateStore(Protocol):
         """Return all traces for a given recording ID."""
         ...
 
-    def list_traces(self) -> list[TraceRecord]:
+    async def list_traces(self) -> list[TraceRecord]:
         """Return all trace records."""
         ...
 
@@ -46,6 +46,14 @@ class StateStore(Protocol):
 
     async def mark_recording_reported(self, recording_id: str) -> None:
         """Mark a recording as progress-reported."""
+        ...
+
+    async def find_failed_traces(self) -> list[TraceRecord]:
+        """Return all traces marked as FAILED."""
+        ...
+
+    async def reset_failed_trace_for_retry(self, trace_id: str) -> None:
+        """Reset a failed trace back to WRITTEN for retry."""
         ...
 
     async def update_status(
@@ -88,13 +96,12 @@ class StateStore(Protocol):
         dataset_name: str | None = None,
         robot_name: str | None = None,
         robot_id: str | None = None,
-        total_bytes: int | None = None,
     ) -> TraceRecord:
         """Insert or update trace with metadata from START_TRACE.
 
         State transitions:
         - If trace doesn't exist: creates with INITIALIZING status
-        - If trace exists with PENDING_BYTES: transitions to WRITTEN
+        - If trace exists with PENDING_METADATA: transitions to WRITTEN
         - If trace exists with other status: updates metadata only
 
         Returns the trace record after upsert.
@@ -110,7 +117,7 @@ class StateStore(Protocol):
         """Insert or update trace with bytes from TRACE_WRITTEN.
 
         State transitions:
-        - If trace doesn't exist: creates with PENDING_BYTES status
+        - If trace doesn't exist: creates with PENDING_METADATA status
         - If trace exists with INITIALIZING: transitions to WRITTEN
         - If trace exists with other status: updates bytes only
 
@@ -139,8 +146,6 @@ class StateStore(Protocol):
         """Mark retries exhausted and persist final failure details."""
         ...
 
-    async def find_traces_ready_for_reupload(
-        self, limit: int = 50
-    ) -> list[TraceRecord]:
-        """Return traces due for retry upload attempts."""
+    async def reset_retrying_to_written(self) -> int:
+        """Reset RETRYING/UPLOADING traces back to WRITTEN (preserve retry schedule)."""
         ...

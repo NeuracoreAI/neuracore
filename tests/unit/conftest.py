@@ -1,6 +1,7 @@
 import pathlib
 import re
 import tempfile
+from collections.abc import Generator
 from unittest.mock import patch
 
 import pytest
@@ -33,7 +34,7 @@ def mocked_org_id():
 
 
 @pytest.fixture
-def mock_auth_requests():
+def mock_auth_requests() -> Generator[requests_mock.Mocker, None, None]:
     """Fixture to mock authentication and API requests."""
     get_provide_live_data_enabled_manager().disable()
     get_consume_live_data_enabled_manager().disable()

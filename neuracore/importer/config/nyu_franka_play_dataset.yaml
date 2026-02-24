@@ -55,7 +55,7 @@ data_import_config:
         index: 7
 
 
-    VISUAL_JOINT_POSITIONS: 
+  VISUAL_JOINT_POSITIONS: 
     source: observation.state
     units: RADIANS
     mapping:

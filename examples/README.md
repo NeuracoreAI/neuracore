@@ -17,10 +17,11 @@ pip install "neuracore[examples]"
 
 Make sure you have an account on [neuracore.com](https://neuracore.com).
 
-### Installing Bi Gym
-To run Bi Gym examples please install it using the following commands: 
+### Installing BiGym
+To run BiGym examples please install it using the following commands: 
 ```bash
 git clone https://github.com/chernyadev/bigym.git
+cd bigym
 pip install . 
 ```
 
@@ -121,15 +122,35 @@ python example_server_endpoint.py
 Unlike the previous example ([Local Model Deployment](#local-model-deployment)), this endpoint runs on our servers. 
 
 
-### View Dataset
+### Retrieve and Visualize Dataset
 This example shows you how to:
 - Stream data from neuracore to your python application (for saving or training)
+- Pull a dataset from Neuracore and **synchronize** joint positions and camera streams at a chosen frequency
+- **Play back** a single episode locally
+
+Run it to replay the first episode of the ASU Table Top shared dataset:
 
 ```bash
-python example_view_dataset.py
+python example_retrieve_dataset.py
 ```
 
 If you want to just view your data, then the best way is via the [web interface](https://www.neuracore.com/dashboard/datasets).
+
+
+### Edit Dataset metadata
+
+This example shows you how to:
+- Edit Dataset metadata:
+  - Its name
+  - Description
+  - Tags 
+- Edit Recording metadata
+  - Its Notes
+  - Its Status e.g. flagged
+
+```bash
+python example_flag_data.py
+```
 
 ### Work with your own robot
 If you want to get your own robot working with neuracore, please refer to and also [tutorial](../docs/tutorial.md) and use the example files as a reference.

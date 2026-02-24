@@ -334,7 +334,7 @@ async def create_recording_state_manager() -> RecordingStateManager:
         RecordingStateManager: Configured recording state
             manager with persistent connection
     """
-    return RecordingStateManager(loop=asyncio.get_event_loop())
+    return RecordingStateManager(loop=get_running_loop())
 
 
 def get_recording_state_manager() -> "RecordingStateManager":

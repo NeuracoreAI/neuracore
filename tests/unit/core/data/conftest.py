@@ -3,11 +3,13 @@
 import copy
 import io
 import re
+from collections.abc import Generator
 from fractions import Fraction
 
 import av
 import numpy as np
 import pytest
+import requests_mock
 from neuracore_types import (
     Dataset,
     DataType,
@@ -20,7 +22,6 @@ from neuracore_types import (
     SynchronizedPoint,
 )
 
-import neuracore as nc
 from neuracore.core.const import API_URL
 
 # Constants for video creation
@@ -139,6 +140,7 @@ def dataset_dict(mocked_org_id):
         "size_bytes": 1024,
         "tags": ["test", "robotics"],
         "is_shared": False,
+        "description": "A test dataset",
         "data_types": {DataType.RGB_IMAGES: 1, DataType.JOINT_POSITIONS: 1},
     }
 
@@ -259,17 +261,15 @@ def synced_data_multiple_frames():
 
 
 @pytest.fixture
-def mock_auth_requests(
-    mock_auth_requests,
+def mock_data_requests(
+    mock_auth_requests: requests_mock.Mocker,
     dataset_model,
     recordings_list,
     synced_data,
     mocked_org_id,
     create_test_video_fn,
-):
+) -> Generator[requests_mock.Mocker, None, None]:
     """Set up mocks for Dataset API endpoints."""
-    nc.login("test_api_key")
-
     # Mock datasets endpoint
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets",

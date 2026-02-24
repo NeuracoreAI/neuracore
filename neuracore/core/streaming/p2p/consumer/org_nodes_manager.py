@@ -411,7 +411,7 @@ async def _create_org_nodes_manager(org_id: str) -> OrgNodesManager:
     """
     return OrgNodesManager(
         org_id=org_id,
-        loop=asyncio.get_event_loop(),
+        loop=get_running_loop(),
     )
 
 

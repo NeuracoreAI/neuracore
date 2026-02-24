@@ -1,3 +1,6 @@
+"""This example demonstrates how you can launch a training job
+from the Neuracore platform."""
+
 import argparse
 
 from common.base_env import BimanualViperXTask

@@ -16,7 +16,7 @@ from neuracore_types import DataType, RecordingDataTraceStatus
 
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
-from neuracore.data_daemon.models import TraceErrorCode, TraceStatus
+from neuracore.data_daemon.models import TraceErrorCode
 from neuracore.data_daemon.upload_management.trace_manager import TraceManager
 
 from .resumable_file_uploader import ResumableFileUploader
@@ -96,11 +96,9 @@ class UploadManager(TraceManager):
             data_type_name: Data type name
             bytes_uploaded: Starting offset for resume
         """
-        logger.info(f"Received READY_FOR_UPLOAD for trace {trace_id}")
-
         loop = asyncio.get_running_loop()
         task = loop.create_task(
-            self._prepare_upload(
+            self._upload_single_trace(
                 filepath,
                 trace_id,
                 data_type,
@@ -155,7 +153,6 @@ class UploadManager(TraceManager):
         trace_id: str,
         bytes_uploaded: int,
         error_message: str,
-        status: TraceStatus = TraceStatus.FAILED,
         error_code: TraceErrorCode = TraceErrorCode.UPLOAD_FAILED,
     ) -> None:
         """Emit an upload failure event.
@@ -164,14 +161,12 @@ class UploadManager(TraceManager):
             trace_id: Trace identifier.
             bytes_uploaded: Bytes uploaded before failure.
             error_message: Description of the failure.
-            status: Trace status to set.
             error_code: Error code for the failure.
         """
         self._emitter.emit(
             Emitter.UPLOAD_FAILED,
             trace_id,
             bytes_uploaded,
-            status,
             error_code,
             error_message,
         )
@@ -208,6 +203,7 @@ class UploadManager(TraceManager):
         trace_id: str,
         recording_id: str,
         base_bytes: int,
+        total_bytes: int,
         last_progress_update: list[float],
     ) -> Callable[[int], Awaitable[None]]:
         """Create a progress callback for tracking upload progress.
@@ -234,6 +230,7 @@ class UploadManager(TraceManager):
                     trace_id,
                     RecordingDataTraceStatus.UPLOAD_STARTED,
                     uploaded_bytes=total_bytes_uploaded,
+                    total_bytes=total_bytes,
                 )
                 last_progress_update[0] = now
 
@@ -272,37 +269,6 @@ class UploadManager(TraceManager):
         )
         return await uploader.upload()
 
-    async def _prepare_upload(
-        self,
-        trace_dir_path: str,
-        trace_id: str,
-        data_type: DataType,
-        data_type_name: str,
-        recording_id: str,
-        bytes_uploaded: int,
-    ) -> bool:
-        """Prepare and execute upload, respecting bandwidth limits.
-
-        Args:
-            trace_dir_path: Local filesystem path to trace directory.
-            trace_id: Trace identifier.
-            data_type: Data type.
-            data_type_name: Data type name.
-            recording_id: Recording identifier.
-            bytes_uploaded: Cumulative bytes already uploaded (for resume).
-
-        Returns:
-            True if all files uploaded successfully, False otherwise.
-        """
-        return await self._upload_single_trace(
-            trace_dir_path,
-            trace_id,
-            data_type,
-            data_type_name,
-            recording_id,
-            bytes_uploaded,
-        )
-
     async def _upload_single_trace(
         self,
         trace_dir_path: str,
@@ -325,16 +291,17 @@ class UploadManager(TraceManager):
         Returns:
             True if all files uploaded successfully, False otherwise.
         """
-        logger.info(f"Starting upload for trace {trace_id}")
-
         files, validation_error = self._validate_trace_directory(trace_dir_path)
         if validation_error or files is None:
             error_msg = validation_error or "No files found in trace directory"
-            logger.error(error_msg)
-            self._emit_upload_failure(trace_id, bytes_uploaded, error_msg)
+            self._emit_upload_failure(
+                trace_id=trace_id,
+                bytes_uploaded=bytes_uploaded,
+                error_message=error_msg,
+            )
             return False
 
-        logger.info(f"Found {len(files)} files to upload for trace {trace_id}")
+        total_bytes = sum(file.stat().st_size for file in files)
 
         registered = await self._register_data_trace(
             recording_id, data_type, UUID(trace_id)
@@ -342,10 +309,9 @@ class UploadManager(TraceManager):
         if not registered:
             logger.error(f"Failed to register trace {trace_id} with backend")
             self._emit_upload_failure(
-                trace_id,
-                bytes_uploaded,
-                "Failed to register trace with backend",
-                status=TraceStatus.FAILED,
+                trace_id=trace_id,
+                bytes_uploaded=bytes_uploaded,
+                error_message="Failed to register trace with backend",
                 error_code=TraceErrorCode.NETWORK_ERROR,
             )
             return False
@@ -357,7 +323,9 @@ class UploadManager(TraceManager):
                     trace_id,
                     RecordingDataTraceStatus.UPLOAD_STARTED,
                     uploaded_bytes=bytes_uploaded,
+                    total_bytes=total_bytes,
                 )
+                self._emitter.emit(Emitter.UPLOAD_STARTED, trace_id)
 
                 start_file_idx, file_offset = self._find_resume_point(
                     files, bytes_uploaded
@@ -376,7 +344,11 @@ class UploadManager(TraceManager):
                     )
 
                     progress_callback = self._make_progress_callback(
-                        trace_id, recording_id, cumulative_bytes, last_progress_update
+                        trace_id,
+                        recording_id,
+                        cumulative_bytes,
+                        total_bytes,
+                        last_progress_update,
                     )
 
                     logger.info(
@@ -400,10 +372,9 @@ class UploadManager(TraceManager):
                             else TraceErrorCode.UPLOAD_FAILED
                         )
                         self._emit_upload_failure(
-                            trace_id,
-                            failed_bytes,
-                            error_message or "Upload failed",
-                            status=TraceStatus.WRITTEN,
+                            trace_id=trace_id,
+                            bytes_uploaded=failed_bytes,
+                            error_message=error_message or "Upload failed",
                             error_code=error_code,
                         )
                         logger.warning(
@@ -427,10 +398,9 @@ class UploadManager(TraceManager):
                         "will retry"
                     )
                     self._emit_upload_failure(
-                        trace_id,
-                        cumulative_bytes,
-                        "Failed to update trace status to complete",
-                        status=TraceStatus.FAILED,
+                        trace_id=trace_id,
+                        bytes_uploaded=cumulative_bytes,
+                        error_message="Failed to update trace status to complete",
                         error_code=TraceErrorCode.NETWORK_ERROR,
                     )
                     return False
@@ -442,14 +412,18 @@ class UploadManager(TraceManager):
             except FileNotFoundError as e:
                 logger.error(f"File not found for trace {trace_id}: {e}")
                 self._emit_upload_failure(
-                    trace_id, bytes_uploaded, f"File not found: {e}"
+                    trace_id=trace_id,
+                    bytes_uploaded=bytes_uploaded,
+                    error_message=f"File not found: {e}",
                 )
                 return False
 
             except ValueError as e:
                 logger.error(f"Invalid path for trace {trace_id}: {e}")
                 self._emit_upload_failure(
-                    trace_id, bytes_uploaded, f"Invalid path: {e}"
+                    trace_id=trace_id,
+                    bytes_uploaded=bytes_uploaded,
+                    error_message=f"Invalid path: {e}",
                 )
                 return False
 
@@ -458,7 +432,9 @@ class UploadManager(TraceManager):
                     f"Unexpected error uploading trace {trace_id}: {e}", exc_info=True
                 )
                 self._emit_upload_failure(
-                    trace_id, bytes_uploaded, f"Upload error: {e}"
+                    trace_id=trace_id,
+                    bytes_uploaded=bytes_uploaded,
+                    error_message=f"Upload error: {e}",
                 )
                 return False
 

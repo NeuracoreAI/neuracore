@@ -40,12 +40,12 @@ def main() -> None:
     db_path = get_daemon_db_path()
 
     try:
-        bootstrap = DaemonBootstrap()
+        bootstrap = DaemonBootstrap(db_path=db_path)
         context = bootstrap.start()
 
-        if context is None:
+        if not isinstance(context, DaemonContext):
             logger.error("Failed to start daemon")
-        assert isinstance(context, DaemonContext)
+            return
         install_signal_handlers(lambda _signum: None)
         daemon = Daemon(
             recording_disk_manager=context.recording_disk_manager,

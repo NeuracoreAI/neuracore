@@ -6,6 +6,8 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy.exc import OperationalError
+
 from neuracore.data_daemon.const import (
     UPLOAD_MAX_RETRIES,
     UPLOAD_RETRY_BASE_SECONDS,
@@ -28,18 +30,50 @@ logger = logging.getLogger(__name__)
 class StateManager:
     """Domain-facing API for trace state."""
 
+    _TRACE_WRITTEN_LOCK_MAX_RETRIES = 5
+    _TRACE_WRITTEN_LOCK_BASE_DELAY_S = 0.1
+    _TRACE_WRITTEN_LOCK_MAX_DELAY_S = 2.0
+    _START_TRACE_LOCK_MAX_RETRIES = 5
+    _START_TRACE_LOCK_BASE_DELAY_S = 0.1
+    _START_TRACE_LOCK_MAX_DELAY_S = 2.0
+    _FAILED_TRACE_MAX_AGE_S = 60 * 60 * 4  # 4 hours
+
     def __init__(self, store: StateStore) -> None:
         """Initialize with a persistence backend."""
         self._store = store
         self._reporting_recordings: set[str] = set()
+        self._trace_written_retry_queue: asyncio.Queue[tuple[str, str, int, int]] = (
+            asyncio.Queue()
+        )
+        self._trace_written_retry_task: asyncio.Task | None = None
+        self._start_trace_retry_queue: asyncio.Queue[
+            tuple[
+                str,
+                str,
+                DataType,
+                str,
+                int,
+                str | None,
+                str | None,
+                str | None,
+                str | None,
+                str,
+                int,
+            ]
+        ] = asyncio.Queue()
+        self._start_trace_retry_task: asyncio.Task | None = None
 
         self._emitter = get_emitter()
 
-        self._emitter.on(Emitter.TRACE_WRITTEN, self._handle_trace_written)
         self._emitter.on(Emitter.START_TRACE, self._handle_start_trace)
-        self._emitter.on(Emitter.UPLOAD_COMPLETE, self.handle_upload_complete)
+        self._emitter.on(Emitter.TRACE_WRITTEN, self._handle_trace_written)
+        self._emitter.on(Emitter.UPLOAD_STARTED, self.handle_upload_started)
         self._emitter.on(Emitter.UPLOADED_BYTES, self.update_bytes_uploaded)
+        self._emitter.on(Emitter.UPLOAD_COMPLETE, self.handle_upload_complete)
         self._emitter.on(Emitter.UPLOAD_FAILED, self.handle_upload_failed)
+        self._emitter.on(
+            Emitter.STOP_RECORDING_REQUESTED, self.handle_stop_recording_requested
+        )
         self._emitter.on(Emitter.STOP_RECORDING, self.handle_stop_recording)
         self._emitter.on(Emitter.IS_CONNECTED, self.handle_is_connected)
         self._emitter.on(Emitter.PROGRESS_REPORTED, self.mark_progress_as_reported)
@@ -59,15 +93,56 @@ class StateManager:
         robot_name: str | None,
         robot_id: str | None,
         path: str,
-        total_bytes: int | None = None,
     ) -> None:
         """Handle START_TRACE event - upsert trace metadata.
 
         State transitions:
         - If trace doesn't exist: creates with INITIALIZING status
-        - If trace exists with PENDING_BYTES: transitions to WRITTEN
+        - If trace exists with PENDING_METADATA: transitions to WRITTEN
         - If status is WRITTEN after upsert: finalizes trace for upload
         """
+        try:
+            await self._process_start_trace(
+                trace_id,
+                recording_id,
+                data_type,
+                data_type_name,
+                robot_instance,
+                dataset_id,
+                dataset_name,
+                robot_name,
+                robot_id,
+                path,
+            )
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            await self._enqueue_start_trace_retry(
+                trace_id,
+                recording_id,
+                data_type,
+                data_type_name,
+                robot_instance,
+                dataset_id,
+                dataset_name,
+                robot_name,
+                robot_id,
+                path,
+            )
+
+    async def _process_start_trace(
+        self,
+        trace_id: str,
+        recording_id: str,
+        data_type: DataType,
+        data_type_name: str,
+        robot_instance: int,
+        dataset_id: str | None,
+        dataset_name: str | None,
+        robot_name: str | None,
+        robot_id: str | None,
+        path: str,
+    ) -> None:
         trace = await self._store.upsert_trace_metadata(
             trace_id=trace_id,
             recording_id=recording_id,
@@ -79,39 +154,127 @@ class StateManager:
             robot_id=robot_id,
             robot_instance=robot_instance,
             path=path,
-            total_bytes=total_bytes,
         )
         if trace.status == TraceStatus.WRITTEN:
             await self._finalize_trace(trace)
 
+    async def _enqueue_start_trace_retry(
+        self,
+        trace_id: str,
+        recording_id: str,
+        data_type: DataType,
+        data_type_name: str,
+        robot_instance: int,
+        dataset_id: str | None,
+        dataset_name: str | None,
+        robot_name: str | None,
+        robot_id: str | None,
+        path: str,
+    ) -> None:
+        self._ensure_start_trace_retry_worker()
+        await self._start_trace_retry_queue.put((
+            trace_id,
+            recording_id,
+            data_type,
+            data_type_name,
+            robot_instance,
+            dataset_id,
+            dataset_name,
+            robot_name,
+            robot_id,
+            path,
+            1,
+        ))
+
+    def _ensure_start_trace_retry_worker(self) -> None:
+        if self._start_trace_retry_task is not None:
+            return
+        loop = asyncio.get_running_loop()
+        self._start_trace_retry_task = loop.create_task(
+            self._start_trace_retry_worker()
+        )
+
+    async def _start_trace_retry_worker(self) -> None:
+        while True:
+            (
+                trace_id,
+                recording_id,
+                data_type,
+                data_type_name,
+                robot_instance,
+                dataset_id,
+                dataset_name,
+                robot_name,
+                robot_id,
+                path,
+                attempt,
+            ) = await self._start_trace_retry_queue.get()
+            try:
+                await self._process_start_trace(
+                    trace_id,
+                    recording_id,
+                    data_type,
+                    data_type_name,
+                    robot_instance,
+                    dataset_id,
+                    dataset_name,
+                    robot_name,
+                    robot_id,
+                    path,
+                )
+            except OperationalError as exc:
+                if (
+                    "database is locked" in str(exc).lower()
+                    and attempt < self._START_TRACE_LOCK_MAX_RETRIES
+                ):
+                    delay = min(
+                        self._START_TRACE_LOCK_BASE_DELAY_S * (2 ** (attempt - 1)),
+                        self._START_TRACE_LOCK_MAX_DELAY_S,
+                    )
+                    await asyncio.sleep(delay)
+                    await self._start_trace_retry_queue.put((
+                        trace_id,
+                        recording_id,
+                        data_type,
+                        data_type_name,
+                        robot_instance,
+                        dataset_id,
+                        dataset_name,
+                        robot_name,
+                        robot_id,
+                        path,
+                        attempt + 1,
+                    ))
+            finally:
+                self._start_trace_retry_queue.task_done()
+
+    async def handle_stop_recording_requested(self, recording_id: str) -> None:
+        """Handle phase-1 stop event from the data bridge.
+
+        Records stop time immediately when the producer requests stop.
+        """
+        await self._store.set_stopped_ats(recording_id)
+
     async def handle_stop_recording(self, recording_id: str) -> None:
-        """Handle a stop recording event from the data bridge.
+        """Handle phase-2 stop event from the data bridge.
 
-        This function is called when the data bridge wants to stop all traces
-        for a given recording. It will emit an event to the RDEM to
-        stop all traces for the recording.
-
-        Args:
-            recording_id (str): unique identifier for the recording.
+        This event is emitted only after the bridge commits close for the
+        recording; at this point RDM can flush/close traces for that recording.
         """
         self._emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
-        await self._store.set_stopped_ats(recording_id)
 
     async def handle_is_connected(self, is_connected: bool) -> None:
         """Handle a connection status event from the data bridge."""
         if not is_connected:
             return
 
+        await self._reconcile_failed_traces()
+
         traces = await self._store.find_ready_traces()
         for trace in traces:
             await self._emit_ready_for_upload_from_trace(trace)
 
-        due = await self._store.find_traces_ready_for_reupload()
-        for trace in due:
-            await self._emit_ready_for_upload_from_trace(trace)
-
     async def _emit_ready_for_upload_from_trace(self, trace: TraceRecord) -> None:
-        await self._store.update_status(trace.trace_id, TraceStatus.UPLOADING)
         self._emitter.emit(
             Emitter.READY_FOR_UPLOAD,
             trace.trace_id,
@@ -121,6 +284,42 @@ class StateManager:
             trace.data_type_name,
             trace.bytes_uploaded,
         )
+
+    async def _reconcile_failed_traces(self) -> None:
+        failed_traces = await self._store.find_failed_traces()
+        if not failed_traces:
+            return
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        cutoff = now - timedelta(seconds=self._FAILED_TRACE_MAX_AGE_S)
+
+        for trace in failed_traces:
+            too_old = trace.created_at < cutoff
+            retries_exhausted = (
+                getattr(trace, "num_upload_attempts", 0) >= UPLOAD_MAX_RETRIES
+            )
+            has_uploadable_payload = (
+                trace.total_bytes is not None
+                and trace.total_bytes > 0
+                and trace.path is not None
+                and trace.data_type is not None
+            )
+
+            if retries_exhausted or too_old or not has_uploadable_payload:
+                if trace.data_type is not None:
+                    self._emitter.emit(
+                        Emitter.DELETE_TRACE,
+                        trace.recording_id,
+                        trace.trace_id,
+                        trace.data_type,
+                    )
+                await self._store.delete_trace(trace.trace_id)
+                continue
+
+            await self._store.reset_failed_trace_for_retry(trace.trace_id)
+            refreshed = await self._store.get_trace(trace.trace_id)
+            if refreshed is not None and refreshed.status == TraceStatus.WRITTEN:
+                await self._emit_ready_for_upload_from_trace(refreshed)
 
     async def handle_upload_complete(self, trace_id: str) -> None:
         """Handle an upload complete event from an uploader.
@@ -150,10 +349,22 @@ class StateManager:
         """Handle TRACE_WRITTEN event - upsert trace bytes.
 
         State transitions:
-        - If trace doesn't exist: creates with PENDING_BYTES status
+        - If trace doesn't exist: creates with PENDING_METADATA status
         - If trace exists with INITIALIZING: transitions to WRITTEN
         - If status is WRITTEN after upsert: finalizes trace for upload
         """
+        try:
+            await self._process_trace_written(trace_id, recording_id, bytes_written)
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            await self._enqueue_trace_written_retry(
+                trace_id, recording_id, bytes_written
+            )
+
+    async def _process_trace_written(
+        self, trace_id: str, recording_id: str, bytes_written: int
+    ) -> None:
         trace = await self._store.upsert_trace_bytes(
             trace_id=trace_id,
             recording_id=recording_id,
@@ -162,19 +373,50 @@ class StateManager:
         if trace.status == TraceStatus.WRITTEN:
             await self._finalize_trace(trace)
 
+    async def _enqueue_trace_written_retry(
+        self, trace_id: str, recording_id: str, bytes_written: int
+    ) -> None:
+        self._ensure_trace_written_retry_worker()
+        await self._trace_written_retry_queue.put(
+            (trace_id, recording_id, bytes_written, 1)
+        )
+
+    def _ensure_trace_written_retry_worker(self) -> None:
+        if self._trace_written_retry_task is not None:
+            return
+        loop = asyncio.get_running_loop()
+        self._trace_written_retry_task = loop.create_task(
+            self._trace_written_retry_worker()
+        )
+
+    async def _trace_written_retry_worker(self) -> None:
+        while True:
+            trace_id, recording_id, bytes_written, attempt = (
+                await self._trace_written_retry_queue.get()
+            )
+            try:
+                await self._process_trace_written(trace_id, recording_id, bytes_written)
+            except OperationalError as exc:
+                if (
+                    "database is locked" in str(exc).lower()
+                    and attempt < self._TRACE_WRITTEN_LOCK_MAX_RETRIES
+                ):
+                    delay = min(
+                        self._TRACE_WRITTEN_LOCK_BASE_DELAY_S * (2 ** (attempt - 1)),
+                        self._TRACE_WRITTEN_LOCK_MAX_DELAY_S,
+                    )
+                    await asyncio.sleep(delay)
+                    await self._trace_written_retry_queue.put(
+                        (trace_id, recording_id, bytes_written, attempt + 1)
+                    )
+            finally:
+                self._trace_written_retry_queue.task_done()
+
     async def _finalize_trace(self, trace: TraceRecord) -> None:
         """Finalize a WRITTEN trace and emit READY_FOR_UPLOAD.
 
-        Transitions trace from WRITTEN to UPLOADING and emits
-        READY_FOR_UPLOAD event for the uploader. Uses atomic CAS
-        to ensure only one handler finalizes when racing.
+        Emits READY_FOR_UPLOAD event for the uploader.
         """
-        transitioned = await self._store.update_status(
-            trace.trace_id, TraceStatus.UPLOADING
-        )
-        if not transitioned:
-            return
-
         self._emitter.emit(
             Emitter.READY_FOR_UPLOAD,
             trace.trace_id,
@@ -187,6 +429,10 @@ class StateManager:
 
         traces = await self._store.find_traces_by_recording_id(trace.recording_id)
         await self._emit_progress_report_if_recording_stopped(traces)
+
+    async def handle_upload_started(self, trace_id: str) -> None:
+        """Mark a trace as uploading once the uploader starts."""
+        await self._store.update_status(trace_id, TraceStatus.UPLOADING)
 
     async def _emit_progress_report_if_recording_stopped(
         self, traces: list[TraceRecord]
@@ -260,7 +506,6 @@ class StateManager:
         self,
         trace_id: str,
         bytes_uploaded: int,
-        status: TraceStatus,
         error_code: TraceErrorCode,
         error_message: str,
     ) -> None:
@@ -269,7 +514,6 @@ class StateManager:
         Args:
             trace_id: unique identifier for the trace.
             bytes_uploaded: latest uploaded byte count for this trace.
-            status: trace status reported at failure time.
             error_code: error code describing the failure type.
             error_message: human readable failure message.
         """
@@ -315,7 +559,7 @@ class StateManager:
         trace = await self._store.get_trace(trace_id)
         if trace is None:
             return
-        if trace.status != TraceStatus.WRITTEN:
+        if trace.status != TraceStatus.RETRYING:
             return
         if trace.next_retry_at is not None:
             now = datetime.now(timezone.utc).replace(tzinfo=None)

@@ -217,6 +217,31 @@ def eval_model(
                 "lr_backbone": 2e-4,
             },
         ),
+        (
+            "Pi0",
+            {
+                DataType.RGB_IMAGES: [NC_CAM_NAME],
+                DataType.JOINT_POSITIONS: JOINT_NAMES,
+            },
+            {
+                DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
+            },
+            0.0,
+            {
+                "batch_size": 2,
+                "epochs": 1,
+                "output_prediction_horizon": 64,
+                "optimizer_lr": 2e-4,
+                "paligemma_variant": "gemma_tiny",
+                "action_expert_variant": "gemma_tiny",
+                "use_pretrained_weights": False,
+                "num_inference_steps": 1,
+                "vlm_max_text_tokens": 4,
+                "compile_model": True,
+                "gradient_checkpointing": True,
+                "dtype": "bfloat16",
+            },
+        ),
     ],
 )
 class TestAlgorithm:
