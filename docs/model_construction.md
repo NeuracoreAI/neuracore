@@ -2,9 +2,9 @@
 
 ## The Problem
 
-It usually begins with a single robot. You train a model on a Franka Emika Panda, define the input tensors, fix the output dimensionality, and everything works as expected. The model converges, inference is stable, and the system feels clean and well-structured. At this stage, the architecture appears robot-agnostic — but in reality, it is tightly coupled to one embodiment.
+It usually begins with a single robot. You train a model on a Franka Emika Panda (7 joints), define the input tensors, fix the output dimensionality, and everything works as expected. The model converges, inference is stable, and the system feels clean and well-structured. At this stage, the architecture appears robot-agnostic, but in reality, it is tightly coupled to one embodiment.
 
-Then a second dataset is introduced, perhaps from a KUKA LBR iiwa. On the surface, the robots are similar: both are 7-DoF manipulators with wrist joints and RGB inputs. But under the hood, the differences begin to surface. Joint names differ. One robot has an extra joint. Camera placements are not identical. The ordering of data points in the logs does not match. Even wrist joint data may be represented differently.
+Then a second dataset is introduced, perhaps from a UR5 (6 joints). On the surface, the robots are similar: both are industrial manipulators with wrist joints and RGB inputs. But under the hood, the differences begin to surface. Joint names differ. Franka has one extra joint (7 vs 6). Camera placements are not identical. The ordering of data points in the logs does not match. Even wrist joint data may be represented differently.
 
 At first, the solution is incremental. You reorder tensors. You insert padding. You add a mapping layer. You write conditionals in the inference code. The pipeline still runs. But now structure has started leaking. The model input definition is no longer cleanly separated from embodiment logic.
 
@@ -57,7 +57,8 @@ This distinction matters because model construction operates across embodiments,
 > Keep this distinction clear:
 > - `EmbodimentDescription` = one robot
 > - `CrossEmbodimentDescription` = many robots
-> Even for a single robot, you must provide a CrossEmbodimentDescription — it will simply contain one robot (Embodiment) entry.
+
+Even for a single robot, you must provide a CrossEmbodimentDescription — it will simply contain one robot (Embodiment) entry.
 
 ### EmbodimentDescription
 
@@ -76,11 +77,11 @@ Conceptual example:
 ```python
 {
     JOINTS: {
-        0: "panda_joint_1",
-        1: "panda_joint_2",
-        2: "panda_joint_3",
-        3: "panda_joint_4",
-        5: "franka_wrist_joint",
+        0: "arm_joint_1",
+        1: "arm_joint_2",
+        2: "arm_joint_3",
+        3: "arm_joint_4",
+        4: "arm_wrist_joint",
     },
     RGB_IMAGES: {
         0: "wrist_camera",
@@ -107,7 +108,7 @@ Example:
 ```python
 {
     "franka": { ... },
-    "kuka": { ... }
+    "ur5": { ... }
 }
 ```
 
@@ -132,39 +133,43 @@ Each robot is an `EmbodimentDescription`, and the full mapping is a `CrossEmbodi
 
 For clarity, input and output specs are identical here. In practice, output specs often represent target data (for example target joints, torques, or end-effector pose) and may differ from input specs.
 
-```python {8,25}
-input_cross_embodiment_spec: CrossEmbodimentDescription = {
+```python {13,30}
+input_cross_embodiment_description: CrossEmbodimentDescription = {
     "franka": {
-        JOINTS: {
+        JOINT_POSITIONS: {
             0: "panda_joint_1",
             1: "panda_joint_2",
             2: "panda_joint_3",
             3: "panda_joint_4",
-            5: "franka_wrist_joint", # Index 4 is missing as there is no joint_5
+            4: "panda_joint_5",
+            5: "panda_joint_6",
+            6: "panda_wrist_joint",
         },
         RGB_IMAGES: {
             0: "franka_wrist_camera",
             1: "franka_overhead_camera",
         },
     },
-    "kuka": {
-        JOINTS: {
-            0: "iiwa_joint_1",
-            1: "iiwa_joint_2",
-            2: "iiwa_joint_3",
-            3: "iiwa_joint_4",
-            4: "iiwa_joint_5",
-            5: "kuka_wrist_joint",
+    "ur5": {
+        JOINT_POSITIONS: {
+            0: "ur5_shoulder_pan_joint",
+            1: "ur5_shoulder_lift_joint",
+            2: "ur5_elbow_joint",
+            3: "ur5_pitch",
+            4: "ur5_roll",
+            #  Missing Index 5 to make sure wrist is at index 6
+            6: "ur5_wrist",
         },
         RGB_IMAGES: {
-            1: "kuka_overhead_camera", # Index 0 is missing as there is no wrist camera
+            # Index 0 is missing as there is no wrist camera
+            1: "ur5_overhead_camera", 
         },
     },
 }
 
-output_cross_embodiment_spec: CrossEmbodimentDescription = input_cross_embodiment_spec
+output_cross_embodiment_description: CrossEmbodimentDescription = input_cross_embodiment_description
 ```
-In this example, the Franka wrist joint is assigned to **index 5** in the model’s joint vector. However, the Franka robot does not have a joint corresponding to **index 4**, meaning that position in the vector is unused for this robot and therefore padded (typically with zeros).
+In this example, Franka contributes all seven joint indices (`0..6`) while UR5 contributes six (`0..5`). That means UR5 does not have a joint corresponding to **index 6**, so that position is unused for UR5 and therefore padded (typically with zeros).
 
 We did this to keep a consistent joint vector size and ordering across all robots used during training.
 
@@ -172,8 +177,8 @@ The model expects a fixed-length input and output vector. That structure is defi
 
 In this example:
 
-- Index 4 exists in the global joint layout because another robot in the dataset uses it.
-- The Franka does not have a joint that maps to index 4.
+- Index 6 exists in the global joint layout because Franka uses it.
+- UR5 does not have a joint that maps to index 6.
 - Therefore, we leave that index empty and pad it with zero.
 
 This ensures:
@@ -189,7 +194,7 @@ Padding is simply a structural requirement to preserve a shared representation a
 ## Data Padding
 
 Different robots can have different numbers of joints, but training requires a **consistent tensor shape**.
-In this example, the wrist joint value stays at its globally assigned index, even when some intermediate indices are empty for a given robot.
+In this example, each joint stays at its globally assigned index, even when some indices are empty for a given robot.
 
 If one robot has fewer joints, Neuracore fills missing dimensions with `0` so all records align to the same width.
 
@@ -201,16 +206,16 @@ Reading the table:
 - Each column is one joint-position slot
 - Missing joints are zero-padded
 
-| Recording ID | 0             | 1             | 2             | 3             | 4              | 5             |
-| ------------ | ------------- | ------------- | ------------- | ------------- | -------------- | ------------- |
-| 1            | panda_joint_1 | panda_joint_2 | panda_joint_3 | panda_joint_4 | **0**          | franka_wrist_joint |
-| 2            | iiwa_joint_1  | iiwa_joint_2  | iiwa_joint_3  | iiwa_joint_4  | iiwa_joint_5   | kuka_wrist_joint  |
-| 3            | panda_joint_1 | panda_joint_2 | panda_joint_3 | panda_joint_4 | **0**          | franka_wrist_joint |
-| 4            | panda_joint_1 | panda_joint_2 | panda_joint_3 | panda_joint_4 | **0**          | franka_wrist_joint |
-| 5            | panda_joint_1 | panda_joint_2 | panda_joint_3 | panda_joint_4 | **0**          | franka_wrist_joint |
-| 6            | iiwa_joint_1  | iiwa_joint_2  | iiwa_joint_3  | iiwa_joint_4  | iiwa_joint_5   | kuka_wrist_joint  |
-| 7            | iiwa_joint_1  | iiwa_joint_2  | iiwa_joint_3  | iiwa_joint_4  | iiwa_joint_5   | kuka_wrist_joint  |
-| 8            | iiwa_joint_1  | iiwa_joint_2  | iiwa_joint_3  | iiwa_joint_4  | iiwa_joint_5   | kuka_wrist_joint  |
+| Recording ID | Joint ID 0             | Joint ID 1              | Joint ID 2      | Joint ID 3        | Joint ID 4        | Joint ID 5        | Joint ID 6   |
+| ------------ | ---------------------- | ----------------------- | --------------- | ----------------- | ----------------- | ----------------- | ------------ |
+| 1            | panda_joint_1          | panda_joint_2           | panda_joint_3   | panda_joint_4     | panda_joint_5     | panda_joint_6     | panda_wrist_joint |
+| 2            | ur5_shoulder_pan_joint | ur5_shoulder_lift_joint | ur5_elbow_joint | ur5_pitch         | ur5_roll          | **0**             | ur5_wrist    |
+| 3            | panda_joint_1          | panda_joint_2           | panda_joint_3   | panda_joint_4     | panda_joint_5     | panda_joint_6     | panda_wrist_joint |
+| 4            | panda_joint_1          | panda_joint_2           | panda_joint_3   | panda_joint_4     | panda_joint_5     | panda_joint_6     | panda_wrist_joint |
+| 5            | panda_joint_1          | panda_joint_2           | panda_joint_3   | panda_joint_4     | panda_joint_5     | panda_joint_6     | panda_wrist_joint |
+| 6            | ur5_shoulder_pan_joint | ur5_shoulder_lift_joint | ur5_elbow_joint | ur5_pitch         | ur5_roll          | **0**             | ur5_wrist    |
+| 7            | ur5_shoulder_pan_joint | ur5_shoulder_lift_joint | ur5_elbow_joint | ur5_pitch         | ur5_roll          | **0**             | ur5_wrist    |
+| 8            | ur5_shoulder_pan_joint | ur5_shoulder_lift_joint | ur5_elbow_joint | ur5_pitch         | ur5_roll          | **0**             | ur5_wrist    |
 
 The same strategy applies to other data types, including image channels.
 
@@ -239,67 +244,55 @@ In this example, input and output specs are the same, so model heads have identi
 
 For inference, define model input/output order using an `EmbodimentDescription` that directly matches the robot being controlled.
 
-For example, if you trained on `franka` and `kuka` data and want inference on `kuka`:
+For example, if you trained on `franka` and `ur5` data and want inference on `ur5`:
 
 ```python
 model_input_embodiment_description: EmbodimentDescription = {
-    JOINTS: {
-        0: "iiwa_joint_1",
-        1: "iiwa_joint_2",
-        2: "iiwa_joint_3",
-        3: "iiwa_joint_4",
-        4: "iiwa_joint_5",
-        5: "kuka_wrist_joint",
-    },
-    RGB_IMAGES: {
-        0: "kuka_front_camera",
-    },
-}
-
-# model_input_embodiment_description follows the JOINTS/RGB_IMAGES order from input_cross_embodiment_spec["kuka"]
-```
-
-For inference on `franka`, keep the same shared index space and skip index `4` (it will be zero-padded):
-
-```python
-model_input_data_spec: EmbodimentDescription = {
-    JOINTS: {
-        0: "panda_joint_1",
-        1: "panda_joint_2",
-        2: "panda_joint_3",
-        3: "panda_joint_4",
-        5: "franka_wrist_joint",
-    },
-    RGB_IMAGES: {
-        0: "franka_wrist_camera",
-        1: "franka_overhead_camera",
+    "ur5": {
+        JOINT_POSITIONS: {
+            0: "ur5_shoulder_pan_joint",
+            1: "ur5_shoulder_lift_joint",
+            2: "ur5_elbow_joint",
+            3: "ur5_pitch",
+            4: "ur5_roll",
+            #  Missing Index 5 to make sure wrist is at index 6
+            6: "ur5_wrist",
+        },
+        RGB_IMAGES: {
+            # Index 0 is missing as there is no wrist camera
+            1: "ur5_overhead_camera", 
+        },
     },
 }
+
+# model_input_embodiment_description follows the JOINTS/RGB_IMAGES order from input_cross_embodiment_description["ur5"]
 ```
 
 ### Inference on a New Robot
 
-Suppose a new inference-time robot `ur5` has:
+Suppose a new inference-time robot `so100` (SO-100, 5 joints) has:
 
-`[ur5_shoulder_pan, ur5_shoulder_lift, ur5_wrist_joint]`
+`[so100_joint_1, so100_joint_2, so100_joint_3, so100_joint_4, so100_joint_5]`
 
-Since this robot only has two joints plus a wrist joint, we should semantically align those datapoints with the trained index layout and keep the wrist joint at the same index used during training:
+Since this robot has fewer joints than both Franka (7) and UR5 (6), we semantically align what exists and leave the remaining indices zero-padded:
 
-| Robot  | 0                 | 1                  | 2             | 3             | 4            | 5               |
-| ------ | ----------------- | ------------------ | ------------- | ------------- | ------------ | --------------- |
-| franka | panda_joint_1     | panda_joint_2      | panda_joint_3 | panda_joint_4 | **0**        | franka_wrist_joint  |
-| kuka   | iiwa_joint_1      | iiwa_joint_2       | iiwa_joint_3  | iiwa_joint_4  | iiwa_joint_5 | kuka_wrist_joint    |
-| ur5    | ur5_shoulder_pan  | ur5_shoulder_lift  | **0**         | **0**         | **0**        | ur5_wrist_joint     |
+| Robot  | Joint ID 0             | Joint ID 1              | Joint ID 2       | Joint ID 3         | Joint ID 4         | Joint ID 5         | Joint ID 6   |
+| ------ | ---------------------- | ----------------------- | ---------------- | ------------------ | ------------------ | ------------------ | ------------ |
+| franka | panda_joint_1          | panda_joint_2           | panda_joint_3    | panda_joint_4      | panda_joint_5      | panda_joint_6      | panda_joint_7 |
+| ur5    | ur5_shoulder_pan_joint | ur5_shoulder_lift_joint | ur5_elbow_joint  | ur5_wrist_1_joint  | ur5_wrist_2_joint  | ur5_wrist_3_joint  | **0**        |
+| so100  | so100_joint_1          | so100_joint_2           | so100_joint_3    | so100_joint_4      |  **0**     | **0**              |   so100_joint_5      |
 
 ```python {5,8}
-ur5_embodiment_spec: EmbodimentDescription = {
-    JOINTS: {
-        0: "ur5_shoulder_pan",
-        1: "ur5_shoulder_lift",
-        5: "ur5_wrist_joint",
+so100_embodiment_description: EmbodimentDescription = {
+    JOINT_POSITIONS: {
+        0: "so100_joint_1",
+        1: "so100_joint_2",
+        2: "so100_joint_3",
+        3: "so100_joint_4",
+        6: "so100_joint_5",
     },
     RGB_IMAGES: {
-        1: "ur5_overhead_camera",
+        1: "so100_overhead_camera",
     },
 }
 ```
