@@ -6,7 +6,7 @@ import re
 import pytest
 import requests_mock
 from neuracore_types import Dataset as DatasetModel
-from neuracore_types import DataType
+from neuracore_types import DataType, SynchronizationProgress
 
 import neuracore as nc
 from neuracore.api.globals import GlobalSingleton
@@ -871,6 +871,52 @@ class TestDatasetSynchronization:
         synced = dataset.synchronize(frequency=30, robot_data_spec=robot_data_spec)
 
         assert synced.robot_data_spec == {"robot_id": robot_data_spec["robot_name"]}
+
+    def test_synchronize_raises_when_backend_reports_failed_recordings(
+        self, mock_data_requests, dataset_dict, recordings_list, monkeypatch
+    ):
+        """Test synchronization fails immediately when backend reports failures."""
+        dataset = Dataset(**dataset_dict, recordings=recordings_list)
+
+        def failed_progress(_: str) -> SynchronizationProgress:
+            return SynchronizationProgress(
+                synchronized_dataset_id="synced_dataset_123",
+                num_synchronized_demonstrations=0,
+                has_failures=True,
+                num_failed_recordings=1,
+                failed_recording_ids=["rec-1"],
+            )
+
+        monkeypatch.setattr(
+            dataset,
+            "_get_synchronization_progress",
+            failed_progress,
+        )
+
+        with pytest.raises(
+            DatasetError, match="Synchronization failed for recording\\(s\\): rec-1"
+        ):
+            dataset.synchronize(frequency=30)
+
+    def test_get_synchronization_progress_raises_dataset_error_on_409(
+        self, mock_data_requests, dataset_dict, recordings_list, mocked_org_id
+    ):
+        dataset = Dataset(**dataset_dict, recordings=recordings_list)
+        mock_data_requests.get(
+            f"{API_URL}/org/{mocked_org_id}/synchronize/synchronization-progress/synced_dataset_123",
+            json={
+                "detail": {
+                    "error": "Synchronization failed for recording(s): rec-1",
+                    "status": 409,
+                }
+            },
+            status_code=409,
+        )
+
+        with pytest.raises(
+            DatasetError, match="Synchronization failed for recording\\(s\\): rec-1"
+        ):
+            dataset._get_synchronization_progress("synced_dataset_123")
 
 
 class TestDatasetMixedOperations:

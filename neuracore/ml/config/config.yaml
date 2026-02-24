@@ -26,6 +26,9 @@ max_prefetch_workers: 4
 dataset_name: null
 dataset_id: null
 frequency: 10
+allow_duplicates: true
+max_delay_s: null
+trim_start_end: true
 
 # You can either specify input_data_types/output_data_types or
 # input_robot_data_spec/output_robot_data_spec
