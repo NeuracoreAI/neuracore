@@ -107,11 +107,9 @@ def start_training_run(
     dataset_id = dataset.id
     input_robot_data_spec_with_ids = convert_robot_data_spec_names_to_ids(
         input_robot_data_spec,
-        dataset.robot_mapping,
     )
     output_robot_data_spec_with_ids = convert_robot_data_spec_names_to_ids(
         output_robot_data_spec,
-        dataset.robot_mapping,
     )
 
     # Get algorithm id
@@ -215,6 +213,43 @@ def get_training_job_status(job_id: str) -> str:
         return job_data["status"]
     except Exception as e:
         raise ValueError(f"Error accessing job: {e}")
+
+
+def get_training_job_logs(
+    job_id: str, max_entries: int = 100, severity_filter: str | None = None
+) -> dict:
+    """Retrieve logs for a training job from neuracore backend.
+
+    Args:
+        job_id: The ID of the training job.
+        max_entries: Maximum number of log entries to return.
+        severity_filter: Optional log severity filter (for example: "ERROR").
+
+    Returns:
+        dict: Cloud compute logs payload.
+
+    Raises:
+        ValueError: If logs cannot be retrieved.
+        requests.exceptions.HTTPError: If the API request returns an error code.
+        requests.exceptions.RequestException: If there is a problem with the request.
+        ConfigError: If there is an error trying to get the current org.
+    """
+    auth = get_auth()
+    org_id = get_current_org()
+    params: dict[str, str | int] = {"max_entries": max_entries}
+    if severity_filter is not None:
+        params["severity_filter"] = severity_filter
+
+    try:
+        response = requests.get(
+            f"{API_URL}/org/{org_id}/training/jobs/{job_id}/logs",
+            headers=auth.get_headers(),
+            params=params,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        raise ValueError(f"Error getting training job logs: {e}")
 
 
 def delete_training_job(job_id: str) -> None:

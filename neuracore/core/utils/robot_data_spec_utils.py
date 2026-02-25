@@ -6,11 +6,25 @@ merge_robot_data_spec. Both packages depend on neuracore_types, so it
 would be the natural home for these shared utilities.
 """
 
+import re
+
 from neuracore_types import DataType, RobotDataSpec
 from ordered_set import OrderedSet
 
-from neuracore.core.exceptions import DatasetError
-from neuracore.core.utils.robot_mapping import RobotMapping
+from neuracore.core.robot import get_robot_id_from_name
+
+ID_REGEX = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
+
+
+def is_robot_id(string: str) -> bool:
+    """Check if a robot identifier is a UUID-style ID.
+
+    Returns:
+        True if the identifier matches UUID format, False otherwise.
+    """
+    return bool(ID_REGEX.match(string))
 
 
 def convert_str_to_robot_data_spec(
@@ -41,13 +55,16 @@ def convert_str_to_robot_data_spec(
 
 def convert_robot_data_spec_names_to_ids(
     robot_data_spec: RobotDataSpec,
-    robot_mapping: RobotMapping,
-) -> dict[str, dict[DataType, list[str]]]:
-    """Convert RobotDataSpec from robot names/IDs to robot IDs using a mapping.
+) -> RobotDataSpec:
+    """Convert RobotDataSpec from robot names/IDs to robot IDs.
+
+    Resolves both private and shared robots.
+
+    If name collision occurs between a private and shared robot,
+    the private robot will take priority.
 
     Args:
         robot_data_spec: Robot data spec keyed by robot names or IDs.
-        robot_mapping: Organization-level robot name/id mapping cache.
 
     Returns:
         Robot data spec keyed by robot IDs.
@@ -55,30 +72,29 @@ def convert_robot_data_spec_names_to_ids(
     Raises:
         DatasetError: If a robot identifier is ambiguous.
     """
-    resolved: dict[str, dict[DataType, list[str]]] = {}
+    robot_data_spec_with_ids: RobotDataSpec = {}
+    seen_ids = []
 
-    for robot_key, data_spec in robot_data_spec.items():
-        try:
-            robot_id = robot_mapping.robot_key_to_id(
-                robot_key,
-            )
-        except ValueError as exc:
-            raise DatasetError(str(exc)) from exc
-        if robot_id is None:
-            # Assume the key is already a robot ID; backend will validate if needed.
-            robot_id = robot_key
+    for robot_name_or_id, data_spec in robot_data_spec.items():
 
-        if robot_id in resolved:
-            # Merge data specs for the same robot
-            merged_data_spec: dict[DataType, list[str]] = dict(resolved[robot_id])
-            for data_type, items in data_spec.items():
-                merged_items = list(merged_data_spec.get(data_type, [])) + list(items)
-                # Preserve order while removing duplicates
-                merged_data_spec[data_type] = list(dict.fromkeys(merged_items))
-            resolved[robot_id] = merged_data_spec
+        if not is_robot_id(robot_name_or_id):
+            robot_name = robot_name_or_id
+            # Assume it's a name and try to resolve to an ID
+            robot_id = get_robot_id_from_name(robot_name)
+            robot_data_spec_with_ids[robot_id] = data_spec
         else:
-            resolved[robot_id] = data_spec
-    return resolved
+            robot_id = robot_name_or_id
+            robot_data_spec_with_ids[robot_id] = data_spec
+
+        seen_ids.append(robot_id)
+
+    # Check for duplicates and raise an error if found
+    if len(seen_ids) != len(set(seen_ids)):
+        raise Exception(
+            "Duplicate robot identifiers found after conversion. "
+            "Please ensure all robot names and IDs are unique."
+        )
+    return robot_data_spec_with_ids
 
 
 def merge_robot_data_spec(

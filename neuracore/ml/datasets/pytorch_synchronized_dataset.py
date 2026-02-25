@@ -333,11 +333,20 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             inputs[data_type] = []
             for name, nc_data in sync_point.data[data_type].items():
                 batched_nc_data = batched_nc_data_class.from_nc_data(nc_data)
+                batched_nc_data.transform_nc_data()
                 inputs[data_type].append(batched_nc_data)
+
+            # Pad to global dataset statistics size so all samples have
+            # consistent per-data-type dimensions across robots.
+            max_items_trained_on = len(self.dataset_statistics[data_type])
+            missing_items = max_items_trained_on - len(inputs[data_type])
+            for _ in range(max(0, missing_items)):
+                inputs[data_type].append(
+                    batched_nc_data_class.sample(batch_size=1, time_steps=1)
+                )
 
             # Create mask for inputs
             max_items_for_this_data_type = len(sync_point.data[data_type])
-            max_items_trained_on = len(self.dataset_statistics[data_type])
             inputs_mask[data_type] = torch.tensor(
                 [1.0] * max_items_for_this_data_type
                 + [0.0] * (max_items_trained_on - max_items_for_this_data_type),
@@ -355,11 +364,23 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     future_sp.data[data_type][name] for future_sp in future_sync_points
                 ]
                 batched_nc_data = batched_nc_data_class.from_nc_data_list(nc_data_list)
+                batched_nc_data.transform_nc_data()
                 outputs[data_type].append(batched_nc_data)
+
+            # Pad to global dataset statistics size so target action dimensions
+            # match model/normalizer dimensions across mixed-robot batches.
+            max_items_trained_on = len(self.dataset_statistics[data_type])
+            missing_items = max_items_trained_on - len(outputs[data_type])
+            for _ in range(max(0, missing_items)):
+                outputs[data_type].append(
+                    batched_nc_data_class.sample(
+                        batch_size=1,
+                        time_steps=self.output_prediction_horizon,
+                    )
+                )
 
             # Create mask for outputs
             max_items_for_this_data_type = len(sync_point.data[data_type])
-            max_items_trained_on = len(self.dataset_statistics[data_type])
             outputs_mask[data_type] = torch.tensor(
                 [1.0] * max_items_for_this_data_type
                 + [0.0] * (max_items_trained_on - max_items_for_this_data_type),

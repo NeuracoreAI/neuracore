@@ -205,6 +205,31 @@ def update_robot_name(
     return robot_id
 
 
+def get_training_job_logs(
+    job_id: str, max_entries: int = 100, severity_filter: str | None = None
+) -> dict:
+    """Retrieve logs for a training job from neuracore backend.
+
+    This convenience wrapper keeps the high-level API surface in `core.py`
+    while delegating the backend call to the training API module.
+
+    Args:
+        job_id: The ID of the training job.
+        max_entries: Maximum number of log entries to return.
+        severity_filter: Optional log severity filter (for example: "ERROR").
+
+    Returns:
+        dict: Cloud compute logs payload.
+    """
+    from .training import get_training_job_logs as _get_training_job_logs
+
+    return _get_training_job_logs(
+        job_id=job_id,
+        max_entries=max_entries,
+        severity_filter=severity_filter,
+    )
+
+
 def is_recording(robot_name: str | None = None, instance: int = 0) -> bool:
     """Check if a robot is currently recording.
 

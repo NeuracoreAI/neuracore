@@ -22,7 +22,6 @@ from neuracore_types import RobotInstanceIdentifier
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
-from neuracore.core.utils.robot_mapping import RobotMapping
 from neuracore.data_daemon.communications_management.producer import Producer
 from neuracore.data_daemon.communications_management.producer import (
     RecordingContext as DaemonRecordingContext,
@@ -823,7 +822,6 @@ def update_robot_name(
     except requests.exceptions.RequestException as e:
         raise RobotError(f"Failed to update robot name: {str(e)}")
     _update_local_robot_name_cache(robot_id, new_robot_name)
-    RobotMapping.for_org(resolved_org_id, is_shared=shared).refresh()
     return robot_id
 
 
@@ -859,3 +857,49 @@ def list_organization_robots(
         )
     except requests.exceptions.RequestException as e:
         raise RobotError(f"Failed to list robots: {str(e)}")
+
+
+def get_robot_id_from_name(robot_name: str, org_id: str | None = None) -> str:
+    """Get the robot ID corresponding to a given robot name.
+
+    This is for any robot in the org, not a specific robot instance.
+
+    Will search through list of robots in given org and shared
+
+    Args:
+        robot_name: The name of the robot to look up.
+
+    Returns:
+        The unique ID of the robot.
+
+    Raises:
+        RobotError: If the robot name is not found in the registry.
+    """
+    if org_id is None:
+        org_id = get_current_org()
+
+    response_private = requests.get(
+        f"{API_URL}/org/{org_id}/robots",
+        headers=get_auth().get_headers(),
+        params={"is_shared": False},
+    )
+
+    response_shared = requests.get(
+        f"{API_URL}/org/{org_id}/robots",
+        headers=get_auth().get_headers(),
+        params={"is_shared": True},
+    )
+
+    response_private.raise_for_status()
+    response_shared.raise_for_status()
+
+    robots = response_private.json() + response_shared.json()
+    # There is a change the same name can exist in both private and shared,
+    # we will return the private first in this case
+    for robot in robots:
+        if robot["name"] == robot_name:
+            return robot["id"]
+    raise RobotError(
+        f"Robot with name '{robot_name}' not found in organization '{org_id}' "
+        "or shared robots."
+    )

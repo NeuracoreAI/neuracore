@@ -31,6 +31,8 @@ FREQ = 30
 PTS_FRACT = 90000  # Common timebase for h264
 
 MOCKED_ORG_ID = "test-org-id"
+TEST_ROBOT_ID_1 = "20a621b7-2f9b-4699-a08e-7d080488a5a3"
+TEST_ROBOT_ID_2 = "30b731c8-3f9c-5799-b19e-8d190599b6b4"
 
 
 @pytest.fixture
@@ -152,7 +154,7 @@ def recordings_list():
         Recording(
             id="rec1",
             name="recording1",
-            robot_id="robot1",
+            robot_id=TEST_ROBOT_ID_1,
             instance=1,
             org_id="test-org-id",
             start_time=0.0,
@@ -163,7 +165,7 @@ def recordings_list():
         Recording(
             id="rec2",
             name="recording2",
-            robot_id="robot2",
+            robot_id=TEST_ROBOT_ID_2,
             instance=1,
             org_id="test-org-id",
             start_time=0.0,

@@ -8,6 +8,7 @@ from neuracore_types import DataType
 import neuracore as nc
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
+from tests.unit.core.data.conftest import TEST_ROBOT_ID_1, TEST_ROBOT_ID_2
 
 
 class TestSynchronizedDataset:
@@ -77,7 +78,7 @@ class TestSynchronizedDataset:
 
         assert isinstance(recording, SynchronizedRecording)
         assert recording.id == "rec1"
-        assert recording.robot_id == "robot1"
+        assert recording.robot_id == TEST_ROBOT_ID_1
         assert recording.frequency == 30
 
     def test_getitem_second_recording(self, synced_dataset, mock_data_requests):
@@ -86,7 +87,7 @@ class TestSynchronizedDataset:
 
         assert isinstance(recording, SynchronizedRecording)
         assert recording.id == "rec2"
-        assert recording.robot_id == "robot2"
+        assert recording.robot_id == TEST_ROBOT_ID_2
 
     def test_getitem_negative_index(self, synced_dataset, mock_data_requests):
         """Test accessing recordings with negative indices."""
@@ -317,7 +318,7 @@ class TestSynchronizedDataset:
         recording = synced_dataset[0]
 
         assert recording.instance == 1
-        assert recording.robot_id == "robot1"
+        assert recording.robot_id == TEST_ROBOT_ID_1
 
     def test_nested_iteration(
         self, synced_dataset, mock_data_requests, mock_wget_download

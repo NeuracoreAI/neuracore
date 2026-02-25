@@ -22,10 +22,7 @@ from tqdm import tqdm
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
-from neuracore.core.utils.robot_data_spec_utils import (
-    convert_robot_data_spec_names_to_ids,
-)
-from neuracore.core.utils.robot_mapping import RobotMapping
+from neuracore.core.utils.robot_data_spec_utils import is_robot_id
 
 from ..auth import Auth, get_auth
 from ..const import API_URL, DEFAULT_RECORDING_CACHE_DIR
@@ -56,7 +53,7 @@ class Dataset:
 
         Args:
             id: Unique identifier for the dataset.
-            org_id: Organization ID associated with the dataset.
+            org_id: Organization ID of the user not for the org owner of the dataset
             name: Human-readable name for the dataset.
             size_bytes: Total size of the dataset in bytes.
             tags: List of tags associated with the dataset.
@@ -82,7 +79,6 @@ class Dataset:
         self.is_shared = is_shared
         self.description = description
         self.data_types = data_types or []
-
         self.cache_dir = DEFAULT_RECORDING_CACHE_DIR
         self._recordings_cache: list[Recording] = (
             [
@@ -95,16 +91,6 @@ class Dataset:
         self._num_recordings: int | None = len(recordings) if recordings else None
         self._start_after: dict | None = None
         self._robot_ids: list[str] | None = None
-        self._robot_mapping: RobotMapping | None = None
-
-    @property
-    def robot_mapping(self) -> RobotMapping:
-        """Organization-level robot name/id mapping cache."""
-        if self._robot_mapping is None:
-            self._robot_mapping = RobotMapping.for_org(
-                self.org_id, is_shared=self.is_shared
-            )
-        return self._robot_mapping
 
     def _wrap_raw_recording(self, raw_recording: dict) -> Recording:
         """Wrap a raw recording dict into a Recording object.
@@ -254,6 +240,7 @@ class Dataset:
                 return None
             raise DatasetError(f"Dataset with ID '{id}' not found.")
         dataset_model = DatasetModel.model_validate(req.json())
+
         return Dataset(
             id=dataset_model.id,
             org_id=org_id,
@@ -486,19 +473,14 @@ class Dataset:
                 for robot_id in self.robot_ids
             }
 
-        try:
-            robot_data_spec_with_ids = convert_robot_data_spec_names_to_ids(
-                robot_data_spec,
-                self.robot_mapping,
-            )
-        except DatasetError as exc:
-            raise DatasetError(
-                f"Failed to resolve robot_data_spec for dataset {self.name}: {exc}"
-            ) from exc
+        # Validate robot_data_spec only has robot_ids
+        for robot_id in robot_data_spec.keys():
+            assert is_robot_id(robot_id), f"Expected robot_id format for {robot_id}"
 
         synced_dataset = self._synchronize(
-            frequency=frequency, robot_data_spec=robot_data_spec_with_ids
+            frequency=frequency, robot_data_spec=robot_data_spec
         )
+
         synchronization_progress = self._get_synchronization_progress(synced_dataset.id)
         total = synced_dataset.num_demonstrations
         processed = synchronization_progress.num_synchronized_demonstrations
@@ -522,23 +504,22 @@ class Dataset:
             id=synced_dataset.id,
             dataset=self,
             frequency=frequency,
-            robot_data_spec=robot_data_spec_with_ids,
+            robot_data_spec=robot_data_spec,
             prefetch_videos=prefetch_videos,
             max_prefetch_workers=max_prefetch_workers,
         )
 
-    def get_full_data_spec(self, robot_key: str) -> DataSpec:
-        """Get full data spec for a given robot name (or ID) in the dataset.
+    def get_full_data_spec(self, robot_id: str) -> DataSpec:
+        """Get full data spec for a given robot ID in the dataset.
 
         Args:
-            robot_key: The robot name (or ID) to get the data spec for.
+            robot_id: The robot ID to get the data spec for.
 
         Returns:
             A dictionary mapping DataType to list of data names.
         """
         # Best-effort resolution without additional network calls.
         # If we can resolve a robot_name to an ID, do so; otherwise delegate to server.
-        robot_id = self.robot_mapping.robot_key_to_id(robot_key) or robot_key
         response = requests.get(
             f"{API_URL}/org/{self.org_id}/datasets/{self.id}/full-data-spec/{robot_id}",
             headers=get_auth().get_headers(),
@@ -561,19 +542,7 @@ class Dataset:
             response.raise_for_status()
             self._robot_ids = response.json()
             # Populate names to keep order consistent with IDs
-            self._initialize_robot_metadata()
         return self._robot_ids
-
-    def _initialize_robot_metadata(self) -> None:
-        """Fetch robot metadata into the shared mapping cache."""
-        self.robot_mapping.ensure_loaded()
-
-    def refresh_robot_metadata(self) -> None:
-        """Refresh cached robot name mappings from the API."""
-        if self._robot_ids is None:
-            _ = self.robot_ids
-            return
-        self.robot_mapping.refresh()
 
     def __iter__(self) -> Iterator[Recording]:
         """Yield recordings one by one, fetching pages lazily."""
