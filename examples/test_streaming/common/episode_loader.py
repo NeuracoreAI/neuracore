@@ -32,7 +32,6 @@ def load_rgb_frames(episode_dir: Path) -> tuple[np.ndarray, np.ndarray] | None:
     ts_rgb = np.load(ts_rgb_path)
 
     import imageio.v3 as iio
-
     frames = iio.imread(str(video_path))
     # Video was saved as BGR0; convert to RGB
     if frames.ndim == 4 and frames.shape[-1] == 4:
