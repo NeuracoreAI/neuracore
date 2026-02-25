@@ -1,0 +1,103 @@
+input_dataset_name: mimic_play
+
+output_dataset:
+  name: MimicPlay
+  tags: [panda, manipulation, real-world, kitchen, long-horizon]
+  description: "Teleoperated Franka Panda demonstrations for 14 long-horizon manipulation tasks in a real-world kitchen (e.g. flower, whiteboard, sandwich, cloth)."
+
+robot: 
+  name: franka_panda
+  urdf_path: "panda.urdf"
+  override_existing: true
+
+frequency: 15.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping: 
+      - name: front_image_1
+        source_name: image.front_image_1
+      - name: front_image_2
+        source_name: image.front_image_2
+      - name: wrist_image
+        source_name: wrist_image.wrist_image
+
+  JOINT_POSITIONS:
+    source: action
+    units: RADIANS
+    mapping:
+      - name: panda_joint1
+      - name: panda_joint2
+      - name: panda_joint3
+      - name: panda_joint4
+      - name: panda_joint5
+      - name: panda_joint6
+      - name: panda_joint7
+  
+  JOINT_VELOCITIES:
+    source: observation.state.joint_velocities
+    units: RADIANS
+    mapping:
+      - name: panda_joint1
+      - name: panda_joint2
+      - name: panda_joint3
+      - name: panda_joint4
+      - name: panda_joint5
+      - name: panda_joint6
+      - name: panda_joint7
+
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.state.gripper_position
+    format:
+      normalize:
+        min: 0.0
+        max: 0.077
+    mapping:
+      - name: gripper
+  
+  PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+    source: action
+    format:
+      invert_gripper_amount: true
+      normalize:
+        min: -1.0
+        max: 1.0
+    mapping:
+      - name: gripper
+        index: 6
+
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state.gripper_position
+    format:
+      visual_joint_type: GRIPPER
+      normalize:
+        min: 0.0
+        max: 0.077
+    mapping:
+      - name: panda_finger_joint1
+      - name: panda_finger_joint2
+
+  END_EFFECTOR_POSES:
+    source: observation.state.ee_pose
+    format:
+      pose_type: POSITION_ORIENTATION
+      orientation:
+        type: QUATERNION
+        quaternion_order: XYZW
+        angle_units: RADIANS
+    mapping:
+      - name: end_effector
+        index_range: 
+          start: 0
+          end: 7
+
+  LANGUAGE:
+    source: language_instruction
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction
