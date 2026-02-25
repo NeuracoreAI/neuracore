@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 from neuracore.data_daemon.recording_encoding_disk_manager.encoding import (
@@ -228,6 +229,27 @@ def test_video_trace_timestamp_fallback_does_not_crash(
 
     frame = bytes([10, 20, 30] * (w * h))
     vt.add_payload(frame)
+    vt.finish()
+
+    assert (out_dir / "lossy.mp4").is_file()
+    assert (out_dir / "lossless.mp4").is_file()
+    assert (out_dir / "trace.json").is_file()
+
+
+def test_video_trace_accepts_depth_float32_payload(
+    tmp_path: Path,
+    patched_video_trace,
+) -> None:
+    VideoTrace = patched_video_trace.VideoTrace
+    out_dir = tmp_path / "video"
+    vt = VideoTrace(output_dir=out_dir)
+
+    w, h = 4, 3
+    meta: dict[str, Any] = {"width": w, "height": h, "timestamp": 1.0}
+    vt.add_payload(json.dumps(meta).encode("utf-8"))
+
+    depth = np.ones((h, w), dtype=np.float32) * 2.0
+    vt.add_payload(depth.tobytes())
     vt.finish()
 
     assert (out_dir / "lossy.mp4").is_file()

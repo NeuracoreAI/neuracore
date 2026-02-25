@@ -66,9 +66,6 @@ class UploadManager(TraceManager):
         logger.info("Shutting down UploadManager...")
 
         if wait and self._active_uploads:
-            logger.info(
-                f"Waiting for {len(self._active_uploads)} uploads to complete..."
-            )
             await asyncio.gather(*self._active_uploads, return_exceptions=True)
         else:
             for task in self._active_uploads:
@@ -352,11 +349,6 @@ class UploadManager(TraceManager):
                         last_progress_update,
                     )
 
-                    logger.info(
-                        f"Uploading file {file_idx + 1}/{len(files)}: {file.name} "
-                        f"(offset={file_bytes_uploaded})"
-                    )
-
                     success, file_total_bytes, error_message = await self._upload_file(
                         file,
                         cloud_filepath,
@@ -407,7 +399,6 @@ class UploadManager(TraceManager):
                     return False
 
                 self._emitter.emit(Emitter.UPLOAD_COMPLETE, trace_id)
-                logger.info(f"Upload successful for trace {trace_id}")
                 return True
 
             except FileNotFoundError as e:

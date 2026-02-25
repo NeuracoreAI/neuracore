@@ -61,7 +61,9 @@ def merge_datasets(name: str, dataset_names: list[str]) -> Dataset:
 
     source_ids = []
     for dataset_name in dataset_names:
-        ds: Dataset = Dataset.get_by_name(dataset_name)  # type: ignore
+        ds = Dataset.get_by_name(dataset_name, non_exist_ok=True)
+        if ds is None:
+            raise DatasetError(f"Dataset '{dataset_name}' not found.")
         source_ids.append(ds.id)
 
     response = requests.post(
