@@ -381,39 +381,33 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                     return length
         return None
 
+    def _resolve_source_path(self, source: Any, source_name: str | None) -> Any:
+        if not source_name:
+            return source
+        for key in source_name.split("."):
+            source = source[key]
+        return source
+
     def _record_step(self, step_data: dict, timestamp: float) -> None:
         """Record a single step to Neuracore."""
-        import tensorflow as tf
-
         for data_type, import_config in self.dataset_config.data_import_config.items():
-            source = step_data
-            for path in import_config.source.split("."):
-                source = source[path]
+            source = self._resolve_source_path(step_data, import_config.source)
 
             for item in import_config.mapping:
-                try:
-                    source_data = self._extract_source_data(
-                        source=source,
-                        item=item,
-                        import_source_path=import_config.source,
-                        data_type=data_type,
-                    )
+                source_data = self._extract_source_data(
+                    source=source,
+                    item=item,
+                    import_source_path=import_config.source,
+                    data_type=data_type,
+                )
 
-                    source_data = self._convert_source_data(
-                        source_data=source_data,
-                        data_type=data_type,
-                        language_type=import_config.format.language_type,
-                        item_name=item.name,
-                        import_source_path=import_config.source,
-                        tf_module=tf,
-                    )
-                except (KeyError, IndexError, TypeError) as exc:
-                    raise ImportError(
-                        f"Failed to extract data for {data_type.value}."
-                        f"{item.name if hasattr(item, 'name') else 'unknown'} "
-                        f"from source '{import_config.source}': {exc}"
-                    ) from exc
-
+                source_data = self._convert_source_data(
+                    source_data=source_data,
+                    data_type=data_type,
+                    language_type=import_config.format.language_type,
+                    item_name=item.name,
+                    import_source_path=import_config.source,
+                )
                 self._log_data(
                     data_type, source_data, item, import_config.format, timestamp
                 )
@@ -425,31 +419,25 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         import_source_path: str,
         data_type: DataType,
     ) -> Any:
-        if item.source_name is not None:
-            source_data = source[item.source_name]
-        else:
-            source_data = source
+        source_data = self._resolve_source_path(source, item.source_name)
 
-        if item.index is not None:
-            if isinstance(source_data, dict):
-                raise ImportError(
-                    "Cannot index dict with integer index for "
-                    f"{data_type.value}."
-                    f"{item.name if hasattr(item, 'name') else 'unknown'}. "
-                    f"Source path '{import_source_path}' resolved to a dict, "
-                    "not a tensor. Check your dataset config."
-                )
-            source_data = source_data[item.index]
-        elif item.index_range is not None:
-            if isinstance(source_data, dict):
-                raise ImportError(
-                    "Cannot slice dict with index_range for "
-                    f"{data_type.value}."
-                    f"{item.name if hasattr(item, 'name') else 'unknown'}. "
-                    f"Source path '{import_source_path}' resolved to a dict, "
-                    "not a tensor."
-                )
-            source_data = source_data[item.index_range.start : item.index_range.end]
+        try:
+            if item.index is not None:
+                source_data = source_data[item.index]
+            elif item.index_range is not None:
+                source_data = source_data[item.index_range.start : item.index_range.end]
+        except Exception as exc:
+            shape_str = (
+                f" with shape {source_data.shape}"
+                if hasattr(source_data, "shape")
+                else ""
+            )
+            raise ImportError(
+                f"Cannot index or slice for '{data_type.value}'. "
+                f"Source path '{import_source_path}' resolved to a "
+                f"{type(source_data)}{shape_str}, not an indexable tensor. "
+                f"Check your dataset config. {exc}"
+            )
 
         return source_data
 
@@ -460,46 +448,18 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         language_type: LanguageConfig,
         item_name: str | None,
         import_source_path: str,
-        tf_module: Any,
     ) -> Any:
         if data_type == DataType.LANGUAGE and language_type == LanguageConfig.STRING:
             return source_data
 
-        if isinstance(source_data, tf_module.Tensor) or (
-            hasattr(source_data, "numpy")
-            and not isinstance(source_data, (dict, list, str, bytes))
-        ):
-            try:
-                return source_data.numpy()
-            except Exception as exc:
-                self.logger.warning(
-                    "Failed to convert tensor to numpy for %s.%s: %s. Using raw value.",
-                    data_type.value,
-                    item_name if item_name else "unknown",
-                    exc,
-                )
-                return source_data
-
-        if isinstance(source_data, dict):
+        try:
+            return source_data.numpy()
+        except Exception as exc:
+            suffix = f".{item_name}" if item_name else ""
             raise ImportError(
-                "Expected tensor but got dict for "
-                f"{data_type.value}.{item_name if item_name else 'unknown'}. "
-                f"Source path '{import_source_path}' may be incorrect."
+                f"Failed to convert data to numpy array for "
+                f"{data_type.value}{suffix}: {exc}."
             )
-
-        if isinstance(source_data, list) and source_data:
-            if isinstance(source_data[0], tf_module.Tensor) or hasattr(
-                source_data[0], "numpy"
-            ):
-                try:
-                    return [
-                        value.numpy() if hasattr(value, "numpy") else value
-                        for value in source_data
-                    ]
-                except Exception:
-                    return source_data
-
-        return source_data
 
 
 class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
@@ -548,42 +508,6 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             max_workers=1,
             skip_on_error=skip_on_error,
         )
-
-    def _record_step(self, step_data: dict, timestamp: float) -> None:
-        """Record a single step to Neuracore.
-
-        RLDS configs may omit source paths, so we preserve that behavior here.
-        """
-        for data_type, import_config in self.dataset_config.data_import_config.items():
-            if not import_config.source:
-                source: Any = step_data
-            else:
-                source_path = import_config.source.split(".")
-                source = step_data
-                for path in source_path:
-                    source = source[path]
-
-            for item in import_config.mapping:
-                source_data = (
-                    source[item.source_name] if item.source_name is not None else source
-                )
-
-                if item.index is not None:
-                    source_data = source_data[item.index]
-                elif item.index_range is not None:
-                    source_data = source_data[
-                        item.index_range.start : item.index_range.end
-                    ]
-
-                if not (
-                    data_type == DataType.LANGUAGE
-                    and import_config.format.language_type == LanguageConfig.STRING
-                ):
-                    source_data = source_data.numpy()
-
-                self._log_data(
-                    data_type, source_data, item, import_config.format, timestamp
-                )
 
 
 class TFDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):

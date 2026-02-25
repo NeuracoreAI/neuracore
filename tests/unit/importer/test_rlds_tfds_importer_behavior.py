@@ -180,14 +180,12 @@ def test_extract_then_convert_dict_raises_import_error_without_nested_search():
         import_source_path="steps.observation",
         data_type=DataType.POSES,
     )
-    tf_module = SimpleNamespace(Tensor=_FakeTensor)
 
-    with pytest.raises(ImportError, match="Expected tensor but got dict"):
+    with pytest.raises(ImportError, match="Failed to convert data to numpy array"):
         importer._convert_source_data(
             source_data=extracted,
             data_type=DataType.POSES,
             language_type=LanguageConfig.STRING,
             item_name="ee_pose",
             import_source_path="steps.observation",
-            tf_module=tf_module,
         )
