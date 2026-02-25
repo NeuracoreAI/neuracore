@@ -102,12 +102,14 @@ class TraceRecord:
     total_bytes: int | None
     bytes_uploaded: int
     progress_reported: ProgressReportStatus
+    expected_trace_count_reported: int
     error_code: TraceErrorCode | None
     error_message: str | None
     created_at: datetime
     last_updated: datetime
     num_upload_attempts: int
     next_retry_at: datetime | None
+    stopped_at: datetime | None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "TraceRecord":
@@ -157,12 +159,14 @@ class TraceRecord:
             total_bytes=row.get("total_bytes"),
             bytes_uploaded=int(row.get("bytes_uploaded", 0)),
             progress_reported=_parse_progress_reported(row.get("progress_reported")),
+            expected_trace_count_reported=row.get("expected_trace_count_reported", 0),
             error_code=error_code,
             error_message=row.get("error_message"),
             created_at=row["created_at"],
             last_updated=row["last_updated"],
             num_upload_attempts=int(row.get("num_upload_attempts", 0)),
             next_retry_at=row.get("next_retry_at"),
+            stopped_at=row.get("stopped_at"),
         )
 
 

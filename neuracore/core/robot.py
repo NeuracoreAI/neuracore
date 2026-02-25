@@ -361,8 +361,23 @@ class Robot:
                 stream.stop_recording()
                 producer = getattr(stream, "_producer", None)
                 if isinstance(producer, Producer):
+                    cutoff_sequence_number = (
+                        producer.get_last_enqueued_sequence_number()
+                    )
+                    drained = producer.wait_until_sequence_sent(cutoff_sequence_number)
+                    if not drained:
+                        sent_sequence_number = producer.get_last_sent_sequence_number()
+                        logger.warning(
+                            "Producer %s sender stopped before draining cutoff "
+                            "(requested=%s sent=%s); using sent cutoff",
+                            producer.producer_id,
+                            cutoff_sequence_number,
+                            sent_sequence_number,
+                        )
+                        cutoff_sequence_number = sent_sequence_number
+
                     producer_stop_sequence_numbers[producer.producer_id] = (
-                        producer.get_last_sent_sequence_number()
+                        cutoff_sequence_number
                     )
             except Exception:
                 logger.exception("Failed to stop data stream %s", stream_id)

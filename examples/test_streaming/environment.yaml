@@ -1,0 +1,16 @@
+name: neuracore-test-streaming
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - neuracore
+      - neuracore_types
+      - numpy
+      - tqdm
+      - viser==1.0.16
+      - yourdfpy
+      - imageio[ffmpeg]
+      - plotly
+      - opencv-python

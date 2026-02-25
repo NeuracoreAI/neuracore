@@ -6,9 +6,16 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+import aiohttp
 from sqlalchemy.exc import OperationalError
 
+from neuracore.core.auth import get_auth
+from neuracore.core.config.get_current_org import get_current_org
 from neuracore.data_daemon.const import (
+    API_URL,
+    BACKEND_API_MAX_BACKOFF_SECONDS,
+    BACKEND_API_MAX_RETRIES,
+    BACKEND_API_RETRYABLE_STATUS_CODES,
     UPLOAD_MAX_RETRIES,
     UPLOAD_RETRY_BASE_SECONDS,
     UPLOAD_RETRY_MAX_SECONDS,
@@ -62,6 +69,7 @@ class StateManager:
             ]
         ] = asyncio.Queue()
         self._start_trace_retry_task: asyncio.Task | None = None
+        self.expected_trace_count_reporting: dict[str, bool] = {}
 
         self._emitter = get_emitter()
 
@@ -313,7 +321,7 @@ class StateManager:
                         trace.trace_id,
                         trace.data_type,
                     )
-                await self._store.delete_trace(trace.trace_id)
+                await self.delete_trace(trace.trace_id)
                 continue
 
             await self._store.reset_failed_trace_for_retry(trace.trace_id)
@@ -325,23 +333,35 @@ class StateManager:
         """Handle an upload complete event from an uploader.
 
         This function is called when an uploader completes an upload.
-        It emits an event to delete the trace from the database and then
-        deletes the trace record from the database.
+        Local trace data is deleted immediately, while DB metadata can be
+        retained until progress reporting completes.
         """
-        # Trigger file deletion
         trace_record = await self._store.get_trace(trace_id)
         if trace_record is None:
             logger.warning("Trace record not found: %s", trace_id)
             return
 
+        # Always delete local trace data after upload; DB metadata may be retained
+        # until progress reporting is complete.
         self._emitter.emit(
             Emitter.DELETE_TRACE,
             trace_record.recording_id,
             trace_id,
             trace_record.data_type,
         )
-        # Delete db entry
-        await self._store.delete_trace(trace_id)
+
+        await self._store.update_status(trace_id, TraceStatus.UPLOADED)
+        traces = await self._store.find_traces_by_recording_id(
+            trace_record.recording_id
+        )
+
+        if any(
+            trace.progress_reported == ProgressReportStatus.REPORTED for trace in traces
+        ):
+            for uploaded_trace in traces:
+                if uploaded_trace.status != TraceStatus.UPLOADED:
+                    continue
+                await self._store.delete_trace(uploaded_trace.trace_id)
 
     async def _handle_trace_written(
         self, trace_id: str, recording_id: str, bytes_written: int
@@ -426,8 +446,13 @@ class StateManager:
             trace.data_type_name,
             trace.bytes_uploaded,
         )
-
         traces = await self._store.find_traces_by_recording_id(trace.recording_id)
+        if trace.stopped_at is None and any(
+            sibling_trace.stopped_at is not None for sibling_trace in traces
+        ):
+            await self._store.set_stopped_ats(trace.recording_id)
+        if all(trace.expected_trace_count_reported != 1 for trace in traces):
+            await self._set_expected_trace_count(trace.recording_id, len(traces))
         await self._emit_progress_report_if_recording_stopped(traces)
 
     async def handle_upload_started(self, trace_id: str) -> None:
@@ -450,9 +475,29 @@ class StateManager:
         ):
             return
 
-        if not all(
-            trace.data_type is not None and trace.bytes_written is not None
+        # Only report after the recording has been explicitly stopped for every
+        # trace currently known to this recording.
+        missing_stopped_at = sum(trace.stopped_at is None for trace in traces)
+        if missing_stopped_at:
+            return
+
+        # Only report once every trace has a final byte count and metadata.
+        missing_data_type = sum(trace.data_type is None for trace in traces)
+        missing_bytes_written = sum(trace.bytes_written is None for trace in traces)
+        missing_total_bytes = sum(trace.total_bytes is None for trace in traces)
+        mismatched_bytes = sum(
+            (
+                trace.bytes_written is not None
+                and trace.total_bytes is not None
+                and trace.bytes_written != trace.total_bytes
+            )
             for trace in traces
+        )
+        if (
+            missing_data_type
+            or missing_bytes_written
+            or missing_total_bytes
+            or mismatched_bytes
         ):
             return
 
@@ -464,8 +509,102 @@ class StateManager:
         self, start_time: float, end_time: float, traces: list[TraceRecord]
     ) -> None:
         """Emit progress report event asynchronously."""
-        await asyncio.sleep(0)
         self._emitter.emit(Emitter.PROGRESS_REPORT, start_time, end_time, traces)
+
+    async def _set_expected_trace_count(
+        self, recording_id: str, expected_trace_count: int
+    ) -> None:
+        """Post expected trace count for a recording to the backend."""
+        if not recording_id:
+            return
+        if recording_id in self.expected_trace_count_reporting:
+            return
+
+        self.expected_trace_count_reporting[recording_id] = True
+        loop = asyncio.get_running_loop()
+        auth = get_auth()
+
+        try:
+            try:
+                org_id = await loop.run_in_executor(None, get_current_org)
+                headers = await loop.run_in_executor(None, auth.get_headers)
+            except Exception:
+                logger.exception(
+                    "Failed preparing expected trace count request for recording %s",
+                    recording_id,
+                )
+                return
+
+            url = (
+                f"{API_URL}/org/{org_id}/recording/{recording_id}/expected-trace-count"
+            )
+            payload = {
+                "expected_trace_count": int(expected_trace_count),
+            }
+            last_error: str | None = None
+
+            async with aiohttp.ClientSession() as session:
+                for attempt in range(BACKEND_API_MAX_RETRIES):
+                    try:
+                        async with session.put(
+                            url,
+                            json=payload,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as response:
+                            if response.status < 400:
+                                await self._store.mark_expected_trace_count_reported(
+                                    recording_id
+                                )
+                                return
+                            if response.status == 401:
+                                await loop.run_in_executor(None, auth.login)
+                                headers = await loop.run_in_executor(
+                                    None, auth.get_headers
+                                )
+                                continue
+
+                            error_text = await response.text()
+                            last_error = f"HTTP {response.status}: {error_text}"
+                            logger.warning(
+                                (
+                                    "Expected trace count post failed "
+                                    "(attempt %d/%d) for %s: %s"
+                                ),
+                                attempt + 1,
+                                BACKEND_API_MAX_RETRIES,
+                                recording_id,
+                                last_error,
+                            )
+                            if (
+                                response.status
+                                not in BACKEND_API_RETRYABLE_STATUS_CODES
+                            ):
+                                break
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        last_error = str(exc)
+                        logger.warning(
+                            (
+                                "Expected trace count request failed "
+                                "(attempt %d/%d) for %s: %s"
+                            ),
+                            attempt + 1,
+                            BACKEND_API_MAX_RETRIES,
+                            recording_id,
+                            exc,
+                        )
+
+                    if attempt < BACKEND_API_MAX_RETRIES - 1:
+                        delay = min(2**attempt, BACKEND_API_MAX_BACKOFF_SECONDS)
+                        await asyncio.sleep(delay)
+
+            logger.error(
+                "Failed to post expected trace count for recording %s: %s",
+                recording_id,
+                last_error or "unknown error",
+            )
+        finally:
+            self.expected_trace_count_reporting.pop(recording_id, None)
 
     async def mark_progress_as_reported(self, recording_id: str) -> None:
         """Mark a recording as progress-reported.
@@ -475,6 +614,11 @@ class StateManager:
         """
         self._reporting_recordings.discard(recording_id)
         await self._store.mark_recording_reported(recording_id)
+        traces = await self._store.find_traces_by_recording_id(recording_id)
+        for trace in traces:
+            if trace.status != TraceStatus.UPLOADED:
+                continue
+            await self._store.delete_trace(trace.trace_id)
 
     def _find_recording_start_and_end(
         self, traces: list[TraceRecord]
@@ -586,6 +730,11 @@ class StateManager:
             the progress report error.
         """
         self._reporting_recordings.discard(recording_id)
+        logger.error(
+            "Progress report failed for recording %s: %s",
+            recording_id,
+            error_message,
+        )
         traces = await self._store.find_traces_by_recording_id(recording_id)
         if not traces:
             return

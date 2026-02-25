@@ -48,6 +48,10 @@ class StateStore(Protocol):
         """Mark a recording as progress-reported."""
         ...
 
+    async def mark_expected_trace_count_reported(self, recording_id: str) -> None:
+        """Mark a recording's expected trace count as reported."""
+        ...
+
     async def find_failed_traces(self) -> list[TraceRecord]:
         """Return all traces marked as FAILED."""
         ...
