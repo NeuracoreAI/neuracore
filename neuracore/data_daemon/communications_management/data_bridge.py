@@ -940,7 +940,6 @@ class Daemon:
             channel = self.channels.get(producer_id)
             if channel is None:
                 continue
-
             if channel is not None and channel.trace_id is not None:
                 recording_id = self._trace_recordings.get(channel.trace_id)
                 self._handle_end_trace(

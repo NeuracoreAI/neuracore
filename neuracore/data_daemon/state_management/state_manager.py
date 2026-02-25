@@ -468,11 +468,19 @@ class StateManager:
         recording_id = traces[0].recording_id
 
         if recording_id in self._reporting_recordings:
+            logger.info(
+                "Progress report already in flight for recording %s; skipping trigger",
+                recording_id,
+            )
             return
 
         if any(
             trace.progress_reported == ProgressReportStatus.REPORTED for trace in traces
         ):
+            logger.info(
+                "Progress report already reported for recording %s; skipping trigger",
+                recording_id,
+            )
             return
 
         # Only report after the recording has been explicitly stopped for every
@@ -499,16 +507,45 @@ class StateManager:
             or missing_total_bytes
             or mismatched_bytes
         ):
+            logger.info(
+                "Progress report not ready for recording %s: missing_data_type=%d "
+                "missing_bytes_written=%d missing_total_bytes=%d mismatched_bytes=%d "
+                "trace_count=%d",
+                recording_id,
+                missing_data_type,
+                missing_bytes_written,
+                missing_total_bytes,
+                mismatched_bytes,
+                len(traces),
+            )
             return
 
         self._reporting_recordings.add(recording_id)
         start_time, end_time = self._find_recording_start_and_end(traces)
+        total_reported_bytes = sum(
+            int(trace.total_bytes or 0)
+            for trace in traces
+        )
+        logger.info(
+            "Queueing progress report for recording %s: trace_count=%d total_bytes=%d "
+            "window_s=%.3f",
+            recording_id,
+            len(traces),
+            total_reported_bytes,
+            max(0.0, end_time - start_time),
+        )
         asyncio.create_task(self._emit_progress_report(start_time, end_time, traces))
 
     async def _emit_progress_report(
         self, start_time: float, end_time: float, traces: list[TraceRecord]
     ) -> None:
         """Emit progress report event asynchronously."""
+        recording_id = traces[0].recording_id if traces else "<unknown>"
+        logger.info(
+            "Emitting progress report event for recording %s (trace_count=%d)",
+            recording_id,
+            len(traces),
+        )
         self._emitter.emit(Emitter.PROGRESS_REPORT, start_time, end_time, traces)
 
     async def _set_expected_trace_count(
@@ -613,6 +650,7 @@ class StateManager:
             recording_id (str): unique identifier for the recording.
         """
         self._reporting_recordings.discard(recording_id)
+        logger.info("Progress report marked as reported for recording %s", recording_id)
         await self._store.mark_recording_reported(recording_id)
         traces = await self._store.find_traces_by_recording_id(recording_id)
         for trace in traces:
