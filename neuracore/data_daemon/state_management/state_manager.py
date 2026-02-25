@@ -437,12 +437,6 @@ class StateManager:
 
         Emits READY_FOR_UPLOAD event for the uploader.
         """
-        traces = await self._store.find_traces_by_recording_id(trace.recording_id)
-        if all(trace.expected_trace_count_reported != 1 for trace in traces):
-            logger.info("Total trace count:%s", len(traces))
-            await self._set_expected_trace_count(trace.recording_id, len(traces))
-        await self._emit_progress_report_if_recording_stopped(traces)
-
         self._emitter.emit(
             Emitter.READY_FOR_UPLOAD,
             trace.trace_id,
