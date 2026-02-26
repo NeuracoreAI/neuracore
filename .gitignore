@@ -115,3 +115,4 @@ logs/
 examples/logs/
 *.log
 *.log.gz
+examples/test_streaming/
