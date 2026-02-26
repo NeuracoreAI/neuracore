@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal, cast
 
+import numpy as np
 import torch
 from neuracore_types import (
     BatchedJointData,
@@ -28,7 +29,9 @@ from neuracore_types import (
     ModelInitDescription,
     ParallelGripperOpenAmountDataStats,
 )
+from neuracore_types.batched_nc_data.batched_language_data import LANGUAGE_MODEL_NAME
 from torch.optim.lr_scheduler import LambdaLR
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from neuracore.ml import (
     BatchedInferenceInputs,
@@ -53,8 +56,8 @@ class Pi05(NeuracoreModel):
 
     Implements the π0.5 model from Physical Intelligence that combines a
     PaliGemma vision-language model with a Gemma action expert. The model
-    uses flow matching to predict action sequences from visual observations,
-    and optional language instructions.
+    uses flow matching to predict action sequences from visual observations.
+    Proprioceptive state is discretized and appended to the language prompt.
 
     The architecture supports flexible finetuning strategies including
     action-expert-only, vision+action, or full model training.
@@ -147,6 +150,21 @@ class Pi05(NeuracoreModel):
         self.pretrained_name_or_path = pretrained_name_or_path
         self.finetune_action_expert_only = finetune_action_expert_only
         self.freeze_language_model_only = freeze_language_model_only
+        self.prompt_tokenizer_name = "google/paligemma-3b-pt-224"
+        self.prompt_tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
+            self.prompt_tokenizer_name
+        )
+        self.prompt_tokenizer.padding_side = "right"
+        self.language_decode_tokenizer_name = LANGUAGE_MODEL_NAME
+        self.language_decode_tokenizer: PreTrainedTokenizerBase = (
+            AutoTokenizer.from_pretrained(self.language_decode_tokenizer_name)
+        )
+        if self.prompt_tokenizer.pad_token is None:
+            if self.prompt_tokenizer.eos_token is None:
+                raise ValueError(
+                    "PI05 tokenizer must define a pad or eos token for prompt batching."
+                )
+            self.prompt_tokenizer.pad_token = self.prompt_tokenizer.eos_token
 
         data_stats: dict[DataType, DataItemStats] = {}
         # Track per-data-type feature sizes to preserve ordering when splitting
@@ -335,7 +353,9 @@ class Pi05(NeuracoreModel):
                 "lr": self.optimizer_lr,
             }]
 
-    def _combine_proprio(self, batch: BatchedInferenceInputs) -> torch.FloatTensor:
+    def _combine_proprio(
+        self, batch: BatchedInferenceInputs
+    ) -> torch.FloatTensor | None:
         """Combine and normalize proprioceptive state data.
 
         Concatenates joint positions, velocities, torques, and gripper states
@@ -393,7 +413,7 @@ class Pi05(NeuracoreModel):
                 "Proprioception inputs were provided but no normalizer was available."
             )
         normalized_proprio = self.proprio_normalizer.normalize(all_proprio)
-        # Pad proprio to max state dim since PI05 expects fixed-size input.
+        # Pad proprio to max state dim since PI0 expects fixed-size input.
         # Pad after normalization to avoid padding artifacts.
         normalized_proprio = pad_vector(normalized_proprio, self.max_state_dim).to(
             self.device
@@ -437,39 +457,61 @@ class Pi05(NeuracoreModel):
     def _process_language_tokens(
         self,
         batch: BatchedInferenceInputs,
+        proprio: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Extract language tokens and attention masks from batch.
+        """Build PI05 prompts from pi0-style language tokens + discretized state.
 
         Args:
             batch: Batch of inference samples
+            normalized_state: Normalized proprio state [B, max_state_dim]
 
         Returns:
             Tuple of (tokens, mask) where tokens is [B, L] token IDs
             and mask is [B, L] attention mask.
         """
         batch_size = len(batch)
-        if DataType.LANGUAGE not in batch.inputs:
-            # Return zero tensor with appropriate dimensions if no language input
-            # Use torch.long for token IDs (embedding layer expects integer indices)
-            language_tokens = torch.zeros(
-                batch_size,
-                self.vlm_max_text_tokens,
-                dtype=torch.long,
-                device=self.device,
+        if proprio.shape[0] != batch_size:
+            raise ValueError(
+                "State batch size does not match input batch size. "
+                f"proprio={proprio.shape[0]}, batch={batch_size}"
             )
-            language_mask = torch.ones(
-                batch_size, self.vlm_max_text_tokens, device=self.device
-            )
-        else:
-            batched_language_data = cast(
-                list[BatchedLanguageData], batch.inputs[DataType.LANGUAGE]
-            )
-            # Grab the last language group and last timestep
-            language_data = batched_language_data[-1]
-            language_tokens = language_data.input_ids[:, -1, :]  # (B, L)
-            language_mask = language_data.attention_mask[:, -1, :]  # (B, L)
 
-        return language_tokens, language_mask
+        if DataType.LANGUAGE not in batch.inputs:
+            raise ValueError("No task found in LANGUAGE input for PI05.")
+        batched_language_data = cast(
+            list[BatchedLanguageData], batch.inputs[DataType.LANGUAGE]
+        )
+        # Grab the last language group and last timestep
+        language_data = batched_language_data[-1]
+        task_tokens = language_data.input_ids[:, -1, :]
+        task_texts = self.language_decode_tokenizer.batch_decode(
+            task_tokens,
+            skip_special_tokens=True,
+        )
+
+        # PI0.5 prompt formatting: discretize normalized state into 256 bins
+        # and append to the text instruction.
+        state_np = proprio.detach().to(dtype=torch.float32).cpu().numpy()
+        discretized_states = (
+            np.digitize(state_np, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
+        )
+        prompts: list[str] = []
+        for i in range(batch_size):
+            task = task_texts[i] if i < len(task_texts) else ""
+            cleaned_text = task.strip().replace("_", " ").replace("\n", " ")
+            state_str = " ".join(map(str, discretized_states[i]))
+            prompts.append(f"Task: {cleaned_text}, State: {state_str};\nAction: ")
+
+        tokenized = self.prompt_tokenizer(
+            prompts,
+            max_length=self.vlm_max_text_tokens,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+        return tokenized["input_ids"].to(self.device), tokenized["attention_mask"].to(
+            self.device
+        )
 
     def _build_inputs_from_batch(
         self, batch: BatchedInferenceInputs
@@ -483,7 +525,10 @@ class Pi05(NeuracoreModel):
             Tuple of (images, image_masks, lang_tokens, lang_masks).
         """
         images, image_masks = self._prepare_rgb_images(batch)
-        lang_tokens, lang_masks = self._process_language_tokens(batch)
+        proprio = self._combine_proprio(batch)
+        if proprio is None:
+            raise ValueError("State is required for PI05 prompt construction.")
+        lang_tokens, lang_masks = self._process_language_tokens(batch, proprio)
         return images, image_masks, lang_tokens, lang_masks
 
     def _predict_action(self, batch: BatchedInferenceInputs) -> torch.Tensor:
