@@ -93,13 +93,13 @@ nc.log_rgb(name="top_camera", rgb=image_array, timestamp=t)
 # Stop recording, the dataset is automatically uploaded to the cloud
 nc.stop_recording()
 
-# Kick off training
-dataset = nc.get_dataset("My Robot Dataset")
+# Kick off cloud training
 job_data = nc.start_training_run(
     name="MyTrainingJob",
+    dataset_name="My Robot Dataset",
+    algorithm_name="diffusion_policy",
     num_gpus=5,
     frequency=50,
-    algorithm_name=diffusion_policy,
     ...
 )
 
