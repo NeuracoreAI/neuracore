@@ -15,6 +15,7 @@ from neuracore_types import (
     BaseRecodingUpdatePayload,
     RecordingNotification,
     RecordingNotificationType,
+    RecordingStartPayload,
     RobotInstanceIdentifier,
 )
 from pyee.asyncio import AsyncIOEventEmitter
@@ -29,6 +30,7 @@ from neuracore.core.streaming.base_sse_consumer import (
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
+from neuracore.data_daemon.lifecycle.daemon_lifecycle import ensure_daemon_running
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,8 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         self.recording_robot_instances: dict[RobotInstanceIdentifier, str] = dict()
         self._expired_recording_ids: set[str] = set()
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
+        self._daemon_ensured: bool = False
+        self.active_dataset_ids: dict[RobotInstanceIdentifier, str] = {}
 
     def get_current_recording_id(self, robot_id: str, instance: int) -> str | None:
         """Get the current recording ID for a robot instance.
@@ -150,6 +154,14 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
             return
         if previous_recording_id is not None:
             self.recording_stopped(robot_id, instance, previous_recording_id)
+
+        if not self._daemon_ensured:
+            try:
+                ensure_daemon_running()
+                self._daemon_ensured = True
+            except Exception:
+                logger.exception("Failed to ensure data daemon is running")
+                return
 
         self.recording_robot_instances[instance_key] = recording_id
         self._schedule_recording_timers(
@@ -273,12 +285,33 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
             return
 
         if is_recording:
+            assert isinstance(
+                details, RecordingStartPayload
+            ), "recording must be started by a start event"
+
+            assert (
+                len(details.dataset_ids) == 1
+            ), "Recording can only be started in one dataset"
+            dataset_id = details.dataset_ids[0]
+            instance_key = RobotInstanceIdentifier(
+                robot_id=robot_id, robot_instance=instance
+            )
+            self.active_dataset_ids[instance_key] = dataset_id
+            logger.info(
+                "active_dataset_received_from_sse: dataset_id=%s recording_id=%s",
+                dataset_id,
+                recording_id,
+            )
             self.recording_started(
                 robot_id=robot_id,
                 instance=instance,
                 recording_id=recording_id,
             )
         else:
+            instance_key = RobotInstanceIdentifier(
+                robot_id=robot_id, robot_instance=instance
+            )
+            self.active_dataset_ids.pop(instance_key, None)
             self.recording_stopped(
                 robot_id=robot_id,
                 instance=instance,
@@ -314,7 +347,6 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
 
         elif message.type in (
             RecordingNotificationType.STOP,
-            RecordingNotificationType.SAVED,
             RecordingNotificationType.DISCARDED,
             RecordingNotificationType.EXPIRED,
         ):
