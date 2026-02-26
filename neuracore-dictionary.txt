@@ -276,3 +276,5 @@ xyzrgb
 xyzw
 ylabel
 znear
+ucsd
+UCSD

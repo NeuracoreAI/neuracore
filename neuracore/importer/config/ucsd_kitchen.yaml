@@ -1,0 +1,95 @@
+input_dataset_name: ucsd_kitchen_dataset_converted_externally_to_rlds
+dataset_type: RLDS
+
+output_dataset:
+  name: UCSD Kitchen
+  tags: [xArm, manipulation, reach, pick, visuomotor]
+  description: "Visuomotor data with language instructions for manipulation of objects in a kitchen environment."
+
+robot: 
+  name: xarm_7
+  urdf_path: "xarm_7.urdf"
+  override_existing: true
+
+frequency: 2.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping: 
+      - name: image
+        source_name: image
+
+  JOINT_POSITIONS: 
+    source: observation.state
+    mapping:
+      - name: joint1
+      - name: joint2
+      - name: joint3
+      - name: joint4
+      - name: joint5
+      - name: joint6
+      - name: joint7
+  
+  JOINT_VELOCITIES: 
+    source: observation.state
+    mapping:
+      - name: joint1
+        index: 7
+      - name: joint2
+        index: 8
+      - name: joint3
+        index: 9
+      - name: joint4
+        index: 10
+      - name: joint5
+        index: 11
+      - name: joint6
+        index: 12
+      - name: joint7
+        index: 13
+    
+  JOINT_TORQUES:
+    source: observation.state
+    mapping:
+      - name: joint1
+        index: 14
+      - name: joint2
+        index: 15
+      - name: joint3
+        index: 16
+      - name: joint4
+        index: 17
+      - name: joint5
+        index: 18
+      - name: joint6
+        index: 19
+      - name: joint7
+        index: 20
+  
+  PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+    source: action
+    format:
+      invert_gripper_amount: true
+    mapping:
+      - name: gripper
+        index: 6
+
+  # VISUAL_JOINT_POSITIONS:
+  #   source: action
+  #   format:
+  #     visual_joint_type: GRIPPER
+  #     invert_gripper_amount: true
+  #   mapping:
+  #     - name: drive_joint
+  #       index: 6
+
+  LANGUAGE:
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction
+        source_name: language_instruction
