@@ -440,9 +440,10 @@ class TestSetupLogging:
 class TestResolveOutputDir:
     """Tests for local output directory resolver behavior."""
 
-    def test_resolve_output_dir_uses_suffix_when_exact_named_run_already_exists(
+    def test_resolve_output_dir_fails_when_run_exists_and_auto_increment_false(
         self, monkeypatch, tmp_path
     ):
+        """Strict default: fail if run name already exists."""
         run_name = "duplicate-run"
         base_dir = tmp_path / ".neuracore" / "training" / "runs"
         base_dir.mkdir(parents=True, exist_ok=True)
@@ -452,13 +453,30 @@ class TestResolveOutputDir:
             "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
         )
 
-        path = _resolve_output_dir(run_name)
+        with pytest.raises(FileExistsError, match=r"A run named .* already exists"):
+            _resolve_output_dir(run_name, run_name_auto_increment=False)
+
+    def test_resolve_output_dir_uses_suffix_when_auto_increment_true(
+        self, monkeypatch, tmp_path
+    ):
+        """Opt-in auto-increment: use run_name_1 when run_name exists."""
+        run_name = "duplicate-run"
+        base_dir = tmp_path / ".neuracore" / "training" / "runs"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        (base_dir / run_name).mkdir()
+
+        monkeypatch.setattr(
+            "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
+        )
+
+        path = _resolve_output_dir(run_name, run_name_auto_increment=True)
         assert path == str(base_dir / f"{run_name}_1")
         assert not Path(path).exists()
 
     def test_resolve_output_dir_uses_next_suffix_when_named_run_prefix_exists(
         self, monkeypatch, tmp_path
     ):
+        """Auto-increment finds next free suffix (run_name_2 when _1 exists)."""
         run_name = "duplicate-run"
         base_dir = tmp_path / ".neuracore" / "training" / "runs"
         base_dir.mkdir(parents=True, exist_ok=True)
@@ -469,9 +487,25 @@ class TestResolveOutputDir:
             "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
         )
 
-        path = _resolve_output_dir(run_name)
+        path = _resolve_output_dir(run_name, run_name_auto_increment=True)
         assert path == str(base_dir / f"{run_name}_2")
         assert not Path(path).exists()
+
+    def test_resolve_output_dir_no_suffix_when_run_does_not_exist(
+        self, monkeypatch, tmp_path
+    ):
+        """When run name does not exist, use it as-is (strict or auto-increment)."""
+        run_name = "unique-run"
+        base_dir = tmp_path / ".neuracore" / "training" / "runs"
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setattr(
+            "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
+        )
+
+        path_strict = _resolve_output_dir(run_name, run_name_auto_increment=False)
+        path_auto = _resolve_output_dir(run_name, run_name_auto_increment=True)
+        assert path_strict == path_auto == str(base_dir / run_name)
 
 
 class TestResolveRecordingCacheDir:
