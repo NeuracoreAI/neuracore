@@ -22,6 +22,7 @@ from neuracore.core.utils.robot_data_spec_utils import (
     merge_robot_data_spec,
 )
 from neuracore.core.utils.training_input_args_validation import (
+    _get_data_types_for_algorithms,
     get_algorithm_id,
     validate_training_params,
 )
@@ -150,14 +151,20 @@ def start_training_run(
     # Get algorithm id
     algorithm_jsons = _get_algorithms()
     algorithm_id = get_algorithm_id(algorithm_name, algorithm_jsons)
-
+    supported_input_data_types, supported_output_data_types = (
+        _get_data_types_for_algorithms(
+            algorithm_name=algorithm_name,
+            algorithm_jsons=algorithm_jsons,
+        )
+    )
     validate_training_params(
         dataset,
         dataset_name,
         algorithm_name,
         input_robot_data_spec_with_ids,
         output_robot_data_spec_with_ids,
-        algorithm_jsons,
+        supported_input_data_types,
+        supported_output_data_types,
     )
 
     data = TrainingJobRequest(

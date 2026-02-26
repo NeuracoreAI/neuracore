@@ -36,6 +36,7 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
 from neuracore.ml.train import (
+    _resolve_algorithm_name_and_supported_data_types,
     _resolve_output_dir,
     _resolve_recording_cache_dir,
     determine_optimal_batch_size,
@@ -183,6 +184,16 @@ class MainTestSetup:
         if include_mp_spawn:
             self.mock_mp_spawn = Mock()
             self.monkeypatch.setattr("torch.multiprocessing.spawn", self.mock_mp_spawn)
+
+
+class LocalValidationAlgorithm:
+    @staticmethod
+    def get_supported_input_data_types() -> set[DataType]:
+        return {DataType.JOINT_POSITIONS}
+
+    @staticmethod
+    def get_supported_output_data_types() -> set[DataType]:
+        return {DataType.JOINT_TARGET_POSITIONS}
 
 
 class RunTrainingTestSetup:
@@ -1397,7 +1408,7 @@ class TestMain:
     ):
         cfg = OmegaConf.create({
             "algorithm": {
-                "_target_": "tests.unit.ml.test_train.mock_model_class",
+                "_target_": "tests.unit.ml.test_train.LocalValidationAlgorithm",
             },
             "algorithm_id": None,
             "dataset_id": "test-dataset-id",
@@ -1422,6 +1433,110 @@ class TestMain:
         main(cfg)
 
         setup.mock_storage_handler_class.assert_not_called()
+
+
+class TestResolveAlgorithmNameAndSupportedDataTypes:
+    """Tests for _resolve_algorithm_name_and_supported_data_types helper."""
+
+    def test_uses_algorithm_id_path_and_resolves_supported_types(self, monkeypatch):
+        cfg = OmegaConf.create({
+            "algorithm_id": "test-algorithm-id",
+            "algorithm": None,
+        })
+        algorithms_jsons = [{"id": "test-algorithm-id", "name": "TestAlgorithm"}]
+        expected_input_types = {DataType.JOINT_POSITIONS}
+        expected_output_types = {DataType.JOINT_TARGET_POSITIONS}
+
+        mock_get_algorithm_name = Mock(return_value="ResolvedAlgorithmName")
+        mock_get_data_types = Mock(
+            return_value=(expected_input_types, expected_output_types)
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.train.get_algorithm_name", mock_get_algorithm_name
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.train._get_data_types_for_algorithms", mock_get_data_types
+        )
+
+        (
+            algorithm_name,
+            supported_input_data_types,
+            supported_output_data_types,
+        ) = _resolve_algorithm_name_and_supported_data_types(cfg, algorithms_jsons)
+
+        assert algorithm_name == "ResolvedAlgorithmName"
+        assert supported_input_data_types == expected_input_types
+        assert supported_output_data_types == expected_output_types
+        mock_get_algorithm_name.assert_called_once_with(
+            algorithm_id=cfg.algorithm_id,
+            algorithm_jsons=algorithms_jsons,
+        )
+        mock_get_data_types.assert_called_once_with(
+            algorithm_name="ResolvedAlgorithmName",
+            algorithm_jsons=algorithms_jsons,
+        )
+
+    def test_uses_local_algorithm_contract_when_no_algorithm_id(self, monkeypatch):
+        cfg = OmegaConf.create({
+            "algorithm": {
+                "_target_": "tests.unit.ml.test_train.LocalValidationAlgorithm",
+            },
+            "algorithm_id": None,
+        })
+        algorithms_jsons: list[dict] = []
+
+        # Ensure hydra.utils.get_object returns our local validation class.
+        monkeypatch.setattr(
+            "neuracore.ml.train.hydra.utils.get_object",
+            lambda target: LocalValidationAlgorithm,
+        )
+
+        (
+            algorithm_name,
+            supported_input_data_types,
+            supported_output_data_types,
+        ) = _resolve_algorithm_name_and_supported_data_types(cfg, algorithms_jsons)
+
+        assert algorithm_name == "LocalValidationAlgorithm"
+        assert supported_input_data_types == {DataType.JOINT_POSITIONS}
+        assert supported_output_data_types == {DataType.JOINT_TARGET_POSITIONS}
+
+    def test_main_uses_local_algorithm_contract_when_not_in_cloud_registry(
+        self, monkeypatch, temp_output_dir
+    ):
+        cfg = OmegaConf.create({
+            "algorithm": {
+                "_target_": "tests.unit.ml.test_train.LocalValidationAlgorithm",
+            },
+            "algorithm_id": None,
+            "dataset_id": "test-dataset-id",
+            "dataset_name": None,
+            "org_id": None,
+            "device": None,
+            "local_output_dir": str(temp_output_dir),
+            "batch_size": 8,
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "output_prediction_horizon": 5,
+            "frequency": 30,
+            "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
+        })
+
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+        setup.mock_get_algorithms.return_value = []
+
+        main(cfg)
+
+        call = setup.mock_validate_training_params.call_args
+        kwargs = call.kwargs
+        assert kwargs["supported_input_data_types"] == {DataType.JOINT_POSITIONS}
+        assert kwargs["supported_output_data_types"] == {
+            DataType.JOINT_TARGET_POSITIONS
+        }
 
     def test_main_uses_default_device_when_device_is_none(
         self, monkeypatch, temp_output_dir
