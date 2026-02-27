@@ -112,6 +112,8 @@ jntadr
 jntid
 jntnum
 jointbody
+kaist
+KAIST
 jsons
 jtps
 keepdim
@@ -169,6 +171,8 @@ nhead
 nheads
 nprocs
 numpy
+nonprehensile
+Nonprehensile
 offsamples
 opencv
 optim

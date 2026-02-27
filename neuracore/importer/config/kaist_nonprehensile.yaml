@@ -1,0 +1,125 @@
+input_dataset_name: kaist_nonprehensile_converted_externally_to_rlds
+dataset_type: RLDS
+
+output_dataset:
+  name: KAIST Nonprehensile Objects
+  tags: [panda, nonprehensile, table-top, real-world, manipulation]
+  description: "Non-prehensile object manipulation with Franka Panda on a table-top: bump domain (pushing/tumbling objects over obstacles), wall domain (repositioning objects against walls), and card domain (dragging and reorienting flat objects), with contact-mode transitions and environmental contacts."
+
+robot: 
+  name: franka_panda
+  urdf_path: "panda.urdf"
+  override_existing: true
+
+frequency: 10.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping: 
+      - name: image
+        source_name: image
+
+  JOINT_POSITIONS: 
+    source: observation.state
+    mapping:
+      - name: panda_joint1
+        index: 0
+      - name: panda_joint2
+        index: 2
+      - name: panda_joint3
+        index: 4
+      - name: panda_joint4
+        index: 6
+      - name: panda_joint5
+        index: 8
+      - name: panda_joint6
+        index: 10
+      - name: panda_joint7
+        index: 12
+
+  JOINT_VELOCITIES: 
+    source: observation.state
+    mapping:
+      - name: panda_joint1
+        index: 1
+      - name: panda_joint2
+        index: 3
+      - name: panda_joint3
+        index: 5
+      - name: panda_joint4
+        index: 7
+      - name: panda_joint5
+        index: 9
+      - name: panda_joint6
+        index: 11
+      - name: panda_joint7
+        index: 13
+    
+  # JOINT_TARGET_POSITIONS:
+  #   source: action_dict.joint_position
+  #   mapping:
+  #     - name: panda_joint1
+  #     - name: panda_joint2
+  #     - name: panda_joint3
+  #     - name: panda_joint4
+  #     - name: panda_joint5
+  #     - name: panda_joint6
+  #     - name: panda_joint7
+
+  # PARALLEL_GRIPPER_OPEN_AMOUNTS:
+  #   source: observation.gripper_position
+  #   format:
+  #     invert_gripper_amount: true
+  #   mapping:
+  #     - name: gripper
+  #       index: 0
+  
+  # PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+  #   source: action_dict.gripper_position
+  #   format:
+  #     invert_gripper_amount: true
+  #   mapping:
+  #     - name: gripper
+  #       index: 0
+
+  # VISUAL_JOINT_POSITIONS:
+  #   source: observation.gripper_position
+  #   format:
+  #     visual_joint_type: GRIPPER
+  #     invert_gripper_amount: true
+  #   mapping:
+  #     - name: panda_finger_joint1
+  #       index: 0
+  #     - name: panda_finger_joint2
+  #       index: 0
+
+  END_EFFECTOR_POSES:
+    source: observation.state
+    format:
+      pose_type: POSITION_ORIENTATION
+      orientation:
+        type: QUATERNION
+        quaternion_order: XYZW
+        angle_units: RADIANS
+    mapping:
+      - name: end_effector
+        index_range:
+          start: 14
+          end: 21
+
+  POINT_CLOUDS:
+    source: observation
+    mapping:
+      - name: pointcloud
+        source_name: partial_pointcloud
+
+  LANGUAGE:
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction
+        source_name: language_instruction

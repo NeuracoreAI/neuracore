@@ -85,7 +85,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
 
         builder = self._load_builder()
         self.split = self._pick_split(builder)
-        self.num_episodes = self._count_episodes(builder, self.split)
+        self.num_episodes = 1
 
         self._builder: tfds.core.DatasetBuilder | None = None
         self._episode_iter = None
