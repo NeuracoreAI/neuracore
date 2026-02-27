@@ -35,7 +35,7 @@ neuracore/
 ```
 
 ## Training Command Examples
-**Note**: Passing `run_name` is optional. If you don't pass the `run_name`, the system will generate a random name together with the timestamp. To better track the training experiment, we highly recommend you to pass a `run_name`.
+**Note**: Passing `run_name` is optional. If you don't pass the `run_name`, the system will generate a random name. To better track the training experiment, we highly recommend you to pass a `run_name`. If a run with the same name already exists, training fails by default; set `run_name_auto_increment=true` to use an incremented name (e.g. `my_experiment_1`) instead.
 ```bash
 # Basic training with Diffusion Policy
 python -m neuracore.ml.train algorithm=diffusion_policy dataset_name="my_dataset" run_name="my_experiment"
