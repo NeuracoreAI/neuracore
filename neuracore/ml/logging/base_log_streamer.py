@@ -163,8 +163,11 @@ class BaseLogStreamer(ABC):
         if not self._line_buffer:
             return True
         chunk_lines = self._line_buffer[:line_count]
-        content = "".join(chunk_lines)
+        content = "".join(
+            line if line.endswith(("\n", "\r")) else f"{line}\n" for line in chunk_lines
+        )
         payload = content.encode("utf-8")
+        consumed_bytes = sum(len(line.encode("utf-8")) for line in chunk_lines)
         remote_path = self._chunk_remote_path(self._chunk_index)
         uploaded = self.storage_handler.upload_bytes(
             data=payload,
@@ -182,7 +185,7 @@ class BaseLogStreamer(ABC):
         self._total_bytes_uploaded += len(payload)
         self._chunk_index += 1
         del self._line_buffer[:line_count]
-        self._buffer_bytes = max(0, self._buffer_bytes - len(payload))
+        self._buffer_bytes = max(0, self._buffer_bytes - consumed_bytes)
         return True
 
     def _upload_index_manifest(self) -> None:

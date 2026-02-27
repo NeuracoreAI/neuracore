@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from torch.utils.data import DataLoader
 
 import neuracore as nc
+from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 from neuracore.ml.utils.device_utils import get_default_device
 
 from ..core.ml_types import BatchedTrainingOutputs, BatchedTrainingSamples
@@ -59,10 +60,11 @@ def setup_logging(output_dir: Path) -> None:
     Args:
         output_dir: Directory where the validation log file will be created.
     """
+    file_handler = logging.FileHandler(output_dir / "validate.log")
+    file_handler.setFormatter(JsonLineLogFormatter())
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[logging.FileHandler(output_dir / "validate.log")],
+        handlers=[file_handler],
         force=True,
     )
 
