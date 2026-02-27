@@ -1,0 +1,127 @@
+input_dataset_name: furniture_bench_dataset
+dataset_type: RLDS
+
+output_dataset:
+  name: FurnitureBench
+  tags: [panda, furniture-assembly, manipulation, teleoperation]
+  description: "Manipulation benchmark with Franka Panda: 5100 teleoperation demos (219.6 hrs) for eight IKEA-style furniture assembly tasks (lamp, square table, desk, drawer, cabinet, round table, stool, chair, one-leg) in a reproducible setup with front and wrist cameras and low/medium/high initial-state randomness."
+
+robot: 
+  name: franka_panda
+  urdf_path: "panda.urdf"
+  override_existing: true
+
+frequency: 10.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping: 
+      - name: image
+        source_name: image
+      - name: wrist_image
+        source_name: wrist_image
+
+  JOINT_POSITIONS: 
+    source: observation.state
+    mapping:
+      - name: panda_joint1
+        index: 13
+      - name: panda_joint2
+        index: 14
+      - name: panda_joint3
+        index: 15
+      - name: panda_joint4
+        index: 16
+      - name: panda_joint5
+        index: 17
+      - name: panda_joint6
+        index: 18
+      - name: panda_joint7
+        index: 19
+  
+  JOINT_VELOCITIES:
+    source: observation.state
+    mapping:
+      - name: panda_joint1
+        index: 20
+      - name: panda_joint2
+        index: 21
+      - name: panda_joint3
+        index: 22
+      - name: panda_joint4
+        index: 23
+      - name: panda_joint5
+        index: 24
+      - name: panda_joint6
+        index: 25
+      - name: panda_joint7
+        index: 26
+    
+  JOINT_TORQUES:
+    source: observation.state
+    mapping:
+      - name: panda_joint1
+        index: 27
+      - name: panda_joint2
+        index: 28
+      - name: panda_joint3
+        index: 29
+      - name: panda_joint4
+        index: 30
+      - name: panda_joint5
+        index: 31
+      - name: panda_joint6
+        index: 32
+      - name: panda_joint7
+        index: 33
+
+  # JOINT_TARGET_POSITIONS:
+  #   source: action_dict.joint_position
+  #   mapping:
+  #     - name: panda_joint1
+  #     - name: panda_joint2
+  #     - name: panda_joint3
+  #     - name: panda_joint4
+  #     - name: panda_joint5
+  #     - name: panda_joint6
+  #     - name: panda_joint7
+
+  # PARALLEL_GRIPPER_OPEN_AMOUNTS:
+  #   source: observation.gripper_position
+  #   format:
+  #     invert_gripper_amount: true
+  #   mapping:
+  #     - name: gripper
+  #       index: 0
+  
+  # PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS:
+  #   source: action_dict.gripper_position
+  #   format:
+  #     invert_gripper_amount: true
+  #   mapping:
+  #     - name: gripper
+  #       index: 0
+
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state
+    format:
+      visual_joint_type: GRIPPER
+      normalize:
+        min: 0.0
+        max: 0.077
+    mapping:
+      - name: panda_finger_joint1
+        index: 34
+      - name: panda_finger_joint2
+        index: 34
+
+  LANGUAGE:
+    format:
+      language_type: BYTES
+    mapping:
+      - name: instruction
+        source_name: language_instruction
