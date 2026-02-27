@@ -713,12 +713,22 @@ class CNNMLP(NeuracoreModel):
         target_actions = self.action_normalizer.normalize(action_data)
         action_predictions = self._predict_action(inference_sample)
 
+        # Build a per-dimension action mask from output masks so missing robot
+        # channels in mixed-robot batches do not contribute to loss.
+        action_mask = torch.cat(
+            [batch.outputs_mask[data_type] for data_type in self.output_data_types],
+            dim=-1,
+        ).unsqueeze(1)
+        action_mask = action_mask.expand(-1, self.output_prediction_horizon, -1)
+
         losses: dict[str, Any] = {}
         metrics: dict[str, Any] = {}
 
         if self.training:
-            losses["l1_loss"] = nn.functional.l1_loss(
-                action_predictions, target_actions
+            absolute_error = torch.abs(action_predictions - target_actions)
+            masked_absolute_error = absolute_error * action_mask
+            losses["l1_loss"] = masked_absolute_error.sum() / torch.clamp(
+                action_mask.sum(), min=1.0
             )
 
         return BatchedTrainingOutputs(

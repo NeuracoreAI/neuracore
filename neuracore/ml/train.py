@@ -677,13 +677,15 @@ def main(cfg: DictConfig) -> None:
             }
 
     input_robot_data_spec_with_id = convert_robot_data_spec_names_to_ids(
-        input_robot_data_spec,
-        dataset.robot_mapping,
+        input_robot_data_spec
     )
     output_robot_data_spec_with_id = convert_robot_data_spec_names_to_ids(
-        output_robot_data_spec,
-        dataset.robot_mapping,
+        output_robot_data_spec
     )
+
+    # =========================================================
+    # From here onwards we only deal with robot IDs, not names
+    # =========================================================
 
     batch_size = cfg.batch_size
 

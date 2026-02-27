@@ -5,6 +5,8 @@ from neuracore_types import Dataset, DataType, GPUType
 import neuracore as nc
 from neuracore.core.const import API_URL
 
+TEST_ROBOT_ID = "20a621b7-2f9b-4699-a08e-7d080488a5a3"
+
 
 @pytest.fixture
 def training_job_response():
@@ -125,7 +127,7 @@ def test_start_training_run(
         status_code=200,
     )
 
-    robot_id = "fake_robot_id"
+    robot_id = TEST_ROBOT_ID
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/robot_ids",
         json=[robot_id],
@@ -279,7 +281,7 @@ def test_start_training_run_raises_on_duplicate_name(
         json={"detail": "Training job with name already exists"},
     )
 
-    robot_id = "fake_robot_id"
+    robot_id = TEST_ROBOT_ID
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/robot_ids",
         json=[robot_id],
