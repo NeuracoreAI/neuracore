@@ -46,9 +46,10 @@ algorithm_id: null    # For cloud training
 training_id: null     # For cloud training
 org_id: null          # For cloud training
 run_name: null        # Optional name for the training run. If not provided, a two-word random name will be generated.
+run_name_auto_increment: false  # If true, when run_name already exists use run_name_1, run_name_2, etc. If false (default), fail when run_name exists.
 
 # Output directory (generated dynamically with the resolver)
-local_output_dir: ${resolve_output_dir:${run_name}}
+local_output_dir: ${resolve_output_dir:${run_name},${run_name_auto_increment}}
 
 # Custom algorithm parameters (used when algorithm_id is provided)
 # These will be passed directly to the algorithm constructor
