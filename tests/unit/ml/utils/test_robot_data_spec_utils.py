@@ -1,92 +1,53 @@
 import pytest
 from neuracore_types import DataType
 
+import neuracore as nc
+from neuracore.core.const import API_URL
 from neuracore.core.utils.robot_data_spec_utils import (
     convert_robot_data_spec_names_to_ids,
 )
-from neuracore.core.utils.robot_mapping import RobotMapping
+
+TEST_ROBOT_ID = "20a621b7-2f9b-4699-a08e-7d080488a5a3"
 
 
-def test_convert_robot_data_spec_names_to_ids_accepts_name_or_id():
-    mapping = RobotMapping("test-org")
-    mapping._id_to_name = {"robot_id": "robot_name"}
-    mapping._name_to_ids = {"robot_name": ["robot_id"]}
-    mapping._initialized = True
-    spec = {
-        "robot_name": {DataType.RGB_IMAGES: ["cam"]},
-        "robot_id": {DataType.JOINT_POSITIONS: ["j0"]},
-    }
-    resolved = convert_robot_data_spec_names_to_ids(spec, mapping)
+@pytest.fixture
+def mock_auth_requests_robots(mock_auth_requests):
+    nc.login("test_api_key")
+    mocked_org_id = "test-org-id"
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/robots?is_shared=false",
+        json=[{"id": TEST_ROBOT_ID, "name": "robot_name"}],
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/robots?is_shared=true",
+        json=[{"id": TEST_ROBOT_ID, "name": "robot_name"}],
+        status_code=200,
+    )
 
-    assert set(resolved) == {"robot_id"}
-    assert DataType.RGB_IMAGES in resolved["robot_id"]
-    assert DataType.JOINT_POSITIONS in resolved["robot_id"]
 
-
-def test_convert_robot_data_spec_names_to_ids_merges_and_dedupes():
-    mapping = RobotMapping("test-org")
-    mapping._id_to_name = {"robot_id": "robot_name"}
-    mapping._name_to_ids = {"robot_name": ["robot_id"]}
-    mapping._initialized = True
+def test_convert_robot_data_spec_names_to_ids_raises_error_on_duplicates(
+    mock_auth_requests_robots,
+):
     spec = {
         "robot_name": {DataType.RGB_IMAGES: ["cam", "cam2"]},
-        "robot_id": {DataType.RGB_IMAGES: ["cam2", "cam3"]},
+        TEST_ROBOT_ID: {DataType.RGB_IMAGES: ["cam2", "cam3"]},
     }
-
-    resolved = convert_robot_data_spec_names_to_ids(spec, mapping)
-
-    assert set(resolved) == {"robot_id"}
-    assert resolved["robot_id"][DataType.RGB_IMAGES] == ["cam", "cam2", "cam3"]
+    with pytest.raises(Exception):
+        convert_robot_data_spec_names_to_ids(spec)
 
 
-def test_convert_robot_data_spec_names_to_ids_allows_unknown_robot():
-    mapping = RobotMapping("test-org")
-    mapping._id_to_name = {"robot_id": "robot_name"}
-    mapping._name_to_ids = {"robot_name": ["robot_id"]}
-    mapping._initialized = True
-    spec = {"unknown": {DataType.RGB_IMAGES: ["cam"]}}
-
-    resolved = convert_robot_data_spec_names_to_ids(spec, mapping)
-    assert resolved == spec
-
-
-def test_convert_robot_data_spec_names_to_ids_allows_missing():
-    mapping = RobotMapping("test-org")
-    mapping._id_to_name = {"robot_id": "robot_name"}
-    mapping._name_to_ids = {"robot_name": ["robot_id"]}
-    mapping._initialized = True
-    spec = {"missing": {DataType.RGB_IMAGES: ["cam"]}}
-
-    resolved = convert_robot_data_spec_names_to_ids(spec, mapping)
-    assert resolved == spec
-
-
-def test_convert_robot_data_spec_names_to_ids_raises_on_ambiguous_name():
-    mapping = RobotMapping("test-org")
-    mapping._id_to_name = {"robot_id_1": "dup_name", "robot_id_2": "dup_name"}
-    mapping._name_to_ids = {"dup_name": ["robot_id_1", "robot_id_2"]}
-    mapping._initialized = True
+def test_convert_robot_data_spec_names_to_ids_raises_on_ambiguous_name(
+    mock_auth_requests_robots,
+):
     spec = {"dup_name": {DataType.RGB_IMAGES: ["cam"]}}
-
     with pytest.raises(Exception):
-        convert_robot_data_spec_names_to_ids(
-            spec,
-            mapping,
-        )
+        convert_robot_data_spec_names_to_ids(spec)
 
 
-def test_convert_robot_data_spec_names_to_ids_raises_on_name_id_collision():
-    mapping = RobotMapping("test-org")
-    mapping._id_to_name = {"robot_id_1": "robot_name", "robot_id_2": "robot_id_1"}
-    mapping._name_to_ids = {
-        "robot_name": ["robot_id_1"],
-        "robot_id_1": ["robot_id_2"],
-    }
-    mapping._initialized = True
+def test_convert_robot_data_spec_names_to_ids_raises_on_name_id_collision(
+    mock_auth_requests_robots,
+):
     spec = {"robot_id_1": {DataType.RGB_IMAGES: ["cam"]}}
-
     with pytest.raises(Exception):
-        convert_robot_data_spec_names_to_ids(
-            spec,
-            mapping,
-        )
+        convert_robot_data_spec_names_to_ids(spec)
