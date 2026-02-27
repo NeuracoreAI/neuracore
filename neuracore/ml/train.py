@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -263,8 +264,13 @@ def _save_local_training_metadata(
         "num_gpus": None,
         "synchronization_details": {
             "frequency": getattr(cfg, "frequency", None),
-            "allow_duplicates": None,
-            "max_delay_s": None,
+            "allow_duplicates": getattr(cfg, "allow_duplicates", True),
+            "max_delay_s": (
+                sys.float_info.max
+                if getattr(cfg, "max_delay_s", None) is None
+                else getattr(cfg, "max_delay_s")
+            ),
+            "trim_start_end": getattr(cfg, "trim_start_end", True),
         },
     }
 
@@ -734,6 +740,13 @@ def main(cfg: DictConfig) -> None:
         robot_data_spec=robot_data_spec,
         prefetch_videos=True,
         max_prefetch_workers=cfg.max_prefetch_workers,
+        max_delay_s=(
+            sys.float_info.max
+            if getattr(cfg, "max_delay_s", None) is None
+            else cfg.max_delay_s
+        ),
+        allow_duplicates=cfg.allow_duplicates,
+        trim_start_end=cfg.trim_start_end,
     )
 
     # Setup logging for main process

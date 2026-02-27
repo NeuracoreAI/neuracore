@@ -325,6 +325,9 @@ def mock_data_requests(
         json=SynchronizationProgress(
             synchronized_dataset_id="synced_dataset_123",
             num_synchronized_demonstrations=len(recordings_list),
+            has_failures=False,
+            num_failed_recordings=0,
+            failed_recording_ids=[],
         ).model_dump(mode="json"),
         status_code=200,
     )
