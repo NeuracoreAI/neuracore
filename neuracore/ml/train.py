@@ -67,26 +67,32 @@ def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
     return Path(str(configured_dir)).expanduser()
 
 
-def _resolve_output_dir(run_name: str | None = None) -> str:
+def _resolve_output_dir(
+    run_name: str | None = None,
+    run_name_auto_increment: bool | str = False,
+) -> str:
     """Hydra resolver to generate the output directory path.
 
-    This resolver generates a unique output directory based on run_name and timestamp.
+    This resolver generates a unique output directory based on run_name.
     It's called during Hydra initialization, so the directory is available before
     the main function runs.
 
+    When run_name_auto_increment is False (default), if a directory for the given
+    run name already exists, resolution fails with FileExistsError. Set
+    run_name_auto_increment=true to automatically use run_name_1, run_name_2, etc.
+
     Args:
         run_name: Optional run name. If None or "null", a random name will be generated.
+        run_name_auto_increment: If True (or "true"), append _1, _2, ... when the
+            name already exists. If False (default), fail when the name exists.
 
     Returns:
         Full path to the output directory.
-    """
-    # Hydra/OmegaConf may pass YAML null to resolvers as the literal string "null".
-    explicit_run_name = bool(
-        run_name
-        and run_name != "null"
-        and not (isinstance(run_name, str) and run_name.strip() == "")
-    )
 
+    Raises:
+        FileExistsError: When run_name_auto_increment is False and a directory
+            for run_name (or run_name_N) already exists.
+    """
     # Handle None, empty string, or string "null"
     if (
         not run_name
@@ -98,26 +104,41 @@ def _resolve_output_dir(run_name: str | None = None) -> str:
     else:
         run_name = _sanitize_run_name(str(run_name))
 
+    auto_increment = (
+        str(run_name_auto_increment).lower() == "true"
+        if not isinstance(run_name_auto_increment, bool)
+        else run_name_auto_increment
+    )
+
     base_dir = DEFAULT_CACHE_DIR / "runs"
 
-    # Prevent starting another local run with the same explicit name.
-    has_conflicting_run_dir = (
-        base_dir.exists()
-        and run_name is not None
-        and any(
-            run_path.is_dir()
-            and (run_path.name == run_name or run_path.name.startswith(f"{run_name}_"))
-            for run_path in base_dir.iterdir()
-        )
-    )
-    if explicit_run_name and has_conflicting_run_dir:
-        raise ValueError(
-            f"A local training run with name '{run_name}' already exists. "
-            "Choose a different run_name."
-        )
+    final_run_name = run_name
+    if base_dir.exists():
+        taken = {
+            p.name
+            for p in base_dir.iterdir()
+            if p.is_dir() and (p.name == run_name or p.name.startswith(f"{run_name}_"))
+        }
+        if run_name in taken:
+            if not auto_increment:
+                existing = base_dir / run_name
+                raise FileExistsError(
+                    f"A run named {run_name!r} already exists at {existing}. "
+                    "Either use a different run_name, "
+                    "or set run_name_auto_increment=true "
+                    "to use an incremented name (e.g. run_name_1)."
+                )
+            suffix = 1
+            while f"{run_name}_{suffix}" in taken:
+                suffix += 1
+            final_run_name = f"{run_name}_{suffix}"
+            logger.warning(
+                f"A run named {run_name} already exists. "
+                f"Using {final_run_name} for this run."
+            )
 
     # Build full path
-    return str(base_dir / run_name)
+    return str(base_dir / final_run_name)
 
 
 def _sanitize_run_name(name: str) -> str:
