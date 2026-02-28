@@ -1,6 +1,8 @@
 name: PR Publish Release
 
 on:
+  # Note temp fix to allow deploys  
+  workflow_dispatch:
   pull_request:
     types: [closed]
     branches:
@@ -8,7 +10,8 @@ on:
 
 jobs:
   check-if-release:
-    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref == 'develop'
+    # TODO: Removed for now to allow deploy 
+    # if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref == 'develop'
     runs-on: ubuntu-latest
     outputs:
       should_publish: ${{ steps.check_version.outputs.should_publish }}
