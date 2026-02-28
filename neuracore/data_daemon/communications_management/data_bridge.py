@@ -63,6 +63,7 @@ class ChannelState:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_sequence_number: int = 0
     opened_at: datetime | None = None
+    heartbeat_expired_at: datetime | None = None
 
     def is_opened(self) -> bool:
         """Check if the channel has been opened with a ring buffer."""
@@ -74,6 +75,7 @@ class ChannelState:
         This is called when a ManagementMessage is received from a producer.
         """
         self.last_heartbeat = datetime.now(timezone.utc)
+        self.heartbeat_expired_at = None
 
     def set_ring_buffer(self, ring_buffer: RingBuffer) -> None:
         """Set the ring buffer for the channel.
@@ -277,11 +279,6 @@ class Daemon:
             producer_id in self._closed_producers
             and cmd != CommandType.OPEN_RING_BUFFER
         ):
-            logger.warning(
-                "Ignoring command %s from closed producer_id=%s",
-                cmd,
-                producer_id,
-            )
             return
 
         if (
@@ -294,7 +291,6 @@ class Daemon:
         if existing is None:
             existing = ChannelState(producer_id=producer_id)
             self.channels[producer_id] = existing
-            logger.info("Created new channel for producer_id=%s", producer_id)
         channel = existing
         channel.touch()
 
@@ -353,36 +349,56 @@ class Daemon:
         size = payload.get("size", DEFAULT_RING_BUFFER_SIZE)
 
         channel.set_ring_buffer(RingBuffer(size))
-        logger.info(
-            "Opened ring buffer (size=%d) for producer_id=%s",
-            size,
-            channel.producer_id,
-        )
 
     # Consumer
     def _drain_channel_messages(self) -> None:
         """Poll all channels for completed messages and handle them."""
         for channel in self.channels.values():
-            # guard against uninitialised channels
-            if channel.reader is None or channel.ring_buffer is None:
-                continue
-            # Loop to receive full message
-            while True:
-                result = channel.reader.poll_one()
-                if result is None:
-                    break
+            self._drain_single_channel_messages(channel)
 
-                trace_id, data_type, payload = result
-                recording_id = self._trace_recordings.get(trace_id)
-                if not recording_id:
-                    logger.warning(
-                        "No recording_id found for trace_id=%s, dropping message",
-                        trace_id,
-                    )
-                    continue
-                self._on_complete_message(
-                    channel, trace_id, data_type, payload, recording_id
+    def _drain_single_channel_messages(self, channel: ChannelState) -> None:
+        """Drain all currently-complete messages for a single channel."""
+        # guard against uninitialised channels
+        if channel.reader is None or channel.ring_buffer is None:
+            return
+
+        while True:
+            result = channel.reader.poll_one()
+            if result is None:
+                break
+
+            trace_id, data_type, payload = result
+            recording_id = self._trace_recordings.get(trace_id)
+            if not recording_id:
+                logger.warning(
+                    "No recording_id found for trace_id=%s, dropping message",
+                    trace_id,
                 )
+                continue
+            self._on_complete_message(
+                channel, trace_id, data_type, payload, recording_id
+            )
+
+    def _channel_stop_cutoff_sequence_number(
+        self, producer_id: str, channel: ChannelState
+    ) -> int | None:
+        """Return stop cutoff sequence for the channel's active trace, if known."""
+        trace_id = channel.trace_id
+        if trace_id is None:
+            return None
+        recording_id = self._trace_recordings.get(trace_id)
+        if recording_id is None:
+            return None
+        closing_state = self._closing_recordings.get(recording_id)
+        if closing_state is None:
+            return None
+        cutoffs = closing_state.producer_stop_sequence_numbers
+        if not cutoffs:
+            return None
+        cutoff = cutoffs.get(producer_id)
+        if cutoff is None:
+            return None
+        return int(cutoff)
 
     def _on_complete_message(
         self,
@@ -572,7 +588,7 @@ class Daemon:
             logger.warning(
                 "Dropping data for closed recording_id=%s trace_id=%s",
                 recording_id,
-                data_chunk.trace_id,
+                trace_id,
             )
             return
 
@@ -659,10 +675,15 @@ class Daemon:
             chunk_len,
         )
 
-        channel.ring_buffer.write(header + data)
+        packet = header + data
+        channel.ring_buffer.write(packet)
 
     def _handle_end_trace(
-        self, channel: ChannelState, message: MessageEnvelope
+        self,
+        channel: ChannelState,
+        message: MessageEnvelope,
+        *,
+        reason: str = "producer_trace_end",
     ) -> None:
         """Handle an END_TRACE command from a producer.
 
@@ -680,19 +701,10 @@ class Daemon:
         payload = message.payload.get("trace_end", {})
         trace_id = payload.get("trace_id")
         if not trace_id:
-            logger.warning(
-                "TRACE_END missing trace_id (producer_id=%s)",
-                channel.producer_id,
-            )
             return
 
         recording_id = self._trace_recordings.get(str(trace_id))
         if not recording_id:
-            logger.warning(
-                "TRACE_END: trace_id=%s not in _trace_recordings producer_id=%s",
-                trace_id,
-                channel.producer_id,
-            )
             return
 
         # Get metadata before removing the trace
@@ -707,6 +719,12 @@ class Daemon:
                 )
         else:
             raise ValueError(f"Missing data_type in metadata for trace_id={trace_id}.")
+
+        # Flush any fully assembled payloads already in the channel ring buffer
+        # before sending the trace-end marker into the RDM queue.
+        # Otherwise the RDM can close the trace and drop trailing
+        # frames that were buffered but not yet drained.
+        self._drain_single_channel_messages(channel)
 
         # Send final_chunk=True message to RDM to signal trace end
         self._on_complete_message(
@@ -844,19 +862,44 @@ class Daemon:
 
     def _cleanup_expired_channels(self) -> None:
         """Remove channels whose heartbeat has not been seen within the timeout."""
-        to_remove = [
-            producer_id
-            for producer_id, state in self.channels.items()
-            if state.should_expire()
-        ]
+        now = utc_now()
+        to_remove: list[str] = []
+
+        for producer_id, state in self.channels.items():
+            if state.is_stale_unopened(now):
+                to_remove.append(producer_id)
+                continue
+
+            if not state.has_missed_heartbeat(now):
+                state.heartbeat_expired_at = None
+                continue
+
+            if state.trace_id is None:
+                to_remove.append(producer_id)
+                continue
+
+            cutoff_sequence_number = self._channel_stop_cutoff_sequence_number(
+                producer_id, state
+            )
+            if (
+                cutoff_sequence_number is not None
+                and state.last_sequence_number < cutoff_sequence_number
+            ):
+                if state.heartbeat_expired_at is None:
+                    state.heartbeat_expired_at = now
+                continue
+
+            # If the daemon already has unread bytes queued locally, let the normal
+            # drain step run before deciding to synthesize TRACE_END.
+            if state.ring_buffer is not None and state.ring_buffer.available() > 0:
+                continue
+
+            to_remove.append(producer_id)
 
         for producer_id in to_remove:
-            logger.info(
-                "Channel for producer_id=%s expired due to heartbeat timeout; "
-                "cleaning up ring buffer and state",
-                producer_id,
-            )
             channel = self.channels.get(producer_id)
+            if channel is None:
+                continue
             if channel is not None and channel.trace_id is not None:
                 recording_id = self._trace_recordings.get(channel.trace_id)
                 self._handle_end_trace(
@@ -871,6 +914,7 @@ class Daemon:
                             }
                         },
                     ),
+                    reason="heartbeat_expiry",
                 )
                 self._producer_last_sequence_numbers[channel.producer_id] = max(
                     self._producer_last_sequence_numbers.get(channel.producer_id, 0),

@@ -346,6 +346,16 @@ class SqliteStateStore(StateStore):
                 )
             )
 
+    async def mark_expected_trace_count_reported(self, recording_id: str) -> None:
+        """Mark a recording's expected trace count as reported."""
+        now = _utc_now()
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                update(traces)
+                .where(traces.c.recording_id == recording_id)
+                .values(expected_trace_count_reported=1, last_updated=now)
+            )
+
     async def reset_failed_trace_for_retry(self, trace_id: str) -> None:
         """Reset a failed trace back to WRITTEN for retry."""
         now = _utc_now()

@@ -717,6 +717,7 @@ def test_channel_expires_after_timeout_without_recording_stopped(
     recording_id = "rec-orphaned"
 
     mock_ring_buffer = MagicMock()
+    mock_ring_buffer.available.return_value = 0
     channel = ChannelState(
         producer_id=producer_id,
         ring_buffer=mock_ring_buffer,

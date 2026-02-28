@@ -69,6 +69,8 @@ class _BatchEncoderWorker:
         self._trace_locks: dict[_TraceKey, asyncio.Lock] = {}
         self._trace_buffers: dict[_TraceKey, dict[int, _BatchJob]] = {}
         self._trace_next_index: dict[_TraceKey, int] = {}
+        self._trace_out_of_order_arrivals: dict[_TraceKey, int] = {}
+        self._trace_max_buffered_batches: dict[_TraceKey, int] = {}
 
         self._trace_pending: dict[_TraceKey, int] = {}
 
@@ -91,6 +93,10 @@ class _BatchEncoderWorker:
         self._aborted_traces.add(trace_key)
         self._trace_done_seen.discard(trace_key)
         self._trace_pending.pop(trace_key, None)
+        self._trace_buffers.pop(trace_key, None)
+        self._trace_next_index.pop(trace_key, None)
+        self._trace_out_of_order_arrivals.pop(trace_key, None)
+        self._trace_max_buffered_batches.pop(trace_key, None)
         self._finalised_traces.add(trace_key)
 
     async def _on_batch_ready(self, batch_job: _BatchJob) -> None:
@@ -102,50 +108,135 @@ class _BatchEncoderWorker:
         self._in_flight_count += 1
         key = batch_job.trace_key
 
-        # track per-trace pending first, so finally always balances it.
-        self._trace_pending[key] = self._trace_pending.get(key, 0) + 1
-        if batch_job.trace_done:
-            self._trace_done_seen.add(key)
-
         try:
-            if key in self._aborted_traces or key in self._finalised_traces:
-                await self._remove_file(batch_job.batch_path)
-                return
-
-            encoder = self._encoder_manager.safe_get_encoder(key)
-            if encoder is None:
-                await self._remove_file(batch_job.batch_path)
-                self._aborted_traces.add(key)
-                return
-
-            ok = await self._process_batch_into_encoder(batch_job, encoder)
-            await self._remove_file(batch_job.batch_path)
-
-            if not ok:
-                self._aborted_traces.add(key)
-                return
+            lock = self._trace_locks.setdefault(key, asyncio.Lock())
+            async with lock:
+                await self._queue_and_process_trace_batches_locked(batch_job)
 
         finally:
             self._in_flight_count -= 1
 
-            pending = self._trace_pending.get(key, 0) - 1
-            if pending <= 0:
-                self._trace_pending.pop(key, None)
-            else:
-                self._trace_pending[key] = pending
+    async def _queue_and_process_trace_batches_locked(
+        self, batch_job: _BatchJob
+    ) -> None:
+        """Queue a batch and process all contiguous batches for the trace in order.
 
-            if (
-                key in self._trace_done_seen
-                and key not in self._trace_pending
-                and key not in self._finalised_traces
-                and key not in self._aborted_traces
-            ):
-                enc = self._encoder_manager.pop_encoder(key)
-                if enc is not None:
-                    self._finalise_trace_encoder(key, enc)
+        Must be called while holding the trace lock for `batch_job.trace_key`.
+        """
+        key = batch_job.trace_key
+        batch_index = self._batch_index(batch_job.batch_path)
 
-                self._finalised_traces.add(key)
-                self._trace_done_seen.discard(key)
+        if key in self._aborted_traces or key in self._finalised_traces:
+            await self._remove_file(batch_job.batch_path)
+            return
+
+        trace_buffer = self._trace_buffers.setdefault(key, {})
+        if batch_index in trace_buffer:
+            logger.warning(
+                (
+                    "Duplicate batch index %d for trace %s; "
+                    "removing duplicate batch file %s"
+                ),
+                batch_index,
+                key,
+                batch_job.batch_path,
+            )
+            await self._remove_file(batch_job.batch_path)
+            return
+
+        trace_buffer[batch_index] = batch_job
+        self._trace_pending[key] = self._trace_pending.get(key, 0) + 1
+        next_index = self._trace_next_index.setdefault(key, 0)
+        if batch_index > next_index:
+            self._trace_out_of_order_arrivals[key] = (
+                self._trace_out_of_order_arrivals.get(key, 0) + 1
+            )
+            if key.data_type.value == "RGB_IMAGES":
+                logger.warning(
+                    "RGB batch arrived out of order for trace %s "
+                    "(arrived=%d expected=%d buffered=%d)",
+                    key,
+                    batch_index,
+                    next_index,
+                    len(trace_buffer),
+                )
+        self._trace_max_buffered_batches[key] = max(
+            self._trace_max_buffered_batches.get(key, 0),
+            len(trace_buffer),
+        )
+
+        while True:
+            next_job = trace_buffer.pop(next_index, None)
+            if next_job is None:
+                break
+
+            if next_job.trace_done:
+                self._trace_done_seen.add(key)
+
+            if key in self._aborted_traces or key in self._finalised_traces:
+                await self._remove_file(next_job.batch_path)
+                self._decrement_trace_pending(key)
+                next_index += 1
+                self._trace_next_index[key] = next_index
+                continue
+
+            encoder = self._encoder_manager.safe_get_encoder(key)
+            if encoder is None:
+                await self._remove_file(next_job.batch_path)
+                self._aborted_traces.add(key)
+                self._decrement_trace_pending(key)
+                next_index += 1
+                self._trace_next_index[key] = next_index
+                continue
+
+            ok = await self._process_batch_into_encoder(next_job, encoder)
+            await self._remove_file(next_job.batch_path)
+            if not ok:
+                self._aborted_traces.add(key)
+
+            self._decrement_trace_pending(key)
+            next_index += 1
+            self._trace_next_index[key] = next_index
+
+        self._try_finalize_trace_after_ordered_batches(key)
+
+    def _decrement_trace_pending(self, key: _TraceKey) -> None:
+        pending = self._trace_pending.get(key, 0) - 1
+        if pending <= 0:
+            self._trace_pending.pop(key, None)
+        else:
+            self._trace_pending[key] = pending
+
+    def _try_finalize_trace_after_ordered_batches(self, key: _TraceKey) -> None:
+        """Finalize trace if the terminal batch has been processed and none remain."""
+        if key in self._finalised_traces or key in self._aborted_traces:
+            return
+        if key not in self._trace_done_seen:
+            return
+        if key in self._trace_pending:
+            return
+        if self._trace_buffers.get(key):
+            return
+
+        enc = self._encoder_manager.pop_encoder(key)
+        if enc is not None:
+            self._finalise_trace_encoder(key, enc)
+
+        if key.data_type.value == "RGB_IMAGES":
+            logger.info(
+                "RGB batch ordering summary trace=%s out_of_order_arrivals=%d "
+                "max_buffered_batches=%d",
+                key,
+                self._trace_out_of_order_arrivals.get(key, 0),
+                self._trace_max_buffered_batches.get(key, 0),
+            )
+
+        self._finalised_traces.add(key)
+        self._trace_done_seen.discard(key)
+        self._trace_buffers.pop(key, None)
+        self._trace_next_index.pop(key, None)
+        self._trace_out_of_order_arrivals.pop(key, None)
+        self._trace_max_buffered_batches.pop(key, None)
 
     @staticmethod
     async def _remove_file(path: Path) -> None:
