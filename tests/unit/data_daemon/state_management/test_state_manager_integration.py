@@ -330,14 +330,15 @@ async def test_concurrent_writes_with_wal(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_race_conditions_on_rapid_state_changes(tmp_path, caplog) -> None:
+async def test_race_conditions_on_rapid_state_changes(
+    tmp_path, caplog, mock_auth_requests
+) -> None:
     """Test race conditions on rapid state changes.
 
     Two tasks concurrently update the state of the same trace from WRITTEN
     through UPLOADING to UPLOADED. The test asserts that the final state
     is UPLOADED and that one worker hits a race condition (either error or no-op).
     """
-
     db_path = tmp_path / "state.db"
     store_one = SqliteStateStore(db_path)
     store_two = SqliteStateStore(db_path)
@@ -472,6 +473,9 @@ async def test_simultaneous_recordings_emit_progress_reports(manager_store) -> N
     emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
     try:
         emitter.emit(Emitter.IS_CONNECTED, True)
+        emitter.emit(Emitter.STOP_RECORDING_REQUESTED, "rec-a")
+        emitter.emit(Emitter.STOP_RECORDING_REQUESTED, "rec-b")
+        await asyncio.sleep(0.1)
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-a1", "rec-a", 10)
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-a2", "rec-a", 10)
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-b1", "rec-b", 10)

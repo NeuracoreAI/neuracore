@@ -117,12 +117,14 @@ def test_startup_reconciles_missing_and_orphaned_traces(tmp_path: Path) -> None:
         total_bytes=None,
         bytes_uploaded=0,
         progress_reported=0,
+        expected_trace_count_reported=0,
         error_code=None,
         error_message=None,
         created_at=now,
         last_updated=now,
         num_upload_attempts=0,
         next_retry_at=None,
+        stopped_at=None,
     )
 
     store = _InMemoryStore([trace])
@@ -172,12 +174,14 @@ def test_reconcile_pauses_uploading_traces(tmp_path: Path) -> None:
         total_bytes=10,
         bytes_uploaded=0,
         progress_reported=0,
+        expected_trace_count_reported=0,
         error_code=None,
         error_message=None,
         created_at=now,
         last_updated=now,
         num_upload_attempts=0,
         next_retry_at=None,
+        stopped_at=None,
     )
     store = _InMemoryStore([trace])
 
@@ -211,12 +215,14 @@ def test_reconcile_marks_empty_trace_dir_as_incomplete(tmp_path: Path) -> None:
         total_bytes=10,
         bytes_uploaded=0,
         progress_reported=0,
+        expected_trace_count_reported=0,
         error_code=None,
         error_message=None,
         created_at=now,
         last_updated=now,
         num_upload_attempts=0,
         next_retry_at=None,
+        stopped_at=None,
     )
     store = _InMemoryStore([trace])
 

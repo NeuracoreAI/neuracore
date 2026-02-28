@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 import struct
 import time
@@ -22,6 +23,8 @@ CHUNK_SIZE = 64 * MB_CHUNK
 LOSSY_VIDEO_NAME = "lossy.mp4"
 LOSSLESS_VIDEO_NAME = "lossless.mp4"
 TRACE_FILE = "trace.json"
+
+logger = logging.getLogger(__name__)
 
 
 class VideoTrace:
@@ -63,6 +66,11 @@ class VideoTrace:
 
         self._frame_metadata: list[dict[str, Any]] = []
         self._frame_index = 0
+        self._fallback_timestamp_count = 0
+        self._expected_raw_frame_bytes_total = 0
+        self._non_monotonic_timestamp_count = 0
+        self._first_frame_timestamp: float | None = None
+        self._last_frame_timestamp: float | None = None
 
     def add_payload(self, payload: bytes) -> None:
         """Consume a payload that is either JSON metadata or raw RGB frame bytes.
@@ -219,10 +227,10 @@ class VideoTrace:
             )
 
     def _handle_frame_bytes(self, frame_bytes: bytes) -> None:
-        """Validate and encode a raw RGB frame payload.
+        """Validate and encode a raw frame payload.
 
         Args:
-            frame_bytes: Raw RGB frame bytes.
+            frame_bytes: Raw frame bytes.
 
         Returns:
             None
@@ -238,16 +246,40 @@ class VideoTrace:
                 "VideoTrace encoders unexpectedly None after initialisation"
             )
 
-        expected_size = self.width * self.height * 3
-        if len(frame_bytes) != expected_size:
-            raise ValueError(
-                f"Unexpected frame size: got={len(frame_bytes)} "
-                f"expected={expected_size}"
-            )
+        pixels = self.width * self.height
+        rgb_size = pixels * 3
+        depth_f16_size = pixels * 2
+        depth_f32_size = pixels * 4
 
-        np_frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
-            (self.height, self.width, 3)
-        )
+        if len(frame_bytes) == rgb_size:
+            np_frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
+                (self.height, self.width, 3)
+            )
+        elif len(frame_bytes) in (depth_f16_size, depth_f32_size):
+            depth_dtype = (
+                np.float16 if len(frame_bytes) == depth_f16_size else np.float32
+            )
+            depth_frame = np.frombuffer(frame_bytes, dtype=depth_dtype).reshape(
+                (self.height, self.width)
+            )
+            # Depth streams are single-channel float images. Convert to an RGB8
+            # grayscale frame so they can pass through the same MP4 encoder path.
+            depth_frame = np.nan_to_num(depth_frame, nan=0.0, posinf=0.0, neginf=0.0)
+            depth_max = float(np.max(depth_frame))
+            if depth_max > 0.0:
+                normalized = np.clip(depth_frame / depth_max, 0.0, 1.0)
+            else:
+                normalized = np.zeros_like(depth_frame, dtype=np.float32)
+            depth_u8 = (normalized * 255.0).astype(np.uint8)
+            np_frame = np.stack((depth_u8, depth_u8, depth_u8), axis=-1)
+        else:
+            raise ValueError(
+                "Unexpected frame size: "
+                f"got={len(frame_bytes)} expected_rgb={rgb_size} "
+                f"expected_depth_f16={depth_f16_size} "
+                f"expected_depth_f32={depth_f32_size}"
+            )
+        self._expected_raw_frame_bytes_total += len(frame_bytes)
 
         timestamp_value = self._get_frame_timestamp()
         self._lossless_encoder.add_frame(timestamp=timestamp_value, np_frame=np_frame)
@@ -265,8 +297,18 @@ class VideoTrace:
         if self._frame_index < len(self._frame_metadata):
             ts = self._frame_metadata[self._frame_index].get("timestamp")
         if not isinstance(ts, (int, float)):
+            self._fallback_timestamp_count += 1
             ts = time.time()
-        return float(ts)
+        ts_float = float(ts)
+        if self._first_frame_timestamp is None:
+            self._first_frame_timestamp = ts_float
+        if (
+            self._last_frame_timestamp is not None
+            and ts_float <= self._last_frame_timestamp
+        ):
+            self._non_monotonic_timestamp_count += 1
+        self._last_frame_timestamp = ts_float
+        return ts_float
 
     def finish(self) -> None:
         """Finalise encoders and write the metadata JSON trace file.
@@ -287,5 +329,73 @@ class VideoTrace:
             json.dumps(self._frame_metadata, separators=(",", ":"), ensure_ascii=False),
             encoding="utf-8",
         )
+
+        lossy_bytes = self.lossy_path.stat().st_size if self.lossy_path.exists() else 0
+        lossless_bytes = (
+            self.lossless_path.stat().st_size if self.lossless_path.exists() else 0
+        )
+        trace_json_bytes = (
+            self.trace_path.stat().st_size if self.trace_path.exists() else 0
+        )
+        total_bytes = lossy_bytes + lossless_bytes + trace_json_bytes
+        encoded_timestamp_span_s = 0.0
+        if (
+            self._first_frame_timestamp is not None
+            and self._last_frame_timestamp is not None
+        ):
+            encoded_timestamp_span_s = max(
+                0.0, self._last_frame_timestamp - self._first_frame_timestamp
+            )
+        metadata_timestamps = [
+            float(ts)
+            for frame_meta in self._frame_metadata
+            for ts in [frame_meta.get("timestamp")]
+            if isinstance(ts, (int, float))
+        ]
+        metadata_timestamp_span_s = 0.0
+        if len(metadata_timestamps) >= 2:
+            metadata_timestamp_span_s = max(metadata_timestamps) - min(
+                metadata_timestamps
+            )
+        logger.info(
+            "VideoTrace finished: dir=%s frames=%d metadata_entries=%d dims=%sx%s "
+            "expected_raw_rgb_bytes=%d fallback_timestamps=%d "
+            "non_monotonic_timestamps=%d metadata_timestamp_count=%d "
+            "encoded_timestamp_span_s=%.3f metadata_timestamp_span_s=%.3f "
+            "lossy_mp4_bytes=%d lossless_mp4_bytes=%d trace_json_bytes=%d "
+            "total_trace_bytes=%d",
+            self.output_dir,
+            self._frame_index,
+            len(self._frame_metadata),
+            self.width,
+            self.height,
+            self._expected_raw_frame_bytes_total,
+            self._fallback_timestamp_count,
+            self._non_monotonic_timestamp_count,
+            len(metadata_timestamps),
+            encoded_timestamp_span_s,
+            metadata_timestamp_span_s,
+            lossy_bytes,
+            lossless_bytes,
+            trace_json_bytes,
+            total_bytes,
+        )
+        if self._fallback_timestamp_count > 0:
+            logger.warning(
+                "VideoTrace used fallback timestamps for %d/%d frames (dir=%s); "
+                "video duration may be compressed to encoder runtime if metadata "
+                "timestamps are missing or misaligned",
+                self._fallback_timestamp_count,
+                self._frame_index,
+                self.output_dir,
+            )
+        if self._non_monotonic_timestamp_count > 0:
+            logger.warning(
+                "VideoTrace observed %d non-monotonic frame timestamps (dir=%s); "
+                "playback duration can be much shorter than capture duration when "
+                "batches are processed out of order",
+                self._non_monotonic_timestamp_count,
+                self.output_dir,
+            )
 
         self._frame_metadata = []

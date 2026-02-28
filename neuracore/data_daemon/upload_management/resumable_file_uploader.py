@@ -149,11 +149,6 @@ class ResumableFileUploader:
         Raises:
             FileNotFoundError: If the local file does not exist.
         """
-        logger.info(
-            f"Starting upload for {self._recording_id} at{self._filepath}: "
-            f"{self._bytes_uploaded} bytes already uploaded"
-        )
-
         file_path = Path(self._filepath)
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {self._filepath}")

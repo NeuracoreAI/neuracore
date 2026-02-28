@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from neuracore_types import DataType
 
 
 class _FakeEmitter:
@@ -123,7 +124,7 @@ def _write_batch_file(path: Path, payloads: list[bytes]) -> None:
 @dataclass(frozen=True)
 class _LocalTraceKey:
     recording_id: str
-    data_type: str
+    data_type: DataType
     trace_id: str
 
 
@@ -169,7 +170,12 @@ def patched_modules(
     monkeypatch.setattr(
         manager_module,
         "get_content_type",
-        lambda dt: "RGB" if str(dt).lower() in {"rgb", "video", "image"} else "JSON",
+        lambda dt: (
+            "RGB"
+            if getattr(dt, "value", str(dt)).lower()
+            in {"rgb_images", "rgb", "video", "image"}
+            else "JSON"
+        ),
         raising=True,
     )
 
@@ -235,7 +241,9 @@ async def test_video_trace_batch_feeds_payloads_in_order_and_finalises_on_trace_
 ) -> None:
     worker, manager, _, _, aborted, worker_module, _ = make_worker
 
-    key = _LocalTraceKey(recording_id="r1", data_type="rgb", trace_id="t1")
+    key = _LocalTraceKey(
+        recording_id="r1", data_type=DataType.RGB_IMAGES, trace_id="t1"
+    )
     batch_path = tmp_path / "batches" / "batch_0.ndjson"
 
     meta = json.dumps(
@@ -272,7 +280,9 @@ async def test_finalises_only_after_all_pending_batches_complete(
 ) -> None:
     worker, _, _, _, aborted, worker_module, _ = make_worker
 
-    key = _LocalTraceKey(recording_id="r2", data_type="rgb", trace_id="t2")
+    key = _LocalTraceKey(
+        recording_id="r2", data_type=DataType.RGB_IMAGES, trace_id="t2"
+    )
 
     batch0 = tmp_path / "batches" / "batch_0.ndjson"
     batch1 = tmp_path / "batches" / "batch_1.ndjson"
@@ -301,7 +311,9 @@ async def test_corrupt_payload_does_not_crash_logs_and_aborts_trace(
 ) -> None:
     worker, manager, _, _, aborted, _, _ = make_worker
 
-    key = _LocalTraceKey(recording_id="r3", data_type="rgb", trace_id="t3")
+    key = _LocalTraceKey(
+        recording_id="r3", data_type=DataType.RGB_IMAGES, trace_id="t3"
+    )
     batch_path = tmp_path / "batches" / "batch_0.ndjson"
 
     meta = json.dumps({"width": 2, "height": 2, "timestamp": 1.0}).encode("utf-8")
@@ -329,11 +341,15 @@ async def test_multiple_traces_concurrently_each_emit_trace_written(
 ) -> None:
     worker, _, _, _, aborted, worker_module, _ = make_worker
 
-    key_a = _LocalTraceKey(recording_id="ra", data_type="rgb", trace_id="ta")
-    key_b = _LocalTraceKey(recording_id="rb", data_type="json", trace_id="tb")
+    key_a = _LocalTraceKey(
+        recording_id="ra", data_type=DataType.RGB_IMAGES, trace_id="ta"
+    )
+    key_b = _LocalTraceKey(
+        recording_id="rb", data_type=DataType.CUSTOM_1D, trace_id="tb"
+    )
 
-    batch_a = tmp_path / "batches" / "batch_0a.ndjson"
-    batch_b = tmp_path / "batches" / "batch_0b.ndjson"
+    batch_a = tmp_path / "batches_a" / "batch_0.ndjson"
+    batch_b = tmp_path / "batches_b" / "batch_0.ndjson"
 
     meta = json.dumps({"width": 2, "height": 2, "timestamp": 1.0}).encode("utf-8")
     frame = b"\x00" * 12
@@ -362,7 +378,9 @@ def test_shutdown_finalises_remaining_encoders_and_emits_trace_written(
 ) -> None:
     worker, manager, _, _, aborted, worker_module, _ = make_worker
 
-    key = _LocalTraceKey(recording_id="rs", data_type="rgb", trace_id="ts")
+    key = _LocalTraceKey(
+        recording_id="rs", data_type=DataType.RGB_IMAGES, trace_id="ts"
+    )
     enc = manager.safe_get_encoder(key)
     assert isinstance(enc, _FakeVideoTrace)
     assert not enc.finished
@@ -386,7 +404,9 @@ async def test_trace_aborted_mid_batch_process_does_not_emit_trace_written_and_c
 ) -> None:
     worker, manager, _, _, aborted, worker_module, _ = make_worker
 
-    key = _LocalTraceKey(recording_id="r_abort", data_type="rgb", trace_id="t_abort")
+    key = _LocalTraceKey(
+        recording_id="r_abort", data_type=DataType.RGB_IMAGES, trace_id="t_abort"
+    )
     batch_path = tmp_path / "batches" / "batch_0.ndjson"
 
     meta = json.dumps({"width": 2, "height": 2, "timestamp": 1.0}).encode("utf-8")
@@ -428,7 +448,9 @@ async def test_in_flight_count_balances_on_success_and_failure(
 ) -> None:
     worker, manager, _, _, aborted, _, _ = make_worker
 
-    key_ok = _LocalTraceKey(recording_id="r_ok", data_type="rgb", trace_id="t_ok")
+    key_ok = _LocalTraceKey(
+        recording_id="r_ok", data_type=DataType.RGB_IMAGES, trace_id="t_ok"
+    )
     p_ok = tmp_path / "batches" / "batch_0_ok.ndjson"
     meta = json.dumps({"width": 2, "height": 2, "timestamp": 1.0}).encode("utf-8")
     frame = b"\x00" * 12
@@ -443,7 +465,9 @@ async def test_in_flight_count_balances_on_success_and_failure(
     assert worker.in_flight_count == 0
     assert aborted == []
 
-    key_bad = _LocalTraceKey(recording_id="r_bad", data_type="rgb", trace_id="t_bad")
+    key_bad = _LocalTraceKey(
+        recording_id="r_bad", data_type=DataType.RGB_IMAGES, trace_id="t_bad"
+    )
     p_bad = tmp_path / "batches" / "batch_0_bad.ndjson"
     _write_batch_file(p_bad, [meta, frame, frame])
 
