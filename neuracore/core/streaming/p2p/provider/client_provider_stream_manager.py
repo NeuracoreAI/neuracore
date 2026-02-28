@@ -238,14 +238,14 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
 
         for video_track in self.tracks:
             if connection_details.video_format == VideoFormat.WEB_RTC_NEGOTIATED:
-                connection.add_video_source(video_track)
+                await connection._add_video_source_impl(video_track)
             else:
-                connection.add_event_source(
+                await connection._add_event_source_impl(
                     video_track.get_neuracore_custom_track(loop=self.loop)
                 )
 
         for data_channel in self.event_source_cache.values():
-            connection.add_event_source(data_channel)
+            await connection._add_event_source_impl(data_channel)
 
         self.connections[connection_id] = connection
         self.background_tracker.submit_background_coroutine(connection.send_offer())
