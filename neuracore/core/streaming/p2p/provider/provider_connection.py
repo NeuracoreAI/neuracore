@@ -37,7 +37,7 @@ ICE_SERVERS = [
 logger = logging.getLogger(__name__)
 
 
-class PierToPierProviderConnection:
+class PeerToPeerProviderConnection:
     """WebRTC peer-to-peer connection for streaming robot sensor data.
 
     Manages the complete lifecycle of a WebRTC connection including SDP
@@ -83,6 +83,7 @@ class PierToPierProviderConnection:
         self.connection = RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=ICE_SERVERS)
         )
+
         self.received_answer_event = asyncio.Event()
         self.handle_answer_lock = asyncio.Lock()
         self.handle_ice_lock = asyncio.Lock()
@@ -97,7 +98,7 @@ class PierToPierProviderConnection:
 
         self.event_sources: set[JSONSource] = set()
         self.data_channel_callback: dict[str, Callable] = dict()
-        self._pending_add_futures: list[asyncio.Future[None]] = []
+        self._add_track_tasks: list[asyncio.Task[None]] = []
 
         @self.connection.on("connectionstatechange")
         def on_connectionstatechange() -> None:
@@ -175,21 +176,13 @@ class PierToPierProviderConnection:
         Args:
             source: Video source containing the track to be streamed
         """
-        if self._running_on_connection_loop():
-            fut = asyncio.ensure_future(
-                self._add_video_source_impl(source), loop=self.loop
-            )
-            self._pending_add_futures.append(fut)
-            return
-        future = asyncio.run_coroutine_threadsafe(
-            self._add_video_source_impl(source), self.loop
-        )
-        future.result(timeout=5.0)
 
-    async def _add_video_source_impl(self, source: VideoSource) -> None:
-        """Run on the connection loop: add track to the peer connection."""
-        track = source.get_video_track()
-        self.connection.addTrack(track)
+        async def _add_video_source() -> None:
+            """Run on the connection loop: add track to the peer connection."""
+            track = source.get_video_track()
+            self.connection.addTrack(track)
+
+        self._add_track_tasks.append(self.loop.create_task(_add_video_source()))
 
     def add_event_source(self, source: JSONSource) -> None:
         """Add a JSON event source to the connection via data channel.
@@ -197,39 +190,31 @@ class PierToPierProviderConnection:
         Args:
             source: JSON source for streaming structured data
         """
-        if self._running_on_connection_loop():
-            fut = asyncio.ensure_future(
-                self._add_event_source_impl(source), loop=self.loop
-            )
-            self._pending_add_futures.append(fut)
-            return
-        future = asyncio.run_coroutine_threadsafe(
-            self._add_event_source_impl(source), self.loop
-        )
-        future.result(timeout=5.0)
 
-    async def _add_event_source_impl(self, source: JSONSource) -> None:
-        """Run on the connection loop: create data channel and wire listeners."""
-        data_channel = self.connection.createDataChannel(source.mid)
+        async def _add_event_source_impl() -> None:
+            """Run on the connection loop: create data channel and wire listeners."""
+            data_channel = self.connection.createDataChannel(source.mid)
 
-        async def on_update(state: str) -> None:
-            if self.enabled_manager.is_disabled():
-                return
-            if data_channel.readyState != "open":
-                return
-            data_channel.send(state)
+            async def on_update(state: str) -> None:
+                if self.enabled_manager.is_disabled():
+                    return
+                if data_channel.readyState != "open":
+                    return
+                data_channel.send(state)
 
-        def on_open() -> None:
-            last_state = source.get_last_state()
-            if last_state:
-                data_channel.send(last_state)
-            data_channel.remove_listener("open", on_open)
+            def on_open() -> None:
+                last_state = source.get_last_state()
+                if last_state:
+                    data_channel.send(last_state)
+                data_channel.remove_listener("open", on_open)
 
-        data_channel.add_listener("open", on_open)
+            data_channel.add_listener("open", on_open)
 
-        self.event_sources.add(source)
-        source.add_listener(source.STATE_UPDATED_EVENT, on_update)
-        self.data_channel_callback[source.mid] = on_update
+            self.event_sources.add(source)
+            source.add_listener(source.STATE_UPDATED_EVENT, on_update)
+            self.data_channel_callback[source.mid] = on_update
+
+        self._add_track_tasks.append(self.loop.create_task(_add_event_source_impl()))
 
     async def send_handshake_message(
         self, message_type: MessageType, content: str
@@ -349,9 +334,9 @@ class PierToPierProviderConnection:
                 return
 
             # Wait for any add_*_source calls made from this loop (no deadlock)
-            if self._pending_add_futures:
-                await asyncio.gather(*self._pending_add_futures)
-                self._pending_add_futures.clear()
+            if self._add_track_tasks:
+                await asyncio.gather(*self._add_track_tasks)
+                self._add_track_tasks.clear()
 
             self.fix_mid_ordering("before offer")
             try:

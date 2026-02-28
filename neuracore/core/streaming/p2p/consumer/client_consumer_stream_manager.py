@@ -24,7 +24,7 @@ from neuracore.core.streaming.p2p.base_p2p_connection_manager import (
     BaseP2PStreamManager,
 )
 from neuracore.core.streaming.p2p.consumer.consumer_connection import (
-    PierToPierConsumerConnection,
+    PeerToPeerConsumerConnection,
 )
 from neuracore.core.streaming.p2p.consumer.ice_models import IceConfig
 from neuracore.core.streaming.p2p.consumer.sync_point_parser import merge_sync_points
@@ -77,7 +77,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
             get_consume_live_data_enabled_manager(), loop=loop
         )
         self.streaming.add_listener(EnabledManager.DISABLED, self._on_close)
-        self.connections: dict[str, PierToPierConsumerConnection] = {}
+        self.connections: dict[str, PeerToPeerConsumerConnection] = {}
         self.ice_config: IceConfig | None = None
 
     @property
@@ -211,7 +211,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
                 remote_stream_id, []
             )
 
-        connection = PierToPierConsumerConnection(
+        connection = PeerToPeerConsumerConnection(
             connection_id=connection_id,
             local_stream_id=self.local_stream_id,
             remote_stream_id=remote_stream_id,
