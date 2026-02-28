@@ -364,18 +364,6 @@ jobs:
           // Output changelog content
           core.setOutput('changelog_content', changelog);
 
-          // Always write the changelog file (will be committed if not dry run)
-          const fs = require('fs');
-          const path = `changelogs/${version}-changelog.md`;
-
-          // Ensure changelogs directory exists
-          if (!fs.existsSync('changelogs')) {
-            fs.mkdirSync('changelogs', { recursive: true });
-          }
-
-          fs.writeFileSync(path, changelog);
-          console.log(`Changelog written to: ${path}`);
-
           // Print summary
           console.log(`\nChangelog Summary:`);
           console.log(`- Major Changes: ${groups.breaking.length}`);
@@ -430,6 +418,24 @@ jobs:
 
         NEW_VERSION=$(grep -m 1 '^current_version = ' .bumpversion.cfg | cut -d'=' -f2 | tr -d ' ')
         echo "Bumped to version: $NEW_VERSION"
+
+    - name: Write changelog file
+      uses: actions/github-script@v7
+      env:
+        CHANGELOG_CONTENT: ${{ needs.generate-changelog.outputs.changelog_content }}
+      with:
+        script: |
+          const fs = require('fs');
+          const version = '${{ needs.generate-changelog.outputs.new_version }}';
+          const changelog = process.env.CHANGELOG_CONTENT;
+          const path = `changelogs/${version}-changelog.md`;
+
+          if (!fs.existsSync('changelogs')) {
+            fs.mkdirSync('changelogs', { recursive: true });
+          }
+
+          fs.writeFileSync(path, changelog);
+          console.log(`Changelog written to: ${path}`);
 
     - name: Reset pending changelog
       run: |
