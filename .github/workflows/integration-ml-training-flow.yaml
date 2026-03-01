@@ -19,6 +19,9 @@ jobs:
     needs: pre-commit
     runs-on: ubuntu-22.04
     strategy:
+      # TODO: NDD has socket issue when running in parallel
+      #   in CommunicationsManager when calling create_producer_socket()
+      max-parallel: 1
       fail-fast: false
       matrix:
         python-version: ['3.11']
