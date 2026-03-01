@@ -19,6 +19,7 @@ jobs:
     needs: pre-commit
     runs-on: ubuntu-latest
     strategy:
+      max-parallel: 1
       fail-fast: false
       matrix:
         python-version: ['3.11']
