@@ -24,6 +24,7 @@ max_prefetch_workers: 4
 
 # Dataset synchronization
 dataset_name: null
+dataset_id: null
 frequency: 10
 
 # You can either specify input_data_types/output_data_types or

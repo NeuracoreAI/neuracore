@@ -248,6 +248,7 @@ def _save_local_training_metadata(
         "status": "RUNNING",
         "algorithm": algorithm_name,
         "algorithm_id": getattr(cfg, "algorithm_id", None),
+        "dataset_id": getattr(cfg, "dataset_id", None),
         "dataset_name": getattr(cfg, "dataset_name", None),
         "launch_time": time.time(),
         "local_output_dir": str(output_dir),
@@ -626,15 +627,25 @@ def main(cfg: DictConfig) -> None:
             "Neither 'algorithm' nor 'algorithm_id' is provided. " "Please specify one."
         )
 
-    if cfg.dataset_name is None:
-        raise ValueError("'dataset_name' must be provided.")
+    if cfg.dataset_id is None and cfg.dataset_name is None:
+        raise ValueError("Either 'dataset_id' or 'dataset_name' must be provided.")
+    if cfg.dataset_id is not None and cfg.dataset_name is not None:
+        raise ValueError(
+            "Both 'dataset_id' and 'dataset_name' are provided. "
+            "Please specify only one."
+        )
 
     # Login and get dataset
     nc.login()
     if cfg.org_id is not None:
         nc.set_organization(cfg.org_id)
 
-    dataset = nc.get_dataset(name=cfg.dataset_name)
+    if cfg.dataset_id is not None:
+        dataset = nc.get_dataset(id=cfg.dataset_id)
+    elif cfg.dataset_name is not None:
+        dataset = nc.get_dataset(name=cfg.dataset_name)
+    else:
+        raise ValueError("Either 'dataset_id' or 'dataset_name' must be provided.")
     dataset.cache_dir = _resolve_recording_cache_dir(cfg)
     dataset.cache_dir.mkdir(parents=True, exist_ok=True)
 
