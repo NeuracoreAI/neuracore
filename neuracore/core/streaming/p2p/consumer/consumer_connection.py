@@ -43,7 +43,7 @@ from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 logger = logging.getLogger(__name__)
 
 
-class PierToPierConsumerConnection:
+class PeerToPeerConsumerConnection:
     """WebRTC peer-to-peer connection for streaming robot sensor data.
 
     Manages the complete lifecycle of a WebRTC connection including SDP

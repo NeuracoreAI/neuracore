@@ -10,7 +10,7 @@ from neuracore_types import OpenConnectionDetails, VideoFormat
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.provider.json_source import JSONSource
 from neuracore.core.streaming.p2p.provider.provider_connection import (
-    PierToPierProviderConnection,
+    PeerToPeerProviderConnection,
 )
 from neuracore.core.streaming.p2p.provider.video_source import VideoSource
 
@@ -61,7 +61,7 @@ def provider_connection(nc_loop):
             return_value=MagicMock(get_headers=lambda: {}),
         ),
     ):
-        conn = PierToPierProviderConnection(
+        conn = PeerToPeerProviderConnection(
             connection_id="conn-1",
             local_stream_id="local-1",
             remote_stream_id="remote-1",
@@ -216,6 +216,31 @@ def test_add_video_source_from_thread_with_own_loop(
 
 
 @pytest.mark.asyncio
+async def test_add_video_and_event_source_from_connection_loop(
+    provider_connection, video_source, json_source, nc_loop
+):
+    """
+    Call add_video_source and add_event_source from a coroutine on the
+    connection's loop (same-loop). Must complete without deadlock; connection
+    schedules the work and send_offer (or awaiting _add_track_tasks) waits
+    for it. Regression for create_new_connection calling add_* with no await.
+    """
+
+    async def add_sources_on_connection_loop():
+        provider_connection.add_video_source(video_source)
+        provider_connection.add_event_source(json_source)
+        if provider_connection._add_track_tasks:
+            await asyncio.gather(*provider_connection._add_track_tasks)
+
+    future = asyncio.run_coroutine_threadsafe(add_sources_on_connection_loop(), nc_loop)
+    await asyncio.wait_for(asyncio.wrap_future(future), timeout=2.0)
+
+    senders = provider_connection.connection.getSenders()
+    assert len(senders) >= 1, "Video track should be added to peer connection"
+    assert json_source in provider_connection.event_sources
+
+
+@pytest.mark.asyncio
 async def test_connection_uses_provided_loop(nc_loop):
     """
     Connection must use the loop passed in, not the calling thread's loop.
@@ -230,7 +255,7 @@ async def test_connection_uses_provided_loop(nc_loop):
             return_value=MagicMock(get_headers=lambda: {}),
         ),
     ):
-        conn = PierToPierProviderConnection(
+        conn = PeerToPeerProviderConnection(
             connection_id="c1",
             local_stream_id="l1",
             remote_stream_id="r1",
