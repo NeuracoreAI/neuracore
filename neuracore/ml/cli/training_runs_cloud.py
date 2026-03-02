@@ -9,7 +9,7 @@ from typing import Any
 
 import requests
 import typer
-from neuracore_types import RobotDataSpec, TrainingJob, TrainingJobStatus
+from neuracore_types import CrossEmbodimentDescription, TrainingJob, TrainingJobStatus
 from pydantic import TypeAdapter, ValidationError
 from rich.console import Console
 
@@ -59,7 +59,7 @@ def _format_duration(start_time: float | None, end_time: float | None) -> str:
     return f"{seconds}s"
 
 
-def _format_robot_data_spec(robot_data_spec: RobotDataSpec | None) -> str:
+def _format_robot_data_spec(robot_data_spec: CrossEmbodimentDescription | None) -> str:
     """Format robot data spec for display.
 
     Args:

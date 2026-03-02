@@ -7,10 +7,10 @@ import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import numpy as np
 from neuracore_types import (
+    CrossEmbodimentDescription,
     DataType,
     JointData,
     RGBCameraData,
-    RobotDataSpec,
     SynchronizedPoint,
 )
 
@@ -116,7 +116,7 @@ def main():
     dataset = nc.get_dataset("ASU Table Top")
     data_types_to_synchronize = [DataType.JOINT_POSITIONS, DataType.RGB_IMAGES]
 
-    robot_data_spec: RobotDataSpec = {}
+    robot_data_spec: CrossEmbodimentDescription = {}
     robot_ids_dataset = dataset.robot_ids
     for robot_id in robot_ids_dataset:
         data_type_to_names = dataset.get_full_data_spec(robot_id)

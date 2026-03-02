@@ -6,9 +6,12 @@ including deployment, status monitoring, and deletion operations.
 """
 
 import requests
-from neuracore_types import DataSpec, DataType, DeploymentRequest, SynchronizedPoint
+from neuracore_types import DataType, DeploymentRequest, SynchronizedPoint
 from neuracore_types.endpoints.endpoint_requests import DeploymentConfig
 from neuracore_types.training.training import GPUType
+from neuracore_types import (
+    EmbodimentDescription,
+)
 
 from neuracore.api.core import _get_robot
 from neuracore.core.auth import get_auth
@@ -123,8 +126,8 @@ def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:
 def deploy_model(
     job_id: str,
     name: str,
-    model_input_order: DataSpec,
-    model_output_order: DataSpec,
+    model_input_order: EmbodimentDescription,
+    model_output_order: EmbodimentDescription,
     ttl: int | None = None,
     gpu_type: GPUType = GPUType.NVIDIA_TESLA_V100,
 ) -> dict:

@@ -6,9 +6,9 @@ algorithm existence, robot existence, and data spec compatibility.
 
 from __future__ import annotations
 
-from neuracore_types import DataType, RobotDataSpec
+from neuracore_types import CrossEmbodimentDescription, DataType
 
-from neuracore.core.data.dataset import Dataset, DataSpec
+from neuracore.core.data.dataset import Dataset, EmbodimentDescription
 from neuracore.core.utils.robot_data_spec_utils import is_robot_id
 
 
@@ -30,7 +30,7 @@ def _validate_data_specs(
     dataset: Dataset,
     dataset_name: str,
     algorithm_name: str,
-    robot_data_spec: RobotDataSpec,
+    robot_data_spec: CrossEmbodimentDescription,
     supported_data_types: set[DataType],
     spec_kind: str,
 ) -> None:
@@ -54,7 +54,7 @@ def _validate_data_specs(
     """
     for robot_id, robot_data in robot_data_spec.items():
         assert is_robot_id(robot_id), f"Expected robot_id format for {robot_id}"
-        dataset_spec: DataSpec = dataset.get_full_data_spec(robot_id)
+        dataset_spec: EmbodimentDescription = dataset.get_full_data_spec(robot_id)
         for data_type, data_value in robot_data.items():
             if data_type not in supported_data_types:
                 raise ValueError(
@@ -155,8 +155,8 @@ def validate_training_params(
     dataset: Dataset,
     dataset_name: str,
     algorithm_name: str,
-    input_robot_data_spec: RobotDataSpec,
-    output_robot_data_spec: RobotDataSpec,
+    input_robot_data_spec: CrossEmbodimentDescription,
+    output_robot_data_spec: CrossEmbodimentDescription,
     algorithm_jsons: list[dict],
 ) -> None:
     """Validate all training parameters.

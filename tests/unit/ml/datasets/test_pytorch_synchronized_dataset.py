@@ -6,10 +6,10 @@ import pytest
 import torch
 from neuracore_types import (
     DATA_TYPE_TO_NC_DATA_CLASS,
+    CrossEmbodimentDescription,
     DataItemStats,
     DataType,
     NCDataStats,
-    RobotDataSpec,
     SynchronizedDatasetStatistics,
     SynchronizedPoint,
 )
@@ -145,7 +145,7 @@ def mock_synchronized_dataset(
             }
 
         def calculate_statistics(
-            self, robot_data_spec: RobotDataSpec
+            self, robot_data_spec: CrossEmbodimentDescription
         ) -> SynchronizedDatasetStatistics:
             return SynchronizedDatasetStatistics(
                 synchronized_dataset_id="mock_dataset",
@@ -182,7 +182,7 @@ def test_should_initialize_with_correct_args(
     mock_synchronized_dataset: SynchronizedDataset,
 ):
     """Test basic dataset initialization."""
-    input_spec: RobotDataSpec = {
+    input_spec: CrossEmbodimentDescription = {
         "robot_0": {
             DataType.JOINT_POSITIONS: [
                 f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
@@ -190,7 +190,7 @@ def test_should_initialize_with_correct_args(
             DataType.RGB_IMAGES: [f"{DataType.RGB_IMAGES.value}_{i}" for i in range(3)],
         }
     }
-    output_spec: RobotDataSpec = {
+    output_spec: CrossEmbodimentDescription = {
         "robot_0": {
             DataType.JOINT_TARGET_POSITIONS: [
                 f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -218,14 +218,14 @@ def test_should_throw_error_with_missing_robot_id(
     mock_synchronized_dataset: SynchronizedDataset,
 ):
     """Test validation fails with missing robot ID."""
-    input_spec: RobotDataSpec = {
+    input_spec: CrossEmbodimentDescription = {
         "robot_999": {  # Robot ID not in dataset
             DataType.JOINT_POSITIONS: [
                 f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
             ],
         }
     }
-    output_spec: RobotDataSpec = {
+    output_spec: CrossEmbodimentDescription = {
         "robot_0": {
             DataType.JOINT_TARGET_POSITIONS: [
                 f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -246,7 +246,7 @@ def test_should_throw_error_with_missing_data_type(
     mock_synchronized_dataset: SynchronizedDataset,
 ):
     """Test validation fails with missing data type."""
-    input_spec: RobotDataSpec = {
+    input_spec: CrossEmbodimentDescription = {
         "robot_0": {
             DataType.JOINT_POSITIONS: [
                 f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
@@ -256,7 +256,7 @@ def test_should_throw_error_with_missing_data_type(
             ],  # Not in dataset
         }
     }
-    output_spec: RobotDataSpec = {
+    output_spec: CrossEmbodimentDescription = {
         "robot_0": {
             DataType.JOINT_TARGET_POSITIONS: [
                 f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -302,7 +302,7 @@ class TestDataLoading:
     @patch("neuracore.login")
     def test_load_sample_basic(self, mock_login, mock_synchronized_dataset):
         """Test basic sample loading."""
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
@@ -312,7 +312,7 @@ class TestDataLoading:
                 ],
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -343,7 +343,7 @@ class TestDataLoading:
     @patch("neuracore.login")
     def test_load_sample_memory_monitoring(self, mock_login, mock_synchronized_dataset):
         """Test memory monitoring during sample loading."""
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
@@ -353,7 +353,7 @@ class TestDataLoading:
                 ],
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -386,7 +386,7 @@ class TestDataTypeProcessing:
     @patch("neuracore.login")
     def test_inputs_and_outputs_structure(self, mock_login, mock_synchronized_dataset):
         """Test that inputs and outputs have correct structure."""
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
@@ -396,7 +396,7 @@ class TestDataTypeProcessing:
                 ],
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -438,7 +438,7 @@ class TestDatasetIntegration:
     @patch("neuracore.login")
     def test_getitem_method(self, mock_login, mock_synchronized_dataset):
         """Test __getitem__ method."""
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
@@ -448,7 +448,7 @@ class TestDatasetIntegration:
                 ],
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -474,7 +474,7 @@ class TestDatasetIntegration:
     @patch("neuracore.login")
     def test_getitem_negative_index(self, mock_login, mock_synchronized_dataset):
         """Test __getitem__ with negative index."""
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
@@ -484,7 +484,7 @@ class TestDatasetIntegration:
                 ],
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -508,14 +508,14 @@ class TestDatasetIntegration:
 
     def test_getitem_index_out_of_bounds(self, mock_synchronized_dataset):
         """Test __getitem__ with out of bounds index."""
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
                 ]
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -540,14 +540,14 @@ class TestDatasetIntegration:
 
     def test_len_method(self, mock_synchronized_dataset):
         """Test __len__ method."""
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
                 ]
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -567,14 +567,14 @@ class TestDatasetIntegration:
     @patch("neuracore.login")
     def test_error_handling_in_getitem(self, mock_login, mock_synchronized_dataset):
         """Test error handling in __getitem__ method."""
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
                 ]
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -602,14 +602,14 @@ class TestPerformanceAndOptimization:
 
     def test_memory_monitoring_initialization(self, mock_synchronized_dataset):
         """Test memory monitor initialization."""
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
                 ]
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -629,14 +629,14 @@ class TestPerformanceAndOptimization:
 
     def test_episode_indices_creation(self, mock_synchronized_dataset):
         """Test episode indices are created correctly."""
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
                 ]
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -665,14 +665,14 @@ class TestErrorRecovery:
 
     def test_error_count_tracking(self, mock_synchronized_dataset):
         """Test error count tracking in parent class."""
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
                 ]
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(4)
@@ -700,7 +700,7 @@ class TestIntegrationWithPyTorchDataLoader:
         """Test DataLoader with custom collate function."""
         from torch.utils.data import DataLoader
 
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(2)
@@ -710,7 +710,7 @@ class TestIntegrationWithPyTorchDataLoader:
                 ],
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(2)
@@ -748,14 +748,14 @@ class TestDatasetStatistics:
 
     def test_dataset_statistics_property(self, mock_synchronized_dataset):
         """Test dataset_statistics property."""
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
                 ]
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(4)
@@ -782,14 +782,14 @@ class TestDatasetStatistics:
         import neuracore.ml.datasets.pytorch_synchronized_dataset as psd
 
         monkeypatch.setattr(psd, "DEFAULT_CACHE_DIR", tmp_path)
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
                 ]
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -833,14 +833,14 @@ class TestDatasetStatistics:
         import neuracore.ml.datasets.pytorch_synchronized_dataset as psd
 
         monkeypatch.setattr(psd, "DEFAULT_CACHE_DIR", tmp_path)
-        input_spec: RobotDataSpec = {
+        input_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_POSITIONS: [
                     f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
                 ]
             }
         }
-        output_spec: RobotDataSpec = {
+        output_spec: CrossEmbodimentDescription = {
             "robot_0": {
                 DataType.JOINT_TARGET_POSITIONS: [
                     f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)

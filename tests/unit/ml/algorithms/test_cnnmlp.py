@@ -5,7 +5,12 @@ from typing import cast
 
 import pytest
 import torch
-from neuracore_types import BatchedNCData, DataType, ModelInitDescription, RobotDataSpec
+from neuracore_types import (
+    BatchedNCData,
+    CrossEmbodimentDescription,
+    DataType,
+    ModelInitDescription,
+)
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -26,10 +31,10 @@ OUTPUT_PREDICTION_HORIZON = 5
 def pytorch_dummy_dataset() -> PytorchDummyDataset:
     input_data_types = CNNMLP.get_supported_input_data_types()
     output_data_types = CNNMLP.get_supported_output_data_types()
-    input_robot_data_spec: RobotDataSpec = {
+    input_robot_data_spec: CrossEmbodimentDescription = {
         "robot_1": {data_type: [] for data_type in input_data_types}
     }
-    output_robot_data_spec: RobotDataSpec = {
+    output_robot_data_spec: CrossEmbodimentDescription = {
         "robot_1": {data_type: [] for data_type in output_data_types}
     }
 
@@ -44,8 +49,10 @@ def pytorch_dummy_dataset() -> PytorchDummyDataset:
 
 @pytest.fixture
 def pytorch_dummy_dataset_no_proprio() -> PytorchDummyDataset:
-    input_robot_data_spec: RobotDataSpec = {"robot_1": {DataType.RGB_IMAGES: []}}
-    output_robot_data_spec: RobotDataSpec = {
+    input_robot_data_spec: CrossEmbodimentDescription = {
+        "robot_1": {DataType.RGB_IMAGES: []}
+    }
+    output_robot_data_spec: CrossEmbodimentDescription = {
         "robot_1": {
             data_type: [] for data_type in CNNMLP.get_supported_output_data_types()
         }

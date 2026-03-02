@@ -33,6 +33,7 @@ import torch
 from neuracore_types import (
     BatchedJointData,
     DataType,
+    EmbodimentDescription,
     JointData,
     RGBCameraData,
     SynchronizedPoint,

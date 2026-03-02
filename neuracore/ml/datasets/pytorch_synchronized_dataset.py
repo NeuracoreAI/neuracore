@@ -10,9 +10,9 @@ import torch
 from neuracore_types import (
     DATA_TYPE_TO_BATCHED_NC_DATA_CLASS,
     BatchedNCData,
+    CrossEmbodimentDescription,
     DataType,
     NCDataStats,
-    RobotDataSpec,
     SynchronizedDatasetStatistics,
     SynchronizedPoint,
 )
@@ -42,8 +42,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
     def __init__(
         self,
         synchronized_dataset: SynchronizedDataset,
-        input_robot_data_spec: RobotDataSpec,
-        output_robot_data_spec: RobotDataSpec,
+        input_robot_data_spec: CrossEmbodimentDescription,
+        output_robot_data_spec: CrossEmbodimentDescription,
         output_prediction_horizon: int,
     ):
         """Initialize the dataset.
@@ -140,7 +140,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     self._requires_fallback = True
                     break
 
-        self._fallback_robot_data_spec: RobotDataSpec = {}
+        self._fallback_robot_data_spec: CrossEmbodimentDescription = {}
 
     def _get_num_training_observations(self) -> int:
         # The count attribute of the stats should give total number of training
@@ -159,8 +159,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
     def _validate_robot_specs(
         self,
         synchronized_dataset: SynchronizedDataset,
-        input_robot_data_spec: RobotDataSpec,
-        output_robot_data_spec: RobotDataSpec,
+        input_robot_data_spec: CrossEmbodimentDescription,
+        output_robot_data_spec: CrossEmbodimentDescription,
     ) -> None:
         """Validate that robot IDs and data types exist in the synchronized dataset.
 

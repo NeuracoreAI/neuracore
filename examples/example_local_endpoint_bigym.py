@@ -17,8 +17,8 @@ from bigym_utils.utils import (
 from neuracore_types import (
     BatchedJointData,
     BatchedNCData,
-    DataSpec,
     DataType,
+    EmbodimentDescription,
     JointData,
     RGBCameraData,
     SynchronizedPoint,
@@ -31,12 +31,12 @@ ROBOT_NAME = "Mujoco UnitreeH1 Example"
 CAMERA_NAMES = ["head"]
 
 # Specification of the order that will be fed into the model
-MODEL_INPUT_ORDER: DataSpec = {
+MODEL_INPUT_ORDER: EmbodimentDescription = {
     DataType.JOINT_POSITIONS: JOINT_NAMES[:-1],
     DataType.RGB_IMAGES: CAMERA_NAMES,
 }
 
-MODEL_OUTPUT_ORDER: DataSpec = {
+MODEL_OUTPUT_ORDER: EmbodimentDescription = {
     DataType.JOINT_TARGET_POSITIONS: JOINT_ACTUATORS,
 }
 
