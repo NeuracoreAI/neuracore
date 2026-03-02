@@ -141,7 +141,7 @@ def run_validation(
         logger.info(f"Supported output data types: {supported_output_data_types}")
 
         # Create dummy robot data specs
-        input_robot_data_spec = {
+        input_cross_embodiment_description = {
             "robot_1": {
                 data_type: [
                     f"{data_type.value}_{i}" for i in range(MAX_LEN_PER_DATA_TYPE)
@@ -149,7 +149,7 @@ def run_validation(
                 for data_type in supported_input_data_types
             }
         }
-        output_robot_data_spec = {
+        output_cross_embodiment_description = {
             "robot_1": {
                 data_type: [
                     f"{data_type.value}_{i}" for i in range(MAX_LEN_PER_DATA_TYPE)
@@ -159,8 +159,8 @@ def run_validation(
         }
 
         dataset = PytorchDummyDataset(
-            input_robot_data_spec=input_robot_data_spec,
-            output_robot_data_spec=output_robot_data_spec,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
             num_samples=5,
         )
 

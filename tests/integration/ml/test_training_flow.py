@@ -232,19 +232,23 @@ def test_training_flow():
             assert (
                 len(robot_ids) == 2
             ), f"Expected 2 robots in merged dataset, got {robot_ids}"
-            input_robot_data_spec = {}
-            output_robot_data_spec = {}
+            input_cross_embodiment_description = {}
+            output_cross_embodiment_description = {}
             for robot_id in robot_ids:
-                data_spec = dataset.get_full_data_spec(robot_id)
-                data_spec = {
-                    dt: item for dt, item in data_spec.items() if dt in INPUT_DATA_TYPES
+                embodiment_description = dataset.get_full_data_spec(robot_id)
+                embodiment_description = {
+                    dt: item
+                    for dt, item in embodiment_description.items()
+                    if dt in INPUT_DATA_TYPES
                 }
                 assert (
-                    DataType.JOINT_POSITIONS in data_spec
+                    DataType.JOINT_POSITIONS in embodiment_description
                 ), f"JOINT_POSITIONS missing from robot {robot_id} data spec"
-                input_robot_data_spec[robot_id] = data_spec
-                output_robot_data_spec[robot_id] = {
-                    DataType.JOINT_POSITIONS: data_spec[DataType.JOINT_POSITIONS],
+                input_cross_embodiment_description[robot_id] = embodiment_description
+                output_cross_embodiment_description[robot_id] = {
+                    DataType.JOINT_POSITIONS: embodiment_description[
+                        DataType.JOINT_POSITIONS
+                    ],
                 }
             job_data = nc.start_training_run(
                 name=training_name,
@@ -254,8 +258,8 @@ def test_training_flow():
                 gpu_type=GPU_TYPE,
                 num_gpus=NUM_GPUS,
                 frequency=FREQUENCY,
-                input_robot_data_spec=input_robot_data_spec,
-                output_robot_data_spec=output_robot_data_spec,
+                input_cross_embodiment_description=input_cross_embodiment_description,
+                output_cross_embodiment_description=output_cross_embodiment_description,
             )
             job_id = job_data["id"]
             logger.info(f"Training job started: {job_id}")

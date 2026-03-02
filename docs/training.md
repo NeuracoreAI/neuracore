@@ -141,7 +141,7 @@ device: null  # e.g., "cuda:0", "mps", "cpu"
 batch_size: "auto"
 
 # You can either specify input_data_types/output_data_types or
-# input_robot_data_spec/output_robot_data_spec
+# input_cross_embodiment_description/output_cross_embodiment_description
 input_data_types:
   - "JOINT_POSITIONS"
   - "RGB_IMAGES"
@@ -151,8 +151,8 @@ output_data_types:
 
 # Dict[str, Dict[DataType, List[str]], e.g., {"my_robot": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...]}}
 # You can also pass in an empty dict {} to use all available data for all robots
-input_robot_data_spec: null
-output_robot_data_spec: null
+input_cross_embodiment_description: null
+output_cross_embodiment_description: null
 ```
 
 The algorithm-specific config file is inside `config/algorithm`:

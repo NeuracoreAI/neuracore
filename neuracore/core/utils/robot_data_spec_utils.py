@@ -2,13 +2,14 @@
 
 TODO: Consider moving these functions to neuracore_types/utils/ to avoid
 duplication with neuracore_backend/utils.py which has its own copy of
-merge_robot_data_spec. Both packages depend on neuracore_types, so it
+merge_cross_embodiment_description. Both packages depend on neuracore_types, so it
 would be the natural home for these shared utilities.
 """
 
 import re
 
-from neuracore_types import DataType, RobotDataSpec
+from neuracore_types import CrossEmbodimentDescription, DataType
+from omegaconf import DictConfig
 from ordered_set import OrderedSet
 
 from neuracore.core.robot import get_robot_id_from_name
@@ -27,9 +28,9 @@ def is_robot_id(string: str) -> bool:
     return bool(ID_REGEX.match(string))
 
 
-def convert_str_to_robot_data_spec(
-    robot_name_to_data_types: dict[str, dict[str, list[str]]],
-) -> RobotDataSpec:
+def convert_omegaconf_to_cross_embodiment_description(
+    cross_embodiment_cfg: DictConfig,
+) -> CrossEmbodimentDescription:
     """Converts string representations of data types to DataType enums.
 
     Takes a dictionary mapping robot names to dictionaries of
@@ -37,26 +38,32 @@ def convert_str_to_robot_data_spec(
     and converts the data type strings to DataType enums.
 
     Args:
-        robot_name_to_data_types: A dictionary where keys are robot names and
+        cross_embodiment_cfg: A dictionary where keys are robot names and
             values are dictionaries mapping data type strings to lists of item names.
 
     Returns:
         A dictionary where keys are robot names and values are dictionaries
             mapping DataType enums to lists of item names, preserving insertion order.
     """
-    result: dict[str, dict[DataType, list[str]]] = {}
-    for robot_name, data_type_dict in robot_name_to_data_types.items():
-        result[robot_name] = {
-            DataType(data_type): list(data_list)
-            for data_type, data_list in data_type_dict.items()
-        }
+    result: CrossEmbodimentDescription = {}
+    for embodiment, embodiment_values in cross_embodiment_cfg.items():
+        result[embodiment] = {}
+        for data_type_str, item_names in embodiment_values.items():
+            try:
+                data_type_enum = DataType(data_type_str)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid data type '{data_type_str}' for robot '{embodiment}'. "
+                    f"Expected one of {[dt.value for dt in DataType]}."
+                )
+            result[embodiment][data_type_enum] = item_names
     return result
 
 
-def convert_robot_data_spec_names_to_ids(
-    robot_data_spec: RobotDataSpec,
-) -> RobotDataSpec:
-    """Convert RobotDataSpec from robot names/IDs to robot IDs.
+def convert_cross_embodiment_description_names_to_ids(
+    cross_embodiment_description: CrossEmbodimentDescription,
+) -> CrossEmbodimentDescription:
+    """Convert CrossEmbodimentDescription from robot names/IDs to robot IDs.
 
     Resolves both private and shared robots.
 
@@ -64,7 +71,7 @@ def convert_robot_data_spec_names_to_ids(
     the private robot will take priority.
 
     Args:
-        robot_data_spec: Robot data spec keyed by robot names or IDs.
+        cross_embodiment_description: Robot data spec keyed by robot names or IDs.
 
     Returns:
         Robot data spec keyed by robot IDs.
@@ -72,19 +79,22 @@ def convert_robot_data_spec_names_to_ids(
     Raises:
         DatasetError: If a robot identifier is ambiguous.
     """
-    robot_data_spec_with_ids: RobotDataSpec = {}
+    robot_data_spec_with_ids: CrossEmbodimentDescription = {}
     seen_ids = []
 
-    for robot_name_or_id, data_spec in robot_data_spec.items():
+    for (
+        robot_name_or_id,
+        embodiment_description,
+    ) in cross_embodiment_description.items():
 
         if not is_robot_id(robot_name_or_id):
             robot_name = robot_name_or_id
             # Assume it's a name and try to resolve to an ID
             robot_id = get_robot_id_from_name(robot_name)
-            robot_data_spec_with_ids[robot_id] = data_spec
+            robot_data_spec_with_ids[robot_id] = embodiment_description
         else:
             robot_id = robot_name_or_id
-            robot_data_spec_with_ids[robot_id] = data_spec
+            robot_data_spec_with_ids[robot_id] = embodiment_description
 
         seen_ids.append(robot_id)
 
@@ -97,10 +107,10 @@ def convert_robot_data_spec_names_to_ids(
     return robot_data_spec_with_ids
 
 
-def merge_robot_data_spec(
-    data_spec_1: RobotDataSpec,
-    data_spec_2: RobotDataSpec,
-) -> RobotDataSpec:
+def merge_cross_embodiment_description(
+    data_spec_1: CrossEmbodimentDescription,
+    data_spec_2: CrossEmbodimentDescription,
+) -> dict[str, dict[DataType, list[str]]]:
     """Merge two robot name to data types dictionaries.
 
     Order is preserved: data_spec_1's order takes priority, then data_spec_2's
@@ -114,29 +124,32 @@ def merge_robot_data_spec(
     Returns:
         Merged dictionary with preserved order.
     """
-    merged_dict: RobotDataSpec = {}
+    cross_embodiment_description: CrossEmbodimentDescription = {}
 
     # dict.fromkeys() preserves order and removes duplicates
     all_robot_ids = list(dict.fromkeys(list(data_spec_1) + list(data_spec_2)))
 
     for robot_id in all_robot_ids:
-        data_type_dict1 = data_spec_1.get(robot_id, {})
-        data_type_dict2 = data_spec_2.get(robot_id, {})
+        embodiment_desc_1 = data_spec_1.get(robot_id, {})
+        embodiment_desc_2 = data_spec_2.get(robot_id, {})
         all_data_types = list(
-            dict.fromkeys(list(data_type_dict1) + list(data_type_dict2))
+            dict.fromkeys(list(embodiment_desc_1) + list(embodiment_desc_2))
         )
 
-        merged_dict[robot_id] = {}
+        cross_embodiment_description[robot_id] = {}
         for data_type in all_data_types:
-            items = list(data_type_dict1.get(data_type, [])) + list(
-                data_type_dict2.get(data_type, [])
+            items1 = list(embodiment_desc_1.get(data_type, []).values())
+            items2 = list(embodiment_desc_2.get(data_type, []).values())
+
+            cross_embodiment_description[robot_id][data_type] = list(
+                dict.fromkeys(items1 + items2)
             )
-            merged_dict[robot_id][data_type] = list(dict.fromkeys(items))
-
-    return merged_dict
+    return cross_embodiment_description
 
 
-def extract_data_types(robot_id_to_data_types: RobotDataSpec) -> OrderedSet[DataType]:
+def extract_data_types(
+    robot_id_to_data_types: CrossEmbodimentDescription,
+) -> OrderedSet[DataType]:
     """Extract unique data types from robot name to data types dictionary.
 
     Args:

@@ -33,6 +33,7 @@ import torch
 from neuracore_types import (
     BatchedJointData,
     DataType,
+    EmbodimentDescription,
     JointData,
     RGBCameraData,
     SynchronizedPoint,
@@ -171,13 +172,14 @@ class TestAlgorithmPerformance:
         can cache and forward it. Locally the ID is logged at INFO level.
         """
         algorithm_name = algorithm_config_entry["name"]
-
         nc.login()
 
         dataset = nc.get_dataset(DATASET_NAME)
-        robot_ids = dataset.robot_ids
-        assert len(robot_ids) == 1, f"Expected one robot in dataset, got {robot_ids}"
-        robot_id = robot_ids[0]
+        robot_ids_dataset = dataset.robot_ids
+        assert len(robot_ids_dataset) == 1, "Expected only one robot in the dataset"
+        robot_id = robot_ids_dataset[0]
+        input_cross_embodiment_description = {robot_id: INPUT_DATA_SPEC}
+        output_cross_embodiment_description = {robot_id: OUTPUT_DATA_SPEC}
 
         timestamp = int(time.time())
         logger.info(f"[{algorithm_name}] Starting training job...")
@@ -189,8 +191,8 @@ class TestAlgorithmPerformance:
             algorithm_name=algorithm_name,
             dataset_name=DATASET_NAME,
             algorithm_config=algorithm_config_entry["algorithm_config"],
-            input_robot_data_spec={robot_id: INPUT_DATA_SPEC},
-            output_robot_data_spec={robot_id: OUTPUT_DATA_SPEC},
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
         )
         training_job_id = job_data["id"]
         logger.info(f"[{algorithm_name}] Training job started: {training_job_id}")

@@ -267,8 +267,8 @@ def _render_local_inspect(metadata: dict) -> None:
 
     console.print(
         Panel(
-            training_runs._format_robot_data_spec(
-                metadata.get("input_robot_data_spec", {})
+            training_runs._format_cross_embodiment_description(
+                metadata.get("input_cross_embodiment_description", {})
             ),
             title="Model Input Data Spec",
             box=box.SQUARE,
@@ -276,8 +276,8 @@ def _render_local_inspect(metadata: dict) -> None:
     )
     console.print(
         Panel(
-            training_runs._format_robot_data_spec(
-                metadata.get("output_robot_data_spec", {})
+            training_runs._format_cross_embodiment_description(
+                metadata.get("output_cross_embodiment_description", {})
             ),
             title="Model Output Data Spec",
             box=box.SQUARE,

@@ -176,13 +176,13 @@ def test_start_training_run(
         "num_layers": 3,
         "cnn_output_dim": 64,
     }
-    input_robot_data_spec = {
+    input_cross_embodiment_description = {
         robot_name: {
             DataType.RGB_IMAGES: ["angle"],
         }
     }
 
-    output_robot_data_spec = {
+    output_cross_embodiment_description = {
         robot_name: {
             DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
         }
@@ -196,8 +196,8 @@ def test_start_training_run(
         gpu_type=GPUType.NVIDIA_TESLA_T4,
         num_gpus=1,
         frequency=10,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
     )
 
     # Verify job was created with expected values
@@ -324,8 +324,8 @@ def test_start_training_run_raises_on_duplicate_name(
         status_code=200,
     )
 
-    input_robot_data_spec = {robot_name: {DataType.RGB_IMAGES: ["angle"]}}
-    output_robot_data_spec = {
+    input_cross_embodiment_description = {robot_name: {DataType.RGB_IMAGES: ["angle"]}}
+    output_cross_embodiment_description = {
         robot_name: {DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"]}
     }
 
@@ -338,8 +338,8 @@ def test_start_training_run_raises_on_duplicate_name(
             gpu_type=GPUType.NVIDIA_TESLA_T4,
             num_gpus=1,
             frequency=10,
-            input_robot_data_spec=input_robot_data_spec,
-            output_robot_data_spec=output_robot_data_spec,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
         )
 
 
