@@ -163,13 +163,6 @@ class PeerToPeerProviderConnection:
                     }),
                 )
 
-    def _running_on_connection_loop(self) -> bool:
-        """True if called from a coroutine running on this connection's loop."""
-        try:
-            return asyncio.get_running_loop() is self.loop
-        except RuntimeError:
-            return False
-
     def add_video_source(self, source: VideoSource) -> None:
         """Add a video source to the connection.
 
