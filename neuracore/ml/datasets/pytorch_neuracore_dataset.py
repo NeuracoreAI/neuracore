@@ -9,7 +9,12 @@ import logging
 from abc import ABC, abstractmethod
 
 import torch
-from neuracore_types import BatchedNCData, DataType, NCDataStats, RobotDataSpec
+from neuracore_types import (
+    BatchedNCData,
+    CrossEmbodimentDescription,
+    DataType,
+    NCDataStats,
+)
 from torch.utils.data import Dataset
 
 from neuracore.core.utils.robot_data_spec_utils import merge_robot_data_spec
@@ -33,8 +38,8 @@ class PytorchNeuracoreDataset(Dataset, ABC):
     def __init__(
         self,
         num_recordings: int,
-        input_robot_data_spec: RobotDataSpec,
-        output_robot_data_spec: RobotDataSpec,
+        input_robot_data_spec: CrossEmbodimentDescription,
+        output_robot_data_spec: CrossEmbodimentDescription,
         output_prediction_horizon: int = 5,
     ):
         """Initialize the dataset with data type specifications and preprocessing.

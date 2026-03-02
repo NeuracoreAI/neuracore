@@ -3,9 +3,9 @@
 from typing import TYPE_CHECKING
 
 import requests
-from neuracore_types import DataSpec, DataType
+from neuracore_types import CrossEmbodimentDescription, DataType, EmbodimentDescription
 from neuracore_types import Recording as RecordingModel
-from neuracore_types import RecordingMetadata, RecordingStatus, RobotDataSpec
+from neuracore_types import RecordingMetadata, RecordingStatus
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -75,8 +75,8 @@ class Recording:
     def synchronize(
         self,
         frequency: int = 0,
-        data_spec: DataSpec | None = None,
-        robot_data_spec: RobotDataSpec | None = None,
+        data_spec: EmbodimentDescription | None = None,
+        robot_data_spec: CrossEmbodimentDescription | None = None,
     ) -> SynchronizedRecording:
         """Synchronize the episode with specified frequency and data types.
 

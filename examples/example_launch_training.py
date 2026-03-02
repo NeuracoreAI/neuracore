@@ -4,11 +4,11 @@ from the Neuracore platform."""
 import argparse
 
 from common.base_env import BimanualViperXTask
-from neuracore_types import DataSpec, DataType, RobotDataSpec
+from neuracore_types import CrossEmbodimentDescription, DataType, EmbodimentDescription
 
 import neuracore as nc
 
-MODEL_OUTPUT_ORDER: DataSpec = {
+MODEL_OUTPUT_ORDER: EmbodimentDescription = {
     DataType.JOINT_TARGET_POSITIONS: (
         BimanualViperXTask.LEFT_ARM_JOINT_NAMES
         + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
@@ -100,13 +100,13 @@ if __name__ == "__main__":
         "output_prediction_horizon": args.output_prediction_horizon,
     }
 
-    input_robot_data_spec: RobotDataSpec = {
+    input_robot_data_spec: CrossEmbodimentDescription = {
         robot_id: {
             nc.DataType.RGB_IMAGES: ["angle"],
         }
     }
 
-    output_robot_data_spec: RobotDataSpec = {
+    output_robot_data_spec: CrossEmbodimentDescription = {
         robot_id: MODEL_OUTPUT_ORDER,
     }
 

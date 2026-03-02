@@ -20,11 +20,11 @@ import torch
 from neuracore_types import (
     BatchedJointData,
     BatchedNCData,
+    CrossEmbodimentDescription,
     DataItemStats,
     DataType,
     JointDataStats,
     ModelInitDescription,
-    RobotDataSpec,
 )
 from omegaconf import DictConfig, OmegaConf
 
@@ -1717,7 +1717,7 @@ class TestMain:
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TARGET_POSITIONS,
         ]
-        data_spec = cast(RobotDataSpec, call_kwargs["robot_data_spec"])
+        data_spec = cast(CrossEmbodimentDescription, call_kwargs["robot_data_spec"])
         assert set(extract_data_types(data_spec)) == set(expected_data_types)
 
     def test_main_uses_default_recording_cache_dir(self, monkeypatch, temp_output_dir):

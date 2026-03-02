@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Union, cast
 
 import requests
-from neuracore_types import RobotDataSpec, SynchronizedDatasetStatistics
+from neuracore_types import CrossEmbodimentDescription, SynchronizedDatasetStatistics
 from tqdm import tqdm
 
 from neuracore.core.auth import get_auth
@@ -28,7 +28,7 @@ class SynchronizedDataset:
         id: str,
         dataset: "Dataset",
         frequency: int,
-        robot_data_spec: RobotDataSpec | None,
+        robot_data_spec: CrossEmbodimentDescription | None,
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 1,
     ):
@@ -189,7 +189,7 @@ class SynchronizedDataset:
         return to_return
 
     def calculate_statistics(
-        self, robot_data_spec: RobotDataSpec
+        self, robot_data_spec: CrossEmbodimentDescription
     ) -> SynchronizedDatasetStatistics:
         """Calculate statistics for each data type in the synchronized dataset.
 

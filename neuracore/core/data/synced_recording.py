@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 import requests
 import wget
-from neuracore_types import CameraData, DataType, RobotDataSpec, SynchronizationDetails
+from neuracore_types import (
+    CameraData,
+    CrossEmbodimentDescription,
+    DataType,
+    SynchronizationDetails,
+)
 from neuracore_types import SynchronizedEpisode as SynchronizedEpisodeModel
 from neuracore_types import SynchronizedPoint, SynchronizeRecordingRequest
 from PIL import Image
@@ -43,7 +48,7 @@ class SynchronizedRecording:
         robot_id: str,
         instance: int,
         frequency: int = 0,
-        robot_data_spec: RobotDataSpec | None = None,
+        robot_data_spec: CrossEmbodimentDescription | None = None,
         prefetch_videos: bool = False,
     ):
         """Initialize episode iterator for a specific recording.

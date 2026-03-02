@@ -9,8 +9,8 @@ import pytest
 import torch
 from neuracore_types import (
     BatchedJointData,
-    DataSpec,
     DataType,
+    EmbodimentDescription,
     JointData,
     RGBCameraData,
     SynchronizedPoint,
@@ -250,8 +250,8 @@ class TestAlgorithm:
     def test_start_training(
         self,
         algorithm_name: str,
-        input_data_spec: DataSpec,
-        output_data_spec: DataSpec,
+        input_data_spec: EmbodimentDescription,
+        output_data_spec: EmbodimentDescription,
         min_success_rate: float,
         algorithm_config: dict,
     ) -> None:

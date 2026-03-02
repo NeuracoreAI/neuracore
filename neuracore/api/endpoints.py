@@ -6,7 +6,12 @@ including deployment, status monitoring, and deletion operations.
 """
 
 import requests
-from neuracore_types import DataSpec, DataType, DeploymentRequest, SynchronizedPoint
+from neuracore_types import (
+    DataType,
+    DeploymentRequest,
+    EmbodimentDescription,
+    SynchronizedPoint,
+)
 
 from neuracore.api.core import _get_robot
 from neuracore.core.auth import get_auth
@@ -121,8 +126,8 @@ def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:
 def deploy_model(
     job_id: str,
     name: str,
-    model_input_order: DataSpec,
-    model_output_order: DataSpec,
+    model_input_order: EmbodimentDescription,
+    model_output_order: EmbodimentDescription,
     ttl: int | None = None,
 ) -> dict:
     """Deploy a trained model to a managed endpoint.

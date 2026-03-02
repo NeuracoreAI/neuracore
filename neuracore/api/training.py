@@ -10,8 +10,8 @@ from typing import Any, cast
 
 import requests
 from neuracore_types import (
+    CrossEmbodimentDescription,
     GPUType,
-    RobotDataSpec,
     SynchronizationDetails,
     TrainingJobRequest,
 )
@@ -73,8 +73,8 @@ def start_training_run(
     gpu_type: str,
     num_gpus: int,
     frequency: int,
-    input_robot_data_spec: RobotDataSpec,
-    output_robot_data_spec: RobotDataSpec,
+    input_robot_data_spec: CrossEmbodimentDescription,
+    output_robot_data_spec: CrossEmbodimentDescription,
     max_delay_s: float = sys.float_info.max,
     allow_duplicates: bool = True,
 ) -> dict:

@@ -13,10 +13,10 @@ from neuracore_types import (
     DATA_TYPE_TO_BATCHED_NC_DATA_CLASS,
     DATA_TYPE_TO_NC_DATA_CLASS,
     BatchedNCData,
+    CrossEmbodimentDescription,
     DataType,
     NCData,
     NCDataStats,
-    RobotDataSpec,
 )
 
 from neuracore.core.robot import Robot
@@ -43,8 +43,8 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
 
     def __init__(
         self,
-        input_robot_data_spec: RobotDataSpec,
-        output_robot_data_spec: RobotDataSpec,
+        input_robot_data_spec: CrossEmbodimentDescription,
+        output_robot_data_spec: CrossEmbodimentDescription,
         num_samples: int = 50,
         num_episodes: int = 10,
         output_prediction_horizon: int = 5,

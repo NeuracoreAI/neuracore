@@ -7,7 +7,12 @@ import matplotlib.pyplot as plt
 import torch
 from common.base_env import BimanualViperXTask
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, BOX_POSE, make_sim_env
-from neuracore_types import BatchedJointData, BatchedNCData, DataSpec, DataType
+from neuracore_types import (
+    BatchedJointData,
+    BatchedNCData,
+    DataType,
+    EmbodimentDescription,
+)
 
 import neuracore as nc
 
@@ -16,7 +21,7 @@ TRAINING_JOB_NAME = "MyTrainingJob"
 CAMERA_NAMES = ["angle"]
 
 # Specification of the order that will be fed into the model
-MODEL_INPUT_ORDER: DataSpec = {
+MODEL_INPUT_ORDER: EmbodimentDescription = {
     DataType.JOINT_POSITIONS: (
         BimanualViperXTask.LEFT_ARM_JOINT_NAMES
         + BimanualViperXTask.LEFT_GRIPPER_JOINT_NAMES
@@ -26,7 +31,7 @@ MODEL_INPUT_ORDER: DataSpec = {
     DataType.RGB_IMAGES: CAMERA_NAMES,
 }
 
-MODEL_OUTPUT_ORDER: DataSpec = {
+MODEL_OUTPUT_ORDER: EmbodimentDescription = {
     DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
 }
 

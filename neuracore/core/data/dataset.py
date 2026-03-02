@@ -7,11 +7,11 @@ from collections.abc import Generator, Iterator
 from typing import Optional, Union
 
 import requests
+from neuracore_types import CrossEmbodimentDescription
 from neuracore_types import Dataset as DatasetModel
-from neuracore_types import DatasetUpdateRequest, DataSpec, DataType
+from neuracore_types import DatasetUpdateRequest, DataType, EmbodimentDescription
 from neuracore_types import Recording as RecordingModel
 from neuracore_types import (
-    RobotDataSpec,
     SynchronizationDetails,
     SynchronizationProgress,
     SynchronizeDatasetRequest,
@@ -392,7 +392,7 @@ class Dataset:
     def _synchronize(
         self,
         frequency: int = 0,
-        robot_data_spec: RobotDataSpec | None = None,
+        robot_data_spec: CrossEmbodimentDescription | None = None,
     ) -> SynchronizedDatasetModel:
         """Synchronize the dataset with specified frequency and data types.
 
@@ -445,7 +445,7 @@ class Dataset:
     def synchronize(
         self,
         frequency: int = 0,
-        robot_data_spec: RobotDataSpec | None = None,
+        robot_data_spec: CrossEmbodimentDescription | None = None,
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 4,
     ) -> SynchronizedDataset:
@@ -509,7 +509,7 @@ class Dataset:
             max_prefetch_workers=max_prefetch_workers,
         )
 
-    def get_full_data_spec(self, robot_id: str) -> DataSpec:
+    def get_full_data_spec(self, robot_id: str) -> EmbodimentDescription:
         """Get full data spec for a given robot ID in the dataset.
 
         Args:
