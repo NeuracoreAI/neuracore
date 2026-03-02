@@ -184,7 +184,7 @@ class PeerToPeerProviderConnection:
             source: JSON source for streaming structured data
         """
 
-        async def _add_event_source_impl() -> None:
+        async def _add_event_source() -> None:
             """Run on the connection loop: create data channel and wire listeners."""
             data_channel = self.connection.createDataChannel(source.mid)
 
@@ -207,7 +207,7 @@ class PeerToPeerProviderConnection:
             source.add_listener(source.STATE_UPDATED_EVENT, on_update)
             self.data_channel_callback[source.mid] = on_update
 
-        self._add_track_tasks.append(self.loop.create_task(_add_event_source_impl()))
+        self._add_track_tasks.append(self.loop.create_task(_add_event_source()))
 
     async def send_handshake_message(
         self, message_type: MessageType, content: str
