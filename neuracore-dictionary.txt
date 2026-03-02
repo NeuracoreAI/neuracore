@@ -29,6 +29,8 @@ CLIPMLP
 cnnmlp
 CNNMLP
 CNNMLPP
+colab
+Colab
 colcon
 colwise
 conaffinity
@@ -60,7 +62,9 @@ EADDRINUSE
 embs
 erfinv
 excinfo
+expanduser
 extr
+extractall
 extrinsics
 Extrinsics
 faceadr
@@ -81,6 +85,7 @@ frictionloss
 fromarray
 frombuffer
 fromlist
+gdown
 gelu
 geomadr
 geomid
@@ -96,14 +101,18 @@ hstack
 huggingface
 hyperparameters
 iiwa
+imageio
 imagenet
 imgmsg
+imgs
 imshow
 inertiafromgeom
 inertiagrouprange
 inproc
 inspectable
+ipython
 iquat
+Irqfx
 itemsize
 jaco
 jdata
@@ -115,6 +124,7 @@ jointbody
 jsons
 jtps
 keepdim
+kernelspec
 keypoints
 killpg
 KINOVA
@@ -141,6 +151,7 @@ meanpooling
 meshgrid
 metadatas
 metas
+mimsave
 Mish
 mjcf
 mline
@@ -155,6 +166,8 @@ Multihead
 multinode
 multirun
 nans
+nbconvert
+nbformat
 nbody
 nbytes
 nccl
@@ -179,6 +192,8 @@ paligemma
 parentbody
 parentid
 patchelf
+pathlib
+pathsep
 pbar
 pbtxt
 perceptrons
@@ -195,10 +210,14 @@ pretrained
 proprio
 proprios
 PSNR
+pygments
 pyquaternion
 pytest
+Qbcaa
 qpos
 qposadr
+QTBD
+Qtoqmzp
 quadprog
 qvel
 randn
@@ -217,6 +236,7 @@ rosdep
 rotvec
 roundoff
 rowwise
+Safetensors
 schematypens
 SCTP
 sdpa
@@ -232,6 +252,7 @@ solref
 squaredcos
 staticmethod
 targetbody
+TDVB
 teleop
 tfds
 TFDS
@@ -245,6 +266,7 @@ torchserve
 torq
 traj
 triu
+TTYNTK
 UFACTORY
 unet
 Unet
@@ -259,6 +281,7 @@ Vaswani
 vertadr
 vertnum
 VIPERX
+Vsqo
 vsync
 wakelock
 WAKELOCK
@@ -270,6 +293,7 @@ XARM
 xdata
 xlabel
 xmat
+xmls
 xmlstr
 xquat
 xyzrgb
