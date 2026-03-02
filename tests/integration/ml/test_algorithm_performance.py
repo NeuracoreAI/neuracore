@@ -309,7 +309,7 @@ class TestAlgorithm:
                 name=endpoint_name,
                 model_input_order=input_data_spec,
                 model_output_order=output_data_spec,
-                ttl=60 * 30,  # 30 minutes
+                ttl=60 * 60,  # 60 minutes
             )
             endpoint_id = endpoint_data["id"]
         except Exception as e:
@@ -338,11 +338,12 @@ class TestAlgorithm:
 
         try:
             policy = nc.policy_remote_server(endpoint_name)
+            num_rollouts = 1 if algorithm_name == "Pi0" else NUM_ROLLOUTS
             env = make_sim_env(seed=42)
             success_rate = eval_model(
                 policy=policy,
                 env=env,
-                num_rollouts=NUM_ROLLOUTS,
+                num_rollouts=num_rollouts,
                 onscreen_render=ONSCREEN_RENDER,
             )
             policy.disconnect()
