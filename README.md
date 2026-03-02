@@ -118,7 +118,7 @@ predictions = policy.predict(timeout=5)
 
 # 📚 Documentation
 - [Examples](./examples/README.md)
-- [Tutorials](./docs/tutorial.md)
+- [Tutorial](./docs/tutorial.md)
 - [Training](./docs/training.md)
 - [Command Line Tools](./docs/commandline.md)
 - [Dataset Importer](./docs/dataset_importer.md)

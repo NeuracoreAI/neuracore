@@ -1,6 +1,6 @@
-# Open Source Training
+# Training models with Neuracore
 
-Neuracore includes a comprehensive training infrastructure with Hydra configuration management for local model development.
+You can train robot learning models either on the **cloud** or **locally** on your own machine.
 
 ## Training Features
 
@@ -12,7 +12,70 @@ Neuracore includes a comprehensive training infrastructure with Hydra configurat
 - **Cloud Integration**: Seamless integration with Neuracore SaaS platform
 - **Multi-modal Support**: Images, joint states, language, and custom data types
 
-## Training Structure
+---
+
+## ☁️ Cloud training
+
+Train models on the cloud using Neuracore's credits. You can start a training job in two ways.
+
+### From the dashboard
+
+1. Go to the **Training** page on your [web dashboard](https://www.neuracore.com/).
+2. Click **+ New training job**.
+3. Select your dataset, algorithm (e.g. CNNMLP, Diffusion Policy), GPU type, and resources.
+4. Launch the job. Training runs on Neuracore's cloud and uses your account credits.
+
+### From Python
+
+Use `nc.start_training_run(...)` to start a cloud training job (see [example_launch_training.py](../examples/example_launch_training.py)):
+
+```python
+import neuracore as nc
+from neuracore_types import DataType, RobotDataSpec
+
+nc.login()
+dataset = nc.get_dataset("My Dataset")
+robot_id = dataset.robot_ids[0]
+full_spec = dataset.get_full_data_spec(robot_id)
+
+input_robot_data_spec: RobotDataSpec = {
+    robot_id: {
+        DataType.JOINT_POSITIONS: full_spec.get(DataType.JOINT_POSITIONS, []),
+        DataType.RGB_IMAGES: full_spec.get(DataType.RGB_IMAGES, []),
+    }
+}
+output_robot_data_spec: RobotDataSpec = {
+    robot_id: {
+        DataType.JOINT_TARGET_POSITIONS: full_spec.get(DataType.JOINT_TARGET_POSITIONS, []),
+    }
+}
+
+job_data = nc.start_training_run(
+    name="MyTrainingJob",
+    dataset_name="My Dataset",
+    algorithm_name="diffusion_policy",
+    frequency=50,
+    num_gpus=1,
+    gpu_type="NVIDIA_TESLA_V100",
+    input_robot_data_spec=input_robot_data_spec,
+    output_robot_data_spec=output_robot_data_spec,
+    algorithm_config={"batch_size": 32, "epochs": 100, "output_prediction_horizon": 50},
+)
+```
+
+---
+
+## 💻 Local training
+
+Neuracore includes a comprehensive training infrastructure with Hydra configuration management for local model development.
+
+### Installation
+
+```bash
+pip install "neuracore[ml]"
+```
+
+### Training structure
 
 ```
 neuracore/
@@ -50,12 +113,12 @@ python -m neuracore.ml.train algorithm=diffusion_policy batch_size=auto dataset_
 python -m neuracore.ml.train --multirun algorithm=cnnmlp algorithm.lr=1e-4,5e-4,1e-3 algorithm.hidden_dim=256,512,1024 dataset_name="my_dataset" run_name="my_experiment"
 
 # Training with specified modalities
-python -m neuracore.ml.train algorithm=pi0 dataset_name="my_multimodal_dataset" input_robot_data_spec={"my_robot": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...], "RGB_IMAGES": ["wrist_camera"], "LANGUAGE": ["task_instruction"]}}
-output_robot_data_spec={"my_robot": {"JOINT_TARGET_POSITIONS": ["joint_1", "joint_2", ...]}} run_name="my_experiment"
+python -m neuracore.ml.train algorithm=pi0 dataset_name="my_multimodal_dataset" input_robot_data_spec={"my_robot": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...], "RGB_IMAGES": ["wrist_camera"], "LANGUAGE": ["task_instruction"]}} output_robot_data_spec={"my_robot": {"JOINT_TARGET_POSITIONS": ["joint_1", "joint_2", ...]}} run_name="my_experiment"
 ```
 
-## Configuration Management
-There are two configs related with the training. The `config/config.yaml` provides the core training parameters:
+### Configuration management
+
+There are two configs related to training. The `config/config.yaml` provides the core training parameters:
 
 ```yaml
 # config/config.yaml
@@ -70,7 +133,7 @@ epochs: 100
 output_prediction_horizon: 100
 validation_split: 0.2
 logging_frequency: 50
-keep_last_n_checkpoints: 5 
+keep_last_n_checkpoints: 5
 device: null  # e.g., "cuda:0", "mps", "cpu"
 
 # Batch size (can be "auto" for automatic tuning or an integer)
@@ -91,7 +154,7 @@ input_robot_data_spec: null
 output_robot_data_spec: null
 ```
 
-The algorithm specific config file is inside `config/algorithm`:
+The algorithm-specific config file is inside `config/algorithm`:
 
 ```yaml
 # @package _global_
@@ -101,23 +164,7 @@ algorithm:
   unet_kernel_size: 5
   unet_n_groups: 8
   unet_diffusion_step_embed_dim: 128
-  hidden_dim: 64 # spatial_softmax_num_keypoints * 2
+  hidden_dim: 64
   spatial_softmax_num_keypoints: 32
-  unet_use_film_scale_modulation: true
-  use_pretrained_weights: true
-  noise_scheduler_type: "DDPM"
-  num_train_timesteps: 100
-  num_inference_steps: 100
-  beta_start: 0.0001
-  beta_end: 0.02
-  beta_schedule: "squaredcos_cap_v2"
-  clip_sample: true
-  clip_sample_range: 1.0
-  lr: 1e-4 # default value for batch size 16
-  freeze_backbone: false
-  lr_backbone: 1e-4 # default value for batch size 16
-  weight_decay: 2e-6
-  optimizer_betas: [0.95, 0.999]
-  optimizer_eps: 1e-8
-  prediction_type: "epsilon"
+  # ... (see config/algorithm/*.yaml in the repo for full options)
 ```

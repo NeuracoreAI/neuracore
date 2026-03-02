@@ -1,6 +1,6 @@
 
 
-## Tutorials
+## Tutorial
 
 In the tutorial, we provide code examples on our key features.
 
