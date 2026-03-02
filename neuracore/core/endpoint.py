@@ -425,7 +425,7 @@ class LocalServerPolicy(ServerPolicy):
             sock.settimeout(1)
             return sock.connect_ex((host, port)) == 0
 
-    def _wait_for_server(self, max_attempts: int = 60) -> None:
+    def _wait_for_server(self, max_attempts: int = 300) -> None:
         """Wait for the server to become available."""
         for attempt in range(max_attempts):
             # Check if the process has terminated unexpectedly
