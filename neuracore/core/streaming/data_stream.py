@@ -67,6 +67,7 @@ class DataStream(ABC):
         self._producer: Producer | None = None
         self.lock = threading.Lock()
         self._management_channel = ManagementChannel()
+        self._max_timestamp = 0.0
 
     def start_recording(self, context: DataRecordingContext) -> None:
         """Start recording data for this stream.
@@ -86,6 +87,7 @@ class DataStream(ABC):
             self.stop_recording()
         self._recording = True
         self._context = context
+        self._max_timestamp = 0.0
         self._handle_ensure_producer(context)
 
     def _handle_ensure_producer(self, context: DataRecordingContext) -> None:
@@ -128,6 +130,7 @@ class DataStream(ABC):
         self._recording = False
         if isinstance(self._producer, Producer) and self._producer.trace_id:
             self._producer.cleanup_producer()
+        self._max_timestamp = 0.0
         return []
 
     def is_recording(self) -> bool:
@@ -145,6 +148,21 @@ class DataStream(ABC):
             Optional[NCData]: The most recently logged data item
         """
         return self._latest_data
+
+    def set_latest_data(self, data: NCData) -> None:
+        """Set the latest data for the stream.
+
+        Timestamps older than the most recent timestamp will trigger a warning.
+
+        Args:
+            data: The most recent data item to store
+        """
+        if data.timestamp <= self._max_timestamp:
+            self._warn_out_of_order_data()
+        else:
+            self._max_timestamp = data.timestamp
+
+        self._latest_data = data
 
     def _send_to_daemon(self, data: bytes) -> None:
         """Send data to the daemon via the producer.
@@ -164,6 +182,10 @@ class DataStream(ABC):
             dataset_id=self._context.dataset_id,
             dataset_name=self._context.dataset_name,
         )
+
+    def _warn_out_of_order_data(self) -> None:
+        """Log a warning about out-of-order data timestamps."""
+        logger.warning("Out of data detected. You may see unexpected behaviour")
 
 
 class JsonDataStream(DataStream):
@@ -188,7 +210,7 @@ class JsonDataStream(DataStream):
         Args:
             data: Data object implementing NCData interface
         """
-        self._latest_data = data
+        self.set_latest_data(data)
         if not self.is_recording():
             return
 
@@ -229,7 +251,7 @@ class VideoDataStream(DataStream):
             frame: Video frame as numpy array
         """
         metadata.frame = frame
-        self._latest_data = metadata
+        self.set_latest_data(metadata)
         if not self.is_recording():
             return
 
