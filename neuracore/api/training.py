@@ -31,6 +31,34 @@ from ..core.const import API_URL
 from ..core.data.dataset import Dataset
 
 
+def _resolve_next_name(base_name: str, existing_names: set[str]) -> str:
+    """Return the next available name, optionally with _1, _2, ... suffix.
+
+    If base_name is not in use, return it. Otherwise return base_name_N
+    for the smallest N >= 1 such that base_name_N is not in existing_names.
+    "In use" means exact match or names of the form base_name_<integer>.
+
+    Args:
+        base_name: Desired base name.
+        existing_names: Set of names already in use.
+
+    Returns:
+        base_name or base_name_N for the next free N.
+    """
+    taken = {
+        name
+        for name in existing_names
+        if name == base_name
+        or (name.startswith(base_name + "_") and name[len(base_name) + 1 :].isdigit())
+    }
+    if base_name not in taken:
+        return base_name
+    suffix = 1
+    while f"{base_name}_{suffix}" in taken:
+        suffix += 1
+    return f"{base_name}_{suffix}"
+
+
 def _get_algorithms() -> list[dict]:
     """Retrieve all available algorithms from the API.
 
@@ -77,6 +105,7 @@ def start_training_run(
     output_robot_data_spec: RobotDataSpec,
     max_delay_s: float = sys.float_info.max,
     allow_duplicates: bool = True,
+    name_auto_increment: bool = False,
 ) -> dict:
     """Start a new training run.
 
@@ -92,7 +121,8 @@ def start_training_run(
         output_robot_data_spec: Output robot data specification.
         max_delay_s: Maximum allowable delay for data synchronization (in seconds)
         allow_duplicates: Whether to allow duplicate data during synchronization
-
+        name_auto_increment: If True and a job with this name already exists, use
+            name_1, name_2, ... instead of failing or duplicating the name.
 
     Returns:
         dict: Training job data including job ID and status
@@ -103,6 +133,11 @@ def start_training_run(
         requests.exceptions.RequestException: If there is a network problem
                 ConfigError: If there is an error trying to get the current org
     """
+    if name_auto_increment:
+        jobs = get_training_jobs()
+        existing_names = {j["name"] for j in jobs if isinstance(j.get("name"), str)}
+        name = _resolve_next_name(name, existing_names)
+
     dataset = cast(Dataset, Dataset.get_by_name(dataset_name))
     dataset_id = dataset.id
     input_robot_data_spec_with_ids = convert_robot_data_spec_names_to_ids(
@@ -158,6 +193,26 @@ def start_training_run(
     return job_data
 
 
+def get_training_jobs() -> list[dict]:
+    """List all training jobs for the current organization.
+
+    Returns:
+        List of training job dicts (id, name, status, etc.).
+
+    Raises:
+        requests.exceptions.HTTPError: If the API request fails.
+        ConfigError: If there is an error trying to get the current org.
+    """
+    auth = get_auth()
+    org_id = get_current_org()
+    response = requests.get(
+        f"{API_URL}/org/{org_id}/training/jobs",
+        headers=auth.get_headers(),
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def get_training_job_data(job_id: str) -> dict:
     """Retrieve complete data for a training job.
 
@@ -173,23 +228,14 @@ def get_training_job_data(job_id: str) -> dict:
         requests.exceptions.RequestException: If there is a problem with the request
         ConfigError: If there is an error trying to get the current org
     """
-    auth = get_auth()
-    org_id = get_current_org()
     try:
-        response = requests.get(
-            f"{API_URL}/org/{org_id}/training/jobs", headers=auth.get_headers()
-        )
-        response.raise_for_status()
-
-        job = response.json()
-        my_job = None
-        for job_data in job:
-            if job_data["id"] == job_id:
-                my_job = job_data
-                break
-        if my_job is None:
-            raise ValueError("Job not found")
-        return my_job
+        jobs = get_training_jobs()
+        for job_data in jobs:
+            if job_data.get("id") == job_id:
+                return job_data
+        raise ValueError("Job not found")
+    except ValueError:
+        raise
     except Exception as e:
         raise ValueError(f"Error accessing job: {e}")
 
