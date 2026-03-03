@@ -83,9 +83,17 @@ def validate_depth_images(data: Any) -> None:
     Raises:
         DataValidationError: If the data does not match the expected format.
     """
-    if len(data.shape) != 2:
+    if len(data.shape) == 2:
+        pass
+    elif len(data.shape) == 3:
+        if data.shape[2] != 1:
+            raise DataValidationError(
+                f"Depth image data must have 1 channel."
+                f"Data of shape {data.shape} has {data.shape[2]} channels."
+            )
+    else:
         raise DataValidationError(
-            f"Depth image data must have 2 dimensions. "
+            f"Depth image data must have 2 or 3 dimensions. "
             f"Data of shape {data.shape} has {len(data.shape)} dimensions."
         )
 
