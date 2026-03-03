@@ -1,0 +1,43 @@
+algorithms:
+  - name: CNNMLP
+    min_success_rate: 0.2
+    algorithm_config:
+      batch_size: 64
+      epochs: 50
+      output_prediction_horizon: 100
+      lr: 1.4e-4
+      lr_backbone: 1.4e-5
+
+  - name: ACT
+    min_success_rate: 0.5
+    algorithm_config:
+      batch_size: 64
+      epochs: 50
+      output_prediction_horizon: 100
+      lr: 1.4e-4
+      lr_backbone: 1.4e-5
+
+  - name: DiffusionPolicy
+    min_success_rate: 0.4
+    algorithm_config:
+      batch_size: 64
+      epochs: 40
+      output_prediction_horizon: 64
+      lr: 2.0e-4
+      lr_backbone: 2.0e-4
+
+  - name: Pi0
+    min_success_rate: 0.0
+    algorithm_config:
+      batch_size: 2
+      epochs: 1
+      output_prediction_horizon: 64
+      optimizer_lr: 2.0e-4
+      paligemma_variant: gemma_tiny
+      action_expert_variant: gemma_tiny
+      use_pretrained_weights: false
+      num_inference_steps: 1
+      vlm_max_text_tokens: 4
+      compile_model: true
+      gradient_checkpointing: true
+      dtype: bfloat16

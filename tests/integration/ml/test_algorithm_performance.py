@@ -1,3 +1,27 @@
+"""Integration tests verifying per-algorithm success rates on the Transfer Cube task.
+
+The suite is split into two phases so CI runners are not held idle during training:
+
+  test_start_training  — submits a training job and records the job ID.
+  test_evaluate        — deploys an endpoint for the completed job, runs
+                         NUM_ROLLOUTS in MuJoCo, and checks the success rate
+                         against the threshold in algorithm_configs.yaml.
+
+Algorithm names, hyperparameters, and thresholds all live in algorithm_configs.yaml.
+To add or remove an algorithm, edit only that file.
+
+Running locally
+---------------
+    # Phase 1 — kick off training (job ID is printed in the log output)
+    ALGORITHM_NAME=ACT pytest -k test_start_training -v <this file>
+
+    # Phase 2 — evaluate once training is complete
+    ALGORITHM_NAME=ACT TRAINING_JOB_ID=<id> pytest -k test_evaluate -v <this file>
+
+    # Running the full file without TRAINING_JOB_ID: test_start_training runs for
+    # all algorithms, test_evaluate skips cleanly for each.
+"""
+
 import logging
 import os
 import sys
@@ -9,7 +33,6 @@ import pytest
 import torch
 from neuracore_types import (
     BatchedJointData,
-    DataSpec,
     DataType,
     JointData,
     RGBCameraData,
@@ -33,8 +56,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 EPISODE_LENGTH: int = 400
-NC_CAM_NAME = "rgb_angle"  # name that we logged in nc as
-MJ_CAM_NAME = "angle"  # name coming from mujoco env
+NC_CAM_NAME = "rgb_angle"
+MJ_CAM_NAME = "angle"
 MAX_REWARD = 4.0
 ENDPOINT_NAME = "Integration Test Endpoint"
 TRAINING_NAME = "Integration Test"
@@ -42,13 +65,12 @@ DATASET_NAME = "Transfer Cube VX300s Dataset"
 GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
 FREQUENCY = 50
-BATCH_SIZE = 64
-OUTPUT_PREDICTION_HORIZON = 100
 NUM_ROLLOUTS = 20
 ONSCREEN_RENDER = False
-TRAINING_TIMEOUT_MINUTES = 360
+# Training should be complete by the time Phase 2 runs; this is a safety buffer
+# for jobs that finish slightly after the Phase 2 workflow starts.
+TRAINING_WAIT_TIMEOUT_MINUTES = 60
 
-# Input includes finger joints (16 joints total)
 JOINT_NAMES = (
     BimanualViperXTask.LEFT_ARM_JOINT_NAMES
     + BimanualViperXTask.LEFT_GRIPPER_JOINT_NAMES
@@ -56,22 +78,28 @@ JOINT_NAMES = (
     + BimanualViperXTask.RIGHT_GRIPPER_JOINT_NAMES
 )
 
+INPUT_DATA_SPEC = {
+    DataType.RGB_IMAGES: [NC_CAM_NAME],
+    DataType.JOINT_POSITIONS: JOINT_NAMES,
+}
+OUTPUT_DATA_SPEC = {
+    DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
+}
+
 
 def eval_model(
     policy: Policy,
     env: TransferCubeTask,
     num_rollouts: int,
     onscreen_render: bool = False,
-):
+) -> float:
     plt_img = None
     success = 0
     for episode_idx in range(num_rollouts):
         logger.info(f"Starting rollout {episode_idx + 1} / {num_rollouts}")
-        # Setup the environment
         BOX_POSE[0] = env.sample_box_pose()
         obs = env.reset()
 
-        # Setup plotting
         if onscreen_render:
             ax = plt.subplot()
             plt_img = ax.imshow(obs.cameras[MJ_CAM_NAME].rgb)
@@ -81,11 +109,9 @@ def eval_model(
         horizon = 1
         actions = []
 
-        # Run episode
         for i in range(EPISODE_LENGTH):
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
-                # Create SynchronizedPoint with current observations
                 sync_point = SynchronizedPoint(
                     data={
                         DataType.JOINT_POSITIONS: {
@@ -99,28 +125,26 @@ def eval_model(
                         },
                     },
                 )
-                # Get predictions from the model
                 predictions = policy.predict(sync_point=sync_point, timeout=10)
                 joint_target_positions = cast(
                     dict[str, BatchedJointData],
                     predictions[DataType.JOINT_TARGET_POSITIONS],
                 )
 
-                # Build action array in correct order for env.step():
-                # [left_arm(6), left_gripper(1), right_arm(6), right_gripper(1)]
-                left_arm_names = BimanualViperXTask.LEFT_ARM_JOINT_NAMES
-                right_arm_names = BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
-
                 left_arm = torch.cat(
-                    [joint_target_positions[name].value for name in left_arm_names],
+                    [
+                        joint_target_positions[n].value
+                        for n in BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+                    ],
                     dim=2,
                 )
                 right_arm = torch.cat(
-                    [joint_target_positions[name].value for name in right_arm_names],
+                    [
+                        joint_target_positions[n].value
+                        for n in BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+                    ],
                     dim=2,
                 )
-
-                # Get gripper from JOINT_TARGET_POSITIONS
                 left_gripper = joint_target_positions[
                     BimanualViperXTask.LEFT_GRIPPER_OPEN
                 ].value
@@ -128,19 +152,14 @@ def eval_model(
                     BimanualViperXTask.RIGHT_GRIPPER_OPEN
                 ].value
 
-                # Concatenate: left_arm, left_gripper, right_arm, right_gripper
                 batched_actions = (
-                    torch.cat(
-                        [left_arm, left_gripper, right_arm, right_gripper],
-                        dim=2,
-                    )
+                    torch.cat([left_arm, left_gripper, right_arm, right_gripper], dim=2)
                     .cpu()
                     .numpy()
                 )
-
-                # Get first batch: (horizon, num_joints)
                 actions = batched_actions[0]
                 horizon = len(actions)
+
             a = actions[idx_in_horizon]
             obs, reward, done = env.step(a)
             episode_max = max(episode_max, reward)
@@ -156,118 +175,27 @@ def eval_model(
         if episode_max >= MAX_REWARD:
             success += 1
 
-    success_rate = success / num_rollouts
-    return success_rate
+    return success / num_rollouts
 
 
-@pytest.mark.parametrize(
-    "algorithm_name, input_data_spec, output_data_spec, min_success_rate, algorithm_config",  # noqa: E501
-    [
-        (
-            "CNNMLP",
-            {
-                DataType.RGB_IMAGES: [NC_CAM_NAME],
-                DataType.JOINT_POSITIONS: JOINT_NAMES,
-            },
-            {
-                DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
-            },
-            0.2,
-            {
-                "batch_size": BATCH_SIZE,
-                "epochs": 50,
-                "output_prediction_horizon": OUTPUT_PREDICTION_HORIZON,
-                "lr": 1.4e-4,
-                "lr_backbone": 1.4e-5,
-            },
-        ),
-        (
-            "ACT",
-            {
-                DataType.RGB_IMAGES: [NC_CAM_NAME],
-                DataType.JOINT_POSITIONS: JOINT_NAMES,
-            },
-            {
-                DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
-            },
-            0.5,
-            {
-                "batch_size": BATCH_SIZE,
-                "epochs": 50,
-                "output_prediction_horizon": OUTPUT_PREDICTION_HORIZON,
-                "lr": 1.4e-4,
-                "lr_backbone": 1.4e-5,
-            },
-        ),
-        (
-            "DiffusionPolicy",
-            {
-                DataType.RGB_IMAGES: [NC_CAM_NAME],
-                DataType.JOINT_POSITIONS: JOINT_NAMES,
-            },
-            {
-                DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
-            },
-            0.4,
-            {
-                "batch_size": BATCH_SIZE,
-                "epochs": 40,
-                "output_prediction_horizon": 64,
-                "lr": 2e-4,
-                "lr_backbone": 2e-4,
-            },
-        ),
-        (
-            "Pi0",
-            {
-                DataType.RGB_IMAGES: [NC_CAM_NAME],
-                DataType.JOINT_POSITIONS: JOINT_NAMES,
-            },
-            {
-                DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
-            },
-            0.0,
-            {
-                "batch_size": 2,
-                "epochs": 1,
-                "output_prediction_horizon": 64,
-                "optimizer_lr": 2e-4,
-                "paligemma_variant": "gemma_tiny",
-                "action_expert_variant": "gemma_tiny",
-                "use_pretrained_weights": False,
-                "num_inference_steps": 1,
-                "vlm_max_text_tokens": 4,
-                "compile_model": True,
-                "gradient_checkpointing": True,
-                "dtype": "bfloat16",
-            },
-        ),
-    ],
-)
-class TestAlgorithm:
-    """A class with common parameters, `param1` and `param2`."""
+class TestAlgorithmPerformance:
+    def test_start_training(self, algorithm_config_entry: dict) -> None:
+        """Phase 1: start a training job and record its ID.
 
-    def test_start_training(
-        self,
-        algorithm_name: str,
-        input_data_spec: DataSpec,
-        output_data_spec: DataSpec,
-        min_success_rate: float,
-        algorithm_config: dict,
-    ) -> None:
+        In CI this writes the job ID to $GITHUB_OUTPUT so the Phase 2 workflow
+        can cache and forward it. Locally the ID is logged at INFO level.
+        """
+        algorithm_name = algorithm_config_entry["name"]
+
         nc.login()
 
-        # Construct robot data specs
         dataset = nc.get_dataset(DATASET_NAME)
-        robot_ids_dataset = dataset.robot_ids
-        assert len(robot_ids_dataset) == 1, "Expected only one robot in the dataset"
-        robot_id = robot_ids_dataset[0]
-        input_robot_data_spec = {robot_id: input_data_spec}
-        output_robot_data_spec = {robot_id: output_data_spec}
+        robot_ids = dataset.robot_ids
+        assert len(robot_ids) == 1, f"Expected one robot in dataset, got {robot_ids}"
+        robot_id = robot_ids[0]
 
-        # Timestamp used for unique naming
         timestamp = int(time.time())
-        logger.info("Starting training job...")
+        logger.info(f"[{algorithm_name}] Starting training job...")
         job_data = nc.start_training_run(
             name=f"{TRAINING_NAME} - {algorithm_name} - {timestamp}",
             gpu_type=GPU_TYPE,
@@ -275,68 +203,91 @@ class TestAlgorithm:
             frequency=FREQUENCY,
             algorithm_name=algorithm_name,
             dataset_name=DATASET_NAME,
-            algorithm_config=algorithm_config,
-            input_robot_data_spec=input_robot_data_spec,
-            output_robot_data_spec=output_robot_data_spec,
+            algorithm_config=algorithm_config_entry["algorithm_config"],
+            input_robot_data_spec={robot_id: INPUT_DATA_SPEC},
+            output_robot_data_spec={robot_id: OUTPUT_DATA_SPEC},
         )
-        logger.info("Training job started!")
         training_job_id = job_data["id"]
-        training_timeout_time = time.time() + TRAINING_TIMEOUT_MINUTES * 60
+        logger.info(f"[{algorithm_name}] Training job started: {training_job_id}")
 
+        github_output = os.environ.get("GITHUB_OUTPUT")
+        if github_output:
+            with open(github_output, "a") as f:
+                f.write(f"training_job_id={training_job_id}\n")
+
+    def test_evaluate(self, algorithm_config_entry: dict) -> None:
+        """Phase 2: deploy an endpoint for a completed training job and evaluate it.
+
+        Expects TRAINING_JOB_ID to be set in the environment (written by
+        test_start_training in Phase 1 and passed through the CI cache).
+        Skips gracefully when TRAINING_JOB_ID is absent so that running the
+        full test file locally does not fail on this test.
+        """
+        training_job_id = os.environ.get("TRAINING_JOB_ID")
+        if not training_job_id:
+            pytest.skip(
+                "TRAINING_JOB_ID not set — run test_start_training first, "
+                "then re-run with TRAINING_JOB_ID=<id>"
+            )
+
+        algorithm_name = algorithm_config_entry["name"]
+        min_success_rate = algorithm_config_entry["min_success_rate"]
+
+        nc.login()
+
+        # Training should already be complete; poll briefly as a safety buffer.
         training_job_status = nc.get_training_job_status(training_job_id)
+        training_wait_start = time.time()
         while training_job_status in ["PREPARING_DATA", "PENDING", "RUNNING"]:
             logger.info(
-                f"Waiting for training to finish, status: {training_job_status}"
+                f"[{algorithm_name}] Waiting for training: "
+                f"status={training_job_status}"
             )
             time.sleep(60)
             training_job_status = nc.get_training_job_status(training_job_id)
-            if time.time() > training_timeout_time:
+            elapsed_minutes = (time.time() - training_wait_start) / 60
+            if elapsed_minutes > TRAINING_WAIT_TIMEOUT_MINUTES:
                 raise TimeoutError(
-                    f"Training job did not complete within "
-                    f"{TRAINING_TIMEOUT_MINUTES} minutes"
+                    f"[{algorithm_name}] Training still not complete after "
+                    f"{TRAINING_WAIT_TIMEOUT_MINUTES} minutes in Phase 2 — "
+                    "training may have overrun its scheduled window"
                 )
 
         if training_job_status != "COMPLETED":
             raise ValueError(
-                f"Training job did not complete and is in status: {training_job_status}"
+                f"[{algorithm_name}] Training job did not complete, "
+                f"status: {training_job_status}"
             )
 
+        timestamp = int(time.time())
         endpoint_name = f"{ENDPOINT_NAME} - {algorithm_name} - {timestamp}"
         endpoint_id = None
         try:
             endpoint_data = nc.deploy_model(
                 job_id=training_job_id,
                 name=endpoint_name,
-                model_input_order=input_data_spec,
-                model_output_order=output_data_spec,
-                ttl=60 * 30,  # 30 minutes
+                model_input_order=INPUT_DATA_SPEC,
+                model_output_order=OUTPUT_DATA_SPEC,
+                ttl=60 * 30,
             )
             endpoint_id = endpoint_data["id"]
-        except Exception as e:
-            if endpoint_id is not None:
-                nc.delete_endpoint(endpoint_id)
-            raise e
 
-        try:
             endpoint_status = nc.get_endpoint_status(endpoint_id=endpoint_id)
             while endpoint_status == "creating":
                 logger.info(
-                    f"Waiting for endpoint to finish, status: {endpoint_status}"
+                    f"[{algorithm_name}] Waiting for endpoint: "
+                    f"status={endpoint_status}"
                 )
                 time.sleep(60)
                 endpoint_status = nc.get_endpoint_status(endpoint_id=endpoint_id)
-        except Exception as e:
-            nc.delete_endpoint(endpoint_id)
-            raise e
 
-        if endpoint_status != "active":
-            raise ValueError(f"Endpoint did not become active: {endpoint_status}")
+            if endpoint_status != "active":
+                raise ValueError(
+                    f"[{algorithm_name}] Endpoint did not become active: "
+                    f"{endpoint_status}"
+                )
 
-        nc.connect_robot(
-            robot_name="Mujoco VX300s",
-        )
-
-        try:
+            nc.connect_robot("Mujoco VX300s")
             policy = nc.policy_remote_server(endpoint_name)
             env = make_sim_env(seed=42)
             success_rate = eval_model(
@@ -346,13 +297,17 @@ class TestAlgorithm:
                 onscreen_render=ONSCREEN_RENDER,
             )
             policy.disconnect()
-        except Exception as e:
-            nc.delete_endpoint(endpoint_id)
-            raise e
+        except Exception:
+            if endpoint_id is not None:
+                nc.delete_endpoint(endpoint_id)
+            raise
 
-        if success_rate < min_success_rate:
-            raise ValueError(f"Success rate is too low: {success_rate}")
-
-        logger.info(f"Success rate: {success_rate}")
+        logger.info(f"[{algorithm_name}] success_rate={success_rate:.2%}")
         nc.delete_endpoint(endpoint_id)
         nc.delete_training_job(training_job_id)
+
+        if success_rate < min_success_rate:
+            raise ValueError(
+                f"[{algorithm_name}] success rate {success_rate:.2%} is below "
+                f"the minimum threshold of {min_success_rate:.2%}"
+            )

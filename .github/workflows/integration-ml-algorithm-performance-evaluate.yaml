@@ -1,0 +1,108 @@
+name: Integration ML Algorithm Performance - Evaluate
+
+on:
+  schedule:
+    - cron: "0 8 * * *"  # 8 hours after training starts; training cap is 6 hours
+  workflow_dispatch:
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    - uses: pre-commit/action@v3.0.1
+
+  discover-algorithms:
+    runs-on: ubuntu-latest
+    outputs:
+      algorithms: ${{ steps.list.outputs.algorithms }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: List algorithm names
+      id: list
+      run: |
+        pip install pyyaml -q
+        python3 << 'EOF' >> $GITHUB_OUTPUT
+        import yaml, json
+        with open('tests/integration/ml/algorithm_configs.yaml') as f:
+            c = yaml.safe_load(f)
+        print('algorithms=' + json.dumps([a['name'] for a in c['algorithms']]))
+        EOF
+
+  evaluate:
+    needs: [pre-commit, discover-algorithms]
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11']
+        algorithm: ${{ fromJson(needs.discover-algorithms.outputs.algorithms) }}
+        environment: [staging, production]
+
+    steps:
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        swap-storage: true
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ matrix.environment == 'staging' && 'develop' || github.ref }}
+    - name: Pull LFS objects
+      run: git lfs pull
+
+    - name: Restore training job ID from cache
+      uses: actions/cache/restore@v4
+      with:
+        path: training_job_id.txt
+        # No exact key match is expected; restore-keys picks the most recent run.
+        key: training-job-${{ matrix.algorithm }}-${{ matrix.environment }}-never-exact
+        restore-keys: |
+          training-job-${{ matrix.algorithm }}-${{ matrix.environment }}-
+
+    - name: Read training job ID
+      run: |
+        if [ ! -f training_job_id.txt ]; then
+          echo "::error::No cached training job ID found for ${{ matrix.algorithm }}/${{ matrix.environment }}. Did the Start Training workflow succeed?"
+          exit 1
+        fi
+        echo "TRAINING_JOB_ID=$(cat training_job_id.txt)" >> $GITHUB_ENV
+        echo "Training job ID: $(cat training_job_id.txt)"
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --no-cache-dir --upgrade pip
+        if [ "${{ matrix.environment }}" = "production" ]; then
+          pip install --no-cache-dir "neuracore[dev,ml,examples]"
+        else
+          pip install --no-cache-dir ".[dev,ml,examples]"
+        fi
+
+    - name: Run Evaluation
+      env:
+        NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
+        NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
+        NEURACORE_ENDPOINT_TIMEOUT: 30
+        ALGORITHM_NAME: ${{ matrix.algorithm }}
+        DISPLAY: :0
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1-mesa-glx libosmesa6-dev
+        Xvfb $DISPLAY -screen 0 1280x1024x24 &
+        pytest -o log_cli=true --log-cli-level=INFO -v -k test_evaluate tests/integration/ml/test_algorithm_performance.py
