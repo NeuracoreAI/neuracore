@@ -393,6 +393,9 @@ class Dataset:
         self,
         frequency: int = 0,
         robot_data_spec: RobotDataSpec | None = None,
+        max_delay_s: float = sys.float_info.max,
+        allow_duplicates: bool = True,
+        trim_start_end: bool = True,
     ) -> SynchronizedDatasetModel:
         """Synchronize the dataset with specified frequency and data types.
 
@@ -402,6 +405,9 @@ class Dataset:
             robot_data_spec: Dict specifying robot name to
                 data types and their names to include in synchronization.
                 If None, will use all available data types from the dataset.
+            max_delay_s: Maximum allowed delay for synchronization.
+            allow_duplicates: Whether duplicate points are allowed when syncing.
+            trim_start_end: Whether to trim start/end during synchronization.
 
         Returns:
             SynchronizedDataset instance containing synchronized data.
@@ -418,9 +424,9 @@ class Dataset:
                 synchronization_details=SynchronizationDetails(
                     frequency=frequency,
                     robot_data_spec=robot_data_spec,
-                    max_delay_s=sys.float_info.max,
-                    allow_duplicates=True,
-                    trim_start_end=True,
+                    max_delay_s=max_delay_s,
+                    allow_duplicates=allow_duplicates,
+                    trim_start_end=trim_start_end,
                 ),
             ).model_dump(mode="json"),
         )
@@ -448,6 +454,9 @@ class Dataset:
         robot_data_spec: RobotDataSpec | None = None,
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 4,
+        max_delay_s: float = sys.float_info.max,
+        allow_duplicates: bool = True,
+        trim_start_end: bool = True,
     ) -> SynchronizedDataset:
         """Synchronize the dataset with specified frequency and data types.
 
@@ -459,6 +468,9 @@ class Dataset:
                 If None, will use all available data types from the dataset.
             prefetch_videos: Whether to prefetch video data for the synchronized data.
             max_prefetch_workers: Number of threads to use for prefetching videos.
+            max_delay_s: Maximum allowed delay for synchronization.
+            allow_duplicates: Whether duplicate points are allowed when syncing.
+            trim_start_end: Whether to trim start/end during synchronization.
 
         Returns:
             SynchronizedDataset instance containing synchronized data.
@@ -478,7 +490,11 @@ class Dataset:
             assert is_robot_id(robot_id), f"Expected robot_id format for {robot_id}"
 
         synced_dataset = self._synchronize(
-            frequency=frequency, robot_data_spec=robot_data_spec
+            frequency=frequency,
+            robot_data_spec=robot_data_spec,
+            max_delay_s=max_delay_s,
+            allow_duplicates=allow_duplicates,
+            trim_start_end=trim_start_end,
         )
 
         synchronization_progress = self._get_synchronization_progress(synced_dataset.id)
