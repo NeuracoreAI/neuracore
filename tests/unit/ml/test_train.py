@@ -370,6 +370,9 @@ def mock_cfg_batch_size(temp_output_dir):
         "min_batch_size": 2,
         "batch_size_autotuning_num_workers": 0,
         "max_prefetch_workers": 4,
+        "max_delay_s": 0.5,
+        "allow_duplicates": True,
+        "trim_start_end": True,
     })
 
 
@@ -391,6 +394,9 @@ def mock_cfg_training(temp_output_dir) -> DictConfig:
         "training_id": None,
         "resume_checkpoint_path": None,
         "max_prefetch_workers": 4,
+        "max_delay_s": 0.5,
+        "allow_duplicates": True,
+        "trim_start_end": True,
     })
 
 
@@ -1314,6 +1320,9 @@ class TestMain:
             "output_prediction_horizon": 5,
             "frequency": 30,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         }
         base_cfg.update(cfg_updates)
         cfg = OmegaConf.create(base_cfg)
@@ -1340,6 +1349,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1367,6 +1379,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1396,6 +1411,9 @@ class TestMain:
             "output_prediction_horizon": 5,
             "frequency": 30,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1422,6 +1440,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1449,6 +1470,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1478,6 +1502,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1505,6 +1532,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1538,6 +1568,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1564,6 +1597,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1598,6 +1634,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch, cuda_device_count=world_size)
@@ -1638,6 +1677,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1667,6 +1709,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1699,6 +1744,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1711,6 +1759,9 @@ class TestMain:
         call_kwargs = setup.mock_dataset.synchronize.call_args[1]
         assert call_kwargs["frequency"] == cfg.frequency
         assert call_kwargs["prefetch_videos"] is True
+        assert call_kwargs["max_delay_s"] == cfg.max_delay_s
+        assert call_kwargs["allow_duplicates"] is cfg.allow_duplicates
+        assert call_kwargs["trim_start_end"] is cfg.trim_start_end
         # Verify data_types includes both input and output types
         expected_data_types = [
             DataType.JOINT_POSITIONS,
@@ -1735,6 +1786,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
             "recording_cache_dir": None,
         })
 
@@ -1761,6 +1815,9 @@ class TestMain:
             "frequency": 30,
             "algorithm_params": None,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
             "recording_cache_dir": str(custom_cache_dir),
         })
 
@@ -1791,6 +1848,9 @@ class TestMain:
             "min_batch_size": 2,
             "batch_size_autotuning_num_workers": 0,
             "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
         })
 
         setup = MainTestSetup(monkeypatch)
