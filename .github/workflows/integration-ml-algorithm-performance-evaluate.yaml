@@ -6,15 +6,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  pre-commit:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-    - uses: pre-commit/action@v3.0.1
-
   discover-algorithms:
     runs-on: ubuntu-latest
     outputs:
@@ -33,7 +24,7 @@ jobs:
         EOF
 
   evaluate:
-    needs: [pre-commit, discover-algorithms]
+    needs: [discover-algorithms]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -43,16 +34,6 @@ jobs:
         environment: [staging, production]
 
     steps:
-    - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: false
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        swap-storage: true
-
     - name: Checkout code
       uses: actions/checkout@v4
       with:
