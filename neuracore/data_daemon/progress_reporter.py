@@ -43,7 +43,9 @@ class ProgressReporter:
 
             recording_id = traces[0].recording_id
             if not recording_id:
-                logger.warning("Progress report missing recording_id; skipping request.")
+                logger.warning(
+                    "Progress report missing recording_id; skipping request."
+                )
                 return
             trace_map: dict[str, int] = {}
 
@@ -142,7 +144,9 @@ class ProgressReporter:
             )
         except Exception as exc:
             if not recording_id:
-                logger.exception("Progress report crashed before recording_id was available")
+                logger.exception(
+                    "Progress report crashed before recording_id was available"
+                )
                 return
             logger.exception(
                 "Progress report crashed for recording %s: %s", recording_id, exc

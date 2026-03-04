@@ -116,7 +116,8 @@ class ProgressReportStatus(str, Enum):
     REPORTING = "reporting"
     REPORTED = "reported"
 
-@deprecated('Used for backwards compatibility')
+
+@deprecated("Used for backwards compatibility")
 def _parse_progress_reported(value: Any) -> ProgressReportStatus:
     """Parse progress_reported from DB (int 0/1 or enum string) to enum."""
     if value is None or value == 0 or value == "pending":
@@ -129,7 +130,8 @@ def _parse_progress_reported(value: Any) -> ProgressReportStatus:
         return value
     return ProgressReportStatus(str(value))
 
-@deprecated('Used for backwards compatibility')
+
+@deprecated("Used for backwards compatibility")
 def _parse_write_status(value: Any) -> TraceWriteStatus:
     """Parse write_status from DB value to enum."""
     if value is None:
@@ -138,7 +140,8 @@ def _parse_write_status(value: Any) -> TraceWriteStatus:
         return value
     return TraceWriteStatus(str(value))
 
-@deprecated('Used for backwards compatibility')
+
+@deprecated("Used for backwards compatibility")
 def _parse_registration_status(value: Any) -> TraceRegistrationStatus:
     """Parse registration_status from DB value to enum."""
     if value is None:
@@ -147,7 +150,8 @@ def _parse_registration_status(value: Any) -> TraceRegistrationStatus:
         return value
     return TraceRegistrationStatus(str(value))
 
-@deprecated('Used for backwards compatibility')
+
+@deprecated("Used for backwards compatibility")
 def _parse_upload_status(value: Any) -> TraceUploadStatus:
     """Parse upload_status from DB value to enum."""
     if value is None:

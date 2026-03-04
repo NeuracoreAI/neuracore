@@ -8,8 +8,8 @@ from typing import Protocol
 from neuracore.data_daemon.models import (
     DataType,
     TraceErrorCode,
-    TraceRegistrationStatus,
     TraceRecord,
+    TraceRegistrationStatus,
     TraceUploadStatus,
     TraceWriteStatus,
 )

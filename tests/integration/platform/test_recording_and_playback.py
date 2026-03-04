@@ -158,7 +158,7 @@ class TestConfig:
         stop_wait_timeout_s=MAX_TIME_TO_STOP_S,
         start_wait_timeout_s=MAX_TIME_TO_START_S,
         log_wait_timeout_s=MAX_TIME_TO_LOG_S,
-        dataset_wait_timeout_s=MAX_TIME_TO_DATASET_READY_S
+        dataset_wait_timeout_s=MAX_TIME_TO_DATASET_READY_S,
     ):
         self.fps = fps
         self.duration_sec = duration_sec
@@ -249,7 +249,11 @@ def stream_data(config: TestConfig) -> int:
 
     # Start recording
     # TODO: Note this now takes a long time to start since adding in P2P
-    with Timer(max_time=config.start_wait_timeout_s, label="nc.start_recording", always_log=True):
+    with Timer(
+        max_time=config.start_wait_timeout_s,
+        label="nc.start_recording",
+        always_log=True,
+    ):
         nc.start_recording()
 
     # Generate and stream test data
@@ -278,24 +282,35 @@ def stream_data(config: TestConfig) -> int:
                     depth_img = generate_depth_image(
                         frame_code, config.image_width, config.image_height
                     )
-                    with Timer(label="nc.log_depth", max_time=config.log_wait_timeout_s):
+                    with Timer(
+                        label="nc.log_depth", max_time=config.log_wait_timeout_s
+                    ):
                         nc.log_depth(camera_id, depth_img, timestamp=t)
 
             # Stream joint positions
             joint_positions = generate_joint_positions(
                 frame_count, config.fps, config.num_joints
             )
-            with Timer(label="nc.log_joint_positions", max_time=config.log_wait_timeout_s):
+            with Timer(
+                label="nc.log_joint_positions", max_time=config.log_wait_timeout_s
+            ):
                 nc.log_joint_positions(joint_positions, timestamp=t)
 
-            with Timer(label="nc.log_joint_velocities", max_time=config.log_wait_timeout_s):
+            with Timer(
+                label="nc.log_joint_velocities", max_time=config.log_wait_timeout_s
+            ):
                 # use the same joint positions for velocities and torques
                 nc.log_joint_velocities(joint_positions, timestamp=t)
-            with Timer(label="nc.log_joint_torques", max_time=config.log_wait_timeout_s):
+            with Timer(
+                label="nc.log_joint_torques", max_time=config.log_wait_timeout_s
+            ):
                 # use the same joint positions for velocities and torques
                 nc.log_joint_torques(joint_positions, timestamp=t)
 
-            with Timer(label="nc.log_parallel_gripper_open_amount", max_time=config.log_wait_timeout_s):
+            with Timer(
+                label="nc.log_parallel_gripper_open_amount",
+                max_time=config.log_wait_timeout_s,
+            ):
                 nc.log_parallel_gripper_open_amount(
                     name="gripper", value=0.5, timestamp=t
                 )
@@ -353,7 +368,9 @@ def _resolve_daemon_db_path() -> str:
     return str(DEFAULT_DAEMON_DB_PATH)
 
 
-def _log_daemon_state_snapshot(label: str, recording_id: str | None = None) -> str | None:
+def _log_daemon_state_snapshot(
+    label: str, recording_id: str | None = None
+) -> str | None:
     """Log a compact daemon DB state snapshot for debugging slow integration runs."""
     db_path = _resolve_daemon_db_path()
     if not os.path.exists(db_path):
@@ -469,7 +486,10 @@ def wait_for_dataset_ready(
                 recording_count,
                 expected_recording_count,
             )
-            if debug_log_every_n_polls > 0 and poll_count % debug_log_every_n_polls == 0:
+            if (
+                debug_log_every_n_polls > 0
+                and poll_count % debug_log_every_n_polls == 0
+            ):
                 debug_recording_id = _log_daemon_state_snapshot(
                     label=f"wait poll={poll_count} elapsed={elapsed_s:.1f}s",
                     recording_id=debug_recording_id,
@@ -507,7 +527,9 @@ def verify_dataset(config: TestConfig, expected_frame_count):
     ):
         dataset = nc.get_dataset(config.dataset_name)
     with Timer(
-        max_time=MAX_TIME_TO_DATASET_READY_S, label="dataset.synchronize", always_log=True
+        max_time=MAX_TIME_TO_DATASET_READY_S,
+        label="dataset.synchronize",
+        always_log=True,
     ):
         synced_dataset = dataset.synchronize()
 
@@ -594,12 +616,10 @@ def run_streaming_test(config: TestConfig):
     """Run a complete streaming test with the given configuration"""
     # Set up
     logger.info(f"Starting test with config: {config}")
-   
+
     with Timer(max_time=MAX_TIME_TO_START_S, label="nc.login", always_log=True):
         nc.login()
-    with Timer(
-        max_time=MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True
-    ):
+    with Timer(max_time=MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True):
         nc.connect_robot(
             config.robot_name,
             urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
@@ -640,13 +660,19 @@ def _mp_stream_robot_data(config):
 def run_before_and_after_tests():
     yield
 
+
 # p
 def test_basic_streaming():
     config = TestConfig(
-        fps=10, duration_sec=2, image_width=640, 
-        image_height=480, synched_time=True, stop_wait_timeout_s=LEAST_TIME_TO_STOP_S
+        fps=10,
+        duration_sec=2,
+        image_width=640,
+        image_height=480,
+        synched_time=True,
+        stop_wait_timeout_s=LEAST_TIME_TO_STOP_S,
     )
     run_streaming_test(config)
+
 
 # p
 def test_basic_streaming_fast_mode():
@@ -660,7 +686,7 @@ def test_basic_streaming_fast_mode():
         use_depth=False,
         num_joints=1,
         synched_time=True,
-        stop_wait_timeout_s=LEAST_TIME_TO_STOP_S
+        stop_wait_timeout_s=LEAST_TIME_TO_STOP_S,
     )
 
     with Timer(
@@ -748,6 +774,7 @@ def test_basic_streaming_fast_mode():
 
     assert found_rgb, "Expected at least one RGB frame in synchronized dataset"
 
+
 # p
 def test_high_framerate():
     config = TestConfig(
@@ -756,9 +783,10 @@ def test_high_framerate():
         image_width=640,
         image_height=480,
         synched_time=True,
-        stop_wait_timeout_s=MAX_TIME_TO_STOP_S
+        stop_wait_timeout_s=MAX_TIME_TO_STOP_S,
     )
     run_streaming_test(config)
+
 
 # p
 def test_multiple_cameras():
@@ -770,9 +798,10 @@ def test_multiple_cameras():
         num_cameras=3,
         synched_time=True,
         stop_wait_timeout_s=MAX_TIME_TO_STOP_S,
-        dataset_wait_timeout_s=HIGH_TIME_TO_DATASET_READY_S
+        dataset_wait_timeout_s=HIGH_TIME_TO_DATASET_READY_S,
     )
     run_streaming_test(config)
+
 
 # p
 def test_with_depth():
@@ -791,12 +820,14 @@ def test_with_depth():
 def test_multiple_concurrent_robots():
     num_robots = 3
     configs = [
-        TestConfig(fps=30, 
-                   duration_sec=2, 
-                   synched_time=True, 
-                   stop_wait_timeout_s=40,
-                   dataset_wait_timeout_s=700) 
-                   for _ in range(num_robots)
+        TestConfig(
+            fps=30,
+            duration_sec=2,
+            synched_time=True,
+            stop_wait_timeout_s=40,
+            dataset_wait_timeout_s=700,
+        )
+        for _ in range(num_robots)
     ]
     nc.login()
 
@@ -805,15 +836,24 @@ def test_multiple_concurrent_robots():
 
     for idx, frame_count in enumerate(frame_counts):
         logger.info(f"Verifying robot {idx+1}/{num_robots}")
-        wait_for_dataset_ready(configs[idx].dataset_name, timeout_s=configs[idx].dataset_wait_timeout_s)
+        wait_for_dataset_ready(
+            configs[idx].dataset_name, timeout_s=configs[idx].dataset_wait_timeout_s
+        )
         results = verify_dataset(configs[idx], frame_count)
         assert len(results["missing_frames"]) == 0
         assert len(results["duplicate_frames"]) == 0
         assert len(results["joint_mismatches"]) == 0
 
+
 # p
 def test_stop_start_sequences():
-    config = TestConfig(fps=30, duration_sec=2, synched_time=True, stop_wait_timeout_s=MAX_TIME_TO_STOP_S, dataset_wait_timeout_s=HIGH_TIME_TO_DATASET_READY_S)
+    config = TestConfig(
+        fps=30,
+        duration_sec=2,
+        synched_time=True,
+        stop_wait_timeout_s=MAX_TIME_TO_STOP_S,
+        dataset_wait_timeout_s=HIGH_TIME_TO_DATASET_READY_S,
+    )
 
     nc.login()
     robot = nc.connect_robot(config.robot_name)
@@ -900,6 +940,7 @@ def test_stop_start_sequences():
     assert len(results["duplicate_frames"]) == 0
     assert len(results["joint_mismatches"]) == 0
 
+
 # p
 def test_high_bandwidth():
     """Test high-throughput streaming with elevated daemon upload bandwidth."""
@@ -944,9 +985,13 @@ def test_high_bandwidth():
         # Set up
         with Timer(max_time=MAX_TIME_TO_START_S, label="hb.nc.login", always_log=True):
             nc.login()
-        with Timer(max_time=MAX_TIME_TO_START_S, label="hb.nc.connect_robot", always_log=True):
+        with Timer(
+            max_time=MAX_TIME_TO_START_S, label="hb.nc.connect_robot", always_log=True
+        ):
             nc.connect_robot(config.robot_name)
-        with Timer(max_time=MAX_TIME_TO_START_S, label="hb.nc.create_dataset", always_log=True):
+        with Timer(
+            max_time=MAX_TIME_TO_START_S, label="hb.nc.create_dataset", always_log=True
+        ):
             nc.create_dataset(config.dataset_name)
         debug_recording_id = _log_daemon_state_snapshot("hb.before_stream")
 

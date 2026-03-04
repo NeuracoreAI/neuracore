@@ -15,8 +15,8 @@ from neuracore.data_daemon.models import (
     DataType,
     ProgressReportStatus,
     TraceErrorCode,
-    TraceRegistrationStatus,
     TraceRecord,
+    TraceRegistrationStatus,
     TraceUploadStatus,
     TraceWriteStatus,
 )
@@ -135,15 +135,12 @@ class SqliteStateStore(StateStore):
                 )
                 return
             existing_expected = (
-                (
-                    await conn.execute(
-                        select(recordings.c.expected_trace_count).where(
-                            recordings.c.recording_id == recording_id
-                        )
+                await conn.execute(
+                    select(recordings.c.expected_trace_count).where(
+                        recordings.c.recording_id == recording_id
                     )
                 )
-                .scalar_one_or_none()
-            )
+            ).scalar_one_or_none()
             expected_trace_count = max(int(existing_expected or 0), trace_count)
             await conn.execute(
                 update(recordings)
@@ -181,9 +178,7 @@ class SqliteStateStore(StateStore):
             await conn.execute(delete(recordings))
 
             recording_rows = (
-                (
-                    await conn.execute(select(func.distinct(traces.c.recording_id)))
-                )
+                (await conn.execute(select(func.distinct(traces.c.recording_id))))
                 .scalars()
                 .all()
             )
@@ -197,32 +192,34 @@ class SqliteStateStore(StateStore):
                                 traces.c.recording_id == recording_id
                             )
                         )
-                    )
-                    .scalar_one()
+                    ).scalar_one()
                 )
                 uploaded_trace_count = int(
                     (
                         await conn.execute(
-                            select(func.sum(
-                                case(
-                                    (
-                                        traces.c.upload_status
-                                        == TraceUploadStatus.UPLOADED,
-                                        1,
-                                    ),
-                                    else_=0,
+                            select(
+                                func.sum(
+                                    case(
+                                        (
+                                            traces.c.upload_status
+                                            == TraceUploadStatus.UPLOADED,
+                                            1,
+                                        ),
+                                        else_=0,
+                                    )
                                 )
-                            )).where(traces.c.recording_id == recording_id)
+                            ).where(traces.c.recording_id == recording_id)
                         )
-                    )
-                    .scalar_one_or_none()
+                    ).scalar_one_or_none()
                     or 0
                 )
                 expected_trace_count = max(
                     trace_count,
-                    int(existing_row["expected_trace_count"] or 0)
-                    if existing_row is not None
-                    else 0,
+                    (
+                        int(existing_row["expected_trace_count"] or 0)
+                        if existing_row is not None
+                        else 0
+                    ),
                 )
                 expected_reported = (
                     int(existing_row["expected_trace_count_reported"] or 0)
@@ -275,30 +272,24 @@ class SqliteStateStore(StateStore):
         """Return True when recording has stopped_at set."""
         async with self._engine.begin() as conn:
             value = (
-                (
-                    await conn.execute(
-                        select(recordings.c.stopped_at).where(
-                            recordings.c.recording_id == recording_id
-                        )
+                await conn.execute(
+                    select(recordings.c.stopped_at).where(
+                        recordings.c.recording_id == recording_id
                     )
                 )
-                .scalar_one_or_none()
-            )
+            ).scalar_one_or_none()
         return value is not None
 
     async def is_expected_trace_count_reported(self, recording_id: str) -> bool:
         """Return True when expected trace count has been reported for recording."""
         async with self._engine.begin() as conn:
             value = (
-                (
-                    await conn.execute(
-                        select(recordings.c.expected_trace_count_reported).where(
-                            recordings.c.recording_id == recording_id
-                        )
+                await conn.execute(
+                    select(recordings.c.expected_trace_count_reported).where(
+                        recordings.c.recording_id == recording_id
                     )
                 )
-                .scalar_one_or_none()
-            )
+            ).scalar_one_or_none()
         return int(value or 0) == 1
 
     async def set_expected_trace_count(
@@ -548,12 +539,10 @@ class SqliteStateStore(StateStore):
                             == TraceRegistrationStatus.REGISTERED
                         )
                         .where(
-                            traces.c.upload_status.in_(
-                                (
-                                    TraceUploadStatus.PENDING,
-                                    TraceUploadStatus.RETRYING,
-                                )
-                            )
+                            traces.c.upload_status.in_((
+                                TraceUploadStatus.PENDING,
+                                TraceUploadStatus.RETRYING,
+                            ))
                         )
                         .where(traces.c.path.is_not(None))
                         .where(traces.c.data_type.is_not(None))
@@ -594,20 +583,16 @@ class SqliteStateStore(StateStore):
         now = _utc_now()
         async with self._engine.begin() as conn:
             candidate_rows = (
-                (
-                    await conn.execute(
-                        select(traces.c.trace_id, traces.c.last_updated)
-                        .where(traces.c.write_status == TraceWriteStatus.WRITTEN)
-                        .where(
-                            traces.c.registration_status
-                            == TraceRegistrationStatus.PENDING
-                        )
-                        .order_by(traces.c.created_at.asc())
-                        .limit(int(limit))
+                await conn.execute(
+                    select(traces.c.trace_id, traces.c.last_updated)
+                    .where(traces.c.write_status == TraceWriteStatus.WRITTEN)
+                    .where(
+                        traces.c.registration_status == TraceRegistrationStatus.PENDING
                     )
+                    .order_by(traces.c.created_at.asc())
+                    .limit(int(limit))
                 )
-                .all()
-            )
+            ).all()
             logger.debug(
                 "claim_traces_for_registration fetched %d candidate rows (limit=%d, max_wait_s=%.2f)",
                 len(candidate_rows),
@@ -764,15 +749,12 @@ class SqliteStateStore(StateStore):
         """Return True when recording progress status is REPORTED."""
         async with self._engine.begin() as conn:
             progress_value = (
-                (
-                    await conn.execute(
-                        select(recordings.c.progress_reported).where(
-                            recordings.c.recording_id == recording_id
-                        )
+                await conn.execute(
+                    select(recordings.c.progress_reported).where(
+                        recordings.c.recording_id == recording_id
                     )
                 )
-                .scalar_one_or_none()
-            )
+            ).scalar_one_or_none()
         return _parse_progress_status(progress_value) == ProgressReportStatus.REPORTED
 
     async def delete_uploaded_traces_for_recording(self, recording_id: str) -> int:
@@ -791,15 +773,12 @@ class SqliteStateStore(StateStore):
         """Return count of traces associated with recording."""
         async with self._engine.begin() as conn:
             count_value = (
-                (
-                    await conn.execute(
-                        select(recordings.c.trace_count).where(
-                            recordings.c.recording_id == recording_id
-                        )
+                await conn.execute(
+                    select(recordings.c.trace_count).where(
+                        recordings.c.recording_id == recording_id
                     )
                 )
-                .scalar_one_or_none()
-            )
+            ).scalar_one_or_none()
         return int(count_value or 0)
 
     async def list_recording_ids_with_stopped_traces(self) -> list[str]:

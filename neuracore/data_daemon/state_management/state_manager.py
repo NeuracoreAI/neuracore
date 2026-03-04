@@ -21,16 +21,16 @@ from neuracore.data_daemon.const import (
     UPLOAD_RETRY_MAX_SECONDS,
 )
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
-from neuracore.data_daemon.registration_management.registration_manager import (
-    RegistrationCandidate,
-)
 from neuracore.data_daemon.models import (
     DataType,
     TraceErrorCode,
-    TraceRegistrationStatus,
     TraceRecord,
+    TraceRegistrationStatus,
     TraceUploadStatus,
     TraceWriteStatus,
+)
+from neuracore.data_daemon.registration_management.registration_manager import (
+    RegistrationCandidate,
 )
 
 from .state_store import StateStore
@@ -293,7 +293,9 @@ class StateManager:
             logger.info(
                 "Reset transient upload statuses on reconnect (count=%d)", reset_count
             )
-        reset_reporting_count = await self._store.reset_reporting_recordings_to_pending()
+        reset_reporting_count = (
+            await self._store.reset_reporting_recordings_to_pending()
+        )
         if reset_reporting_count:
             logger.info(
                 "Reset reporting recordings to pending on reconnect (count=%d)",
@@ -319,7 +321,11 @@ class StateManager:
             await self._emit_ready_for_upload_from_trace(trace)
 
     async def _emit_ready_for_upload_from_trace(self, trace: TraceRecord) -> None:
-        if trace.path is None or trace.data_type is None or trace.data_type_name is None:
+        if (
+            trace.path is None
+            or trace.data_type is None
+            or trace.data_type_name is None
+        ):
             logger.warning(
                 "Skipping READY_FOR_UPLOAD for trace %s: incomplete metadata",
                 trace.trace_id,
@@ -390,7 +396,7 @@ class StateManager:
 
         await self._store.update_upload_status(trace_id, TraceUploadStatus.UPLOADED)
 
-        # Always delete local trace data after upload 
+        # Always delete local trace data after upload
         # DB metadata may be kept until progress reporting total_bytes.
         if trace_record.data_type is not None:
             self._emitter.emit(
@@ -750,9 +756,7 @@ class StateManager:
                 skipped_missing_data_type,
             )
         else:
-            logger.debug(
-                "StateManager prepared 0 registration candidates"
-            )
+            logger.debug("StateManager prepared 0 registration candidates")
         return candidates
 
     async def mark_traces_registration_failed(

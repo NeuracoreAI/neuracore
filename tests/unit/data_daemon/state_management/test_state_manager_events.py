@@ -93,7 +93,9 @@ class FakeStateStore:
             missing_bytes_written_count=sum(
                 trace.bytes_written is None for trace in traces
             ),
-            missing_total_bytes_count=sum(trace.total_bytes is None for trace in traces),
+            missing_total_bytes_count=sum(
+                trace.total_bytes is None for trace in traces
+            ),
             mismatched_bytes_count=sum(
                 (
                     trace.bytes_written is not None
@@ -179,7 +181,6 @@ class FakeStateStore:
 
     async def reset_retrying_to_written(self) -> int:
         return 0
-
 
     async def record_error(
         self,
@@ -337,7 +338,6 @@ class FakeStateStore:
         self._update_trace_in_recording(trace, recording_id)
         return trace
 
-
     async def claim_traces_for_registration(self, limit: int, max_wait_s: float):
         return []
 
@@ -347,7 +347,9 @@ class FakeStateStore:
     async def mark_traces_as_registered(self, trace_ids: list[str]) -> list[str]:
         return list(trace_ids)
 
-    async def update_write_status(self, trace_id: str, write_status: TraceWriteStatus) -> None:
+    async def update_write_status(
+        self, trace_id: str, write_status: TraceWriteStatus
+    ) -> None:
         trace = self._traces_by_id.get(trace_id)
         if trace is None:
             return
@@ -355,7 +357,9 @@ class FakeStateStore:
         self._traces_by_id[trace_id] = updated
         self._update_trace_in_recording(updated, updated.recording_id)
 
-    async def update_registration_status(self, trace_id: str, registration_status: TraceRegistrationStatus) -> None:
+    async def update_registration_status(
+        self, trace_id: str, registration_status: TraceRegistrationStatus
+    ) -> None:
         trace = self._traces_by_id.get(trace_id)
         if trace is None:
             return
@@ -363,7 +367,9 @@ class FakeStateStore:
         self._traces_by_id[trace_id] = updated
         self._update_trace_in_recording(updated, updated.recording_id)
 
-    async def update_upload_status(self, trace_id: str, upload_status: TraceUploadStatus) -> None:
+    async def update_upload_status(
+        self, trace_id: str, upload_status: TraceUploadStatus
+    ) -> None:
         trace = self._traces_by_id.get(trace_id)
         if trace is None:
             return

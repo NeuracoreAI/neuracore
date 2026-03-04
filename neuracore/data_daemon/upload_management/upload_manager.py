@@ -455,11 +455,13 @@ class UploadManager:
 
                     cumulative_bytes += file.stat().st_size
 
-                updated_trace = await self._mark_backend_trace_status_as_upload_complete(
-                    recording_id,
-                    trace_id,
-                    uploaded_bytes=cumulative_bytes,
-                    total_bytes=cumulative_bytes,
+                updated_trace = (
+                    await self._mark_backend_trace_status_as_upload_complete(
+                        recording_id,
+                        trace_id,
+                        uploaded_bytes=cumulative_bytes,
+                        total_bytes=cumulative_bytes,
+                    )
                 )
                 if not updated_trace:
                     logger.warning(
@@ -512,7 +514,6 @@ class UploadManager:
             return await upload_files()
         async with self._upload_semaphore:
             return await upload_files()
-
 
     async def _update_backend_trace_record(
         self,

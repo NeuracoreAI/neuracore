@@ -22,11 +22,11 @@ from neuracore.data_daemon.connection_management.connection_manager import (
 from neuracore.data_daemon.const import CONFIG_DIR
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.progress_reporter import ProgressReporter
-from neuracore.data_daemon.registration_management.registration_manager import (
-    RegistrationManager,
-)
 from neuracore.data_daemon.recording_encoding_disk_manager import (
     recording_disk_manager as rdm,
+)
+from neuracore.data_daemon.registration_management.registration_manager import (
+    RegistrationManager,
 )
 from neuracore.data_daemon.state_management.state_manager import StateManager
 from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
