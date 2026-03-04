@@ -308,6 +308,45 @@ class TestSynchronizedRecording:
             assert cam_data.frame is not None
             assert isinstance(cam_data.frame, Image.Image)
 
+    def test_rgb_to_depth_storage_called_when_retrieving_frame(
+        self,
+        dataset_mock,
+        mock_login,
+        mock_data_requests,
+        mock_wget_download,
+        tmp_path,
+    ):
+        """Test that rgb_to_depth_storage is called when retrieving a frame
+        with depth images."""
+        rgb_cache = dataset_mock.cache_dir / "rec1" / DataType.RGB_IMAGES.value / "cam1"
+        depth_cache = (
+            dataset_mock.cache_dir / "rec1" / DataType.DEPTH_IMAGES.value / "cam2"
+        )
+        rgb_cache.mkdir(parents=True, exist_ok=True)
+        depth_cache.mkdir(parents=True, exist_ok=True)
+        fake_image = Image.fromarray(np.ones((224, 224, 3), dtype=np.uint8) * 128)
+        fake_image.save(rgb_cache / "0.png")
+        fake_image.save(depth_cache / "0.png")
+
+        synced = SynchronizedRecording(
+            dataset=dataset_mock,
+            recording_id="rec1",
+            recording_name="recording1",
+            robot_id="robot1",
+            instance=1,
+            frequency=30,
+            robot_data_spec=None,
+        )
+
+        with patch(
+            "neuracore.core.data.synced_recording.rgb_to_depth_storage"
+        ) as mock_rgb_to_depth_storage:
+            mock_rgb_to_depth_storage.return_value = np.zeros(
+                (224, 224), dtype=np.uint8
+            )
+            _ = synced[0]
+            mock_rgb_to_depth_storage.assert_called()
+
     def test_camera_data_copy_independence(
         self, synced_recording: SynchronizedRecording, mock_wget_download
     ):
