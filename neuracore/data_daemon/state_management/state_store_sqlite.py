@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import case, delete, or_, select, text, update
+from sqlalchemy import case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from neuracore.data_daemon.models import (
     DataType,
     ProgressReportStatus,
+    RecordingProgressSnapshot,
     TraceErrorCode,
+    TraceRegistrationStatus,
     TraceRecord,
-    TraceStatus,
+    TraceUploadStatus,
+    TraceWriteStatus,
 )
 
 from .state_store import StateStore
@@ -27,22 +30,6 @@ logger = logging.getLogger(__name__)
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-_ALLOWED_PREVIOUS_STATUSES: dict[TraceStatus, set[TraceStatus]] = {
-    TraceStatus.WRITTEN: {
-        TraceStatus.INITIALIZING,
-        TraceStatus.PENDING_METADATA,
-        TraceStatus.RETRYING,
-    },
-    TraceStatus.UPLOADING: {
-        TraceStatus.WRITTEN,
-        TraceStatus.PAUSED,
-        TraceStatus.RETRYING,
-    },
-    TraceStatus.UPLOADED: {TraceStatus.UPLOADING},
-    TraceStatus.PAUSED: {TraceStatus.UPLOADING},
-}
 
 
 class SqliteStateStore(StateStore):
@@ -96,6 +83,7 @@ class SqliteStateStore(StateStore):
             await conn.execute(
                 update(traces)
                 .where(traces.c.recording_id == recording_id)
+                .where(traces.c.stopped_at.is_(None))
                 .values(stopped_at=_utc_now())
             )
 
@@ -167,76 +155,99 @@ class SqliteStateStore(StateStore):
             rows = (await conn.execute(select(traces))).mappings().all()
         return [TraceRecord.from_row(dict(row)) for row in rows]
 
-    async def update_status(
-        self,
-        trace_id: str,
-        status: TraceStatus,
-        *,
-        error_message: str | None = None,
-    ) -> bool:
-        """Update the status and optional error message for a trace.
-
-        Args:
-            trace_id (str): Unique identifier for the trace.
-            status (TraceStatus): New status for the trace.
-            error_message (str | None): Optional error message to
-            associate with the trace.
-
-        Returns:
-            True if status was changed, False if already at target status.
-
-        Raises:
-            ValueError: If trace not found or invalid transition.
-        """
+    async def _update_lifecycle_status_column(
+        self, trace_id: str, *, column_name: str, value: Any
+    ) -> None:
+        """Update one lifecycle status column for a trace."""
         now = _utc_now()
-        values: dict[str, Any] = {"status": status, "last_updated": now}
-        if error_message is not None:
-            values["error_message"] = error_message
-        allowed_previous = _ALLOWED_PREVIOUS_STATUSES.get(status, set())
         async with self._engine.begin() as conn:
-            # No previous enforcement for FAILED status
-            if status == TraceStatus.FAILED:
-                result = await conn.execute(
-                    update(traces).where(traces.c.trace_id == trace_id).values(**values)
-                )
-            elif allowed_previous:
-                result = await conn.execute(
-                    update(traces)
-                    .where(traces.c.trace_id == trace_id)
-                    .where(traces.c.status.in_(allowed_previous))
-                    .values(**values)
-                )
-            else:
-                result = await conn.execute(
-                    update(traces)
-                    .where(traces.c.trace_id == trace_id)
-                    .where(traces.c.status == status)
-                    .values(**values)
-                )
-            if result.rowcount == 0:
-                current = (
+            result = await conn.execute(
+                update(traces)
+                .where(traces.c.trace_id == trace_id)
+                .values({column_name: value, "last_updated": now})
+            )
+            if not result.rowcount:
+                raise ValueError(f"Trace not found: {trace_id}")
+
+    async def update_write_status(
+        self, trace_id: str, write_status: TraceWriteStatus
+    ) -> None:
+        """Update write lifecycle status for a trace."""
+        await self._update_lifecycle_status_column(
+            trace_id, column_name="write_status", value=write_status
+        )
+
+    async def update_registration_status(
+        self, trace_id: str, registration_status: TraceRegistrationStatus
+    ) -> None:
+        """Update registration lifecycle status for a trace."""
+        await self._update_lifecycle_status_column(
+            trace_id, column_name="registration_status", value=registration_status
+        )
+
+    async def _mark_traces_registration_status(
+        self, trace_ids: list[str], registration_status: TraceRegistrationStatus
+    ) -> list[str]:
+        """Batch set registration lifecycle status for traces."""
+        if not trace_ids:
+            return []
+
+        # Keep only IDs that currently exist; caller can drop the rest from
+        # subsequent workflow steps.
+        unique_ids = list(dict.fromkeys(trace_ids))
+        async with self._engine.begin() as conn:
+            existing_rows = (
+                (
                     await conn.execute(
-                        select(traces.c.status).where(traces.c.trace_id == trace_id)
+                        select(traces.c.trace_id).where(
+                            traces.c.trace_id.in_(unique_ids)
+                        )
                     )
-                ).scalar_one_or_none()
-                if current is None:
-                    raise ValueError(f"Trace not found: {trace_id}")
-                if current == status:
-                    logger.debug(
-                        "Trace %s already has status %s (no-op)", trace_id, status
-                    )
-                    return False
-                raise ValueError(
-                    f"Invalid status transition {current} -> {status} for {trace_id}"
                 )
-            return True
+                .scalars()
+                .all()
+            )
+        existing_ids = [str(trace_id) for trace_id in existing_rows]
+        if not existing_ids:
+            return []
+
+        now = _utc_now()
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                update(traces)
+                .where(traces.c.trace_id.in_(existing_ids))
+                .values(
+                    registration_status=registration_status,
+                    last_updated=now,
+                )
+            )
+        return existing_ids
+
+    async def mark_traces_as_registering(self, trace_ids: list[str]) -> list[str]:
+        """Batch mark traces as registering."""
+        return await self._mark_traces_registration_status(
+            trace_ids, TraceRegistrationStatus.REGISTERING
+        )
+
+    async def mark_traces_as_registered(self, trace_ids: list[str]) -> list[str]:
+        """Batch mark traces as registered."""
+        return await self._mark_traces_registration_status(
+            trace_ids, TraceRegistrationStatus.REGISTERED
+        )
+
+    async def update_upload_status(
+        self, trace_id: str, upload_status: TraceUploadStatus
+    ) -> None:
+        """Update upload lifecycle status for a trace."""
+        await self._update_lifecycle_status_column(
+            trace_id, column_name="upload_status", value=upload_status
+        )
 
     async def record_error(
         self,
         trace_id: str,
         error_message: str,
         error_code: TraceErrorCode | None = None,
-        status: TraceStatus = TraceStatus.FAILED,
     ) -> None:
         """Record a standardized error for a trace.
 
@@ -245,8 +256,6 @@ class SqliteStateStore(StateStore):
             error_message (str): Error message of the error.
             error_code (TraceErrorCode | None): Error code of the
             error, by default None.
-            status (TraceStatus): Status to set for the trace after
-            recording the error, by default TraceStatus.FAILED.
         """
         now = _utc_now()
         async with self._engine.begin() as conn:
@@ -254,7 +263,6 @@ class SqliteStateStore(StateStore):
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
                 .values(
-                    status=status,
                     error_message=error_message,
                     error_code=error_code.value if error_code else None,
                     last_updated=now,
@@ -286,7 +294,21 @@ class SqliteStateStore(StateStore):
                 (
                     await conn.execute(
                         select(traces)
-                        .where(traces.c.status == TraceStatus.WRITTEN)
+                        .where(traces.c.write_status == TraceWriteStatus.WRITTEN)
+                        .where(
+                            traces.c.registration_status
+                            == TraceRegistrationStatus.REGISTERED
+                        )
+                        .where(
+                            traces.c.upload_status.in_(
+                                (
+                                    TraceUploadStatus.PENDING,
+                                    TraceUploadStatus.RETRYING,
+                                )
+                            )
+                        )
+                        .where(traces.c.path.is_not(None))
+                        .where(traces.c.data_type.is_not(None))
                         .where(
                             or_(
                                 # First time trying to upload
@@ -303,6 +325,97 @@ class SqliteStateStore(StateStore):
             )
 
         return [TraceRecord.from_row(dict(row)) for row in rows]
+
+    async def claim_traces_for_registration(
+        self, limit: int = 200, max_wait_s: float = 1
+    ) -> list[TraceRecord]:
+        """Claim traces ready for registration by transitioning to REGISTERING.
+
+        Selection criteria:
+        - write_status == WRITTEN
+        - registration_status == PENDING
+        Ordered by created_at ascending.
+        Claim policy:
+        - if at least `limit` candidates exist: claim immediately
+        - otherwise: claim only candidates older than `max_wait_s`
+          using `last_updated` as "became ready" timestamp
+        """
+        if limit <= 0 or max_wait_s < 0:
+            return []
+
+        now = _utc_now()
+        async with self._engine.begin() as conn:
+            candidate_rows = (
+                (
+                    await conn.execute(
+                        select(traces.c.trace_id, traces.c.last_updated)
+                        .where(traces.c.write_status == TraceWriteStatus.WRITTEN)
+                        .where(
+                            traces.c.registration_status
+                            == TraceRegistrationStatus.PENDING
+                        )
+                        .order_by(traces.c.created_at.asc())
+                        .limit(int(limit))
+                    )
+                )
+                .all()
+            )
+            logger.debug(
+                "claim_traces_for_registration fetched %d candidate rows (limit=%d, max_wait_s=%.2f)",
+                len(candidate_rows),
+                limit,
+                max_wait_s,
+            )
+
+            if len(candidate_rows) >= int(limit):
+                candidate_ids = [str(row[0]) for row in candidate_rows[: int(limit)]]
+            else:
+                cutoff = now - timedelta(seconds=float(max_wait_s))
+                candidate_ids = [
+                    str(trace_id)
+                    for trace_id, last_updated in candidate_rows
+                    if last_updated is not None and last_updated <= cutoff
+                ]
+            if not candidate_ids:
+                logger.debug("claim_traces_for_registration selected no claimable ids")
+                return []
+            logger.info(
+                "claim_traces_for_registration claiming %d traces (sample_ids=%s)",
+                len(candidate_ids),
+                candidate_ids[:5],
+            )
+
+            await conn.execute(
+                update(traces)
+                .where(traces.c.trace_id.in_(candidate_ids))
+                .where(traces.c.registration_status == TraceRegistrationStatus.PENDING)
+                .values(
+                    registration_status=TraceRegistrationStatus.REGISTERING,
+                    last_updated=now,
+                )
+            )
+
+            claimed_rows = (
+                (
+                    await conn.execute(
+                        select(traces)
+                        .where(traces.c.trace_id.in_(candidate_ids))
+                        .where(
+                            traces.c.registration_status
+                            == TraceRegistrationStatus.REGISTERING
+                        )
+                        .where(traces.c.last_updated == now)
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            logger.info(
+                "claim_traces_for_registration claimed %d rows",
+                len(claimed_rows),
+            )
+
+        return [TraceRecord.from_row(dict(row)) for row in claimed_rows]
 
     async def find_unreported_traces(self) -> list[TraceRecord]:
         """Return all traces that have not been progress-reported."""
@@ -326,7 +439,9 @@ class SqliteStateStore(StateStore):
             rows = (
                 (
                     await conn.execute(
-                        select(traces).where(traces.c.status == TraceStatus.FAILED)
+                        select(traces).where(
+                            traces.c.upload_status == TraceUploadStatus.FAILED
+                        )
                     )
                 )
                 .mappings()
@@ -346,6 +461,133 @@ class SqliteStateStore(StateStore):
                 )
             )
 
+    async def get_recording_progress_snapshot(
+        self, recording_id: str
+    ) -> RecordingProgressSnapshot | None:
+        """Return aggregate progress-report gate state for one recording."""
+        async with self._engine.begin() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        select(
+                            func.count().label("trace_count"),
+                            func.sum(
+                                case(
+                                    (
+                                        traces.c.progress_reported
+                                        == ProgressReportStatus.REPORTED,
+                                        1,
+                                    ),
+                                    else_=0,
+                                )
+                            ).label("reported_count"),
+                            func.sum(
+                                case((traces.c.stopped_at.is_(None), 1), else_=0)
+                            ).label("missing_stopped_at_count"),
+                            func.sum(
+                                case((traces.c.data_type.is_(None), 1), else_=0)
+                            ).label("missing_data_type_count"),
+                            func.sum(
+                                case((traces.c.bytes_written.is_(None), 1), else_=0)
+                            ).label("missing_bytes_written_count"),
+                            func.sum(
+                                case((traces.c.total_bytes.is_(None), 1), else_=0)
+                            ).label("missing_total_bytes_count"),
+                            func.sum(
+                                case(
+                                    (
+                                        traces.c.bytes_written.is_not(None)
+                                        & traces.c.total_bytes.is_not(None)
+                                        & (traces.c.bytes_written != traces.c.total_bytes),
+                                        1,
+                                    ),
+                                    else_=0,
+                                )
+                            ).label("mismatched_bytes_count"),
+                        ).where(traces.c.recording_id == recording_id)
+                    )
+                )
+                .mappings()
+                .one()
+            )
+
+        trace_count = int(row["trace_count"] or 0)
+        if trace_count == 0:
+            return None
+
+        return RecordingProgressSnapshot(
+            recording_id=recording_id,
+            trace_count=trace_count,
+            reported_count=int(row["reported_count"] or 0),
+            missing_stopped_at_count=int(row["missing_stopped_at_count"] or 0),
+            missing_data_type_count=int(row["missing_data_type_count"] or 0),
+            missing_bytes_written_count=int(row["missing_bytes_written_count"] or 0),
+            missing_total_bytes_count=int(row["missing_total_bytes_count"] or 0),
+            mismatched_bytes_count=int(row["mismatched_bytes_count"] or 0),
+        )
+
+    async def recording_has_reported_progress(self, recording_id: str) -> bool:
+        """Return True when any trace in recording is already REPORTED."""
+        async with self._engine.begin() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        select(traces.c.trace_id)
+                        .where(traces.c.recording_id == recording_id)
+                        .where(
+                            traces.c.progress_reported == ProgressReportStatus.REPORTED
+                        )
+                        .limit(1)
+                    )
+                )
+                .scalar_one_or_none()
+            )
+        return row is not None
+
+    async def delete_uploaded_traces_for_recording(self, recording_id: str) -> int:
+        """Delete all UPLOADED traces for one recording and return deleted count."""
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                delete(traces)
+                .where(traces.c.recording_id == recording_id)
+                .where(traces.c.upload_status == TraceUploadStatus.UPLOADED)
+            )
+        return int(result.rowcount or 0)
+
+    async def count_traces_for_recording(self, recording_id: str) -> int:
+        """Return count of traces associated with recording."""
+        async with self._engine.begin() as conn:
+            count = (
+                (
+                    await conn.execute(
+                        select(func.count()).where(
+                            traces.c.recording_id == recording_id
+                        )
+                    )
+                )
+                .scalar_one()
+            )
+        return int(count)
+
+    async def list_recording_ids_with_stopped_traces(self) -> list[str]:
+        """Return recording IDs that already have at least one stopped trace."""
+        async with self._engine.begin() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        select(traces.c.recording_id)
+                        .where(traces.c.stopped_at.is_not(None))
+                        .where(
+                            traces.c.progress_reported == ProgressReportStatus.PENDING
+                        )
+                        .distinct()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [str(recording_id) for recording_id in rows]
+
     async def mark_expected_trace_count_reported(self, recording_id: str) -> None:
         """Mark a recording's expected trace count as reported."""
         now = _utc_now()
@@ -364,7 +606,8 @@ class SqliteStateStore(StateStore):
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
                 .values(
-                    status=TraceStatus.WRITTEN,
+                    write_status=TraceWriteStatus.WRITTEN,
+                    upload_status=TraceUploadStatus.PENDING,
                     error_code=None,
                     error_message=None,
                     next_retry_at=None,
@@ -409,7 +652,9 @@ class SqliteStateStore(StateStore):
             robot_instance=robot_instance,
             path=path,
             total_bytes=None,
-            status=TraceStatus.INITIALIZING,
+            write_status=TraceWriteStatus.INITIALIZING,
+            registration_status=TraceRegistrationStatus.PENDING,
+            upload_status=TraceUploadStatus.PENDING,
             bytes_uploaded=0,
             progress_reported=ProgressReportStatus.PENDING,
             created_at=now,
@@ -426,13 +671,13 @@ class SqliteStateStore(StateStore):
             "path": path,
             "last_updated": now,
             # If trace_written received before metadata,
-            # and entry exists, set status to WRITTEN
-            "status": case(
+            # and entry exists, set status/write_status to WRITTEN
+            "write_status": case(
                 (
-                    traces.c.status == TraceStatus.PENDING_METADATA,
-                    TraceStatus.WRITTEN,
+                    traces.c.write_status == TraceWriteStatus.PENDING_METADATA,
+                    TraceWriteStatus.WRITTEN,
                 ),
-                else_=traces.c.status,
+                else_=traces.c.write_status,
             ),
         }
         stmt = stmt.on_conflict_do_update(
@@ -473,7 +718,9 @@ class SqliteStateStore(StateStore):
             recording_id=recording_id,
             bytes_written=bytes_written,
             total_bytes=bytes_written,
-            status=TraceStatus.PENDING_METADATA,
+            write_status=TraceWriteStatus.PENDING_METADATA,
+            registration_status=TraceRegistrationStatus.PENDING,
+            upload_status=TraceUploadStatus.PENDING,
             bytes_uploaded=0,
             progress_reported=ProgressReportStatus.PENDING,
             created_at=now,
@@ -491,12 +738,12 @@ class SqliteStateStore(StateStore):
                     else_=traces.c.total_bytes,
                 ),
                 "last_updated": now,
-                "status": case(
+                "write_status": case(
                     (
-                        traces.c.status == TraceStatus.INITIALIZING,
-                        TraceStatus.WRITTEN,
+                        traces.c.write_status == TraceWriteStatus.INITIALIZING,
+                        TraceWriteStatus.WRITTEN,
                     ),
-                    else_=traces.c.status,
+                    else_=traces.c.write_status,
                 ),
             },
         )
@@ -541,7 +788,7 @@ class SqliteStateStore(StateStore):
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
                 .values(
-                    status=TraceStatus.RETRYING,
+                    upload_status=TraceUploadStatus.RETRYING,
                     error_code=error_code.value,
                     error_message=error_message,
                     next_retry_at=next_retry_at,
@@ -586,7 +833,7 @@ class SqliteStateStore(StateStore):
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
                 .values(
-                    status=TraceStatus.FAILED,
+                    upload_status=TraceUploadStatus.FAILED,
                     error_code=error_code.value,
                     error_message=error_message,
                     next_retry_at=None,
@@ -606,15 +853,20 @@ class SqliteStateStore(StateStore):
         return int(attempts)
 
     async def reset_retrying_to_written(self) -> int:
-        """Reset RETRYING/UPLOADING traces back to WRITTEN (preserve retry schedule)."""
+        """Reset RETRYING/UPLOADING traces back to upload PENDING."""
         now = _utc_now()
         async with self._engine.begin() as conn:
             result = await conn.execute(
                 update(traces)
                 .where(
-                    traces.c.status.in_((TraceStatus.RETRYING, TraceStatus.UPLOADING))
+                    traces.c.upload_status.in_(
+                        (TraceUploadStatus.RETRYING, TraceUploadStatus.UPLOADING)
+                    )
                 )
-                .values(status=TraceStatus.WRITTEN, last_updated=now)
+                .values(
+                    upload_status=TraceUploadStatus.PENDING,
+                    last_updated=now,
+                )
             )
         return int(result.rowcount or 0)
 

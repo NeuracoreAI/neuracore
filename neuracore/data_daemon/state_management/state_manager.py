@@ -21,12 +21,17 @@ from neuracore.data_daemon.const import (
     UPLOAD_RETRY_MAX_SECONDS,
 )
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.registration_management.registration_manager import (
+    RegistrationCandidate,
+)
 from neuracore.data_daemon.models import (
     DataType,
-    ProgressReportStatus,
+    RecordingProgressSnapshot,
     TraceErrorCode,
+    TraceRegistrationStatus,
     TraceRecord,
-    TraceStatus,
+    TraceUploadStatus,
+    TraceWriteStatus,
 )
 
 from .state_store import StateStore
@@ -49,6 +54,7 @@ class StateManager:
         """Initialize with a persistence backend."""
         self._store = store
         self._reporting_recordings: set[str] = set()
+        self._stopped_recordings: set[str] = set()
         self._trace_written_retry_queue: asyncio.Queue[tuple[str, str, int, int]] = (
             asyncio.Queue()
         )
@@ -88,6 +94,16 @@ class StateManager:
         self._emitter.on(
             Emitter.PROGRESS_REPORT_FAILED, self.handle_progress_report_error
         )
+
+    async def rebuild_runtime_state(self) -> None:
+        """Rebuild ephemeral in-memory state from persisted traces on startup."""
+        recording_ids = await self._store.list_recording_ids_with_stopped_traces()
+        self._stopped_recordings = set(recording_ids)
+        if recording_ids:
+            logger.info(
+                "Rebuilt stopped recording cache from store (count=%d)",
+                len(recording_ids),
+            )
 
     async def _handle_start_trace(
         self,
@@ -151,6 +167,10 @@ class StateManager:
         robot_id: str | None,
         path: str,
     ) -> None:
+        # NOTE
+        # Here traces be written to disk but without metadata.
+        # So either this will just add the metadata of the written file,
+        # ...or create entry
         trace = await self._store.upsert_trace_metadata(
             trace_id=trace_id,
             recording_id=recording_id,
@@ -163,7 +183,7 @@ class StateManager:
             robot_instance=robot_instance,
             path=path,
         )
-        if trace.status == TraceStatus.WRITTEN:
+        if trace.write_status == TraceWriteStatus.WRITTEN:
             await self._finalize_trace(trace)
 
     async def _enqueue_start_trace_retry(
@@ -261,6 +281,7 @@ class StateManager:
 
         Records stop time immediately when the producer requests stop.
         """
+        self._stopped_recordings.add(recording_id)
         await self._store.set_stopped_ats(recording_id)
 
     async def handle_stop_recording(self, recording_id: str) -> None:
@@ -269,13 +290,18 @@ class StateManager:
         This event is emitted only after the bridge commits close for the
         recording; at this point RDM can flush/close traces for that recording.
         """
+        self._stopped_recordings.add(recording_id)
         self._emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
+        await self._store.set_stopped_ats(recording_id)
+        await self._emit_progress_report_if_recording_stopped(recording_id)
 
     async def handle_is_connected(self, is_connected: bool) -> None:
         """Handle a connection status event from the data bridge."""
         if not is_connected:
             return
 
+        # Wake registration worker after connectivity is restored.
+        self._emit_trace_registration_available()
         await self._reconcile_failed_traces()
 
         traces = await self._store.find_ready_traces()
@@ -283,6 +309,12 @@ class StateManager:
             await self._emit_ready_for_upload_from_trace(trace)
 
     async def _emit_ready_for_upload_from_trace(self, trace: TraceRecord) -> None:
+        if trace.path is None or trace.data_type is None or trace.data_type_name is None:
+            logger.warning(
+                "Skipping READY_FOR_UPLOAD for trace %s: incomplete metadata",
+                trace.trace_id,
+            )
+            return
         self._emitter.emit(
             Emitter.READY_FOR_UPLOAD,
             trace.trace_id,
@@ -326,7 +358,12 @@ class StateManager:
 
             await self._store.reset_failed_trace_for_retry(trace.trace_id)
             refreshed = await self._store.get_trace(trace.trace_id)
-            if refreshed is not None and refreshed.status == TraceStatus.WRITTEN:
+            if (
+                refreshed is not None
+                and refreshed.write_status == TraceWriteStatus.WRITTEN
+                and refreshed.registration_status == TraceRegistrationStatus.REGISTERED
+                and refreshed.upload_status == TraceUploadStatus.PENDING
+            ):
                 await self._emit_ready_for_upload_from_trace(refreshed)
 
     async def handle_upload_complete(self, trace_id: str) -> None:
@@ -341,29 +378,34 @@ class StateManager:
             logger.warning("Trace record not found: %s", trace_id)
             return
 
-        # Always delete local trace data after upload; DB metadata may be retained
-        # until progress reporting is complete.
-        self._emitter.emit(
-            Emitter.DELETE_TRACE,
-            trace_record.recording_id,
-            trace_id,
-            trace_record.data_type,
-        )
+        await self._store.update_upload_status(trace_id, TraceUploadStatus.UPLOADED)
 
-        await self._store.update_status(trace_id, TraceStatus.UPLOADED)
-        traces = await self._store.find_traces_by_recording_id(
+        # Always delete local trace data after upload 
+        # DB metadata may be kept until progress reporting total_bytes.
+        if trace_record.data_type is not None:
+            self._emitter.emit(
+                Emitter.DELETE_TRACE,
+                trace_record.recording_id,
+                trace_id,
+                trace_record.data_type,
+            )
+
+        # Delete traces kept but marked as uploaded after progress reporting.
+        if await self._delete_uploaded_traces_if_progress_reported(
             trace_record.recording_id
-        )
-        if any(
-            trace.progress_reported == ProgressReportStatus.REPORTED for trace in traces
         ):
-            for uploaded_trace in traces:
-                if uploaded_trace.status != TraceStatus.UPLOADED:
-                    continue
-                await self._store.delete_trace(uploaded_trace.trace_id)
             return
 
-        await self._emit_progress_report_if_recording_stopped(traces)
+        await self._emit_progress_report_if_recording_stopped(trace_record.recording_id)
+
+    async def _delete_uploaded_traces_if_progress_reported(
+        self, recording_id: str
+    ) -> bool:
+        """Delete uploaded trace metadata when reporting is already complete."""
+        if not await self._store.recording_has_reported_progress(recording_id):
+            return False
+        await self._store.delete_uploaded_traces_for_recording(recording_id)
+        return True
 
     async def _handle_trace_written(
         self, trace_id: str, recording_id: str, bytes_written: int
@@ -392,7 +434,7 @@ class StateManager:
             recording_id=recording_id,
             bytes_written=bytes_written,
         )
-        if trace.status == TraceStatus.WRITTEN:
+        if trace.write_status == TraceWriteStatus.WRITTEN:
             await self._finalize_trace(trace)
 
     async def _enqueue_trace_written_retry(
@@ -435,79 +477,104 @@ class StateManager:
                 self._trace_written_retry_queue.task_done()
 
     async def _finalize_trace(self, trace: TraceRecord) -> None:
-        """Finalize a WRITTEN trace and emit READY_FOR_UPLOAD.
+        """Finalize trace for upload."""
+        # Mark written internally
+        await self._store.update_write_status(trace.trace_id, TraceWriteStatus.WRITTEN)
 
-        Emits READY_FOR_UPLOAD event for the uploader.
-        """
-        self._emitter.emit(
-            Emitter.READY_FOR_UPLOAD,
-            trace.trace_id,
-            trace.recording_id,
-            trace.path,
-            trace.data_type,
-            trace.data_type_name,
-            trace.bytes_uploaded,
-        )
-        traces = await self._store.find_traces_by_recording_id(trace.recording_id)
-        if trace.stopped_at is None and any(
-            sibling_trace.stopped_at is not None for sibling_trace in traces
-        ):
+        # Start registering loop
+        self._emit_trace_registration_available()
+
+        # If stop was already requested, ensure late-arriving traces get stopped_at.
+        if trace.recording_id in self._stopped_recordings:
             await self._store.set_stopped_ats(trace.recording_id)
-        if all(trace.expected_trace_count_reported != 1 for trace in traces):
+
+        trace_count = await self._store.count_traces_for_recording(trace.recording_id)
+        # Make expected trace count call (on first opportunity only)
+        # 1 = reported, 0 = Not reported
+        if trace.expected_trace_count_reported != 1:
             asyncio.create_task(
-                self._set_expected_trace_count(trace.recording_id, len(traces))
+                self._set_expected_trace_count(trace.recording_id, trace_count)
             )
-        await self._emit_progress_report_if_recording_stopped(traces)
+
+        # Possibly last trace to be written, so check if so and can report progress
+        await self._emit_progress_report_if_recording_stopped(trace.recording_id)
 
     async def handle_upload_started(self, trace_id: str) -> None:
         """Mark a trace as uploading once the uploader starts."""
-        await self._store.update_status(trace_id, TraceStatus.UPLOADING)
+        await self._store.update_upload_status(trace_id, TraceUploadStatus.UPLOADING)
+
+    def _emit_trace_registration_available(self) -> None:
+        self._emitter.emit(Emitter.TRACE_REGISTRATION_AVAILABLE)
 
     async def _emit_progress_report_if_recording_stopped(
-        self, traces: list[TraceRecord]
+        self, recording_id: str
     ) -> None:
-        if not traces:
-            return
-
-        recording_id = traces[0].recording_id
-
         if recording_id in self._reporting_recordings:
             return
 
-        if any(
-            trace.progress_reported == ProgressReportStatus.REPORTED for trace in traces
-        ):
+        snapshot = await self._store.get_recording_progress_snapshot(recording_id)
+        if snapshot is None:
             return
 
-        # Only report after the recording has been explicitly stopped for every
-        # trace currently known to this recording.
-        missing_stopped_at = sum(trace.stopped_at is None for trace in traces)
-        if missing_stopped_at:
-            return
-
-        # Only report once every trace has a final byte count and metadata.
-        missing_data_type = sum(trace.data_type is None for trace in traces)
-        missing_bytes_written = sum(trace.bytes_written is None for trace in traces)
-        missing_total_bytes = sum(trace.total_bytes is None for trace in traces)
-        mismatched_bytes = sum(
-            (
-                trace.bytes_written is not None
-                and trace.total_bytes is not None
-                and trace.bytes_written != trace.total_bytes
-            )
-            for trace in traces
+        should_stop, snapshot = await self._reconcile_progress_report_state(
+            recording_id, snapshot
         )
-        if (
-            missing_data_type
-            or missing_bytes_written
-            or missing_total_bytes
-            or mismatched_bytes
-        ):
+        if should_stop:
             return
 
+        if not self._is_progress_report_eligible(snapshot):
+            return
+
+        traces = await self._store.find_traces_by_recording_id(recording_id)
+        if not traces:
+            return
+        self._schedule_progress_report(recording_id, traces)
+
+    async def _reconcile_progress_report_state(
+        self, recording_id: str, snapshot: RecordingProgressSnapshot
+    ) -> tuple[bool, RecordingProgressSnapshot]:
+        """Normalize partial progress/stopped states before eligibility checks.
+
+        Returns:
+            (should_stop, snapshot)
+            - should_stop=True: caller should return early
+            - snapshot: aggregate gate state (possibly refreshed after reconciliation)
+        """
+        if snapshot.reported_count == snapshot.trace_count:
+            return True, snapshot
+        if snapshot.reported_count > 0:
+            # Reconcile partial-reported recordings to a consistent terminal state.
+            await self._store.mark_recording_reported(recording_id)
+            return True, snapshot
+
+        if snapshot.missing_stopped_at_count == snapshot.trace_count:
+            return True, snapshot
+        if snapshot.missing_stopped_at_count > 0:
+            # Reconcile partial stop state when some traces have stopped_at
+            # and others do not.
+            await self._store.set_stopped_ats(recording_id)
+            refreshed = await self._store.get_recording_progress_snapshot(recording_id)
+            if refreshed is None:
+                return True, snapshot
+            return False, refreshed
+
+        return False, snapshot
+
+    def _is_progress_report_eligible(self, snapshot: RecordingProgressSnapshot) -> bool:
+        """Return True when traces have complete, consistent byte totals."""
+        return not (
+            snapshot.missing_data_type_count
+            or snapshot.missing_bytes_written_count
+            or snapshot.missing_total_bytes_count
+            or snapshot.mismatched_bytes_count
+        )
+
+    def _schedule_progress_report(
+        self, recording_id: str, traces: list[TraceRecord]
+    ) -> None:
+        """Schedule async progress reporting for a recording."""
         self._reporting_recordings.add(recording_id)
         start_time, end_time = self._find_recording_start_and_end(traces)
-        sum(int(trace.total_bytes or 0) for trace in traces)
         asyncio.create_task(self._emit_progress_report(start_time, end_time, traces))
 
     async def _emit_progress_report(
@@ -618,12 +685,9 @@ class StateManager:
             recording_id (str): unique identifier for the recording.
         """
         self._reporting_recordings.discard(recording_id)
+        self._stopped_recordings.discard(recording_id)
         await self._store.mark_recording_reported(recording_id)
-        traces = await self._store.find_traces_by_recording_id(recording_id)
-        for trace in traces:
-            if trace.status != TraceStatus.UPLOADED:
-                continue
-            await self._store.delete_trace(trace.trace_id)
+        await self._store.delete_uploaded_traces_for_recording(recording_id)
 
     def _find_recording_start_and_end(
         self, traces: list[TraceRecord]
@@ -641,15 +705,123 @@ class StateManager:
         """Increment uploaded byte count for a trace."""
         await self._store.update_bytes_uploaded(trace_id, bytes_uploaded)
 
-    async def update_status(
-        self, trace_id: str, status: TraceStatus, *, error_message: str | None = None
-    ) -> None:
-        """Update the status and optional error message for a trace."""
-        await self._store.update_status(
-            trace_id,
-            status,
-            error_message=error_message,
+    async def mark_traces_registering(self, trace_ids: list[str]) -> list[str]:
+        """Batch mark traces as currently registering with the backend."""
+        if not trace_ids:
+            return []
+
+        updated = await self._store.mark_traces_as_registering(trace_ids)
+        logger.info(
+            "StateManager marked traces REGISTERING (requested=%d, updated=%d)",
+            len(trace_ids),
+            len(updated),
         )
+        return updated
+
+    async def mark_traces_registered(self, trace_ids: list[str]) -> list[str]:
+        """Batch mark traces as registered with the backend."""
+        if not trace_ids:
+            return []
+
+        updated = await self._store.mark_traces_as_registered(trace_ids)
+        logger.info(
+            "StateManager marked traces REGISTERED (requested=%d, updated=%d)",
+            len(trace_ids),
+            len(updated),
+        )
+        return updated
+
+    async def claim_traces_for_registration(
+        self, limit: int = 200, max_wait_s: float = 1
+    ) -> list[RegistrationCandidate]:
+        """Claim registration-eligible traces from state storage."""
+        records = await self._store.claim_traces_for_registration(limit, max_wait_s)
+        if records:
+            logger.info(
+                "StateManager claim_traces_for_registration returned %d records (limit=%d, max_wait_s=%.2f)",
+                len(records),
+                limit,
+                max_wait_s,
+            )
+        else:
+            logger.debug(
+                "StateManager claim_traces_for_registration returned 0 records (limit=%d, max_wait_s=%.2f)",
+                limit,
+                max_wait_s,
+            )
+        candidates: list[RegistrationCandidate] = []
+        skipped_missing_data_type = 0
+        for trace in records:
+            if trace.data_type is None:
+                logger.warning(
+                    "Skipping registration claim for trace %s: missing data_type",
+                    trace.trace_id,
+                )
+                skipped_missing_data_type += 1
+                continue
+            candidates.append(
+                RegistrationCandidate(
+                    trace_id=trace.trace_id,
+                    recording_id=trace.recording_id,
+                    data_type=trace.data_type,
+                )
+            )
+        if candidates or skipped_missing_data_type:
+            logger.info(
+                "StateManager prepared %d registration candidates (skipped_missing_data_type=%d)",
+                len(candidates),
+                skipped_missing_data_type,
+            )
+        else:
+            logger.debug(
+                "StateManager prepared 0 registration candidates"
+            )
+        return candidates
+
+    async def mark_traces_registration_failed(
+        self, trace_ids: list[str], error_message: str
+    ) -> None:
+        """Mark traces as registration-retry pending after a failed batch."""
+        if not trace_ids:
+            return
+        logger.warning(
+            "StateManager marking registration failed traces (count=%d, sample_ids=%s, error=%s)",
+            len(trace_ids),
+            trace_ids[:5],
+            error_message,
+        )
+        for trace_id in trace_ids:
+            await self._store.update_registration_status(
+                trace_id, TraceRegistrationStatus.RETRYING
+            )
+            await self._store.update_registration_status(
+                trace_id, TraceRegistrationStatus.PENDING
+            )
+            await self._store.record_error(
+                trace_id,
+                error_message=error_message,
+                error_code=TraceErrorCode.UNKNOWN,
+            )
+        self._emit_trace_registration_available()
+
+    async def emit_ready_for_upload(self, trace_ids: list[str]) -> None:
+        """Emit READY_FOR_UPLOAD for trace IDs that are upload-eligible."""
+        if not trace_ids:
+            return
+        logger.info(
+            "StateManager emitting READY_FOR_UPLOAD for trace ids (count=%d, sample_ids=%s)",
+            len(trace_ids),
+            trace_ids[:5],
+        )
+        for trace_id in trace_ids:
+            trace = await self._store.get_trace(trace_id)
+            if trace is None:
+                logger.warning(
+                    "Cannot emit READY_FOR_UPLOAD: trace %s missing from store",
+                    trace_id,
+                )
+                continue
+            await self._emit_ready_for_upload_from_trace(trace)
 
     async def handle_upload_failed(
         self,
@@ -708,7 +880,7 @@ class StateManager:
         trace = await self._store.get_trace(trace_id)
         if trace is None:
             return
-        if trace.status != TraceStatus.RETRYING:
+        if trace.upload_status != TraceUploadStatus.RETRYING:
             return
         if trace.next_retry_at is not None:
             now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -748,7 +920,6 @@ class StateManager:
                 trace.trace_id,
                 error_message,
                 error_code=TraceErrorCode.PROGRESS_REPORT_ERROR,
-                status=TraceStatus.FAILED,
             )
 
     async def _record_error(
@@ -756,7 +927,6 @@ class StateManager:
         trace_id: str,
         error_message: str,
         error_code: TraceErrorCode | None = TraceErrorCode.UNKNOWN,
-        status: TraceStatus = TraceStatus.FAILED,
     ) -> None:
         """Record an error for a trace.
 
@@ -767,15 +937,12 @@ class StateManager:
                 Error message of the error.
             error_code: TraceErrorCode | None, optional
                 Error code of the error, by default None.
-            status: TraceStatus, optional
-                Status to set for the trace after recording the error,
-                by default TraceStatus.FAILED.
         """
+        await self._store.update_upload_status(trace_id, TraceUploadStatus.FAILED)
         await self._store.record_error(
             trace_id,
             error_message,
             error_code,
-            status,
         )
 
     async def delete_trace(self, trace_id: str) -> None:

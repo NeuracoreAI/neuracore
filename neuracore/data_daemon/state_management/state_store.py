@@ -7,9 +7,12 @@ from typing import Protocol
 
 from neuracore.data_daemon.models import (
     DataType,
+    RecordingProgressSnapshot,
     TraceErrorCode,
+    TraceRegistrationStatus,
     TraceRecord,
-    TraceStatus,
+    TraceUploadStatus,
+    TraceWriteStatus,
 )
 
 
@@ -40,12 +43,45 @@ class StateStore(Protocol):
         """Return all traces marked as ready for upload."""
         ...
 
+    async def claim_traces_for_registration(
+        self, limit: int, max_wait_s: float
+    ) -> list[TraceRecord]:
+        """Claim traces for registration using size-or-age policy.
+
+        Claims immediately when enough traces are available to fill `limit`.
+        Otherwise, claims only traces older than `max_wait_s` based on
+        `last_updated`.
+        """
+        ...
+
     async def find_unreported_traces(self) -> list[TraceRecord]:
         """Return all traces that have not been progress-reported."""
         ...
 
     async def mark_recording_reported(self, recording_id: str) -> None:
         """Mark a recording as progress-reported."""
+        ...
+
+    async def get_recording_progress_snapshot(
+        self, recording_id: str
+    ) -> RecordingProgressSnapshot | None:
+        """Return aggregate progress-report gate state for one recording."""
+        ...
+
+    async def recording_has_reported_progress(self, recording_id: str) -> bool:
+        """Return True when any trace in recording is already REPORTED."""
+        ...
+
+    async def delete_uploaded_traces_for_recording(self, recording_id: str) -> int:
+        """Delete all UPLOADED traces for one recording and return deleted count."""
+        ...
+
+    async def count_traces_for_recording(self, recording_id: str) -> int:
+        """Return count of traces associated with recording."""
+        ...
+
+    async def list_recording_ids_with_stopped_traces(self) -> list[str]:
+        """Return recording IDs that already have at least one stopped trace."""
         ...
 
     async def mark_expected_trace_count_reported(self, recording_id: str) -> None:
@@ -60,18 +96,36 @@ class StateStore(Protocol):
         """Reset a failed trace back to WRITTEN for retry."""
         ...
 
-    async def update_status(
-        self,
-        trace_id: str,
-        status: TraceStatus,
-        *,
-        error_message: str | None = None,
-    ) -> bool:
-        """Update the status and optional error message for a trace.
+    async def update_write_status(
+        self, trace_id: str, write_status: TraceWriteStatus
+    ) -> None:
+        """Update write lifecycle status for a trace."""
+        ...
 
-        Returns True if the status was changed, False if already at target status.
-        Raises ValueError for invalid transitions or missing trace.
+    async def update_registration_status(
+        self, trace_id: str, registration_status: TraceRegistrationStatus
+    ) -> None:
+        """Update registration lifecycle status for a trace."""
+        ...
+
+    async def mark_traces_as_registering(self, trace_ids: list[str]) -> list[str]:
+        """Batch mark traces as registering.
+
+        Returns trace_ids that were actually updated.
         """
+        ...
+
+    async def mark_traces_as_registered(self, trace_ids: list[str]) -> list[str]:
+        """Batch mark traces as registered.
+
+        Returns trace_ids that were actually updated.
+        """
+        ...
+
+    async def update_upload_status(
+        self, trace_id: str, upload_status: TraceUploadStatus
+    ) -> None:
+        """Update upload lifecycle status for a trace."""
         ...
 
     async def record_error(
@@ -79,7 +133,6 @@ class StateStore(Protocol):
         trace_id: str,
         error_message: str,
         error_code: TraceErrorCode | None = None,
-        status: TraceStatus = TraceStatus.FAILED,
     ) -> None:
         """Record a standardized error for a trace."""
         ...
@@ -151,5 +204,5 @@ class StateStore(Protocol):
         ...
 
     async def reset_retrying_to_written(self) -> int:
-        """Reset RETRYING/UPLOADING traces back to WRITTEN (preserve retry schedule)."""
+        """Reset RETRYING/UPLOADING traces back to upload PENDING."""
         ...

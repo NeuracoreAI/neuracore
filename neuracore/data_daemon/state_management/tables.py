@@ -14,7 +14,13 @@ from sqlalchemy import (
     func,
 )
 
-from neuracore.data_daemon.models import DataType, ProgressReportStatus, TraceStatus
+from neuracore.data_daemon.models import (
+    DataType,
+    ProgressReportStatus,
+    TraceRegistrationStatus,
+    TraceUploadStatus,
+    TraceWriteStatus,
+)
 
 metadata = MetaData()
 
@@ -23,13 +29,34 @@ traces = Table(
     metadata,
     Column("trace_id", Text, primary_key=True),
     Column(
-        "status",
+        "write_status",
         Enum(
-            TraceStatus,
+            TraceWriteStatus,
             native_enum=False,
             values_callable=lambda x: [e.value for e in x],
         ),
         nullable=False,
+        default=TraceWriteStatus.PENDING,
+    ),
+    Column(
+        "registration_status",
+        Enum(
+            TraceRegistrationStatus,
+            native_enum=False,
+            values_callable=lambda x: [e.value for e in x],
+        ),
+        nullable=False,
+        default=TraceRegistrationStatus.PENDING,
+    ),
+    Column(
+        "upload_status",
+        Enum(
+            TraceUploadStatus,
+            native_enum=False,
+            values_callable=lambda x: [e.value for e in x],
+        ),
+        nullable=False,
+        default=TraceUploadStatus.PENDING,
     ),
     Column("recording_id", Text, nullable=False),
     Column(
@@ -80,5 +107,15 @@ traces = Table(
 )
 
 Index("idx_traces_trace_id", traces.c.trace_id)
-Index("idx_traces_status", traces.c.status)
+Index("idx_traces_recording_id", traces.c.recording_id)
+Index("idx_traces_recording_id_stopped_at", traces.c.recording_id, traces.c.stopped_at)
+Index(
+    "idx_traces_recording_id_upload_progress",
+    traces.c.recording_id,
+    traces.c.upload_status,
+    traces.c.progress_reported,
+)
+Index("idx_traces_write_status", traces.c.write_status)
+Index("idx_traces_registration_status", traces.c.registration_status)
+Index("idx_traces_upload_status", traces.c.upload_status)
 Index("idx_traces_next_retry_at", traces.c.next_retry_at)

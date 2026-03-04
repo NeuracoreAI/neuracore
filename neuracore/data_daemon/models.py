@@ -10,6 +10,8 @@ from typing import Any
 from neuracore_types import DATA_TYPE_CONTENT_MAPPING, DataType
 from pydantic import BaseModel
 
+from neuracore.utils import deprecated
+
 
 def get_content_type(data_type: DataType) -> str:
     """Return the content type for a given DataType."""
@@ -53,6 +55,38 @@ class TraceStatus(str, Enum):
     FAILED = "failed"
 
 
+class TraceWriteStatus(str, Enum):
+    """Write/persistence lifecycle for a trace."""
+
+    PENDING = "pending"
+    INITIALIZING = "initializing"
+    PENDING_METADATA = "pending_metadata"
+    WRITTEN = "written"
+    FAILED = "failed"
+
+
+class TraceRegistrationStatus(str, Enum):
+    """Backend registration lifecycle for a trace."""
+
+    PENDING = "pending"
+    REGISTERING = "registering"
+    REGISTERED = "registered"
+    RETRYING = "retrying"
+    FAILED = "failed"
+
+
+class TraceUploadStatus(str, Enum):
+    """Upload lifecycle for a trace."""
+
+    PENDING = "pending"
+    QUEUED = "queued"
+    UPLOADING = "uploading"
+    PAUSED = "paused"
+    UPLOADED = "uploaded"
+    RETRYING = "retrying"
+    FAILED = "failed"
+
+
 class TraceErrorCode(str, Enum):
     """Standardized error codes for trace failures."""
 
@@ -65,13 +99,23 @@ class TraceErrorCode(str, Enum):
     PROGRESS_REPORT_ERROR = "progress_report_error"
 
 
+class TraceRegistrationErrorCode(str, Enum):
+    """Standardized error codes for data-trace registration failures."""
+
+    UNKNOWN = "unknown"
+    PENDING_RECORDING_NOT_FOUND = "pending_recording_not_found"
+    STREAM_REGISTRATION_ERROR = "stream_registration_error"
+    REGISTER_DATA_TRACE_FAILED = "register_data_trace_failed"
+    NETWORK_ERROR = "network_error"
+
+
 class ProgressReportStatus(str, Enum):
     """Status of progress report for a trace."""
 
     PENDING = "pending"
     REPORTED = "reported"
 
-
+@deprecated('Used for backwards compatibility')
 def _parse_progress_reported(value: Any) -> ProgressReportStatus:
     """Parse progress_reported from DB (int 0/1 or enum string) to enum."""
     if value is None or value == 0 or value == "pending":
@@ -82,13 +126,39 @@ def _parse_progress_reported(value: Any) -> ProgressReportStatus:
         return value
     return ProgressReportStatus(str(value))
 
+@deprecated('Used for backwards compatibility')
+def _parse_write_status(value: Any) -> TraceWriteStatus:
+    """Parse write_status from DB value to enum."""
+    if value is None:
+        return TraceWriteStatus.PENDING
+    if isinstance(value, TraceWriteStatus):
+        return value
+    return TraceWriteStatus(str(value))
+
+@deprecated('Used for backwards compatibility')
+def _parse_registration_status(value: Any) -> TraceRegistrationStatus:
+    """Parse registration_status from DB value to enum."""
+    if value is None:
+        return TraceRegistrationStatus.PENDING
+    if isinstance(value, TraceRegistrationStatus):
+        return value
+    return TraceRegistrationStatus(str(value))
+
+@deprecated('Used for backwards compatibility')
+def _parse_upload_status(value: Any) -> TraceUploadStatus:
+    """Parse upload_status from DB value to enum."""
+    if value is None:
+        return TraceUploadStatus.PENDING
+    if isinstance(value, TraceUploadStatus):
+        return value
+    return TraceUploadStatus(str(value))
+
 
 @dataclass(frozen=True)
 class TraceRecord:
     """Typed representation of a trace row in the state store."""
 
     trace_id: str
-    status: TraceStatus
     recording_id: str
     data_type: DataType | None
     data_type_name: str | None
@@ -110,16 +180,13 @@ class TraceRecord:
     num_upload_attempts: int
     next_retry_at: datetime | None
     stopped_at: datetime | None
+    write_status: TraceWriteStatus = TraceWriteStatus.PENDING
+    registration_status: TraceRegistrationStatus = TraceRegistrationStatus.PENDING
+    upload_status: TraceUploadStatus = TraceUploadStatus.PENDING
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "TraceRecord":
         """Build a TraceRecord from a SQLAlchemy mapping row."""
-        status_raw = row["status"]
-        status = (
-            status_raw
-            if isinstance(status_raw, TraceStatus)
-            else TraceStatus(str(status_raw))
-        )
         data_type_raw = row.get("data_type")
         data_type = (
             None
@@ -141,7 +208,6 @@ class TraceRecord:
         bytes_written_raw = row.get("bytes_written")
         return cls(
             trace_id=str(row["trace_id"]),
-            status=status,
             recording_id=str(row["recording_id"]),
             data_type=data_type,
             data_type_name=row.get("data_type_name"),
@@ -167,7 +233,26 @@ class TraceRecord:
             num_upload_attempts=int(row.get("num_upload_attempts", 0)),
             next_retry_at=row.get("next_retry_at"),
             stopped_at=row.get("stopped_at"),
+            write_status=_parse_write_status(row.get("write_status")),
+            registration_status=_parse_registration_status(
+                row.get("registration_status")
+            ),
+            upload_status=_parse_upload_status(row.get("upload_status")),
         )
+
+
+@dataclass(frozen=True)
+class RecordingProgressSnapshot:
+    """Aggregate progress-report gate state for one recording."""
+
+    recording_id: str
+    trace_count: int
+    reported_count: int
+    missing_stopped_at_count: int
+    missing_data_type_count: int
+    missing_bytes_written_count: int
+    missing_total_bytes_count: int
+    mismatched_bytes_count: int
 
 
 class OpenRingBufferModel(BaseModel):

@@ -82,6 +82,10 @@ class Emitter(AsyncIOEventEmitter):
     RECORDING_STOPPED = "RECORDING_STOPPED"
     # (recording_id: str)
 
+    # State manager -> Registration manager
+    TRACE_REGISTRATION_AVAILABLE = "TRACE_REGISTRATION_AVAILABLE"
+    # (recording_id: str)
+
     def __init__(self, *, loop: asyncio.AbstractEventLoop) -> None:
         """Initialize the event emitter.
 

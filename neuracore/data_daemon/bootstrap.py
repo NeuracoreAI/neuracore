@@ -22,6 +22,9 @@ from neuracore.data_daemon.connection_management.connection_manager import (
 from neuracore.data_daemon.const import CONFIG_DIR
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.progress_reporter import ProgressReporter
+from neuracore.data_daemon.registration_management.registration_manager import (
+    RegistrationManager,
+)
 from neuracore.data_daemon.recording_encoding_disk_manager import (
     recording_disk_manager as rdm,
 )
@@ -47,6 +50,7 @@ class AsyncServices:
     client_session: aiohttp.ClientSession
     state_store: SqliteStateStore
     state_manager: StateManager
+    registration_manager: RegistrationManager
     upload_manager: UploadManager
     connection_manager: ConnectionManager
     progress_reporter: ProgressReporter
@@ -94,7 +98,15 @@ async def bootstrap_async_services(
     await state_store.reset_retrying_to_written()
 
     state_manager = StateManager(state_store)
+    await state_manager.rebuild_runtime_state()
     logger.info("StateManager initialized")
+
+    registration_manager = RegistrationManager(
+        client_session=client_session,
+        state_api=state_manager,
+    )
+    registration_manager.start()
+    logger.info("RegistrationManager started")
 
     upload_manager = UploadManager(config, client_session)
     logger.info("UploadManager initialized")
@@ -112,6 +124,7 @@ async def bootstrap_async_services(
         client_session=client_session,
         state_store=state_store,
         state_manager=state_manager,
+        registration_manager=registration_manager,
         upload_manager=upload_manager,
         connection_manager=connection_manager,
         progress_reporter=progress_reporter,
@@ -134,6 +147,12 @@ async def shutdown_async_services(services: AsyncServices) -> None:
         logger.debug("ConnectionManager stopped")
     except Exception:
         logger.exception("Error stopping ConnectionManager")
+
+    try:
+        await services.registration_manager.shutdown()
+        logger.debug("RegistrationManager stopped")
+    except Exception:
+        logger.exception("Error stopping RegistrationManager")
 
     try:
         await services.upload_manager.shutdown()

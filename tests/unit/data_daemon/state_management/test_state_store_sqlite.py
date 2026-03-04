@@ -12,7 +12,9 @@ from neuracore.data_daemon.models import (
     DATA_TYPE_CONTENT_MAPPING,
     ProgressReportStatus,
     TraceErrorCode,
-    TraceStatus,
+    TraceRegistrationStatus,
+    TraceUploadStatus,
+    TraceWriteStatus,
 )
 from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
 from neuracore.data_daemon.state_management.tables import traces
@@ -49,7 +51,7 @@ async def test_upsert_trace_metadata_inserts_row(store: SqliteStateStore) -> Non
         robot_instance=ROBOT_INSTANCE,
     )
 
-    assert trace.status == TraceStatus.INITIALIZING
+    assert trace.write_status == TraceWriteStatus.INITIALIZING
     row = await _get_trace_row(store, "trace-1")
     assert row is not None
     assert row["trace_id"] == "trace-1"
@@ -57,7 +59,7 @@ async def test_upsert_trace_metadata_inserts_row(store: SqliteStateStore) -> Non
     assert row["data_type"] == PRIMARY_DATA_TYPE
     assert row["path"] == "/tmp/trace-1.bin"
     assert row["total_bytes"] is None
-    assert row["status"] == TraceStatus.INITIALIZING
+    assert row["write_status"] == TraceWriteStatus.INITIALIZING
     assert row["bytes_written"] is None
     assert row["bytes_uploaded"] == 0
     assert row["progress_reported"] == ProgressReportStatus.PENDING
@@ -84,14 +86,14 @@ async def test_upsert_trace_metadata_updates_existing(store: SqliteStateStore) -
         robot_instance=ROBOT_INSTANCE,
     )
 
-    assert trace.status == TraceStatus.INITIALIZING
+    assert trace.write_status == TraceWriteStatus.INITIALIZING
     row = await _get_trace_row(store, "trace-2")
     assert row is not None
     assert row["recording_id"] == "rec-1"
     assert row["data_type"] == SECONDARY_DATA_TYPE
     assert row["path"] == "/tmp/trace-2.mp4"
     assert row["total_bytes"] is None
-    assert row["status"] == TraceStatus.INITIALIZING
+    assert row["write_status"] == TraceWriteStatus.INITIALIZING
 
 
 @pytest.mark.asyncio
@@ -102,14 +104,14 @@ async def test_upsert_trace_bytes_inserts_row(store: SqliteStateStore) -> None:
         bytes_written=64,
     )
 
-    assert trace.status == TraceStatus.PENDING_METADATA
+    assert trace.write_status == TraceWriteStatus.PENDING_METADATA
     row = await _get_trace_row(store, "trace-bytes-1")
     assert row is not None
     assert row["trace_id"] == "trace-bytes-1"
     assert row["recording_id"] == "rec-bytes-1"
     assert row["bytes_written"] == 64
     assert row["total_bytes"] == 64
-    assert row["status"] == TraceStatus.PENDING_METADATA
+    assert row["write_status"] == TraceWriteStatus.PENDING_METADATA
     assert row["bytes_uploaded"] == 0
 
 
@@ -132,7 +134,7 @@ async def test_upsert_trace_bytes_preserves_existing_total_bytes(
         bytes_written=64,
     )
 
-    assert trace.status == TraceStatus.WRITTEN
+    assert trace.write_status == TraceWriteStatus.WRITTEN
     row = await _get_trace_row(store, "trace-bytes-preserve-total")
     assert row is not None
     assert row["bytes_written"] == 64
@@ -157,7 +159,7 @@ async def test_upsert_trace_bytes_backfills_missing_total_bytes(
         bytes_written=96,
     )
 
-    assert trace.status == TraceStatus.WRITTEN
+    assert trace.write_status == TraceWriteStatus.WRITTEN
     row = await _get_trace_row(store, "trace-bytes-backfill-total")
     assert row is not None
     assert row["bytes_written"] == 96
@@ -186,7 +188,7 @@ async def test_update_bytes_uploaded_sets_value(store: SqliteStateStore) -> None
 
 
 @pytest.mark.asyncio
-async def test_update_status_sets_error(store: SqliteStateStore) -> None:
+async def test_update_upload_status_and_record_error(store: SqliteStateStore) -> None:
     await store.upsert_trace_metadata(
         trace_id="trace-4",
         recording_id="rec-4",
@@ -201,11 +203,12 @@ async def test_update_status_sets_error(store: SqliteStateStore) -> None:
         bytes_written=64,
     )
 
-    await store.update_status("trace-4", TraceStatus.FAILED, error_message="boom")
+    await store.update_upload_status("trace-4", TraceUploadStatus.FAILED)
+    await store.record_error("trace-4", error_message="boom")
 
     row = await _get_trace_row(store, "trace-4")
     assert row is not None
-    assert row["status"] == TraceStatus.FAILED
+    assert row["upload_status"] == TraceUploadStatus.FAILED
     assert row["error_message"] == "boom"
 
 
@@ -228,7 +231,7 @@ async def test_record_error_sets_code_and_status(store: SqliteStateStore) -> Non
 
     row = await _get_trace_row(store, "trace-4b")
     assert row is not None
-    assert row["status"] == TraceStatus.FAILED
+    assert row["upload_status"] == TraceUploadStatus.FAILED
     assert row["error_message"] == "disk full"
     assert row["error_code"] == TraceErrorCode.DISK_FULL.value
 
@@ -246,7 +249,7 @@ async def test_join_pattern_metadata_then_bytes_transitions_to_written(
         path="/tmp/trace-6b.bin",
         robot_instance=ROBOT_INSTANCE,
     )
-    assert trace.status == TraceStatus.INITIALIZING
+    assert trace.write_status == TraceWriteStatus.INITIALIZING
 
     trace = await store.upsert_trace_bytes(
         trace_id="trace-6b",
@@ -254,10 +257,10 @@ async def test_join_pattern_metadata_then_bytes_transitions_to_written(
         bytes_written=64,
     )
 
-    assert trace.status == TraceStatus.WRITTEN
+    assert trace.write_status == TraceWriteStatus.WRITTEN
     row = await _get_trace_row(store, "trace-6b")
     assert row is not None
-    assert row["status"] == TraceStatus.WRITTEN
+    assert row["write_status"] == TraceWriteStatus.WRITTEN
     assert row["bytes_written"] == 64
     assert row["total_bytes"] == 64
     assert row["progress_reported"] == ProgressReportStatus.PENDING
@@ -273,7 +276,7 @@ async def test_join_pattern_bytes_then_metadata_transitions_to_written(
         recording_id="rec-6c",
         bytes_written=128,
     )
-    assert trace.status == TraceStatus.PENDING_METADATA
+    assert trace.write_status == TraceWriteStatus.PENDING_METADATA
 
     trace = await store.upsert_trace_metadata(
         trace_id="trace-6c",
@@ -284,10 +287,10 @@ async def test_join_pattern_bytes_then_metadata_transitions_to_written(
         robot_instance=ROBOT_INSTANCE,
     )
 
-    assert trace.status == TraceStatus.WRITTEN
+    assert trace.write_status == TraceWriteStatus.WRITTEN
     row = await _get_trace_row(store, "trace-6c")
     assert row is not None
-    assert row["status"] == TraceStatus.WRITTEN
+    assert row["write_status"] == TraceWriteStatus.WRITTEN
     assert row["bytes_written"] == 128
     assert row["total_bytes"] == 128
     assert row["progress_reported"] == ProgressReportStatus.PENDING
@@ -324,6 +327,7 @@ async def test_find_ready_traces_returns_only_ready(store: SqliteStateStore) -> 
         recording_id="rec-8",
         bytes_written=64,
     )
+    await store.mark_traces_as_registered(["trace-8"])
 
     await store.upsert_trace_metadata(
         trace_id="trace-9",
@@ -338,7 +342,8 @@ async def test_find_ready_traces_returns_only_ready(store: SqliteStateStore) -> 
         recording_id="rec-9",
         bytes_written=64,
     )
-    await store.update_status("trace-9", TraceStatus.UPLOADING)
+    await store.mark_traces_as_registered(["trace-9"])
+    await store.update_upload_status("trace-9", TraceUploadStatus.UPLOADING)
 
     ready = await store.find_ready_traces()
     assert [trace.trace_id for trace in ready] == ["trace-8"]
@@ -459,28 +464,28 @@ async def test_state_transition_sequence(store: SqliteStateStore) -> None:
         path="/tmp/trace-transition.bin",
         robot_instance=ROBOT_INSTANCE,
     )
-    assert trace.status == TraceStatus.INITIALIZING
+    assert trace.write_status == TraceWriteStatus.INITIALIZING
 
     trace = await store.upsert_trace_bytes(
         trace_id="trace-transition",
         recording_id="rec-transition",
         bytes_written=256,
     )
-    assert trace.status == TraceStatus.WRITTEN
+    assert trace.write_status == TraceWriteStatus.WRITTEN
 
     row = await _get_trace_row(store, "trace-transition")
     assert row is not None
-    assert row["status"] == TraceStatus.WRITTEN
+    assert row["write_status"] == TraceWriteStatus.WRITTEN
 
-    await store.update_status("trace-transition", TraceStatus.UPLOADING)
+    await store.update_upload_status("trace-transition", TraceUploadStatus.UPLOADING)
     row = await _get_trace_row(store, "trace-transition")
     assert row is not None
-    assert row["status"] == TraceStatus.UPLOADING
+    assert row["upload_status"] == TraceUploadStatus.UPLOADING
 
-    await store.update_status("trace-transition", TraceStatus.UPLOADED)
+    await store.update_upload_status("trace-transition", TraceUploadStatus.UPLOADED)
     row = await _get_trace_row(store, "trace-transition")
     assert row is not None
-    assert row["status"] == TraceStatus.UPLOADED
+    assert row["upload_status"] == TraceUploadStatus.UPLOADED
 
 
 @pytest.mark.asyncio
@@ -495,12 +500,12 @@ async def test_invalid_state_transition_rejected(store: SqliteStateStore) -> Non
         robot_instance=ROBOT_INSTANCE,
     )
 
-    with pytest.raises(ValueError, match="Invalid status transition"):
-        await store.update_status("trace-invalid", TraceStatus.UPLOADED)
+    with pytest.raises(ValueError, match="Trace not found"):
+        await store.update_upload_status("trace-invalid-missing", TraceUploadStatus.UPLOADED)
 
     row = await _get_trace_row(store, "trace-invalid")
     assert row is not None
-    assert row["status"] == TraceStatus.INITIALIZING
+    assert row["write_status"] == TraceWriteStatus.INITIALIZING
 
 
 @pytest.mark.asyncio
@@ -524,6 +529,7 @@ async def test_state_recovery_after_restart(tmp_path: Path) -> None:
             recording_id="rec-recover",
             bytes_written=512,
         )
+        await store.mark_traces_as_registered(["trace-recover"])
     finally:
         await store._engine.dispose()
 
@@ -533,15 +539,17 @@ async def test_state_recovery_after_restart(tmp_path: Path) -> None:
     try:
         recovered_trace = await recovered_store.get_trace("trace-recover")
         assert recovered_trace is not None
-        assert recovered_trace.status == TraceStatus.WRITTEN
+        assert recovered_trace.write_status == TraceWriteStatus.WRITTEN
 
         ready = await recovered_store.find_ready_traces()
         assert [trace.trace_id for trace in ready] == ["trace-recover"]
 
-        await recovered_store.update_status("trace-recover", TraceStatus.UPLOADING)
+        await recovered_store.update_upload_status(
+            "trace-recover", TraceUploadStatus.UPLOADING
+        )
         updated = await recovered_store.get_trace("trace-recover")
         assert updated is not None
-        assert updated.status == TraceStatus.UPLOADING
+        assert updated.upload_status == TraceUploadStatus.UPLOADING
     finally:
         await recovered_store._engine.dispose()
 
@@ -610,8 +618,8 @@ async def test_race_conditions_on_rapid_state_changes(tmp_path: Path, caplog) ->
 
         async def worker() -> None:
             try:
-                await store.update_status("trace-race", TraceStatus.UPLOADING)
-                await store.update_status("trace-race", TraceStatus.UPLOADED)
+                await store.update_upload_status("trace-race", TraceUploadStatus.UPLOADING)
+                await store.update_upload_status("trace-race", TraceUploadStatus.UPLOADED)
             except ValueError as exc:
                 errors.append(str(exc))
 
@@ -619,7 +627,7 @@ async def test_race_conditions_on_rapid_state_changes(tmp_path: Path, caplog) ->
 
         row = await _get_trace_row(store, "trace-race")
         assert row is not None
-        assert row["status"] == TraceStatus.UPLOADED
+        assert row["upload_status"] == TraceUploadStatus.UPLOADED
     finally:
         await store._engine.dispose()
 
@@ -698,7 +706,7 @@ async def test_find_ready_traces_excludes_future_retries(
 ) -> None:
     """A WRITTEN trace with next_retry_at in the future not be returned as ready."""
     await store.upsert_trace_metadata(
-        trace_id="trace-id",
+        trace_id="trace-future-retry",
         recording_id="rec-id",
         data_type=PRIMARY_DATA_TYPE,
         data_type_name="primary",
@@ -709,7 +717,7 @@ async def test_find_ready_traces_excludes_future_retries(
         await conn.execute(
             traces.update()
             .where(traces.c.trace_id == "trace-future-retry")
-            .values(status=TraceStatus.WRITTEN)
+            .values(write_status=TraceWriteStatus.WRITTEN, registration_status=TraceRegistrationStatus.REGISTERED, upload_status=TraceUploadStatus.RETRYING)
         )
 
     future = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=60)
