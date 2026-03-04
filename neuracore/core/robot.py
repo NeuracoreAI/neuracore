@@ -190,6 +190,12 @@ class Robot:
                 self._upload_urdf_and_meshes()
                 if self._temp_dir:
                     self._temp_dir.cleanup()
+            elif not self.urdf_path and not has_urdf:
+                logger.warning(
+                    "This robot name has no URDF / MJCF file associated with it."
+                    " This may cause issues with visualization and simulation. Fix this"
+                    "by providing a URDF / MJCF file path for this robot name."
+                )
         except requests.exceptions.ConnectionError:
             raise RobotError(
                 "Failed to connect to neuracore server, "
