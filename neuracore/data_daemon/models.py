@@ -110,9 +110,10 @@ class TraceRegistrationErrorCode(str, Enum):
 
 
 class ProgressReportStatus(str, Enum):
-    """Status of progress report for a trace."""
+    """Status of progress report for a recording."""
 
     PENDING = "pending"
+    REPORTING = "reporting"
     REPORTED = "reported"
 
 @deprecated('Used for backwards compatibility')
@@ -120,6 +121,8 @@ def _parse_progress_reported(value: Any) -> ProgressReportStatus:
     """Parse progress_reported from DB (int 0/1 or enum string) to enum."""
     if value is None or value == 0 or value == "pending":
         return ProgressReportStatus.PENDING
+    if value == "reporting":
+        return ProgressReportStatus.REPORTING
     if value == 1 or value == "reported":
         return ProgressReportStatus.REPORTED
     if isinstance(value, ProgressReportStatus):
@@ -239,20 +242,6 @@ class TraceRecord:
             ),
             upload_status=_parse_upload_status(row.get("upload_status")),
         )
-
-
-@dataclass(frozen=True)
-class RecordingProgressSnapshot:
-    """Aggregate progress-report gate state for one recording."""
-
-    recording_id: str
-    trace_count: int
-    reported_count: int
-    missing_stopped_at_count: int
-    missing_data_type_count: int
-    missing_bytes_written_count: int
-    missing_total_bytes_count: int
-    mismatched_bytes_count: int
 
 
 class OpenRingBufferModel(BaseModel):

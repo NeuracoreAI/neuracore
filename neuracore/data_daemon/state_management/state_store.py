@@ -7,7 +7,6 @@ from typing import Protocol
 
 from neuracore.data_daemon.models import (
     DataType,
-    RecordingProgressSnapshot,
     TraceErrorCode,
     TraceRegistrationStatus,
     TraceRecord,
@@ -19,8 +18,8 @@ from neuracore.data_daemon.models import (
 class StateStore(Protocol):
     """Persistence interface for trace state."""
 
-    async def set_stopped_ats(self, recording_id: str) -> None:
-        """Set the end time for all traces for a recording."""
+    async def set_stopped_at(self, recording_id: str) -> None:
+        """Set recording-level stopped_at for a recording."""
         ...
 
     async def get_trace(self, trace_id: str) -> TraceRecord | None:
@@ -62,14 +61,20 @@ class StateStore(Protocol):
         """Mark a recording as progress-reported."""
         ...
 
-    async def get_recording_progress_snapshot(
-        self, recording_id: str
-    ) -> RecordingProgressSnapshot | None:
-        """Return aggregate progress-report gate state for one recording."""
+    async def mark_recording_reporting(self, recording_id: str) -> bool:
+        """Atomically move recording progress state from PENDING to REPORTING."""
+        ...
+
+    async def mark_recording_pending(self, recording_id: str) -> None:
+        """Set recording progress state to PENDING."""
+        ...
+
+    async def reset_reporting_recordings_to_pending(self) -> int:
+        """Reset in-flight REPORTING rows to PENDING and return affected count."""
         ...
 
     async def recording_has_reported_progress(self, recording_id: str) -> bool:
-        """Return True when any trace in recording is already REPORTED."""
+        """Return True when recording progress status is REPORTED."""
         ...
 
     async def delete_uploaded_traces_for_recording(self, recording_id: str) -> int:
@@ -82,6 +87,28 @@ class StateStore(Protocol):
 
     async def list_recording_ids_with_stopped_traces(self) -> list[str]:
         """Return recording IDs that already have at least one stopped trace."""
+        ...
+
+    async def reconcile_recordings_from_traces(self) -> None:
+        """Rebuild recording rows from trace rows (startup reconciliation)."""
+        ...
+
+    async def prune_old_empty_recordings(self, max_age_hours: int) -> int:
+        """Delete recordings with no traces and age older than threshold hours."""
+        ...
+
+    async def is_recording_stopped(self, recording_id: str) -> bool:
+        """Return True when recording has stopped_at set."""
+        ...
+
+    async def is_expected_trace_count_reported(self, recording_id: str) -> bool:
+        """Return True when expected trace count has been reported for recording."""
+        ...
+
+    async def set_expected_trace_count(
+        self, recording_id: str, expected_trace_count: int
+    ) -> None:
+        """Persist expected trace count for one recording."""
         ...
 
     async def mark_expected_trace_count_reported(self, recording_id: str) -> None:

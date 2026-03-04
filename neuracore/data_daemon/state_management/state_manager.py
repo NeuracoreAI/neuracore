@@ -26,7 +26,6 @@ from neuracore.data_daemon.registration_management.registration_manager import (
 )
 from neuracore.data_daemon.models import (
     DataType,
-    RecordingProgressSnapshot,
     TraceErrorCode,
     TraceRegistrationStatus,
     TraceRecord,
@@ -49,12 +48,11 @@ class StateManager:
     _START_TRACE_LOCK_BASE_DELAY_S = 0.1
     _START_TRACE_LOCK_MAX_DELAY_S = 2.0
     _FAILED_TRACE_MAX_AGE_S = 60 * 60 * 4  # 4 hours
+    _EMPTY_RECORDING_MAX_AGE_HOURS = 24
 
     def __init__(self, store: StateStore) -> None:
         """Initialize with a persistence backend."""
         self._store = store
-        self._reporting_recordings: set[str] = set()
-        self._stopped_recordings: set[str] = set()
         self._trace_written_retry_queue: asyncio.Queue[tuple[str, str, int, int]] = (
             asyncio.Queue()
         )
@@ -94,16 +92,6 @@ class StateManager:
         self._emitter.on(
             Emitter.PROGRESS_REPORT_FAILED, self.handle_progress_report_error
         )
-
-    async def rebuild_runtime_state(self) -> None:
-        """Rebuild ephemeral in-memory state from persisted traces on startup."""
-        recording_ids = await self._store.list_recording_ids_with_stopped_traces()
-        self._stopped_recordings = set(recording_ids)
-        if recording_ids:
-            logger.info(
-                "Rebuilt stopped recording cache from store (count=%d)",
-                len(recording_ids),
-            )
 
     async def _handle_start_trace(
         self,
@@ -281,8 +269,7 @@ class StateManager:
 
         Records stop time immediately when the producer requests stop.
         """
-        self._stopped_recordings.add(recording_id)
-        await self._store.set_stopped_ats(recording_id)
+        await self._store.set_stopped_at(recording_id)
 
     async def handle_stop_recording(self, recording_id: str) -> None:
         """Handle phase-2 stop event from the data bridge.
@@ -290,15 +277,38 @@ class StateManager:
         This event is emitted only after the bridge commits close for the
         recording; at this point RDM can flush/close traces for that recording.
         """
-        self._stopped_recordings.add(recording_id)
         self._emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
-        await self._store.set_stopped_ats(recording_id)
+        if not await self._store.is_recording_stopped(recording_id):
+            await self._store.set_stopped_at(recording_id)
         await self._emit_progress_report_if_recording_stopped(recording_id)
 
     async def handle_is_connected(self, is_connected: bool) -> None:
         """Handle a connection status event from the data bridge."""
         if not is_connected:
             return
+
+        # Reconcile in flight states on reconnect
+        reset_count = await self._store.reset_retrying_to_written()
+        if reset_count:
+            logger.info(
+                "Reset transient upload statuses on reconnect (count=%d)", reset_count
+            )
+        reset_reporting_count = await self._store.reset_reporting_recordings_to_pending()
+        if reset_reporting_count:
+            logger.info(
+                "Reset reporting recordings to pending on reconnect (count=%d)",
+                reset_reporting_count,
+            )
+        await self._store.reconcile_recordings_from_traces()
+        pruned_count = await self._store.prune_old_empty_recordings(
+            self._EMPTY_RECORDING_MAX_AGE_HOURS
+        )
+        if pruned_count:
+            logger.info(
+                "Pruned stale empty recordings on reconnect (count=%d, max_age_hours=%d)",
+                pruned_count,
+                self._EMPTY_RECORDING_MAX_AGE_HOURS,
+            )
 
         # Wake registration worker after connectivity is restored.
         self._emit_trace_registration_available()
@@ -478,20 +488,21 @@ class StateManager:
 
     async def _finalize_trace(self, trace: TraceRecord) -> None:
         """Finalize trace for upload."""
-        # Mark written internally
-        await self._store.update_write_status(trace.trace_id, TraceWriteStatus.WRITTEN)
-
         # Start registering loop
         self._emit_trace_registration_available()
 
-        # If stop was already requested, ensure late-arriving traces get stopped_at.
-        if trace.recording_id in self._stopped_recordings:
-            await self._store.set_stopped_ats(trace.recording_id)
+        # If recording stopped at not set, set it
+        if not await self._store.is_recording_stopped(trace.recording_id):
+            await self._store.set_stopped_at(trace.recording_id)
 
         trace_count = await self._store.count_traces_for_recording(trace.recording_id)
+        expected_reported = await self._store.is_expected_trace_count_reported(
+            trace.recording_id
+        )
         # Make expected trace count call (on first opportunity only)
         # 1 = reported, 0 = Not reported
-        if trace.expected_trace_count_reported != 1:
+        if not expected_reported:
+            await self._store.set_expected_trace_count(trace.recording_id, trace_count)
             asyncio.create_task(
                 self._set_expected_trace_count(trace.recording_id, trace_count)
             )
@@ -509,71 +520,39 @@ class StateManager:
     async def _emit_progress_report_if_recording_stopped(
         self, recording_id: str
     ) -> None:
-        if recording_id in self._reporting_recordings:
+        if not await self._store.is_recording_stopped(recording_id):
             return
 
-        snapshot = await self._store.get_recording_progress_snapshot(recording_id)
-        if snapshot is None:
-            return
-
-        should_stop, snapshot = await self._reconcile_progress_report_state(
-            recording_id, snapshot
-        )
-        if should_stop:
-            return
-
-        if not self._is_progress_report_eligible(snapshot):
+        if await self._store.recording_has_reported_progress(recording_id):
             return
 
         traces = await self._store.find_traces_by_recording_id(recording_id)
         if not traces:
             return
+        if not self._is_progress_report_eligible(traces):
+            return
+        claimed = await self._store.mark_recording_reporting(recording_id)
+        if not claimed:
+            return
         self._schedule_progress_report(recording_id, traces)
 
-    async def _reconcile_progress_report_state(
-        self, recording_id: str, snapshot: RecordingProgressSnapshot
-    ) -> tuple[bool, RecordingProgressSnapshot]:
-        """Normalize partial progress/stopped states before eligibility checks.
-
-        Returns:
-            (should_stop, snapshot)
-            - should_stop=True: caller should return early
-            - snapshot: aggregate gate state (possibly refreshed after reconciliation)
-        """
-        if snapshot.reported_count == snapshot.trace_count:
-            return True, snapshot
-        if snapshot.reported_count > 0:
-            # Reconcile partial-reported recordings to a consistent terminal state.
-            await self._store.mark_recording_reported(recording_id)
-            return True, snapshot
-
-        if snapshot.missing_stopped_at_count == snapshot.trace_count:
-            return True, snapshot
-        if snapshot.missing_stopped_at_count > 0:
-            # Reconcile partial stop state when some traces have stopped_at
-            # and others do not.
-            await self._store.set_stopped_ats(recording_id)
-            refreshed = await self._store.get_recording_progress_snapshot(recording_id)
-            if refreshed is None:
-                return True, snapshot
-            return False, refreshed
-
-        return False, snapshot
-
-    def _is_progress_report_eligible(self, snapshot: RecordingProgressSnapshot) -> bool:
+    def _is_progress_report_eligible(self, traces: list[TraceRecord]) -> bool:
         """Return True when traces have complete, consistent byte totals."""
-        return not (
-            snapshot.missing_data_type_count
-            or snapshot.missing_bytes_written_count
-            or snapshot.missing_total_bytes_count
-            or snapshot.mismatched_bytes_count
-        )
+        for trace in traces:
+            if trace.data_type is None:
+                return False
+            if trace.bytes_written is None:
+                return False
+            if trace.total_bytes is None:
+                return False
+            if trace.bytes_written != trace.total_bytes:
+                return False
+        return True
 
     def _schedule_progress_report(
         self, recording_id: str, traces: list[TraceRecord]
     ) -> None:
         """Schedule async progress reporting for a recording."""
-        self._reporting_recordings.add(recording_id)
         start_time, end_time = self._find_recording_start_and_end(traces)
         asyncio.create_task(self._emit_progress_report(start_time, end_time, traces))
 
@@ -684,8 +663,6 @@ class StateManager:
         Args:
             recording_id (str): unique identifier for the recording.
         """
-        self._reporting_recordings.discard(recording_id)
-        self._stopped_recordings.discard(recording_id)
         await self._store.mark_recording_reported(recording_id)
         await self._store.delete_uploaded_traces_for_recording(recording_id)
 
@@ -906,7 +883,7 @@ class StateManager:
             error_message (str): Error message associated with
             the progress report error.
         """
-        self._reporting_recordings.discard(recording_id)
+        await self._store.mark_recording_pending(recording_id)
         logger.error(
             "Progress report failed for recording %s: %s",
             recording_id,
@@ -916,7 +893,7 @@ class StateManager:
         if not traces:
             return
         for trace in traces:
-            await self._record_error(
+            await self._store.record_error(
                 trace.trace_id,
                 error_message,
                 error_code=TraceErrorCode.PROGRESS_REPORT_ERROR,

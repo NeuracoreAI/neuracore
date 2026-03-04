@@ -50,13 +50,24 @@ class UploadManager:
     def __init__(self, config: DaemonConfig, client_session: aiohttp.ClientSession):
         """Initialize the upload manager."""
         self._config = config
-        self._active_uploads: set[asyncio.Task] = set()
+        self._active_uploads: dict[str, asyncio.Task] = {}
         self._client_session = client_session
         self._bandwidth_limiter = (
             AsyncLimiter(config.bandwidth_limit, time_period=1)
             if config.bandwidth_limit
             else None
         )
+        max_concurrent_uploads = config.max_concurrent_uploads
+        if max_concurrent_uploads is not None and max_concurrent_uploads > 0:
+            self._upload_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
+                max_concurrent_uploads
+            )
+            logger.info(
+                "UploadManager concurrency limit enabled (max_concurrent_uploads=%d)",
+                max_concurrent_uploads,
+            )
+        else:
+            self._upload_semaphore = None
 
         self._emitter = get_emitter()
         self._emitter.on(Emitter.READY_FOR_UPLOAD, self._on_ready_for_upload)
@@ -74,13 +85,14 @@ class UploadManager:
         )
         logger.info("Shutting down UploadManager...")
 
-        if wait and self._active_uploads:
-            await asyncio.gather(*self._active_uploads, return_exceptions=True)
+        active_tasks = list(self._active_uploads.values())
+        if wait and active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
         else:
-            for task in self._active_uploads:
+            for task in active_tasks:
                 task.cancel()
-            if self._active_uploads:
-                await asyncio.gather(*self._active_uploads, return_exceptions=True)
+            if active_tasks:
+                await asyncio.gather(*active_tasks, return_exceptions=True)
 
         logger.info("UploadManager shutdown complete")
 
@@ -103,6 +115,18 @@ class UploadManager:
             data_type_name: Data type name
             bytes_uploaded: Starting offset for resume
         """
+        existing = self._active_uploads.get(trace_id)
+        if existing is not None:
+            if existing.done():
+                # Defensive cleanup in case callback ordering lags.
+                self._active_uploads.pop(trace_id, None)
+            else:
+                logger.debug(
+                    "Skipping READY_FOR_UPLOAD for trace %s: upload already in progress",
+                    trace_id,
+                )
+                return
+
         loop = asyncio.get_running_loop()
         task = loop.create_task(
             self._upload_single_trace(
@@ -115,8 +139,14 @@ class UploadManager:
             )
         )
 
-        self._active_uploads.add(task)
-        task.add_done_callback(self._active_uploads.discard)
+        self._active_uploads[trace_id] = task
+
+        def _on_done(done_task: asyncio.Task, *, tid: str = trace_id) -> None:
+            tracked = self._active_uploads.get(tid)
+            if tracked is done_task:
+                self._active_uploads.pop(tid, None)
+
+        task.add_done_callback(_on_done)
 
     def _find_resume_point(
         self, files: list[Path], bytes_uploaded: int
@@ -466,17 +496,22 @@ class UploadManager:
                 return False
 
             except Exception as e:
+                error_detail = f"{type(e).__name__}: {e}"
                 logger.error(
-                    f"Unexpected error uploading trace {trace_id}: {e}", exc_info=True
+                    f"Unexpected error uploading trace {trace_id}: {error_detail}",
+                    exc_info=True,
                 )
                 self._emit_upload_failure(
                     trace_id=trace_id,
                     bytes_uploaded=bytes_uploaded,
-                    error_message=f"Upload error: {e}",
+                    error_message=f"Upload error: {error_detail}",
                 )
                 return False
 
-        return await upload_files()
+        if self._upload_semaphore is None:
+            return await upload_files()
+        async with self._upload_semaphore:
+            return await upload_files()
 
 
     async def _update_backend_trace_record(
@@ -542,5 +577,5 @@ class UploadManager:
             return False
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.warning(f"Failed to update data trace: {e}")
+            logger.warning("Failed to update data trace: %s: %s", type(e).__name__, e)
             return False

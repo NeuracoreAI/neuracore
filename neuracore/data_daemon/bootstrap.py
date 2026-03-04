@@ -98,7 +98,6 @@ async def bootstrap_async_services(
     await state_store.reset_retrying_to_written()
 
     state_manager = StateManager(state_store)
-    await state_manager.rebuild_runtime_state()
     logger.info("StateManager initialized")
 
     registration_manager = RegistrationManager(

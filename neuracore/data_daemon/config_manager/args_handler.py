@@ -71,6 +71,12 @@ def add_common_config_args(parser: argparse.ArgumentParser) -> None:
         help="Number of worker threads.",
     )
     parser.add_argument(
+        "--max-concurrent-uploads",
+        "--max_concurrent_uploads",
+        type=int,
+        help="Maximum number of traces uploaded concurrently.",
+    )
+    parser.add_argument(
         "--keep-wakelock-while-upload",
         "--keep_wakelock_while_upload",
         dest="keep_wakelock_while_upload",

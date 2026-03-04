@@ -31,9 +31,13 @@ class FakeStateStore:
         self.unreported_traces: list[TraceRecord] = []
         self._traces_by_id: dict[str, TraceRecord] = {}
         self._traces_by_recording: dict[str, list[TraceRecord]] = {}
+        self._recording_stopped: dict[str, bool] = {}
+        self._expected_trace_count_reported: dict[str, bool] = {}
+        self._expected_trace_count: dict[str, int] = {}
 
     async def set_stopped_ats(self, recording_id: str) -> None:
         self.stopped.append(recording_id)
+        self._recording_stopped[recording_id] = True
         now = datetime.now(timezone.utc)
         traces = self._traces_by_recording.get(recording_id, [])
         updated = []
@@ -130,6 +134,23 @@ class FakeStateStore:
             if any(trace.stopped_at is not None for trace in traces)
         ]
 
+    async def reconcile_recordings_from_traces(self) -> None:
+        return None
+
+    async def prune_old_empty_recordings(self, max_age_hours: int) -> int:
+        return 0
+
+    async def is_recording_stopped(self, recording_id: str) -> bool:
+        return self._recording_stopped.get(recording_id, False)
+
+    async def is_expected_trace_count_reported(self, recording_id: str) -> bool:
+        return self._expected_trace_count_reported.get(recording_id, False)
+
+    async def set_expected_trace_count(
+        self, recording_id: str, expected_trace_count: int
+    ) -> None:
+        self._expected_trace_count[recording_id] = int(expected_trace_count)
+
     async def find_failed_traces(self) -> list[TraceRecord]:
         return [
             trace
@@ -155,6 +176,9 @@ class FakeStateStore:
         )
         self._traces_by_id[trace_id] = updated
         self._update_trace_in_recording(updated, updated.recording_id)
+
+    async def reset_retrying_to_written(self) -> int:
+        return 0
 
 
     async def record_error(
@@ -348,7 +372,7 @@ class FakeStateStore:
         self._update_trace_in_recording(updated, updated.recording_id)
 
     async def mark_expected_trace_count_reported(self, recording_id: str) -> None:
-        return None
+        self._expected_trace_count_reported[recording_id] = True
 
 
 def _register_state_manager(manager: StateManager) -> None:

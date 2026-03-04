@@ -323,3 +323,67 @@ class TestProgressReporterEdgeCases:
             mock_emitter.emit.assert_called_once_with(
                 Emitter.PROGRESS_REPORTED, "recording-123"
             )
+
+    @pytest.mark.asyncio
+    async def test_org_lookup_exception_emits_failed(
+        self, mock_emitter, mock_trace, mock_auth
+    ):
+        """Test uncaught org lookup exceptions emit PROGRESS_REPORT_FAILED."""
+        mock_session = MagicMock()
+
+        with (
+            patch(
+                "neuracore.data_daemon.progress_reporter.get_emitter",
+                return_value=mock_emitter,
+            ),
+            patch(
+                "neuracore.data_daemon.progress_reporter.get_auth",
+                return_value=mock_auth,
+            ),
+            patch(
+                "neuracore.data_daemon.progress_reporter.get_current_org",
+                side_effect=RuntimeError("org lookup failed"),
+            ),
+        ):
+            reporter = ProgressReporter(mock_session)
+            await reporter.report_progress(1000.0, 2000.0, [mock_trace])
+
+            mock_emitter.emit.assert_called_once_with(
+                Emitter.PROGRESS_REPORT_FAILED,
+                "recording-123",
+                "org lookup failed",
+            )
+
+    @pytest.mark.asyncio
+    async def test_unhandled_body_build_exception_emits_failed(
+        self, mock_emitter, mock_trace, mock_auth
+    ):
+        """Test unhandled body build exceptions emit PROGRESS_REPORT_FAILED."""
+        mock_session = MagicMock()
+
+        with (
+            patch(
+                "neuracore.data_daemon.progress_reporter.get_emitter",
+                return_value=mock_emitter,
+            ),
+            patch(
+                "neuracore.data_daemon.progress_reporter.get_auth",
+                return_value=mock_auth,
+            ),
+            patch(
+                "neuracore.data_daemon.progress_reporter.get_current_org",
+                return_value="org-123",
+            ),
+            patch(
+                "neuracore.data_daemon.progress_reporter.TracesMetadataRequest",
+                side_effect=RuntimeError("invalid traces payload"),
+            ),
+        ):
+            reporter = ProgressReporter(mock_session)
+            await reporter.report_progress(1000.0, 2000.0, [mock_trace])
+
+            mock_emitter.emit.assert_called_once_with(
+                Emitter.PROGRESS_REPORT_FAILED,
+                "recording-123",
+                "invalid traces payload",
+            )
