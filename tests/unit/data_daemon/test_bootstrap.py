@@ -46,6 +46,8 @@ def mock_async_services() -> AsyncServices:
     mock_state_store = MagicMock(spec=SqliteStateStore)
     mock_state_store.close = AsyncMock()
     mock_state_manager = MagicMock(spec=StateManager)
+    mock_registration_manager = MagicMock()
+    mock_registration_manager.shutdown = AsyncMock()
 
     mock_upload_manager = MagicMock()
     mock_upload_manager.shutdown = AsyncMock()
@@ -59,10 +61,21 @@ def mock_async_services() -> AsyncServices:
         client_session=mock_session,
         state_store=mock_state_store,
         state_manager=mock_state_manager,
+        registration_manager=mock_registration_manager,
         upload_manager=mock_upload_manager,
         connection_manager=mock_connection_manager,
         progress_reporter=mock_progress_reporter,
     )
+
+
+@pytest.fixture(autouse=True)
+def _mock_registration_manager_ctor():
+    with patch("neuracore.data_daemon.bootstrap.RegistrationManager") as mock_ctor:
+        instance = MagicMock()
+        instance.start = MagicMock()
+        instance.shutdown = AsyncMock()
+        mock_ctor.return_value = instance
+        yield mock_ctor
 
 
 class TestBootstrapAsyncServices:
@@ -125,6 +138,7 @@ class TestBootstrapAsyncServices:
             MockStateStore.return_value = mock_state_store_instance
 
             mock_state_manager_instance = MagicMock()
+            mock_state_manager_instance.recover_startup_state = AsyncMock()
             MockStateMgr.return_value = mock_state_manager_instance
 
             services = await bootstrap_async_services(mock_config, temp_db_path)

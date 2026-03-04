@@ -15,7 +15,7 @@ from types import FrameType
 
 from neuracore.data_daemon.const import RECORDING_EVENTS_SOCKET_PATH, SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
-from neuracore.data_daemon.models import TraceErrorCode, TraceStatus
+from neuracore.data_daemon.models import TraceErrorCode, TraceUploadStatus
 from neuracore.data_daemon.state_management.state_store import StateStore
 
 logger = logging.getLogger(__name__)
@@ -323,11 +323,10 @@ async def reconcile_state_with_filesystem(
                 trace.trace_id,
                 "Trace data missing or incomplete on disk",
                 error_code=TraceErrorCode.WRITE_FAILED,
-                status=TraceStatus.FAILED,
             )
             continue
-        elif trace.status == TraceStatus.UPLOADING:
-            await store.update_status(trace.trace_id, TraceStatus.PAUSED)
+        elif trace.upload_status == TraceUploadStatus.UPLOADING:
+            await store.update_upload_status(trace.trace_id, TraceUploadStatus.PAUSED)
 
     for trace_dir in _iter_trace_dirs(recordings_root):
         if trace_dir not in trace_paths:
@@ -382,6 +381,11 @@ async def startup(
     sqlite_recovered = not validate_or_recover_sqlite(db_path, recover=recover_sqlite)
     if sqlite_recovered:
         logger.warning("SQLite recovered by rotation; new DB will be created.")
+
+    # Ensure schema migrations run before any startup reconciliation reads.
+    init_store = getattr(store, "init_async_store", None)
+    if callable(init_store):
+        await init_store()
 
     recordings_root.mkdir(parents=True, exist_ok=True)
     await reconcile_state_with_filesystem(store, recordings_root)

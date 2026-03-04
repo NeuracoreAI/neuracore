@@ -8,17 +8,20 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
-from uuid import UUID
+from typing import Any
 
 import aiohttp
 from aiolimiter import AsyncLimiter
 from neuracore_types import DataType, RecordingDataTraceStatus
 
+from neuracore.core.auth import get_auth
+from neuracore.core.config.get_current_org import get_current_org
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
+from neuracore.data_daemon.const import API_URL
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.models import TraceErrorCode
-from neuracore.data_daemon.upload_management.trace_manager import TraceManager
 
 from .resumable_file_uploader import ResumableFileUploader
 
@@ -30,7 +33,14 @@ CONTENT_TYPE_MAPPING = {
 }
 
 
-class UploadManager(TraceManager):
+@dataclass
+class _ProgressUpdateState:
+    """Mutable progress timing state shared across file callbacks."""
+
+    last_progress_update: float
+
+
+class UploadManager:
     """Manages upload operations for the data daemon.
 
     Uploads traces to cloud storage using a thread pool of workers.
@@ -40,19 +50,29 @@ class UploadManager(TraceManager):
     def __init__(self, config: DaemonConfig, client_session: aiohttp.ClientSession):
         """Initialize the upload manager."""
         self._config = config
-        self._active_uploads: set[asyncio.Task] = set()
+        self._active_uploads: dict[str, asyncio.Task] = {}
         self._client_session = client_session
         self._bandwidth_limiter = (
             AsyncLimiter(config.bandwidth_limit, time_period=1)
             if config.bandwidth_limit
             else None
         )
-        super().__init__(client_session)
+        max_concurrent_uploads = config.max_concurrent_uploads or 10
+        if max_concurrent_uploads is not None and max_concurrent_uploads > 0:
+            self._upload_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
+                max_concurrent_uploads
+            )
+            logger.info(
+                "UploadManager concurrency limit enabled (max_concurrent_uploads=%d)",
+                max_concurrent_uploads,
+            )
+        else:
+            self._upload_semaphore = None
 
         self._emitter = get_emitter()
         self._emitter.on(Emitter.READY_FOR_UPLOAD, self._on_ready_for_upload)
 
-        logger.info("UploadManager initialized")
+        logger.debug("UploadManager initialized")
 
     async def shutdown(self, wait: bool = True) -> None:
         """Shutdown the upload manager gracefully.
@@ -63,17 +83,18 @@ class UploadManager(TraceManager):
         self._emitter.remove_listener(
             Emitter.READY_FOR_UPLOAD, self._on_ready_for_upload
         )
-        logger.info("Shutting down UploadManager...")
+        logger.debug("Shutting down UploadManager...")
 
-        if wait and self._active_uploads:
-            await asyncio.gather(*self._active_uploads, return_exceptions=True)
+        active_tasks = list(self._active_uploads.values())
+        if wait and active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
         else:
-            for task in self._active_uploads:
+            for task in active_tasks:
                 task.cancel()
-            if self._active_uploads:
-                await asyncio.gather(*self._active_uploads, return_exceptions=True)
+            if active_tasks:
+                await asyncio.gather(*active_tasks, return_exceptions=True)
 
-        logger.info("UploadManager shutdown complete")
+        logger.debug("UploadManager shutdown complete")
 
     async def _on_ready_for_upload(
         self,
@@ -94,6 +115,21 @@ class UploadManager(TraceManager):
             data_type_name: Data type name
             bytes_uploaded: Starting offset for resume
         """
+        active_uploads = self._active_uploads.get(trace_id)
+        if active_uploads is not None:
+            if active_uploads.done():
+                # Defensive cleanup in case callback ordering lags.
+                self._active_uploads.pop(trace_id, None)
+            else:
+                logger.debug(
+                    (
+                        "Skipping READY_FOR_UPLOAD for trace %s: "
+                        "upload already in progress"
+                    ),
+                    trace_id,
+                )
+                return
+
         loop = asyncio.get_running_loop()
         task = loop.create_task(
             self._upload_single_trace(
@@ -106,8 +142,16 @@ class UploadManager(TraceManager):
             )
         )
 
-        self._active_uploads.add(task)
-        task.add_done_callback(self._active_uploads.discard)
+        self._active_uploads[trace_id] = task
+
+        def _cleanup_active_uploads(
+            done_task: asyncio.Task, *, tid: str = trace_id
+        ) -> None:
+            tracked = self._active_uploads.get(tid)
+            if tracked is done_task:
+                self._active_uploads.pop(tid, None)
+
+        task.add_done_callback(_cleanup_active_uploads)
 
     def _find_resume_point(
         self, files: list[Path], bytes_uploaded: int
@@ -201,8 +245,7 @@ class UploadManager(TraceManager):
         trace_id: str,
         recording_id: str,
         base_bytes: int,
-        total_bytes: int,
-        last_progress_update: list[float],
+        progress_state: _ProgressUpdateState,
     ) -> Callable[[int], Awaitable[None]]:
         """Create a progress callback for tracking upload progress.
 
@@ -210,29 +253,82 @@ class UploadManager(TraceManager):
             trace_id: Trace identifier.
             recording_id: Recording identifier.
             base_bytes: Cumulative bytes uploaded before this file.
-            last_progress_update: Mutable list containing last update timestamp.
+            progress_state: Shared upload progress timing state.
 
         Returns:
             Async callback function that handles progress updates.
         """
-        cumulative_delta = [0]
+        cumulative_delta = 0
 
         async def progress_callback(bytes_delta: int) -> None:
-            cumulative_delta[0] += bytes_delta
-            total_bytes_uploaded = base_bytes + cumulative_delta[0]
+            nonlocal cumulative_delta
+            cumulative_delta += bytes_delta
+            total_bytes_uploaded = base_bytes + cumulative_delta
             self._emitter.emit(Emitter.UPLOADED_BYTES, trace_id, total_bytes_uploaded)
             now = time.time()
-            if now - last_progress_update[0] >= 30.0:
-                await self._update_data_trace(
+            if now - progress_state.last_progress_update >= 30.0:
+                await self._update_backend_trace_progress(
                     recording_id,
                     trace_id,
-                    RecordingDataTraceStatus.UPLOAD_STARTED,
                     uploaded_bytes=total_bytes_uploaded,
-                    total_bytes=total_bytes,
                 )
-                last_progress_update[0] = now
+                progress_state.last_progress_update = now
 
         return progress_callback
+
+    async def _mark_backend_trace_status_as_upload_started(
+        self,
+        recording_id: str,
+        trace_id: str,
+        *,
+        uploaded_bytes: int,
+        total_bytes: int,
+    ) -> bool:
+        """Mark backend trace status as UPLOAD_STARTED with progress counters."""
+        return await self._update_backend_trace_record(
+            recording_id,
+            trace_id,
+            updates={
+                "status": RecordingDataTraceStatus.UPLOAD_STARTED,
+                "uploaded_bytes": uploaded_bytes,
+                "total_bytes": total_bytes,
+            },
+        )
+
+    async def _mark_backend_trace_status_as_upload_complete(
+        self,
+        recording_id: str,
+        trace_id: str,
+        *,
+        uploaded_bytes: int,
+        total_bytes: int,
+    ) -> bool:
+        """Mark backend trace status as UPLOAD_COMPLETE with final counters."""
+        return await self._update_backend_trace_record(
+            recording_id,
+            trace_id,
+            updates={
+                "status": RecordingDataTraceStatus.UPLOAD_COMPLETE,
+                "uploaded_bytes": uploaded_bytes,
+                "total_bytes": total_bytes,
+            },
+        )
+
+    async def _update_backend_trace_progress(
+        self,
+        recording_id: str,
+        trace_id: str,
+        *,
+        uploaded_bytes: int,
+    ) -> bool:
+        """Update backend upload byte counters without changing status."""
+        return await self._update_backend_trace_record(
+            recording_id,
+            trace_id,
+            updates={
+                "uploaded_bytes": uploaded_bytes,
+            },
+        )
 
     async def _upload_file(
         self,
@@ -289,6 +385,7 @@ class UploadManager(TraceManager):
         Returns:
             True if all files uploaded successfully, False otherwise.
         """
+        # Validate trace data exists at path
         files, validation_error = self._validate_trace_directory(trace_dir_path)
         if validation_error or files is None:
             error_msg = validation_error or "No files found in trace directory"
@@ -301,25 +398,11 @@ class UploadManager(TraceManager):
 
         total_bytes = sum(file.stat().st_size for file in files)
 
-        registered = await self._register_data_trace(
-            recording_id, data_type, UUID(trace_id)
-        )
-        if not registered:
-            logger.error(f"Failed to register trace {trace_id} with backend")
-            self._emit_upload_failure(
-                trace_id=trace_id,
-                bytes_uploaded=bytes_uploaded,
-                error_message="Failed to register trace with backend",
-                error_code=TraceErrorCode.NETWORK_ERROR,
-            )
-            return False
-
         async def upload_files() -> bool:
             try:
-                await self._update_data_trace(
+                await self._mark_backend_trace_status_as_upload_started(
                     recording_id,
                     trace_id,
-                    RecordingDataTraceStatus.UPLOAD_STARTED,
                     uploaded_bytes=bytes_uploaded,
                     total_bytes=total_bytes,
                 )
@@ -331,7 +414,7 @@ class UploadManager(TraceManager):
                 cumulative_bytes = sum(
                     file.stat().st_size for file in files[:start_file_idx]
                 )
-                last_progress_update = [time.time()]
+                progress_state = _ProgressUpdateState(last_progress_update=time.time())
 
                 for file_idx, file in enumerate(
                     files[start_file_idx:], start=start_file_idx
@@ -345,8 +428,7 @@ class UploadManager(TraceManager):
                         trace_id,
                         recording_id,
                         cumulative_bytes,
-                        total_bytes,
-                        last_progress_update,
+                        progress_state,
                     )
 
                     success, file_total_bytes, error_message = await self._upload_file(
@@ -378,12 +460,13 @@ class UploadManager(TraceManager):
 
                     cumulative_bytes += file.stat().st_size
 
-                updated_trace = await self._update_data_trace(
-                    recording_id,
-                    trace_id,
-                    RecordingDataTraceStatus.UPLOAD_COMPLETE,
-                    uploaded_bytes=cumulative_bytes,
-                    total_bytes=cumulative_bytes,
+                updated_trace = (
+                    await self._mark_backend_trace_status_as_upload_complete(
+                        recording_id,
+                        trace_id,
+                        uploaded_bytes=cumulative_bytes,
+                        total_bytes=cumulative_bytes,
+                    )
                 )
                 if not updated_trace:
                     logger.warning(
@@ -420,14 +503,88 @@ class UploadManager(TraceManager):
                 return False
 
             except Exception as e:
+                error_detail = f"{type(e).__name__}: {e}"
                 logger.error(
-                    f"Unexpected error uploading trace {trace_id}: {e}", exc_info=True
+                    f"Unexpected error uploading trace {trace_id}: {error_detail}",
+                    exc_info=True,
                 )
                 self._emit_upload_failure(
                     trace_id=trace_id,
                     bytes_uploaded=bytes_uploaded,
-                    error_message=f"Upload error: {e}",
+                    error_message=f"Upload error: {error_detail}",
                 )
                 return False
 
-        return await upload_files()
+        if self._upload_semaphore is None:
+            return await upload_files()
+        async with self._upload_semaphore:
+            return await upload_files()
+
+    async def _update_backend_trace_record(
+        self,
+        recording_id: str,
+        trace_id: str,
+        updates: dict[str, Any],
+    ) -> bool:
+        """Update fields of a backend DataTrace.
+
+        Args:
+            recording_id: The recording ID
+            trace_id: The trace ID
+            updates: JSON payload fields to update on backend DataTrace
+
+        Returns:
+            True if update succeeded, False otherwise
+        """
+        if not trace_id:
+            logger.warning("No trace ID provided for update")
+            return False
+        if not updates:
+            logger.warning("No data trace updates provided for trace_id=%s", trace_id)
+            return False
+
+        try:
+            loop = asyncio.get_running_loop()
+            auth = get_auth()
+            org_id, headers = await asyncio.gather(
+                loop.run_in_executor(None, get_current_org),
+                loop.run_in_executor(None, auth.get_headers),
+            )
+
+            for attempt in range(2):
+                endpoint = (
+                    f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/{trace_id}"
+                )
+                async with self._client_session.put(
+                    endpoint,
+                    json=updates,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    assert isinstance(response, aiohttp.ClientResponse)
+                    if response.status == 401 and attempt == 0:
+                        logger.debug("Access token expired, refreshing token")
+                        await loop.run_in_executor(None, auth.login)
+                        headers = await loop.run_in_executor(None, auth.get_headers)
+                        continue
+
+                    if response.status >= 400:
+                        error = await response.text()
+                        logger.warning(
+                            f"Failed to update data trace: "
+                            f"HTTP {response.status}: {error}"
+                        )
+                        return False
+
+                    logger.debug(
+                        "Updated trace %s with backend fields: %s",
+                        trace_id,
+                        list(updates.keys()),
+                    )
+                    return True
+
+            return False
+
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning("Failed to update data trace: %s: %s", type(e).__name__, e)
+            return False

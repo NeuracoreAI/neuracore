@@ -50,7 +50,7 @@ class ConnectionManager:
         """Start the connectivity check loop."""
         self._stopped = False
         self._connection_task = asyncio.create_task(self._check_loop())
-        logger.info("ConnectionManager started")
+        logger.debug("ConnectionManager started")
 
     async def stop(self) -> None:
         """Stop the connectivity check loop."""
@@ -61,7 +61,7 @@ class ConnectionManager:
                 await self._connection_task
             except asyncio.CancelledError:
                 pass
-        logger.info("ConnectionManager stopped")
+        logger.debug("ConnectionManager stopped")
 
     async def _check_loop(self) -> None:
         """Periodically check connectivity and emit events on state change."""

@@ -9,15 +9,17 @@ from neuracore.data_daemon.models import (
     DataType,
     TraceErrorCode,
     TraceRecord,
-    TraceStatus,
+    TraceRegistrationStatus,
+    TraceUploadStatus,
+    TraceWriteStatus,
 )
 
 
 class StateStore(Protocol):
     """Persistence interface for trace state."""
 
-    async def set_stopped_ats(self, recording_id: str) -> None:
-        """Set the end time for all traces for a recording."""
+    async def set_stopped_at(self, recording_id: str) -> None:
+        """Set recording-level stopped_at for a recording."""
         ...
 
     async def get_trace(self, trace_id: str) -> TraceRecord | None:
@@ -26,6 +28,16 @@ class StateStore(Protocol):
 
     async def find_traces_by_recording_id(self, recording_id: str) -> list[TraceRecord]:
         """Return all traces for a given recording ID."""
+        ...
+
+    async def get_progress_report_snapshot(
+        self, recording_id: str
+    ) -> tuple[float, float, dict[str, int], int] | None:
+        """Return an immutable progress snapshot for one recording.
+
+        Returns None when there are no traces or when any trace is ineligible
+        (missing metadata/byte totals).
+        """
         ...
 
     async def list_traces(self) -> list[TraceRecord]:
@@ -40,12 +52,83 @@ class StateStore(Protocol):
         """Return all traces marked as ready for upload."""
         ...
 
+    async def claim_traces_for_registration(
+        self, limit: int, max_wait_s: float
+    ) -> list[TraceRecord]:
+        """Claim traces for registration using size-or-age policy.
+
+        Claims immediately when enough traces are available to fill `limit`.
+        Otherwise, claims only traces older than `max_wait_s` based on
+        `last_updated`.
+        """
+        ...
+
     async def find_unreported_traces(self) -> list[TraceRecord]:
         """Return all traces that have not been progress-reported."""
         ...
 
     async def mark_recording_reported(self, recording_id: str) -> None:
         """Mark a recording as progress-reported."""
+        ...
+
+    async def mark_recording_reporting(self, recording_id: str) -> bool:
+        """Atomically move recording progress state from PENDING to REPORTING."""
+        ...
+
+    async def mark_recording_pending(self, recording_id: str) -> None:
+        """Set recording progress state to PENDING."""
+        ...
+
+    async def reset_reporting_recordings_to_pending(self) -> int:
+        """Reset in-flight REPORTING rows to PENDING and return affected count."""
+        ...
+
+    async def recording_has_reported_progress(self, recording_id: str) -> bool:
+        """Return True when recording progress status is REPORTED."""
+        ...
+
+    async def delete_uploaded_traces_for_recording(self, recording_id: str) -> int:
+        """Delete all UPLOADED traces for one recording and return deleted count."""
+        ...
+
+    async def delete_recording_and_traces_if_fully_uploaded(
+        self, recording_id: str
+    ) -> bool:
+        """Delete recording and all remaining traces when upload is fully complete."""
+        ...
+
+    async def list_recording_ids_with_stopped_traces(self) -> list[str]:
+        """Return recording IDs that already have at least one stopped trace."""
+        ...
+
+    async def reconcile_recordings_from_traces(self) -> None:
+        """Rebuild recording rows from trace rows (startup reconciliation)."""
+        ...
+
+    async def prune_old_empty_recordings(self, max_age_hours: int) -> int:
+        """Delete recordings with no traces and age older than threshold hours."""
+        ...
+
+    async def is_recording_stopped(self, recording_id: str) -> bool:
+        """Return True when recording has stopped_at set."""
+        ...
+
+    async def is_expected_trace_count_reported(self, recording_id: str) -> bool:
+        """Return True when expected trace count has been reported for recording."""
+        ...
+
+    async def get_expected_trace_count(self, recording_id: str) -> int | None:
+        """Return expected trace count for a recording, if any."""
+        ...
+
+    async def count_traces_for_recording(self, recording_id: str) -> int:
+        """Return trace count for a recording."""
+        ...
+
+    async def set_expected_trace_count(
+        self, recording_id: str, expected_trace_count: int
+    ) -> None:
+        """Persist expected trace count for a recording."""
         ...
 
     async def mark_expected_trace_count_reported(self, recording_id: str) -> None:
@@ -60,18 +143,40 @@ class StateStore(Protocol):
         """Reset a failed trace back to WRITTEN for retry."""
         ...
 
-    async def update_status(
-        self,
-        trace_id: str,
-        status: TraceStatus,
-        *,
-        error_message: str | None = None,
-    ) -> bool:
-        """Update the status and optional error message for a trace.
+    async def update_write_status(
+        self, trace_id: str, write_status: TraceWriteStatus
+    ) -> None:
+        """Update write lifecycle status for a trace."""
+        ...
 
-        Returns True if the status was changed, False if already at target status.
-        Raises ValueError for invalid transitions or missing trace.
+    async def update_registration_status(
+        self, trace_id: str, registration_status: TraceRegistrationStatus
+    ) -> None:
+        """Update registration lifecycle status for a trace."""
+        ...
+
+    async def mark_traces_as_registering(self, trace_ids: list[str]) -> list[str]:
+        """Batch mark traces as registering.
+
+        Returns trace_ids that were actually updated.
         """
+        ...
+
+    async def mark_traces_as_registered(self, trace_ids: list[str]) -> list[str]:
+        """Batch mark traces as registered.
+
+        Returns trace_ids that were actually updated.
+        """
+        ...
+
+    async def update_upload_status(
+        self, trace_id: str, upload_status: TraceUploadStatus
+    ) -> None:
+        """Update upload lifecycle status for a trace."""
+        ...
+
+    async def increment_uploaded_trace_count(self, recording_id: str) -> None:
+        """Increment recording-level uploaded trace count."""
         ...
 
     async def record_error(
@@ -79,7 +184,6 @@ class StateStore(Protocol):
         trace_id: str,
         error_message: str,
         error_code: TraceErrorCode | None = None,
-        status: TraceStatus = TraceStatus.FAILED,
     ) -> None:
         """Record a standardized error for a trace."""
         ...
@@ -87,6 +191,9 @@ class StateStore(Protocol):
     async def delete_trace(self, trace_id: str) -> None:
         """Delete a trace record."""
         ...
+
+    async def init_async_store(self) -> None:
+        """Apply pragmas and ensure schema."""
 
     async def upsert_trace_metadata(
         self,
@@ -151,5 +258,5 @@ class StateStore(Protocol):
         ...
 
     async def reset_retrying_to_written(self) -> int:
-        """Reset RETRYING/UPLOADING traces back to WRITTEN (preserve retry schedule)."""
+        """Reset RETRYING/UPLOADING traces back to upload PENDING."""
         ...
