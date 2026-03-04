@@ -77,11 +77,16 @@ class MuJoCoEnvironment:
         self.initialize_episode()
         return self.get_observation()
 
-    def step(self, action: np.ndarray) -> tuple[Observation, float, bool]:
+    def step(
+        self, action: np.ndarray, no_obs: bool = False
+    ) -> tuple[Observation, float, bool]:
         """Execute one environment step.
 
         Args:
             action: Control action to execute.
+            no_obs: If True, skip observation calculation.
+                Handy for when using action sequences that don't
+                require intermediate observations.
 
         Returns:
             Tuple of (observation, reward, done).
@@ -91,7 +96,7 @@ class MuJoCoEnvironment:
             mujoco.mj_step(self.model, self.data)
         self.step_count += 1
 
-        obs = self.get_observation()
+        obs = None if no_obs else self.get_observation()
         reward = self.get_reward()
         done = self.step_count * self.dt >= self.time_limit
 

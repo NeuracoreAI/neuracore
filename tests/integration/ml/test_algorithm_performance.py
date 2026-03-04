@@ -28,7 +28,6 @@ import sys
 import time
 from typing import cast
 
-import matplotlib.pyplot as plt
 import pytest
 import torch
 from neuracore_types import (
@@ -66,7 +65,6 @@ GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
 FREQUENCY = 50
 NUM_ROLLOUTS = 20
-ONSCREEN_RENDER = False
 # Training should be complete by the time Phase 2 runs; this is a safety buffer
 # for jobs that finish slightly after the Phase 2 workflow starts.
 TRAINING_WAIT_TIMEOUT_MINUTES = 60
@@ -91,27 +89,19 @@ def eval_model(
     policy: Policy,
     env: TransferCubeTask,
     num_rollouts: int,
-    onscreen_render: bool = False,
 ) -> float:
-    plt_img = None
     success = 0
     for episode_idx in range(num_rollouts):
         logger.info(f"Starting rollout {episode_idx + 1} / {num_rollouts}")
         BOX_POSE[0] = env.sample_box_pose()
         obs = env.reset()
-
-        if onscreen_render:
-            ax = plt.subplot()
-            plt_img = ax.imshow(obs.cameras[MJ_CAM_NAME].rgb)
-            plt.ion()
-
         episode_max = 0
         horizon = 1
         actions = []
-
         for i in range(EPISODE_LENGTH):
             idx_in_horizon = i % horizon
             if idx_in_horizon == 0:
+                obs = env.get_observation()
                 sync_point = SynchronizedPoint(
                     data={
                         DataType.JOINT_POSITIONS: {
@@ -161,16 +151,10 @@ def eval_model(
                 horizon = len(actions)
 
             a = actions[idx_in_horizon]
-            obs, reward, done = env.step(a)
+            # To save on rendering time during action sequences,
+            # we do an explicit get_observation() every prediction step
+            obs, reward, done = env.step(a, no_obs=True)
             episode_max = max(episode_max, reward)
-
-            if onscreen_render:
-                assert plt_img is not None
-                plt_img.set_data(obs.cameras[MJ_CAM_NAME].rgb)
-                plt.pause(0.002)
-
-        if onscreen_render:
-            plt.close()
 
         if episode_max >= MAX_REWARD:
             success += 1
@@ -294,7 +278,6 @@ class TestAlgorithmPerformance:
                 policy=policy,
                 env=env,
                 num_rollouts=NUM_ROLLOUTS,
-                onscreen_render=ONSCREEN_RENDER,
             )
             policy.disconnect()
         except Exception:
