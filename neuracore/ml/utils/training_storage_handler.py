@@ -76,26 +76,25 @@ class TrainingStorageHandler(UploadStorageMixin):
             )
         return response.json()["url"]
 
-    def _get_download_url(self, filepath: str) -> str:
-        """Get a signed download URL for a file in cloud storage.
+    def _get_checkpoint_download_url(self, checkpoint_name: str) -> str:
+        """Get a signed download URL for a checkpoint file in cloud storage.
 
         Args:
-            filepath: Path of the file to download.
+            checkpoint_name: Name of the checkpoint file to download.
 
         Returns:
-            str: Signed URL for downloading the file.
+            str: Signed URL for downloading the checkpoint.
 
         Raises:
             ValueError: If the request to get the download URL fails.
         """
-        get_current_org()
         response = self._get_request(
-            f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/download-url",
-            params={"filepath": filepath},
+            f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}"
+            f"/checkpoint_url/{checkpoint_name}",
         )
         if response.status_code != 200:
             raise ValueError(
-                f"Failed to get download URL for {filepath}: {response.text}"
+                f"Failed to get download URL for {checkpoint_name}: {response.text}"
             )
         return response.json()["url"]
 
@@ -181,9 +180,7 @@ class TrainingStorageHandler(UploadStorageMixin):
         """
         load_path = self.local_dir / checkpoint_name
         if self.log_to_cloud:
-            download_url = self._get_download_url(
-                filepath="checkpoints/" + checkpoint_name
-            )
+            download_url = self._get_checkpoint_download_url(checkpoint_name)
             response = requests.get(download_url)
             if response.status_code != 200:
                 raise ValueError(
