@@ -280,7 +280,7 @@ class DistributedTrainer:
                 epoch=start_epoch, step=self.global_train_step
             )
 
-        err_msg: str = ""
+        error_msg: str = ""
         try:
             start_epoch = max(start_epoch, 1)
             for epoch in range(start_epoch, self.num_epochs + 1):
@@ -324,11 +324,11 @@ class DistributedTrainer:
             error_msg = f"Error during training. \n{traceback.format_exc()}"
             raise  # Re-raise to ensure proper exit code
         finally:
-            if err_msg:
+            if error_msg:
                 logger.error(error_msg)
                 if self.rank == 0:
                     self.storage_handler.update_training_metadata(
-                        epoch=epoch, step=self.global_train_step, error=err_msg
+                        epoch=epoch, step=self.global_train_step, error=error_msg
                     )
             # Close the logger
             if self.rank == 0:
