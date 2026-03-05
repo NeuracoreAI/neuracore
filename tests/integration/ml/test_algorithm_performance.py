@@ -37,6 +37,7 @@ from neuracore_types import (
     RGBCameraData,
     SynchronizedPoint,
 )
+from neuracore_types.training.training import GPUType
 
 import neuracore as nc
 from neuracore.core.endpoint import Policy
@@ -253,6 +254,7 @@ class TestAlgorithmPerformance:
                 model_input_order=INPUT_DATA_SPEC,
                 model_output_order=OUTPUT_DATA_SPEC,
                 ttl=60 * 30,
+                gpu_type=GPUType.NVIDIA_TESLA_V100,
             )
             endpoint_id = endpoint_data["id"]
 
