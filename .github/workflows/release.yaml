@@ -1,11 +1,11 @@
-name: Prepare Release
-run-name: ${{ inputs.dry_run && 'Prepare Release (Dry Run)' || 'Prepare Release' }}
+name: Release
+run-name: ${{ inputs.dry_run && 'Release (Dry Run)' || 'Release' }}
 
 on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run mode (only show what would happen, no commits/pushes/PR creation)'
+        description: 'Dry run mode (only show what would happen, no commits/pushes/publishing)'
         required: false
         type: boolean
         default: false
@@ -22,26 +22,12 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        ref: develop
-        fetch-depth: 0  # Need full history for comparison
-
-    - name: Verify on develop branch
-      run: |
-        CURRENT_BRANCH=$(git branch --show-current)
-        if [ "$CURRENT_BRANCH" != "develop" ]; then
-          echo "ERROR: This workflow must run on the develop branch"
-          echo "Current branch: $CURRENT_BRANCH"
-          exit 1
-        fi
-        echo "✓ Running on develop branch"
+        ref: main
+        fetch-depth: 0
 
     - name: Get latest release tag
       id: get_tag
       run: |
-        # Fetch main branch to compare
-        git fetch origin main:main
-
-        # Get the latest tag (should be on main)
         LATEST_TAG=$(git describe --tags --abbrev=0 --match "v*" 2>/dev/null || echo "")
         if [ -z "$LATEST_TAG" ]; then
           echo "ERROR: No previous release tag found"
@@ -50,20 +36,19 @@ jobs:
         echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
         echo "Found latest release tag: $LATEST_TAG"
 
-    - name: Check if develop is ahead of main
+    - name: Check for new commits since last tag
       run: |
-        # Check if develop has commits not on main
-        COMMITS_AHEAD=$(git rev-list --count main..develop)
+        COMMITS_SINCE=$(git rev-list --count ${{ steps.get_tag.outputs.latest_tag }}..HEAD)
 
-        if [ "$COMMITS_AHEAD" -eq 0 ]; then
-          echo "ERROR: develop branch has no new commits compared to main"
+        if [ "$COMMITS_SINCE" -eq 0 ]; then
+          echo "ERROR: No new commits on main since ${{ steps.get_tag.outputs.latest_tag }}"
           echo "There is nothing to release"
           exit 1
         fi
 
-        echo "✓ develop is $COMMITS_AHEAD commits ahead of main"
+        echo "✓ $COMMITS_SINCE new commits on main since ${{ steps.get_tag.outputs.latest_tag }}"
 
-    - name: Get PRs merged to develop since last release
+    - name: Get PRs merged to main since last release
       id: get_prs
       uses: actions/github-script@v7
       with:
@@ -80,11 +65,10 @@ jobs:
           const tagDate = tagCommit.data.commit.committer.date;
           console.log(`Tag ${tag} was created at: ${tagDate}`);
 
-          // Search for PRs merged to develop after the tag date
-          const query = `repo:${context.repo.owner}/${context.repo.repo} is:pr is:merged base:develop merged:>${tagDate}`;
+          // Search for PRs merged to main after the tag date
+          const query = `repo:${context.repo.owner}/${context.repo.repo} is:pr is:merged base:main merged:>${tagDate}`;
           console.log(`Search query: ${query}`);
 
-          // Handle pagination to get all PRs
           let allPRs = [];
           let page = 1;
           let hasMore = true;
@@ -111,11 +95,11 @@ jobs:
           const prNumbers = allPRs.map(pr => pr.number);
 
           if (prNumbers.length === 0) {
-            core.setFailed(`No merged PRs found on develop since ${tag}`);
+            core.setFailed(`No merged PRs found on main since ${tag}`);
             return [];
           }
 
-          console.log(`Found ${prNumbers.length} merged PRs to develop: ${prNumbers.join(', ')}`);
+          console.log(`Found ${prNumbers.length} merged PRs to main: ${prNumbers.join(', ')}`);
           return prNumbers;
 
     - name: Fetch PR data and determine version bump
@@ -131,7 +115,6 @@ jobs:
           let highestPriority = 0;
           const prData = [];
 
-          // Fetch PR details
           for (const prNumber of prNumbers) {
             try {
               const pr = await github.rest.pulls.get({
@@ -194,23 +177,20 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        ref: develop
+        ref: main
         fetch-depth: 0
 
     - name: Calculate new version
       id: calc_version
       run: |
-        # Read current version from .bumpversion.cfg
         CURRENT_VERSION=$(grep '^current_version = ' .bumpversion.cfg | cut -d'=' -f2 | tr -d ' ')
         BUMP_TYPE="${{ needs.analyze-changes.outputs.bump_type }}"
 
         echo "Current version: $CURRENT_VERSION"
         echo "Bump type: $BUMP_TYPE"
 
-        # Parse version
         IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
 
-        # Bump version
         case $BUMP_TYPE in
           major)
             MAJOR=$((MAJOR + 1))
@@ -226,7 +206,6 @@ jobs:
             ;;
           none)
             echo "No version bump (type: none)"
-            # Keep current version
             ;;
           *)
             echo "ERROR: Invalid bump type: $BUMP_TYPE"
@@ -247,7 +226,6 @@ jobs:
       id: read_pending
       run: |
         if [ -f "changelogs/pending-changelog.md" ]; then
-          # Read file and remove template placeholders
           PENDING_CONTENT=$(cat changelogs/pending-changelog.md | \
             grep -v '^\[' | \
             grep -v '<!--' | \
@@ -255,10 +233,8 @@ jobs:
             sed '/^$/N;/^\n$/D' | \
             sed 's/^# Pending Release Notes//')
 
-          # Check if there's actual content (not just headers)
           if echo "$PENDING_CONTENT" | grep -qv '^#'; then
             echo "Found pending changelog content"
-            # Escape for JSON
             PENDING_CONTENT=$(echo "$PENDING_CONTENT" | jq -Rs .)
             echo "pending_content=$PENDING_CONTENT" >> $GITHUB_OUTPUT
           else
@@ -281,44 +257,31 @@ jobs:
           const version = '${{ steps.calc_version.outputs.new_version }}';
           const prData = JSON.parse(process.env.PR_DATA);
           const pendingContent = process.env.PENDING_CONTENT ? JSON.parse(process.env.PENDING_CONTENT) : '';
-          const isDryRun = ${{ inputs.dry_run }};
 
-          // Get current date
           const date = new Date().toISOString().split('T')[0];
 
-          // Group PRs by bump type
           const groups = {
-            breaking: [],  // version:major
-            features: [],  // version:minor
-            fixes: [],     // version:patch
-            other: []      // version:none
+            breaking: [],
+            features: [],
+            fixes: [],
+            other: []
           };
 
           for (const pr of prData) {
             switch (pr.bump_type) {
-              case 'major':
-                groups.breaking.push(pr);
-                break;
-              case 'minor':
-                groups.features.push(pr);
-                break;
-              case 'patch':
-                groups.fixes.push(pr);
-                break;
-              default:
-                groups.other.push(pr);
+              case 'major': groups.breaking.push(pr); break;
+              case 'minor': groups.features.push(pr); break;
+              case 'patch': groups.fixes.push(pr); break;
+              default: groups.other.push(pr);
             }
           }
 
-          // Build changelog markdown
           let changelog = `# Release v${version} - ${date}\n\n`;
 
-          // Add pending summary if available
           if (pendingContent && pendingContent.trim()) {
             changelog += `## Summary\n\n${pendingContent.trim()}\n\n---\n\n`;
           }
 
-          // Add Breaking Changes section
           if (groups.breaking.length > 0) {
             changelog += `## Breaking Changes\n\n`;
             for (const pr of groups.breaking.sort((a, b) => a.number - b.number)) {
@@ -327,7 +290,6 @@ jobs:
             changelog += '\n';
           }
 
-          // Add Features section
           if (groups.features.length > 0) {
             changelog += `## Features\n\n`;
             for (const pr of groups.features.sort((a, b) => a.number - b.number)) {
@@ -336,7 +298,6 @@ jobs:
             changelog += '\n';
           }
 
-          // Add Bug Fixes section
           if (groups.fixes.length > 0) {
             changelog += `## Bug Fixes\n\n`;
             for (const pr of groups.fixes.sort((a, b) => a.number - b.number)) {
@@ -345,7 +306,6 @@ jobs:
             changelog += '\n';
           }
 
-          // Add Other Changes section
           if (groups.other.length > 0) {
             changelog += `## Other Changes\n\n`;
             for (const pr of groups.other.sort((a, b) => a.number - b.number)) {
@@ -354,17 +314,14 @@ jobs:
             changelog += '\n';
           }
 
-          // Add footer
           changelog += `---\n\n`;
           changelog += `**Installation:**\n\`\`\`bash\npip install neuracore==${version}\n\`\`\`\n\n`;
           changelog += `**Links:**\n`;
           changelog += `- PyPI: https://pypi.org/project/neuracore/${version}/\n`;
           changelog += `- GitHub Release: https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/v${version}\n`;
 
-          // Output changelog content
           core.setOutput('changelog_content', changelog);
 
-          // Print summary
           console.log(`\nChangelog Summary:`);
           console.log(`- Major Changes: ${groups.breaking.length}`);
           console.log(`- Minor Changes: ${groups.features.length}`);
@@ -372,13 +329,14 @@ jobs:
           console.log(`- Misc/Chore Changes: ${groups.other.length}`);
           console.log(`- Total PRs: ${prData.length}`);
 
-  version-bump:
+  release:
     needs: [analyze-changes, generate-changelog]
     if: needs.analyze-changes.outputs.should_release == 'true' && inputs.dry_run == false
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       new_version: ${{ needs.generate-changelog.outputs.new_version }}
-      commit_sha: ${{ steps.push.outputs.commit_sha }}
 
     steps:
     - name: Generate GitHub App Token
@@ -391,7 +349,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        ref: develop
+        ref: main
         token: ${{ steps.generate-token.outputs.token }}
         fetch-depth: 0
 
@@ -400,8 +358,8 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: Install bump2version
-      run: pip install bump2version
+    - name: Install build tools
+      run: pip install bump2version build twine
 
     - name: Bump version
       run: |
@@ -409,166 +367,104 @@ jobs:
 
         echo "Bumping $BUMP_TYPE version"
 
-        # Configure git
         git config user.email "github-actions[bot]@users.noreply.github.com"
         git config user.name "github-actions[bot]"
 
-        # Use bump2version to bump the version (without committing)
         bump2version $BUMP_TYPE --allow-dirty --no-commit --no-tag
 
         NEW_VERSION=$(grep -m 1 '^current_version = ' .bumpversion.cfg | cut -d'=' -f2 | tr -d ' ')
         echo "Bumped to version: $NEW_VERSION"
 
-    - name: Write changelog file
-      uses: actions/github-script@v7
-      env:
-        CHANGELOG_CONTENT: ${{ needs.generate-changelog.outputs.changelog_content }}
-      with:
-        script: |
-          const fs = require('fs');
-          const version = '${{ needs.generate-changelog.outputs.new_version }}';
-          const changelog = process.env.CHANGELOG_CONTENT;
-          const path = `changelogs/${version}-changelog.md`;
-
-          if (!fs.existsSync('changelogs')) {
-            fs.mkdirSync('changelogs', { recursive: true });
-          }
-
-          fs.writeFileSync(path, changelog);
-          console.log(`Changelog written to: ${path}`);
-
     - name: Reset pending changelog
       run: |
-        cat > changelogs/pending-changelog.md << 'EOF'
-        # Pending Release Notes
-
-        <!--
-        This file contains a human-written summary for the next release.
-        Append your changes below. This content will be included at the top of the release changelog.
-
-        Example: "This release adds support for multi-GPU training and improves streaming performance by 40%."
-        -->
-
-        ## Summary
-
-        <!-- Append your summary here -->
-        EOF
-
+        cp changelogs/template.md changelogs/pending-changelog.md
         echo "Reset pending changelog to template"
 
-    - name: Commit version bump and changelog
+    - name: Commit and push version bump
       run: |
         NEW_VERSION="${{ needs.generate-changelog.outputs.new_version }}"
 
-        # Add all changed files
-        git add .bumpversion.cfg neuracore/__init__.py changelogs/
-
-        # Create commit
+        git add .bumpversion.cfg neuracore/__init__.py changelogs/pending-changelog.md
         git commit -m "Bump version to ${NEW_VERSION} [skip ci]"
+        git push origin main
 
-        echo "Created version bump commit"
+        echo "Pushed version bump to main"
 
-    - name: Push to develop
-      id: push
+    - name: Build Python package
+      run: python -m build
+
+    - name: Publish to PyPI
+      env:
+        TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+        TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+      run: twine upload --skip-existing dist/*
+
+    - name: Create git tag
       run: |
-        git push origin develop
+        VERSION="${{ needs.generate-changelog.outputs.new_version }}"
+        TAG_NAME="v${VERSION}"
 
-        COMMIT_SHA=$(git rev-parse HEAD)
-        echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+        if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+          echo "Tag $TAG_NAME already exists, skipping"
+        else
+          git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
+          git push origin "$TAG_NAME"
+          echo "Created and pushed tag: $TAG_NAME"
+        fi
 
-        echo "Pushed version bump commit to develop"
-        echo "Commit SHA: $COMMIT_SHA"
-
-  create-release-pr:
-    needs: [analyze-changes, generate-changelog, version-bump]
-    if: needs.analyze-changes.outputs.should_release == 'true' && inputs.dry_run == false
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Generate GitHub App Token
-      id: generate-token
-      uses: actions/create-github-app-token@v1
-      with:
-        app-id: ${{ vars.NC_VERSION_BUMPER_APP_ID }}
-        private-key: ${{ secrets.NC_VERSION_BUMPER_PRIVATE_KEY }}
-
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        ref: develop
-        token: ${{ steps.generate-token.outputs.token }}
-        fetch-depth: 0
-
-    - name: Pull latest develop
-      run: git pull origin develop
-
-    - name: Create Pull Request
-      id: create_pr
+    - name: Create GitHub Release
       uses: actions/github-script@v7
       env:
         CHANGELOG_CONTENT: ${{ needs.generate-changelog.outputs.changelog_content }}
       with:
-        github-token: ${{ steps.generate-token.outputs.token }}
         script: |
-          const version = '${{ needs.version-bump.outputs.new_version }}';
-          const changelogContent = process.env.CHANGELOG_CONTENT;
-          const bumpType = '${{ needs.analyze-changes.outputs.bump_type }}';
+          const version = '${{ needs.generate-changelog.outputs.new_version }}';
+          const changelogBody = process.env.CHANGELOG_CONTENT;
+          const tagName = `v${version}`;
 
-          // Build PR body
-          let prBody = `## Release v${version}\n\n`;
-          prBody += `This PR merges the release preparation from \`develop\` into \`main\`.\n\n`;
-          prBody += `**Version bump type:** \`${bumpType}\`\n\n`;
-          prBody += `---\n\n`;
-          prBody += `### Changelog Preview\n\n`;
-          prBody += changelogContent;
-          prBody += `\n---\n\n`;
-          prBody += `**⚠️ Important:** This PR was automatically created by the \`prepare-release\` workflow.\n`;
-          prBody += `When merged, the \`pr-publish-release\` workflow will automatically:\n`;
-          prBody += `- Publish the package to PyPI\n`;
-          prBody += `- Create a GitHub release with the above changelog\n`;
-          prBody += `- Tag the release as \`v${version}\`\n`;
+          try {
+            const existingRelease = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: tagName
+            });
+            console.log(`Release ${tagName} already exists, skipping`);
+            return;
+          } catch (error) {
+            if (error.status !== 404) throw error;
+          }
 
-          const pr = await github.rest.pulls.create({
+          const release = await github.rest.repos.createRelease({
             owner: context.repo.owner,
             repo: context.repo.repo,
-            title: `Release v${version}`,
-            head: 'develop',
-            base: 'main',
-            body: prBody
+            tag_name: tagName,
+            name: `Release v${version}`,
+            body: changelogBody,
+            draft: false,
+            prerelease: false
           });
 
-          console.log(`Created PR #${pr.data.number}: ${pr.data.html_url}`);
+          console.log(`Created GitHub Release for v${version}`);
+          console.log(`Release URL: ${release.data.html_url}`);
 
-          // Add label to identify this as a release PR
-          await github.rest.issues.addLabels({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: pr.data.number,
-            labels: ['automated-release']
-          });
-
-          core.setOutput('pr_number', pr.data.number);
-          core.setOutput('pr_url', pr.data.html_url);
-
-    - name: Add PR summary
+    - name: Generate release summary
       uses: actions/github-script@v7
       with:
         script: |
-          const prUrl = '${{ steps.create_pr.outputs.pr_url }}';
-          const prNumber = '${{ steps.create_pr.outputs.pr_number }}';
-          const version = '${{ needs.version-bump.outputs.new_version }}';
-
+          const version = '${{ needs.generate-changelog.outputs.new_version }}';
           const fs = require('fs');
-          let summary = `# ✅ Release PR Created\n\n`;
+          let summary = `# Release Published Successfully\n\n`;
           summary += `**Version:** \`${version}\`\n\n`;
-          summary += `**Pull Request:** [#${prNumber}](${prUrl})\n\n`;
-          summary += `---\n\n`;
-          summary += `## Next Steps\n\n`;
-          summary += `1. Review the release PR: ${prUrl}\n`;
-          summary += `2. Merge the PR to trigger the \`publish-release\` workflow\n`;
-          summary += `3. The package will be automatically published to PyPI\n`;
-          summary += `4. A GitHub release will be created automatically\n`;
-
+          summary += `## Actions Completed\n\n`;
+          summary += `- Version bumped and pushed to \`main\`\n`;
+          summary += `- Package published to PyPI\n`;
+          summary += `- Git tag \`v${version}\` created\n`;
+          summary += `- GitHub Release created\n\n`;
+          summary += `### Links\n\n`;
+          summary += `- [PyPI Package](https://pypi.org/project/neuracore/${version}/)\n`;
+          summary += `- [GitHub Release](https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/v${version})\n\n`;
+          summary += `### Installation\n\n`;
+          summary += `\`\`\`bash\npip install neuracore==${version}\n\`\`\`\n`;
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
 
   dry-run-summary:
@@ -592,23 +488,22 @@ jobs:
           let summary = '';
 
           if (!shouldRelease) {
-            summary += '# ⚠️ No Release Needed\n\n';
-            summary += 'All PRs merged to develop since the last release have `version:none` label.\n\n';
+            summary += '# No Release Needed\n\n';
+            summary += 'All PRs merged to main since the last release have `version:none` label.\n\n';
             summary += 'No version bump or release will be created.\n\n';
             summary += '---\n\n';
             summary += '## Changelog Preview\n\n';
             summary += changelogContent;
           } else {
-            summary += '# 🧪 Dry Run Complete\n\n';
-            summary += '**⚠️ This was a DRY RUN** - no changes were made\n\n';
+            summary += '# Dry Run Complete\n\n';
+            summary += '**This was a DRY RUN** - no changes were made\n\n';
             summary += '## What Would Happen\n\n';
-            summary += `- **Version Bump:** \`${bumpType}\` → \`${newVersion}\`\n`;
-            summary += `- ✅ Version updated in \`.bumpversion.cfg\` and \`neuracore/__init__.py\`\n`;
-            summary += `- ✅ Changelog created at \`changelogs/${newVersion}-changelog.md\`\n`;
-            summary += `- ✅ Pending changelog reset to template\n`;
-            summary += `- ✅ Changes committed to \`develop\` branch\n`;
-            summary += `- ✅ Pull Request created: \`develop\` → \`main\`\n`;
-            summary += `- ✅ On PR merge: Package published to PyPI, GitHub release created\n\n`;
+            summary += `- **Version Bump:** \`${bumpType}\` -> \`${newVersion}\`\n`;
+            summary += `- Version updated in \`.bumpversion.cfg\` and \`neuracore/__init__.py\`\n`;
+            summary += `- Changes committed and pushed to \`main\`\n`;
+            summary += `- Package published to PyPI\n`;
+            summary += `- Git tag \`v${newVersion}\` created\n`;
+            summary += `- GitHub Release created\n\n`;
             summary += `---\n\n`;
             summary += `## Changelog Preview\n\n`;
             summary += changelogContent;
@@ -618,13 +513,13 @@ jobs:
 
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
 
-  final-check:
+  no-release-needed:
     needs: [analyze-changes, generate-changelog]
     if: always() && needs.analyze-changes.outputs.should_release != 'true' && inputs.dry_run == false
     runs-on: ubuntu-latest
 
     steps:
-    - name: Fail if no release needed
+    - name: Fail - no release needed
       run: |
         echo "ERROR: Cannot create a release - all PRs have version:none label"
         echo "Run with dry_run: true to see what would be released"

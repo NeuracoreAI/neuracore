@@ -322,12 +322,11 @@ If you encounter issues with your algorithm:
 
 ### Branch Strategy
 
-- **`develop`**: Primary development branch - target most PRs here
-- **`main`**: Production releases - synced via release workflow or manual PRs
+- **`main`**: The single development and release branch - target all PRs here
 
 ### Creating PRs
 
-All PRs to `develop` must have a version label:
+All PRs to `main` must have a version label:
 
 - `version:major` - Breaking changes
 - `version:minor` - New features
@@ -342,33 +341,24 @@ Valid prefixes: `feat`, `fix`, `chore`, `docs`, `ci`, `test`, `refactor`, `style
 
 ### Pending Changelog
 
-For significant changes, optionally update `changelogs/pending-changelog.md`:
+For significant changes, optionally update `changelogs/pending-changelog.md` as part of your PR:
 ```markdown
 ## Summary
 
 This release adds multi-GPU training and improves streaming performance by 40%.
 ```
+This human-written summary is included at the top of the GitHub release notes. It is reset to a blank template automatically after each release.
 
 ### Creating a Release
 
-**Step 1: Prepare Release** (on `develop` branch)
-
-1. Go to **Actions** → **Prepare Release** → **Run workflow**
-2. Select branch: `develop`
-3. Check **dry_run** to preview (recommended)
-4. Review the summary, then run again without dry_run
-5. The workflow will:
-   - Analyze PRs merged to `develop` since last release
-   - Bump version on `develop`
-   - Generate changelog
-   - Create PR: `develop` → `main`
-
-**Step 2: Review and Merge**
-
-1. Review the automated release PR
-2. Merge the PR 
-3. The **Publish Release** workflow triggers automatically:
-   - Publishes to PyPI
-   - Creates GitHub release with changelog
-   - Tags the release
+1. Go to **Actions** → **Release** → **Run workflow**
+2. Check **dry_run** to preview (recommended)
+3. Review the summary, then run again without dry_run
+4. The workflow will:
+   - Analyze PRs merged to `main` since last release
+   - Determine version bump from PR labels
+   - Bump version and push directly to `main`
+   - Publish to PyPI
+   - Create a GitHub release with changelog
+   - Tag the release
 
