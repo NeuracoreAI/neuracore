@@ -61,6 +61,7 @@ job_data = nc.start_training_run(
     output_robot_data_spec=output_robot_data_spec,
     algorithm_config={"batch_size": 32, "epochs": 100, "output_prediction_horizon": 50},
 )
+# Use name_auto_increment=True to auto-use MyTrainingJob_1, MyTrainingJob_2, etc. if the name already exists.
 ```
 
 ---
