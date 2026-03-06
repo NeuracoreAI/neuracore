@@ -44,26 +44,32 @@ jobs:
 
   pre-commit:
     runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - uses: pre-commit/action@v3.0.1
 
   test-non-ml:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.non-ml == 'true' || needs.detect-changes.outputs.deps == 'true' || needs.detect-changes.outputs.ci == 'true'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: true
       matrix:
         python-version: ["3.10", "3.11"]
+    env:
+      SHOULD_RUN: ${{ needs.detect-changes.outputs.non-ml == 'true' || needs.detect-changes.outputs.deps == 'true' || needs.detect-changes.outputs.ci == 'true' }}
     steps:
       - name: Checkout code
+        if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@v6
 
       - name: Set up Python
+        if: env.SHOULD_RUN == 'true'
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
@@ -71,26 +77,30 @@ jobs:
           cache-dependency-path: "setup.py"
 
       - name: Install Python dependencies
+        if: env.SHOULD_RUN == 'true'
         run: pip install ".[dev,ml,import]" --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Run non-ML unit tests
+        if: env.SHOULD_RUN == 'true'
         run: pytest tests/unit --ignore=tests/unit/ml
 
   test-ml:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.ml == 'true' || needs.detect-changes.outputs.deps == 'true' || needs.detect-changes.outputs.ci == 'true'
     runs-on: ubuntu-22.04
     env:
       UV_VENV_SEED: "true"
+      SHOULD_RUN: ${{ needs.detect-changes.outputs.ml == 'true' || needs.detect-changes.outputs.deps == 'true' || needs.detect-changes.outputs.ci == 'true' }}
     strategy:
       fail-fast: true
       matrix:
         python-version: ["3.10", "3.11"]
     steps:
       - name: Checkout code
+        if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@v6
 
       - name: Set up uv
+        if: env.SHOULD_RUN == 'true'
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
@@ -98,14 +108,17 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python dependencies
+        if: env.SHOULD_RUN == 'true'
         run: uv pip install ".[dev,ml,import]" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
 
       - name: Run ML unit tests (except PI0)
+        if: env.SHOULD_RUN == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: uv run pytest tests/unit/ml --ignore=tests/unit/ml/algorithms/test_pi0.py
 
       - name: Run PI0 unit tests in isolated pytest process
+        if: env.SHOULD_RUN == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: uv run pytest tests/unit/ml/algorithms/test_pi0.py
