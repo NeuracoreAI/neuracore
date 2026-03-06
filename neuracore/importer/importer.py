@@ -143,6 +143,7 @@ def _run_import(
     dry_run: bool = False,
     skip_on_error: str = "episode",
     suppress_validation_warnings: bool = False,
+    max_workers: int | None = 1,
 ) -> None:
     """Execute the dataset import workflow."""
     args = SimpleNamespace(
@@ -153,6 +154,7 @@ def _run_import(
         dry_run=dry_run,
         skip_on_error=skip_on_error,
         no_validation_warnings=suppress_validation_warnings,
+        max_workers=max_workers,
     )
 
     cli_args_validation(args)
@@ -278,6 +280,8 @@ def _run_import(
             ik_init_config=ik_init_config,
             dry_run=args.dry_run,
             suppress_warnings=args.no_validation_warnings,
+            max_workers=args.max_workers,
+            skip_on_error=skip_on_error,
         )
         importer.import_all()
     elif dataset_type == DatasetTypeConfig.RLDS:
@@ -292,6 +296,7 @@ def _run_import(
             ik_init_config=ik_init_config,
             dry_run=args.dry_run,
             suppress_warnings=args.no_validation_warnings,
+            max_workers=args.max_workers,
             skip_on_error=skip_on_error,
         )
         importer.import_all()
@@ -307,6 +312,7 @@ def _run_import(
             ik_init_config=ik_init_config,
             dry_run=args.dry_run,
             suppress_warnings=args.no_validation_warnings,
+            max_workers=args.max_workers,
             skip_on_error=skip_on_error,
         )
         importer.import_all()
