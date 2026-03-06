@@ -65,10 +65,13 @@ jobs:
     env:
       UV_VENV_SEED: "true"
       SHOULD_RUN: ${{ needs.detect-changes.outputs.non-ml == 'true' || needs.detect-changes.outputs.deps == 'true' || needs.detect-changes.outputs.ci == 'true' }}
+      SHOULD_RUN_COVERAGE: ${{ matrix.python-version == '3.11' }}
     steps:
       - name: Checkout code
         if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up uv
         if: env.SHOULD_RUN == 'true'
@@ -80,12 +83,46 @@ jobs:
 
       - name: Install Python dependencies
         if: env.SHOULD_RUN == 'true'
-        run: uv pip install ".[dev,import]"
+        run: |
+          uv pip install ".[dev,import]"
+          if [ "${SHOULD_RUN_COVERAGE}" = "true" ]; then
+            uv pip install pytest-cov diff-cover
+          fi
 
       - name: Run non-ML unit tests
         if: env.SHOULD_RUN == 'true'
-        run: uv run pytest tests/unit --ignore=tests/unit/ml
+        run: |
+          if [ "${SHOULD_RUN_COVERAGE}" = "true" ]; then
+            uv run pytest tests/unit \
+              --ignore=tests/unit/ml \
+              --cov=neuracore \
+              --junitxml=pytest.xml \
+              --cov-report=term-missing:skip-covered \
+              --cov-report=xml \
+              | tee pytest-coverage.txt
+          else
+            uv run pytest tests/unit --ignore=tests/unit/ml
+          fi
 
+      - name: Generate diff coverage
+        if: env.SHOULD_RUN == 'true' && env.SHOULD_RUN_COVERAGE == 'true'
+        run: |
+          diff-cover coverage.xml \
+            --compare-branch=origin/main \
+            --exclude neuracore/ml/** \
+            --json-report diff-cover.json \
+            || true
+
+      - name: Upload coverage artifacts
+        if: env.SHOULD_RUN == 'true' && env.SHOULD_RUN_COVERAGE == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-artifacts
+          path: |
+            pytest-coverage.txt
+            pytest.xml
+            diff-cover.json
+            
   test-ml:
     needs: [detect-changes, pre-commit]
     runs-on: ubuntu-22.04
