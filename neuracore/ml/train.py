@@ -608,7 +608,11 @@ def run_training(
 
 
 # Register the resolver with OmegaConf
-OmegaConf.register_new_resolver("resolve_output_dir", _resolve_output_dir)
+OmegaConf.register_new_resolver(
+    "resolve_output_dir",
+    _resolve_output_dir,
+    use_cache=True,  # Avoid re-resolving the output directory after it's been created
+)
 
 
 @hydra.main(version_base=None, config_path="config", config_name="config")
