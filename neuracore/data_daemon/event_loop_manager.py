@@ -54,7 +54,7 @@ class EventLoopManager:
         if self._started:
             raise RuntimeError("EventLoopManager already started")
 
-        logger.info("Starting EventLoopManager...")
+        logger.debug("Starting EventLoopManager...")
 
         self._general_thread = threading.Thread(
             target=self._run_general_loop,
@@ -81,7 +81,7 @@ class EventLoopManager:
             raise RuntimeError("Encoder event loop failed to start within timeout")
 
         self._started = True
-        logger.info("EventLoopManager started successfully")
+        logger.debug("EventLoopManager started successfully")
 
     def stop(self, timeout: float = 10.0) -> None:
         """Stop both event loops gracefully.
@@ -97,7 +97,7 @@ class EventLoopManager:
         if not self._started:
             raise RuntimeError("EventLoopManager not started")
 
-        logger.info("Stopping EventLoopManager...")
+        logger.debug("Stopping EventLoopManager...")
 
         self._encoder_shutdown.set()
         self._general_shutdown.set()
@@ -114,7 +114,7 @@ class EventLoopManager:
                 logger.warning("Encoder loop thread did not stop within timeout")
 
         self._started = False
-        logger.info("EventLoopManager stopped")
+        logger.debug("EventLoopManager stopped")
 
     def schedule_on_general_loop(
         self, coroutine: Coroutine[Any, Any, Any]
@@ -164,7 +164,7 @@ class EventLoopManager:
             asyncio.set_event_loop(loop)
             self.general_loop = loop
 
-            logger.info("General event loop started")
+            logger.debug("General event loop started")
             self._general_ready.set()
 
             async def monitor_shutdown() -> None:
@@ -176,7 +176,7 @@ class EventLoopManager:
 
             loop.run_forever()
 
-            logger.info("General event loop shutting down")
+            logger.debug("General event loop shutting down")
 
         except Exception as e:
             logger.error(f"Error in general event loop: {e}", exc_info=True)
@@ -201,7 +201,7 @@ class EventLoopManager:
 
             if not loop.is_closed():
                 loop.close()
-            logger.info("General event loop stopped")
+            logger.debug("General event loop stopped")
 
     def _run_encoder_loop(self) -> None:
         """Run the encoder event loop in its dedicated thread.
@@ -213,7 +213,7 @@ class EventLoopManager:
             asyncio.set_event_loop(loop)
             self.encoder_loop = loop
 
-            logger.info("Encoder event loop started")
+            logger.debug("Encoder event loop started")
             self._encoder_ready.set()
 
             async def monitor_shutdown() -> None:
@@ -225,7 +225,7 @@ class EventLoopManager:
 
             loop.run_forever()
 
-            logger.info("Encoder event loop shutting down")
+            logger.debug("Encoder event loop shutting down")
 
         except Exception as e:
             logger.error(f"Error in encoder event loop: {e}", exc_info=True)
@@ -250,7 +250,7 @@ class EventLoopManager:
 
             if not loop.is_closed():
                 loop.close()
-            logger.info("Encoder event loop stopped")
+            logger.debug("Encoder event loop stopped")
 
     def is_running(self) -> bool:
         """Check if both event loops are running.

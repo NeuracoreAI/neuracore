@@ -2,7 +2,6 @@ import logging
 import math
 import multiprocessing
 import os
-import sqlite3
 import sys
 import time
 import uuid
@@ -13,7 +12,6 @@ from neuracore_types import DataType
 from PIL import Image
 
 import neuracore as nc
-from neuracore.data_daemon.const import DEFAULT_DAEMON_DB_PATH
 
 # Add examples dir to path
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -57,7 +55,7 @@ logger = logging.getLogger(__name__)
 # Keep integration timing deterministic across machines by avoiding
 # low default daemon upload bandwidth derived from local disk size.
 os.environ.setdefault("NCD_BANDWIDTH_LIMIT", str(200 * 1024 * 1024))  # 200 MiB/s
-os.environ.setdefault("NCD_NUM_THREADS", "4")
+os.environ.setdefault("NCD_MAX_CONCURRENT_UPLOADS", "30")
 
 
 class Timer:
@@ -74,29 +72,6 @@ class Timer:
         self.label = label
         self.always_log = always_log
         self.log_threshold = log_threshold
-
-    @classmethod
-    def reset_stats(cls):
-        cls._stats = {}
-
-    @classmethod
-    def log_stats(cls, prefix="Timer stats"):
-        if not cls._stats:
-            return
-
-        logger.info(prefix)
-        for label, stats in sorted(
-            cls._stats.items(), key=lambda item: item[1]["total"], reverse=True
-        ):
-            avg = stats["total"] / stats["count"]
-            logger.info(
-                "  %-32s count=%4d total=%7.3fs avg=%6.3fs max=%6.3fs",
-                label,
-                stats["count"],
-                stats["total"],
-                avg,
-                stats["max"],
-            )
 
     def __enter__(self):
         self.start = time.perf_counter()
@@ -358,109 +333,11 @@ def stream_data(config: TestConfig) -> int:
     return frame_count
 
 
-def _resolve_daemon_db_path() -> str:
-    explicit = os.environ.get("NCD_STATE_DB_PATH")
-    if explicit:
-        return explicit
-    cwd_db = os.path.join(os.getcwd(), "data_daemon_state.db")
-    if os.path.exists(cwd_db):
-        return cwd_db
-    return str(DEFAULT_DAEMON_DB_PATH)
-
-
-def _log_daemon_state_snapshot(
-    label: str, recording_id: str | None = None
-) -> str | None:
-    """Log a compact daemon DB state snapshot for debugging slow integration runs."""
-    db_path = _resolve_daemon_db_path()
-    if not os.path.exists(db_path):
-        logger.warning("%s: daemon DB not found at %s", label, db_path)
-        return recording_id
-
-    try:
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-
-            if recording_id is None:
-                cur.execute(
-                    """
-                    SELECT recording_id, expected_trace_count, trace_count, uploaded_trace_count,
-                           progress_reported, stopped_at, last_updated
-                    FROM recordings
-                    ORDER BY last_updated DESC
-                    LIMIT 1
-                    """
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT recording_id, expected_trace_count, trace_count, uploaded_trace_count,
-                           progress_reported, stopped_at, last_updated
-                    FROM recordings
-                    WHERE recording_id = ?
-                    LIMIT 1
-                    """,
-                    (recording_id,),
-                )
-
-            recording_row = cur.fetchone()
-            if recording_row is None:
-                logger.info("%s: recordings table has no matching row", label)
-                return recording_id
-
-            resolved_recording_id = str(recording_row["recording_id"])
-            cur.execute(
-                """
-                SELECT
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN write_status = 'written' THEN 1 ELSE 0 END) AS written,
-                    SUM(CASE WHEN registration_status = 'registered' THEN 1 ELSE 0 END) AS registered,
-                    SUM(CASE WHEN upload_status = 'uploaded' THEN 1 ELSE 0 END) AS uploaded,
-                    SUM(CASE WHEN upload_status = 'uploading' THEN 1 ELSE 0 END) AS uploading,
-                    SUM(CASE WHEN upload_status = 'failed' THEN 1 ELSE 0 END) AS failed,
-                    SUM(CASE WHEN upload_status = 'retrying' THEN 1 ELSE 0 END) AS retrying
-                FROM traces
-                WHERE recording_id = ?
-                """,
-                (resolved_recording_id,),
-            )
-            trace_stats = cur.fetchone()
-
-            logger.info(
-                (
-                    "%s: recording=%s progress=%s stopped_at=%s "
-                    "expected=%s trace_count=%s uploaded_trace_count=%s "
-                    "traces(total=%s written=%s registered=%s uploaded=%s uploading=%s failed=%s retrying=%s)"
-                ),
-                label,
-                resolved_recording_id,
-                recording_row["progress_reported"],
-                recording_row["stopped_at"],
-                recording_row["expected_trace_count"],
-                recording_row["trace_count"],
-                recording_row["uploaded_trace_count"],
-                trace_stats["total"] if trace_stats else 0,
-                trace_stats["written"] if trace_stats else 0,
-                trace_stats["registered"] if trace_stats else 0,
-                trace_stats["uploaded"] if trace_stats else 0,
-                trace_stats["uploading"] if trace_stats else 0,
-                trace_stats["failed"] if trace_stats else 0,
-                trace_stats["retrying"] if trace_stats else 0,
-            )
-            return resolved_recording_id
-    except Exception as exc:
-        logger.warning("%s: failed to snapshot daemon DB state: %s", label, exc)
-        return recording_id
-
-
 def wait_for_dataset_ready(
     dataset_name: str,
     expected_recording_count: int = 1,
     timeout_s: float = MAX_TIME_TO_DATASET_READY_S,
     poll_interval_s: float = 1.5,
-    debug_log_every_n_polls: int = 0,
-    debug_recording_id: str | None = None,
 ) -> None:
     """Wait for the dataset to be ready.
 
@@ -478,27 +355,7 @@ def wait_for_dataset_ready(
             dataset = nc.get_dataset(dataset_name)
 
             recording_count = len(dataset)
-            logger.info(
-                "wait_for_dataset_ready poll=%d elapsed=%.1fs dataset=%s recordings=%d/%d",
-                poll_count,
-                elapsed_s,
-                dataset_name,
-                recording_count,
-                expected_recording_count,
-            )
-            if (
-                debug_log_every_n_polls > 0
-                and poll_count % debug_log_every_n_polls == 0
-            ):
-                debug_recording_id = _log_daemon_state_snapshot(
-                    label=f"wait poll={poll_count} elapsed={elapsed_s:.1f}s",
-                    recording_id=debug_recording_id,
-                )
             if recording_count >= expected_recording_count:
-                _log_daemon_state_snapshot(
-                    label=f"wait complete elapsed={elapsed_s:.1f}s",
-                    recording_id=debug_recording_id,
-                )
                 return
         except Exception as exc:
             last_error = exc
@@ -587,36 +444,11 @@ def verify_dataset(config: TestConfig, expected_frame_count):
     expected_frames = set(range(expected_frame_count))
     results["missing_frames"] = list(expected_frames - results["unique_frames"])
 
-    # Log summary
-    logger.info("Verification results:")
-    logger.info(f"  Retrieved frames: {results['retrieved_frames']}")
-    logger.info(f"  Unique frames: {len(results['unique_frames'])}")
-    logger.info(f"  Missing frames: {len(results['missing_frames'])}")
-    logger.info(f"  Duplicate frames: {len(results['duplicate_frames'])}")
-    logger.info(f"  Joint mismatches: {len(results['joint_mismatches'])}")
-
-    if results["missing_frames"]:
-        missing_count = len(results["missing_frames"])
-        missing_percent = missing_count / expected_frame_count * 100
-        logger.warning(f"Missing {missing_count} frames ({missing_percent:.2f}%)")
-        logger.warning(
-            f"First few missing frames: {sorted(results['missing_frames'])[:20]}"
-        )
-
-    if results["duplicate_frames"]:
-        logger.warning(f"Duplicate frames: {results['duplicate_frames'][:20]}...")
-
-    if results["joint_mismatches"]:
-        logger.warning(f"Joint mismatches: {results['joint_mismatches'][:5]}...")
-
     return results
 
 
 def run_streaming_test(config: TestConfig):
     """Run a complete streaming test with the given configuration"""
-    # Set up
-    logger.info(f"Starting test with config: {config}")
-
     with Timer(max_time=MAX_TIME_TO_START_S, label="nc.login", always_log=True):
         nc.login()
     with Timer(max_time=MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True):
@@ -725,7 +557,6 @@ def test_basic_streaming_fast_mode():
     with Timer(max_time=config.log_wait_timeout_s, label="fast.nc.log_rgb"):
         nc.log_rgb("camera_0", rgb_img, timestamp=0.0)
 
-    # Use wait=False so stop measures producer/daemon stop path only, not full upload drain.
     with Timer(
         max_time=config.stop_wait_timeout_s,
         label="fast.nc.stop_recording(wait=False)",
@@ -851,7 +682,7 @@ def test_stop_start_sequences():
         fps=30,
         duration_sec=2,
         synched_time=True,
-        stop_wait_timeout_s=MAX_TIME_TO_STOP_S,
+        stop_wait_timeout_s=HIGH_TIME_TO_STOP_S,
         dataset_wait_timeout_s=HIGH_TIME_TO_DATASET_READY_S,
     )
 
@@ -966,20 +797,10 @@ def test_high_bandwidth():
     )
     joint_bytes = config.num_joints * 8  # float64
     bytes_per_second = (total_image_bytes + joint_bytes) * fps
-    mb_per_second = bytes_per_second / (1024 * 1024)
 
     daemon_bandwidth_limit = int(bytes_per_second * 1.25)
     os.environ["NCD_BANDWIDTH_LIMIT"] = str(daemon_bandwidth_limit)
     os.environ["NCD_NUM_THREADS"] = "8"
-
-    logger.info(f"Estimated bandwidth: {mb_per_second:.2f} MB/s")
-    logger.info(
-        "Configured daemon bandwidth limit: %.2f MB/s",
-        daemon_bandwidth_limit / (1024 * 1024),
-    )
-
-    test_started = time.perf_counter()
-    debug_recording_id: str | None = None
 
     try:
         # Set up
@@ -993,56 +814,17 @@ def test_high_bandwidth():
             max_time=MAX_TIME_TO_START_S, label="hb.nc.create_dataset", always_log=True
         ):
             nc.create_dataset(config.dataset_name)
-        debug_recording_id = _log_daemon_state_snapshot("hb.before_stream")
 
         # Stream data
-        stream_started = time.perf_counter()
         actual_frame_count = stream_data(config)
-        logger.info(
-            "hb.stream_data complete: frames=%d elapsed=%.2fs",
-            actual_frame_count,
-            time.perf_counter() - stream_started,
-        )
-        Timer.log_stats(prefix="high_bandwidth timer stats after stream")
-        debug_recording_id = _log_daemon_state_snapshot(
-            "hb.after_stream",
-            recording_id=debug_recording_id,
-        )
-
-        wait_started = time.perf_counter()
         wait_for_dataset_ready(
             config.dataset_name,
             timeout_s=500,
             poll_interval_s=1.0,
-            debug_log_every_n_polls=1,
-            debug_recording_id=debug_recording_id,
-        )
-        logger.info(
-            "hb.wait_for_dataset_ready complete elapsed=%.2fs",
-            time.perf_counter() - wait_started,
-        )
-        debug_recording_id = _log_daemon_state_snapshot(
-            "hb.after_wait",
-            recording_id=debug_recording_id,
         )
 
         # Verify
-        verify_started = time.perf_counter()
         results = verify_dataset(config, actual_frame_count)
-        logger.info(
-            "hb.verify_dataset complete elapsed=%.2fs",
-            time.perf_counter() - verify_started,
-        )
-        _log_daemon_state_snapshot(
-            "hb.after_verify",
-            recording_id=debug_recording_id,
-        )
-        Timer.log_stats(prefix="high_bandwidth timer stats final")
-        logger.info(
-            "hb.total_test_elapsed=%.2fs dataset=%s",
-            time.perf_counter() - test_started,
-            config.dataset_name,
-        )
         assert len(results["missing_frames"]) == 0
         assert len(results["duplicate_frames"]) == 0
         assert len(results["joint_mismatches"]) == 0

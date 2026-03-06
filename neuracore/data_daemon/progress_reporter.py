@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from typing import Any
 
 import aiohttp
 from neuracore_types.upload.upload import TracesMetadataRequest
@@ -31,41 +30,23 @@ class ProgressReporter:
 
     async def report_progress(
         self,
+        recording_id: str,
         start_time: float,
         end_time: float,
-        traces: Any,
+        trace_map: dict[str, int],
+        total_bytes: int,
     ) -> None:
-        """Post a progress report for the provided trace records."""
-        recording_id: str | None = None
+        """Post a progress report for a recording snapshot."""
         try:
-            if not traces:
-                return
-
-            recording_id = traces[0].recording_id
             if not recording_id:
                 logger.warning(
                     "Progress report missing recording_id; skipping request."
                 )
                 return
-            trace_map: dict[str, int] = {}
-
-            for trace in traces:
-                if trace.total_bytes is None:
-                    logger.warning(
-                        "Progress report skipped for %s; trace %s missing total_bytes",
-                        recording_id,
-                        trace.trace_id,
-                    )
-                    self._emitter.emit(
-                        Emitter.PROGRESS_REPORT_FAILED,
-                        recording_id,
-                        f"Trace {trace.trace_id} missing total_bytes",
-                    )
-                    return
-                trace_map[trace.trace_id] = trace.total_bytes
+            if not trace_map:
+                return
 
             body = TracesMetadataRequest(traces=trace_map)
-            total_bytes = sum(trace_map.values())
 
             loop = asyncio.get_running_loop()
             auth = get_auth()
@@ -75,7 +56,7 @@ class ProgressReporter:
 
             url = f"{API_URL}/org/{org_id}/recording/{recording_id}/traces-metadata"
             logger.info(
-                "Sending progress report for recording %s: trace_count=%d total_bytes=%d "
+                "Sending progress report for recording %s: traces=%d total_bytes=%d "
                 "start_time=%.3f end_time=%.3f",
                 recording_id,
                 len(trace_map),
@@ -95,14 +76,14 @@ class ProgressReporter:
                         if response.status < 400:
                             logger.info(
                                 "Progress report sent successfully for recording %s "
-                                "(trace_count=%d)",
+                                "(traces=%d)",
                                 recording_id,
                                 len(trace_map),
                             )
                             self._emitter.emit(Emitter.PROGRESS_REPORTED, recording_id)
                             return
                         if response.status == 401:
-                            logger.info("Access token expired, refreshing token")
+                            logger.debug("Access token expired, refreshing token")
                             await loop.run_in_executor(None, auth.login)
                             headers = await loop.run_in_executor(None, auth.get_headers)
                             continue
@@ -143,11 +124,6 @@ class ProgressReporter:
                 last_error or "Unknown error",
             )
         except Exception as exc:
-            if not recording_id:
-                logger.exception(
-                    "Progress report crashed before recording_id was available"
-                )
-                return
             logger.exception(
                 "Progress report crashed for recording %s: %s", recording_id, exc
             )

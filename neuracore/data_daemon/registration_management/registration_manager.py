@@ -12,8 +12,10 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Protocol
+
 import aiohttp
 from neuracore_types import DataType
+
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.data_daemon.const import API_URL
@@ -27,6 +29,11 @@ STATUS_TO_REGISTRATION_ERROR_CODE: dict[int, TraceRegistrationErrorCode] = {
     404: TraceRegistrationErrorCode.PENDING_RECORDING_NOT_FOUND,
     500: TraceRegistrationErrorCode.REGISTER_DATA_TRACE_FAILED,
 }
+
+# Retry policy for batch registration requests.
+REGISTRATION_MAX_RETRIES = 5
+REGISTRATION_MAX_BACKOFF_SECONDS = 16
+REGISTRATION_RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 # Backend contract for batch registration response.
 REGISTERED_IDS_KEY = "registered_trace_ids"
@@ -74,6 +81,7 @@ class RegistrationStateAPI(Protocol):
     async def mark_traces_registering(self, trace_ids: list[str]) -> list[str]:
         """Mark traces as registering and return updated IDs."""
 
+
 class RegistrationManager:
     """Background manager for batched trace registration."""
 
@@ -89,8 +97,8 @@ class RegistrationManager:
         """Initialize a queue-less registration manager.
 
         Args:
+            client_session: Shared HTTP session used for backend registration calls.
             state_api: State facade that owns DB access and transitions.
-            backend_api: Backend client implementing batch registration.
             batch_size: Max traces to claim/register per drain iteration.
             max_wait_s: Max age threshold before flushing short batches.
             poll_interval_s: Safety polling interval when no wake signal arrives.
@@ -122,7 +130,10 @@ class RegistrationManager:
         if self._worker_task is not None and not self._worker_task.done():
             return
         logger.info(
-            "RegistrationManager starting (batch_size=%d, max_wait_s=%.2f, poll_interval_s=%.2f)",
+            (
+                "RegistrationManager starting (batch_size=%d, max_wait_s=%.2f, "
+                "poll_interval_s=%.2f)"
+            ),
             self._batch_size,
             self._max_wait_s,
             self._poll_interval_s,
@@ -173,7 +184,9 @@ class RegistrationManager:
 
     async def _wait_for_wakeup_or_poll(self) -> None:
         try:
-            await asyncio.wait_for(self._wake_event.wait(), timeout=self._poll_interval_s)
+            await asyncio.wait_for(
+                self._wake_event.wait(), timeout=self._poll_interval_s
+            )
             logger.debug("RegistrationManager woke from event signal")
         except asyncio.TimeoutError:
             logger.debug("RegistrationManager woke from poll timeout")
@@ -191,7 +204,7 @@ class RegistrationManager:
             if not traces:
                 logger.debug("RegistrationManager claim returned no traces")
                 return
-            logger.info(
+            logger.debug(
                 "RegistrationManager claimed %d traces for batch registration",
                 len(traces),
             )
@@ -226,7 +239,7 @@ class RegistrationManager:
             )
 
             requested_trace_ids = {trace.trace_id for trace in traces}
-            logger.info(
+            logger.debug(
                 "Submitting registration batch (size=%d, sample_ids=%s)",
                 len(requested_trace_ids),
                 sorted(list(requested_trace_ids))[:5],
@@ -242,90 +255,133 @@ class RegistrationManager:
                 ]
             }
             endpoint = f"{API_URL}/org/{org_id}/recording/traces/batch-register"
+            refreshed_auth = False
 
-            for attempt in range(2):
-                async with self._client_session.post(
-                    endpoint,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    assert isinstance(response, aiohttp.ClientResponse)
-                    if response.status == 401 and attempt == 0:
-                        logger.info("Access token expired, refreshing token")
-                        await loop.run_in_executor(None, auth.login)
-                        headers = await loop.run_in_executor(None, auth.get_headers)
-                        continue
+            for attempt in range(REGISTRATION_MAX_RETRIES):
+                try:
+                    async with self._client_session.post(
+                        endpoint,
+                        json=payload,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        assert isinstance(response, aiohttp.ClientResponse)
+                        if response.status == 401 and not refreshed_auth:
+                            logger.debug("Access token expired, refreshing token")
+                            await loop.run_in_executor(None, auth.login)
+                            headers = await loop.run_in_executor(None, auth.get_headers)
+                            refreshed_auth = True
+                            continue
 
-                    if response.status >= 400:
-                        error = await response.text()
-                        logger.warning(
-                            "Registration batch failed with HTTP %d (size=%d, body=%s)",
-                            response.status,
-                            len(requested_trace_ids),
-                            error[:300],
+                        if response.status >= 400:
+                            error = await response.text()
+                            logger.warning(
+                                (
+                                    "Registration batch failed with HTTP %d "
+                                    "(size=%d, body=%s, attempt=%d/%d)"
+                                ),
+                                response.status,
+                                len(requested_trace_ids),
+                                error[:300],
+                                attempt + 1,
+                                REGISTRATION_MAX_RETRIES,
+                            )
+                            if (
+                                response.status in REGISTRATION_RETRYABLE_STATUS_CODES
+                                and attempt < REGISTRATION_MAX_RETRIES - 1
+                            ):
+                                delay = min(
+                                    2**attempt, REGISTRATION_MAX_BACKOFF_SECONDS
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+                            return RegistrationBatchOutcome(
+                                registered_trace_ids=[],
+                                failed_trace_ids=list(requested_trace_ids),
+                                error_code=STATUS_TO_REGISTRATION_ERROR_CODE.get(
+                                    response.status, TraceRegistrationErrorCode.UNKNOWN
+                                ),
+                                error_message=error,
+                            )
+
+                        response_payload = await response.json()
+                        if not isinstance(response_payload, dict):
+                            return RegistrationBatchOutcome(
+                                registered_trace_ids=[],
+                                failed_trace_ids=list(requested_trace_ids),
+                                error_code=TraceRegistrationErrorCode.UNKNOWN,
+                                error_message=(
+                                    "Invalid batch-register response payload "
+                                    f"type={type(response_payload).__name__}"
+                                ),
+                            )
+
+                        registered_raw = response_payload.get(REGISTERED_IDS_KEY, [])
+                        failed_raw = response_payload.get(FAILED_IDS_KEY, [])
+
+                        registered_trace_ids = [
+                            str(trace_id)
+                            for trace_id in registered_raw
+                            if str(trace_id) in requested_trace_ids
+                        ]
+                        failed_trace_ids = [
+                            str(trace_id)
+                            for trace_id in failed_raw
+                            if str(trace_id) in requested_trace_ids
+                        ]
+
+                        unresolved = (
+                            requested_trace_ids
+                            - set(registered_trace_ids)
+                            - set(failed_trace_ids)
                         )
+                        if unresolved:
+                            failed_trace_ids.extend(sorted(unresolved))
+
                         return RegistrationBatchOutcome(
-                            registered_trace_ids=[],
-                            failed_trace_ids=list(requested_trace_ids),
-                            error_code=STATUS_TO_REGISTRATION_ERROR_CODE.get(
-                                response.status, TraceRegistrationErrorCode.UNKNOWN
+                            registered_trace_ids=registered_trace_ids,
+                            failed_trace_ids=failed_trace_ids,
+                            error_code=(
+                                TraceRegistrationErrorCode.UNKNOWN
+                                if failed_trace_ids
+                                else None
                             ),
-                            error_message=error,
-                        )
-
-                    response_payload = await response.json()
-                    if not isinstance(response_payload, dict):
-                        return RegistrationBatchOutcome(
-                            registered_trace_ids=[],
-                            failed_trace_ids=list(requested_trace_ids),
-                            error_code=TraceRegistrationErrorCode.UNKNOWN,
                             error_message=(
-                                "Invalid batch-register response payload "
-                                f"type={type(response_payload).__name__}"
+                                "Batch registration returned failed trace IDs"
+                                if failed_trace_ids
+                                else None
                             ),
                         )
-
-                    registered_raw = response_payload.get(REGISTERED_IDS_KEY, [])
-                    failed_raw = response_payload.get(FAILED_IDS_KEY, [])
-
-                    registered_trace_ids = [
-                        str(trace_id)
-                        for trace_id in registered_raw
-                        if str(trace_id) in requested_trace_ids
-                    ]
-                    failed_trace_ids = [
-                        str(trace_id)
-                        for trace_id in failed_raw
-                        if str(trace_id) in requested_trace_ids
-                    ]
-
-                    unresolved = requested_trace_ids - set(registered_trace_ids) - set(
-                        failed_trace_ids
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    logger.warning(
+                        (
+                            "Registration batch request error "
+                            "(size=%d, attempt=%d/%d, error=%s)"
+                        ),
+                        len(requested_trace_ids),
+                        attempt + 1,
+                        REGISTRATION_MAX_RETRIES,
+                        exc,
                     )
-                    if unresolved:
-                        failed_trace_ids.extend(sorted(unresolved))
-
+                    if attempt < REGISTRATION_MAX_RETRIES - 1:
+                        delay = min(2**attempt, REGISTRATION_MAX_BACKOFF_SECONDS)
+                        await asyncio.sleep(delay)
+                        continue
                     return RegistrationBatchOutcome(
-                        registered_trace_ids=registered_trace_ids,
-                        failed_trace_ids=failed_trace_ids,
-                        error_code=(
-                            TraceRegistrationErrorCode.UNKNOWN
-                            if failed_trace_ids
-                            else None
-                        ),
-                        error_message=(
-                            "Batch registration returned failed trace IDs"
-                            if failed_trace_ids
-                            else None
-                        ),
+                        registered_trace_ids=[],
+                        failed_trace_ids=list(requested_trace_ids),
+                        error_code=TraceRegistrationErrorCode.NETWORK_ERROR,
+                        error_message=str(exc),
                     )
 
             return RegistrationBatchOutcome(
                 registered_trace_ids=[],
                 failed_trace_ids=list(requested_trace_ids),
                 error_code=TraceRegistrationErrorCode.NETWORK_ERROR,
-                error_message="Unable to register traces after auth refresh attempt",
+                error_message=(
+                    "Unable to register traces after "
+                    f"{REGISTRATION_MAX_RETRIES} attempts"
+                ),
             )
 
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
@@ -342,8 +398,11 @@ class RegistrationManager:
         self, traces: list[RegistrationCandidate]
     ) -> None:
         trace_ids = [trace.trace_id for trace in traces]
-        logger.info(
-            "Processing registration outcome for claimed traces (size=%d, sample_ids=%s)",
+        logger.debug(
+            (
+                "Processing registration outcome for claimed traces "
+                "(size=%d, sample_ids=%s)"
+            ),
             len(trace_ids),
             trace_ids[:5],
         )
@@ -365,29 +424,33 @@ class RegistrationManager:
             registered_ids = await self._state_api.mark_traces_registered(
                 outcome.registered_trace_ids
             )
-            logger.info(
+            logger.debug(
                 "Registration batch success persisted (registered=%d, sample_ids=%s)",
                 len(registered_ids),
                 registered_ids[:5],
             )
             if registered_ids:
                 await self._state_api.emit_ready_for_upload(registered_ids)
-                logger.info(
+                logger.debug(
                     "Emitted READY_FOR_UPLOAD for registered traces (count=%d)",
                     len(registered_ids),
                 )
 
         if outcome.failed_trace_ids:
             logger.warning(
-                "Registration batch had failed traces (count=%d, sample_ids=%s, error=%s)",
+                (
+                    "Registration batch had failed traces "
+                    "(count=%d, sample_ids=%s, error=%s)"
+                ),
                 len(outcome.failed_trace_ids),
                 outcome.failed_trace_ids[:5],
                 outcome.error_message,
             )
+            error_code = outcome.error_code or TraceRegistrationErrorCode.UNKNOWN
             await self._state_api.mark_traces_registration_failed(
                 trace_ids=outcome.failed_trace_ids,
                 error_message=(
-                    f"{(outcome.error_code or TraceRegistrationErrorCode.UNKNOWN).value}: "
+                    f"{error_code.value}: "
                     f"{outcome.error_message or 'Registration failed'}"
                 ),
             )

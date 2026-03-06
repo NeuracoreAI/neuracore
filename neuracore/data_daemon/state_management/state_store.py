@@ -30,6 +30,16 @@ class StateStore(Protocol):
         """Return all traces for a given recording ID."""
         ...
 
+    async def get_progress_report_snapshot(
+        self, recording_id: str
+    ) -> tuple[float, float, dict[str, int], int] | None:
+        """Return an immutable progress snapshot for one recording.
+
+        Returns None when there are no traces or when any trace is ineligible
+        (missing metadata/byte totals).
+        """
+        ...
+
     async def list_traces(self) -> list[TraceRecord]:
         """Return all trace records."""
         ...
@@ -81,8 +91,10 @@ class StateStore(Protocol):
         """Delete all UPLOADED traces for one recording and return deleted count."""
         ...
 
-    async def count_traces_for_recording(self, recording_id: str) -> int:
-        """Return count of traces associated with recording."""
+    async def delete_recording_and_traces_if_fully_uploaded(
+        self, recording_id: str
+    ) -> bool:
+        """Delete recording and all remaining traces when upload is fully complete."""
         ...
 
     async def list_recording_ids_with_stopped_traces(self) -> list[str]:
@@ -105,10 +117,18 @@ class StateStore(Protocol):
         """Return True when expected trace count has been reported for recording."""
         ...
 
+    async def get_expected_trace_count(self, recording_id: str) -> int | None:
+        """Return expected trace count for a recording, if any."""
+        ...
+
+    async def count_traces_for_recording(self, recording_id: str) -> int:
+        """Return trace count for a recording."""
+        ...
+
     async def set_expected_trace_count(
         self, recording_id: str, expected_trace_count: int
     ) -> None:
-        """Persist expected trace count for one recording."""
+        """Persist expected trace count for a recording."""
         ...
 
     async def mark_expected_trace_count_reported(self, recording_id: str) -> None:
@@ -153,6 +173,10 @@ class StateStore(Protocol):
         self, trace_id: str, upload_status: TraceUploadStatus
     ) -> None:
         """Update upload lifecycle status for a trace."""
+        ...
+
+    async def increment_uploaded_trace_count(self, recording_id: str) -> None:
+        """Increment recording-level uploaded trace count."""
         ...
 
     async def record_error(

@@ -57,7 +57,7 @@ class UploadManager:
             if config.bandwidth_limit
             else None
         )
-        max_concurrent_uploads = config.max_concurrent_uploads
+        max_concurrent_uploads = config.max_concurrent_uploads or 30
         if max_concurrent_uploads is not None and max_concurrent_uploads > 0:
             self._upload_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
                 max_concurrent_uploads
@@ -72,7 +72,7 @@ class UploadManager:
         self._emitter = get_emitter()
         self._emitter.on(Emitter.READY_FOR_UPLOAD, self._on_ready_for_upload)
 
-        logger.info("UploadManager initialized")
+        logger.debug("UploadManager initialized")
 
     async def shutdown(self, wait: bool = True) -> None:
         """Shutdown the upload manager gracefully.
@@ -83,7 +83,7 @@ class UploadManager:
         self._emitter.remove_listener(
             Emitter.READY_FOR_UPLOAD, self._on_ready_for_upload
         )
-        logger.info("Shutting down UploadManager...")
+        logger.debug("Shutting down UploadManager...")
 
         active_tasks = list(self._active_uploads.values())
         if wait and active_tasks:
@@ -94,7 +94,7 @@ class UploadManager:
             if active_tasks:
                 await asyncio.gather(*active_tasks, return_exceptions=True)
 
-        logger.info("UploadManager shutdown complete")
+        logger.debug("UploadManager shutdown complete")
 
     async def _on_ready_for_upload(
         self,
@@ -122,7 +122,10 @@ class UploadManager:
                 self._active_uploads.pop(trace_id, None)
             else:
                 logger.debug(
-                    "Skipping READY_FOR_UPLOAD for trace %s: upload already in progress",
+                    (
+                        "Skipping READY_FOR_UPLOAD for trace %s: "
+                        "upload already in progress"
+                    ),
                     trace_id,
                 )
                 return
@@ -547,15 +550,18 @@ class UploadManager:
             )
 
             for attempt in range(2):
+                endpoint = (
+                    f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/{trace_id}"
+                )
                 async with self._client_session.put(
-                    f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/{trace_id}",
+                    endpoint,
                     json=updates,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
                     assert isinstance(response, aiohttp.ClientResponse)
                     if response.status == 401 and attempt == 0:
-                        logger.info("Access token expired, refreshing token")
+                        logger.debug("Access token expired, refreshing token")
                         await loop.run_in_executor(None, auth.login)
                         headers = await loop.run_in_executor(None, auth.get_headers)
                         continue

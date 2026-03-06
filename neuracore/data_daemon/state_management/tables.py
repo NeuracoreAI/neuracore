@@ -29,8 +29,8 @@ recordings = Table(
     metadata,
     Column("recording_id", Text, primary_key=True),
     Column("expected_trace_count", Integer, nullable=False, default=0),
-    Column("expected_trace_count_reported", Integer, nullable=False, default=0),
     Column("trace_count", Integer, nullable=False, default=0),
+    Column("expected_trace_count_reported", Integer, nullable=False, default=0),
     Column("uploaded_trace_count", Integer, nullable=False, default=0),
     Column(
         "progress_reported",

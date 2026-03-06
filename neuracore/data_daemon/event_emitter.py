@@ -43,7 +43,16 @@ class Emitter(AsyncIOEventEmitter):
 
     # State manager -> Progress reporter
     PROGRESS_REPORT = "PROGRESS_REPORT"
-    # (start_time:float, end_time:float, traces:List[TraceRecord])
+    # (
+    #   recording_id:str,
+    #   start_time:float,
+    #   end_time:float,
+    #   trace_map:dict[str,int],
+    #   total_bytes:int,
+    # )
+
+    SET_EXPECTED_TRACE_COUNT = "SET_EXPECTED_TRACE_COUNT"
+    # (recording_id:str, expected_trace_count:int)
 
     # Progress reporter -> State manager
     PROGRESS_REPORTED = "PROGRESS_REPORTED"

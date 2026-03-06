@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,12 +18,55 @@ from neuracore.data_daemon.models import (
     TraceWriteStatus,
 )
 from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
-from neuracore.data_daemon.state_management.tables import traces
+from neuracore.data_daemon.state_management.tables import recordings, traces
 
 DATA_TYPES = list(DATA_TYPE_CONTENT_MAPPING.keys())
 PRIMARY_DATA_TYPE = DATA_TYPES[0]
 SECONDARY_DATA_TYPE = DATA_TYPES[1] if len(DATA_TYPES) > 1 else DATA_TYPES[0]
 ROBOT_INSTANCE = 1
+
+
+def _create_legacy_schema_db(db_path: Path) -> None:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE traces (
+                trace_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                recording_id TEXT NOT NULL,
+                data_type TEXT,
+                data_type_name TEXT,
+                dataset_id TEXT,
+                dataset_name TEXT,
+                robot_name TEXT,
+                robot_id TEXT,
+                robot_instance INTEGER,
+                path TEXT,
+                bytes_written INTEGER,
+                total_bytes INTEGER,
+                bytes_uploaded INTEGER DEFAULT 0,
+                progress_reported TEXT NOT NULL DEFAULT 'pending',
+                expected_trace_count_reported INTEGER NOT NULL DEFAULT 0,
+                error_code TEXT,
+                error_message TEXT,
+                stopped_at DATETIME,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                num_upload_attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at DATETIME
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX idx_traces_status ON traces(status)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_traces_next_retry_at ON traces(next_retry_at)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @pytest_asyncio.fixture
@@ -36,6 +80,15 @@ async def store(tmp_path: Path) -> SqliteStateStore:
 async def _get_trace_row(store: SqliteStateStore, trace_id: str) -> dict | None:
     async with store._engine.begin() as conn:
         result = await conn.execute(select(traces).where(traces.c.trace_id == trace_id))
+        row = result.mappings().first()
+        return dict(row) if row else None
+
+
+async def _get_recording_row(store: SqliteStateStore, recording_id: str) -> dict | None:
+    async with store._engine.begin() as conn:
+        result = await conn.execute(
+            select(recordings).where(recordings.c.recording_id == recording_id)
+        )
         row = result.mappings().first()
         return dict(row) if row else None
 
@@ -65,6 +118,161 @@ async def test_upsert_trace_metadata_inserts_row(store: SqliteStateStore) -> Non
     assert row["progress_reported"] == ProgressReportStatus.PENDING
     assert row["error_message"] is None
     assert row["robot_instance"] == ROBOT_INSTANCE
+
+
+@pytest.mark.asyncio
+async def test_init_async_store_migrates_legacy_trace_schema(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-state.db"
+    _create_legacy_schema_db(db_path)
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO traces (
+                trace_id,
+                status,
+                recording_id,
+                data_type,
+                data_type_name,
+                path,
+                bytes_written,
+                total_bytes,
+                bytes_uploaded,
+                progress_reported,
+                expected_trace_count_reported,
+                created_at,
+                last_updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "trace-written",
+                "written",
+                "rec-legacy",
+                PRIMARY_DATA_TYPE.value,
+                "primary",
+                "/tmp/trace-written.bin",
+                100,
+                100,
+                0,
+                "pending",
+                0,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO traces (
+                trace_id,
+                status,
+                recording_id,
+                data_type,
+                data_type_name,
+                path,
+                bytes_written,
+                total_bytes,
+                bytes_uploaded,
+                progress_reported,
+                expected_trace_count_reported,
+                created_at,
+                last_updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "trace-uploaded",
+                "uploaded",
+                "rec-legacy",
+                PRIMARY_DATA_TYPE.value,
+                "primary",
+                "/tmp/trace-uploaded.bin",
+                200,
+                200,
+                200,
+                "reported",
+                1,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO traces (
+                trace_id,
+                status,
+                recording_id,
+                data_type,
+                data_type_name,
+                path,
+                progress_reported,
+                expected_trace_count_reported,
+                created_at,
+                last_updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "trace-failed-no-bytes",
+                "failed",
+                "rec-failed",
+                PRIMARY_DATA_TYPE.value,
+                "primary",
+                "/tmp/trace-failed-no-bytes.bin",
+                "pending",
+                0,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    store = SqliteStateStore(db_path)
+    await store.init_async_store()
+    try:
+        row_written = await _get_trace_row(store, "trace-written")
+        row_uploaded = await _get_trace_row(store, "trace-uploaded")
+        row_failed = await _get_trace_row(store, "trace-failed-no-bytes")
+        recording = await _get_recording_row(store, "rec-legacy")
+        failed_recording = await _get_recording_row(store, "rec-failed")
+
+        assert row_written is not None
+        assert row_uploaded is not None
+        assert row_failed is not None
+        assert recording is not None
+        assert failed_recording is None
+
+        assert row_written["write_status"] == TraceWriteStatus.WRITTEN
+        assert row_written["registration_status"] == TraceRegistrationStatus.PENDING
+        assert row_written["upload_status"] == TraceUploadStatus.PENDING
+
+        assert row_uploaded["write_status"] == TraceWriteStatus.WRITTEN
+        assert row_uploaded["registration_status"] == TraceRegistrationStatus.REGISTERED
+        assert row_uploaded["upload_status"] == TraceUploadStatus.UPLOADED
+
+        assert row_failed["write_status"] == TraceWriteStatus.FAILED
+        assert row_failed["registration_status"] == TraceRegistrationStatus.PENDING
+        assert row_failed["upload_status"] == TraceUploadStatus.FAILED
+
+        assert int(recording["expected_trace_count"]) == 2
+        assert int(recording["trace_count"]) == 2
+        assert int(recording["uploaded_trace_count"]) == 1
+        assert int(recording["expected_trace_count_reported"]) == 1
+        assert recording["progress_reported"] == ProgressReportStatus.PENDING
+
+        async with store._engine.begin() as async_conn:
+            legacy_exists = (
+                await async_conn.execute(
+                    text(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type='table' AND name='traces_legacy'"
+                    )
+                )
+            ).scalar_one_or_none()
+        assert legacy_exists is None
+    finally:
+        await store._engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -264,6 +472,19 @@ async def test_join_pattern_metadata_then_bytes_transitions_to_written(
     assert row["bytes_written"] == 64
     assert row["total_bytes"] == 64
     assert row["progress_reported"] == ProgressReportStatus.PENDING
+    recording_row = await _get_recording_row(store, "rec-6b")
+    assert recording_row is not None
+    assert int(recording_row["expected_trace_count"]) == 1
+
+    # Duplicate TRACE_WRITTEN for the same trace must not increment expected count.
+    await store.upsert_trace_bytes(
+        trace_id="trace-6b",
+        recording_id="rec-6b",
+        bytes_written=64,
+    )
+    recording_row = await _get_recording_row(store, "rec-6b")
+    assert recording_row is not None
+    assert int(recording_row["expected_trace_count"]) == 1
 
 
 @pytest.mark.asyncio
@@ -277,6 +498,9 @@ async def test_join_pattern_bytes_then_metadata_transitions_to_written(
         bytes_written=128,
     )
     assert trace.write_status == TraceWriteStatus.PENDING_METADATA
+    recording_row = await _get_recording_row(store, "rec-6c")
+    assert recording_row is not None
+    assert int(recording_row["expected_trace_count"]) == 0
 
     trace = await store.upsert_trace_metadata(
         trace_id="trace-6c",
@@ -294,6 +518,9 @@ async def test_join_pattern_bytes_then_metadata_transitions_to_written(
     assert row["bytes_written"] == 128
     assert row["total_bytes"] == 128
     assert row["progress_reported"] == ProgressReportStatus.PENDING
+    recording_row = await _get_recording_row(store, "rec-6c")
+    assert recording_row is not None
+    assert int(recording_row["expected_trace_count"]) == 1
 
 
 @pytest.mark.asyncio
@@ -501,7 +728,9 @@ async def test_invalid_state_transition_rejected(store: SqliteStateStore) -> Non
     )
 
     with pytest.raises(ValueError, match="Trace not found"):
-        await store.update_upload_status("trace-invalid-missing", TraceUploadStatus.UPLOADED)
+        await store.update_upload_status(
+            "trace-invalid-missing", TraceUploadStatus.UPLOADED
+        )
 
     row = await _get_trace_row(store, "trace-invalid")
     assert row is not None
@@ -618,8 +847,12 @@ async def test_race_conditions_on_rapid_state_changes(tmp_path: Path, caplog) ->
 
         async def worker() -> None:
             try:
-                await store.update_upload_status("trace-race", TraceUploadStatus.UPLOADING)
-                await store.update_upload_status("trace-race", TraceUploadStatus.UPLOADED)
+                await store.update_upload_status(
+                    "trace-race", TraceUploadStatus.UPLOADING
+                )
+                await store.update_upload_status(
+                    "trace-race", TraceUploadStatus.UPLOADED
+                )
             except ValueError as exc:
                 errors.append(str(exc))
 
@@ -717,7 +950,11 @@ async def test_find_ready_traces_excludes_future_retries(
         await conn.execute(
             traces.update()
             .where(traces.c.trace_id == "trace-future-retry")
-            .values(write_status=TraceWriteStatus.WRITTEN, registration_status=TraceRegistrationStatus.REGISTERED, upload_status=TraceUploadStatus.RETRYING)
+            .values(
+                write_status=TraceWriteStatus.WRITTEN,
+                registration_status=TraceRegistrationStatus.REGISTERED,
+                upload_status=TraceUploadStatus.RETRYING,
+            )
         )
 
     future = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=60)

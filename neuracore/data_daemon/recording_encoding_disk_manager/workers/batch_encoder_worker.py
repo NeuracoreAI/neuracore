@@ -230,7 +230,7 @@ class _BatchEncoderWorker:
             self._finalise_trace_encoder(key, enc)
 
         if key.data_type.value == "RGB_IMAGES":
-            logger.info(
+            logger.debug(
                 "RGB batch ordering summary trace=%s out_of_order_arrivals=%d "
                 "max_buffered_batches=%d",
                 key,

@@ -11,7 +11,6 @@ from neuracore.data_daemon.event_emitter import Emitter, get_emitter
 from neuracore.data_daemon.models import (
     DataType,
     ProgressReportStatus,
-    RecordingProgressSnapshot,
     TraceErrorCode,
     TraceRecord,
     TraceRegistrationStatus,
@@ -34,6 +33,7 @@ class FakeStateStore:
         self._recording_stopped: dict[str, bool] = {}
         self._expected_trace_count_reported: dict[str, bool] = {}
         self._expected_trace_count: dict[str, int] = {}
+        self.uploaded_count_increments: list[str] = []
 
     async def set_stopped_ats(self, recording_id: str) -> None:
         self.stopped.append(recording_id)
@@ -75,37 +75,6 @@ class FakeStateStore:
             updated.append(reported)
         self._traces_by_recording[recording_id] = updated
 
-    async def get_recording_progress_snapshot(
-        self, recording_id: str
-    ) -> RecordingProgressSnapshot | None:
-        traces = self._traces_by_recording.get(recording_id, [])
-        if not traces:
-            return None
-        return RecordingProgressSnapshot(
-            recording_id=recording_id,
-            trace_count=len(traces),
-            reported_count=sum(
-                trace.progress_reported == ProgressReportStatus.REPORTED
-                for trace in traces
-            ),
-            missing_stopped_at_count=sum(trace.stopped_at is None for trace in traces),
-            missing_data_type_count=sum(trace.data_type is None for trace in traces),
-            missing_bytes_written_count=sum(
-                trace.bytes_written is None for trace in traces
-            ),
-            missing_total_bytes_count=sum(
-                trace.total_bytes is None for trace in traces
-            ),
-            mismatched_bytes_count=sum(
-                (
-                    trace.bytes_written is not None
-                    and trace.total_bytes is not None
-                    and trace.bytes_written != trace.total_bytes
-                )
-                for trace in traces
-            ),
-        )
-
     async def recording_has_reported_progress(self, recording_id: str) -> bool:
         traces = self._traces_by_recording.get(recording_id, [])
         return any(
@@ -126,9 +95,6 @@ class FakeStateStore:
         self._traces_by_recording[recording_id] = keep
         return deleted_count
 
-    async def count_traces_for_recording(self, recording_id: str) -> int:
-        return len(self._traces_by_recording.get(recording_id, []))
-
     async def list_recording_ids_with_stopped_traces(self) -> list[str]:
         return [
             recording_id
@@ -147,6 +113,9 @@ class FakeStateStore:
 
     async def is_expected_trace_count_reported(self, recording_id: str) -> bool:
         return self._expected_trace_count_reported.get(recording_id, False)
+
+    async def get_expected_trace_count(self, recording_id: str) -> int | None:
+        return self._expected_trace_count.get(recording_id)
 
     async def set_expected_trace_count(
         self, recording_id: str, expected_trace_count: int
@@ -377,6 +346,9 @@ class FakeStateStore:
         self._traces_by_id[trace_id] = updated
         self._update_trace_in_recording(updated, updated.recording_id)
 
+    async def increment_uploaded_trace_count(self, recording_id: str) -> None:
+        self.uploaded_count_increments.append(recording_id)
+
     async def mark_expected_trace_count_reported(self, recording_id: str) -> None:
         self._expected_trace_count_reported[recording_id] = True
 
@@ -491,6 +463,173 @@ async def test_stop_recording_emits_stop_all_and_sets_stopped(state_manager) -> 
 
 
 @pytest.mark.asyncio
+async def test_stop_recording_sets_expected_trace_count_once(state_manager) -> None:
+    manager, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    trace_a = _make_trace(
+        "trace-a",
+        "rec-exp",
+        created_at=created_at,
+        last_updated=created_at,
+    )
+    trace_b = _make_trace(
+        "trace-b",
+        "rec-exp",
+        created_at=created_at,
+        last_updated=created_at,
+    )
+    store._traces_by_id["trace-a"] = trace_a
+    store._traces_by_id["trace-b"] = trace_b
+    store._traces_by_recording["rec-exp"] = [trace_a, trace_b]
+    store._expected_trace_count["rec-exp"] = 2
+
+    posted: list[tuple[str, int]] = []
+
+    async def fake_set_expected(recording_id: str, expected_trace_count: int) -> None:
+        posted.append((recording_id, expected_trace_count))
+
+    manager._set_expected_trace_count = fake_set_expected  # type: ignore[method-assign]
+
+    get_emitter().emit(Emitter.STOP_RECORDING, "rec-exp")
+    await asyncio.sleep(0.2)
+
+    assert store._expected_trace_count["rec-exp"] == 2
+    assert posted == [("rec-exp", 2)]
+
+    # A repeated stop should not schedule another expected-count post once reported.
+    store._expected_trace_count_reported["rec-exp"] = True
+    get_emitter().emit(Emitter.STOP_RECORDING, "rec-exp")
+    await asyncio.sleep(0.2)
+
+    assert posted == [("rec-exp", 2)]
+
+
+@pytest.mark.asyncio
+async def test_is_connected_backfills_expected_trace_count_for_stopped_recordings(
+    state_manager,
+) -> None:
+    manager, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    missing_a = replace(
+        _make_trace(
+            "trace-missing-a",
+            "rec-missing",
+            created_at=created_at,
+            last_updated=created_at,
+        ),
+        stopped_at=created_at,
+    )
+    missing_b = replace(
+        _make_trace(
+            "trace-missing-b",
+            "rec-missing",
+            created_at=created_at,
+            last_updated=created_at,
+        ),
+        stopped_at=created_at,
+    )
+    already_reported = replace(
+        _make_trace(
+            "trace-reported",
+            "rec-reported",
+            created_at=created_at,
+            last_updated=created_at,
+        ),
+        stopped_at=created_at,
+    )
+
+    store._traces_by_id[missing_a.trace_id] = missing_a
+    store._traces_by_id[missing_b.trace_id] = missing_b
+    store._traces_by_id[already_reported.trace_id] = already_reported
+    store._traces_by_recording["rec-missing"] = [missing_a, missing_b]
+    store._traces_by_recording["rec-reported"] = [already_reported]
+    store._expected_trace_count["rec-missing"] = 2
+    store._expected_trace_count_reported["rec-reported"] = True
+    store._expected_trace_count["rec-reported"] = 1
+
+    posted: list[tuple[str, int]] = []
+
+    async def fake_set_expected(recording_id: str, expected_trace_count: int) -> None:
+        posted.append((recording_id, expected_trace_count))
+
+    manager._set_expected_trace_count = fake_set_expected  # type: ignore[method-assign]
+
+    get_emitter().emit(Emitter.IS_CONNECTED, True)
+    await asyncio.sleep(0.2)
+
+    assert store._expected_trace_count["rec-missing"] == 2
+    assert store._expected_trace_count["rec-reported"] == 1
+    assert posted == [("rec-missing", 2)]
+
+
+@pytest.mark.asyncio
+async def test_stop_recording_does_not_post_expected_when_local_missing(
+    state_manager,
+) -> None:
+    manager, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    trace_a = _make_trace(
+        "trace-missing-local-a",
+        "rec-missing-local",
+        created_at=created_at,
+        last_updated=created_at,
+    )
+    store._traces_by_id[trace_a.trace_id] = trace_a
+    store._traces_by_recording["rec-missing-local"] = [trace_a]
+
+    posted: list[tuple[str, int]] = []
+
+    async def fake_set_expected(recording_id: str, expected_trace_count: int) -> None:
+        posted.append((recording_id, expected_trace_count))
+
+    manager._set_expected_trace_count = fake_set_expected  # type: ignore[method-assign]
+
+    get_emitter().emit(Emitter.STOP_RECORDING, "rec-missing-local")
+    await asyncio.sleep(0.2)
+
+    assert posted == []
+
+
+@pytest.mark.asyncio
+async def test_stop_recording_uses_existing_local_expected_trace_count(
+    state_manager,
+) -> None:
+    manager, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    trace_a = _make_trace(
+        "trace-local-a",
+        "rec-local",
+        created_at=created_at,
+        last_updated=created_at,
+    )
+    trace_b = _make_trace(
+        "trace-local-b",
+        "rec-local",
+        created_at=created_at,
+        last_updated=created_at,
+    )
+    store._traces_by_id[trace_a.trace_id] = trace_a
+    store._traces_by_id[trace_b.trace_id] = trace_b
+    store._traces_by_recording["rec-local"] = [trace_a, trace_b]
+    # Simulate local expected count already frozen previously.
+    store._expected_trace_count["rec-local"] = 7
+
+    posted: list[tuple[str, int]] = []
+
+    async def fake_set_expected(recording_id: str, expected_trace_count: int) -> None:
+        posted.append((recording_id, expected_trace_count))
+
+    manager._set_expected_trace_count = fake_set_expected  # type: ignore[method-assign]
+
+    get_emitter().emit(Emitter.STOP_RECORDING, "rec-local")
+    await asyncio.sleep(0.2)
+
+    assert store._expected_trace_count["rec-local"] == 7
+    assert posted == [("rec-local", 7)]
+
+
+@pytest.mark.asyncio
 async def test_start_trace_creates_trace(state_manager) -> None:
     """START_TRACE creates trace in INITIALIZING with metadata (waiting for bytes)."""
     _, store = state_manager
@@ -557,6 +696,7 @@ async def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
         await asyncio.sleep(0.2)
 
         assert store.deleted == ["trace-3"]
+        assert store.uploaded_count_increments == ["rec-3"]
         assert received == [("rec-3", "trace-3", DataType.CUSTOM_1D)]
     finally:
         get_emitter().remove_listener(Emitter.DELETE_TRACE, handler)

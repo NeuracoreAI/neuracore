@@ -76,7 +76,9 @@ async def _set_created_at(
         )
 
 
-async def _get_trace_upload_status(store: SqliteStateStore, trace_id: str) -> TraceUploadStatus:
+async def _get_trace_upload_status(
+    store: SqliteStateStore, trace_id: str
+) -> TraceUploadStatus:
     async with store._engine.begin() as conn:
         return (
             await conn.execute(
@@ -242,7 +244,9 @@ async def test_invalid_transition_raises_via_manager(manager_store) -> None:
     )
 
     with pytest.raises(ValueError, match="Invalid status transition"):
-        await manager._store.update_upload_status("trace-invalid", TraceUploadStatus.UPLOADED)
+        await manager._store.update_upload_status(
+            "trace-invalid", TraceUploadStatus.UPLOADED
+        )
 
 
 @pytest.mark.asyncio
@@ -366,13 +370,17 @@ async def test_race_conditions_on_rapid_state_changes(
             path="/tmp/trace-race.bin",
         )
         await manager_one._handle_trace_written("trace-race", "rec-race", 64)
-        await manager_one._store.update_upload_status("trace-race", TraceUploadStatus.UPLOADING)
+        await manager_one._store.update_upload_status(
+            "trace-race", TraceUploadStatus.UPLOADING
+        )
 
         errors: list[str] = []
 
         async def worker(manager: StateManager) -> None:
             try:
-                await manager._store.update_upload_status("trace-race", TraceUploadStatus.UPLOADED)
+                await manager._store.update_upload_status(
+                    "trace-race", TraceUploadStatus.UPLOADED
+                )
             except ValueError as exc:
                 errors.append(str(exc))
 
@@ -382,7 +390,10 @@ async def test_race_conditions_on_rapid_state_changes(
                 worker(manager_two),
             )
 
-        assert await _get_trace_upload_status(store_one, "trace-race") == TraceUploadStatus.UPLOADED
+        assert (
+            await _get_trace_upload_status(store_one, "trace-race")
+            == TraceUploadStatus.UPLOADED
+        )
     finally:
         _cleanup_state_manager(manager_one)
         _cleanup_state_manager(manager_two)
@@ -429,8 +440,12 @@ async def test_state_recovery_after_restart(tmp_path) -> None:
         ready = await recovered_store.find_ready_traces()
         assert [trace.trace_id for trace in ready] == ["trace-recover"]
 
-        await recovered_store.update_upload_status("trace-recover", TraceUploadStatus.UPLOADING)
-        await recovered_store.update_upload_status("trace-recover", TraceUploadStatus.UPLOADED)
+        await recovered_store.update_upload_status(
+            "trace-recover", TraceUploadStatus.UPLOADING
+        )
+        await recovered_store.update_upload_status(
+            "trace-recover", TraceUploadStatus.UPLOADED
+        )
         updated = await recovered_store.get_trace("trace-recover")
         assert updated is not None
         assert updated.upload_status == TraceUploadStatus.UPLOADED
@@ -617,7 +632,9 @@ async def test_status_is_uploading_during_active_upload(manager_store) -> None:
         await asyncio.sleep(0.1)
 
         status = await _get_trace_upload_status(store, "trace-upload-status")
-        assert status == TraceUploadStatus.UPLOADING, f"Expected UPLOADING, got {status}"
+        assert (
+            status == TraceUploadStatus.UPLOADING
+        ), f"Expected UPLOADING, got {status}"
 
         assert len(ready_events) == 1
         assert ready_events[0] == (
@@ -871,9 +888,13 @@ async def test_upload_failed_schedules_retry_increments_attempts_sets_next_retry
         path="/tmp/trace-retry-1.bin",
     )
 
-    await manager._store.update_write_status("trace-retry-1", TraceWriteStatus.INITIALIZING)
+    await manager._store.update_write_status(
+        "trace-retry-1", TraceWriteStatus.INITIALIZING
+    )
     await manager._store.update_write_status("trace-retry-1", TraceWriteStatus.WRITTEN)
-    await manager._store.update_upload_status("trace-retry-1", TraceUploadStatus.UPLOADING)
+    await manager._store.update_upload_status(
+        "trace-retry-1", TraceUploadStatus.UPLOADING
+    )
 
     scheduled: list[float] = []
     scheduled_evt = asyncio.Event()
@@ -957,9 +978,15 @@ async def test_upload_failed_backoff_caps_at_max(manager_store, monkeypatch) -> 
         path="/tmp/trace-retry-cap.bin",
     )
 
-    await manager._store.update_write_status("trace-retry-cap", TraceWriteStatus.INITIALIZING)
-    await manager._store.update_write_status("trace-retry-cap", TraceWriteStatus.WRITTEN)
-    await manager._store.update_upload_status("trace-retry-cap", TraceUploadStatus.UPLOADING)
+    await manager._store.update_write_status(
+        "trace-retry-cap", TraceWriteStatus.INITIALIZING
+    )
+    await manager._store.update_write_status(
+        "trace-retry-cap", TraceWriteStatus.WRITTEN
+    )
+    await manager._store.update_upload_status(
+        "trace-retry-cap", TraceUploadStatus.UPLOADING
+    )
 
     cap_attempts = 0
     while True:
@@ -1040,9 +1067,13 @@ async def test_upload_failed_after_max_retries_marks_failed_and_no_ready_emitted
         path="/tmp/trace-exhaust.bin",
     )
 
-    await manager._store.update_write_status("trace-exhaust", TraceWriteStatus.INITIALIZING)
+    await manager._store.update_write_status(
+        "trace-exhaust", TraceWriteStatus.INITIALIZING
+    )
     await manager._store.update_write_status("trace-exhaust", TraceWriteStatus.WRITTEN)
-    await manager._store.update_upload_status("trace-exhaust", TraceUploadStatus.UPLOADING)
+    await manager._store.update_upload_status(
+        "trace-exhaust", TraceUploadStatus.UPLOADING
+    )
 
     await _set_attempts_and_retry_at(
         store,
@@ -1148,7 +1179,9 @@ async def test_retry_emit_does_not_emit_before_next_retry_at(
     )
     await store.mark_traces_as_registered(["trace-not-due"])
 
-    await manager._store.update_write_status("trace-not-due", TraceWriteStatus.INITIALIZING)
+    await manager._store.update_write_status(
+        "trace-not-due", TraceWriteStatus.INITIALIZING
+    )
     await manager._store.update_write_status("trace-not-due", TraceWriteStatus.WRITTEN)
 
     future = dt.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=60)
@@ -1157,7 +1190,11 @@ async def test_retry_emit_does_not_emit_before_next_retry_at(
         await conn.execute(
             update(traces)
             .where(traces.c.trace_id == "trace-not-due")
-            .values(upload_status=TraceUploadStatus.RETRYING, registration_status=TraceRegistrationStatus.REGISTERED, write_status=TraceWriteStatus.WRITTEN)
+            .values(
+                upload_status=TraceUploadStatus.RETRYING,
+                registration_status=TraceRegistrationStatus.REGISTERED,
+                write_status=TraceWriteStatus.WRITTEN,
+            )
         )
 
     ready_events: list[tuple] = []

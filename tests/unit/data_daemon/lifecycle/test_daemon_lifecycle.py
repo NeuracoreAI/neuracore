@@ -25,11 +25,12 @@ from neuracore.data_daemon.models import (
     DataType,
     ProgressReportStatus,
     TraceErrorCode,
-    TraceRegistrationStatus,
     TraceRecord,
+    TraceRegistrationStatus,
     TraceUploadStatus,
     TraceWriteStatus,
 )
+from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
 
 
 class _InMemoryStore:
@@ -155,6 +156,66 @@ def test_startup_reconciles_missing_and_orphaned_traces(tmp_path: Path) -> None:
     assert updated.upload_status == TraceUploadStatus.FAILED
     assert updated.error_code == TraceErrorCode.WRITE_FAILED
     assert not orphan_dir.exists()
+
+
+def test_startup_initializes_store_before_reconcile(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-state.db"
+    recordings_root = tmp_path / "recordings"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE traces (
+                trace_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                recording_id TEXT NOT NULL,
+                progress_reported TEXT NOT NULL DEFAULT 'pending',
+                expected_trace_count_reported INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO traces (
+                trace_id,
+                status,
+                recording_id,
+                progress_reported,
+                expected_trace_count_reported
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            ("trace-legacy", "written", "rec-legacy", "pending", 0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    store = SqliteStateStore(db_path)
+    asyncio.run(
+        startup(
+            pid_path=tmp_path / "daemon.pid",
+            socket_paths=(),
+            db_path=db_path,
+            recordings_root=recordings_root,
+            store=store,
+            recover_sqlite=True,
+            manage_pid=False,
+        )
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(traces)").fetchall()
+        }
+        assert "write_status" in columns
+        assert "registration_status" in columns
+        assert "upload_status" in columns
+    finally:
+        conn.close()
+    asyncio.run(store.close())
 
 
 def test_reconcile_pauses_uploading_traces(tmp_path: Path) -> None:

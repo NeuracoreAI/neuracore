@@ -382,6 +382,11 @@ async def startup(
     if sqlite_recovered:
         logger.warning("SQLite recovered by rotation; new DB will be created.")
 
+    # Ensure schema migrations run before any startup reconciliation reads.
+    init_store = getattr(store, "init_async_store", None)
+    if callable(init_store):
+        await init_store()
+
     recordings_root.mkdir(parents=True, exist_ok=True)
     await reconcile_state_with_filesystem(store, recordings_root)
 

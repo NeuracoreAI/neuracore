@@ -357,7 +357,7 @@ class VideoTrace:
             metadata_timestamp_span_s = max(metadata_timestamps) - min(
                 metadata_timestamps
             )
-        logger.info(
+        logger.debug(
             "VideoTrace finished: dir=%s frames=%d metadata_entries=%d dims=%sx%s "
             "expected_raw_rgb_bytes=%d fallback_timestamps=%d "
             "non_monotonic_timestamps=%d metadata_timestamp_count=%d "
