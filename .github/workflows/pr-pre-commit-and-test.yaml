@@ -28,6 +28,7 @@ jobs:
           filters: |
             ml:
               - 'neuracore/ml/**'
+              - 'neuracore/core/**'
               - 'tests/unit/ml/**'
               - 'tests/unit/conftest.py'
               - 'neuracore/__init__.py'
@@ -62,27 +63,28 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11"]
     env:
+      UV_VENV_SEED: "true"
       SHOULD_RUN: ${{ needs.detect-changes.outputs.non-ml == 'true' || needs.detect-changes.outputs.deps == 'true' || needs.detect-changes.outputs.ci == 'true' }}
     steps:
       - name: Checkout code
         if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@v6
 
-      - name: Set up Python
+      - name: Set up uv
         if: env.SHOULD_RUN == 'true'
-        uses: actions/setup-python@v6
+        uses: astral-sh/setup-uv@v5
         with:
+          enable-cache: true
+          cache-dependency-glob: "setup.py"
           python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: "setup.py"
 
       - name: Install Python dependencies
         if: env.SHOULD_RUN == 'true'
-        run: pip install ".[dev,ml,import]" --extra-index-url https://download.pytorch.org/whl/cpu
+        run: uv pip install ".[dev,import]"
 
       - name: Run non-ML unit tests
         if: env.SHOULD_RUN == 'true'
-        run: pytest tests/unit --ignore=tests/unit/ml
+        run: uv run pytest tests/unit --ignore=tests/unit/ml
 
   test-ml:
     needs: [detect-changes, pre-commit]
