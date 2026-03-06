@@ -183,6 +183,7 @@ def test_training_flow():
     job_id = None
     endpoint_id = None
     merged_dataset = None
+    collected_dataset = None
 
     try:
         # ------------------------------------------------------------------
