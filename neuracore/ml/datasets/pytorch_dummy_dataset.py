@@ -67,7 +67,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             output_prediction_horizon=output_prediction_horizon,
         )
         self.num_samples = num_samples
-        self.robot = Robot("dummy_robot", 0)
+        self.robot = Robot(robot_name="dummy_robot", instance=0, org_id="dummy_org_id")
         self.robot.id = "dummy_robot_id"
 
         self._dataset_statistics: dict[DataType, list[NCDataStats]] = {}
