@@ -85,12 +85,11 @@ nc.stop_recording()
 
 #### Live Data Streaming Control
 
-```python
-# Stop live data streaming but still keep recording (saves bandwidth)
-nc.stop_live_data(robot_name="MyRobot", instance=0)
+Data logs from your robot are automatically streamed to the web dashboard in real time for visualization and monitoring. You can stop this default behavior by calling:
 
-# Resume live data streaming
-nc.start_live_data(robot_name="MyRobot", instance=0)
+```python
+# Stop live data streaming to save bandwidth. Does not affect recording
+nc.stop_live_data(robot_name="MyRobot", instance=0)
 ```
 
 ### Dataset Access and Visualization
