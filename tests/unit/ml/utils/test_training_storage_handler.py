@@ -341,32 +341,42 @@ class TestSaveModelArtifacts:
         assert len(put_requests) == 2
 
 
-class TestUpdateTrainingMetadata:
-    def test_update_training_metadata_sends_epoch_step_and_error_to_cloud(
+class TestUpdateTrainingProgress:
+    def test_sends_epoch_and_step_with_null_error_to_cloud(
         self, handler, requests_mock
     ):
         requests_mock.put(f"{BASE_JOB_URL}/update", status_code=200)
 
-        handler.update_training_metadata(epoch=3, step=150)
+        handler.update_training_progress(epoch=3, step=150)
 
         put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
         assert len(put_requests) == 1
         assert put_requests[0].json() == {"epoch": 3, "step": 150, "error": None}
 
-    def test_update_training_metadata_includes_error_message_in_request_body(
+    def test_makes_no_http_request_without_job_id(self, local_handler, requests_mock):
+        local_handler.update_training_progress(epoch=1, step=1)
+
+        assert len(requests_mock.request_history) == 0
+
+
+class TestReportTrainingError:
+    def test_sends_error_with_null_epoch_and_step_to_cloud(
         self, handler, requests_mock
     ):
         requests_mock.put(f"{BASE_JOB_URL}/update", status_code=200)
 
-        handler.update_training_metadata(epoch=1, step=10, error="OOM error")
+        handler.report_training_error("OOM error")
 
         put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
-        assert put_requests[0].json()["error"] == "OOM error"
+        assert len(put_requests) == 1
+        assert put_requests[0].json() == {
+            "epoch": None,
+            "step": None,
+            "error": "OOM error",
+        }
 
-    def test_update_training_metadata_makes_no_http_request_without_job_id(
-        self, local_handler, requests_mock
-    ):
-        local_handler.update_training_metadata(epoch=1, step=1)
+    def test_makes_no_http_request_without_job_id(self, local_handler, requests_mock):
+        local_handler.report_training_error("some error")
 
         assert len(requests_mock.request_history) == 0
 

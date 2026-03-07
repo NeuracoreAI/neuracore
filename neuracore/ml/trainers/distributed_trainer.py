@@ -2,7 +2,6 @@
 
 import logging
 import os
-import traceback
 from pathlib import Path
 from typing import cast
 
@@ -209,7 +208,7 @@ class DistributedTrainer:
                 self.rank == 0
                 and self.global_train_step % UPDATE_TRAINING_METADATA_EVERY == 0
             ):
-                self.storage_handler.update_training_metadata(
+                self.storage_handler.update_training_progress(
                     epoch=epoch, step=self.global_train_step
                 )
 
@@ -276,11 +275,10 @@ class DistributedTrainer:
             start_epoch: Epoch to start from (for resuming training)
         """
         if self.rank == 0:
-            self.storage_handler.update_training_metadata(
+            self.storage_handler.update_training_progress(
                 epoch=start_epoch, step=self.global_train_step
             )
 
-        error_msg: str = ""
         try:
             start_epoch = max(start_epoch, 1)
             for epoch in range(start_epoch, self.num_epochs + 1):
@@ -306,7 +304,7 @@ class DistributedTrainer:
 
                 # Save metadata
                 if self.rank == 0:
-                    self.storage_handler.update_training_metadata(
+                    self.storage_handler.update_training_progress(
                         epoch=epoch,
                         step=self.global_train_step,
                     )
@@ -315,21 +313,16 @@ class DistributedTrainer:
                         self.training_logger.flush()
 
         except OutOfMemoryError:
-            error_msg = (
-                f"Batch size {self.train_loader.batch_size} is too large. "
-                "Try reducing batch size or using a more powerful machine."
+            logger.error(
+                "Batch size %s is too large. "
+                "Try reducing batch size or using a more powerful machine.",
+                self.train_loader.batch_size,
             )
-            raise  # Re-raise to ensure proper exit code
+            raise
         except Exception:
-            error_msg = f"Error during training. \n{traceback.format_exc()}"
-            raise  # Re-raise to ensure proper exit code
+            logger.error("Error during training.", exc_info=True)
+            raise
         finally:
-            if error_msg:
-                logger.error(error_msg)
-                if self.rank == 0:
-                    self.storage_handler.update_training_metadata(
-                        epoch=epoch, step=self.global_train_step, error=error_msg
-                    )
             # Close the logger
             if self.rank == 0:
                 self.training_logger.close()

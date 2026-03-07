@@ -1884,3 +1884,127 @@ class TestMain:
         setup.mock_determine_optimal_batch_size.assert_called_once()
         # Verify run_training was called with the optimal batch size
         assert setup.mock_run_training.call_args[0][3] == 16
+
+
+class TestMainErrorReporting:
+    """Tests for top-level error capture and cloud reporting in main()."""
+
+    def _cloud_cfg(self, temp_output_dir, training_id="cloud-job-id"):
+        """Return a minimal valid cfg with the given training_id."""
+        return OmegaConf.create({
+            "algorithm_id": "test-algorithm-id",
+            "dataset_id": "test-dataset-id",
+            "dataset_name": None,
+            "org_id": None,
+            "device": None,
+            "training_id": training_id,
+            "local_output_dir": str(temp_output_dir),
+            "batch_size": 8,
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "output_prediction_horizon": 5,
+            "frequency": 30,
+            "algorithm_params": None,
+            "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
+        })
+
+    def test_calls_try_report_error_to_cloud_when_training_id_set_and_run_training_raises(  # noqa: E501
+        self, monkeypatch, temp_output_dir
+    ):
+        cfg = self._cloud_cfg(temp_output_dir, training_id="cloud-job-id")
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+        setup.mock_run_training.side_effect = RuntimeError("simulated crash")
+
+        mock_report = Mock()
+        monkeypatch.setattr(
+            "neuracore.ml.train._try_report_error_to_cloud", mock_report
+        )
+
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            main(cfg)
+
+        mock_report.assert_called_once()
+        reported_cfg, reported_error_msg = mock_report.call_args[0]
+        assert "simulated crash" in reported_error_msg
+
+    def test_does_not_call_try_report_error_to_cloud_when_training_id_is_none(
+        self, monkeypatch, temp_output_dir
+    ):
+        cfg = self._cloud_cfg(temp_output_dir, training_id=None)
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+        setup.mock_run_training.side_effect = RuntimeError("simulated crash")
+
+        mock_report = Mock()
+        monkeypatch.setattr(
+            "neuracore.ml.train._try_report_error_to_cloud", mock_report
+        )
+
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            main(cfg)
+
+        mock_report.assert_not_called()
+
+    def test_reraises_original_exception_after_cloud_reporting(
+        self, monkeypatch, temp_output_dir
+    ):
+        cfg = self._cloud_cfg(temp_output_dir, training_id="cloud-job-id")
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+        setup.mock_run_training.side_effect = ValueError("original error")
+
+        monkeypatch.setattr("neuracore.ml.train._try_report_error_to_cloud", Mock())
+
+        with pytest.raises(ValueError, match="original error"):
+            main(cfg)
+
+    def test_reports_pre_training_errors_that_occur_before_run_training(
+        self, monkeypatch, temp_output_dir
+    ):
+        """Errors during dataset loading (before run_training) are also reported."""
+        cfg = self._cloud_cfg(temp_output_dir, training_id="cloud-job-id")
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+        # Force failure at dataset loading — before run_training is ever called
+        setup.mock_get_dataset.side_effect = ValueError("dataset not found")
+
+        mock_report = Mock()
+        monkeypatch.setattr(
+            "neuracore.ml.train._try_report_error_to_cloud", mock_report
+        )
+
+        with pytest.raises(ValueError, match="dataset not found"):
+            main(cfg)
+
+        mock_report.assert_called_once()
+        _, reported_error_msg = mock_report.call_args[0]
+        assert "dataset not found" in reported_error_msg
+
+    def test_reported_error_message_contains_full_traceback(
+        self, monkeypatch, temp_output_dir
+    ):
+        cfg = self._cloud_cfg(temp_output_dir, training_id="cloud-job-id")
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+        setup.mock_run_training.side_effect = RuntimeError("crash!")
+
+        captured: list[str] = []
+
+        def capture_report(cfg, error_msg):
+            captured.append(error_msg)
+
+        monkeypatch.setattr(
+            "neuracore.ml.train._try_report_error_to_cloud", capture_report
+        )
+
+        with pytest.raises(RuntimeError):
+            main(cfg)
+
+        assert len(captured) == 1
+        # The full traceback string should include the exception type and message
+        assert "RuntimeError" in captured[0]
+        assert "crash!" in captured[0]
