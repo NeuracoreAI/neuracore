@@ -72,6 +72,17 @@ CNNMLP_CONFIG = {
 
 TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "ERROR"}
 
+# A batch_size value that is not "auto" and not parseable as an integer.
+# It passes client-side validation (which only checks data types / algorithm
+# compatibility, not the batch_size value itself) but causes a ValueError in
+# train.py at `batch_size = int(batch_size)`, which happens *after* nc.login()
+# so our new top-level error handler can catch and report it.
+FAILURE_CNNMLP_CONFIG = {
+    "batch_size": "not_a_valid_integer",
+    "epochs": 1,
+    "output_prediction_horizon": 5,
+}
+
 
 def _unique_name(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
@@ -394,3 +405,118 @@ def test_training_flow():
                 logger.warning(
                     f"Failed to delete collected dataset {collected_dataset_name}"
                 )
+
+
+def test_training_failure_error_reporting():
+    """Verify that training script failures are correctly reported to the cloud.
+
+    Forces a deliberate runtime failure by submitting a training job whose
+    batch_size cannot be parsed as an integer.  The error occurs inside
+    train.py *after* nc.login() — so the new top-level error handler in
+    main() is responsible for catching it and calling
+    _try_report_error_to_cloud().
+
+    Assertions:
+    1. The job reaches FAILED status (not stuck in RUNNING or PENDING).
+    2. The job data returned by the API contains a non-empty 'error' field,
+       confirming that the error was propagated back to the server.
+    """
+    nc.login()
+
+    job_id = None
+    dataset = None
+    dataset_name = _unique_name("failure_report_test")
+
+    try:
+        # ------------------------------------------------------------------
+        # Collect minimal demo data (1 episode is enough)
+        # ------------------------------------------------------------------
+        try:
+            dataset = _collect_demo_data(ROBOT_NAME, dataset_name, num_episodes=1)
+        except Exception as e:
+            pytest.fail(f"Data collection failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Build a per-robot data spec from the collected dataset
+        # ------------------------------------------------------------------
+        try:
+            robot_ids = dataset.robot_ids
+            input_robot_data_spec: dict = {}
+            output_robot_data_spec: dict = {}
+            for robot_id in robot_ids:
+                data_spec = dataset.get_full_data_spec(robot_id)
+                filtered = {
+                    dt: item for dt, item in data_spec.items() if dt in INPUT_DATA_TYPES
+                }
+                input_robot_data_spec[robot_id] = filtered
+                output_robot_data_spec[robot_id] = {
+                    DataType.JOINT_POSITIONS: filtered[DataType.JOINT_POSITIONS],
+                }
+        except Exception as e:
+            pytest.fail(f"Building data spec failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Submit a training job that will fail at runtime
+        # ------------------------------------------------------------------
+        try:
+            job_data = nc.start_training_run(
+                name=_unique_name("failure_report_job"),
+                dataset_name=dataset_name,
+                algorithm_name="CNNMLP",
+                algorithm_config=FAILURE_CNNMLP_CONFIG,
+                gpu_type=GPU_TYPE,
+                num_gpus=NUM_GPUS,
+                frequency=FREQUENCY,
+                input_robot_data_spec=input_robot_data_spec,
+                output_robot_data_spec=output_robot_data_spec,
+            )
+            job_id = job_data["id"]
+            logger.info(f"Failure-reporting test job started: {job_id}")
+        except Exception as e:
+            pytest.fail(f"Failed to submit training job: {e}")
+
+        # ------------------------------------------------------------------
+        # Wait for the job to reach a terminal state (expect FAILED)
+        # ------------------------------------------------------------------
+        try:
+            final_status = _wait_for_training(job_id, timeout_minutes=30)
+            assert final_status == "FAILED", (
+                f"Expected FAILED status, got: {final_status!r}.  "
+                "The deliberate bad batch_size should have caused a ValueError "
+                "in train.py that maps to a FAILED job."
+            )
+            logger.info(f"Job {job_id} correctly reached FAILED status")
+        except Exception as e:
+            pytest.fail(f"Unexpected error waiting for job failure: {e}")
+
+        # ------------------------------------------------------------------
+        # Verify error info is surfaced in the job data
+        # ------------------------------------------------------------------
+        try:
+            job_detail = nc.get_training_job_data(job_id)
+            assert "error" in job_detail, (
+                "Job data is missing 'error' field — the server may not have "
+                "received the error report from the training script."
+            )
+            assert job_detail["error"], (
+                "The 'error' field in job data is empty — "
+                "_try_report_error_to_cloud may not have been called."
+            )
+            logger.info(
+                "Error field present in job data: %s",
+                str(job_detail["error"])[:200],
+            )
+        except Exception as e:
+            pytest.fail(f"Failed to verify error info in job data: {e}")
+
+    finally:
+        if job_id:
+            try:
+                nc.delete_training_job(job_id)
+            except Exception:
+                logger.warning(f"Failed to delete job {job_id}")
+        if dataset:
+            try:
+                dataset.delete()
+            except Exception:
+                logger.warning(f"Failed to delete dataset {dataset_name}")

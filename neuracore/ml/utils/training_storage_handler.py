@@ -254,23 +254,42 @@ class TrainingStorageHandler(UploadStorageMixin):
             headers={"Content-Type": content_type},
         )
 
-    def update_training_metadata(
-        self, epoch: int, step: int, error: str | None = None
-    ) -> None:
-        """Update training metadata in cloud storage.
+    def update_training_progress(self, epoch: int, step: int) -> None:
+        """Update training epoch/step progress in cloud storage.
 
         Args:
             epoch: Current training epoch.
             step: Current training step.
-            error: Optional error message if training failed.
         """
         if self.log_to_cloud:
             response = self._put_request(
                 f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/update",
-                json={"epoch": epoch, "step": step, "error": error},
+                json={"epoch": epoch, "step": step, "error": None},
             )
             if response.status_code != 200:
-                logger.error(f"Failed to save epoch {epoch} to cloud: {response.text}")
+                logger.error(
+                    f"Failed to update training progress to cloud: {response.text}"
+                )
+
+    def report_training_error(self, error: str) -> None:
+        """Report a training failure to cloud storage.
+
+        This should be called in exactly one place — the top-level error
+        handler in train.py — so that every failure is surfaced regardless
+        of where in the training pipeline it originated.
+
+        Args:
+            error: Formatted error / traceback string to persist.
+        """
+        if self.log_to_cloud:
+            response = self._put_request(
+                f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/update",
+                json={"epoch": None, "step": None, "error": error},
+            )
+            if response.status_code != 200:
+                logger.error(
+                    f"Failed to report training error to cloud: {response.text}"
+                )
 
     def _put_request(
         self,

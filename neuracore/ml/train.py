@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -615,9 +616,42 @@ OmegaConf.register_new_resolver(
 )
 
 
-@hydra.main(version_base=None, config_path="config", config_name="config")
-def main(cfg: DictConfig) -> None:
-    """Main function to run the training script."""
+def _try_report_error_to_cloud(cfg: DictConfig, error_msg: str) -> None:
+    """Best-effort attempt to report a training error to the cloud.
+
+    This function is deliberately exception-safe: it will never raise, so it
+    cannot mask the original error that triggered the call.
+
+    Args:
+        cfg: Hydra configuration (may be only partially resolved).
+        error_msg: Formatted traceback / error message to persist.
+    """
+    try:
+        nc.login()
+        org_id = getattr(cfg, "org_id", None)
+        if org_id is not None:
+            nc.set_organization(org_id)
+        local_output_dir = getattr(cfg, "local_output_dir", None)
+        training_id = getattr(cfg, "training_id", None)
+        storage_handler = TrainingStorageHandler(
+            local_dir=str(local_output_dir) if local_output_dir else "./output",
+            training_job_id=training_id,
+        )
+        storage_handler.report_training_error(error_msg)
+        logger.info("Successfully reported training error to cloud.")
+    except Exception:
+        logger.error("Failed to report training error to cloud.", exc_info=True)
+
+
+def _main(cfg: DictConfig) -> None:
+    """Inner implementation of main.
+
+    Separated so the outer wrapper can catch
+    any exception and report it to the cloud before re-raising.
+
+    Args:
+        cfg: Fully resolved Hydra configuration.
+    """
     # Resolve the configuration
     OmegaConf.resolve(cfg)
 
@@ -841,6 +875,23 @@ def main(cfg: DictConfig) -> None:
             pytorch_dataset,
             device,
         )
+
+
+@hydra.main(version_base=None, config_path="config", config_name="config")
+def main(cfg: DictConfig) -> None:
+    """Main function to run the training script."""
+    # Read training_id early — before any code that might raise — so it is
+    # available for error reporting even if cfg resolution fails later.
+    training_id = getattr(cfg, "training_id", None)
+
+    try:
+        _main(cfg)
+    except Exception:
+        error_msg = traceback.format_exc()
+        logger.error("Training script failed:\n%s", error_msg)
+        if training_id is not None:
+            _try_report_error_to_cloud(cfg, error_msg)
+        raise
 
 
 if __name__ == "__main__":

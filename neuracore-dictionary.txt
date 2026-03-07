@@ -289,3 +289,4 @@ checkpointing
 bfloat
 metafunc
 fixturenames
+reraises
