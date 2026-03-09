@@ -32,6 +32,14 @@ It does not explain internal implementation details.
 pip install -e .
 ```
 
+Optional, but recommended for video performance:
+
+```bash
+sudo apt-get update && sudo apt-get install -y ffmpeg
+```
+
+The data daemon prefers the `ffmpeg` CLI encoder for recording. If the binary is not installed or encoder init fails, it automatically falls back to PyAV.
+
 ### 2) Launch the daemon
 
 With defaults (no profile):
@@ -415,6 +423,20 @@ If it still fails, check your profiles:
 nc-data-daemon list-profiles
 nc-data-daemon profile show --name <name>
 ```
+
+### Which video encoder backend is being used
+
+The recording encoder selects backend at runtime:
+- Uses `ffmpeg` CLI when `ffmpeg` is available on `PATH`
+- Falls back to PyAV when `ffmpeg` is unavailable or fails to initialize
+
+Quick check:
+
+```bash
+ffmpeg -version
+```
+
+If this command succeeds, the daemon will use the FFmpeg backend for new recordings.
 
 ### Migration issues on startup
 

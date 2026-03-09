@@ -54,7 +54,13 @@ To install the basic package for data logging and visualization:
 pip install neuracore
 ```
 
-**Note:** for faster video decoding, installing `ffmpeg` via `sudo apt-get install ffmpeg` (for Linux) is recommended. 
+**Note:** installing the `ffmpeg` binary is recommended for faster video encoding (during recording) and decoding (during playback/import). If not available, Neuracore falls back to PyAV for encoding.
+
+Linux (Debian/Ubuntu):
+
+```bash
+sudo apt-get update && sudo apt-get install -y ffmpeg
+```
 
 For training and ML development:
 ```bash
