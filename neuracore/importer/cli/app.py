@@ -74,6 +74,12 @@ def import_dataset(
         "--no-validation-warnings",
         help="Suppress warning messages from data validation.",
     ),
+    max_workers: int = typer.Option(
+        1,
+        "--max-workers",
+        help="Maximum number of worker processes to use.",
+        min=1,
+    ),
 ) -> None:
     """Import a dataset into Neuracore using the provided configuration."""
     try:
@@ -85,6 +91,7 @@ def import_dataset(
             dry_run=dry_run,
             skip_on_error=skip_on_error,
             suppress_validation_warnings=no_validation_warnings,
+            max_workers=max_workers,
         )
     except (
         CLIError,

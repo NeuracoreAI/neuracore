@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 import traceback
@@ -9,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import tensorflow as tf
 import tensorflow_datasets as tfds
 from neuracore_types import DataType
 from neuracore_types.importer.config import LanguageConfig
@@ -22,6 +24,16 @@ from neuracore.importer.core.base import (
     WorkerError,
 )
 from neuracore.importer.core.exceptions import ImportError
+
+logger = logging.getLogger(__name__)
+gpus = tf.config.list_physical_devices("GPU")
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        logger.info("Memory growth enabled")
+    except RuntimeError as e:
+        logger.error("Error enabling memory growth: %s", e)
 
 # Suppress TensorFlow informational messages (e.g., "End of sequence")
 # 0 = all logs, 1 = no INFO, 2 = no WARNING, 3 = no ERROR
@@ -120,24 +132,56 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         """Prepare the worker for the dataset importer."""
         super().prepare_worker(worker_id, chunk)
         self._builder = self._load_builder()
-        chunk_start = chunk[0].index if chunk else 0
-        chunk_length = len(chunk) if chunk else None
 
+        sliced_split = self._build_sliced_split(chunk, self._builder)
         self.logger.info(
-            "[worker %s] Loading split=%s (start=%s count=%s) from %s",
+            "[worker %s] Loading split=%s from %s",
             worker_id,
-            self.split,
-            chunk_start,
-            chunk_length if chunk_length is not None else "remainder",
+            sliced_split,
             self.builder_dir,
         )
 
-        dataset = self._load_dataset(self._builder, self.split)
-        if chunk_start:
-            dataset = dataset.skip(chunk_start)
-        if chunk_length is not None:
-            dataset = dataset.take(chunk_length)
+        dataset = self._load_dataset(self._builder, sliced_split)
         self._episode_iter = iter(dataset)
+
+    def _build_sliced_split(
+        self,
+        chunk: Sequence[ImportItem] | None,
+        builder: tfds.core.DatasetBuilder,
+    ) -> str:
+        """Build a TFDS split string that selects only this worker's range.
+
+        Uses TFDS split slicing (e.g. ``"train[300:400]"``) so the reader
+        can seek directly to the relevant shard offsets instead of reading
+        and discarding skipped episodes.
+
+        For the ``all`` pseudo-split, enumerates the concrete split names
+        from the builder info, maps the absolute ``[start, end)`` range
+        onto per-split slices, and joins them with ``+``.
+        """
+        if not chunk:
+            return str(self.split)
+
+        start = chunk[0].index
+        end = start + len(chunk)
+
+        if str(self.split).lower() != "all" and self.split != tfds.Split.ALL:
+            return f"{self.split}[{start}:{end}]"
+
+        parts: list[str] = []
+        offset = 0
+        for name, info in builder.info.splits.items():
+            split_len = int(info.num_examples)
+            split_end = offset + split_len
+            if start < split_end and end > offset:
+                lo = max(start - offset, 0)
+                hi = min(end - offset, split_len)
+                parts.append(f"{name}[{lo}:{hi}]")
+            offset = split_end
+
+        if not parts:
+            return str(self.split)
+        return "+".join(parts)
 
     def import_item(self, item: ImportItem) -> None:
         """Import a single episode to the dataset importer."""
@@ -154,7 +198,8 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             raise ImportError("Frequency is required for importing episodes.")
         total_steps = self._infer_total_steps(steps)
         base_time = time.time()
-        nc.start_recording()
+        if not self.dry_run:
+            nc.start_recording(robot_name=self.robot_name, instance=self._worker_id)
         episode_label = (
             f"{item.split or 'episode'} #{item.index}"
             if item.split is not None
@@ -188,7 +233,10 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                 total_steps=total_steps,
                 episode_label=episode_label,
             )
-        nc.stop_recording(wait=True)
+        if not self.dry_run:
+            nc.stop_recording(
+                robot_name=self.robot_name, instance=self._worker_id, wait=True
+            )
         self.logger.info("[%s] Completed %s", worker_label, episode_label)
 
     def _handle_step_error(
@@ -478,6 +526,7 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
         ik_init_config: list[float] | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
+        max_workers: int | None = 1,
         skip_on_error: str = "episode",
     ):
         """Initialize the RLDS/TFDS dataset importer.
@@ -492,6 +541,7 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             ik_init_config: Initial joint configuration for IK.
             dry_run: If True, skip actual logging (validation only).
             suppress_warnings: If True, suppress warning messages.
+            max_workers: Maximum number of worker processes.
             skip_on_error: "episode" to skip a failed episode; "step" to skip only
                 failing steps; "all" to abort on the first error.
         """
@@ -505,7 +555,7 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             ik_init_config=ik_init_config,
             dry_run=dry_run,
             suppress_warnings=suppress_warnings,
-            max_workers=1,
+            max_workers=max_workers,
             skip_on_error=skip_on_error,
         )
 

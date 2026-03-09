@@ -37,6 +37,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         ik_init_config: list[float] | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
+        max_workers: int | None = 1,
         skip_on_error: str = "episode",
     ) -> None:
         """Initialize the LeRobot dataset importer.
@@ -51,6 +52,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             ik_init_config: Initial joint configuration for IK.
             dry_run: If True, skip actual logging (validation only).
             suppress_warnings: If True, suppress warning messages.
+            max_workers: Maximum number of worker processes.
             skip_on_error: "episode" to skip a failed episode; "step" to skip only
                 failing steps; "all" to abort on the first error.
         """
@@ -58,7 +60,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             dataset_dir=dataset_dir,
             dataset_config=dataset_config,
             output_dataset_name=output_dataset_name,
-            max_workers=1,
+            max_workers=max_workers,
             joint_info=joint_info,
             ik_urdf_path=ik_urdf_path,
             ik_init_config=ik_init_config,
@@ -127,7 +129,8 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             item.index + 1,
             self.num_episodes,
         )
-        nc.start_recording()
+        if not self.dry_run:
+            nc.start_recording(robot_name=self.robot_name, instance=self._worker_id)
         step_iter, total_steps = self._iter_episode_steps(self._dataset, episode_id)
         self._emit_progress(
             item.index, step=0, total_steps=total_steps, episode_label=str(episode_id)
@@ -158,7 +161,10 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 total_steps=total_steps,
                 episode_label=str(episode_id),
             )
-        nc.stop_recording(wait=True)
+        if not self.dry_run:
+            nc.stop_recording(
+                robot_name=self.robot_name, instance=self._worker_id, wait=True
+            )
         self.logger.info("[%s] Completed episode %s", worker_label, episode_id)
 
     def _load_metadata(self) -> LeRobotDatasetMetadata:
