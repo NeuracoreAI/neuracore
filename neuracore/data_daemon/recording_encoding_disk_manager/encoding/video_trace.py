@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 
 from neuracore.data_daemon.recording_encoding_disk_manager.encoding.disk_video_encoder import (  # noqa: E501
+    BaseDiskVideoEncoder,
     DiskVideoEncoder,
 )
 
@@ -61,8 +62,8 @@ class VideoTrace:
         self.width: int | None = None
         self.height: int | None = None
 
-        self._lossless_encoder: DiskVideoEncoder | None = None
-        self._lossy_encoder: DiskVideoEncoder | None = None
+        self._lossless_encoder: BaseDiskVideoEncoder | None = None
+        self._lossy_encoder: BaseDiskVideoEncoder | None = None
 
         self._frame_metadata: list[dict[str, Any]] = []
         self._frame_index = 0

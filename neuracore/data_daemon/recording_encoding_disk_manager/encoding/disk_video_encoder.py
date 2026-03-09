@@ -7,9 +7,12 @@ both lossy and lossless MP4 outputs plus a metadata trace file.
 from __future__ import annotations
 
 import io
+import logging
 import pathlib
+import subprocess
 import threading
 import time
+from abc import ABC, abstractmethod
 from fractions import Fraction
 
 import numpy as np
@@ -23,8 +26,40 @@ LOSSY_VIDEO_NAME = "lossy.mp4"
 LOSSLESS_VIDEO_NAME = "lossless.mp4"
 TRACE_FILE = "trace.json"
 
+logger = logging.getLogger(__name__)
+_FFMPEG_AVAILABLE: bool | None = None
 
-class DiskVideoEncoder:
+
+def _is_ffmpeg_available() -> bool:
+    """Return whether ffmpeg CLI is available on the host."""
+    global _FFMPEG_AVAILABLE
+    if _FFMPEG_AVAILABLE is None:
+        try:
+            subprocess.run(
+                ["ffmpeg", "-version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+            _FFMPEG_AVAILABLE = True
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            _FFMPEG_AVAILABLE = False
+    return _FFMPEG_AVAILABLE
+
+
+class BaseDiskVideoEncoder(ABC):
+    """Abstract video encoder interface used by VideoTrace."""
+
+    @abstractmethod
+    def add_frame(self, *, timestamp: float, np_frame: np.ndarray) -> None:
+        """Encode a frame."""
+
+    @abstractmethod
+    def finish(self) -> None:
+        """Flush and close encoder resources."""
+
+
+class PyAVDiskVideoEncoder(BaseDiskVideoEncoder):
     """Encode frames into an MP4 container buffered in memory.
 
     Output bytes are flushed to disk in chunks.
@@ -245,3 +280,175 @@ class DiskVideoEncoder:
 
             self._fh.flush()
             self._fh.close()
+
+
+class FfmpegDiskVideoEncoder(BaseDiskVideoEncoder):
+    """Encode frames by piping raw RGB frames into ffmpeg CLI."""
+
+    def __init__(
+        self,
+        *,
+        filepath: pathlib.Path,
+        width: int,
+        height: int,
+        codec: str,
+        pixel_format: str,
+        codec_context_options: dict[str, str] | None,
+        chunk_size: int = CHUNK_SIZE,
+    ) -> None:
+        """Initialise an ffmpeg CLI encoder process.
+
+        Args:
+            filepath: Output file path.
+            width: Frame width in pixels.
+            height: Frame height in pixels.
+            codec: FFmpeg codec name (e.g. "libx264").
+            pixel_format: Pixel format for the stream (e.g. "yuv420p").
+            codec_context_options: Codec options passed to ffmpeg.
+            chunk_size: Buffered write chunk size (kept for API parity).
+
+        Returns:
+            None
+        """
+        self.width = width
+        self.height = height
+        self.codec = codec
+        self.pixel_format = pixel_format
+        self.codec_context_options = codec_context_options
+        self.chunk_size = chunk_size
+        self._lock = threading.Lock()
+        self._finished = False
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{self.width}x{self.height}",
+            "-r",
+            str(PTS_FRACT),
+            "-i",
+            "pipe:0",
+            "-c:v",
+            self.codec,
+            "-pix_fmt",
+            self.pixel_format,
+        ]
+        for key, value in (self.codec_context_options or {}).items():
+            cmd.extend([f"-{key}", value])
+        cmd.extend([
+            "-movflags",
+            "frag_keyframe+empty_moov",
+            str(filepath),
+        ])
+
+        self._proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+
+    def add_frame(self, *, timestamp: float, np_frame: np.ndarray) -> None:
+        """Write a single RGB frame to ffmpeg stdin."""
+        del timestamp
+        with self._lock:
+            if self._finished:
+                return
+            if self._proc.stdin is None:
+                raise RuntimeError("ffmpeg encoder stdin is not available")
+            if np_frame.dtype != np.uint8:
+                frame = np_frame.astype(np.uint8, copy=False)
+            else:
+                frame = np_frame
+            if frame.shape != (self.height, self.width, 3):
+                raise ValueError(
+                    "Unexpected frame shape for ffmpeg encoder: "
+                    f"got={frame.shape} expected={(self.height, self.width, 3)}"
+                )
+            try:
+                self._proc.stdin.write(frame.tobytes())
+            except BrokenPipeError as exc:
+                stderr_msg = ""
+                if self._proc.stderr is not None:
+                    stderr_msg = self._proc.stderr.read().decode("utf-8", "ignore")
+                raise RuntimeError(
+                    f"ffmpeg encoder process closed stdin unexpectedly: {stderr_msg}"
+                ) from exc
+
+    def finish(self) -> None:
+        """Close ffmpeg stdin and wait for process completion."""
+        with self._lock:
+            if self._finished:
+                return
+            self._finished = True
+
+            if self._proc.stdin is not None:
+                self._proc.stdin.close()
+
+            stderr_output = b""
+            if self._proc.stderr is not None:
+                stderr_output = self._proc.stderr.read()
+                self._proc.stderr.close()
+
+            return_code = self._proc.wait()
+            if return_code != 0:
+                raise RuntimeError(
+                    "ffmpeg encoder failed "
+                    f"(exit_code={return_code}): "
+                    f"{stderr_output.decode('utf-8', 'ignore')}"
+                )
+
+
+def DiskVideoEncoder(
+    *,
+    filepath: pathlib.Path,
+    width: int,
+    height: int,
+    codec: str,
+    pixel_format: str,
+    codec_context_options: dict[str, str] | None,
+    chunk_size: int = CHUNK_SIZE,
+) -> BaseDiskVideoEncoder:
+    """Create either an ffmpeg or PyAV encoder implementation.
+
+    Args:
+        filepath: Output file path.
+        width: Frame width in pixels.
+        height: Frame height in pixels.
+        codec: FFmpeg codec name (e.g. "libx264").
+        pixel_format: Pixel format for the stream (e.g. "yuv420p").
+        codec_context_options: Codec options passed to the encoder backend.
+        chunk_size: Buffered write chunk size.
+
+    Returns:
+        Concrete disk video encoder implementation.
+    """
+    if _is_ffmpeg_available():
+        try:
+            return FfmpegDiskVideoEncoder(
+                filepath=filepath,
+                width=width,
+                height=height,
+                codec=codec,
+                pixel_format=pixel_format,
+                codec_context_options=codec_context_options,
+                chunk_size=chunk_size,
+            )
+        except Exception:
+            logger.exception("ffmpeg encoder init failed, falling back to PyAV encoder")
+
+    return PyAVDiskVideoEncoder(
+        filepath=filepath,
+        width=width,
+        height=height,
+        codec=codec,
+        pixel_format=pixel_format,
+        codec_context_options=codec_context_options,
+        chunk_size=chunk_size,
+    )

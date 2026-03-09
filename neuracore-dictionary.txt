@@ -290,3 +290,5 @@ bfloat
 metafunc
 fixturenames
 reraises
+pyav
+rawvideo
