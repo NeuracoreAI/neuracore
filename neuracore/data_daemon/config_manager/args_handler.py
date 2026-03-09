@@ -71,6 +71,12 @@ def add_common_config_args(parser: argparse.ArgumentParser) -> None:
         help="Number of worker threads.",
     )
     parser.add_argument(
+        "--max-concurrent-uploads",
+        "--max_concurrent_uploads",
+        type=int,
+        help="Maximum number of traces uploaded concurrently.",
+    )
+    parser.add_argument(
         "--keep-wakelock-while-upload",
         "--keep_wakelock_while_upload",
         dest="keep_wakelock_while_upload",
@@ -196,6 +202,7 @@ def handle_launch(args: argparse.Namespace) -> None:
         - Otherwise: launch in foreground and wait, streaming logs.
     """
     pid_path = get_daemon_pid_path()
+    db_path = get_daemon_db_path()
     pid_path.parent.mkdir(parents=True, exist_ok=True)
 
     existing_pid = read_pid_from_file(pid_path)
@@ -216,6 +223,7 @@ def handle_launch(args: argparse.Namespace) -> None:
 
     env = os.environ.copy()
     env["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
+    env["NEURACORE_DAEMON_DB_PATH"] = str(db_path)
     env["NEURACORE_DAEMON_MANAGE_PID"] = "0"
 
     profile_name = getattr(args, "profile", None)

@@ -15,7 +15,9 @@ Profiles are optional. If you do not use a profile, the daemon runs with built i
 - How to run the daemon (CLI or from a script)
 - How profiles work (optional) and where they are stored
 - The configuration fields you can set
+- Environment variables that control DB path, recordings root, and upload concurrency
 - The order of precedence (defaults, profile, environment variables, CLI)
+- What happens to old daemon databases at startup (automatic schema migration)
 - A full CLI reference for the commands currently in use
 
 It does not explain internal implementation details.
@@ -120,6 +122,23 @@ You may see simple messages when it stops:
 - Daemon exited.
 - Daemon stopped.
 
+### Startup and schema migration
+
+On startup, the daemon initializes the SQLite store and ensures schema compatibility.
+
+If an older single-table schema is detected (legacy `traces.status` format), the daemon
+automatically migrates data to the current schema:
+
+- `traces` rows are transformed into lifecycle fields:
+  - `write_status`
+  - `registration_status`
+  - `upload_status`
+- `recordings` rows are generated per unique `recording_id`
+- Existing trace metadata/bytes/error fields are preserved
+- Migration runs before normal startup reconciliation
+
+Migration runs once per DB file. After a successful migration, startup continues normally.
+
 ---
 
 ## Configuration
@@ -157,6 +176,7 @@ These are the supported settings:
 | `bandwidth_limit` | Maximum upload speed the daemon should use (bytes per second). |
 | `path_to_store_record` | Folder where recordings are stored. |
 | `num_threads` | Number of worker threads used by the daemon. |
+| `max_concurrent_uploads` | Max traces uploaded at once. Recommended: `5-10`. |
 | `keep_wakelock_while_upload` | Whether to keep the machine awake during uploads (where supported). |
 | `offline` | If enabled, uploading is disabled and data is only stored locally. |
 | `api_key` | API key used for authenticating the daemon. |
@@ -207,6 +227,7 @@ Supported environment variables:
 | `bandwidth_limit` | `NCD_BANDWIDTH_LIMIT` |
 | `path_to_store_record` | `NCD_PATH_TO_STORE_RECORD` |
 | `num_threads` | `NCD_NUM_THREADS` |
+| `max_concurrent_uploads` | `NCD_MAX_CONCURRENT_UPLOADS` |
 | `keep_wakelock_while_upload` | `NCD_KEEP_WAKELOCK_WHILE_UPLOAD` |
 | `offline` | `NCD_OFFLINE` |
 | `api_key` | `NCD_API_KEY` |
@@ -229,6 +250,30 @@ export NCD_NUM_THREADS=4
 nc-data-daemon launch --background
 ```
 
+### Runtime path environment variables
+
+These variables control where the daemon runtime artifacts live:
+
+| Purpose | Environment variable | Default |
+|---|---|---|
+| PID file path | `NEURACORE_DAEMON_PID_PATH` | `~/.neuracore/daemon.pid` |
+| SQLite DB path | `NEURACORE_DAEMON_DB_PATH` | `~/.neuracore/data_daemon/state.db` |
+| Recordings root | `NEURACORE_DAEMON_RECORDINGS_ROOT` | sibling of DB path (`<db_dir>/recordings`) |
+| Profile for launch/auto-start | `NEURACORE_DAEMON_PROFILE` | unset |
+
+Recommended for containers/dev environments:
+
+```bash
+export NEURACORE_DAEMON_DB_PATH=/workspaces/neuracore/data_daemon_state.db
+export NEURACORE_DAEMON_RECORDINGS_ROOT=/workspaces/neuracore/recordings
+export NCD_MAX_CONCURRENT_UPLOADS=10
+```
+
+Recommended upload concurrency:
+- Most machines: `5-10`
+- Start at `5`, increase only if CPU/network/disk are stable
+- Very high values can increase retries, memory pressure, and shutdown latency
+
 ---
 
 ## CLI reference
@@ -248,7 +293,7 @@ nc-data-daemon profile create --name laptop
 ### nc-data-daemon profile update
 
 ```bash
-nc-data-daemon profile update --name <name>   [--storage-limit <bytes|unit>]   [--bandwidth-limit <bytes|unit>]   [--storage-path <path>]   [--num-threads <n>]   [--keep-wakelock-while-upload]   [--offline]   [--api-key <key>]   [--current-org-id <org_id>]
+nc-data-daemon profile update --name <name>   [--storage-limit <bytes|unit>]   [--bandwidth-limit <bytes|unit>]   [--storage-path <path>]   [--num-threads <n>]   [--max_concurrent_uploads <n>]   [--keep-wakelock-while-upload]   [--offline]   [--api-key <key>]   [--current-org-id <org_id>]
 ```
 
 Example:
@@ -316,7 +361,7 @@ Resolve and print the effective configuration using:
 - any CLI values you pass to this command
 
 ```bash
-nc-data-daemon update   [--storage-limit <bytes|unit>]   [--bandwidth-limit <bytes|unit>]   [--storage-path <path>]   [--num-threads <n>]   [--keep-wakelock-while-upload]   [--offline]   [--api-key <key>]   [--current-org-id <org_id>]
+nc-data-daemon update   [--storage-limit <bytes|unit>]   [--bandwidth-limit <bytes|unit>]   [--storage-path <path>]   [--num-threads <n>]   [--max_concurrent_uploads <n>]   [--keep-wakelock-while-upload]   [--offline]   [--api-key <key>]   [--current-org-id <org_id>]
 ```
 
 ---
@@ -346,4 +391,36 @@ If it still fails, check your profiles:
 ```bash
 nc-data-daemon list-profiles
 nc-data-daemon profile show --name <name>
+```
+
+### Migration issues on startup
+
+If startup logs mention migration failures:
+
+1. Verify the daemon is using the DB you expect:
+
+```bash
+echo "$NEURACORE_DAEMON_DB_PATH"
+```
+
+2. Ensure the process has write permission to DB directory and recordings root.
+
+3. Start in foreground and read migration logs:
+
+```bash
+nc-data-daemon launch
+```
+
+4. If migration fails repeatedly, stop daemon and keep a backup copy of the DB before retrying.
+
+### Shutdown hangs or noisy `KeyboardInterrupt` traces
+
+Repeated `Ctrl+C` while shutdown is already in progress can interrupt cleanup.
+
+Recommended:
+- Press `Ctrl+C` once, then wait for shutdown to complete
+- For normal operation, use:
+
+```bash
+nc-data-daemon stop
 ```

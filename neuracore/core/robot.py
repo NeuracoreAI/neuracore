@@ -270,11 +270,9 @@ class Robot:
                     "robot_id": self.id,
                     "instance": self.instance,
                     "dataset_id": dataset_id,
-                    "upload_method": "data_daemon",
                 },
             )
             response.raise_for_status()
-            # Inform the state manager immediately to skip the round trip.
 
             recording_details = response.json()
             recording_id = recording_details["id"]

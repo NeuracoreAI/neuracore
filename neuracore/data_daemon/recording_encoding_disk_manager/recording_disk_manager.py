@@ -232,30 +232,6 @@ class RecordingDiskManager:
         Returns:
             None
         """
-        self.delete_trace(recording_id, trace_id, data_type)
-
-    def _on_delete_recording(self, recording_id: str) -> None:
-        """Handle DELETE_RECORDING(recording_id).
-
-        Args:
-            recording_id: Recording identifier.
-
-        Returns:
-            None
-        """
-        self.delete_recording(recording_id)
-
-    def delete_trace(self, recording_id: str, trace_id: str, data_type: str) -> None:
-        """Delete a trace and all its persisted files.
-
-        Args:
-            recording_id: Recording identifier.
-            trace_id: Trace identifier.
-            data_type: Data type of the trace.
-
-        Returns:
-            None
-        """
         if self._controller is None:
             raise RuntimeError("RecordingDiskManager not initialised correctly")
 
@@ -265,8 +241,8 @@ class RecordingDiskManager:
             data_type=parse_data_type(data_type),
         )
 
-    def delete_recording(self, recording_id: str) -> None:
-        """Delete a recording by deleting all known traces plus the recording directory.
+    def _on_delete_recording(self, recording_id: str) -> None:
+        """Handle DELETE_RECORDING(recording_id).
 
         Args:
             recording_id: Recording identifier.

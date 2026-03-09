@@ -279,6 +279,10 @@ def test_rdm_delete_trace_event_deletes_trace_dir(
         )
 
         assert _wait_for(lambda: not trace_dir.exists(), timeout=5.0) is True
+        data_type_dir = recordings_root / recording_id / "JOINT_POSITIONS"
+        recording_dir = recordings_root / recording_id
+        assert _wait_for(lambda: not data_type_dir.exists(), timeout=5.0) is True
+        assert _wait_for(lambda: not recording_dir.exists(), timeout=5.0) is True
     finally:
         emitter.remove_listener(Emitter.TRACE_WRITTEN, _on_trace_written)
 

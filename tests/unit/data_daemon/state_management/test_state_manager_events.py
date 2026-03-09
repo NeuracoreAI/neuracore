@@ -13,7 +13,9 @@ from neuracore.data_daemon.models import (
     ProgressReportStatus,
     TraceErrorCode,
     TraceRecord,
-    TraceStatus,
+    TraceRegistrationStatus,
+    TraceUploadStatus,
+    TraceWriteStatus,
 )
 from neuracore.data_daemon.state_management.state_manager import StateManager
 
@@ -23,14 +25,20 @@ class FakeStateStore:
         self.stopped: list[str] = []
         self.updated_bytes: list[tuple[str, int]] = []
         self.deleted: list[str] = []
-        self.errors: list[tuple[str, str, TraceErrorCode | None, TraceStatus]] = []
+        self.errors: list[tuple[str, str, TraceErrorCode | None]] = []
         self.ready_traces: list[TraceRecord] = []
         self.unreported_traces: list[TraceRecord] = []
         self._traces_by_id: dict[str, TraceRecord] = {}
         self._traces_by_recording: dict[str, list[TraceRecord]] = {}
+        self._recording_stopped: dict[str, bool] = {}
+        self._recording_progress_reported: dict[str, bool] = {}
+        self._expected_trace_count_reported: dict[str, bool] = {}
+        self._expected_trace_count: dict[str, int] = {}
+        self.uploaded_count_increments: list[str] = []
 
-    async def set_stopped_ats(self, recording_id: str) -> None:
+    async def set_stopped_at(self, recording_id: str) -> None:
         self.stopped.append(recording_id)
+        self._recording_stopped[recording_id] = True
         now = datetime.now(timezone.utc)
         traces = self._traces_by_recording.get(recording_id, [])
         updated = []
@@ -47,7 +55,7 @@ class FakeStateStore:
     async def find_traces_by_recording_id(self, recording_id: str) -> list[TraceRecord]:
         return list(self._traces_by_recording.get(recording_id, []))
 
-    def list_traces(self) -> list[TraceRecord]:
+    async def list_traces(self) -> list[TraceRecord]:
         return list(self._traces_by_id.values())
 
     async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
@@ -60,13 +68,120 @@ class FakeStateStore:
         return list(self.unreported_traces)
 
     async def mark_recording_reported(self, recording_id: str) -> None:
+        if hasattr(self, "_recording_reporting"):
+            self._recording_reporting.discard(recording_id)
+        self._recording_progress_reported[recording_id] = True
+        traces = self._traces_by_recording.get(recording_id, [])
+        updated = []
+        for trace in traces:
+            reported = replace(trace, progress_reported=ProgressReportStatus.REPORTED)
+            self._traces_by_id[reported.trace_id] = reported
+            updated.append(reported)
+        self._traces_by_recording[recording_id] = updated
+
+    async def recording_has_reported_progress(self, recording_id: str) -> bool:
+        return self._recording_progress_reported.get(recording_id, False)
+
+    async def mark_recording_reporting(self, recording_id: str) -> bool:
+        if not hasattr(self, "_recording_reporting"):
+            self._recording_reporting: set[str] = set()
+        if self._recording_progress_reported.get(recording_id, False):
+            return False
+        if recording_id in self._recording_reporting:
+            return False
+        self._recording_reporting.add(recording_id)
+        return True
+
+    async def mark_recording_pending(self, recording_id: str) -> None:
+        if hasattr(self, "_recording_reporting"):
+            self._recording_reporting.discard(recording_id)
+        self._recording_progress_reported[recording_id] = False
         return None
+
+    async def reset_reporting_recordings_to_pending(self) -> int:
+        if not hasattr(self, "_recording_reporting"):
+            return 0
+        count = len(self._recording_reporting)
+        self._recording_reporting.clear()
+        return count
+
+    async def delete_uploaded_traces_for_recording(self, recording_id: str) -> int:
+        traces = self._traces_by_recording.get(recording_id, [])
+        keep: list[TraceRecord] = []
+        deleted_count = 0
+        for trace in traces:
+            if trace.upload_status == TraceUploadStatus.UPLOADED:
+                self.deleted.append(trace.trace_id)
+                self._traces_by_id.pop(trace.trace_id, None)
+                deleted_count += 1
+                continue
+            keep.append(trace)
+        self._traces_by_recording[recording_id] = keep
+        return deleted_count
+
+    async def list_recording_ids_with_stopped_traces(self) -> list[str]:
+        return [
+            recording_id
+            for recording_id, traces in self._traces_by_recording.items()
+            if any(trace.stopped_at is not None for trace in traces)
+        ]
+
+    async def reconcile_recordings_from_traces(self) -> None:
+        return None
+
+    async def prune_old_empty_recordings(self, max_age_hours: int) -> int:
+        return 0
+
+    async def is_recording_stopped(self, recording_id: str) -> bool:
+        return self._recording_stopped.get(recording_id, False)
+
+    async def is_expected_trace_count_reported(self, recording_id: str) -> bool:
+        return self._expected_trace_count_reported.get(recording_id, False)
+
+    async def get_expected_trace_count(self, recording_id: str) -> int | None:
+        return self._expected_trace_count.get(recording_id)
+
+    async def set_expected_trace_count(
+        self, recording_id: str, expected_trace_count: int
+    ) -> None:
+        self._expected_trace_count[recording_id] = int(expected_trace_count)
+
+    async def count_traces_for_recording(self, recording_id: str) -> int:
+        traces = self._traces_by_recording.get(recording_id, [])
+        return sum(
+            1
+            for trace in traces
+            if trace.write_status == TraceWriteStatus.WRITTEN
+            and trace.total_bytes is not None
+            and trace.total_bytes > 0
+        )
+
+    async def get_progress_report_snapshot(
+        self, recording_id: str
+    ) -> tuple[float, float, dict[str, int], int] | None:
+        traces = self._traces_by_recording.get(recording_id, [])
+        eligible = [
+            trace
+            for trace in traces
+            if trace.data_type_name
+            and trace.total_bytes is not None
+            and trace.total_bytes > 0
+        ]
+        if not eligible:
+            return None
+        start_time = min(trace.created_at for trace in eligible).timestamp()
+        end_time = datetime.now(timezone.utc).timestamp()
+        trace_map = {
+            str(trace.trace_id): int(trace.total_bytes or 0) for trace in eligible
+        }
+        total_bytes = sum(trace_map.values())
+        return start_time, end_time, trace_map, total_bytes
 
     async def find_failed_traces(self) -> list[TraceRecord]:
         return [
             trace
             for trace in self._traces_by_id.values()
-            if trace.status == TraceStatus.FAILED
+            if trace.upload_status == TraceUploadStatus.FAILED
         ]
 
     async def reset_failed_trace_for_retry(self, trace_id: str) -> None:
@@ -76,7 +191,8 @@ class FakeStateStore:
         now = datetime.now(timezone.utc)
         updated = replace(
             trace,
-            status=TraceStatus.WRITTEN,
+            write_status=TraceWriteStatus.WRITTEN,
+            upload_status=TraceUploadStatus.PENDING,
             error_code=None,
             error_message=None,
             next_retry_at=None,
@@ -87,31 +203,16 @@ class FakeStateStore:
         self._traces_by_id[trace_id] = updated
         self._update_trace_in_recording(updated, updated.recording_id)
 
-    async def update_status(
-        self, trace_id: str, status: TraceStatus, *, error_message=None
-    ) -> bool:
-        trace = self._traces_by_id.get(trace_id)
-        if trace is None:
-            raise ValueError(f"Trace not found: {trace_id}")
-        if trace.status == status:
-            return False  # Already at target status
-        updated = replace(trace, status=status)
-        self._traces_by_id[trace_id] = updated
-        recording_id = trace.recording_id
-        traces = self._traces_by_recording.get(recording_id, [])
-        self._traces_by_recording[recording_id] = [
-            updated if t.trace_id == trace_id else t for t in traces
-        ]
-        return True
+    async def reset_retrying_to_written(self) -> int:
+        return 0
 
     async def record_error(
         self,
         trace_id: str,
         error_message: str,
         error_code: TraceErrorCode | None = None,
-        status: TraceStatus = TraceStatus.FAILED,
     ) -> None:
-        self.errors.append((trace_id, error_message, error_code, status))
+        self.errors.append((trace_id, error_message, error_code))
 
     async def delete_trace(self, trace_id: str) -> None:
         self.deleted.append(trace_id)
@@ -150,13 +251,13 @@ class FakeStateStore:
         existing = self._traces_by_id.get(trace_id)
         if existing:
             new_status = (
-                TraceStatus.WRITTEN
-                if existing.status == TraceStatus.PENDING_METADATA
-                else existing.status
+                TraceWriteStatus.WRITTEN
+                if existing.write_status == TraceWriteStatus.PENDING_METADATA
+                else existing.write_status
             )
             trace = replace(
                 existing,
-                status=new_status,
+                write_status=new_status,
                 data_type=data_type,
                 data_type_name=data_type_name,
                 dataset_id=dataset_id,
@@ -174,7 +275,9 @@ class FakeStateStore:
             trace = TraceRecord(
                 trace_id=trace_id,
                 recording_id=recording_id,
-                status=TraceStatus.INITIALIZING,
+                write_status=TraceWriteStatus.INITIALIZING,
+                registration_status=TraceRegistrationStatus.PENDING,
+                upload_status=TraceUploadStatus.PENDING,
                 data_type=data_type,
                 data_type_name=data_type_name,
                 dataset_id=dataset_id,
@@ -216,13 +319,13 @@ class FakeStateStore:
         existing = self._traces_by_id.get(trace_id)
         if existing:
             new_status = (
-                TraceStatus.WRITTEN
-                if existing.status == TraceStatus.INITIALIZING
-                else existing.status
+                TraceWriteStatus.WRITTEN
+                if existing.write_status == TraceWriteStatus.INITIALIZING
+                else existing.write_status
             )
             trace = replace(
                 existing,
-                status=new_status,
+                write_status=new_status,
                 bytes_written=bytes_written,
                 total_bytes=bytes_written,
                 last_updated=now,
@@ -231,7 +334,9 @@ class FakeStateStore:
             trace = TraceRecord(
                 trace_id=trace_id,
                 recording_id=recording_id,
-                status=TraceStatus.PENDING_METADATA,
+                write_status=TraceWriteStatus.PENDING_METADATA,
+                registration_status=TraceRegistrationStatus.PENDING,
+                upload_status=TraceUploadStatus.PENDING,
                 data_type=None,
                 data_type_name=None,
                 dataset_id=None,
@@ -256,6 +361,100 @@ class FakeStateStore:
         self._traces_by_id[trace_id] = trace
         self._update_trace_in_recording(trace, recording_id)
         return trace
+
+    async def claim_traces_for_registration(self, limit: int, max_wait_s: float):
+        return []
+
+    async def mark_traces_as_registering(self, trace_ids: list[str]) -> list[str]:
+        return list(trace_ids)
+
+    async def mark_traces_as_registered(self, trace_ids: list[str]) -> list[str]:
+        return list(trace_ids)
+
+    async def update_write_status(
+        self, trace_id: str, write_status: TraceWriteStatus
+    ) -> None:
+        trace = self._traces_by_id.get(trace_id)
+        if trace is None:
+            return
+        updated = replace(trace, write_status=write_status)
+        self._traces_by_id[trace_id] = updated
+        self._update_trace_in_recording(updated, updated.recording_id)
+
+    async def update_registration_status(
+        self, trace_id: str, registration_status: TraceRegistrationStatus
+    ) -> None:
+        trace = self._traces_by_id.get(trace_id)
+        if trace is None:
+            return
+        updated = replace(trace, registration_status=registration_status)
+        self._traces_by_id[trace_id] = updated
+        self._update_trace_in_recording(updated, updated.recording_id)
+
+    async def update_upload_status(
+        self, trace_id: str, upload_status: TraceUploadStatus
+    ) -> None:
+        trace = self._traces_by_id.get(trace_id)
+        if trace is None:
+            return
+        updated = replace(trace, upload_status=upload_status)
+        self._traces_by_id[trace_id] = updated
+        self._update_trace_in_recording(updated, updated.recording_id)
+
+    async def increment_uploaded_trace_count(self, recording_id: str) -> None:
+        self.uploaded_count_increments.append(recording_id)
+
+    async def delete_recording_and_traces_if_fully_uploaded(
+        self, recording_id: str
+    ) -> bool:
+        return False
+
+    async def mark_expected_trace_count_reported(self, recording_id: str) -> None:
+        self._expected_trace_count_reported[recording_id] = True
+
+    async def schedule_retry(
+        self,
+        trace_id: str,
+        *,
+        next_retry_at: datetime,
+        error_code: TraceErrorCode,
+        error_message: str,
+    ) -> int:
+        trace = self._traces_by_id.get(trace_id)
+        if trace is None:
+            return 0
+        updated = replace(
+            trace,
+            upload_status=TraceUploadStatus.RETRYING,
+            next_retry_at=next_retry_at,
+            num_upload_attempts=int(trace.num_upload_attempts) + 1,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        self._traces_by_id[trace_id] = updated
+        self._update_trace_in_recording(updated, updated.recording_id)
+        return 1
+
+    async def mark_retry_exhausted(
+        self,
+        trace_id: str,
+        *,
+        error_code: TraceErrorCode,
+        error_message: str,
+    ) -> int:
+        trace = self._traces_by_id.get(trace_id)
+        if trace is None:
+            return 0
+        updated = replace(
+            trace,
+            upload_status=TraceUploadStatus.FAILED,
+            error_code=error_code,
+            error_message=error_message,
+            num_upload_attempts=int(trace.num_upload_attempts) + 1,
+        )
+        self._traces_by_id[trace_id] = updated
+        self._update_trace_in_recording(updated, updated.recording_id)
+        return 1
 
 
 def _register_state_manager(manager: StateManager) -> None:
@@ -293,6 +492,13 @@ def _cleanup_state_manager(manager: StateManager) -> None:
 async def state_manager() -> tuple[StateManager, FakeStateStore]:
     store = FakeStateStore()
     manager = StateManager(store)
+
+    async def _fake_set_expected(recording_id: str, expected_trace_count: int) -> bool:
+        await store.set_expected_trace_count(recording_id, expected_trace_count)
+        await store.mark_expected_trace_count_reported(recording_id)
+        return True
+
+    setattr(manager, "_set_expected_trace_count", _fake_set_expected)
     _register_state_manager(manager)
     try:
         yield manager, store
@@ -304,7 +510,9 @@ def _make_trace(
     trace_id: str,
     recording_id: str,
     *,
-    status: TraceStatus = TraceStatus.INITIALIZING,
+    write_status: TraceWriteStatus = TraceWriteStatus.INITIALIZING,
+    registration_status: TraceRegistrationStatus = TraceRegistrationStatus.REGISTERED,
+    upload_status: TraceUploadStatus = TraceUploadStatus.PENDING,
     progress_reported: ProgressReportStatus = ProgressReportStatus.PENDING,
     bytes_written: int | None = 0,
     total_bytes: int | None = None,
@@ -316,7 +524,9 @@ def _make_trace(
 ) -> TraceRecord:
     return TraceRecord(
         trace_id=trace_id,
-        status=status,
+        write_status=write_status,
+        registration_status=registration_status,
+        upload_status=upload_status,
         recording_id=recording_id,
         data_type=DataType.CUSTOM_1D,
         data_type_name="custom",
@@ -364,6 +574,186 @@ async def test_stop_recording_emits_stop_all_and_sets_stopped(state_manager) -> 
 
 
 @pytest.mark.asyncio
+async def test_stop_recording_sets_expected_trace_count_once(state_manager) -> None:
+    manager, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    trace_a = _make_trace(
+        "trace-a",
+        "rec-exp",
+        created_at=created_at,
+        last_updated=created_at,
+    )
+    trace_b = _make_trace(
+        "trace-b",
+        "rec-exp",
+        created_at=created_at,
+        last_updated=created_at,
+    )
+    store._traces_by_id["trace-a"] = trace_a
+    store._traces_by_id["trace-b"] = trace_b
+    store._traces_by_recording["rec-exp"] = [trace_a, trace_b]
+    store._expected_trace_count["rec-exp"] = 2
+
+    posted: list[tuple[str, int]] = []
+
+    async def fake_set_expected(recording_id: str, expected_trace_count: int) -> None:
+        await store.set_expected_trace_count(recording_id, expected_trace_count)
+        await store.mark_expected_trace_count_reported(recording_id)
+        posted.append((recording_id, expected_trace_count))
+
+    manager._set_expected_trace_count = fake_set_expected  # type: ignore[method-assign]
+
+    get_emitter().emit(Emitter.STOP_RECORDING, "rec-exp")
+    await asyncio.sleep(0.2)
+
+    assert store._expected_trace_count["rec-exp"] == 2
+    assert posted == []
+
+    # A repeated stop should not schedule an expected-count post.
+    store._expected_trace_count_reported["rec-exp"] = True
+    get_emitter().emit(Emitter.STOP_RECORDING, "rec-exp")
+    await asyncio.sleep(0.2)
+
+    assert posted == []
+
+
+@pytest.mark.asyncio
+async def test_is_connected_backfills_expected_trace_count_for_stopped_recordings(
+    state_manager,
+) -> None:
+    manager, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    missing_a = replace(
+        _make_trace(
+            "trace-missing-a",
+            "rec-missing",
+            write_status=TraceWriteStatus.WRITTEN,
+            bytes_written=10,
+            total_bytes=10,
+            created_at=created_at,
+            last_updated=created_at,
+        ),
+        stopped_at=created_at,
+    )
+    missing_b = replace(
+        _make_trace(
+            "trace-missing-b",
+            "rec-missing",
+            write_status=TraceWriteStatus.WRITTEN,
+            bytes_written=10,
+            total_bytes=10,
+            created_at=created_at,
+            last_updated=created_at,
+        ),
+        stopped_at=created_at,
+    )
+    already_reported = replace(
+        _make_trace(
+            "trace-reported",
+            "rec-reported",
+            write_status=TraceWriteStatus.WRITTEN,
+            bytes_written=10,
+            total_bytes=10,
+            created_at=created_at,
+            last_updated=created_at,
+        ),
+        stopped_at=created_at,
+    )
+
+    store._traces_by_id[missing_a.trace_id] = missing_a
+    store._traces_by_id[missing_b.trace_id] = missing_b
+    store._traces_by_id[already_reported.trace_id] = already_reported
+    store._traces_by_recording["rec-missing"] = [missing_a, missing_b]
+    store._traces_by_recording["rec-reported"] = [already_reported]
+    store._expected_trace_count["rec-missing"] = 2
+    store._expected_trace_count_reported["rec-reported"] = True
+    store._expected_trace_count["rec-reported"] = 1
+
+    posted: list[tuple[str, int]] = []
+
+    async def fake_set_expected(recording_id: str, expected_trace_count: int) -> None:
+        await store.set_expected_trace_count(recording_id, expected_trace_count)
+        await store.mark_expected_trace_count_reported(recording_id)
+        posted.append((recording_id, expected_trace_count))
+
+    manager._set_expected_trace_count = fake_set_expected  # type: ignore[method-assign]
+
+    get_emitter().emit(Emitter.IS_CONNECTED, True)
+    await asyncio.sleep(0.2)
+
+    assert store._expected_trace_count["rec-missing"] == 2
+    assert store._expected_trace_count["rec-reported"] == 1
+    assert posted == [("rec-missing", 2)]
+
+
+@pytest.mark.asyncio
+async def test_stop_recording_does_not_post_expected_when_local_missing(
+    state_manager,
+) -> None:
+    manager, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    trace_a = _make_trace(
+        "trace-missing-local-a",
+        "rec-missing-local",
+        created_at=created_at,
+        last_updated=created_at,
+    )
+    store._traces_by_id[trace_a.trace_id] = trace_a
+    store._traces_by_recording["rec-missing-local"] = [trace_a]
+
+    posted: list[tuple[str, int]] = []
+
+    async def fake_set_expected(recording_id: str, expected_trace_count: int) -> None:
+        posted.append((recording_id, expected_trace_count))
+
+    manager._set_expected_trace_count = fake_set_expected  # type: ignore[method-assign]
+
+    get_emitter().emit(Emitter.STOP_RECORDING, "rec-missing-local")
+    await asyncio.sleep(0.2)
+
+    assert posted == []
+
+
+@pytest.mark.asyncio
+async def test_stop_recording_uses_existing_local_expected_trace_count(
+    state_manager,
+) -> None:
+    manager, store = state_manager
+    created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    trace_a = _make_trace(
+        "trace-local-a",
+        "rec-local",
+        created_at=created_at,
+        last_updated=created_at,
+    )
+    trace_b = _make_trace(
+        "trace-local-b",
+        "rec-local",
+        created_at=created_at,
+        last_updated=created_at,
+    )
+    store._traces_by_id[trace_a.trace_id] = trace_a
+    store._traces_by_id[trace_b.trace_id] = trace_b
+    store._traces_by_recording["rec-local"] = [trace_a, trace_b]
+    # Simulate local expected count already frozen previously.
+    store._expected_trace_count["rec-local"] = 7
+
+    posted: list[tuple[str, int]] = []
+
+    async def fake_set_expected(recording_id: str, expected_trace_count: int) -> None:
+        posted.append((recording_id, expected_trace_count))
+
+    manager._set_expected_trace_count = fake_set_expected  # type: ignore[method-assign]
+
+    get_emitter().emit(Emitter.STOP_RECORDING, "rec-local")
+    await asyncio.sleep(0.2)
+
+    assert store._expected_trace_count["rec-local"] == 7
+    assert posted == []
+
+
+@pytest.mark.asyncio
 async def test_start_trace_creates_trace(state_manager) -> None:
     """START_TRACE creates trace in INITIALIZING with metadata (waiting for bytes)."""
     _, store = state_manager
@@ -391,7 +781,7 @@ async def test_start_trace_creates_trace(state_manager) -> None:
     assert trace.data_type_name == "custom"
     assert trace.path == "/tmp/trace-1.bin"
     assert trace.total_bytes is None
-    assert trace.status == TraceStatus.INITIALIZING
+    assert trace.write_status == TraceWriteStatus.INITIALIZING
     assert trace.bytes_written is None  # Not complete yet
 
 
@@ -413,13 +803,14 @@ async def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
     trace = _make_trace(
         "trace-3",
         "rec-3",
-        status=TraceStatus.UPLOADED,
+        upload_status=TraceUploadStatus.UPLOADED,
         progress_reported=ProgressReportStatus.REPORTED,
         created_at=created_at,
         last_updated=created_at,
     )
     store._traces_by_id["trace-3"] = trace
     store._traces_by_recording["rec-3"] = [trace]
+    store._recording_progress_reported["rec-3"] = True
 
     def handler(recording_id: str, trace_id: str, data_type: DataType) -> None:
         received.append((recording_id, trace_id, data_type))
@@ -430,6 +821,7 @@ async def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
         await asyncio.sleep(0.2)
 
         assert store.deleted == ["trace-3"]
+        assert store.uploaded_count_increments == ["rec-3"]
         assert received == [("rec-3", "trace-3", DataType.CUSTOM_1D)]
     finally:
         get_emitter().remove_listener(Emitter.DELETE_TRACE, handler)
@@ -509,20 +901,14 @@ async def test_trace_written_emits_ready_for_upload_when_connected(
 
         get_emitter().emit(Emitter.IS_CONNECTED, True)
         await asyncio.sleep(0)
+        store._expected_trace_count_reported["rec-5"] = True
 
         # Second: TRACE_WRITTEN with bytes (completes the trace)
         get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-5", "rec-5", 64)
         await asyncio.sleep(0.2)
 
-        # Now READY_FOR_UPLOAD should be emitted
-        assert received == [(
-            "trace-5",
-            "rec-5",
-            "/tmp/trace-5.bin",
-            DataType.CUSTOM_1D,
-            "custom",
-            0,
-        )]
+        # Registration is now signaled; upload-ready happens after registration stage.
+        assert received == []
     finally:
         get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, handler)
 
@@ -573,6 +959,8 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
         )
         await asyncio.sleep(0.2)
 
+        store._expected_trace_count_reported["rec-1"] = True
+        store._expected_trace_count["rec-1"] = 2
         get_emitter().emit(Emitter.IS_CONNECTED, True)
         await asyncio.sleep(0)
 
@@ -589,17 +977,19 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
 
         # Still no progress report - trace-2 not complete
         assert len(progress_events) == 0
-        assert len(ready_events) == 1  # trace-1 ready for upload
+        assert len(ready_events) == 0
 
         # Complete second trace
         get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-2", "rec-1", 10)
         await asyncio.sleep(0.3)
 
         # Now progress report should be emitted
-        assert len(ready_events) == 2  # both traces ready
+        assert len(ready_events) == 0
         assert len(progress_events) == 1
-        start_time, end_time, traces = progress_events[0]
-        assert {trace.trace_id for trace in traces} == {"trace-1", "trace-2"}
+        recording_id, start_time, end_time, trace_map, total_bytes = progress_events[0]
+        assert recording_id == "rec-1"
+        assert set(trace_map.keys()) == {"trace-1", "trace-2"}
+        assert total_bytes == 20
         # Verify time bounds are reasonable (both created close to now)
         assert start_time <= end_time
     finally:
@@ -618,7 +1008,7 @@ async def test_trace_written_waits_for_all_traces_before_progress_report(
     trace_written = _make_trace(
         "trace-written",
         "rec-1",
-        status=TraceStatus.WRITTEN,
+        write_status=TraceWriteStatus.WRITTEN,
         bytes_written=8,
         total_bytes=8,
         created_at=created_at,
@@ -627,7 +1017,7 @@ async def test_trace_written_waits_for_all_traces_before_progress_report(
     trace_pending = _make_trace(
         "trace-pending",
         "rec-1",
-        status=TraceStatus.INITIALIZING,
+        write_status=TraceWriteStatus.INITIALIZING,
         bytes_written=None,
         total_bytes=8,
         created_at=created_at,
@@ -636,6 +1026,8 @@ async def test_trace_written_waits_for_all_traces_before_progress_report(
     store._traces_by_id["trace-written"] = trace_written
     store._traces_by_id["trace-pending"] = trace_pending
     store._traces_by_recording["rec-1"] = [trace_written, trace_pending]
+    store._expected_trace_count["rec-1"] = 2
+    store._expected_trace_count_reported["rec-1"] = True
 
     progress_events: list[tuple] = []
 
@@ -644,9 +1036,6 @@ async def test_trace_written_waits_for_all_traces_before_progress_report(
 
     get_emitter().on(Emitter.PROGRESS_REPORT, progress_handler)
     try:
-        get_emitter().emit(Emitter.IS_CONNECTED, True)
-        await asyncio.sleep(0.1)
-
         get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-written", "rec-1", 8)
         await asyncio.sleep(0.3)
 
@@ -664,7 +1053,7 @@ async def test_recording_completion_isolated_across_recordings(state_manager) ->
     trace_a = _make_trace(
         "trace-a",
         "rec-a",
-        status=TraceStatus.INITIALIZING,
+        write_status=TraceWriteStatus.INITIALIZING,
         bytes_written=None,
         created_at=created_at,
         last_updated=updated_at,
@@ -672,7 +1061,7 @@ async def test_recording_completion_isolated_across_recordings(state_manager) ->
     trace_b1 = _make_trace(
         "trace-b1",
         "rec-b",
-        status=TraceStatus.WRITTEN,
+        write_status=TraceWriteStatus.WRITTEN,
         bytes_written=10,
         total_bytes=10,
         created_at=created_at,
@@ -681,7 +1070,7 @@ async def test_recording_completion_isolated_across_recordings(state_manager) ->
     trace_b2 = _make_trace(
         "trace-b2",
         "rec-b",
-        status=TraceStatus.INITIALIZING,
+        write_status=TraceWriteStatus.INITIALIZING,
         bytes_written=None,
         total_bytes=10,
         created_at=created_at,
@@ -692,6 +1081,8 @@ async def test_recording_completion_isolated_across_recordings(state_manager) ->
     store._traces_by_id["trace-b2"] = trace_b2
     store._traces_by_recording["rec-a"] = [trace_a]
     store._traces_by_recording["rec-b"] = [trace_b1, trace_b2]
+    store._expected_trace_count_reported["rec-b"] = True
+    store._expected_trace_count["rec-b"] = 2
 
     progress_events: list[tuple] = []
 
@@ -711,8 +1102,9 @@ async def test_recording_completion_isolated_across_recordings(state_manager) ->
         await asyncio.sleep(0.3)
 
         assert len(progress_events) == 1
-        _, _, traces = progress_events[0]
-        assert {trace.recording_id for trace in traces} == {"rec-b"}
+        recording_id, _, _, trace_map, _ = progress_events[0]
+        assert recording_id == "rec-b"
+        assert set(trace_map.keys()) == {"trace-b1", "trace-b2"}
     finally:
         get_emitter().remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
 
@@ -726,7 +1118,7 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
     trace_a = _make_trace(
         "trace-a",
         "rec-a",
-        status=TraceStatus.INITIALIZING,
+        write_status=TraceWriteStatus.INITIALIZING,
         bytes_written=None,
         created_at=created_at,
         last_updated=updated_at,
@@ -734,7 +1126,7 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
     trace_b = _make_trace(
         "trace-b",
         "rec-b",
-        status=TraceStatus.INITIALIZING,
+        write_status=TraceWriteStatus.INITIALIZING,
         bytes_written=None,
         created_at=created_at,
         last_updated=updated_at,
@@ -743,6 +1135,7 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
     store._traces_by_id["trace-b"] = trace_b
     store._traces_by_recording["rec-a"] = [trace_a]
     store._traces_by_recording["rec-b"] = [trace_b]
+    store._expected_trace_count_reported["rec-b"] = True
 
     ready_events: list[tuple] = []
 
@@ -766,14 +1159,7 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
         get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-b", "rec-b", 10)
         await asyncio.sleep(0.3)
 
-        assert ready_events == [(
-            "trace-b",
-            "rec-b",
-            "/tmp/trace-b.bin",
-            DataType.CUSTOM_1D,
-            "custom",
-            0,
-        )]
+        assert ready_events == []
     finally:
         get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
 
@@ -792,7 +1178,7 @@ async def test_is_connected_emits_ready_for_due_retries_event_suite(
     due_trace = _make_trace(
         "trace-due",
         "rec-due",
-        status=TraceStatus.WRITTEN,
+        write_status=TraceWriteStatus.WRITTEN,
         bytes_written=10,
         total_bytes=10,
         bytes_uploaded=3,
@@ -841,7 +1227,7 @@ async def test_is_connected_emits_ready_even_when_next_retry_at_in_future_event_
     trace = _make_trace(
         "trace-not-due",
         "rec-not-due",
-        status=TraceStatus.WRITTEN,
+        write_status=TraceWriteStatus.WRITTEN,
         bytes_written=10,
         total_bytes=10,
         bytes_uploaded=1,

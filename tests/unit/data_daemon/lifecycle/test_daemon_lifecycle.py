@@ -23,10 +23,14 @@ from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
 )
 from neuracore.data_daemon.models import (
     DataType,
+    ProgressReportStatus,
     TraceErrorCode,
     TraceRecord,
-    TraceStatus,
+    TraceRegistrationStatus,
+    TraceUploadStatus,
+    TraceWriteStatus,
 )
+from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
 
 
 class _InMemoryStore:
@@ -41,20 +45,21 @@ class _InMemoryStore:
         trace_id: str,
         error_message: str,
         error_code: TraceErrorCode | None = None,
-        status: TraceStatus = TraceStatus.FAILED,
     ) -> None:
         self._traces[trace_id] = replace(
             self._traces[trace_id],
-            status=status,
+            upload_status=TraceUploadStatus.FAILED,
             error_message=error_message,
             error_code=error_code,
             last_updated=datetime.now(),
         )
 
-    async def update_status(self, trace_id: str, status: TraceStatus) -> None:
+    async def update_upload_status(
+        self, trace_id: str, upload_status: TraceUploadStatus
+    ) -> None:
         self._traces[trace_id] = replace(
             self._traces[trace_id],
-            status=status,
+            upload_status=upload_status,
             last_updated=datetime.now(),
         )
 
@@ -103,7 +108,9 @@ def test_startup_reconciles_missing_and_orphaned_traces(tmp_path: Path) -> None:
     now = datetime.now()
     trace = TraceRecord(
         trace_id="trace-missing",
-        status=TraceStatus.INITIALIZING,
+        write_status=TraceWriteStatus.INITIALIZING,
+        registration_status=TraceRegistrationStatus.PENDING,
+        upload_status=TraceUploadStatus.PENDING,
         recording_id="rec-1",
         data_type=DataType.CUSTOM_1D,
         data_type_name="custom",
@@ -116,7 +123,7 @@ def test_startup_reconciles_missing_and_orphaned_traces(tmp_path: Path) -> None:
         bytes_written=0,
         total_bytes=None,
         bytes_uploaded=0,
-        progress_reported=0,
+        progress_reported=ProgressReportStatus.PENDING,
         expected_trace_count_reported=0,
         error_code=None,
         error_message=None,
@@ -146,9 +153,101 @@ def test_startup_reconciles_missing_and_orphaned_traces(tmp_path: Path) -> None:
     )
     updated = asyncio.run(store.get_trace("trace-missing"))
     assert updated is not None
-    assert updated.status == TraceStatus.FAILED
+    assert updated.upload_status == TraceUploadStatus.FAILED
     assert updated.error_code == TraceErrorCode.WRITE_FAILED
     assert not orphan_dir.exists()
+
+
+def test_startup_initializes_store_before_reconcile(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-state.db"
+    recordings_root = tmp_path / "recordings"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE traces (
+                trace_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                recording_id TEXT NOT NULL,
+                data_type TEXT,
+                data_type_name TEXT,
+                dataset_id TEXT,
+                dataset_name TEXT,
+                robot_name TEXT,
+                robot_id TEXT,
+                robot_instance INTEGER,
+                path TEXT,
+                bytes_written INTEGER,
+                total_bytes INTEGER,
+                bytes_uploaded INTEGER DEFAULT 0,
+                progress_reported TEXT NOT NULL DEFAULT 'pending',
+                expected_trace_count_reported INTEGER NOT NULL DEFAULT 0,
+                error_code TEXT,
+                error_message TEXT,
+                stopped_at DATETIME,
+                num_upload_attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at DATETIME,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO traces (
+                trace_id,
+                status,
+                recording_id,
+                data_type,
+                data_type_name,
+                path,
+                bytes_written,
+                total_bytes,
+                progress_reported,
+                expected_trace_count_reported
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "trace-legacy",
+                "written",
+                "rec-legacy",
+                "CUSTOM_1D",
+                "custom",
+                "/tmp/trace-legacy.bin",
+                10,
+                10,
+                "pending",
+                0,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    store = SqliteStateStore(db_path)
+    asyncio.run(
+        startup(
+            pid_path=tmp_path / "daemon.pid",
+            socket_paths=(),
+            db_path=db_path,
+            recordings_root=recordings_root,
+            store=store,
+            recover_sqlite=True,
+            manage_pid=False,
+        )
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(traces)").fetchall()
+        }
+        assert "write_status" in columns
+        assert "registration_status" in columns
+        assert "upload_status" in columns
+    finally:
+        conn.close()
+    asyncio.run(store.close())
 
 
 def test_reconcile_pauses_uploading_traces(tmp_path: Path) -> None:
@@ -160,7 +259,9 @@ def test_reconcile_pauses_uploading_traces(tmp_path: Path) -> None:
     now = datetime.now()
     trace = TraceRecord(
         trace_id="trace-upload",
-        status=TraceStatus.UPLOADING,
+        write_status=TraceWriteStatus.WRITTEN,
+        registration_status=TraceRegistrationStatus.REGISTERED,
+        upload_status=TraceUploadStatus.UPLOADING,
         recording_id="rec-2",
         data_type=DataType.CUSTOM_1D,
         data_type_name="custom",
@@ -173,7 +274,7 @@ def test_reconcile_pauses_uploading_traces(tmp_path: Path) -> None:
         bytes_written=10,
         total_bytes=10,
         bytes_uploaded=0,
-        progress_reported=0,
+        progress_reported=ProgressReportStatus.PENDING,
         expected_trace_count_reported=0,
         error_code=None,
         error_message=None,
@@ -189,7 +290,7 @@ def test_reconcile_pauses_uploading_traces(tmp_path: Path) -> None:
 
     updated = asyncio.run(store.get_trace("trace-upload"))
     assert updated is not None
-    assert updated.status == TraceStatus.PAUSED
+    assert updated.upload_status == TraceUploadStatus.PAUSED
 
 
 def test_reconcile_marks_empty_trace_dir_as_incomplete(tmp_path: Path) -> None:
@@ -201,7 +302,9 @@ def test_reconcile_marks_empty_trace_dir_as_incomplete(tmp_path: Path) -> None:
     now = datetime.now()
     trace = TraceRecord(
         trace_id="trace-empty",
-        status=TraceStatus.WRITTEN,
+        write_status=TraceWriteStatus.WRITTEN,
+        registration_status=TraceRegistrationStatus.REGISTERED,
+        upload_status=TraceUploadStatus.PENDING,
         recording_id="rec-3",
         data_type=DataType.CUSTOM_1D,
         data_type_name="custom",
@@ -214,7 +317,7 @@ def test_reconcile_marks_empty_trace_dir_as_incomplete(tmp_path: Path) -> None:
         bytes_written=10,
         total_bytes=10,
         bytes_uploaded=0,
-        progress_reported=0,
+        progress_reported=ProgressReportStatus.PENDING,
         expected_trace_count_reported=0,
         error_code=None,
         error_message=None,
@@ -230,7 +333,7 @@ def test_reconcile_marks_empty_trace_dir_as_incomplete(tmp_path: Path) -> None:
 
     updated = asyncio.run(store.get_trace("trace-empty"))
     assert updated is not None
-    assert updated.status == TraceStatus.FAILED
+    assert updated.upload_status == TraceUploadStatus.FAILED
     assert updated.error_code == TraceErrorCode.WRITE_FAILED
 
 

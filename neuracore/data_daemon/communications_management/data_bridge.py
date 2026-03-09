@@ -172,6 +172,7 @@ class Daemon:
         self.channels: dict[str, ChannelState] = {}
         self._closed_producers: set[str] = set()
         self._recording_traces: dict[str, set[str]] = {}
+        self._recording_unique_traces: dict[str, set[str]] = {}
         self._trace_recordings: dict[str, str] = {}
         self._trace_metadata: dict[str, dict[str, str | int | None]] = {}
         self._closed_recordings: set[str] = set()
@@ -475,8 +476,14 @@ class Daemon:
                 recording_id,
             )
             self._recording_traces.get(existing, set()).discard(trace_id)
+            old_unique_traces = self._recording_unique_traces.get(existing)
+            if old_unique_traces is not None:
+                old_unique_traces.discard(trace_id)
+                if not old_unique_traces:
+                    self._recording_unique_traces.pop(existing, None)
         self._trace_recordings[trace_id] = recording_id
         self._recording_traces.setdefault(recording_id, set()).add(trace_id)
+        self._recording_unique_traces.setdefault(recording_id, set()).add(trace_id)
 
     def _register_trace_metadata(
         self, trace_id: str, metadata: dict[str, str | int | None]
@@ -810,8 +817,17 @@ class Daemon:
 
         # Only stop recording (signal flush RDM) when all traces have been processed
         for recording_id in to_close:
+            expected_trace_count = len(
+                self._recording_unique_traces.get(recording_id, set())
+            )
+            self._emitter.emit(
+                Emitter.SET_EXPECTED_TRACE_COUNT,
+                recording_id,
+                expected_trace_count,
+            )
             self._closing_recordings.pop(recording_id, None)
             self._closed_recordings.add(recording_id)
+            self._recording_unique_traces.pop(recording_id, None)
             self._emitter.emit(Emitter.STOP_RECORDING, recording_id)
 
     def _has_reached_sequence_cutoffs(
