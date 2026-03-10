@@ -123,7 +123,7 @@ class ResumableFileUploader:
                 timeout=timeout,
             ) as response:
                 if response.status == 401 and attempt == 0:
-                    logger.debug("Access token expired, refreshing token")
+                    logger.info("Access token expired, refreshing token")
                     await loop.run_in_executor(None, auth.login)
                     headers = await loop.run_in_executor(None, auth.get_headers)
                     continue
@@ -177,7 +177,7 @@ class ResumableFileUploader:
                     f"{checksum_error}"
                 )
                 return (False, self._bytes_uploaded, checksum_error)
-            logger.debug(
+            logger.info(
                 f"Upload complete for {self._recording_id} at {self._filepath}: "
                 f"{self._total_bytes} bytes"
             )
@@ -326,12 +326,12 @@ class ResumableFileUploader:
                             return (False, "Finalization incomplete", None)
                         return (True, None, None)
                     if status_code == self.SESSION_EXPIRED_CODE:
-                        logger.debug("Upload session expired, obtaining new session")
+                        logger.info("Upload session expired, obtaining new session")
                         self._session_uri = await self._get_upload_session_uri()
                         continue
                     if status_code == 403:
                         if await self._is_signed_url_expired(response):
-                            logger.debug("Signed URL expired, re-acquiring session URL")
+                            logger.info("Signed URL expired, re-acquiring session URL")
                             self._session_uri = await self._get_upload_session_uri()
                             continue
                         return (False, "Permission denied (403)", None)
@@ -446,7 +446,7 @@ class ResumableFileUploader:
             return (True, None)
 
         if server_bytes != self._bytes_uploaded:
-            logger.debug(
+            logger.info(
                 "Adjusting resume offset from %s to %s based on server status",
                 self._bytes_uploaded,
                 server_bytes,

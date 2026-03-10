@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 import pytest_asyncio
-from neuracore_types import DataType, RecordingDataTraceStatus
+from neuracore_types import DataType
 
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
@@ -65,20 +65,14 @@ def single_file(tmp_path: Path) -> Path:
 @pytest.fixture
 def mock_auth():
     """Mock get_auth() for all tests."""
-    with (
-        patch(
-            "neuracore.data_daemon.upload_management.upload_manager.get_auth"
-        ) as mock_get_auth,
-        patch(
-            "neuracore.data_daemon.upload_management.upload_manager.get_current_org",
-            return_value="test-org",
-        ),
-    ):
+    with patch(
+        "neuracore.data_daemon.upload_management.trace_manager.get_auth"
+    ) as mock_get_auth:
         auth_instance = MagicMock()
-        auth_instance.get_headers = MagicMock(
+        auth_instance.get_org_id = AsyncMock(return_value="test-org")
+        auth_instance.get_headers = AsyncMock(
             return_value={"Authorization": "Bearer test-token"}
         )
-        auth_instance.login = MagicMock()
         mock_get_auth.return_value = auth_instance
         yield mock_get_auth
 
@@ -91,140 +85,11 @@ async def client_session():
     await session.close()
 
 
-def _attach_legacy_upload_manager_compat(manager: UploadManager) -> None:
-    async def _register_data_trace(
-        recording_id: str,
-        trace_id: str,
-        data_type: DataType,
-        data_type_name: str,
-    ) -> str | None:
-        return trace_id
-
-    async def _update_data_trace(
-        recording_id: str,
-        trace_id: str,
-        status: RecordingDataTraceStatus | None = None,
-        *,
-        uploaded_bytes: int | None = None,
-        total_bytes: int | None = None,
-    ) -> bool:
-        updates: dict[str, object] = {}
-        if status is not None:
-            updates["status"] = status
-        if uploaded_bytes is not None:
-            updates["uploaded_bytes"] = uploaded_bytes
-        if total_bytes is not None:
-            updates["total_bytes"] = total_bytes
-        return await manager._update_backend_trace_record(
-            recording_id, trace_id, updates
-        )
-
-    manager._register_data_trace = _register_data_trace  # type: ignore[attr-defined]
-    manager._update_data_trace = _update_data_trace  # type: ignore[attr-defined]
-    manager._external_trace_ids: dict[str, str] = {}  # type: ignore[attr-defined]
-
-    original_upload_single_trace = manager._upload_single_trace
-
-    async def _compat_upload_single_trace(
-        trace_dir_path: str,
-        trace_id: str,
-        data_type: DataType,
-        data_type_name: str,
-        recording_id: str,
-        bytes_uploaded: int,
-    ) -> bool:
-        external_trace_id = await manager._register_data_trace(
-            recording_id, trace_id, data_type, data_type_name
-        )  # type: ignore[attr-defined]
-        if not external_trace_id:
-            manager._emit_upload_failure(
-                trace_id=trace_id,
-                bytes_uploaded=bytes_uploaded,
-                error_message="Failed to register data trace",
-                error_code=TraceErrorCode.NETWORK_ERROR,
-            )
-            return False
-        getattr(manager, "_external_trace_ids")[trace_id] = external_trace_id
-        try:
-            return await original_upload_single_trace(
-                trace_dir_path,
-                trace_id,
-                data_type,
-                data_type_name,
-                recording_id,
-                bytes_uploaded,
-            )
-        finally:
-            getattr(manager, "_external_trace_ids").pop(trace_id, None)
-
-    async def _compat_mark_started(
-        recording_id: str,
-        trace_id: str,
-        *,
-        uploaded_bytes: int,
-        total_bytes: int,
-    ) -> bool:
-        backend_trace_id = manager._external_trace_ids.get(
-            trace_id, trace_id
-        )  # type: ignore[attr-defined]
-        return await manager._update_data_trace(  # type: ignore[attr-defined]
-            recording_id,
-            backend_trace_id,
-            RecordingDataTraceStatus.UPLOAD_STARTED,
-            uploaded_bytes=uploaded_bytes,
-            total_bytes=total_bytes,
-        )
-
-    async def _compat_mark_complete(
-        recording_id: str,
-        trace_id: str,
-        *,
-        uploaded_bytes: int,
-        total_bytes: int,
-    ) -> bool:
-        backend_trace_id = manager._external_trace_ids.get(
-            trace_id, trace_id
-        )  # type: ignore[attr-defined]
-        return await manager._update_data_trace(  # type: ignore[attr-defined]
-            recording_id,
-            backend_trace_id,
-            RecordingDataTraceStatus.UPLOAD_COMPLETE,
-            uploaded_bytes=uploaded_bytes,
-            total_bytes=total_bytes,
-        )
-
-    async def _compat_progress(
-        recording_id: str,
-        trace_id: str,
-        *,
-        uploaded_bytes: int,
-    ) -> bool:
-        backend_trace_id = manager._external_trace_ids.get(
-            trace_id, trace_id
-        )  # type: ignore[attr-defined]
-        return await manager._update_data_trace(  # type: ignore[attr-defined]
-            recording_id,
-            backend_trace_id,
-            uploaded_bytes=uploaded_bytes,
-        )
-
-    setattr(manager, "_upload_single_trace", _compat_upload_single_trace)
-    manager._mark_backend_trace_status_as_upload_started = (
-        _compat_mark_started
-    )  # type: ignore[method-assign]
-    manager._mark_backend_trace_status_as_upload_complete = (
-        _compat_mark_complete
-    )  # type: ignore[method-assign]
-    setattr(manager, "_update_backend_trace_progress", _compat_progress)
-
-
 @pytest_asyncio.fixture
 async def upload_manager(client_session: aiohttp.ClientSession, mock_auth):
     """Create and cleanup UploadManager instance."""
     config = DaemonConfig(num_threads=2)
     manager = UploadManager(config=config, client_session=client_session)
-    _attach_legacy_upload_manager_compat(manager)
-
     yield manager
     await manager.shutdown(wait=False)
 
@@ -1702,7 +1567,6 @@ class TestBandwidthThrottling:
         bandwidth_limit = 2 * 1024 * 1024  # 2MB/s
         config = DaemonConfig(num_threads=2, bandwidth_limit=bandwidth_limit)
         manager = UploadManager(config=config, client_session=client_session)
-        _attach_legacy_upload_manager_compat(manager)
 
         uploader_kwargs: list[dict] = []
         upload_done = asyncio.Event()
@@ -1774,7 +1638,6 @@ class TestBandwidthThrottling:
 
         config = DaemonConfig(num_threads=2, bandwidth_limit=None)
         manager = UploadManager(config=config, client_session=client_session)
-        _attach_legacy_upload_manager_compat(manager)
 
         uploader_kwargs: list[dict] = []
         upload_done = asyncio.Event()
@@ -1896,7 +1759,6 @@ class TestBandwidthThrottling:
             ):
                 config = DaemonConfig(num_threads=2, bandwidth_limit=bandwidth_limit)
                 manager = UploadManager(config=config, client_session=client_session)
-                _attach_legacy_upload_manager_compat(manager)
 
                 rfu_auth = MagicMock()
                 rfu_auth.get_headers.return_value = {"Authorization": "Bearer test"}

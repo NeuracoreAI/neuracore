@@ -51,7 +51,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_description=None,
         )
 
     def test_init(self, synced_recording: SynchronizedRecording, dataset_mock):
@@ -61,14 +61,14 @@ class TestSynchronizedRecording:
         assert synced_recording.frequency == 30
         assert synced_recording.robot_id == "robot1"
         assert synced_recording.instance == 1
-        assert synced_recording.robot_data_spec is None
+        assert synced_recording.cross_embodiment_description is None
         assert synced_recording._iter_idx == 0
 
     def test_init_with_data_types(self, dataset_mock, mock_data_requests):
         """Test initialization with specific data types."""
         from neuracore_types import DataType
 
-        robot_data_spec = {
+        cross_embodiment_description = {
             "robot1": {
                 DataType.RGB_IMAGES: [],
                 DataType.DEPTH_IMAGES: [],
@@ -81,10 +81,10 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=robot_data_spec,
+            cross_embodiment_description=cross_embodiment_description,
         )
 
-        assert synced.robot_data_spec == robot_data_spec
+        assert synced.cross_embodiment_description == cross_embodiment_description
 
     def test_get_synced_data(
         self, synced_recording: SynchronizedRecording, synced_data
@@ -176,7 +176,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_description=None,
         )
 
         frames = synced[0:5:2]
@@ -253,7 +253,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_description=None,
         )
 
         sync_point = cast(SynchronizedPoint, synced[0])
@@ -273,7 +273,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_description=None,
             prefetch_videos=True,
         )
 
@@ -290,7 +290,7 @@ class TestSynchronizedRecording:
                 robot_id="robot1",
                 instance=1,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_description=None,
                 prefetch_videos=True,
             )
 
@@ -307,45 +307,6 @@ class TestSynchronizedRecording:
             cam_data = cast(CameraData, cam_data)
             assert cam_data.frame is not None
             assert isinstance(cam_data.frame, Image.Image)
-
-    def test_rgb_to_depth_storage_called_when_retrieving_frame(
-        self,
-        dataset_mock,
-        mock_login,
-        mock_data_requests,
-        mock_wget_download,
-        tmp_path,
-    ):
-        """Test that rgb_to_depth_storage is called when retrieving a frame
-        with depth images."""
-        rgb_cache = dataset_mock.cache_dir / "rec1" / DataType.RGB_IMAGES.value / "cam1"
-        depth_cache = (
-            dataset_mock.cache_dir / "rec1" / DataType.DEPTH_IMAGES.value / "cam2"
-        )
-        rgb_cache.mkdir(parents=True, exist_ok=True)
-        depth_cache.mkdir(parents=True, exist_ok=True)
-        fake_image = Image.fromarray(np.ones((224, 224, 3), dtype=np.uint8) * 128)
-        fake_image.save(rgb_cache / "0.png")
-        fake_image.save(depth_cache / "0.png")
-
-        synced = SynchronizedRecording(
-            dataset=dataset_mock,
-            recording_id="rec1",
-            recording_name="recording1",
-            robot_id="robot1",
-            instance=1,
-            frequency=30,
-            robot_data_spec=None,
-        )
-
-        with patch(
-            "neuracore.core.data.synced_recording.rgb_to_depth_storage"
-        ) as mock_rgb_to_depth_storage:
-            mock_rgb_to_depth_storage.return_value = np.zeros(
-                (224, 224), dtype=np.uint8
-            )
-            _ = synced[0]
-            mock_rgb_to_depth_storage.assert_called()
 
     def test_camera_data_copy_independence(
         self, synced_recording: SynchronizedRecording, mock_wget_download
@@ -389,7 +350,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_description=None,
         )
 
         synced_60 = SynchronizedRecording(
@@ -399,7 +360,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=60,
-            robot_data_spec=None,
+            cross_embodiment_description=None,
         )
 
         # Trigger cache creation

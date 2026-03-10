@@ -13,6 +13,7 @@ Constants:
 
 import asyncio
 import fractions
+import math
 import time
 from dataclasses import dataclass, field
 from uuid import uuid4
@@ -23,7 +24,6 @@ from aiortc import MediaStreamTrack
 from neuracore_types import CameraData
 
 from neuracore.core.streaming.p2p.provider.json_source import JSONSource
-from neuracore.core.utils.depth_utils import MAX_DEPTH, depth_to_rgb_visualization
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 
 from ..enabled_manager import EnabledManager
@@ -131,29 +131,43 @@ class DepthVideoSource(VideoSource):
     """A specialized video source for streaming depth video data.
 
     This class extends VideoSource to handle depth data by automatically
-    normalizing depth values to the max depth value extracted from the first frame
-    and converting them to RGB images for streaming.
+    normalizing depth values to the 0-1 range and converting them to RGB
+    grayscale images for streaming.
 
     Attributes:
-        _depth_max: The maximum depth value extracted from the first frame.
+        _maximum_depth: Maximum depth value seen so far.
+        _minimum_depth: Minimum depth value seen so far.
     """
 
-    _depth_max: float | None = field(default=None, init=False)
+    _maximum_depth: float = field(default=-math.inf, init=False)
+    _minimum_depth: float = field(default=math.inf, init=False)
 
     def get_last_frame(self) -> av.VideoFrame:
-        """Get the most recent depth frame as RGB.
+        """Get the most recent depth frame normalized to RGB format.
 
-        On the first frame, the maximum depth value is saved and used to
-        normalize all frames before converting to RGB.
+        The depth data is normalized using the running min/max values and
+        converted to a 3-channel RGB image where all channels contain the
+        same grayscale depth representation.
+
+        Returns:
+            av.VideoFrame: Normalized depth frame as RGB24 format where each
+                channel contains the same grayscale depth visualization.
         """
-        depth = np.asarray(self._last_frame, dtype=np.float64)
-        depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
-        depth = np.clip(depth, 0, MAX_DEPTH)
+        # Ensure _last_frame is in [0, 1] range
+        self._maximum_depth = max(self._maximum_depth, self._last_frame.max())
+        self._minimum_depth = min(self._minimum_depth, self._last_frame.min())
 
-        if self._depth_max is None:
-            self._depth_max = float(np.max(depth))
+        normalized_frame = np.clip(
+            (self._last_frame - self._minimum_depth)
+            / (self._maximum_depth - self._minimum_depth),
+            0,
+            1,
+        )
 
-        rgb_frame = depth_to_rgb_visualization(depth, max_depth=self._depth_max)
+        # Convert to uint8 safely
+        uint8_frame = (normalized_frame * 255).astype(np.uint8)
+        # Stack three identical grayscale frames into an RGB image
+        rgb_frame = np.stack([uint8_frame] * 3, axis=-1)
         return av.VideoFrame.from_ndarray(rgb_frame, format="rgb24")
 
 

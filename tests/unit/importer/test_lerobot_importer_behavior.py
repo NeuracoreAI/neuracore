@@ -103,8 +103,6 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
     importer._worker_id = 2
     importer.num_episodes = 1
     importer.skip_on_error = "step"
-    importer.robot_name = "test_robot"
-    importer.dry_run = False
     importer.logger = MagicMock()
     importer._error_queue = MagicMock()
     importer._log_worker_error = MagicMock()
@@ -133,9 +131,7 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
         call(0, step=0, total_steps=2, episode_label="123"),
         call(0, step=2, total_steps=2, episode_label="123"),
     ])
-    stop_recording.assert_called_once_with(
-        robot_name="test_robot", instance=2, wait=True
-    )
+    stop_recording.assert_called_once_with(wait=True)
 
 
 def test_lerobot_import_item_non_step_mode_re_raises():
@@ -148,8 +144,6 @@ def test_lerobot_import_item_non_step_mode_re_raises():
     importer._worker_id = 1
     importer.num_episodes = 1
     importer.skip_on_error = "episode"
-    importer.robot_name = "test_robot"
-    importer.dry_run = False
     importer.logger = MagicMock()
     importer._error_queue = MagicMock()
     importer._log_worker_error = MagicMock()

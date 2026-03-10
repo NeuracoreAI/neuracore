@@ -25,7 +25,7 @@ def sample_training_jobs_response():
                 "frequency": 10,
                 "max_delay_s": 0.5,
                 "allow_duplicates": True,
-                "robot_data_spec": {},
+                "cross_embodiment_description": {},
             },
         },
         {
@@ -39,7 +39,7 @@ def sample_training_jobs_response():
                 "frequency": 20,
                 "max_delay_s": 1.0,
                 "allow_duplicates": False,
-                "robot_data_spec": {},
+                "cross_embodiment_description": {},
             },
         },
     ]
@@ -151,8 +151,9 @@ def test_training_local_inspect(tmp_path):
     "max_delay_s": null,
     "allow_duplicates": null
   },
-  "input_robot_data_spec": {"robot_1": {"RGB_IMAGES": ["cam1"]}},
-  "output_robot_data_spec": {"robot_1": {"JOINT_TARGET_POSITIONS": ["joint1"]}},
+  "input_cross_embodiment_description": {"robot_1": {"RGB_IMAGES": ["cam1"]}},
+  "output_cross_embodiment_description":
+    {"robot_1": {"JOINT_TARGET_POSITIONS": ["joint1"]}},
   "frequency": 10,
   "output_prediction_horizon": 5
 }

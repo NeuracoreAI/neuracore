@@ -8,10 +8,9 @@ from typing import Optional, Union
 
 import requests
 from neuracore_types import Dataset as DatasetModel
-from neuracore_types import DatasetUpdateRequest, DataSpec, DataType
+from neuracore_types import DatasetUpdateRequest, DataType, EmbodimentDescription
 from neuracore_types import Recording as RecordingModel
 from neuracore_types import (
-    RobotDataSpec,
     SynchronizationDetails,
     SynchronizationProgress,
     SynchronizeDatasetRequest,
@@ -22,7 +21,6 @@ from tqdm import tqdm
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
-from neuracore.core.utils.robot_data_spec_utils import is_robot_id
 
 from ..auth import Auth, get_auth
 from ..const import API_URL, DEFAULT_RECORDING_CACHE_DIR
@@ -30,7 +28,6 @@ from ..exceptions import AuthenticationError, DatasetError
 from ..utils.http_errors import extract_error_detail
 
 PAGE_SIZE = 30
-SYNC_PROGRESS_POLL_INTERVAL_S = 5.0
 
 logger = logging.getLogger(__name__)
 
@@ -390,32 +387,19 @@ class Dataset:
         )
         response.raise_for_status()
 
-    @staticmethod
-    def _format_failure_summary(failed_recording_ids: list[str]) -> str:
-        summary = ", ".join(failed_recording_ids[:3])
-        if len(failed_recording_ids) > 3:
-            summary += ", ..."
-        return summary
-
     def _synchronize(
         self,
         frequency: int = 0,
-        robot_data_spec: RobotDataSpec | None = None,
-        max_delay_s: float = sys.float_info.max,
-        allow_duplicates: bool = True,
-        trim_start_end: bool = True,
+        cross_embodiment_union: dict[str, dict[DataType, list[str]]] | None = None,
     ) -> SynchronizedDatasetModel:
         """Synchronize the dataset with specified frequency and data types.
 
         Args:
             frequency: Frequency at which to synchronize the dataset.
                 If 0, uses the default frequency.
-            robot_data_spec: Dict specifying robot name to
+            cross_embodiment_union: Dict specifying robot name to
                 data types and their names to include in synchronization.
                 If None, will use all available data types from the dataset.
-            max_delay_s: Maximum allowed delay for synchronization.
-            allow_duplicates: Whether duplicate points are allowed when syncing.
-            trim_start_end: Whether to trim start/end during synchronization.
 
         Returns:
             SynchronizedDataset instance containing synchronized data.
@@ -431,10 +415,10 @@ class Dataset:
                 dataset_id=self.id,
                 synchronization_details=SynchronizationDetails(
                     frequency=frequency,
-                    robot_data_spec=robot_data_spec,
-                    max_delay_s=max_delay_s,
-                    allow_duplicates=allow_duplicates,
-                    trim_start_end=trim_start_end,
+                    cross_embodiment_union=cross_embodiment_union,
+                    max_delay_s=sys.float_info.max,
+                    allow_duplicates=True,
+                    trim_start_end=True,
                 ),
             ).model_dump(mode="json"),
         )
@@ -453,35 +437,25 @@ class Dataset:
             f"{API_URL}/org/{self.org_id}/synchronize/synchronization-progress/{synchronized_dataset_id}",
             headers=get_auth().get_headers(),
         )
-        if response.status_code == 409:
-            detail = extract_error_detail(response)
-            raise DatasetError(detail or "Synchronization failed.")
         response.raise_for_status()
         return SynchronizationProgress.model_validate(response.json())
 
     def synchronize(
         self,
+        cross_embodiment_union: dict[str, dict[DataType, list[str]]] | None = None,
         frequency: int = 0,
-        robot_data_spec: RobotDataSpec | None = None,
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 4,
-        max_delay_s: float = sys.float_info.max,
-        allow_duplicates: bool = True,
-        trim_start_end: bool = True,
     ) -> SynchronizedDataset:
         """Synchronize the dataset with specified frequency and data types.
 
         Args:
             frequency: Frequency at which to synchronize the dataset.
                 If 0, uses the default frequency.
-            robot_data_spec: Dict specifying robot name to
-                data types and their names to include in synchronization.
-                If None, will use all available data types from the dataset.
+            cross_embodiment_description: Dict specifying robot IDs to data types and
+                their names to include in synchronization.
             prefetch_videos: Whether to prefetch video data for the synchronized data.
             max_prefetch_workers: Number of threads to use for prefetching videos.
-            max_delay_s: Maximum allowed delay for synchronization.
-            allow_duplicates: Whether duplicate points are allowed when syncing.
-            trim_start_end: Whether to trim start/end during synchronization.
 
         Returns:
             SynchronizedDataset instance containing synchronized data.
@@ -490,55 +464,23 @@ class Dataset:
             requests.HTTPError: If the API request fails.
             DatasetError: If frequency is not greater than 0.
         """
-        if robot_data_spec is None:
-            robot_data_spec = {
-                robot_id: {data_type: [] for data_type in self.data_types}
-                for robot_id in self.robot_ids
-            }
-
-        # Validate robot_data_spec only has robot_ids
-        for robot_id in robot_data_spec.keys():
-            assert is_robot_id(robot_id), f"Expected robot_id format for {robot_id}"
-
         synced_dataset = self._synchronize(
             frequency=frequency,
-            robot_data_spec=robot_data_spec,
-            max_delay_s=max_delay_s,
-            allow_duplicates=allow_duplicates,
-            trim_start_end=trim_start_end,
+            cross_embodiment_union=cross_embodiment_union,
         )
 
         synchronization_progress = self._get_synchronization_progress(synced_dataset.id)
         total = synced_dataset.num_demonstrations
         processed = synchronization_progress.num_synchronized_demonstrations
-        if synchronization_progress.has_failures:
-            failure_summary = self._format_failure_summary(
-                synchronization_progress.failed_recording_ids
-            )
-            raise DatasetError(
-                "Synchronization failed for recording(s): "
-                f"{failure_summary} ({processed}/{total} recordings synchronized)."
-            )
         if total != processed:
             pbar = tqdm(total=total, desc="Synchronizing dataset", unit="recording")
             pbar.n = processed
             pbar.refresh()
             while processed < total:
-                time.sleep(SYNC_PROGRESS_POLL_INTERVAL_S)
+                time.sleep(5.0)
                 synchronization_progress = self._get_synchronization_progress(
                     synced_dataset.id
                 )
-                if synchronization_progress.has_failures:
-                    pbar.close()
-                    failure_summary = self._format_failure_summary(
-                        synchronization_progress.failed_recording_ids
-                    )
-                    raise DatasetError(
-                        "Synchronization failed for recording(s): "
-                        f"{failure_summary} "
-                        f"({processed}/{total} recordings synchronized)."
-                    )
-
                 new_processed = synchronization_progress.num_synchronized_demonstrations
                 if new_processed > processed:
                     pbar.update(new_processed - processed)
@@ -546,16 +488,17 @@ class Dataset:
             pbar.close()
         else:
             logger.info("Dataset is already synchronized.")
+
         return SynchronizedDataset(
             id=synced_dataset.id,
             dataset=self,
             frequency=frequency,
-            robot_data_spec=robot_data_spec,
+            cross_embodiment_union=cross_embodiment_union,
             prefetch_videos=prefetch_videos,
             max_prefetch_workers=max_prefetch_workers,
         )
 
-    def get_full_data_spec(self, robot_id: str) -> DataSpec:
+    def get_full_data_spec(self, robot_id: str) -> EmbodimentDescription:
         """Get full data spec for a given robot ID in the dataset.
 
         Args:

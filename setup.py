@@ -93,9 +93,9 @@ setup(
         "import": [
             "lerobot==0.3.3",
             "huggingface-hub>0.34.0,<0.36.0",
-            "tensorflow-datasets>=4.9.9",
-            "tensorflow>=2.20.0",
-            "pin-pink>=4",
+            "tensorflow-datasets",
+            "tensorflow",
+            "pin-pink",
         ],
     },
     entry_points={

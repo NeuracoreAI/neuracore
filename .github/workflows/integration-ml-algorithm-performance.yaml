@@ -1,4 +1,4 @@
-name: Integration ML Algorithm Performance - Start Training
+name: Integration ML Algorithm Performance
 
 on:
   schedule:
@@ -6,38 +6,39 @@ on:
   workflow_dispatch:
 
 jobs:
-  discover-algorithms:
+  pre-commit:
     runs-on: ubuntu-latest
-    outputs:
-      algorithms: ${{ steps.list.outputs.algorithms }}
     steps:
     - uses: actions/checkout@v4
-    - name: List algorithm names
-      id: list
-      run: |
-        pip install pyyaml -q
-        python3 << 'EOF' >> $GITHUB_OUTPUT
-        import yaml, json
-        with open('tests/integration/ml/algorithm_configs.yaml') as f:
-            c = yaml.safe_load(f)
-        print('algorithms=' + json.dumps([a['name'] for a in c['algorithms']]))
-        EOF
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    - uses: pre-commit/action@v3.0.1
 
-  start-training:
-    needs: [discover-algorithms]
+  test:
+    needs: pre-commit
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
         python-version: ['3.11']
-        algorithm: ${{ fromJson(needs.discover-algorithms.outputs.algorithms) }}
         environment: [staging, production]
 
     steps:
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        swap-storage: true
+
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        ref: main
+        ref: ${{ matrix.environment == 'staging' && 'develop' || github.ref }}
     - name: Pull LFS objects
       run: git lfs pull
 
@@ -56,20 +57,15 @@ jobs:
           pip install --no-cache-dir ".[dev,ml,examples]"
         fi
 
-    - name: Start training job
-      id: start-training
+    - name: Run Integration Test
       env:
         NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
         NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
-        ALGORITHM_NAME: ${{ matrix.algorithm }}
-      run: pytest -o log_cli=true --log-cli-level=INFO -v -k test_start_training tests/integration/ml/test_algorithm_performance.py
-
-    - name: Write job ID to file
-      run: echo "${{ steps.start-training.outputs.training_job_id }}" > training_job_id.txt
-
-    - name: Cache training job ID
-      uses: actions/cache/save@v4
-      with:
-        path: training_job_id.txt
-        key: training-job-${{ matrix.algorithm }}-${{ matrix.environment }}-${{ github.run_number }}
+        NEURACORE_ENDPOINT_TIMEOUT: 30
+        DISPLAY: :0
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1-mesa-glx libosmesa6-dev
+        Xvfb $DISPLAY -screen 0 1280x1024x24 &
+        pytest -o log_cli=true --log-cli-level=INFO -v -n 8 tests/integration/ml/test_algorithm_performance.py

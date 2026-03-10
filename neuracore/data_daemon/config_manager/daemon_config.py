@@ -9,7 +9,6 @@ class DaemonConfig(BaseModel):
     Attributes:
         storage_limit: maximum storage the daemon may use locally, in bytes.
         bandwidth_limit: maximum upload bandwidth, in bytes per second.
-        max_concurrent_uploads: max number of traces uploaded concurrently.
         path_to_store_record: directory where the daemon writes recording files.
         num_threads: number of worker threads used by the daemon.
         keep_wakelock_while_upload: whether to keep a wakelock while uploading data.
@@ -20,7 +19,6 @@ class DaemonConfig(BaseModel):
 
     storage_limit: int | None = None
     bandwidth_limit: int | None = None
-    max_concurrent_uploads: int | None = None
     path_to_store_record: str | None = None
     num_threads: int | None = None
     keep_wakelock_while_upload: bool | None = None

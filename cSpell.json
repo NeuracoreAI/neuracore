@@ -5,8 +5,7 @@
         "*.Dockerfile",
         "docker-compose.yml",
         "requirements*.txt",
-        "*.sh",
-        "changelogs/"
+        "*.sh"
     ],
     "dictionaryDefinitions": [
         {

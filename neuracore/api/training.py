@@ -10,16 +10,16 @@ from typing import Any, cast
 
 import requests
 from neuracore_types import (
+    CrossEmbodimentDescription,
     GPUType,
-    RobotDataSpec,
     SynchronizationDetails,
     TrainingJobRequest,
 )
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.utils.robot_data_spec_utils import (
-    convert_robot_data_spec_names_to_ids,
-    merge_robot_data_spec,
+    convert_cross_embodiment_description_names_to_ids,
+    merge_cross_embodiment_description,
 )
 from neuracore.core.utils.training_input_args_validation import (
     get_algorithm_id,
@@ -29,34 +29,6 @@ from neuracore.core.utils.training_input_args_validation import (
 from ..core.auth import get_auth
 from ..core.const import API_URL
 from ..core.data.dataset import Dataset
-
-
-def _resolve_next_name(base_name: str, existing_names: set[str]) -> str:
-    """Return the next available name, optionally with _1, _2, ... suffix.
-
-    If base_name is not in use, return it. Otherwise return base_name_N
-    for the smallest N >= 1 such that base_name_N is not in existing_names.
-    "In use" means exact match or names of the form base_name_<integer>.
-
-    Args:
-        base_name: Desired base name.
-        existing_names: Set of names already in use.
-
-    Returns:
-        base_name or base_name_N for the next free N.
-    """
-    taken = {
-        name
-        for name in existing_names
-        if name == base_name
-        or (name.startswith(base_name + "_") and name[len(base_name) + 1 :].isdigit())
-    }
-    if base_name not in taken:
-        return base_name
-    suffix = 1
-    while f"{base_name}_{suffix}" in taken:
-        suffix += 1
-    return f"{base_name}_{suffix}"
 
 
 def _get_algorithms() -> list[dict]:
@@ -101,11 +73,10 @@ def start_training_run(
     gpu_type: str,
     num_gpus: int,
     frequency: int,
-    input_robot_data_spec: RobotDataSpec,
-    output_robot_data_spec: RobotDataSpec,
+    input_cross_embodiment_description: CrossEmbodimentDescription,
+    output_cross_embodiment_description: CrossEmbodimentDescription,
     max_delay_s: float = sys.float_info.max,
     allow_duplicates: bool = True,
-    name_auto_increment: bool = False,
 ) -> dict:
     """Start a new training run.
 
@@ -117,12 +88,11 @@ def start_training_run(
         gpu_type: Type of GPU to use for training (e.g., "A100", "V100")
         num_gpus: Number of GPUs to use for training
         frequency: Frequency to sync training data to (in Hz)
-        input_robot_data_spec: Input robot data specification.
-        output_robot_data_spec: Output robot data specification.
+        input_cross_embodiment_description: Input robot data specification.
+        output_cross_embodiment_description: Output robot data specification.
         max_delay_s: Maximum allowable delay for data synchronization (in seconds)
         allow_duplicates: Whether to allow duplicate data during synchronization
-        name_auto_increment: If True and a job with this name already exists, use
-            name_1, name_2, ... instead of failing or duplicating the name.
+
 
     Returns:
         dict: Training job data including job ID and status
@@ -133,18 +103,13 @@ def start_training_run(
         requests.exceptions.RequestException: If there is a network problem
                 ConfigError: If there is an error trying to get the current org
     """
-    if name_auto_increment:
-        jobs = get_training_jobs()
-        existing_names = {j["name"] for j in jobs if isinstance(j.get("name"), str)}
-        name = _resolve_next_name(name, existing_names)
-
     dataset = cast(Dataset, Dataset.get_by_name(dataset_name))
     dataset_id = dataset.id
-    input_robot_data_spec_with_ids = convert_robot_data_spec_names_to_ids(
-        input_robot_data_spec,
+    input_robot_data_spec_with_ids = convert_cross_embodiment_description_names_to_ids(
+        input_cross_embodiment_description,
     )
-    output_robot_data_spec_with_ids = convert_robot_data_spec_names_to_ids(
-        output_robot_data_spec,
+    output_robot_data_spec_with_ids = convert_cross_embodiment_description_names_to_ids(
+        output_cross_embodiment_description,
     )
 
     # Get algorithm id
@@ -171,12 +136,12 @@ def start_training_run(
             frequency=frequency,
             max_delay_s=max_delay_s,
             allow_duplicates=allow_duplicates,
-            robot_data_spec=merge_robot_data_spec(
+            cross_embodiment_description=merge_cross_embodiment_description(
                 input_robot_data_spec_with_ids, output_robot_data_spec_with_ids
             ),
         ),
-        input_robot_data_spec=input_robot_data_spec_with_ids,
-        output_robot_data_spec=output_robot_data_spec_with_ids,
+        input_cross_embodiment_description=input_robot_data_spec_with_ids,
+        output_cross_embodiment_description=output_robot_data_spec_with_ids,
     )
 
     auth = get_auth()
@@ -191,26 +156,6 @@ def start_training_run(
 
     job_data = response.json()
     return job_data
-
-
-def get_training_jobs() -> list[dict]:
-    """List all training jobs for the current organization.
-
-    Returns:
-        List of training job dicts (id, name, status, etc.).
-
-    Raises:
-        requests.exceptions.HTTPError: If the API request fails.
-        ConfigError: If there is an error trying to get the current org.
-    """
-    auth = get_auth()
-    org_id = get_current_org()
-    response = requests.get(
-        f"{API_URL}/org/{org_id}/training/jobs",
-        headers=auth.get_headers(),
-    )
-    response.raise_for_status()
-    return response.json()
 
 
 def get_training_job_data(job_id: str) -> dict:
@@ -228,14 +173,23 @@ def get_training_job_data(job_id: str) -> dict:
         requests.exceptions.RequestException: If there is a problem with the request
         ConfigError: If there is an error trying to get the current org
     """
+    auth = get_auth()
+    org_id = get_current_org()
     try:
-        jobs = get_training_jobs()
-        for job_data in jobs:
-            if job_data.get("id") == job_id:
-                return job_data
-        raise ValueError("Job not found")
-    except ValueError:
-        raise
+        response = requests.get(
+            f"{API_URL}/org/{org_id}/training/jobs", headers=auth.get_headers()
+        )
+        response.raise_for_status()
+
+        job = response.json()
+        my_job = None
+        for job_data in job:
+            if job_data["id"] == job_id:
+                my_job = job_data
+                break
+        if my_job is None:
+            raise ValueError("Job not found")
+        return my_job
     except Exception as e:
         raise ValueError(f"Error accessing job: {e}")
 

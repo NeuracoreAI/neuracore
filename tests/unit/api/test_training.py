@@ -3,31 +3,9 @@ import requests
 from neuracore_types import Dataset, DataType, GPUType
 
 import neuracore as nc
-from neuracore.api.training import _resolve_next_name
 from neuracore.core.const import API_URL
 
 TEST_ROBOT_ID = "20a621b7-2f9b-4699-a08e-7d080488a5a3"
-
-
-def test_resolve_next_name_uses_base_name_when_available():
-    """When base name is not taken, return it as-is."""
-    assert _resolve_next_name("my_run", set()) == "my_run"
-    assert _resolve_next_name("my_run", {"other_run"}) == "my_run"
-
-
-def test_resolve_next_name_increments_when_base_name_taken():
-    """When base name is taken, return base_1, base_2, etc."""
-    assert _resolve_next_name("my_run", {"my_run"}) == "my_run_1"
-    assert _resolve_next_name("my_run", {"my_run", "my_run_1"}) == "my_run_2"
-    assert (
-        _resolve_next_name("my_run", {"my_run", "my_run_1", "my_run_2"}) == "my_run_3"
-    )
-
-
-def test_resolve_next_name_ignores_unrelated_names():
-    """Only exact base_name and base_name_N are considered taken."""
-    assert _resolve_next_name("foo", {"foo_abc", "foo_12"}) == "foo"
-    assert _resolve_next_name("foo", {"foo", "foo_1"}) == "foo_2"
 
 
 @pytest.fixture
@@ -176,13 +154,13 @@ def test_start_training_run(
         "num_layers": 3,
         "cnn_output_dim": 64,
     }
-    input_robot_data_spec = {
+    input_cross_embodiment_description = {
         robot_name: {
             DataType.RGB_IMAGES: ["angle"],
         }
     }
 
-    output_robot_data_spec = {
+    output_cross_embodiment_description = {
         robot_name: {
             DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
         }
@@ -196,8 +174,8 @@ def test_start_training_run(
         gpu_type=GPUType.NVIDIA_TESLA_T4,
         num_gpus=1,
         frequency=10,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
     )
 
     # Verify job was created with expected values
@@ -324,8 +302,8 @@ def test_start_training_run_raises_on_duplicate_name(
         status_code=200,
     )
 
-    input_robot_data_spec = {robot_name: {DataType.RGB_IMAGES: ["angle"]}}
-    output_robot_data_spec = {
+    input_cross_embodiment_description = {robot_name: {DataType.RGB_IMAGES: ["angle"]}}
+    output_cross_embodiment_description = {
         robot_name: {DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"]}
     }
 
@@ -338,136 +316,9 @@ def test_start_training_run_raises_on_duplicate_name(
             gpu_type=GPUType.NVIDIA_TESLA_T4,
             num_gpus=1,
             frequency=10,
-            input_robot_data_spec=input_robot_data_spec,
-            output_robot_data_spec=output_robot_data_spec,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
         )
-
-
-def test_start_training_run_name_auto_increment(
-    temp_config_dir,
-    mock_auth_requests,
-    reset_neuracore,
-    training_job_response,
-    algorithm_list_response,
-    mocked_org_id,
-):
-    """With name_auto_increment=True, an existing name is resolved to name_1."""
-    nc.login("test_api_key")
-    dataset_id = "dataset123"
-    dataset_response = Dataset(
-        id=dataset_id,
-        name="test_dataset",
-        created_at=0.0,
-        modified_at=0.0,
-        description="A test dataset",
-        size_bytes=2048,
-        tags=["test"],
-        is_shared=False,
-        num_demonstrations=20,
-        all_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
-        common_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
-    )
-
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=[dataset_response.model_dump(mode="json")],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
-        json=dataset_response.model_dump(mode="json"),
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
-        json={"recordings": []},
-        status_code=200,
-    )
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/dataset123",
-        json={"data": [], "total": 10, "limit": 1, "start_after": None},
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/shared",
-        json=[],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms",
-        json=algorithm_list_response,
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms?shared=true",
-        json=[],
-        status_code=200,
-    )
-    # Existing job with the same name so that name_auto_increment resolves to name_1
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        json=[{"id": "existing_123", "name": "test_training_run"}],
-        status_code=200,
-    )
-
-    response_with_incremented_name = {
-        **training_job_response,
-        "name": "test_training_run_1",
-        "id": "train_job_456",
-    }
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        json=response_with_incremented_name,
-        status_code=200,
-    )
-
-    robot_id = TEST_ROBOT_ID
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/robot_ids",
-        json=[robot_id],
-        status_code=200,
-    )
-    robot_name = "fake_robot_name"
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json=[{"id": robot_id, "name": robot_name}],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-data-spec/{robot_id}",
-        json={
-            DataType.RGB_IMAGES: ["angle"],
-            DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
-        },
-        status_code=200,
-    )
-
-    input_robot_data_spec = {robot_name: {DataType.RGB_IMAGES: ["angle"]}}
-    output_robot_data_spec = {
-        robot_name: {DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"]}
-    }
-
-    job = nc.start_training_run(
-        name="test_training_run",
-        dataset_name="test_dataset",
-        algorithm_name="cnnmlp",
-        algorithm_config={"hidden_dim": 512},
-        gpu_type=GPUType.NVIDIA_TESLA_T4,
-        num_gpus=1,
-        frequency=10,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
-        name_auto_increment=True,
-    )
-
-    assert job["name"] == "test_training_run_1"
-    post_requests = [
-        r
-        for r in mock_auth_requests.request_history
-        if r.method == "POST" and "/training/jobs" in r.url
-    ]
-    assert len(post_requests) == 1
-    assert post_requests[0].json()["name"] == "test_training_run_1"
 
 
 def test_get_training_job_status(

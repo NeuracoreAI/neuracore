@@ -11,11 +11,6 @@ from typing import Any
 
 import numpy as np
 
-from neuracore.core.utils.depth_utils import (
-    MAX_DEPTH,
-    depth_to_rgb_storage,
-    depth_to_rgb_visualization,
-)
 from neuracore.data_daemon.recording_encoding_disk_manager.encoding.disk_video_encoder import (  # noqa: E501
     DiskVideoEncoder,
 )
@@ -76,7 +71,6 @@ class VideoTrace:
         self._non_monotonic_timestamp_count = 0
         self._first_frame_timestamp: float | None = None
         self._last_frame_timestamp: float | None = None
-        self._depth_max: float | None = None
 
     def add_payload(self, payload: bytes) -> None:
         """Consume a payload that is either JSON metadata or raw RGB frame bytes.
@@ -258,11 +252,9 @@ class VideoTrace:
         depth_f32_size = pixels * 4
 
         if len(frame_bytes) == rgb_size:
-            np_frame_lossless = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
+            np_frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
                 (self.height, self.width, 3)
             )
-            # For RGB, use the same frame for lossless and lossy encoding
-            np_frame_lossy = np_frame_lossless
         elif len(frame_bytes) in (depth_f16_size, depth_f32_size):
             depth_dtype = (
                 np.float16 if len(frame_bytes) == depth_f16_size else np.float32
@@ -270,18 +262,16 @@ class VideoTrace:
             depth_frame = np.frombuffer(frame_bytes, dtype=depth_dtype).reshape(
                 (self.height, self.width)
             )
+            # Depth streams are single-channel float images. Convert to an RGB8
+            # grayscale frame so they can pass through the same MP4 encoder path.
             depth_frame = np.nan_to_num(depth_frame, nan=0.0, posinf=0.0, neginf=0.0)
-            depth_frame = np.clip(depth_frame, 0, MAX_DEPTH)
-
-            # On first depth frame, save max depth for this recording
-            if self._depth_max is None:
-                self._depth_max = float(np.max(depth_frame))
-
-            # For depth, ensure maximum precision for lossless storage
-            np_frame_lossless = depth_to_rgb_storage(depth_frame)
-            np_frame_lossy = depth_to_rgb_visualization(
-                depth_frame, max_depth=self._depth_max
-            )
+            depth_max = float(np.max(depth_frame))
+            if depth_max > 0.0:
+                normalized = np.clip(depth_frame / depth_max, 0.0, 1.0)
+            else:
+                normalized = np.zeros_like(depth_frame, dtype=np.float32)
+            depth_u8 = (normalized * 255.0).astype(np.uint8)
+            np_frame = np.stack((depth_u8, depth_u8, depth_u8), axis=-1)
         else:
             raise ValueError(
                 "Unexpected frame size: "
@@ -292,12 +282,8 @@ class VideoTrace:
         self._expected_raw_frame_bytes_total += len(frame_bytes)
 
         timestamp_value = self._get_frame_timestamp()
-        self._lossless_encoder.add_frame(
-            timestamp=timestamp_value, np_frame=np_frame_lossless
-        )
-        self._lossy_encoder.add_frame(
-            timestamp=timestamp_value, np_frame=np_frame_lossy
-        )
+        self._lossless_encoder.add_frame(timestamp=timestamp_value, np_frame=np_frame)
+        self._lossy_encoder.add_frame(timestamp=timestamp_value, np_frame=np_frame)
 
         self._frame_index += 1
 
@@ -371,7 +357,7 @@ class VideoTrace:
             metadata_timestamp_span_s = max(metadata_timestamps) - min(
                 metadata_timestamps
             )
-        logger.debug(
+        logger.info(
             "VideoTrace finished: dir=%s frames=%d metadata_entries=%d dims=%sx%s "
             "expected_raw_rgb_bytes=%d fallback_timestamps=%d "
             "non_monotonic_timestamps=%d metadata_timestamp_count=%d "

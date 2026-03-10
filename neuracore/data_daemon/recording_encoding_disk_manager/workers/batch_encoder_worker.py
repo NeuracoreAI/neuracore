@@ -30,13 +30,6 @@ from ..lifecycle.encoder_manager import _EncoderManager
 logger = logging.getLogger(__name__)
 
 
-def _is_executor_shutdown_runtime_error(exc: BaseException) -> bool:
-    """Return True when RuntimeError comes from a shutting down executor."""
-    return isinstance(exc, RuntimeError) and (
-        "cannot schedule new futures after shutdown" in str(exc).lower()
-    )
-
-
 class _BatchEncoderWorker:
     """Encode-stage worker that processes raw batch jobs and finalises trace outputs.
 
@@ -230,7 +223,7 @@ class _BatchEncoderWorker:
             self._finalise_trace_encoder(key, enc)
 
         if key.data_type.value == "RGB_IMAGES":
-            logger.debug(
+            logger.info(
                 "RGB batch ordering summary trace=%s out_of_order_arrivals=%d "
                 "max_buffered_batches=%d",
                 key,
@@ -252,13 +245,6 @@ class _BatchEncoderWorker:
             await aiofiles.os.remove(path)
         except FileNotFoundError:
             pass
-        except RuntimeError as exc:
-            if _is_executor_shutdown_runtime_error(exc):
-                logger.debug(
-                    "Skipping batch file cleanup during executor shutdown: %s", path
-                )
-                return
-            logger.warning("Failed to remove batch file: %s", path, exc_info=True)
         except OSError:
             logger.warning("Failed to remove batch file: %s", path, exc_info=True)
 
@@ -350,15 +336,7 @@ class _BatchEncoderWorker:
 
             return True
 
-        except Exception as exc:
-            if _is_executor_shutdown_runtime_error(exc):
-                logger.debug(
-                    "Batch processing interrupted by executor shutdown for trace %s",
-                    batch_job.trace_key,
-                )
-                self._encoder_manager.pop_encoder(batch_job.trace_key)
-                self._abort_trace(batch_job.trace_key)
-                return False
+        except Exception:
             logger.exception(
                 "Failed to process batch for trace %s", batch_job.trace_key
             )

@@ -30,7 +30,7 @@ from neuracore.core.streaming.p2p.provider.json_source import JSONSource
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
 
 from .global_live_data_enabled import get_provide_live_data_enabled_manager
-from .provider_connection import PeerToPeerProviderConnection
+from .provider_connection import PierToPierProviderConnection
 from .video_source import DepthVideoSource, VideoSource
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
             EnabledManager.DISABLED, self._on_close
         )
         self.streaming.add_listener(EnabledManager.DISABLED, self._on_close)
-        self.connections: dict[str, PeerToPeerProviderConnection] = {}
+        self.connections: dict[str, PierToPierProviderConnection] = {}
 
         self.video_tracks_cache: dict[str, VideoSource] = {}
         self.event_source_cache: dict[str, JSONSource] = {}
@@ -221,7 +221,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
             connection_id: Unique identifier for this connection
             connection_details: The describes the type of connection to establish.
         """
-        connection = PeerToPeerProviderConnection(
+        connection = PierToPierProviderConnection(
             connection_id=connection_id,
             local_stream_id=self.local_stream_id,
             remote_stream_id=remote_stream_id,
@@ -238,14 +238,14 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
 
         for video_track in self.tracks:
             if connection_details.video_format == VideoFormat.WEB_RTC_NEGOTIATED:
-                connection.add_video_source(video_track)
+                await connection._add_video_source_impl(video_track)
             else:
-                connection.add_event_source(
+                await connection._add_event_source_impl(
                     video_track.get_neuracore_custom_track(loop=self.loop)
                 )
 
         for data_channel in self.event_source_cache.values():
-            connection.add_event_source(data_channel)
+            await connection._add_event_source_impl(data_channel)
 
         self.connections[connection_id] = connection
         self.background_tracker.submit_background_coroutine(connection.send_offer())

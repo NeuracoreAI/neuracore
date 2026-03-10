@@ -12,7 +12,6 @@ from neuracore.data_daemon.config_manager.profiles import ProfileManager
 _ENV_MAP: dict[str, str] = {
     "storage_limit": "NCD_STORAGE_LIMIT",
     "bandwidth_limit": "NCD_BANDWIDTH_LIMIT",
-    "max_concurrent_uploads": "NCD_MAX_CONCURRENT_UPLOADS",
     "path_to_store_record": "NCD_PATH_TO_STORE_RECORD",
     "num_threads": "NCD_NUM_THREADS",
     "keep_wakelock_while_upload": "NCD_KEEP_WAKELOCK_WHILE_UPLOAD",
@@ -57,7 +56,7 @@ class ConfigManager:
                     overrides[field_name] = parse_bytes(env_value)
                 except ValueError:
                     continue
-            elif field_name in {"num_threads", "max_concurrent_uploads"}:
+            elif field_name == "num_threads":
                 try:
                     overrides[field_name] = int(env_value)
                 except ValueError:

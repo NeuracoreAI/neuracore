@@ -119,7 +119,6 @@ class _TraceController:
             reclaimed_bytes = 0
 
         shutil.rmtree(trace_dir_path, ignore_errors=True)
-        self._remove_empty_trace_parents(trace_key)
         self._storage_budget.release(reclaimed_bytes)
 
     def delete_recording(self, recording_id: str) -> None:
@@ -140,24 +139,3 @@ class _TraceController:
         path = self._filesystem.recordings_root / recording_id_value
         shutil.rmtree(path, ignore_errors=True)
         self._storage_budget.refresh_if_stale()
-
-    def _remove_empty_trace_parents(self, trace_key: _TraceKey) -> None:
-        """Remove empty data_type and recording directories for a trace.
-
-        Removes only if directories are empty; leaves them in place otherwise.
-        """
-        data_type_dir = (
-            self._filesystem.recordings_root
-            / trace_key.recording_id
-            / trace_key.data_type.value
-        )
-        recording_dir = self._filesystem.recordings_root / trace_key.recording_id
-
-        for path in (data_type_dir, recording_dir):
-            try:
-                path.rmdir()
-            except FileNotFoundError:
-                continue
-            except OSError:
-                # Directory exists but is not empty or otherwise cannot be removed.
-                continue

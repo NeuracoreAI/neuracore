@@ -25,9 +25,6 @@ from neuracore.data_daemon.progress_reporter import ProgressReporter
 from neuracore.data_daemon.recording_encoding_disk_manager import (
     recording_disk_manager as rdm,
 )
-from neuracore.data_daemon.registration_management.registration_manager import (
-    RegistrationManager,
-)
 from neuracore.data_daemon.state_management.state_manager import StateManager
 from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
 from neuracore.data_daemon.upload_management.upload_manager import UploadManager
@@ -50,7 +47,6 @@ class AsyncServices:
     client_session: aiohttp.ClientSession
     state_store: SqliteStateStore
     state_manager: StateManager
-    registration_manager: RegistrationManager
     upload_manager: UploadManager
     connection_manager: ConnectionManager
     progress_reporter: ProgressReporter
@@ -87,44 +83,35 @@ async def bootstrap_async_services(
     Returns:
         AsyncServices with all initialized services.
     """
-    logger.debug("Bootstrapping async services on General Loop...")
+    logger.info("Bootstrapping async services on General Loop...")
 
     client_session = aiohttp.ClientSession()
     logger.debug("Created aiohttp.ClientSession")
 
     state_store = SqliteStateStore(db_path)
     await state_store.init_async_store()
-    logger.debug("SqliteStateStore initialized at %s", db_path)
+    logger.info("SqliteStateStore initialized at %s", db_path)
     await state_store.reset_retrying_to_written()
 
     state_manager = StateManager(state_store)
-    await state_manager.recover_startup_state()
-    logger.debug("StateManager initialized")
-
-    registration_manager = RegistrationManager(
-        client_session=client_session,
-        state_api=state_manager,
-    )
-    registration_manager.start()
-    logger.debug("RegistrationManager started")
+    logger.info("StateManager initialized")
 
     upload_manager = UploadManager(config, client_session)
-    logger.debug("UploadManager initialized")
+    logger.info("UploadManager initialized")
 
     connection_manager = ConnectionManager(client_session)
     await connection_manager.start()
-    logger.debug("ConnectionManager started")
+    logger.info("ConnectionManager started")
 
     progress_reporter = ProgressReporter(client_session)
-    logger.debug("ProgressReporter initialized")
+    logger.info("ProgressReporter initialized")
 
-    logger.debug("Async services bootstrap complete")
+    logger.info("Async services bootstrap complete")
 
     return AsyncServices(
         client_session=client_session,
         state_store=state_store,
         state_manager=state_manager,
-        registration_manager=registration_manager,
         upload_manager=upload_manager,
         connection_manager=connection_manager,
         progress_reporter=progress_reporter,
@@ -140,19 +127,13 @@ async def shutdown_async_services(services: AsyncServices) -> None:
     Args:
         services: AsyncServices to shutdown.
     """
-    logger.debug("Shutting down async services...")
+    logger.info("Shutting down async services...")
 
     try:
         await services.connection_manager.stop()
         logger.debug("ConnectionManager stopped")
     except Exception:
         logger.exception("Error stopping ConnectionManager")
-
-    try:
-        await services.registration_manager.shutdown()
-        logger.debug("RegistrationManager stopped")
-    except Exception:
-        logger.exception("Error stopping RegistrationManager")
 
     try:
         await services.upload_manager.shutdown()
@@ -173,7 +154,7 @@ async def shutdown_async_services(services: AsyncServices) -> None:
     except Exception:
         logger.exception("Error closing aiohttp session")
 
-    logger.debug("Async services shutdown complete")
+    logger.info("Async services shutdown complete")
 
 
 class DaemonBootstrap:
@@ -217,7 +198,7 @@ class DaemonBootstrap:
 
             config = config_manager.resolve_effective_config()
 
-            logger.debug("Configuration resolved")
+            logger.info("Configuration resolved")
             return config
         except Exception:
             logger.exception("Failed to resolve configuration")
@@ -228,8 +209,8 @@ class DaemonBootstrap:
         loop_manager = EventLoopManager()
         try:
             loop_manager.start()
-            logger.debug("       General Loop: started (I/O-bound work)")
-            logger.debug("       Encoder Loop: started (CPU-bound work)")
+            logger.info("       General Loop: started (I/O-bound work)")
+            logger.info("       Encoder Loop: started (CPU-bound work)")
             return loop_manager
         except Exception as e:
             logger.exception(f"Failed to start EventLoopManager: {str(e)}")
@@ -246,11 +227,11 @@ class DaemonBootstrap:
                 bootstrap_async_services(config, self._db_path)
             )
             services = future.result(timeout=30.0)
-            logger.debug("       SqliteStateStore: initialized")
-            logger.debug("       StateManager: listening for events")
-            logger.debug("       UploadManager: ready for uploads")
-            logger.debug("       ConnectionManager: monitoring API")
-            logger.debug("       ProgressReporter: ready to report")
+            logger.info("       SqliteStateStore: initialized")
+            logger.info("       StateManager: listening for events")
+            logger.info("       UploadManager: ready for uploads")
+            logger.info("       ConnectionManager: monitoring API")
+            logger.info("       ProgressReporter: ready to report")
             return services
         except Exception:
             logger.exception("Failed to bootstrap async services")
@@ -269,8 +250,8 @@ class DaemonBootstrap:
                 loop_manager=loop_manager,
                 recordings_root=config.path_to_store_record,
             )
-            logger.debug("       _RawBatchWriter: scheduled on General Loop")
-            logger.debug("       _BatchEncoderWorker: scheduled on Encoder Loop")
+            logger.info("       _RawBatchWriter: scheduled on General Loop")
+            logger.info("       _BatchEncoderWorker: scheduled on Encoder Loop")
             return recording_disk_manager
         except Exception:
             logger.exception("Failed to initialize RecordingDiskManager")
@@ -287,8 +268,8 @@ class DaemonBootstrap:
                 ctx.recording_disk_manager.shutdown()
             )
             future.result(timeout=30.0)
-            logger.debug("       _RawBatchWriter: stopped")
-            logger.debug("       _BatchEncoderWorker: stopped")
+            logger.info("       _RawBatchWriter: stopped")
+            logger.info("       _BatchEncoderWorker: stopped")
         except Exception:
             logger.exception("Error shutting down RecordingDiskManager")
 
@@ -306,8 +287,8 @@ class DaemonBootstrap:
         """Stop the EventLoopManager."""
         try:
             ctx.loop_manager.stop()
-            logger.debug("       General Loop: stopped")
-            logger.debug("       Encoder Loop: stopped")
+            logger.info("       General Loop: stopped")
+            logger.info("       Encoder Loop: stopped")
         except Exception:
             logger.exception("Error stopping EventLoopManager")
 
@@ -347,37 +328,39 @@ class DaemonBootstrap:
         Returns:
             DaemonContext if successful, None if startup failed.
         """
-        logger.info("Daemon bootstrap starting")
+        logger.info("=" * 60)
+        logger.info("DAEMON BOOTSTRAP STARTING")
+        logger.info("=" * 60)
 
-        logger.debug("[1/6] Resolving configuration...")
+        logger.info("[1/6] Resolving configuration...")
         config = self._resolve_configuration()
         if config is None:
             return None
 
-        logger.debug("[2/6] Initializing authentication...")
+        logger.info("[2/6] Initializing authentication...")
         if not self._initialize_auth(config):
             return None
 
-        logger.debug("[3/6] Starting EventLoopManager...")
+        logger.info("[3/6] Starting EventLoopManager...")
         loop_manager = self._start_event_loops()
         if loop_manager is None:
             return None
 
-        logger.debug("[4/6] Bootstrapping async services on General Loop...")
+        logger.info("[4/6] Bootstrapping async services on General Loop...")
         services = self._bootstrap_async_services(config, loop_manager)
         if services is None:
             return None
 
-        logger.debug("[5/6] Initializing RecordingDiskManager...")
+        logger.info("[5/6] Initializing RecordingDiskManager...")
         recording_disk_manager = self._init_recording_disk_manager(
             config, loop_manager, services
         )
         if recording_disk_manager is None:
             return None
 
-        logger.debug("[6/6] Creating CommunicationsManager...")
+        logger.info("[6/6] Creating CommunicationsManager...")
         comm_manager = CommunicationsManager()
-        logger.debug("       ZMQ sockets ready")
+        logger.info("       ZMQ sockets ready")
 
         self._context = DaemonContext(
             config=config,
@@ -387,7 +370,9 @@ class DaemonBootstrap:
             recording_disk_manager=recording_disk_manager,
         )
 
-        logger.info("Daemon bootstrap complete")
+        logger.info("=" * 60)
+        logger.info("DAEMON BOOTSTRAP COMPLETE")
+        logger.info("=" * 60)
         return self._context
 
     def stop(self) -> None:
@@ -402,22 +387,26 @@ class DaemonBootstrap:
             logger.warning("Cannot stop: daemon not started")
             return
 
-        logger.info("Daemon shutdown starting")
+        logger.info("=" * 60)
+        logger.info("DAEMON SHUTDOWN STARTING")
+        logger.info("=" * 60)
 
         ctx = self._context
 
-        logger.debug("[1/3] Shutting down RecordingDiskManager...")
+        logger.info("[1/3] Shutting down RecordingDiskManager...")
         self._shutdown_recording_disk_manager(ctx)
 
-        logger.debug("[2/3] Shutting down async services...")
+        logger.info("[2/3] Shutting down async services...")
         self._shutdown_async_services(ctx)
 
-        logger.debug("[3/3] Stopping EventLoopManager...")
+        logger.info("[3/3] Stopping EventLoopManager...")
         self._stop_event_loops(ctx)
 
         self._context = None
 
-        logger.info("Daemon shutdown complete")
+        logger.info("=" * 60)
+        logger.info("DAEMON SHUTDOWN COMPLETE")
+        logger.info("=" * 60)
 
     @property
     def context(self) -> DaemonContext | None:

@@ -76,25 +76,26 @@ class TrainingStorageHandler(UploadStorageMixin):
             )
         return response.json()["url"]
 
-    def _get_checkpoint_download_url(self, checkpoint_name: str) -> str:
-        """Get a signed download URL for a checkpoint file in cloud storage.
+    def _get_download_url(self, filepath: str) -> str:
+        """Get a signed download URL for a file in cloud storage.
 
         Args:
-            checkpoint_name: Name of the checkpoint file to download.
+            filepath: Path of the file to download.
 
         Returns:
-            str: Signed URL for downloading the checkpoint.
+            str: Signed URL for downloading the file.
 
         Raises:
             ValueError: If the request to get the download URL fails.
         """
+        get_current_org()
         response = self._get_request(
-            f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}"
-            f"/checkpoint_url/{checkpoint_name}",
+            f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/download-url",
+            params={"filepath": filepath},
         )
         if response.status_code != 200:
             raise ValueError(
-                f"Failed to get download URL for {checkpoint_name}: {response.text}"
+                f"Failed to get download URL for {filepath}: {response.text}"
             )
         return response.json()["url"]
 
@@ -180,7 +181,9 @@ class TrainingStorageHandler(UploadStorageMixin):
         """
         load_path = self.local_dir / checkpoint_name
         if self.log_to_cloud:
-            download_url = self._get_checkpoint_download_url(checkpoint_name)
+            download_url = self._get_download_url(
+                filepath="checkpoints/" + checkpoint_name
+            )
             response = requests.get(download_url)
             if response.status_code != 200:
                 raise ValueError(
@@ -254,42 +257,23 @@ class TrainingStorageHandler(UploadStorageMixin):
             headers={"Content-Type": content_type},
         )
 
-    def update_training_progress(self, epoch: int, step: int) -> None:
-        """Update training epoch/step progress in cloud storage.
+    def update_training_metadata(
+        self, epoch: int, step: int, error: str | None = None
+    ) -> None:
+        """Update training metadata in cloud storage.
 
         Args:
             epoch: Current training epoch.
             step: Current training step.
+            error: Optional error message if training failed.
         """
         if self.log_to_cloud:
             response = self._put_request(
                 f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/update",
-                json={"epoch": epoch, "step": step, "error": None},
+                json={"epoch": epoch, "step": step, "error": error},
             )
             if response.status_code != 200:
-                logger.error(
-                    f"Failed to update training progress to cloud: {response.text}"
-                )
-
-    def report_training_error(self, error: str) -> None:
-        """Report a training failure to cloud storage.
-
-        This should be called in exactly one place — the top-level error
-        handler in train.py — so that every failure is surfaced regardless
-        of where in the training pipeline it originated.
-
-        Args:
-            error: Formatted error / traceback string to persist.
-        """
-        if self.log_to_cloud:
-            response = self._put_request(
-                f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/update",
-                json={"epoch": None, "step": None, "error": error},
-            )
-            if response.status_code != 200:
-                logger.error(
-                    f"Failed to report training error to cloud: {response.text}"
-                )
+                logger.error(f"Failed to save epoch {epoch} to cloud: {response.text}")
 
     def _put_request(
         self,

@@ -6,9 +6,12 @@ including deployment, status monitoring, and deletion operations.
 """
 
 import requests
-from neuracore_types import DataSpec, DataType, DeploymentRequest, SynchronizedPoint
-from neuracore_types.endpoints.endpoint_requests import DeploymentConfig
-from neuracore_types.training.training import GPUType
+from neuracore_types import (
+    DataType,
+    DeploymentRequest,
+    EmbodimentDescription,
+    SynchronizedPoint,
+)
 
 from neuracore.api.core import _get_robot
 from neuracore.core.auth import get_auth
@@ -123,10 +126,9 @@ def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:
 def deploy_model(
     job_id: str,
     name: str,
-    model_input_order: DataSpec,
-    model_output_order: DataSpec,
+    model_input_order: EmbodimentDescription,
+    model_output_order: EmbodimentDescription,
     ttl: int | None = None,
-    gpu_type: GPUType = GPUType.NVIDIA_TESLA_V100,
 ) -> dict:
     """Deploy a trained model to a managed endpoint.
 
@@ -142,7 +144,6 @@ def deploy_model(
         model_output_order: Specification of the model output data order.
         ttl: Optional time-to-live in seconds for the endpoint. If provided,
             the endpoint will be automatically deleted after this duration.
-        gpu_type: Type of GPU to use for deployment.
 
     Returns:
         Deployment response containing endpoint details and deployment status.
@@ -168,7 +169,6 @@ def deploy_model(
                 ttl=ttl,
                 model_input_order=model_input_order,
                 model_output_order=model_output_order,
-                config=DeploymentConfig(gpu_type=gpu_type),
             ).model_dump(mode="json"),
         )
         response.raise_for_status()

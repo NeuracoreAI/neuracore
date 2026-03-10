@@ -3,7 +3,7 @@ import sys
 
 import rclpy
 from cv_bridge import CvBridge
-from neuracore_types import DataSpec, DataType
+from neuracore_types import DataType, EmbodimentDescription
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
@@ -21,14 +21,14 @@ from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
 CAMERA_NAMES = ["top", "angle", "vis"]
 
 # Specification of the order that will be fed into the model
-MODEL_INPUT_ORDER: DataSpec = {
+MODEL_INPUT_ORDER: EmbodimentDescription = {
     DataType.JOINT_POSITIONS: BimanualViperXTask.LEFT_ARM_JOINT_NAMES
     + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES,
     DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
     DataType.RGB_IMAGES: CAMERA_NAMES,
 }
 
-MODEL_OUTPUT_ORDER: DataSpec = {
+MODEL_OUTPUT_ORDER: EmbodimentDescription = {
     DataType.JOINT_TARGET_POSITIONS: (
         BimanualViperXTask.LEFT_ARM_JOINT_NAMES
         + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES

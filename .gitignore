@@ -86,8 +86,6 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-cleanup.sh
-
 # pyright
 .pyright/
 

@@ -82,21 +82,23 @@ class TestRecording:
     def test_synchronize_with_valid_data_types(self, recording: Recording):
         """Test synchronizing with specific data types."""
 
-        robot_data_spec = {
+        cross_embodiment_description = {
             recording.robot_id: {
                 DataType.RGB_IMAGES: ["camera_front", "camera_rear"],
                 DataType.JOINT_POSITIONS: ["arm", "gripper"],
             }
         }
-        synced = recording.synchronize(frequency=30, robot_data_spec=robot_data_spec)
+        synced = recording.synchronize(
+            frequency=30, cross_embodiment_description=cross_embodiment_description
+        )
 
         assert isinstance(synced, SynchronizedRecording)
-        assert synced.robot_data_spec == robot_data_spec
+        assert synced.cross_embodiment_description == cross_embodiment_description
 
     def test_synchronize_with_invalid_data_types(self, recording: Recording):
         """Test synchronizing with invalid data types raises an error."""
 
-        robot_data_spec = {
+        cross_embodiment_description = {
             recording.robot_id: {
                 "INVALID_DATA_TYPE": ["some_item"],
             }
@@ -105,20 +107,22 @@ class TestRecording:
             ValueError,
             match="Invalid data types provided. ",
         ):
-            recording.synchronize(frequency=30, robot_data_spec=robot_data_spec)
+            recording.synchronize(
+                frequency=30, cross_embodiment_description=cross_embodiment_description
+            )
 
     def test_synchronize_with_empty_data_types(self, recording: Recording):
         """Test synchronizing with empty data types list."""
-        synced = recording.synchronize(frequency=30, robot_data_spec={})
+        synced = recording.synchronize(frequency=30, cross_embodiment_description={})
         assert isinstance(synced, SynchronizedRecording)
-        assert synced.robot_data_spec == {}
+        assert synced.cross_embodiment_description == {}
 
     def test_synchronize_with_none_data_types(self, recording: Recording):
         """Test synchronizing with None data types (should default to empty list)."""
-        synced = recording.synchronize(frequency=30, robot_data_spec=None)
+        synced = recording.synchronize(frequency=30, cross_embodiment_description=None)
 
         assert isinstance(synced, SynchronizedRecording)
-        assert synced.robot_data_spec is None
+        assert synced.cross_embodiment_description is None
 
     def test_iter_raises_runtime_error(self, recording: Recording):
         """Test that iterating over unsynchronized recording raises RuntimeError."""

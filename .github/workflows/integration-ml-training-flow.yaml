@@ -41,7 +41,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        ref: main
+        ref: ${{ matrix.environment == 'staging' && 'develop' || github.ref }}
     - name: Pull LFS objects
       run: git lfs pull
 

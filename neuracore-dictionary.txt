@@ -26,9 +26,6 @@ childbody
 childinertia
 chonk
 CLIPMLP
-cmap
-Colormaps
-cmaps
 cnnmlp
 CNNMLP
 CNNMLPP
@@ -288,8 +285,3 @@ viser
 yourdfpy
 imageio
 plotly
-checkpointing
-bfloat
-metafunc
-fixturenames
-reraises

@@ -6,7 +6,6 @@ import inspect
 import logging
 import multiprocessing as mp
 import os
-import threading
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
@@ -122,7 +121,7 @@ class NeuracoreDatasetImporter(ABC):
         if skip_on_error not in {"episode", "step", "all"}:
             raise ValueError("skip_on_error must be one of: 'episode', 'step', 'all'")
 
-        self.max_workers = max_workers
+        self.max_workers = 1
         self.min_workers = min_workers
         self.skip_on_error = skip_on_error  # one of: "episode", "step", "all"
         self.progress_interval = max(1, progress_interval)
@@ -134,7 +133,7 @@ class NeuracoreDatasetImporter(ABC):
             f"{self.__class__.__module__}.{self.__class__.__name__}"
         )
         self._progress_queue: mp.Queue[ProgressUpdate] | None = None
-        self._worker_id: int = -1
+        self._worker_id: int | None = None
         self._error_queue: mp.Queue[WorkerError] | None = None
 
     @abstractmethod
@@ -309,7 +308,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 rgb=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -318,7 +316,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 depth=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -327,7 +324,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 points=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -336,7 +332,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 language=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -345,7 +340,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 position=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -354,7 +348,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 velocity=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -363,7 +356,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 torque=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -372,7 +364,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 target_position=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -381,7 +372,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 position=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -390,7 +380,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 value=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -399,7 +388,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 value=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -408,7 +396,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 pose=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -417,7 +404,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 pose=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -426,7 +412,6 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 data=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -458,26 +443,20 @@ class NeuracoreDatasetImporter(ABC):
             return
 
         worker_count = self._resolve_worker_count(len(items))
-        self.logger.info(f"Using {worker_count} workers")
+        os.cpu_count()
 
         ctx = mp.get_context("spawn")
         error_queue: mp.Queue[WorkerError] = ctx.Queue()
         progress_queue: mp.Queue[ProgressUpdate] = ctx.Queue()
         chunks = self._partition(items, worker_count)
-        non_empty_chunks = [(wid, c) for wid, c in enumerate(chunks) if c]
-        ready_barrier = ctx.Barrier(len(non_empty_chunks))
         processes: list[mp.context.SpawnProcess] = []
 
-        for worker_id, chunk in non_empty_chunks:
+        for worker_id, chunk in enumerate(chunks):
+            if not chunk:
+                continue
             process = ctx.Process(
                 target=self._worker_entry,
-                args=(
-                    chunk,
-                    worker_id,
-                    error_queue,
-                    progress_queue,
-                    ready_barrier,
-                ),
+                args=(chunk, worker_id, error_queue, progress_queue),
             )
             process.start()
             processes.append(process)
@@ -531,26 +510,18 @@ class NeuracoreDatasetImporter(ABC):
         worker_id: int,
         error_queue: mp.Queue,
         progress_queue: mp.Queue | None,
-        ready_barrier: mp.synchronize.Barrier | None = None,
     ) -> None:
-        """Worker body that wraps import with error capture.
-
-        All workers prepare first, then synchronise on *ready_barrier*
-        before any of them starts importing items.  If any worker fails
-        during preparation it aborts the barrier so the remaining workers
-        can exit promptly.
-        """
+        """Worker body that wraps import with error capture."""
         self._worker_id = worker_id
         self._progress_queue = progress_queue
-
         try:
             sig = inspect.signature(self.prepare_worker)
             if "chunk" in sig.parameters:
                 self.prepare_worker(worker_id, chunk)
             else:
                 self.prepare_worker(worker_id)  # type: ignore[misc]
+            # Progress bar will reflect work; keep startup quiet to reduce noise.
         except Exception as exc:  # noqa: BLE001 - propagate unexpected worker failures
-            self._abort_barrier(ready_barrier)
             if error_queue:
                 tb = traceback.format_exc()
                 error_queue.put(
@@ -563,12 +534,6 @@ class NeuracoreDatasetImporter(ABC):
                 )
             self._log_worker_error(worker_id, None, str(exc))
             raise
-
-        if ready_barrier is not None:
-            try:
-                ready_barrier.wait()
-            except threading.BrokenBarrierError:
-                return
 
         for idx, item in enumerate(chunk):
             try:
@@ -586,15 +551,6 @@ class NeuracoreDatasetImporter(ABC):
                     )
                 self._log_worker_error(worker_id, item.index, str(exc))
                 raise
-
-    @staticmethod
-    def _abort_barrier(barrier: mp.synchronize.Barrier | None) -> None:
-        """Break the barrier so waiting workers unblock immediately."""
-        if barrier is not None:
-            try:
-                barrier.abort()
-            except Exception:  # noqa: BLE001, S110
-                pass
 
     def _step(
         self,
@@ -702,7 +658,7 @@ class NeuracoreDatasetImporter(ABC):
         episode_label: str | None = None,
     ) -> None:
         """Send a progress update to the main process if available."""
-        if self._progress_queue is None or self._worker_id == -1:
+        if self._progress_queue is None or self._worker_id is None:
             return
         try:
             self._progress_queue.put_nowait(

@@ -46,7 +46,12 @@ class NeuracoreModel(nn.Module, ABC):
         super().__init__()
         self.model_init_description = model_init_description
         self._validate_input_output_types()
-        self.dataset_statistics = model_init_description.dataset_statistics
+        self.input_dataset_statistics = model_init_description.dataset_statistics[
+            "input"
+        ]
+        self.output_dataset_statistics = model_init_description.dataset_statistics[
+            "output"
+        ]
         self.input_data_types = model_init_description.input_data_types
         self.output_data_types = model_init_description.output_data_types
         self.data_types = self.input_data_types.union(self.output_data_types)
@@ -81,15 +86,18 @@ class NeuracoreModel(nn.Module, ABC):
             ValueError: If any requested data type is not supported or not
                 available in the dataset
         """
+        # Check input validation
         req_input_data_types = set(self.model_init_description.input_data_types)
-        types_in_dataset = set(self.model_init_description.dataset_statistics.keys())
+        input_types_in_dataset = set(
+            self.model_init_description.dataset_statistics["input"].keys()
+        )
         input_types_supported_by_model = set(self.get_supported_input_data_types())
 
         # Check if the requested input data types are in the dataset description
-        if not req_input_data_types.issubset(types_in_dataset):
+        if not req_input_data_types.issubset(input_types_in_dataset):
             raise ValueError(
                 "Requested input data types not in dataset: "
-                f"{req_input_data_types - types_in_dataset}"
+                f"{req_input_data_types - input_types_in_dataset}"
             )
 
         # Check if the requested input data types are supported by the model
@@ -99,7 +107,11 @@ class NeuracoreModel(nn.Module, ABC):
                 f"{req_input_data_types - input_types_supported_by_model}"
             )
 
+        # Check output validation
         req_output_data_types = set(self.model_init_description.output_data_types)
+        output_types_in_dataset = set(
+            self.model_init_description.dataset_statistics["output"].keys()
+        )
         outut_types_supported_by_model = set(self.get_supported_output_data_types())
 
         # Check if the requested output data types are supported by the model
@@ -109,10 +121,10 @@ class NeuracoreModel(nn.Module, ABC):
                 f"{req_output_data_types - outut_types_supported_by_model}"
             )
         # Check if the requested output data types are in the dataset description
-        if not req_output_data_types.issubset(types_in_dataset):
+        if not req_output_data_types.issubset(output_types_in_dataset):
             raise ValueError(
                 "Requested output data types not in dataset: "
-                f"{req_output_data_types - types_in_dataset}"
+                f"{req_output_data_types - output_types_in_dataset}"
             )
 
     @abstractmethod

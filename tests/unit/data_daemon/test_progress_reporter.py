@@ -11,22 +11,6 @@ from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.progress_reporter import ProgressReporter
 
 
-async def _report(
-    reporter: ProgressReporter,
-    *,
-    recording_id: str = "recording-123",
-    trace_map: dict[str, int] | None = None,
-) -> None:
-    payload = trace_map if trace_map is not None else {"trace-456": 1024}
-    await reporter.report_progress(
-        recording_id=recording_id,
-        start_time=1000.0,
-        end_time=2000.0,
-        trace_map=payload,
-        total_bytes=sum(payload.values()),
-    )
-
-
 @pytest.fixture
 def mock_emitter():
     """Create a mock emitter."""
@@ -88,7 +72,7 @@ class TestProgressReporterSuccess:
             ),
         ):
             reporter = ProgressReporter(mock_session)
-            await _report(reporter)
+            await reporter.report_progress(1000.0, 2000.0, [mock_trace])
 
             mock_emitter.emit.assert_called_once_with(
                 Emitter.PROGRESS_REPORTED, "recording-123"
@@ -137,7 +121,7 @@ class TestProgressReporterRetry:
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             reporter = ProgressReporter(mock_session)
-            await _report(reporter)
+            await reporter.report_progress(1000.0, 2000.0, [mock_trace])
 
             assert call_count == 3
             mock_emitter.emit.assert_called_once_with(
@@ -173,7 +157,7 @@ class TestProgressReporterRetry:
             ),
         ):
             reporter = ProgressReporter(mock_session)
-            await _report(reporter)
+            await reporter.report_progress(1000.0, 2000.0, [mock_trace])
 
             mock_session.post.assert_called_once()
             mock_emitter.emit.assert_called_once_with(
@@ -217,7 +201,7 @@ class TestProgressReporterRetry:
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             reporter = ProgressReporter(mock_session)
-            await _report(reporter)
+            await reporter.report_progress(1000.0, 2000.0, [mock_trace])
 
             assert call_count == 3
             mock_emitter.emit.assert_called_once_with(
@@ -254,7 +238,7 @@ class TestProgressReporterRetry:
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             reporter = ProgressReporter(mock_session)
-            await _report(reporter)
+            await reporter.report_progress(1000.0, 2000.0, [mock_trace])
 
             assert mock_session.post.call_count == BACKEND_API_MAX_RETRIES
             mock_emitter.emit.assert_called_once_with(
@@ -277,7 +261,7 @@ class TestProgressReporterEdgeCases:
             return_value=mock_emitter,
         ):
             reporter = ProgressReporter(mock_session)
-            await _report(reporter, trace_map={})
+            await reporter.report_progress(1000.0, 2000.0, [])
 
             mock_session.post.assert_not_called()
             mock_emitter.emit.assert_not_called()
@@ -285,6 +269,7 @@ class TestProgressReporterEdgeCases:
     @pytest.mark.asyncio
     async def test_missing_recording_id_returns_early(self, mock_emitter, mock_trace):
         """Test that missing recording_id returns without action."""
+        mock_trace.recording_id = None
         mock_session = MagicMock()
 
         with patch(
@@ -292,7 +277,7 @@ class TestProgressReporterEdgeCases:
             return_value=mock_emitter,
         ):
             reporter = ProgressReporter(mock_session)
-            await _report(reporter, recording_id="")
+            await reporter.report_progress(1000.0, 2000.0, [mock_trace])
 
             mock_session.post.assert_not_called()
             mock_emitter.emit.assert_not_called()
@@ -332,73 +317,9 @@ class TestProgressReporterEdgeCases:
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             reporter = ProgressReporter(mock_session)
-            await _report(reporter)
+            await reporter.report_progress(1000.0, 2000.0, [mock_trace])
 
             assert call_count == 2
             mock_emitter.emit.assert_called_once_with(
                 Emitter.PROGRESS_REPORTED, "recording-123"
-            )
-
-    @pytest.mark.asyncio
-    async def test_org_lookup_exception_emits_failed(
-        self, mock_emitter, mock_trace, mock_auth
-    ):
-        """Test uncaught org lookup exceptions emit PROGRESS_REPORT_FAILED."""
-        mock_session = MagicMock()
-
-        with (
-            patch(
-                "neuracore.data_daemon.progress_reporter.get_emitter",
-                return_value=mock_emitter,
-            ),
-            patch(
-                "neuracore.data_daemon.progress_reporter.get_auth",
-                return_value=mock_auth,
-            ),
-            patch(
-                "neuracore.data_daemon.progress_reporter.get_current_org",
-                side_effect=RuntimeError("org lookup failed"),
-            ),
-        ):
-            reporter = ProgressReporter(mock_session)
-            await _report(reporter)
-
-            mock_emitter.emit.assert_called_once_with(
-                Emitter.PROGRESS_REPORT_FAILED,
-                "recording-123",
-                "org lookup failed",
-            )
-
-    @pytest.mark.asyncio
-    async def test_unhandled_body_build_exception_emits_failed(
-        self, mock_emitter, mock_trace, mock_auth
-    ):
-        """Test unhandled body build exceptions emit PROGRESS_REPORT_FAILED."""
-        mock_session = MagicMock()
-
-        with (
-            patch(
-                "neuracore.data_daemon.progress_reporter.get_emitter",
-                return_value=mock_emitter,
-            ),
-            patch(
-                "neuracore.data_daemon.progress_reporter.get_auth",
-                return_value=mock_auth,
-            ),
-            patch(
-                "neuracore.data_daemon.progress_reporter.get_current_org",
-                return_value="org-123",
-            ),
-            patch(
-                "neuracore.data_daemon.progress_reporter.TracesMetadataRequest",
-                side_effect=RuntimeError("invalid traces payload"),
-            ),
-        ):
-            reporter = ProgressReporter(mock_session)
-            await _report(reporter)
-
-            mock_emitter.emit.assert_called_once_with(
-                Emitter.PROGRESS_REPORT_FAILED,
-                "recording-123",
-                "invalid traces payload",
             )
