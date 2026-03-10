@@ -61,8 +61,15 @@ class MeanStdNormalizer(Normalizer):
     """Mean/std normalization normalizer.
 
     This class manages normalization using mean and standard deviation
-    for joint states (joint_positions, joint_velocities, joint_torques)
-    and actions (target positions).
+    for joint states (joint_positions, joint_velocities, joint_torques), pose,
+    and actions (target positions). It applies standard z-score normalization:
+
+        y = (x - mean) / (std + 1e-6)
+
+    and the corresponding inverse:
+
+        x = y * std + mean
+
     It uses register_buffer to ensure statistics move with the model.
 
     Args:
@@ -139,8 +146,16 @@ class MinMaxNormalizer(Normalizer):
     """Min/max normalization normalizer.
 
     This class manages normalization using min and max values
-    for joint states (joint_positions, joint_velocities, joint_torques)
-    and actions (target positions).
+    for joint states (joint_positions, joint_velocities, joint_torques),
+    pose, and actions (target positions). It scales inputs to the [-1, 1]
+    range using:
+
+        y = 2.0 * (x - min) / (max - min + 1e-6) - 1.0
+
+    and the corresponding inverse:
+
+        x = (y + 1.0) / 2.0 * (max - min) + min
+
     It uses register_buffer to ensure statistics move with the model.
 
     Args:
@@ -212,3 +227,61 @@ class MinMaxNormalizer(Normalizer):
         max_val = getattr(self, f"{self._name}_max")
         range_val = max_val - min_val
         return (data + 1.0) / 2.0 * range_val + min_val
+
+
+class QuantileNormalizer(Normalizer):
+    """Quantile-based normalization normalizer.
+
+    This class manages normalization using quantiles (q01 and q99) for joint
+    states (joint_positions, joint_velocities, joint_torques), pose, and
+    actions (target positions). It uses register_buffer to ensure statistics
+    move with the model.
+
+    It scales inputs to the [-1, 1] range using:
+
+        y = (x - q01) / (q99 - q01 + 1e-6) * 2.0 - 1.0
+
+    and the corresponding inverse:
+
+        x = (y + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01
+    """
+
+    def __init__(self, name: str, statistics: list[Any]) -> None:
+        """Initialize a QuantileNormalizer with quantile statistics.
+
+        Args:
+            name: Name of the normalizer.
+            statistics: List of DataItemStats objects with .q01/.q99 attributes.
+
+        Raises:
+            ValueError: If statistics are not provided.
+        """
+        super().__init__(name=name)
+        if statistics:
+            combined_q01: list[float] = []
+            combined_q99: list[float] = []
+            for s in statistics:
+                combined_q01.extend(s.q01)
+                combined_q99.extend(s.q99)
+            self.register_buffer(
+                f"{self._name}_q01", torch.tensor(combined_q01, dtype=torch.float32)
+            )
+            self.register_buffer(
+                f"{self._name}_q99", torch.tensor(combined_q99, dtype=torch.float32)
+            )
+        else:
+            raise ValueError(f"Statistics are not provided for {self._name}")
+
+    def normalize(self, data: torch.Tensor) -> torch.Tensor:
+        """Normalize using quantile-based scaling to [-1, 1]."""
+        q01 = getattr(self, f"{self._name}_q01")
+        q99 = getattr(self, f"{self._name}_q99")
+        denom = torch.clamp(q99 - q01, min=1e-6)
+        return (data - q01) / denom * 2.0 - 1.0
+
+    def unnormalize(self, data: torch.Tensor) -> torch.Tensor:
+        """Unnormalize using quantile-based scaling from [-1, 1]."""
+        q01 = getattr(self, f"{self._name}_q01")
+        q99 = getattr(self, f"{self._name}_q99")
+        denom = torch.clamp(q99 - q01, min=1e-6)
+        return (data + 1.0) / 2.0 * denom + q01
