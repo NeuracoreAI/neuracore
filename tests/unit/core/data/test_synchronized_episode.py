@@ -51,7 +51,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_description=None,
         )
 
     def test_init(self, synced_recording: SynchronizedRecording, dataset_mock):
@@ -61,14 +61,14 @@ class TestSynchronizedRecording:
         assert synced_recording.frequency == 30
         assert synced_recording.robot_id == "robot1"
         assert synced_recording.instance == 1
-        assert synced_recording.robot_data_spec is None
+        assert synced_recording.cross_embodiment_description is None
         assert synced_recording._iter_idx == 0
 
     def test_init_with_data_types(self, dataset_mock, mock_data_requests):
         """Test initialization with specific data types."""
         from neuracore_types import DataType
 
-        robot_data_spec = {
+        cross_embodiment_description = {
             "robot1": {
                 DataType.RGB_IMAGES: [],
                 DataType.DEPTH_IMAGES: [],
@@ -81,10 +81,10 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=robot_data_spec,
+            cross_embodiment_description=cross_embodiment_description,
         )
 
-        assert synced.robot_data_spec == robot_data_spec
+        assert synced.cross_embodiment_description == cross_embodiment_description
 
     def test_get_synced_data(
         self, synced_recording: SynchronizedRecording, synced_data
@@ -176,7 +176,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_description=None,
         )
 
         frames = synced[0:5:2]
@@ -253,7 +253,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_description=None,
         )
 
         sync_point = cast(SynchronizedPoint, synced[0])
@@ -273,7 +273,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_description=None,
             prefetch_videos=True,
         )
 
@@ -290,7 +290,7 @@ class TestSynchronizedRecording:
                 robot_id="robot1",
                 instance=1,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_description=None,
                 prefetch_videos=True,
             )
 
@@ -389,7 +389,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_description=None,
         )
 
         synced_60 = SynchronizedRecording(
@@ -399,7 +399,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=60,
-            robot_data_spec=None,
+            cross_embodiment_description=None,
         )
 
         # Trigger cache creation

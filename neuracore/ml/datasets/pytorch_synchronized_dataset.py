@@ -22,6 +22,9 @@ import neuracore as nc
 from neuracore.core.const import DEFAULT_CACHE_DIR
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
+from neuracore.core.utils.training_input_args_validation import (
+    _validate_data_specs_against_dataset,
+)
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
 from neuracore.ml.utils.memory_monitor import MemoryMonitor
@@ -42,26 +45,30 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
     def __init__(
         self,
         synchronized_dataset: SynchronizedDataset,
-        input_robot_data_spec: CrossEmbodimentDescription,
-        output_robot_data_spec: CrossEmbodimentDescription,
+        input_cross_embodiment_description: CrossEmbodimentDescription,
+        output_cross_embodiment_description: CrossEmbodimentDescription,
         output_prediction_horizon: int,
     ):
         """Initialize the dataset.
 
         Args:
             synchronized_dataset: The synchronized dataset to load data from.
-            input_robot_data_spec: List of input data types to include in the dataset.
-            output_robot_data_spec: List of output data types to include in the dataset.
+            input_cross_embodiment_description: List of input data types to
+                include in the dataset.
+            output_cross_embodiment_description: List of output data types to
+                include in the dataset.
             output_prediction_horizon: Number of future timesteps to predict.
             order_configuration: Configuration for ordering data types.
         """
-        self._validate_robot_specs(
-            synchronized_dataset, input_robot_data_spec, output_robot_data_spec
+        self._validate_cross_embodiment_specs(
+            synchronized_dataset,
+            input_cross_embodiment_description,
+            output_cross_embodiment_description,
         )
 
         super().__init__(
-            input_robot_data_spec=input_robot_data_spec,
-            output_robot_data_spec=output_robot_data_spec,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
             output_prediction_horizon=output_prediction_horizon,
             num_recordings=len(synchronized_dataset),
         )
@@ -69,10 +76,13 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
         # Try cached stats first; fall back to server computation if missing/unreadable.
         logger.info("Loading dataset statistics...")
-        if hasattr(self.robot_data_spec, "model_dump"):
-            spec_payload = self.robot_data_spec.model_dump(mode="json")
+        if hasattr(self.merged_cross_embodiment_description, "model_dump"):
+            spec_payload = self.merged_cross_embodiment_description.model_dump(
+                mode="json"
+            )
         else:
-            spec_payload = self.robot_data_spec
+            spec_payload = self.merged_cross_embodiment_description
+
         spec_key = json.dumps(spec_payload, sort_keys=True, separators=(",", ":"))
         spec_hash = hashlib.sha256(spec_key.encode("utf-8")).hexdigest()[:12]
 
@@ -103,11 +113,12 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         # Cache miss: compute via API, then persist for next run.
         if self.synchronized_dataset_statistics is None:
             logger.info("Calculating dataset statistics...")
-            self.synchronized_dataset_statistics = (
-                synchronized_dataset.calculate_statistics(
-                    robot_data_spec=self.robot_data_spec
-                )
+            calculate_statistics = synchronized_dataset.calculate_statistics
+            self.synchronized_dataset_statistics = calculate_statistics(
+                input_cross_embodiment_description=self.input_cross_embodiment_description,
+                output_cross_embodiment_description=self.output_cross_embodiment_description,
             )
+
             stats_cache_dir.mkdir(parents=True, exist_ok=True)
             with stats_cache_path.open("w", encoding="utf-8") as handle:
                 json.dump(
@@ -115,6 +126,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     handle,
                 )
             logger.info("Done calculating dataset statistics.")
+
         self._dataset_statistics = (
             self.synchronized_dataset_statistics.dataset_statistics
         )
@@ -128,25 +140,17 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         self._num_samples_excluding_last = self._get_num_training_observations() - len(
             self.synchronized_dataset
         )
+
         self.episode_indices = self._get_episode_indices()
         self._logged_in = False
-
-        # If user does not provide a robot data spec, use the first sample we see
-        # to determine ordering
-        self._requires_fallback = False
-        for robot_id, data_spec in self.robot_data_spec.items():
-            for data_type, names in data_spec.items():
-                if len(names) == 0:
-                    self._requires_fallback = True
-                    break
-
-        self._fallback_robot_data_spec: CrossEmbodimentDescription = {}
 
     def _get_num_training_observations(self) -> int:
         # The count attribute of the stats should give total number of training
         # observations and should be same across all data types
-        first_data_type = next(iter(self._dataset_statistics))
-        data_stats_of_unknown_nc_data = self._dataset_statistics[first_data_type][0]
+        first_data_type = next(iter(self._dataset_statistics["input"]))
+        data_stats_of_unknown_nc_data = self._dataset_statistics["input"][
+            first_data_type
+        ][0]
         # Loop over all attributes until we find one of type DataItemStats
         for attr_name, attr_value in vars(data_stats_of_unknown_nc_data).items():
             if isinstance(attr_value, DataItemStats):
@@ -156,98 +160,34 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             "statistics to get number of training observations."
         )
 
-    def _validate_robot_specs(
+    def _validate_cross_embodiment_specs(
         self,
         synchronized_dataset: SynchronizedDataset,
-        input_robot_data_spec: CrossEmbodimentDescription,
-        output_robot_data_spec: CrossEmbodimentDescription,
+        input_cross_embodiment_description: CrossEmbodimentDescription,
+        output_cross_embodiment_description: CrossEmbodimentDescription,
     ) -> None:
         """Validate that robot IDs and data types exist in the synchronized dataset.
 
         Args:
             synchronized_dataset: The synchronized dataset to validate against.
-            input_robot_data_spec: Input robot data specification.
-            output_robot_data_spec: Output robot data specification.
+            input_cross_embodiment_description: Input robot data specification.
+            output_cross_embodiment_description: Output robot data specification.
 
         Raises:
             ValueError: If robot IDs or data types are missing from the dataset.
         """
-        assert synchronized_dataset.robot_data_spec is not None
-        robot_ids_in_dataset = set(synchronized_dataset.robot_data_spec.keys())
-
-        # Validate robot IDs
-        self._validate_robot_ids(
-            set(input_robot_data_spec.keys()), robot_ids_in_dataset, "Input"
+        _validate_data_specs_against_dataset(
+            dataset=synchronized_dataset.dataset,
+            dataset_name=f"synchronized dataset {synchronized_dataset.id}",
+            cross_embodiment_description=input_cross_embodiment_description,
+            spec_kind="Input",
         )
-        self._validate_robot_ids(
-            set(output_robot_data_spec.keys()), robot_ids_in_dataset, "Output"
+        _validate_data_specs_against_dataset(
+            dataset=synchronized_dataset.dataset,
+            dataset_name=f"synchronized dataset {synchronized_dataset.id}",
+            cross_embodiment_description=output_cross_embodiment_description,
+            spec_kind="Output",
         )
-
-        # Validate data types per robot
-        for robot_id in robot_ids_in_dataset:
-            if robot_id in input_robot_data_spec:
-                self._validate_data_types(
-                    robot_id,
-                    set(input_robot_data_spec[robot_id]),
-                    set(synchronized_dataset.robot_data_spec[robot_id]),
-                    "Input",
-                )
-            if robot_id in output_robot_data_spec:
-                self._validate_data_types(
-                    robot_id,
-                    set(output_robot_data_spec[robot_id]),
-                    set(synchronized_dataset.robot_data_spec[robot_id]),
-                    "Output",
-                )
-
-    def _validate_robot_ids(
-        self, spec_robot_ids: set, dataset_robot_ids: set, spec_type: str
-    ) -> None:
-        """Validate that robot IDs in spec exist in dataset.
-
-        Args:
-            spec_robot_ids: Robot IDs from input/output spec.
-            dataset_robot_ids: Robot IDs available in dataset.
-            spec_type: Either "Input" or "Output" for error messages.
-
-        Raises:
-            ValueError: If robot IDs are missing from the dataset.
-        """
-        if not spec_robot_ids.issubset(dataset_robot_ids):
-            missing_robot_ids = spec_robot_ids - dataset_robot_ids
-            raise ValueError(
-                f"{spec_type} robot IDs {missing_robot_ids} "
-                "not found in synchronized dataset. "
-                f"robot_ids_in_{spec_type.lower()}_spec has:\n{spec_robot_ids}. \n"
-                f"robot_ids_in_synchronized_dataset has:\n{dataset_robot_ids}."
-            )
-
-    def _validate_data_types(
-        self,
-        robot_id: str,
-        spec_data_types: set,
-        available_data_types: set,
-        spec_type: str,
-    ) -> None:
-        """Validate that data types for a robot exist in dataset.
-
-        Args:
-            robot_id: The robot ID being validated.
-            spec_data_types: Data types from input/output spec.
-            available_data_types: Data types available in dataset.
-            spec_type: Either "Input" or "Output" for error messages.
-
-        Raises:
-            ValueError: If data types are missing from the dataset.
-        """
-        if not spec_data_types.issubset(available_data_types):
-            missing_data_types = spec_data_types - available_data_types
-            raise ValueError(
-                f"{spec_type} data types {missing_data_types} for robot ID {robot_id} "
-                f"not found in synchronized dataset. "
-                f"{spec_type.lower()}_data_types has:\n{spec_data_types}. \n"
-                f"available_data_types has:\n{available_data_types}."
-            )
 
     def _get_episode_indices(self) -> list[int]:
         """Return a list mapping each sample index to its episode (recording) index.
@@ -307,18 +247,16 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         # Order the SynchronizedPoints
         robot_id = synced_recording.robot_id
 
-        if self._requires_fallback:
-            # Build fallback spec from first sync point seen
-            if robot_id not in self._fallback_robot_data_spec:
-                self._fallback_robot_data_spec[robot_id] = {
-                    data_type: list(sync_point.data[data_type].keys())
-                    for data_type in sync_point.data.keys()
-                }
-            spec_for_ordering = self._fallback_robot_data_spec[robot_id]
-        else:
-            spec_for_ordering = self.robot_data_spec[robot_id]
+        spec_for_ordering = self.merged_cross_embodiment_description[robot_id]
+        # input_embodiment_description = (
+        #     self.input_cross_embodiment_description[robot_id]
+        # )
+        # output_embodiment_description = (
+        #     self.output_cross_embodiment_description[robot_id]
+        # )
 
         sync_point = sync_point.order(spec_for_ordering)
+
         for i in range(len(future_sync_points)):
             future_sync_points[i] = future_sync_points[i].order(spec_for_ordering)
 
@@ -326,66 +264,95 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         for _ in range(self.output_prediction_horizon - len(future_sync_points)):
             future_sync_points.append(future_sync_points[-1])
 
+        # Sort out Inputs
         inputs: dict[DataType, list[BatchedNCData]] = {}
         inputs_mask: dict[DataType, torch.Tensor] = {}
-        for data_type in self.input_robot_data_spec[robot_id]:
+
+        for data_type in self.input_cross_embodiment_description[robot_id]:
             batched_nc_data_class = DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type]
             inputs[data_type] = []
-            for name, nc_data in sync_point.data[data_type].items():
-                batched_nc_data = batched_nc_data_class.from_nc_data(nc_data)
-                batched_nc_data.transform_nc_data()
-                inputs[data_type].append(batched_nc_data)
+            mask = []
 
-            # Pad to global dataset statistics size so all samples have
-            # consistent per-data-type dimensions across robots.
-            max_items_trained_on = len(self.dataset_statistics[data_type])
-            missing_items = max_items_trained_on - len(inputs[data_type])
-            for _ in range(max(0, missing_items)):
-                inputs[data_type].append(
-                    batched_nc_data_class.sample(batch_size=1, time_steps=1)
+            max_items_for_this_data_type = 0
+            # Iterate through all robots and find the max index for this data
+            # type across all robots to determine padding length.
+            for other_robot_id in self.input_cross_embodiment_description:
+                for index in self.input_cross_embodiment_description[other_robot_id][
+                    data_type
+                ].keys():
+                    if index > max_items_for_this_data_type:
+                        max_items_for_this_data_type = index
+
+            for index in range(max_items_for_this_data_type + 1):
+                name = self.input_cross_embodiment_description[robot_id][data_type].get(
+                    index
                 )
 
+                if name is not None:
+                    # If the current robot has a name for this index, use it to
+                    # get the data. Otherwise, pad with zeros.
+                    nc_data = sync_point.data[data_type][name]
+                    batched_nc_data = batched_nc_data_class.from_nc_data(nc_data)
+                    inputs[data_type].append(batched_nc_data)
+                    mask.append(1.0)
+
+                else:
+                    # Pad missing data with zeros
+                    inputs[data_type].append(
+                        batched_nc_data_class.sample(batch_size=1, time_steps=1)
+                    )
+                    mask.append(0.0)
+
             # Create mask for inputs
-            max_items_for_this_data_type = len(sync_point.data[data_type])
-            inputs_mask[data_type] = torch.tensor(
-                [1.0] * max_items_for_this_data_type
-                + [0.0] * (max_items_trained_on - max_items_for_this_data_type),
-                dtype=torch.float32,
-            )
+            inputs_mask[data_type] = torch.tensor(mask, dtype=torch.float32)
 
         outputs: dict[DataType, list[BatchedNCData]] = {}
         outputs_mask: dict[DataType, torch.Tensor] = {}
-        for data_type in self.output_robot_data_spec[robot_id]:
+        for data_type in self.output_cross_embodiment_description[robot_id]:
             batched_nc_data_class = DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type]
             outputs[data_type] = []
-            # Need to add action prediction horizon for outputs
-            for name in sync_point.data[data_type].keys():
-                nc_data_list = [
-                    future_sp.data[data_type][name] for future_sp in future_sync_points
-                ]
-                batched_nc_data = batched_nc_data_class.from_nc_data_list(nc_data_list)
-                batched_nc_data.transform_nc_data()
-                outputs[data_type].append(batched_nc_data)
+            mask = []
 
-            # Pad to global dataset statistics size so target action dimensions
-            # match model/normalizer dimensions across mixed-robot batches.
-            max_items_trained_on = len(self.dataset_statistics[data_type])
-            missing_items = max_items_trained_on - len(outputs[data_type])
-            for _ in range(max(0, missing_items)):
-                outputs[data_type].append(
-                    batched_nc_data_class.sample(
-                        batch_size=1,
-                        time_steps=self.output_prediction_horizon,
+            max_items_for_this_data_type = 0
+            # Iterate through all robots and find the max index for this data
+            # type across all robots to determine padding length.
+            for other_robot_id in self.output_cross_embodiment_description:
+                for index in self.output_cross_embodiment_description[other_robot_id][
+                    data_type
+                ].keys():
+                    if index > max_items_for_this_data_type:
+                        max_items_for_this_data_type = index
+
+            # Need to add action prediction horizon for outputs.
+            for index in range(max_items_for_this_data_type + 1):
+                name = self.output_cross_embodiment_description[robot_id][
+                    data_type
+                ].get(index)
+
+                if name is not None:
+                    # If the current robot has a name for this index, use it to
+                    # get the data. Otherwise, pad with zeros.
+                    nc_data_list = [
+                        future_sp.data[data_type][name]
+                        for future_sp in future_sync_points
+                    ]
+                    batched_nc_data = batched_nc_data_class.from_nc_data_list(
+                        nc_data_list
                     )
-                )
+                    outputs[data_type].append(batched_nc_data)
+                    mask.append(1.0)
+                else:
+                    # Pad missing data with zeros.
+                    outputs[data_type].append(
+                        batched_nc_data_class.sample(
+                            batch_size=1,
+                            time_steps=self.output_prediction_horizon,
+                        )
+                    )
+                    mask.append(0.0)
 
-            # Create mask for outputs
-            max_items_for_this_data_type = len(sync_point.data[data_type])
-            outputs_mask[data_type] = torch.tensor(
-                [1.0] * max_items_for_this_data_type
-                + [0.0] * (max_items_trained_on - max_items_for_this_data_type),
-                dtype=torch.float32,
-            )
+            # Create mask for outputs.
+            outputs_mask[data_type] = torch.tensor(mask, dtype=torch.float32)
 
         return TrainingSample(
             inputs=inputs,

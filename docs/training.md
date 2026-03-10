@@ -114,7 +114,8 @@ python -m neuracore.ml.train algorithm=diffusion_policy batch_size=auto dataset_
 python -m neuracore.ml.train --multirun algorithm=cnnmlp algorithm.lr=1e-4,5e-4,1e-3 algorithm.hidden_dim=256,512,1024 dataset_name="my_dataset" run_name="my_experiment"
 
 # Training with specified modalities
-python -m neuracore.ml.train algorithm=pi0 dataset_name="my_multimodal_dataset" input_robot_data_spec={"my_robot": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...], "RGB_IMAGES": ["wrist_camera"], "LANGUAGE": ["task_instruction"]}} output_robot_data_spec={"my_robot": {"JOINT_TARGET_POSITIONS": ["joint_1", "joint_2", ...]}} run_name="my_experiment"
+python -m neuracore.ml.train algorithm=pi0 dataset_name="my_multimodal_dataset" input_cross_embodiment_description={"my_robot": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...], "RGB_IMAGES": ["wrist_camera"], "LANGUAGE": ["task_instruction"]}}
+output_cross_embodiment_description={"my_robot": {"JOINT_TARGET_POSITIONS": ["joint_1", "joint_2", ...]}} run_name="my_experiment"
 ```
 
 ### Configuration management
@@ -141,7 +142,7 @@ device: null  # e.g., "cuda:0", "mps", "cpu"
 batch_size: "auto"
 
 # You can either specify input_data_types/output_data_types or
-# input_robot_data_spec/output_robot_data_spec
+# input_cross_embodiment_description/output_cross_embodiment_description
 input_data_types:
   - "JOINT_POSITIONS"
   - "RGB_IMAGES"
@@ -151,8 +152,8 @@ output_data_types:
 
 # Dict[str, Dict[DataType, List[str]], e.g., {"my_robot": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...]}}
 # You can also pass in an empty dict {} to use all available data for all robots
-input_robot_data_spec: null
-output_robot_data_spec: null
+input_cross_embodiment_description: null
+output_cross_embodiment_description: null
 ```
 
 The algorithm-specific config file is inside `config/algorithm`:

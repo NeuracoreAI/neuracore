@@ -201,9 +201,11 @@ class PolicyInference:
         Raises:
             ValueError: If the sync point does not contain required data types.
         """
-        input_robot_data_spec = self.model.model_init_description.input_data_types
+        input_cross_embodiment_description = (
+            self.model.model_init_description.input_data_types
+        )
         missing_data_types = []
-        for data_type in input_robot_data_spec:
+        for data_type in input_cross_embodiment_description:
             # Convert string to DataType enum if needed
             # (can happen after JSON deserialization)
             if isinstance(data_type, str):

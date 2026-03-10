@@ -16,7 +16,9 @@ from neuracore_types import (
 
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
-from neuracore.core.utils.robot_data_spec_utils import merge_robot_data_spec
+from neuracore.core.utils.robot_data_spec_utils import (
+    merge_cross_embodiment_description,
+)
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
@@ -130,7 +132,7 @@ def mock_synchronized_dataset(
         def __init__(self):
             self.id = "mock_dataset"
             self.dataset = MagicMock()
-            self.robot_data_spec = {
+            self.cross_embodiment_description = {
                 "robot_0": {
                     DataType.JOINT_POSITIONS: [
                         f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
@@ -145,11 +147,11 @@ def mock_synchronized_dataset(
             }
 
         def calculate_statistics(
-            self, robot_data_spec: CrossEmbodimentDescription
+            self, cross_embodiment_description: CrossEmbodimentDescription
         ) -> SynchronizedDatasetStatistics:
             return SynchronizedDatasetStatistics(
                 synchronized_dataset_id="mock_dataset",
-                robot_data_spec=robot_data_spec,
+                cross_embodiment_description=cross_embodiment_description,
                 dataset_statistics=dataset_statistics,
             )
 
@@ -168,11 +170,11 @@ def mock_synchronized_dataset(
     return MockSynchronizedDataset()
 
 
-def _stats_cache_path(cache_root, sync_id, robot_data_spec):
-    if hasattr(robot_data_spec, "model_dump"):
-        spec_payload = robot_data_spec.model_dump(mode="json")
+def _stats_cache_path(cache_root, sync_id, cross_embodiment_description):
+    if hasattr(cross_embodiment_description, "model_dump"):
+        spec_payload = cross_embodiment_description.model_dump(mode="json")
     else:
-        spec_payload = robot_data_spec
+        spec_payload = cross_embodiment_description
     spec_key = json.dumps(spec_payload, sort_keys=True, separators=(",", ":"))
     spec_hash = hashlib.sha256(spec_key.encode("utf-8")).hexdigest()[:12]
     return cache_root / "dataset_cache" / f"{sync_id}_statistics_{spec_hash}.json"
@@ -200,14 +202,14 @@ def test_should_initialize_with_correct_args(
 
     dataset = PytorchSynchronizedDataset(
         synchronized_dataset=mock_synchronized_dataset,
-        input_robot_data_spec=input_spec,
-        output_robot_data_spec=output_spec,
+        input_cross_embodiment_description=input_spec,
+        output_cross_embodiment_description=output_spec,
         output_prediction_horizon=5,
     )
 
     assert dataset.synchronized_dataset == mock_synchronized_dataset
-    assert dataset.input_robot_data_spec == input_spec
-    assert dataset.output_robot_data_spec == output_spec
+    assert dataset.input_cross_embodiment_description == input_spec
+    assert dataset.output_cross_embodiment_description == output_spec
     assert dataset.output_prediction_horizon == 5
     assert (
         len(dataset) == NUM_EPISODES * NUM_OBSERVATIONS_PER_EPISODE - NUM_EPISODES
@@ -236,8 +238,8 @@ def test_should_throw_error_with_missing_robot_id(
     with pytest.raises(ValueError, match="Input robot IDs .* not found"):
         PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=5,
         )
 
@@ -267,8 +269,8 @@ def test_should_throw_error_with_missing_data_type(
     with pytest.raises(ValueError, match="Input data types .* not found"):
         PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=5,
         )
 
@@ -278,14 +280,14 @@ def test_initialization_invalid_synchronized_dataset():
     with pytest.raises(AttributeError):  # Will fail when trying to access attributes
         PytorchSynchronizedDataset(
             synchronized_dataset="invalid",  # type: ignore
-            input_robot_data_spec={
+            input_cross_embodiment_description={
                 "robot_0": {
                     DataType.JOINT_POSITIONS: [
                         f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
                     ]
                 }
             },
-            output_robot_data_spec={
+            output_cross_embodiment_description={
                 "robot_0": {
                     DataType.JOINT_TARGET_POSITIONS: [
                         f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
@@ -321,8 +323,8 @@ class TestDataLoading:
         }
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
@@ -363,8 +365,8 @@ class TestDataLoading:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
@@ -406,8 +408,8 @@ class TestDataTypeProcessing:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=2,
         )
 
@@ -458,8 +460,8 @@ class TestDatasetIntegration:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
@@ -494,8 +496,8 @@ class TestDatasetIntegration:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
@@ -525,8 +527,8 @@ class TestDatasetIntegration:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
@@ -557,8 +559,8 @@ class TestDatasetIntegration:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
@@ -584,8 +586,8 @@ class TestDatasetIntegration:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
@@ -619,8 +621,8 @@ class TestPerformanceAndOptimization:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
@@ -646,8 +648,8 @@ class TestPerformanceAndOptimization:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
@@ -682,8 +684,8 @@ class TestErrorRecovery:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
@@ -720,8 +722,8 @@ class TestIntegrationWithPyTorchDataLoader:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
@@ -765,8 +767,8 @@ class TestDatasetStatistics:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
@@ -796,14 +798,16 @@ class TestDatasetStatistics:
                 ]
             }
         }
-        robot_data_spec = merge_robot_data_spec(input_spec, output_spec)
+        cross_embodiment_description = merge_cross_embodiment_description(
+            input_spec, output_spec
+        )
         stats = SynchronizedDatasetStatistics(
             synchronized_dataset_id=mock_synchronized_dataset.id,
-            robot_data_spec=robot_data_spec,
+            cross_embodiment_description=cross_embodiment_description,
             dataset_statistics=dataset_statistics,
         )
         cache_path = _stats_cache_path(
-            tmp_path, mock_synchronized_dataset.id, robot_data_spec
+            tmp_path, mock_synchronized_dataset.id, cross_embodiment_description
         )
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         with cache_path.open("w", encoding="utf-8") as handle:
@@ -815,8 +819,8 @@ class TestDatasetStatistics:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
@@ -847,23 +851,25 @@ class TestDatasetStatistics:
                 ]
             }
         }
-        robot_data_spec = merge_robot_data_spec(input_spec, output_spec)
+        cross_embodiment_description = merge_cross_embodiment_description(
+            input_spec, output_spec
+        )
         stats = SynchronizedDatasetStatistics(
             synchronized_dataset_id=mock_synchronized_dataset.id,
-            robot_data_spec=robot_data_spec,
+            cross_embodiment_description=cross_embodiment_description,
             dataset_statistics=dataset_statistics,
         )
         mock_synchronized_dataset.calculate_statistics = MagicMock(return_value=stats)
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_robot_data_spec=input_spec,
-            output_robot_data_spec=output_spec,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
         )
 
         assert mock_synchronized_dataset.calculate_statistics.call_count == 1
         cache_path = _stats_cache_path(
-            tmp_path, mock_synchronized_dataset.id, dataset.robot_data_spec
+            tmp_path, mock_synchronized_dataset.id, dataset.cross_embodiment_description
         )
         assert cache_path.exists()

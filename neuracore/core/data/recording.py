@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING
 
 import requests
-from neuracore_types import CrossEmbodimentDescription, DataType, EmbodimentDescription
+from neuracore_types import DataType, EmbodimentDescription
 from neuracore_types import Recording as RecordingModel
 from neuracore_types import RecordingMetadata, RecordingStatus
 
@@ -75,20 +75,16 @@ class Recording:
     def synchronize(
         self,
         frequency: int = 0,
-        data_spec: EmbodimentDescription | None = None,
-        robot_data_spec: CrossEmbodimentDescription | None = None,
+        embodiment_description: EmbodimentDescription | None = None,
     ) -> SynchronizedRecording:
         """Synchronize the episode with specified frequency and data types.
 
         Args:
             frequency: Frequency at which to synchronize the episode.
                 Use 0 for aperiodic data.
-            data_spec: Dict specifying data types and their names to include
-                in synchronization. If None, will use all available data
-                types from the dataset.
-            robot_data_spec: Dict specifying robot id to
-                data types and their names to include in synchronization.
-                If None, will use all available data types from the dataset.
+            embodiment_description: Dict specifying data types and their
+                names to include in synchronization. If None, will use all
+                available data types from the dataset.
 
         Raises:
             SynchronizationError: If synchronization fails.
@@ -96,14 +92,17 @@ class Recording:
         if frequency < 0:
             raise SynchronizationError("Frequency must be >= 0")
 
-        if data_spec is not None:
+        cross_embodiment_description = None
+        data_types = None
+        if embodiment_description is not None:
             # Special case for backend.
             # TODO: Find a better way to handle this.
-            robot_data_spec = {
-                "": data_spec,
+            cross_embodiment_description = {
+                "": embodiment_description,
             }
 
-        data_types = extract_data_types(robot_data_spec) if robot_data_spec else None
+            data_types = extract_data_types(cross_embodiment_description)
+
         # check valid data types if provided
         if data_types is not None:
             if not all(isinstance(data_type, DataType) for data_type in data_types):
@@ -123,7 +122,7 @@ class Recording:
             robot_id=self.robot_id,
             instance=self.instance,
             frequency=frequency,
-            robot_data_spec=robot_data_spec,
+            cross_embodiment_union=cross_embodiment_description,
         )
 
     def __iter__(self) -> None:

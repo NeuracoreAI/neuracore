@@ -100,13 +100,13 @@ if __name__ == "__main__":
         "output_prediction_horizon": args.output_prediction_horizon,
     }
 
-    input_robot_data_spec: CrossEmbodimentDescription = {
+    input_cross_embodiment_description: CrossEmbodimentDescription = {
         robot_id: {
             nc.DataType.RGB_IMAGES: ["angle"],
         }
     }
 
-    output_robot_data_spec: CrossEmbodimentDescription = {
+    output_cross_embodiment_description: CrossEmbodimentDescription = {
         robot_id: MODEL_OUTPUT_ORDER,
     }
 
@@ -118,8 +118,8 @@ if __name__ == "__main__":
         algorithm_name=algorithm_name,
         dataset_name=dataset_name,
         algorithm_config=algorithm_config,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
     )
 
     print("Training job started")

@@ -31,7 +31,7 @@ max_delay_s: null
 trim_start_end: true
 
 # You can either specify input_data_types/output_data_types or
-# input_robot_data_spec/output_robot_data_spec
+# input_cross_embodiment_description/output_cross_embodiment_description
 input_data_types:
   - "JOINT_POSITIONS"
   - "RGB_IMAGES"
@@ -41,8 +41,34 @@ output_data_types:
 
 # Dict[str, Dict[DataType, List[str]], e.g., {"my_robot": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...]}}
 # You can also pass in an empty dict {} to use all available data for all robots
-input_robot_data_spec: null
-output_robot_data_spec: null
+input_cross_embodiment_description: {
+  "MyRobot1": {
+    "JOINT_POSITIONS": {
+      0: "joint1",
+      1: "joint2",
+    }
+  },
+   "MyRobot2": {
+    "JOINT_POSITIONS": {
+      0: "joint1",
+      1: "joint2",
+    }
+  },
+}
+output_cross_embodiment_description: {
+  "MyRobot1": {
+    "JOINT_POSITIONS": {
+      0: "joint1",
+      1: "joint2",
+    }
+  },
+   "MyRobot2": {
+    "JOINT_POSITIONS": {
+      0: "joint1",
+      1: "joint2",
+    }
+  },
+}
 
 # Paths and IDs (for cloud vs local training)
 algorithm_id: null    # For cloud training

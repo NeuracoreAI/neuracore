@@ -99,7 +99,7 @@ class MainTestSetup:
         self.mock_dataset.robot_ids = ["robot-id-1", "robot-id-2"]
         self.mock_synchronized_dataset = Mock()
         self.mock_pytorch_dataset = Mock(spec=PytorchSynchronizedDataset)
-        self.mock_pytorch_dataset.dataset_description = Mock()
+        self.mock_pytorch_dataset.cross_embodiment_description = Mock()
         self.mock_pytorch_dataset.__len__ = Mock(return_value=100)
         self.mock_pytorch_dataset.load_sample = Mock(return_value=Mock())
         self.mock_pytorch_dataset.__getitem__ = Mock(
@@ -158,7 +158,7 @@ class MainTestSetup:
             self.mock_storage_handler_class,
         )
         self.monkeypatch.setattr(
-            "neuracore.ml.train.convert_robot_data_spec_names_to_ids",
+            "neuracore.ml.train.convert_cross_embodiment_description_names_to_ids",
             Mock(side_effect=lambda x: x),
         )
 
@@ -264,8 +264,8 @@ class RunTrainingTestSetup:
             self.world_size,
             cfg,
             self.batch_size,
-            cfg.input_robot_data_spec,
-            cfg.output_robot_data_spec,
+            cfg.input_cross_embodiment_description,
+            cfg.output_cross_embodiment_description,
             dataset,
         )
 
@@ -363,8 +363,8 @@ def mock_cfg_batch_size(temp_output_dir):
     return OmegaConf.create({
         "algorithm_id": "test-algorithm-id",
         "local_output_dir": str(temp_output_dir),
-        "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-        "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+        "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+        "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
         "output_prediction_horizon": 5,
         "max_batch_size": 32,
         "min_batch_size": 2,
@@ -383,8 +383,8 @@ def mock_cfg_training(temp_output_dir) -> DictConfig:
         "local_output_dir": str(temp_output_dir),
         "seed": 42,
         "validation_split": 0.2,
-        "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-        "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+        "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+        "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
         "output_prediction_horizon": 5,
         "num_train_workers": 0,
         "num_val_workers": 0,
@@ -670,8 +670,8 @@ class TestDetermineOptimalBatchSize:
 
         result = determine_optimal_batch_size(
             mock_cfg_batch_size,
-            mock_cfg_batch_size.input_robot_data_spec,
-            mock_cfg_batch_size.output_robot_data_spec,
+            mock_cfg_batch_size.input_cross_embodiment_description,
+            mock_cfg_batch_size.output_cross_embodiment_description,
             mock_single_sample_dataset,
         )
 
@@ -688,8 +688,8 @@ class TestDetermineOptimalBatchSize:
         with pytest.raises(ValueError, match="Autotuning is only supported on GPUs"):
             determine_optimal_batch_size(
                 mock_cfg_batch_size,
-                mock_cfg_batch_size.input_robot_data_spec,
-                mock_cfg_batch_size.output_robot_data_spec,
+                mock_cfg_batch_size.input_cross_embodiment_description,
+                mock_cfg_batch_size.output_cross_embodiment_description,
                 mock_single_sample_dataset,
             )
 
@@ -718,8 +718,8 @@ class TestDetermineOptimalBatchSize:
         device = torch.device("cuda:0")
         result = determine_optimal_batch_size(
             mock_cfg_batch_size,
-            mock_cfg_batch_size.input_robot_data_spec,
-            mock_cfg_batch_size.output_robot_data_spec,
+            mock_cfg_batch_size.input_cross_embodiment_description,
+            mock_cfg_batch_size.output_cross_embodiment_description,
             mock_single_sample_dataset,
             device=device,
         )
@@ -738,8 +738,8 @@ class TestDetermineOptimalBatchSize:
         cfg = OmegaConf.create({
             "algorithm_id": "test-algorithm-id",
             "local_output_dir": "/tmp/test",
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "batch_size_autotuning_num_workers": 0,
         })
@@ -762,8 +762,8 @@ class TestDetermineOptimalBatchSize:
 
         result = determine_optimal_batch_size(
             cfg,
-            cfg.input_robot_data_spec,
-            cfg.output_robot_data_spec,
+            cfg.input_cross_embodiment_description,
+            cfg.output_cross_embodiment_description,
             mock_single_sample_dataset,
         )
 
@@ -813,8 +813,8 @@ class TestDetermineOptimalBatchSize:
 
         result = determine_optimal_batch_size(
             mock_cfg_batch_size,
-            mock_cfg_batch_size.input_robot_data_spec,
-            mock_cfg_batch_size.output_robot_data_spec,
+            mock_cfg_batch_size.input_cross_embodiment_description,
+            mock_cfg_batch_size.output_cross_embodiment_description,
             mock_single_sample_dataset,
         )
 
@@ -848,8 +848,8 @@ class TestDetermineOptimalBatchSize:
 
         result = determine_optimal_batch_size(
             mock_cfg_batch_size,
-            mock_cfg_batch_size.input_robot_data_spec,
-            mock_cfg_batch_size.output_robot_data_spec,
+            mock_cfg_batch_size.input_cross_embodiment_description,
+            mock_cfg_batch_size.output_cross_embodiment_description,
             mock_single_sample_dataset,
         )
 
@@ -866,8 +866,8 @@ class TestDetermineOptimalBatchSize:
         with pytest.raises(ValueError, match="Autotuning is only supported on GPUs"):
             determine_optimal_batch_size(
                 mock_cfg_batch_size,
-                mock_cfg_batch_size.input_robot_data_spec,
-                mock_cfg_batch_size.output_robot_data_spec,
+                mock_cfg_batch_size.input_cross_embodiment_description,
+                mock_cfg_batch_size.output_cross_embodiment_description,
                 mock_single_sample_dataset,
                 device=device,
             )
@@ -1315,8 +1315,8 @@ class TestMain:
             "dataset_id": "test-dataset-id",
             "local_output_dir": "/tmp/test",
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "max_prefetch_workers": 4,
@@ -1343,8 +1343,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1373,8 +1373,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1406,8 +1406,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "max_prefetch_workers": 4,
@@ -1434,8 +1434,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1464,8 +1464,8 @@ class TestMain:
             "device": "cuda:1",
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1496,8 +1496,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 16,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1526,8 +1526,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1562,8 +1562,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1591,8 +1591,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": "16",
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1628,8 +1628,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1671,8 +1671,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1703,8 +1703,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1725,7 +1725,10 @@ class TestMain:
         assert metadata["algorithm"] == "test-algorithm"
         assert metadata["dataset_id"] == "test-dataset-id"
         assert metadata["status"] == "RUNNING"
-        assert "JOINT_POSITIONS" in metadata["input_robot_data_spec"]["robot-id-1"]
+        assert (
+            "JOINT_POSITIONS"
+            in metadata["input_cross_embodiment_description"]["robot-id-1"]
+        )
 
     def test_main_calls_dataset_synchronize_with_correct_parameters(
         self, monkeypatch, temp_output_dir
@@ -1738,8 +1741,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1768,8 +1771,12 @@ class TestMain:
             DataType.JOINT_VELOCITIES,
             DataType.JOINT_TARGET_POSITIONS,
         ]
-        data_spec = cast(CrossEmbodimentDescription, call_kwargs["robot_data_spec"])
-        assert set(extract_data_types(data_spec)) == set(expected_data_types)
+        embodiment_description = cast(
+            CrossEmbodimentDescription, call_kwargs["cross_embodiment_description"]
+        )
+        assert set(extract_data_types(embodiment_description)) == set(
+            expected_data_types
+        )
 
     def test_main_uses_default_recording_cache_dir(self, monkeypatch, temp_output_dir):
         cfg = OmegaConf.create({
@@ -1780,8 +1787,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1809,8 +1816,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": 8,
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,
@@ -1839,8 +1846,8 @@ class TestMain:
             "device": None,
             "local_output_dir": str(temp_output_dir),
             "batch_size": "auto",
-            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
-            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "input_cross_embodiment_description": INPUT_ROBOT_DATA_SPEC,
+            "output_cross_embodiment_description": OUTPUT_ROBOT_DATA_SPEC,
             "output_prediction_horizon": 5,
             "frequency": 30,
             "algorithm_params": None,

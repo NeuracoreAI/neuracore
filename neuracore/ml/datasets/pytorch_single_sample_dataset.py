@@ -16,8 +16,8 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
     def __init__(
         self,
         sample: BatchedTrainingSamples,
-        input_robot_data_spec: CrossEmbodimentDescription,
-        output_robot_data_spec: CrossEmbodimentDescription,
+        input_cross_embodiment_description: CrossEmbodimentDescription,
+        output_cross_embodiment_description: CrossEmbodimentDescription,
         output_prediction_horizon: int,
         num_recordings: int,
         dataset_statistics: dict[DataType, list[NCDataStats]],
@@ -25,8 +25,8 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
         """Initialize the decoy dataset."""
         super().__init__(
             num_recordings=num_recordings,
-            input_robot_data_spec=input_robot_data_spec,
-            output_robot_data_spec=output_robot_data_spec,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
             output_prediction_horizon=output_prediction_horizon,
         )
 

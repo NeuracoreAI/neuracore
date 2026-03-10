@@ -34,7 +34,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_description=None,
                 prefetch_videos=False,
             )
             mock_prefetch.assert_called_once()
@@ -49,14 +49,14 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec={
+                cross_embodiment_description={
                     "robot_id": {DataType.RGB_IMAGES: [], DataType.DEPTH_IMAGES: []}
                 },
                 prefetch_videos=False,
             )
             mock_prefetch.assert_called_once()
 
-        assert synced.robot_data_spec == {
+        assert synced.cross_embodiment_description == {
             "robot_id": {DataType.RGB_IMAGES: [], DataType.DEPTH_IMAGES: []}
         }
 
@@ -151,7 +151,10 @@ class TestSynchronizedDataset:
         sliced = synced_dataset[0:1]
 
         assert sliced.frequency == synced_dataset.frequency
-        assert sliced.robot_data_spec == synced_dataset.robot_data_spec
+        assert (
+            sliced.cross_embodiment_description
+            == synced_dataset.cross_embodiment_description
+        )
 
     def test_iteration(self, synced_dataset, mock_data_requests):
         """Test iterating through synchronized dataset."""
@@ -216,7 +219,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_description=None,
                 prefetch_videos=False,
             )
 
@@ -232,7 +235,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_description=None,
                 prefetch_videos=True,
             )
 
@@ -258,7 +261,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_description=None,
                 prefetch_videos=True,
             )
 
@@ -282,7 +285,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_description=None,
                 prefetch_videos=True,
             )
 
@@ -298,7 +301,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_description=None,
                 prefetch_videos=True,
                 max_prefetch_workers=8,
             )
@@ -357,16 +360,16 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_description=None,
                 prefetch_videos=False,
             )
             mock_prefetch.assert_called_once()
 
-        assert synced.robot_data_spec is None
+        assert synced.cross_embodiment_description is None
 
     def test_multiple_data_types(self, dataset_mock):
         """Test initialization with multiple data types."""
-        robot_data_spec = {
+        cross_embodiment_description = {
             "robot_id": {
                 DataType.RGB_IMAGES: [],
                 DataType.DEPTH_IMAGES: [],
@@ -380,12 +383,12 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=robot_data_spec,
+                cross_embodiment_description=cross_embodiment_description,
                 prefetch_videos=False,
             )
             mock_prefetch.assert_called_once()
 
-        assert synced.robot_data_spec == robot_data_spec
+        assert synced.cross_embodiment_description == cross_embodiment_description
 
     def test_cache_independence_between_instances(
         self, dataset_mock, mock_data_requests
@@ -398,7 +401,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_description=None,
                 prefetch_videos=False,
             )
             mock_prefetch.assert_called_once()
@@ -410,7 +413,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id_2",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_description=None,
                 prefetch_videos=False,
             )
             mock_prefetch.assert_called_once()

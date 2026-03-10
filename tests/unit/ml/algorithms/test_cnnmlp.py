@@ -1,12 +1,15 @@
 import inspect
 import random
+from copy import deepcopy
 from pathlib import Path
 from typing import cast
 
 import pytest
 import torch
 from neuracore_types import (
+    BatchedJointData,
     BatchedNCData,
+    BatchedParallelGripperOpenAmountData,
     CrossEmbodimentDescription,
     DataType,
     ModelInitDescription,
@@ -27,21 +30,38 @@ DEVICE = get_default_device()
 OUTPUT_PREDICTION_HORIZON = 5
 
 
+def _split_dataset_statistics(
+    dataset: PytorchDummyDataset,
+) -> dict[str, dict[DataType, list]]:
+    input_data_types = extract_data_types(dataset.input_cross_embodiment_description)
+    output_data_types = extract_data_types(dataset.output_cross_embodiment_description)
+    return {
+        "input": {
+            data_type: deepcopy(dataset.dataset_statistics[data_type])
+            for data_type in input_data_types
+        },
+        "output": {
+            data_type: deepcopy(dataset.dataset_statistics[data_type])
+            for data_type in output_data_types
+        },
+    }
+
+
 @pytest.fixture
 def pytorch_dummy_dataset() -> PytorchDummyDataset:
     input_data_types = CNNMLP.get_supported_input_data_types()
     output_data_types = CNNMLP.get_supported_output_data_types()
-    input_robot_data_spec: CrossEmbodimentDescription = {
-        "robot_1": {data_type: [] for data_type in input_data_types}
+    input_cross_embodiment_description: CrossEmbodimentDescription = {
+        "robot_1": {data_type: {} for data_type in input_data_types}
     }
-    output_robot_data_spec: CrossEmbodimentDescription = {
-        "robot_1": {data_type: [] for data_type in output_data_types}
+    output_cross_embodiment_description: CrossEmbodimentDescription = {
+        "robot_1": {data_type: {} for data_type in output_data_types}
     }
 
     dataset = PytorchDummyDataset(
         num_samples=5,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
         output_prediction_horizon=OUTPUT_PREDICTION_HORIZON,
     )
     return dataset
@@ -49,19 +69,19 @@ def pytorch_dummy_dataset() -> PytorchDummyDataset:
 
 @pytest.fixture
 def pytorch_dummy_dataset_no_proprio() -> PytorchDummyDataset:
-    input_robot_data_spec: CrossEmbodimentDescription = {
-        "robot_1": {DataType.RGB_IMAGES: []}
+    input_cross_embodiment_description: CrossEmbodimentDescription = {
+        "robot_1": {DataType.RGB_IMAGES: {}}
     }
-    output_robot_data_spec: CrossEmbodimentDescription = {
+    output_cross_embodiment_description: CrossEmbodimentDescription = {
         "robot_1": {
-            data_type: [] for data_type in CNNMLP.get_supported_output_data_types()
+            data_type: {} for data_type in CNNMLP.get_supported_output_data_types()
         }
     }
 
     dataset = PytorchDummyDataset(
         num_samples=5,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
         output_prediction_horizon=OUTPUT_PREDICTION_HORIZON,
     )
     return dataset
@@ -71,12 +91,16 @@ def pytorch_dummy_dataset_no_proprio() -> PytorchDummyDataset:
 def model_init_description(
     pytorch_dummy_dataset: PytorchDummyDataset,
 ) -> ModelInitDescription:
-    input_data_types = extract_data_types(pytorch_dummy_dataset.input_robot_data_spec)
-    output_data_types = extract_data_types(pytorch_dummy_dataset.output_robot_data_spec)
+    input_data_types = extract_data_types(
+        pytorch_dummy_dataset.input_cross_embodiment_description
+    )
+    output_data_types = extract_data_types(
+        pytorch_dummy_dataset.output_cross_embodiment_description
+    )
     return ModelInitDescription(
         input_data_types=input_data_types,
         output_data_types=output_data_types,
-        dataset_statistics=pytorch_dummy_dataset.dataset_statistics,
+        dataset_statistics=_split_dataset_statistics(pytorch_dummy_dataset),
         output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
     )
 
@@ -86,15 +110,15 @@ def model_init_description_no_proprio(
     pytorch_dummy_dataset_no_proprio: PytorchDummyDataset,
 ) -> ModelInitDescription:
     input_data_types = extract_data_types(
-        pytorch_dummy_dataset_no_proprio.input_robot_data_spec
+        pytorch_dummy_dataset_no_proprio.input_cross_embodiment_description
     )
     output_data_types = extract_data_types(
-        pytorch_dummy_dataset_no_proprio.output_robot_data_spec
+        pytorch_dummy_dataset_no_proprio.output_cross_embodiment_description
     )
     return ModelInitDescription(
         input_data_types=input_data_types,
         output_data_types=output_data_types,
-        dataset_statistics=pytorch_dummy_dataset_no_proprio.dataset_statistics,
+        dataset_statistics=_split_dataset_statistics(pytorch_dummy_dataset_no_proprio),
         output_prediction_horizon=pytorch_dummy_dataset_no_proprio.output_prediction_horizon,
     )
 
@@ -171,6 +195,7 @@ def sample_training_batch_no_proprio(
 def test_model_construction(
     model_init_description: ModelInitDescription, model_config: dict
 ):
+    assert set(model_init_description.dataset_statistics.keys()) == {"input", "output"}
     model = CNNMLP(model_init_description, **model_config)
     model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
@@ -191,6 +216,11 @@ def test_model_forward(
         assert isinstance(tensors, list)
         for tensor in tensors:
             assert isinstance(tensor, BatchedNCData)
+
+    expected_output_width = dict(model.output_layout)
+    assert set(output.keys()) == set(model.ordered_output_data_types)
+    for data_type, tensors in output.items():
+        assert len(tensors) == expected_output_width[data_type]
 
 
 def test_model_forward_without_proprioception(
@@ -255,6 +285,93 @@ def test_model_backward_without_proprioception(
         if param.requires_grad:
             assert param.grad is not None, f"Gradient for {name} is None"
             assert torch.isfinite(param.grad).all()
+
+
+def test_model_supports_input_output_count_divergence(
+    model_init_description: ModelInitDescription,
+):
+    input_stats = deepcopy(model_init_description.dataset_statistics["input"])
+    output_stats = {
+        DataType.JOINT_TARGET_POSITIONS: deepcopy(
+            model_init_description.dataset_statistics["output"][
+                DataType.JOINT_TARGET_POSITIONS
+            ][:1]
+        )
+    }
+    model_init = ModelInitDescription(
+        input_data_types=model_init_description.input_data_types,
+        output_data_types={DataType.JOINT_TARGET_POSITIONS},
+        dataset_statistics={"input": input_stats, "output": output_stats},
+        output_prediction_horizon=model_init_description.output_prediction_horizon,
+    )
+
+    model = CNNMLP(model_init)
+
+    joint_encoder = cast(nn.Linear, model.encoders[DataType.JOINT_POSITIONS])
+    assert joint_encoder.in_features == len(input_stats[DataType.JOINT_POSITIONS])
+    assert model.max_output_size == 1
+    assert model.output_layout == [(DataType.JOINT_TARGET_POSITIONS, 1)]
+
+
+def test_training_step_uses_deterministic_output_order(
+    model_init_description: ModelInitDescription,
+    sample_training_batch: BatchedTrainingSamples,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    model = CNNMLP(model_init_description).to(DEVICE)
+    batch = sample_training_batch.to(DEVICE)
+
+    reversed_output_types = list(reversed(list(batch.outputs.keys())))
+    reordered_batch = BatchedTrainingSamples(
+        inputs=batch.inputs,
+        inputs_mask=batch.inputs_mask,
+        outputs={
+            data_type: batch.outputs[data_type] for data_type in reversed_output_types
+        },
+        outputs_mask={
+            data_type: batch.outputs_mask[data_type]
+            for data_type in reversed_output_types
+        },
+        batch_size=batch.batch_size,
+    )
+
+    expected_targets = []
+    for data_type in model.ordered_output_data_types:
+        if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+            joints = cast(list[BatchedJointData], reordered_batch.outputs[data_type])
+            expected_targets.extend([joint.value for joint in joints])
+        else:
+            grippers = cast(
+                list[BatchedParallelGripperOpenAmountData],
+                reordered_batch.outputs[data_type],
+            )
+            expected_targets.extend([gripper.open_amount for gripper in grippers])
+    expected_action_data = torch.cat(expected_targets, dim=-1).view(
+        reordered_batch.batch_size, model.output_prediction_horizon, -1
+    )
+
+    captured: dict[str, torch.Tensor] = {}
+
+    def capture_normalize(tensor: torch.Tensor) -> torch.Tensor:
+        captured["action_data"] = tensor.detach().clone()
+        return tensor
+
+    def fake_predict_action(_: BatchedInferenceInputs) -> torch.Tensor:
+        return torch.zeros(
+            (
+                reordered_batch.batch_size,
+                model.output_prediction_horizon,
+                model.max_output_size,
+            ),
+            device=model.device,
+            dtype=torch.float32,
+        )
+
+    monkeypatch.setattr(model.action_normalizer, "normalize", capture_normalize)
+    monkeypatch.setattr(model, "_predict_action", fake_predict_action)
+
+    model.training_step(reordered_batch)
+    assert torch.allclose(captured["action_data"], expected_action_data)
 
 
 def test_run_validation(tmp_path: Path, mock_login):
