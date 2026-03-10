@@ -147,6 +147,65 @@ def test_connect_inactive_endpoint(
         nc.policy_remote_server("test_endpoint")
 
 
+def test_connect_active_endpoint_with_duplicate_name(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """Test connecting to active endpoint when duplicate names exist."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot")
+
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints",
+        json=[
+            {"id": "inactive_endpoint_id", "name": "test_endpoint", "status": "failed"},
+            {"id": "active_endpoint_id", "name": "test_endpoint", "status": "active"},
+        ],
+        status_code=200,
+    )
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints/active_endpoint_id/predict",
+        json=FAKE_PREDICTED_DATA_JSON,
+        status_code=200,
+    )
+
+    endpoint = nc.policy_remote_server("test_endpoint")
+
+    nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
+    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
+
+    preds = endpoint.predict()
+    assert DataType.JOINT_TARGET_POSITIONS in preds
+    assert (
+        preds[DataType.JOINT_TARGET_POSITIONS].keys()
+        == FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].keys()
+    )
+
+
+def test_connect_multiple_active_endpoints_with_duplicate_name(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """Test error when multiple active endpoints have the same name."""
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints",
+        json=[
+            {"id": "active_endpoint_1", "name": "test_endpoint", "status": "active"},
+            {"id": "active_endpoint_2", "name": "test_endpoint", "status": "active"},
+        ],
+        status_code=200,
+    )
+
+    with pytest.raises(
+        Exception, match="Multiple active endpoints found with name test_endpoint"
+    ):
+        nc.policy_remote_server("test_endpoint")
+
+
 def test_connect_local_endpoint(
     temp_config_dir,
     mock_model_mar,
