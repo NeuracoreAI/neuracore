@@ -58,12 +58,14 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         dataset_dir: Path,
         dataset_config: DatasetImportConfig,
         joint_info: dict[str, JointInfo] = {},
-        ik_urdf_path: str | None = None,
+        urdf_path: str | None = None,
         ik_init_config: list[float] | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
         max_workers: int | None = 1,
         skip_on_error: str = "episode",
+        storage_limit: int = 5 * 1024**3,
+        random_sample: int | None = None,
     ):
         """Initialize the RLDS/TFDS dataset importer.
 
@@ -73,13 +75,15 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             dataset_dir: Directory containing the dataset.
             dataset_config: Dataset configuration.
             joint_info: Joint info to use for validation.
-            ik_urdf_path: URDF path for IK (used to recreate IK in worker processes).
+            urdf_path: URDF path for robot utilities.
             ik_init_config: Initial joint configuration for IK.
             dry_run: If True, skip actual logging (validation only).
             suppress_warnings: If True, suppress warning messages.
             max_workers: Maximum number of worker processes.
             skip_on_error: "episode" to skip a failed episode; "step" to skip only
                 failing steps; "all" to abort on the first error.
+            random_sample: If set, import only this many episodes chosen at random.
+            storage_limit: If set, pause when disk usage reaches this (bytes).
         """
         super().__init__(
             dataset_dir=dataset_dir,
@@ -87,11 +91,13 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             output_dataset_name=output_dataset_name,
             max_workers=max_workers,
             joint_info=joint_info,
-            ik_urdf_path=ik_urdf_path,
+            urdf_path=urdf_path,
             ik_init_config=ik_init_config,
             dry_run=dry_run,
             suppress_warnings=suppress_warnings,
             skip_on_error=skip_on_error,
+            random_sample=random_sample,
+            storage_limit=storage_limit,
         )
         self.dataset_name = input_dataset_name
         self.builder_dir = self._resolve_builder_dir()
@@ -189,6 +195,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
 
     def import_item(self, item: ImportItem) -> None:
         """Import a single episode to the dataset importer."""
+        self._reset_episode_state()
         if self._episode_iter is None:
             raise ImportError("Worker dataset iterator was not initialized.")
 
@@ -224,6 +231,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             item.index, step=0, total_steps=total_steps, episode_label=episode_label
         )
         for idx, step in enumerate(steps, start=1):
+            self._reset_step_state()
             timestamp = base_time + (idx / self.frequency)
             try:
                 self._record_step(step, timestamp)
@@ -442,7 +450,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
 
     def _record_step(self, step_data: dict, timestamp: float) -> None:
         """Record a single step to Neuracore."""
-        for data_type, import_config in self.dataset_config.data_import_config.items():
+        for data_type, import_config in self.ordered_import_configs:
             source = self._resolve_source_path(step_data, import_config.source)
 
             for item in import_config.mapping:
@@ -560,12 +568,14 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
         dataset_dir: Path,
         dataset_config: DatasetImportConfig,
         joint_info: dict[str, JointInfo] = {},
-        ik_urdf_path: str | None = None,
+        urdf_path: str | None = None,
         ik_init_config: list[float] | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
         max_workers: int | None = 1,
         skip_on_error: str = "episode",
+        storage_limit: int = 5 * 1024**3,
+        random_sample: int | None = None,
     ):
         """Initialize the RLDS/TFDS dataset importer.
 
@@ -575,13 +585,15 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             dataset_dir: Directory containing the dataset.
             dataset_config: Dataset configuration.
             joint_info: Joint info to use for validation.
-            ik_urdf_path: URDF path for IK (used to recreate IK in worker processes).
+            urdf_path: URDF path for robot utilities.
             ik_init_config: Initial joint configuration for IK.
             dry_run: If True, skip actual logging (validation only).
             suppress_warnings: If True, suppress warning messages.
             max_workers: Maximum number of worker processes.
             skip_on_error: "episode" to skip a failed episode; "step" to skip only
                 failing steps; "all" to abort on the first error.
+            random_sample: If set, import only this many episodes chosen at random.
+            storage_limit: If set, pause when disk usage reaches this (bytes).
         """
         super().__init__(
             input_dataset_name=input_dataset_name,
@@ -589,12 +601,14 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             dataset_dir=dataset_dir,
             dataset_config=dataset_config,
             joint_info=joint_info,
-            ik_urdf_path=ik_urdf_path,
+            urdf_path=urdf_path,
             ik_init_config=ik_init_config,
             dry_run=dry_run,
             suppress_warnings=suppress_warnings,
             max_workers=max_workers,
             skip_on_error=skip_on_error,
+            random_sample=random_sample,
+            storage_limit=storage_limit,
         )
 
 

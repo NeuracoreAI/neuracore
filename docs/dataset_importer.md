@@ -241,12 +241,13 @@ The importer supports the following data types:
         inverted: true
   ```
 
-- **JOINT_TARGET_POSITIONS**: Target joint positions issued to the robot
+- **JOINT_TARGET_POSITIONS**: Target joint positions issued to the robot (if action type is relative, the action values will be added on top of the current joint positions)
   
   ```yaml
   JOINT_TARGET_POSITIONS:
     source: action.target_joints
     format:
+      action_type: ABSOLUTE # ABSOLUTE | RELATIVE
       angle_units: RADIANS
     mapping:
       - name: joint_1
@@ -455,12 +456,28 @@ JOINT_POSITIONS:
       quaternion_order: XYZW
       angle_units: RADIANS
   mapping:
-    - name: end_effector
+    - name: ee_frame_name
       index_range:
         start: 0
         end: 7
 ```
 
+**Forward Kinematics (FK) for End-effector Poses**
+
+When `ee_pose_type: JOINT_POSITIONS` is specified, the importer uses forward kinematics to convert joint positions to end-effector poses. This requires:
+
+- A valid URDF or MJCF file with the robot model
+- An end-effector frame name (obtained from mapping `name`)
+- JOINT_POSITIONS being imported
+
+```yaml
+END_EFFECTOR_POSES:
+  source: observation.state
+  format:
+    ee_pose_type: JOINT_POSITIONS
+  mapping:
+    - name: ee_frame_name
+```
 
 **Visual Joint Positions from Gripper**
 

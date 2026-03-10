@@ -74,7 +74,35 @@ data_import_config:
         index_range:
           start: 0
           end: 7
-
+    
+  JOINT_TARGET_POSITIONS:
+    source: action.target_joints # path to the data in the input dataset
+    format:
+      action_type: ABSOLUTE # ABSOLUTE | RELATIVE
+      angle_units: RADIANS # RADIANS | DEGREES
+    mapping:
+      - name: joint_1
+      - name: joint_2
+      - name: joint_3
+      - name: joint_4
+  
+  JOINT_TARGET_POSITIONS:
+    source: action.target_pose # path to the data in the input dataset
+    format:
+      action_type: ABSOLUTE # ABSOLUTE | RELATIVE
+      joint_position_type: END_EFFECTOR # END_EFFECTOR | CUSTOM, When using END_EFFECTOR, we will use the inverse kinematics to convert the end effector pose to joint positions.
+      ik_init_config: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # initial joint configuration for the inverse kinematics
+      pose_type: POSITION_ORIENTATION # POSITION_ORIENTATION | MATRIX
+      orientation:
+        type: QUATERNION # QUATERNION | EULER | MATRIX | AXIS_ANGLE
+        quaternion_order: XYZW # XYZW | WXYZ
+        angle_units: RADIANS # RADIANS | DEGREES
+    mapping:
+      - name: end_effector
+        index_range:
+          start: 0
+          end: 7
+  
   JOINT_VELOCITIES:
     source: observation.state_vel # path to the data in the input dataset
     format:

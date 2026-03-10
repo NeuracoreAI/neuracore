@@ -6,7 +6,9 @@ import inspect
 import logging
 import multiprocessing as mp
 import os
+import random
 import threading
+import time
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
@@ -16,9 +18,13 @@ from queue import Empty
 from typing import Any
 
 import numpy as np
-from neuracore_types.importer.config import JointPositionTypeConfig
+from neuracore_types.importer.config import (
+    ActionTypeConfig,
+    EndEffectorPoseTypeConfig,
+    JointPositionTypeConfig,
+)
 from neuracore_types.importer.data_config import DataFormat
-from neuracore_types.nc_data import DatasetImportConfig, DataType
+from neuracore_types.nc_data import DatasetImportConfig, DataType, NCDataImportConfig
 from neuracore_types.nc_data.nc_data import MappingItem
 from rich.console import Console
 from rich.progress import (
@@ -34,7 +40,8 @@ from rich.progress import (
 
 import neuracore as nc
 from neuracore.core.robot import JointInfo
-from neuracore.importer.core.inverse_kinematics import InverseKinematics
+from neuracore.data_daemon.const import DEFAULT_RECORDING_ROOT_PATH
+from neuracore.importer.core.robot_utils import Robot
 from neuracore.importer.core.validation import (
     JOINT_DATA_TYPES,
     validate_depth_images,
@@ -92,6 +99,8 @@ def get_shared_console() -> Console:
 class NeuracoreDatasetImporter(ABC):
     """Importer workflow that manages workers and Neuracore session setup."""
 
+    DISK_CHECK_INTERVAL_SECS: float = 10.0
+
     def __init__(
         self,
         dataset_dir: Path,
@@ -102,23 +111,46 @@ class NeuracoreDatasetImporter(ABC):
         skip_on_error: str = "episode",
         progress_interval: int = 1,
         joint_info: dict[str, JointInfo] = {},
-        ik_urdf_path: str | None = None,
+        urdf_path: str | None = None,
         ik_init_config: list[float] | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
+        storage_limit: int = 5 * 1024**3,
+        random_sample: int | None = None,
     ) -> None:
-        """Initialize the base dataset importer."""
+        """Initialize the base dataset importer.
+
+        Args:
+            dataset_dir: Root directory of the source dataset.
+            dataset_config: Dataset configuration (robot, frequency, etc.).
+            output_dataset_name: Name of the dataset to create.
+            max_workers: Maximum number of worker processes; None for auto.
+            min_workers: Minimum number of workers to use.
+            skip_on_error: "episode" to skip a failed episode; "step" to skip only
+                failing steps; "all" to abort on the first error.
+            progress_interval: Emit progress updates every this many items (>= 1).
+            joint_info: Joint name -> JointInfo for validation.
+            urdf_path: Optional URDF path for robot utilities.
+            ik_init_config: Optional initial joint configuration for IK.
+            dry_run: If True, skip actual recording (validation only).
+            suppress_warnings: If True, suppress warning messages.
+            storage_limit: Pause workers when disk usage (used bytes)
+                on the recording filesystem reaches this value (bytes).
+            random_sample: If set, import only this many items chosen at random.
+        """
         self.dataset_dir = Path(dataset_dir)
         self.dataset_config = dataset_config
+        self.ordered_import_configs = self._get_ordered_import_configs()
         self.data_config = dataset_config  # Backwards-compat alias used by callers
         self.output_dataset_name = output_dataset_name
         self.robot_name = dataset_config.robot.name
         self.frequency = dataset_config.frequency
         self.joint_info = joint_info
-        self.ik_urdf_path = ik_urdf_path
+        self.urdf_path = urdf_path
         self.ik_init_config = ik_init_config
-        self.ik: InverseKinematics | None = None
+        self.robot: Robot | None = None
         self.prev_ik_solution: list[float] | None = None
+        self.curr_joint_positions: dict[str, float] = {}
 
         if skip_on_error not in {"episode", "step", "all"}:
             raise ValueError("skip_on_error must be one of: 'episode', 'step', 'all'")
@@ -129,6 +161,8 @@ class NeuracoreDatasetImporter(ABC):
         self.progress_interval = max(1, progress_interval)
         self.dry_run = dry_run
         self.suppress_warnings = suppress_warnings
+        self.storage_limit = storage_limit
+        self.random_sample = random_sample
         self.worker_errors: list[WorkerError] = []
         self._logged_error_keys: set[tuple[int | None, int | None, str]] = set()
         self.logger = logging.getLogger(
@@ -153,6 +187,55 @@ class NeuracoreDatasetImporter(ABC):
     def _reset_episode_state(self) -> None:
         """Reset episode-specific state at the start of each episode."""
         self.prev_ik_solution = self.ik_init_config
+
+    def _reset_step_state(self) -> None:
+        """Reset step-specific state at the start of each step."""
+        self.curr_joint_positions = {}
+
+    def _get_ordered_import_configs(self) -> list[tuple[DataType, NCDataImportConfig]]:
+        """Get the ordered import configurations for the dataset.
+
+        If both FK and IK are requested, an error is raised.
+        Otherwise, process joint positions first, then end effector poses
+
+        Returns:
+            List of tuples of (DataType, NCDataImportConfig) in the order
+            they should be processed.
+        """
+        data_import_config = self.dataset_config.data_import_config
+        joint_position_config = data_import_config.get(DataType.JOINT_POSITIONS, None)
+        end_effector_pose_config = data_import_config.get(
+            DataType.END_EFFECTOR_POSES, None
+        )
+
+        if joint_position_config is None:
+            fk_requested = False
+        else:
+            fk_requested = (
+                joint_position_config.format.joint_position_type
+                == JointPositionTypeConfig.END_EFFECTOR
+            )
+        if end_effector_pose_config is None:
+            ik_requested = False
+        else:
+            ik_requested = (
+                end_effector_pose_config.format.ee_pose_type
+                == EndEffectorPoseTypeConfig.JOINT_POSITIONS
+            )
+
+        ordered_items = list(data_import_config.items())
+        if fk_requested and ik_requested:
+            raise ImportError("Cannot request both FK and IK at the same time.")
+        else:
+            ordered_items = sorted(
+                list(data_import_config.items()),
+                key=lambda x: (
+                    x[0] != DataType.JOINT_POSITIONS,
+                    x[0] != DataType.END_EFFECTOR_POSES,
+                    x[0].value,
+                ),
+            )
+        return ordered_items
 
     def _validate_input_data(
         self, data_type: DataType, data: Any, format: DataFormat
@@ -232,6 +315,11 @@ class NeuracoreDatasetImporter(ABC):
                 and format.joint_position_type == JointPositionTypeConfig.END_EFFECTOR
             ):
                 self._validate_input_data(DataType.POSES, source_data, format)
+            elif (
+                data_type == DataType.END_EFFECTOR_POSES
+                and format.ee_pose_type == EndEffectorPoseTypeConfig.JOINT_POSITIONS
+            ):
+                pass
             else:
                 self._validate_input_data(data_type, source_data, format)
         except DataValidationWarning as w:
@@ -244,24 +332,55 @@ class NeuracoreDatasetImporter(ABC):
             raise
 
         try:
-            transformed_data = item.transforms(source_data)
+            if not (
+                data_type == DataType.END_EFFECTOR_POSES
+                and format.ee_pose_type == EndEffectorPoseTypeConfig.JOINT_POSITIONS
+            ):
+                transformed_data = item.transforms(source_data)
+
             if (
                 data_type == DataType.JOINT_POSITIONS
                 and format.joint_position_type == JointPositionTypeConfig.END_EFFECTOR
             ):
-                if self.ik is None:
+                if self.robot is None:
                     raise ImporterError(
                         "Failed to convert end effector pose to joint positions: "
-                        "Inverse Kinematics is not initialized"
+                        "Robot utilities are not initialized"
                     )
-                transformed_data = self.ik.end_effector_to_joint_positions(
+                transformed_data = self.robot.end_effector_to_joint_positions(
                     transformed_data, item.name, self.prev_ik_solution
                 )
                 self.prev_ik_solution = list(transformed_data.values())
                 for name, position in transformed_data.items():
+                    if format.action_type == ActionTypeConfig.RELATIVE:
+                        if name not in self.curr_joint_positions:
+                            raise DataValidationError(
+                                f"Joint position {name} not found in "
+                                "current joint positions"
+                            )
+                        position += self.curr_joint_positions[name]
                     self._validate_joint_data(data_type, position, name)
+            elif (
+                data_type == DataType.END_EFFECTOR_POSES
+                and format.ee_pose_type == EndEffectorPoseTypeConfig.JOINT_POSITIONS
+            ):
+                if self.robot is None:
+                    raise ImporterError(
+                        "Failed to convert joint positions to end effector pose: "
+                        "Robot utilities are not initialized"
+                    )
+                transformed_data = self.robot.joint_positions_to_end_effector_pose(
+                    self.curr_joint_positions, item.name
+                )
             else:
                 if data_type in JOINT_DATA_TYPES and self.joint_info:
+                    if format.action_type == ActionTypeConfig.RELATIVE:
+                        if item.name not in self.curr_joint_positions:
+                            raise DataValidationError(
+                                f"Joint position {item.name} not found in "
+                                "current joint positions"
+                            )
+                        transformed_data += self.curr_joint_positions[item.name]
                     self._validate_joint_data(data_type, transformed_data, item.name)
         except DataValidationWarning as w:
             if not self.suppress_warnings:
@@ -367,6 +486,7 @@ class NeuracoreDatasetImporter(ABC):
                 dry_run=self.dry_run,
             )
         elif data_type == DataType.JOINT_POSITIONS:
+            self.curr_joint_positions[name] = transformed_data
             nc.log_joint_position(
                 name=name,
                 position=transformed_data,
@@ -464,9 +584,9 @@ class NeuracoreDatasetImporter(ABC):
         nc.login()
         nc.connect_robot(self.robot_name, instance=worker_id)
         nc.get_dataset(self.output_dataset_name)
-        if self.ik_urdf_path is not None:
-            ik_packages_dir = os.path.dirname(self.ik_urdf_path)
-            self.ik = InverseKinematics(self.ik_urdf_path, ik_packages_dir)
+        if self.urdf_path is not None:
+            urdf_packages_dir = os.path.dirname(self.urdf_path)
+            self.robot = Robot(self.urdf_path, urdf_packages_dir)
 
     def import_all(self) -> None:
         """Run imports across workers while aggregating errors.
@@ -483,12 +603,22 @@ class NeuracoreDatasetImporter(ABC):
             self.logger.info("No import items found; nothing to do.")
             return
 
+        if self.random_sample is not None:
+            n = min(self.random_sample, len(items))
+            items = random.sample(items, n)
+            self.logger.info(
+                "Sampling %s random episode(s) from %s episodes.",
+                n,
+                len(items),
+            )
+
         worker_count = self._resolve_worker_count(len(items))
         self.logger.info(f"Using {worker_count} workers")
 
         ctx = mp.get_context("spawn")
         error_queue: mp.Queue[WorkerError] = ctx.Queue()
         progress_queue: mp.Queue[ProgressUpdate] = ctx.Queue()
+        pause_event = ctx.Event()  # when set, workers pause at next item boundary
         chunks = self._partition(items, worker_count)
         non_empty_chunks = [(wid, c) for wid, c in enumerate(chunks) if c]
         ready_barrier = ctx.Barrier(len(non_empty_chunks))
@@ -503,12 +633,13 @@ class NeuracoreDatasetImporter(ABC):
                     error_queue,
                     progress_queue,
                     ready_barrier,
+                    pause_event,
                 ),
             )
             process.start()
             processes.append(process)
 
-        self._monitor_progress(processes, progress_queue)
+        self._monitor_progress(processes, progress_queue, len(items), pause_event)
 
         for process in processes:
             process.join()
@@ -558,13 +689,15 @@ class NeuracoreDatasetImporter(ABC):
         error_queue: mp.Queue,
         progress_queue: mp.Queue | None,
         ready_barrier: mp.synchronize.Barrier | None = None,
+        pause_event: mp.synchronize.Event | None = None,
     ) -> None:
         """Worker body that wraps import with error capture.
 
         All workers prepare first, then synchronise on *ready_barrier*
         before any of them starts importing items.  If any worker fails
         during preparation it aborts the barrier so the remaining workers
-        can exit promptly.
+        can exit promptly. When *pause_event* is set (e.g. low disk),
+        workers block at item boundaries until it is cleared.
         """
         self._worker_id = worker_id
         self._progress_queue = progress_queue
@@ -597,6 +730,8 @@ class NeuracoreDatasetImporter(ABC):
                 return
 
         for idx, item in enumerate(chunk):
+            while pause_event is not None and pause_event.is_set():
+                time.sleep(1)
             try:
                 self._step(item, worker_id, idx, len(chunk), error_queue)
             except Exception as exc:  # noqa: BLE001 - keep traceback for summary
@@ -743,22 +878,62 @@ class NeuracoreDatasetImporter(ABC):
         except Exception:  # noqa: BLE001 - best-effort progress updates
             self.logger.debug("Failed to emit progress update.", exc_info=True)
 
+    @staticmethod
+    def _format_bytes(num_bytes: int | float) -> str:
+        """Format a byte count into a human-readable string."""
+        for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+            if abs(num_bytes) < 1024:
+                return f"{num_bytes:.1f} {unit}"
+            num_bytes /= 1024
+        return f"{num_bytes:.1f} PiB"
+
+    def _get_disk_check_path(self) -> Path:
+        """Return the filesystem path to monitor for disk/folder usage.
+
+        Defaults to the daemon recording directory.
+        """
+        return DEFAULT_RECORDING_ROOT_PATH
+
+    def _get_disk_usage(self) -> int:
+        """Return total size in bytes of the monitored folder."""
+        path = self._get_disk_check_path()
+        if not path.exists():
+            return 0
+        total_size = 0
+        if path.is_file():
+            return path.stat().st_size
+        for dirpath, dirnames, filenames in os.walk(path):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                try:
+                    total_size += os.path.getsize(fp)
+                except (OSError, FileNotFoundError):
+                    pass  # Skip files that disappear or can't be accessed
+        return total_size
+
     def _monitor_progress(
         self,
         processes: Sequence[mp.context.SpawnProcess],
         progress_queue: mp.Queue[ProgressUpdate],
+        total_items: int,
+        pause_event: mp.synchronize.Event | None = None,
     ) -> None:
-        """Render rich progress bars based on worker updates."""
+        """Render a progress bar by aggregating all worker updates.
+
+        Workers are paused when disk usage reaches storage_limit until
+        usage drops below it.
+        """
         if not processes:
             return
 
-        task_map: dict[int, TaskID] = {}
-        current_items: dict[int, int] = {}
+        completed_items: set[int] = set()
+        worker_states: dict[int, ProgressUpdate] = {}
+        last_disk_check = 0.0
+        workers_paused = False
 
         with Progress(
             SpinnerColumn(style="cyan"),
-            TextColumn("[bold blue]Worker {task.fields[worker]}"),
-            TextColumn("| Episode {task.fields[episode]}"),
+            TextColumn("[bold blue]{task.description}"),
             BarColumn(bar_width=None, complete_style="green", pulse_style="cyan"),
             MofNCompleteColumn(),
             TimeElapsedColumn(),
@@ -767,7 +942,58 @@ class NeuracoreDatasetImporter(ABC):
             transient=True,
             console=get_shared_console(),
         ) as progress:
+            overall_task = progress.add_task("Importing episodes", total=total_items)
+
             while True:
+                now = time.monotonic()
+                if now - last_disk_check >= self.DISK_CHECK_INTERVAL_SECS:
+                    last_disk_check = now
+                    try:
+                        used_bytes = self._get_disk_usage()
+                        pct_used = used_bytes / self.storage_limit * 100
+                        used_str = self._format_bytes(used_bytes)
+                        limit_str = self._format_bytes(self.storage_limit)
+
+                        if used_bytes >= self.storage_limit:
+                            if pause_event is not None and not workers_paused:
+                                workers_paused = True
+                                pause_event.set()
+                                self.logger.warning(
+                                    "Local cache limit exceeded "
+                                    f"({used_str} of {limit_str}). "
+                                    "Pausing workers until usage drops below limit."
+                                )
+                            progress.update(
+                                overall_task,
+                                description=(
+                                    f"Paused ({pct_used:.0f}% of local cache used: "
+                                    f"{used_str} / {limit_str}). "
+                                    "Waiting for recordings to upload to cloud "
+                                    "and free up local cache."
+                                ),
+                            )
+                            time.sleep(self.DISK_CHECK_INTERVAL_SECS)
+                            continue
+                        else:
+                            if workers_paused and pause_event is not None:
+                                workers_paused = False
+                                pause_event.clear()
+                                self.logger.info(
+                                    "Local cache usage below limit "
+                                    f"({used_str} of {limit_str}). "
+                                    "Resuming import."
+                                )
+                            progress.update(
+                                overall_task,
+                                description=(
+                                    f"Importing episodes "
+                                    f"({pct_used:.0f}% of local cache used: "
+                                    f"{used_str} / {limit_str})."
+                                ),
+                            )
+                    except Exception:  # noqa: BLE001 - best-effort disk check
+                        pass
+
                 any_alive = any(proc.is_alive() for proc in processes)
                 timeout = 0.1 if any_alive else 0
                 try:
@@ -777,61 +1003,48 @@ class NeuracoreDatasetImporter(ABC):
 
                 if update is not None:
                     self._apply_progress_update(
-                        progress, task_map, current_items, update
+                        progress,
+                        overall_task,
+                        completed_items,
+                        worker_states,
+                        update,
                     )
 
                 if not any_alive:
-                    # Drain remaining updates before exiting.
                     while True:
                         try:
                             update = progress_queue.get_nowait()
                         except Empty:
-                            return
+                            break
                         self._apply_progress_update(
-                            progress, task_map, current_items, update
+                            progress,
+                            overall_task,
+                            completed_items,
+                            worker_states,
+                            update,
                         )
+                    progress.update(overall_task, completed=total_items)
+                    return
 
     def _apply_progress_update(
         self,
         progress: Progress,
-        task_map: dict[int, TaskID],
-        current_items: dict[int, int],
+        overall_task: TaskID,
+        completed_items: set[int],
+        worker_states: dict[int, ProgressUpdate],
         update: ProgressUpdate,
     ) -> None:
-        """Update or create the progress task for a worker."""
-        desc = update.episode_label or str(update.item_index)
-        task_id = task_map.get(update.worker_id)
+        """Process a single progress update and refresh the unified bar."""
+        prev = worker_states.get(update.worker_id)
+        if prev is not None and prev.item_index != update.item_index:
+            completed_items.add(prev.item_index)
 
-        if task_id is None:
-            task_id = progress.add_task(
-                f"Episode {desc}",
-                total=update.total_steps,
-                completed=update.step,
-                worker=update.worker_id,
-                episode=desc,
-            )
-            task_map[update.worker_id] = task_id
-            current_items[update.worker_id] = update.item_index
-            return
+        if update.total_steps is not None and update.step >= update.total_steps:
+            completed_items.add(update.item_index)
 
-        if current_items.get(update.worker_id) != update.item_index:
-            current_items[update.worker_id] = update.item_index
-            progress.update(
-                task_id,
-                total=update.total_steps,
-                completed=update.step,
-                description=f"Episode {desc}",
-                worker=update.worker_id,
-                episode=desc,
-                refresh=True,
-            )
-            return
+        worker_states[update.worker_id] = update
 
         progress.update(
-            task_id,
-            total=update.total_steps,
-            completed=update.step,
-            description=f"Episode {desc}",
-            episode=desc,
-            refresh=True,
+            overall_task,
+            completed=len(completed_items),
         )
