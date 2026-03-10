@@ -26,7 +26,7 @@ from neuracore.importer.core.exceptions import (
     DatasetOperationError,
     ImporterError,
 )
-from neuracore.importer.core.inverse_kinematics import InverseKinematics
+from neuracore.importer.core.robot_utils import Robot
 from neuracore.importer.core.utils import populate_robot_info
 from neuracore.importer.core.validation import (
     validate_dataset_config_against_robot_model,
@@ -144,6 +144,8 @@ def _run_import(
     skip_on_error: str = "episode",
     suppress_validation_warnings: bool = False,
     max_workers: int | None = 1,
+    storage_limit: int = 5 * 1024**3,
+    random_sample: int | None = None,
 ) -> None:
     """Execute the dataset import workflow."""
     args = SimpleNamespace(
@@ -155,6 +157,8 @@ def _run_import(
         skip_on_error=skip_on_error,
         no_validation_warnings=suppress_validation_warnings,
         max_workers=max_workers,
+        random_sample=random_sample,
+        storage_limit=storage_limit,
     )
 
     cli_args_validation(args)
@@ -243,7 +247,6 @@ def _run_import(
         validate_dataset_config_against_robot_model(dataconfig, robot.joint_info)
         dataconfig = populate_robot_info(dataconfig, robot.joint_info)
 
-    ik_urdf_path = None
     ik_init_config = None
     if urdf_path:
         if DataType.JOINT_POSITIONS in dataconfig.data_import_config:
@@ -254,11 +257,10 @@ def _run_import(
                 format_config.joint_position_type
                 == JointPositionTypeConfig.END_EFFECTOR
             ):
-                ik_urdf_path = urdf_path
                 ik_init_config = format_config.ik_init_config
                 try:
-                    ik_packages_dir = os.path.dirname(urdf_path)
-                    InverseKinematics(ik_urdf_path, ik_packages_dir)
+                    urdf_packages_dir = os.path.dirname(urdf_path)
+                    Robot(urdf_path, urdf_packages_dir)
                 except Exception as exc:
                     raise ConfigLoadError(
                         f"Failed to initialize Inverse Kinematics: {exc}"
@@ -276,12 +278,14 @@ def _run_import(
             dataset_dir=args.dataset_dir,
             dataset_config=dataconfig,
             joint_info=robot.joint_info,
-            ik_urdf_path=ik_urdf_path,
+            urdf_path=urdf_path,
             ik_init_config=ik_init_config,
             dry_run=args.dry_run,
             suppress_warnings=args.no_validation_warnings,
             max_workers=args.max_workers,
             skip_on_error=skip_on_error,
+            random_sample=args.random_sample,
+            storage_limit=args.storage_limit,
         )
         importer.import_all()
     elif dataset_type == DatasetTypeConfig.RLDS:
@@ -292,12 +296,14 @@ def _run_import(
             dataset_dir=dataset_dir,
             dataset_config=dataconfig,
             joint_info=robot.joint_info,
-            ik_urdf_path=ik_urdf_path,
+            urdf_path=urdf_path,
             ik_init_config=ik_init_config,
             dry_run=args.dry_run,
             suppress_warnings=args.no_validation_warnings,
             max_workers=args.max_workers,
             skip_on_error=skip_on_error,
+            random_sample=args.random_sample,
+            storage_limit=args.storage_limit,
         )
         importer.import_all()
     elif dataset_type == DatasetTypeConfig.LEROBOT:
@@ -308,12 +314,14 @@ def _run_import(
             dataset_dir=dataset_dir,
             dataset_config=dataconfig,
             joint_info=robot.joint_info,
-            ik_urdf_path=ik_urdf_path,
+            urdf_path=urdf_path,
             ik_init_config=ik_init_config,
             dry_run=args.dry_run,
             suppress_warnings=args.no_validation_warnings,
             max_workers=args.max_workers,
             skip_on_error=skip_on_error,
+            random_sample=args.random_sample,
+            storage_limit=args.storage_limit,
         )
         importer.import_all()
     else:

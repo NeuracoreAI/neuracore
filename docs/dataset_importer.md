@@ -241,12 +241,13 @@ The importer supports the following data types:
         inverted: true
   ```
 
-- **JOINT_TARGET_POSITIONS**: Target joint positions issued to the robot
+- **JOINT_TARGET_POSITIONS**: Target joint positions issued to the robot (if action type is relative, the action values will be added on top of the current joint positions)
   
   ```yaml
   JOINT_TARGET_POSITIONS:
     source: action.target_joints
     format:
+      action_type: ABSOLUTE # ABSOLUTE | RELATIVE
       angle_units: RADIANS
     mapping:
       - name: joint_1
@@ -442,25 +443,60 @@ When `joint_position_type: END_EFFECTOR` is specified, the importer uses inverse
 - A valid URDF or MJCF file with the robot model
 - An end-effector frame name (obtained from mapping `name`)
 - Optional joint configuration to initiate inverse kinematics (`ik_init_config`)
+- End-effector poses being imported
 
 ```yaml
+# End-effector pose to convert from
+END_EFFECTOR_POSES:
+    source: observation.state
+    mapping:
+      - name: ee_name
+        index_range:
+          start: 0
+          end: 7
+
+# Joint position calculated using Inverse Kinematics
 JOINT_POSITIONS:
-  source: observation.pose
+  source: observation.state
   format:
     joint_position_type: END_EFFECTOR  # Use IK to convert pose to joint positions
     ik_init_config: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # Initial joint config
-    pose_type: POSITION_ORIENTATION
-    orientation:
-      type: QUATERNION
-      quaternion_order: XYZW
-      angle_units: RADIANS
   mapping:
-    - name: end_effector
-      index_range:
-        start: 0
-        end: 7
+    - name: ee_frame_name
+      source_name: ee_name
 ```
 
+**Forward Kinematics (FK) for End-effector Poses**
+
+When `ee_pose_type: JOINT_POSITIONS` is specified, the importer uses forward kinematics to convert joint positions to end-effector poses. This requires:
+
+- A valid URDF or MJCF file with the robot model
+- An end-effector frame name (obtained from mapping `name`)
+- Joint positions being imported
+
+```yaml
+# Joint positions to convert from
+JOINT_POSITIONS:
+  source: observation.state
+  format:
+    angle_units: RADIANS
+  mapping:
+    - name: joint_1
+    - name: joint_2
+    - name: joint_3
+    - name: joint_4
+    - name: joint_5
+    - name: joint_6
+    - name: joint_7
+
+# End-effector pose calculated using Forward Kinematics
+END_EFFECTOR_POSES:
+  source: observation.state
+  format:
+    ee_pose_type: JOINT_POSITIONS
+  mapping:
+    - name: ee_frame_name
+```
 
 **Visual Joint Positions from Gripper**
 
@@ -472,6 +508,7 @@ When `visual_joint_type: GRIPPER` is specified, the importer automatically conve
 - Gripper open amounts data (typically from `PARALLEL_GRIPPER_OPEN_AMOUNTS`)
 
 ```yaml
+# Converting gripper open amounts (0-1) to individual gripper finger positions
 VISUAL_JOINT_POSITIONS:
   source: observation.state
   format:
@@ -481,6 +518,47 @@ VISUAL_JOINT_POSITIONS:
       index: 6
     - name: finger_joint2
       index: 6
+```
+
+**Relative Joint Target Positions**
+
+Joint target positions can be specified as delta values relative to the current robot state in either joint space or end-effector space. The current robot state will be processed first and the extracted delta values will be added to the current robot state to form the joint target positions. This requires:
+
+- If working in end-effector space, must be importing end-effector pose
+- If working in joint space, must be importing joint positions
+
+```yaml
+# Example 1: Relative action in pose space
+JOINT_TARGET_POSITIONS:
+  source: action
+  format:
+    action_type: RELATIVE
+    action_space: END_EFFECTOR
+    pose_type: POSITION_ORIENTATION
+    orientation:
+      type: EULER
+      euler_order: XYZ
+      angle_units: RADIANS
+  mapping:
+    - name: ee_frame_name
+      index_range:
+        start: 7
+        end: 13
+
+# Example 2: Relative action in joint space
+  JOINT_TARGET_POSITIONS:
+    source: action
+    format:
+      action_type: RELATIVE
+      action_space: JOINT
+    mapping:
+    - name: joint_1
+    - name: joint_2
+    - name: joint_3
+    - name: joint_4
+    - name: joint_5
+    - name: joint_6
+    - name: joint_7
 ```
 
 ## Example Workflow

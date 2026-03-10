@@ -4,6 +4,7 @@ from typing import Any
 
 from neuracore_types import JointData
 from neuracore_types.importer.config import (
+    ActionSpaceConfig,
     ImageConventionConfig,
     JointPositionTypeConfig,
     LanguageConfig,
@@ -262,9 +263,10 @@ def validate_dataset_config_against_robot_model(
     for data_type, import_config in dataset_config.data_import_config.items():
         if data_type in JOINT_DATA_TYPES:
             # No need to check joint names if converting from end effector
-            if (
+            if not (
                 import_config.format.joint_position_type
-                == JointPositionTypeConfig.CUSTOM
+                == JointPositionTypeConfig.END_EFFECTOR
+                or import_config.format.action_space == ActionSpaceConfig.END_EFFECTOR
             ):
                 for item in import_config.mapping:
                     if item.name is not None:

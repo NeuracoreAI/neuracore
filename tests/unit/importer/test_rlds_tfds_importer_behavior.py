@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from neuracore_types import DataType
+from neuracore_types import DataType, JointPositionTypeConfig
 from neuracore_types.importer.config import LanguageConfig
 
 from neuracore.importer.core.base import ImportItem, WorkerError
@@ -94,6 +94,7 @@ def test_rlds_record_step_supports_empty_source_path_for_language():
     importer.dataset_config = SimpleNamespace(
         data_import_config={DataType.LANGUAGE: import_config}
     )
+    importer.ordered_import_configs = [(DataType.LANGUAGE, import_config)]
     importer._log_data = MagicMock()
 
     importer._record_step({"instruction": "pick up block"}, timestamp=12.5)
@@ -118,7 +119,11 @@ def test_rlds_record_step_converts_tensor_to_numpy_for_non_language():
         index_range=None,
         name="joint_positions",
     )
-    import_format = SimpleNamespace(language_type=LanguageConfig.STRING)
+    import_format = SimpleNamespace(
+        language_type=LanguageConfig.STRING,
+        joint_position_type=JointPositionTypeConfig.CUSTOM,
+        ee_pose_type=None,
+    )
     import_config = SimpleNamespace(
         source="",
         mapping=[mapping_item],
@@ -127,6 +132,7 @@ def test_rlds_record_step_converts_tensor_to_numpy_for_non_language():
     importer.dataset_config = SimpleNamespace(
         data_import_config={DataType.JOINT_POSITIONS: import_config}
     )
+    importer.ordered_import_configs = [(DataType.JOINT_POSITIONS, import_config)]
     importer._log_data = MagicMock()
 
     importer._record_step({"joint_positions": _FakeTensor([1.0, 2.0])}, timestamp=3.0)
@@ -157,14 +163,14 @@ def test_rlds_init_forwards_ik_args_to_base(monkeypatch):
         dataset_dir=SimpleNamespace(),
         dataset_config=SimpleNamespace(),
         joint_info={},
-        ik_urdf_path="/tmp/robot.urdf",
+        urdf_path="/tmp/robot.urdf",
         ik_init_config=[0.0, 1.0],
         dry_run=True,
         suppress_warnings=True,
         skip_on_error="step",
     )
 
-    assert captured["ik_urdf_path"] == "/tmp/robot.urdf"
+    assert captured["urdf_path"] == "/tmp/robot.urdf"
     assert captured["ik_init_config"] == [0.0, 1.0]
     assert captured["skip_on_error"] == "step"
 

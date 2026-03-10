@@ -225,6 +225,7 @@ plotly
 pointcloud
 POLLIN
 posinf
+precheck
 preds
 preexec
 pretrained
