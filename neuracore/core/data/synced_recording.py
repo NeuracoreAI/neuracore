@@ -312,14 +312,25 @@ class SynchronizedRecording:
             lock_file = cam_id_rgb_root / ".recording.lock"
             self._wait_for_lock_release(lock_file, cam_id_rgb_root)
 
-            if not cam_id_rgb_root.exists():
-                # Not in cache, download video and cache frames to disk
+            frame_file = cam_id_rgb_root / f"{cam_data.frame_idx}.png"
+
+            # If the cache directory or specific frame file is missing, re-download
+            # and re-decode the video to rebuild the cache for this camera.
+            if not cam_id_rgb_root.exists() or not frame_file.exists():
+                if cam_id_rgb_root.exists():
+                    shutil.rmtree(cam_id_rgb_root, ignore_errors=True)
                 cam_id_rgb_root.mkdir(parents=True, exist_ok=True)
                 self._download_video_and_cache_frames_to_disk(
                     camera_type, cam_id, cam_id_rgb_root
                 )
+                frame_file = cam_id_rgb_root / f"{cam_data.frame_idx}.png"
+                if not frame_file.exists():
+                    raise FileNotFoundError(
+                        f"Expected cached frame {frame_file} not found even after "
+                        "rebuilding cache. Try deleting the recording cache directory "
+                        "and re-running synchronization."
+                    )
 
-            frame_file = cam_id_rgb_root / f"{cam_data.frame_idx}.png"
             frame = Image.open(frame_file)
 
             if transform_fn:

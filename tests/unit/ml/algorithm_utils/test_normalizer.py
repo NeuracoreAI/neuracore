@@ -14,6 +14,7 @@ from neuracore.ml.algorithm_utils.normalizer import (
     MeanStdNormalizer,
     MinMaxNormalizer,
     Normalizer,
+    QuantileNormalizer,
 )
 
 
@@ -339,6 +340,100 @@ class TestMinMaxNormalizer:
         data_high = torch.rand(5, 10)
         normalized_high = normalizer_high.normalize(data_high)
         assert normalized_high.shape == (5, 10)
+
+
+class TestQuantileNormalizer:
+    """Test suite for QuantileNormalizer class."""
+
+    @pytest.fixture
+    def sample_stats(self):
+        """Create sample DataItemStats with q01 and q99."""
+        return DataItemStats(
+            q01=np.array([0.0, 1.0, 2.0]),
+            q99=np.array([2.0, 3.0, 4.0]),
+        )
+
+    @pytest.fixture
+    def multiple_stats(self):
+        """Create multiple DataItemStats for combined quantile normalization."""
+        return [
+            DataItemStats(q01=np.array([0.0, 1.0]), q99=np.array([2.0, 3.0])),
+            DataItemStats(q01=np.array([2.0, 3.0]), q99=np.array([4.0, 5.0])),
+        ]
+
+    def test_init_with_statistics(self, sample_stats):
+        """Test QuantileNormalizer initialization with statistics."""
+        normalizer = QuantileNormalizer(name="test", statistics=[sample_stats])
+        assert hasattr(normalizer, "test_q01")
+        assert hasattr(normalizer, "test_q99")
+        assert torch.equal(normalizer.test_q01, torch.tensor([0.0, 1.0, 2.0]))
+        assert torch.equal(normalizer.test_q99, torch.tensor([2.0, 3.0, 4.0]))
+
+    def test_init_without_statistics(self):
+        """Test QuantileNormalizer initialization without statistics raises error."""
+        with pytest.raises(ValueError, match="Statistics are not provided"):
+            QuantileNormalizer(name="test", statistics=None)
+
+    def test_init_with_empty_statistics(self):
+        """Test QuantileNormalizer initialization with empty statistics raises error."""
+        with pytest.raises(ValueError, match="Statistics are not provided"):
+            QuantileNormalizer(name="test", statistics=[])
+
+    def test_init_with_multiple_statistics(self, multiple_stats):
+        """Test QuantileNormalizer with multiple DataItemStats."""
+        normalizer = QuantileNormalizer(name="joint_states", statistics=multiple_stats)
+        # Should combine q01 and q99
+        expected_q01 = torch.tensor([0.0, 1.0, 2.0, 3.0])
+        expected_q99 = torch.tensor([2.0, 3.0, 4.0, 5.0])
+        assert torch.equal(normalizer.joint_states_q01, expected_q01)
+        assert torch.equal(normalizer.joint_states_q99, expected_q99)
+
+    def test_normalize(self, sample_stats):
+        """Test normalization with quantile-based scaling to [-1, 1]."""
+        normalizer = QuantileNormalizer(name="test", statistics=[sample_stats])
+        data = torch.tensor([[0.0, 1.0, 2.0], [1.0, 2.0, 3.0], [2.0, 3.0, 4.0]])
+
+        normalized = normalizer.normalize(data)
+
+        # For q01=[0,1,2], q99=[2,3,4]:
+        # First: [0,1,2] -> [-1, -1, -1]
+        # Second: [1,2,3] -> [0, 0, 0]
+        # Third: [2,3,4] -> [1, 1, 1]
+        expected = torch.tensor([[-1.0, -1.0, -1.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+        assert torch.allclose(normalized, expected, atol=1e-6)
+
+    def test_unnormalize(self, sample_stats):
+        """Test unnormalization with quantile-based scaling."""
+        normalizer = QuantileNormalizer(name="test", statistics=[sample_stats])
+        normalized_data = torch.tensor(
+            [[-1.0, -1.0, -1.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]
+        )
+
+        unnormalized = normalizer.unnormalize(normalized_data)
+
+        expected = torch.tensor([[0.0, 1.0, 2.0], [1.0, 2.0, 3.0], [2.0, 3.0, 4.0]])
+        assert torch.allclose(unnormalized, expected, atol=1e-6)
+
+    def test_normalize_unnormalize_roundtrip(self, sample_stats):
+        """Test that normalize and unnormalize are inverse operations."""
+        normalizer = QuantileNormalizer(name="test", statistics=[sample_stats])
+        original_data = torch.tensor(
+            [[0.5, 1.5, 2.5], [1.0, 2.0, 3.0], [1.5, 2.5, 3.5]]
+        )
+
+        normalized = normalizer.normalize(original_data)
+        unnormalized = normalizer.unnormalize(normalized)
+
+        assert torch.allclose(original_data, unnormalized, atol=1e-6)
+
+    def test_device_handling(self, sample_stats):
+        """Test that quantile normalizer buffers move with model to device."""
+        normalizer = QuantileNormalizer(name="test", statistics=[sample_stats])
+        device = torch.device("cpu")
+        normalizer = normalizer.to(device)
+
+        assert normalizer.test_q01.device == device
+        assert normalizer.test_q99.device == device
 
 
 class TestNormalizerIntegration:
