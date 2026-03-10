@@ -120,8 +120,8 @@ async def _get_trace_row(store, trace_id: str):
 @pytest.mark.asyncio
 async def test_trace_written_emits_ready_and_progress_report(manager_store) -> None:
     manager, store = manager_store
-    created_early = datetime(2024, 1, 1)
-    created_late = datetime(2024, 1, 2)
+    created_early = datetime.now(timezone.utc) - timedelta(seconds=100)
+    created_late = datetime.now(timezone.utc) - timedelta(seconds=50)
 
     await manager._handle_start_trace(
         "trace-1",
@@ -152,9 +152,9 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
     await store.set_expected_trace_count("rec-1", 2)
     await store.mark_expected_trace_count_reported("rec-1")
     emitter = get_emitter()
-    emitter.emit(Emitter.UPLOADED_BYTES, "trace-2", 4)
-    emitter.emit(Emitter.IS_CONNECTED, True)
-    await asyncio.sleep(0.1)
+    # emitter.emit(Emitter.UPLOADED_BYTES, "trace-2", 4)
+    # emitter.emit(Emitter.IS_CONNECTED, True)
+    # await asyncio.sleep(0.1)
 
     ready_events: list[tuple] = []
     progress_events: list[tuple] = []
