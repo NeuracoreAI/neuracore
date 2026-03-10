@@ -58,6 +58,7 @@ setup(
         "aiolimiter",
         "pyee==13.0.0",
         "greenlet",
+        "filelock>=3.0.0",
     ],
     extras_require={
         "examples": [

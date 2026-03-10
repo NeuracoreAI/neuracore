@@ -13,6 +13,8 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 from types import FrameType
 
+import filelock
+
 from neuracore.data_daemon.const import RECORDING_EVENTS_SOCKET_PATH, SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
 from neuracore.data_daemon.models import TraceErrorCode, TraceUploadStatus
@@ -187,26 +189,28 @@ def ensure_daemon_running(*, timeout_s: float = 5.0) -> int:
     """
     pid_path = get_daemon_pid_path()
     db_path = get_daemon_db_path()
+    pid_file_lock = str(pid_path) + ".lock"
 
     os.environ.setdefault("NEURACORE_DAEMON_PID_PATH", str(pid_path))
     os.environ.setdefault("NEURACORE_DAEMON_DB_PATH", str(db_path))
 
-    existing_pid = read_pid_from_file(pid_path)
-    if existing_pid is not None and pid_is_running(existing_pid):
-        wait_for_socket_paths(
-            (str(SOCKET_PATH), str(RECORDING_EVENTS_SOCKET_PATH)),
-            timeout_s=timeout_s,
-        )
-        return existing_pid
+    with filelock.FileLock(pid_file_lock):
+        existing_pid = read_pid_from_file(pid_path)
+        if existing_pid is not None and pid_is_running(existing_pid):
+            wait_for_socket_paths(
+                (str(SOCKET_PATH), str(RECORDING_EVENTS_SOCKET_PATH)),
+                timeout_s=timeout_s,
+            )
+            return existing_pid
 
-    cleanup_stale_client_state(
-        pid_path=pid_path,
-        db_path=db_path,
-        socket_paths=(str(SOCKET_PATH), str(RECORDING_EVENTS_SOCKET_PATH)),
-    )
-    return launch_daemon_subprocess(
-        pid_path=pid_path, db_path=db_path, timeout_s=timeout_s
-    )
+        cleanup_stale_client_state(
+            pid_path=pid_path,
+            db_path=db_path,
+            socket_paths=(str(SOCKET_PATH), str(RECORDING_EVENTS_SOCKET_PATH)),
+        )
+        return launch_daemon_subprocess(
+            pid_path=pid_path, db_path=db_path, timeout_s=timeout_s
+        )
 
 
 def acquire_pid_file(pid_path: Path) -> bool:
