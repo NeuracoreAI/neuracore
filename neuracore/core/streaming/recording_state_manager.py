@@ -88,7 +88,6 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         self.recording_robot_instances: dict[RobotInstanceIdentifier, str] = dict()
         self._expired_recording_ids: set[str] = set()
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
-        self._daemon_ensured: bool = False
         self.active_dataset_ids: dict[RobotInstanceIdentifier, str] = {}
 
     def get_current_recording_id(self, robot_id: str, instance: int) -> str | None:
@@ -155,13 +154,11 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         if previous_recording_id is not None:
             self.recording_stopped(robot_id, instance, previous_recording_id)
 
-        if not self._daemon_ensured:
-            try:
-                ensure_daemon_running()
-                self._daemon_ensured = True
-            except Exception:
-                logger.exception("Failed to ensure data daemon is running")
-                return
+        try:
+            ensure_daemon_running()
+        except Exception:
+            logger.exception("Failed to ensure data daemon is running")
+            return
 
         self.recording_robot_instances[instance_key] = recording_id
         self._schedule_recording_timers(
