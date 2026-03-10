@@ -26,6 +26,9 @@ childbody
 childinertia
 chonk
 CLIPMLP
+cmap
+Colormaps
+cmaps
 cnnmlp
 CNNMLP
 CNNMLPP

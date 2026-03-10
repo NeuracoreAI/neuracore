@@ -318,12 +318,19 @@ def stop_recording(
     if not recording_id:
         raise ValueError("Recording_id is None, no current recording")
     robot.stop_recording(recording_id)
-    if wait:
-        while True:
-            data_traces = backend_utils.get_active_data_traces(recording_id)
-            if len(data_traces) == 0:
-                break
-        time.sleep(2.0)
+
+    if not wait:
+        return
+
+    # TODO: We need to instead check that the specific recording is complete
+    is_traces_registered = False
+    while True:
+        data_traces = backend_utils.get_active_data_traces(recording_id)
+        if len(data_traces) > 0:
+            is_traces_registered = True
+        elif len(data_traces) == 0 and is_traces_registered:
+            break
+        time.sleep(0.2)
 
 
 def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:

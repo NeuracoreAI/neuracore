@@ -19,6 +19,7 @@ from neuracore_types import SynchronizedPoint, SynchronizeRecordingRequest
 from PIL import Image
 
 from neuracore.core.data.cache_manager import CacheManager
+from neuracore.core.utils.depth_utils import rgb_to_depth_storage
 
 from ..auth import get_auth
 from ..const import API_URL
@@ -349,7 +350,7 @@ class SynchronizedRecording:
                 )
             elif data_type == DataType.DEPTH_IMAGES:
                 new_data[data_type] = self._get_frame_from_disk_cache(
-                    DataType.DEPTH_IMAGES, data_dict
+                    DataType.DEPTH_IMAGES, data_dict, rgb_to_depth_storage
                 )
             else:
                 # create NEW instances to avoid shared references
