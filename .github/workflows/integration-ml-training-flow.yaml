@@ -70,7 +70,5 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1-mesa-glx libosmesa6-dev
-        ls -al ~/.neuracore
-        rm -rf ~/.neuracore
         Xvfb $DISPLAY -screen 0 1280x1024x24 &
-        pytest -o log_cli=true --log-cli-level=INFO -v -n 8 tests/integration/ml/test_training_flow.py
+        pytest -o log_cli=true --log-cli-level=INFO -v tests/integration/ml/test_training_flow.py
