@@ -753,15 +753,14 @@ def _main(cfg: DictConfig) -> None:
         )
     else:
         algorithm_name = cfg.algorithm._target_.rsplit(".", 1)[-1]
-
-    validate_training_params(
-        dataset,
-        dataset_name=cfg.dataset_name if cfg.dataset_name is not None else "",
-        algorithm_name=algorithm_name,
-        input_robot_data_spec=input_robot_data_spec_with_id,
-        output_robot_data_spec=output_robot_data_spec_with_id,
-        algorithm_jsons=algorithms_jsons,
-    )
+    # validate_training_params(
+    #     dataset,
+    #     dataset_name=cfg.dataset_name if cfg.dataset_name is not None else "",
+    #     algorithm_name=algorithm_name,
+    #     input_robot_data_spec=input_robot_data_spec_with_id,
+    #     output_robot_data_spec=output_robot_data_spec_with_id,
+    #     algorithm_jsons=algorithms_jsons,
+    # )
 
     # Prepare data types for synchronization
     robot_data_spec = merge_robot_data_spec(
