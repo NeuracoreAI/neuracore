@@ -449,36 +449,48 @@ def verify_dataset(config: TestConfig, expected_frame_count):
 
 def run_streaming_test(config: TestConfig):
     """Run a complete streaming test with the given configuration"""
-    with Timer(max_time=MAX_TIME_TO_START_S, label="nc.login", always_log=True):
-        nc.login()
-    with Timer(max_time=MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True):
-        nc.connect_robot(
-            config.robot_name,
-            urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
-            overwrite=False,
+    dataset = None
+    robot = None
+    try:
+        with Timer(max_time=MAX_TIME_TO_START_S, label="nc.login", always_log=True):
+            nc.login()
+        with Timer(
+            max_time=MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True
+        ):
+            robot = nc.connect_robot(
+                config.robot_name,
+                urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
+                overwrite=False,
+            )
+        with Timer(
+            max_time=MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True
+        ):
+            dataset = nc.create_dataset(
+                config.dataset_name,
+                description=(
+                    f"Test dataset with {config.fps}fps, "
+                    f"{config.image_width}x{config.image_height}"
+                ),
+            )
+
+        actual_frame_count = stream_data(config)
+
+        wait_for_dataset_ready(
+            config.dataset_name, timeout_s=config.dataset_wait_timeout_s
         )
-    with Timer(
-        max_time=MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True
-    ):
-        nc.create_dataset(
-            config.dataset_name,
-            description=(
-                f"Test dataset with {config.fps}fps, "
-                f"{config.image_width}x{config.image_height}"
-            ),
-        )
 
-    actual_frame_count = stream_data(config)
+        results = verify_dataset(config, actual_frame_count)
 
-    wait_for_dataset_ready(config.dataset_name, timeout_s=config.dataset_wait_timeout_s)
+        assert len(results["missing_frames"]) == 0
+        assert len(results["duplicate_frames"]) == 0
+        assert len(results["joint_mismatches"]) == 0
 
-    results = verify_dataset(config, actual_frame_count)
-
-    assert len(results["missing_frames"]) == 0
-    assert len(results["duplicate_frames"]) == 0
-    assert len(results["joint_mismatches"]) == 0
-
-    return results
+        return results
+    finally:
+        if dataset:
+            dataset.delete()
+        if robot:
+            robot.delete()
 
 
 def _mp_stream_robot_data(config):
@@ -493,7 +505,6 @@ def run_before_and_after_tests():
     yield
 
 
-# p
 def test_basic_streaming():
     config = TestConfig(
         fps=10,
@@ -506,7 +517,6 @@ def test_basic_streaming():
     run_streaming_test(config)
 
 
-# p
 def test_basic_streaming_fast_mode():
     """Fast smoke test for daemon recording flow with minimal payload."""
     config = TestConfig(
@@ -521,92 +531,101 @@ def test_basic_streaming_fast_mode():
         stop_wait_timeout_s=LEAST_TIME_TO_STOP_S,
     )
 
-    with Timer(
-        max_time=config.start_wait_timeout_s, label="fast.nc.login", always_log=True
-    ):
-        nc.login()
-    with Timer(
-        max_time=config.start_wait_timeout_s,
-        label="fast.nc.connect_robot",
-        always_log=True,
-    ):
-        nc.connect_robot(
-            config.robot_name,
-            urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
-            overwrite=False,
+    dataset = None
+    robot = None
+    try:
+        with Timer(
+            max_time=config.start_wait_timeout_s, label="fast.nc.login", always_log=True
+        ):
+            nc.login()
+        with Timer(
+            max_time=config.start_wait_timeout_s,
+            label="fast.nc.connect_robot",
+            always_log=True,
+        ):
+            robot = nc.connect_robot(
+                config.robot_name,
+                urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
+                overwrite=False,
+            )
+        with Timer(
+            max_time=config.start_wait_timeout_s,
+            label="fast.nc.create_dataset",
+            always_log=True,
+        ):
+            dataset = nc.create_dataset(
+                config.dataset_name,
+                description="Fast integration smoke test",
+            )
+
+        with Timer(
+            max_time=config.start_wait_timeout_s,
+            label="fast.nc.start_recording",
+            always_log=True,
+        ):
+            nc.start_recording()
+
+        frame_code = 0
+        rgb_img = encode_frame_number(
+            frame_code, config.image_width, config.image_height
         )
-    with Timer(
-        max_time=config.start_wait_timeout_s,
-        label="fast.nc.create_dataset",
-        always_log=True,
-    ):
-        nc.create_dataset(
-            config.dataset_name,
-            description="Fast integration smoke test",
-        )
+        with Timer(max_time=config.log_wait_timeout_s, label="fast.nc.log_rgb"):
+            nc.log_rgb("camera_0", rgb_img, timestamp=0.0)
 
-    with Timer(
-        max_time=config.start_wait_timeout_s,
-        label="fast.nc.start_recording",
-        always_log=True,
-    ):
-        nc.start_recording()
+        with Timer(
+            max_time=config.stop_wait_timeout_s,
+            label="fast.nc.stop_recording(wait=False)",
+            always_log=True,
+        ):
+            nc.stop_recording(wait=True)
 
-    frame_code = 0
-    rgb_img = encode_frame_number(frame_code, config.image_width, config.image_height)
-    with Timer(max_time=config.log_wait_timeout_s, label="fast.nc.log_rgb"):
-        nc.log_rgb("camera_0", rgb_img, timestamp=0.0)
+        with Timer(
+            max_time=MAX_TIME_TO_DATASET_READY_S,
+            label="fast.wait_for_dataset_ready",
+            always_log=True,
+        ):
+            wait_for_dataset_ready(
+                config.dataset_name,
+                expected_recording_count=1,
+                poll_interval_s=0.5,
+            )
 
-    with Timer(
-        max_time=config.stop_wait_timeout_s,
-        label="fast.nc.stop_recording(wait=False)",
-        always_log=True,
-    ):
-        nc.stop_recording(wait=True)
+        with Timer(
+            max_time=config.stop_wait_timeout_s,
+            label="fast.nc.get_dataset",
+            always_log=True,
+        ):
+            dataset = nc.get_dataset(config.dataset_name)
+        with Timer(
+            max_time=MAX_TIME_TO_DATASET_READY_S,
+            label="fast.dataset.synchronize",
+            always_log=True,
+        ):
+            synced_dataset = dataset.synchronize()
 
-    with Timer(
-        max_time=MAX_TIME_TO_DATASET_READY_S,
-        label="fast.wait_for_dataset_ready",
-        always_log=True,
-    ):
-        wait_for_dataset_ready(
-            config.dataset_name,
-            expected_recording_count=1,
-            poll_interval_s=0.5,
-        )
-
-    with Timer(
-        max_time=config.stop_wait_timeout_s,
-        label="fast.nc.get_dataset",
-        always_log=True,
-    ):
-        dataset = nc.get_dataset(config.dataset_name)
-    with Timer(
-        max_time=MAX_TIME_TO_DATASET_READY_S,
-        label="fast.dataset.synchronize",
-        always_log=True,
-    ):
-        synced_dataset = dataset.synchronize()
-
-    found_rgb = False
-    for synced_episode in synced_dataset:
-        for sync_point in synced_episode:
-            if DataType.RGB_IMAGES not in sync_point.data:
-                continue
-            for _, cam_data in sync_point[DataType.RGB_IMAGES].items():
-                np_img = np.array(cam_data.frame)
-                assert decode_frame_number(np_img) == frame_code
-                found_rgb = True
-                break
+        found_rgb = False
+        for synced_episode in synced_dataset:
+            for sync_point in synced_episode:
+                if DataType.RGB_IMAGES not in sync_point.data:
+                    continue
+                for _, cam_data in sync_point[DataType.RGB_IMAGES].items():
+                    np_img = np.array(cam_data.frame)
+                    assert decode_frame_number(np_img) == frame_code
+                    found_rgb = True
+                    break
+                if found_rgb:
+                    break
             if found_rgb:
                 break
-        if found_rgb:
-            break
 
-    assert found_rgb, "Expected at least one RGB frame in synchronized dataset"
+        assert found_rgb, "Expected at least one RGB frame in synchronized dataset"
+    finally:
+        if dataset:
+            dataset.delete()
+        if robot:
+            robot.delete()
 
 
-# p
 def test_high_framerate():
     config = TestConfig(
         fps=200,
@@ -619,7 +638,6 @@ def test_high_framerate():
     run_streaming_test(config)
 
 
-# p
 def test_multiple_cameras():
     config = TestConfig(
         fps=30,
@@ -634,7 +652,6 @@ def test_multiple_cameras():
     run_streaming_test(config)
 
 
-# p
 def test_with_depth():
     config = TestConfig(
         fps=30,
@@ -676,7 +693,6 @@ def test_multiple_concurrent_robots():
         assert len(results["joint_mismatches"]) == 0
 
 
-# p
 def test_stop_start_sequences():
     config = TestConfig(
         fps=30,
@@ -686,93 +702,102 @@ def test_stop_start_sequences():
         dataset_wait_timeout_s=HIGH_TIME_TO_DATASET_READY_S,
     )
 
-    nc.login()
-    robot = nc.connect_robot(config.robot_name)
-    nc.create_dataset(config.dataset_name)
+    dataset = None
+    robot = None
+    try:
+        nc.login()
+        robot = nc.connect_robot(config.robot_name)
+        dataset = nc.create_dataset(config.dataset_name)
 
-    segments = 3
-    total_frames = 0
-    previous_recording_id: str | None = None
+        segments = 3
+        total_frames = 0
+        previous_recording_id: str | None = None
 
-    # Ensure no stale active recording is reused for segment 1.
-    stale_recording_id = robot.get_current_recording_id()
-    if stale_recording_id is not None:
-        logger.warning(
-            "Stopping stale active recording before test start: %s",
-            stale_recording_id,
-        )
-        with Timer(max_time=config.stop_wait_timeout_s):
-            nc.stop_recording(wait=True)
-
-    for segment in range(segments):
-        logger.info(f"Starting recording segment {segment+1}/{segments}")
-        started_recording_id: str | None = None
-        for attempt in range(3):
-            recording_id_before_start = robot.get_current_recording_id()
-            with Timer(max_time=config.start_wait_timeout_s):
-                nc.start_recording()
-            started_recording_id = robot.get_current_recording_id()
-            if started_recording_id is None:
-                pytest.fail("No active recording ID after nc.start_recording()")
-            is_new_id = (
-                started_recording_id != previous_recording_id
-                and started_recording_id != recording_id_before_start
-            )
-            if is_new_id:
-                break
+        # Ensure no stale active recording is reused for segment 1.
+        stale_recording_id = robot.get_current_recording_id()
+        if stale_recording_id is not None:
             logger.warning(
-                "Segment %d reused active recording_id=%s on attempt %d; "
-                "stopping and retrying start",
-                segment + 1,
-                started_recording_id,
-                attempt + 1,
+                "Stopping stale active recording before test start: %s",
+                stale_recording_id,
             )
             with Timer(max_time=config.stop_wait_timeout_s):
                 nc.stop_recording(wait=True)
-        else:
-            pytest.fail(
-                f"Unable to start a new recording for segment {segment+1}; "
-                f"still using recording_id={started_recording_id}"
-            )
 
-        local_t = 0.0
-        segment_frames = 0
-        segment_time_offset = segment * (config.duration_sec + (1.0 / config.fps))
+        for segment in range(segments):
+            logger.info(f"Starting recording segment {segment+1}/{segments}")
+            started_recording_id: str | None = None
+            for attempt in range(3):
+                recording_id_before_start = robot.get_current_recording_id()
+                with Timer(max_time=config.start_wait_timeout_s):
+                    nc.start_recording()
+                started_recording_id = robot.get_current_recording_id()
+                if started_recording_id is None:
+                    pytest.fail("No active recording ID after nc.start_recording()")
+                is_new_id = (
+                    started_recording_id != previous_recording_id
+                    and started_recording_id != recording_id_before_start
+                )
+                if is_new_id:
+                    break
+                logger.warning(
+                    "Segment %d reused active recording_id=%s on attempt %d; "
+                    "stopping and retrying start",
+                    segment + 1,
+                    started_recording_id,
+                    attempt + 1,
+                )
+                with Timer(max_time=config.stop_wait_timeout_s):
+                    nc.stop_recording(wait=True)
+            else:
+                pytest.fail(
+                    f"Unable to start a new recording for segment {segment+1}; "
+                    f"still using recording_id={started_recording_id}"
+                )
 
-        while local_t < config.duration_sec:
-            frame_num = total_frames + segment_frames
-            img = encode_frame_number(
-                frame_num, config.image_width, config.image_height
-            )
-            timestamp = segment_time_offset + local_t
-            with Timer():
-                nc.log_rgb("camera_0", img, timestamp=timestamp)
+            local_t = 0.0
+            segment_frames = 0
+            segment_time_offset = segment * (config.duration_sec + (1.0 / config.fps))
 
-            joint_positions = generate_joint_positions(
-                segment_frames, config.fps, config.num_joints
-            )
-            with Timer():
-                nc.log_joint_positions(joint_positions, timestamp=timestamp)
+            while local_t < config.duration_sec:
+                frame_num = total_frames + segment_frames
+                img = encode_frame_number(
+                    frame_num, config.image_width, config.image_height
+                )
+                timestamp = segment_time_offset + local_t
+                with Timer():
+                    nc.log_rgb("camera_0", img, timestamp=timestamp)
 
-            segment_frames += 1
-            local_t += 1 / config.fps
+                joint_positions = generate_joint_positions(
+                    segment_frames, config.fps, config.num_joints
+                )
+                with Timer():
+                    nc.log_joint_positions(joint_positions, timestamp=timestamp)
 
-        with Timer(max_time=config.stop_wait_timeout_s):
-            nc.stop_recording(wait=True)
-        logger.info(f"Completed segment {segment+1} with {segment_frames} frames")
+                segment_frames += 1
+                local_t += 1 / config.fps
 
-        previous_recording_id = started_recording_id
-        total_frames += segment_frames
+            with Timer(max_time=config.stop_wait_timeout_s):
+                nc.stop_recording(wait=True)
+            logger.info(f"Completed segment {segment+1} with {segment_frames} frames")
 
-    wait_for_dataset_ready(config.dataset_name, timeout_s=config.dataset_wait_timeout_s)
+            previous_recording_id = started_recording_id
+            total_frames += segment_frames
 
-    results = verify_dataset(config, total_frames)
-    assert len(results["missing_frames"]) == 0
-    assert len(results["duplicate_frames"]) == 0
-    assert len(results["joint_mismatches"]) == 0
+        wait_for_dataset_ready(
+            config.dataset_name, timeout_s=config.dataset_wait_timeout_s
+        )
+
+        results = verify_dataset(config, total_frames)
+        assert len(results["missing_frames"]) == 0
+        assert len(results["duplicate_frames"]) == 0
+        assert len(results["joint_mismatches"]) == 0
+    finally:
+        if dataset:
+            dataset.delete()
+        if robot:
+            robot.delete()
 
 
-# p
 def test_high_bandwidth():
     """Test high-throughput streaming with elevated daemon upload bandwidth."""
     previous_bandwidth_limit = os.environ.get("NCD_BANDWIDTH_LIMIT")
@@ -802,20 +827,20 @@ def test_high_bandwidth():
     os.environ["NCD_BANDWIDTH_LIMIT"] = str(daemon_bandwidth_limit)
     os.environ["NCD_NUM_THREADS"] = "8"
 
+    dataset = None
+    robot = None
     try:
-        # Set up
         with Timer(max_time=MAX_TIME_TO_START_S, label="hb.nc.login", always_log=True):
             nc.login()
         with Timer(
             max_time=MAX_TIME_TO_START_S, label="hb.nc.connect_robot", always_log=True
         ):
-            nc.connect_robot(config.robot_name)
+            robot = nc.connect_robot(config.robot_name)
         with Timer(
             max_time=MAX_TIME_TO_START_S, label="hb.nc.create_dataset", always_log=True
         ):
-            nc.create_dataset(config.dataset_name)
+            dataset = nc.create_dataset(config.dataset_name)
 
-        # Stream data
         actual_frame_count = stream_data(config)
         wait_for_dataset_ready(
             config.dataset_name,
@@ -823,7 +848,6 @@ def test_high_bandwidth():
             poll_interval_s=1.0,
         )
 
-        # Verify
         results = verify_dataset(config, actual_frame_count)
         assert len(results["missing_frames"]) == 0
         assert len(results["duplicate_frames"]) == 0
@@ -832,6 +856,10 @@ def test_high_bandwidth():
     except Exception as e:
         pytest.fail(f"High bandwidth test failed: {str(e)}")
     finally:
+        if dataset:
+            dataset.delete()
+        if robot:
+            robot.delete()
         if previous_bandwidth_limit is None:
             os.environ.pop("NCD_BANDWIDTH_LIMIT", None)
         else:
