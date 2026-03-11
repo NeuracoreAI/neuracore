@@ -138,8 +138,18 @@ def merge_cross_embodiment_description(
 
         cross_embodiment_description[robot_id] = {}
         for data_type in all_data_types:
-            items1 = list(embodiment_desc_1.get(data_type, []).values())
-            items2 = list(embodiment_desc_2.get(data_type, []).values())
+            values_1 = embodiment_desc_1.get(data_type, {})
+            values_2 = embodiment_desc_2.get(data_type, {})
+            items1 = (
+                list(values_1.values())
+                if isinstance(values_1, dict)
+                else list(values_1)
+            )
+            items2 = (
+                list(values_2.values())
+                if isinstance(values_2, dict)
+                else list(values_2)
+            )
 
             cross_embodiment_description[robot_id][data_type] = list(
                 dict.fromkeys(items1 + items2)

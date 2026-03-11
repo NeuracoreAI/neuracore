@@ -48,7 +48,7 @@ setup(
         "fastapi",
         "psutil",
         "typer>=0.20.0",
-        "neuracore_types",
+        "neuracore_types @ git+https://github.com/NeuracoreAI/neuracore_types.git@72f06b181b2cacb4cee20d85dcf0d2b224d56cbd",
         "ordered_set",
         "pyzmq==27.1.0",
         "sqlalchemy>=2.0.0",
