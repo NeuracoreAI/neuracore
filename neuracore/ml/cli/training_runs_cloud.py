@@ -4,6 +4,7 @@ This module provides CLI commands to list and inspect training runs,
 displaying training parameters, model input/output ordering, and artifact paths.
 """
 
+import sys
 from datetime import datetime
 from typing import Any
 
@@ -285,12 +286,14 @@ def run_list(
 
         typer.echo(f"\nFound {len(jobs)} training run(s):\n")
         rows = [_build_run_row(job) for job in jobs]
-        print_run_table(console, "Cloud Training Runs", rows, include_status=True)
-
-        # Emit a plain-text list to ensure names are present in environments
-        # where rich formatting is disabled (used by tests).
-        for row in rows:
-            typer.echo(f"{row.name} | {row.success} | {row.algorithm} | {row.dataset}")
+        if sys.stdout.isatty():
+            print_run_table(console, "Cloud Training Runs", rows, include_status=True)
+        else:
+            typer.echo("Cloud Training Runs")
+            for row in rows:
+                typer.echo(
+                    f"{row.name} | {row.success} | {row.algorithm} | {row.dataset}"
+                )
 
         if verbose:
             typer.echo("")

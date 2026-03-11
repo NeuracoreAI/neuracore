@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
@@ -345,11 +346,13 @@ def _print_cloud_runs(
         return False
 
     rows = [_build_cloud_run_row(job) for job in jobs]
-    _print_run_table("Cloud Training Runs", rows, include_status=True)
-
-    # Plain-text fallback to ensure content appears when rich output is disabled.
-    for row in rows:
-        typer.echo(f"{row.name} | {row.success} | {row.algorithm} | {row.dataset}")
+    if sys.stdout.isatty():
+        _print_run_table("Cloud Training Runs", rows, include_status=True)
+    else:
+        # Plain-text only when not a TTY (piped/CI) so rich table may not render.
+        typer.echo("Cloud Training Runs")
+        for row in rows:
+            typer.echo(f"{row.name} | {row.success} | {row.algorithm} | {row.dataset}")
     return True
 
 
