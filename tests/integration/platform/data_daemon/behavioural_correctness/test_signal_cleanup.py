@@ -50,6 +50,9 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_SIGKILL,
 )
+from tests.integration.platform.data_daemon.shared.test_infrastructure import (
+    delete_cloud_resources,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -351,31 +354,35 @@ def test_sigkill_after_recording_allows_clean_restart(case: DataDaemonTestCase) 
     not prevent ``ensure_daemon_running`` from succeeding.
     """
 
-    with online_daemon_running():
-        pid_first = assert_exactly_one_daemon_pid()
-        specs = build_context_specs(case=case)
-        results = run_case_contexts(case, specs=specs)
-        if results:
-            wait_for_all_traces_written(results=results)
-        logger.info("SIGKILL daemon pid=%d after completed recording", pid_first)
-        stop_daemon(method=STOP_METHOD_SIGKILL)
+    specs = build_context_specs(case=case)
 
-        assert not pid_is_running(
-            pid_first
-        ), f"pid_is_running still True for killed daemon pid={pid_first}"
+    try:
+        with online_daemon_running():
+            pid_first = assert_exactly_one_daemon_pid()
+            results = run_case_contexts(case, specs=specs)
+            if results:
+                wait_for_all_traces_written(results=results)
+            logger.info("SIGKILL daemon pid=%d after completed recording", pid_first)
+            stop_daemon(method=STOP_METHOD_SIGKILL)
 
-    # IPC artefacts may be stale here — daemon_setup_teardown cleans them up.
-    # A second online_daemon_running block must succeed from scratch.
-    with online_daemon_running():
-        pid_second = assert_exactly_one_daemon_pid()
-        assert pid_second != pid_first, (
-            f"Expected a new daemon PID after SIGKILL restart, "
-            f"got the same pid={pid_second}"
-        )
-        assert pid_is_running(
-            pid_second
-        ), f"Restarted daemon pid={pid_second} is not running"
-        logger.info("Restarted daemon pid=%d", pid_second)
+            assert not pid_is_running(
+                pid_first
+            ), f"pid_is_running still True for killed daemon pid={pid_first}"
+
+        # IPC artefacts may be stale here — daemon_setup_teardown cleans them up.
+        # A second online_daemon_running block must succeed from scratch.
+        with online_daemon_running():
+            pid_second = assert_exactly_one_daemon_pid()
+            assert pid_second != pid_first, (
+                f"Expected a new daemon PID after SIGKILL restart, "
+                f"got the same pid={pid_second}"
+            )
+            assert pid_is_running(
+                pid_second
+            ), f"Restarted daemon pid={pid_second} is not running"
+            logger.info("Restarted daemon pid=%d", pid_second)
+    finally:
+        delete_cloud_resources(specs)
 
 
 @pytest.mark.parametrize("case", _KILL_RESTART_CASES, ids=case_ids(_KILL_RESTART_CASES))
@@ -396,73 +403,77 @@ def test_sigkill_mid_recording_allows_clean_restart(case: DataDaemonTestCase) ->
       4. Restart daemon in a new block — assert new PID and healthy state.
       5. Assert full cleanup after the second block exits.
     """
-    with online_daemon_running():
-        pid_first = assert_exactly_one_daemon_pid()
-        specs = build_context_specs(case=case)
+    specs = build_context_specs(case=case)
 
-        # Run the producer workload in a child process so a SIGKILL at any point
-        # cannot leave an uninterruptible background thread in this test process.
-        worker = multiprocessing.Process(
-            target=_run_recording_workload,
-            args=(case, specs),
-            name="sigkill-recording-worker",
-        )
-        worker.start()
-        # The point of this test is restartability after an unclean daemon death;
-        # the kill may land during setup, active logging, or stop cleanup.
-        time.sleep(max(1.0, case.duration_sec / 4))
+    try:
+        with online_daemon_running():
+            pid_first = assert_exactly_one_daemon_pid()
 
-        logger.info("SIGKILL daemon pid=%d during recording workload", pid_first)
-        stop_daemon(method=STOP_METHOD_SIGKILL)
-
-        assert not pid_is_running(
-            pid_first
-        ), f"pid_is_running still True for killed daemon pid={pid_first}"
-
-        worker.join(timeout=10.0)
-        if worker.is_alive():
-            logger.warning(
-                "Recording workload process still running after daemon SIGKILL; "
-                "terminating producer process pid=%s",
-                worker.pid,
+            # Run the producer workload in a child process so a SIGKILL at any point
+            # cannot leave an uninterruptible background thread in this test process.
+            worker = multiprocessing.Process(
+                target=_run_recording_workload,
+                args=(case, specs),
+                name="sigkill-recording-worker",
             )
-            worker.terminate()
-            worker.join(timeout=5.0)
-        if worker.is_alive():
-            logger.warning(
-                "Recording workload process ignored SIGTERM; killing pid=%s",
-                worker.pid,
-            )
-            worker.kill()
-            worker.join(timeout=5.0)
+            worker.start()
+            # The point of this test is restartability after an unclean daemon death;
+            # the kill may land during setup, active logging, or stop cleanup.
+            time.sleep(max(1.0, case.duration_sec / 4))
 
-        assert (
-            not worker.is_alive()
-        ), "Recording workload process did not exit after daemon SIGKILL"
-        if worker.exitcode not in (0, -15, -9):
-            logger.info(
-                "Interrupted recording workload exited with expected code %s",
-                worker.exitcode,
-            )
-
-        # Depending on where SIGKILL lands, the interrupted workload may have
-        # auto-started a replacement daemon through nc.* calls. Remove it before
-        # online_daemon_running() performs its isolation check.
-        replacement_pids = get_runner_pids()
-        if replacement_pids:
-            logger.info(
-                "Cleaning up daemon PIDs started by interrupted workload: %s",
-                sorted(replacement_pids),
-            )
+            logger.info("SIGKILL daemon pid=%d during recording workload", pid_first)
             stop_daemon(method=STOP_METHOD_SIGKILL)
 
-    with online_daemon_running():
-        pid_second = assert_exactly_one_daemon_pid()
-        assert pid_second != pid_first, (
-            f"Expected a new daemon PID after mid-recording SIGKILL restart, "
-            f"got the same pid={pid_second}"
-        )
-        assert pid_is_running(
-            pid_second
-        ), f"Restarted daemon pid={pid_second} is not running"
-        logger.info("Restarted daemon pid=%d after mid-recording kill", pid_second)
+            assert not pid_is_running(
+                pid_first
+            ), f"pid_is_running still True for killed daemon pid={pid_first}"
+
+            worker.join(timeout=10.0)
+            if worker.is_alive():
+                logger.warning(
+                    "Recording workload process still running after daemon SIGKILL; "
+                    "terminating producer process pid=%s",
+                    worker.pid,
+                )
+                worker.terminate()
+                worker.join(timeout=5.0)
+            if worker.is_alive():
+                logger.warning(
+                    "Recording workload process ignored SIGTERM; killing pid=%s",
+                    worker.pid,
+                )
+                worker.kill()
+                worker.join(timeout=5.0)
+
+            assert (
+                not worker.is_alive()
+            ), "Recording workload process did not exit after daemon SIGKILL"
+            if worker.exitcode not in (0, -15, -9):
+                logger.info(
+                    "Interrupted recording workload exited with expected code %s",
+                    worker.exitcode,
+                )
+
+            # Depending on where SIGKILL lands, the interrupted workload may have
+            # auto-started a replacement daemon through nc.* calls. Remove it before
+            # online_daemon_running() performs its isolation check.
+            replacement_pids = get_runner_pids()
+            if replacement_pids:
+                logger.info(
+                    "Cleaning up daemon PIDs started by interrupted workload: %s",
+                    sorted(replacement_pids),
+                )
+                stop_daemon(method=STOP_METHOD_SIGKILL)
+
+        with online_daemon_running():
+            pid_second = assert_exactly_one_daemon_pid()
+            assert pid_second != pid_first, (
+                f"Expected a new daemon PID after mid-recording SIGKILL restart, "
+                f"got the same pid={pid_second}"
+            )
+            assert pid_is_running(
+                pid_second
+            ), f"Restarted daemon pid={pid_second} is not running"
+            logger.info("Restarted daemon pid=%d after mid-recording kill", pid_second)
+    finally:
+        delete_cloud_resources(specs)

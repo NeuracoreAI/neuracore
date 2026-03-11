@@ -82,7 +82,7 @@ def test_shared_slot_reopen_after_stalled_descriptor_uploads_next_recording(
     results: list[ContextResult] = []
 
     try:
-        with scoped_storage_state(case, dataset_name=dataset_name):
+        with scoped_storage_state(case, specs=specs):
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
 
