@@ -584,7 +584,7 @@ class Daemon:
 
         trace_id = data_chunk.trace_id
         if channel.trace_id != trace_id and channel.trace_id is not None:
-            logger.warning(
+            logger.debug(
                 "DATA_CHUNK trace_id=%s does not match channel trace_id=%s",
                 data_chunk.trace_id,
                 channel.trace_id,
@@ -592,7 +592,7 @@ class Daemon:
         channel.set_trace_id(trace_id)
 
         if recording_id in self._closed_recordings:
-            logger.warning(
+            logger.debug(
                 "Dropping data for closed recording_id=%s trace_id=%s",
                 recording_id,
                 trace_id,
@@ -605,7 +605,7 @@ class Daemon:
                 channel.producer_id
             )
             if cutoff_sequence_number is None:
-                logger.warning(
+                logger.debug(
                     "Dropping data from producer_id=%s while "
                     "recording_id=%s is closing "
                     "(missing stop sequence number)",
@@ -614,7 +614,7 @@ class Daemon:
                 )
                 return
             if message.sequence_number is None:
-                logger.warning(
+                logger.debug(
                     "Dropping data for producer_id=%s recording_id=%s "
                     "without sequence_number "
                     "while recording is closing",
@@ -623,7 +623,7 @@ class Daemon:
                 )
                 return
             if message.sequence_number > cutoff_sequence_number:
-                logger.warning(
+                logger.debug(
                     "Dropping post-stop data for producer_id=%s recording_id=%s "
                     "(sequence_number=%s, cutoff_sequence_number=%s)",
                     channel.producer_id,

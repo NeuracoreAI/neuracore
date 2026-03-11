@@ -564,7 +564,7 @@ def test_data_blocked_after_recording_closed(
             payload={"data_chunk": data_chunk.to_dict()},
         )
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.DEBUG):
             daemon._handle_write_data_chunk(channel, msg)
 
         mock_ring_buffer.write.assert_not_called()
