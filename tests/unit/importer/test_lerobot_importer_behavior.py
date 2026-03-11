@@ -230,6 +230,8 @@ def test_lerobot_record_step_supports_empty_source_path_for_language():
         mapping_item,
         import_format,
         7.5,
+        extrinsics=None,
+        intrinsics=None,
     )
 
 
@@ -264,6 +266,8 @@ def test_lerobot_record_step_reads_dotted_source_key_and_converts_tensor():
         mapping_item,
         import_format,
         2.0,
+        extrinsics=None,
+        intrinsics=None,
     )
 
 

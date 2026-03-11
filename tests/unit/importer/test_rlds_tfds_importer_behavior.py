@@ -104,6 +104,8 @@ def test_rlds_record_step_supports_empty_source_path_for_language():
         mapping_item,
         import_format,
         12.5,
+        extrinsics=None,
+        intrinsics=None,
     )
 
 
@@ -135,6 +137,8 @@ def test_rlds_record_step_converts_tensor_to_numpy_for_non_language():
         mapping_item,
         import_format,
         3.0,
+        extrinsics=None,
+        intrinsics=None,
     )
 
 
@@ -185,7 +189,5 @@ def test_extract_then_convert_dict_raises_import_error_without_nested_search():
         importer._convert_source_data(
             source_data=extracted,
             data_type=DataType.POSES,
-            language_type=LanguageConfig.STRING,
             item_name="ee_pose",
-            import_source_path="steps.observation",
         )

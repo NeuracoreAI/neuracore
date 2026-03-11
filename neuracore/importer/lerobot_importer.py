@@ -11,6 +11,11 @@ from typing import Any
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from neuracore_types import DataType
 from neuracore_types.importer.config import LanguageConfig
+from neuracore_types.importer.data_config import (
+    DepthCameraDataMappingItem,
+    PointCloudDataMappingItem,
+    RGBCameraDataMappingItem,
+)
 from neuracore_types.nc_data import DatasetImportConfig
 
 import neuracore as nc
@@ -246,7 +251,6 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 source_data = source[import_source_path]
 
         try:
-
             if item.index is not None:
                 source_data = source_data[item.index]
             elif item.index_range is not None:
@@ -270,13 +274,8 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         self,
         source_data: Any,
         data_type: DataType,
-        language_type: LanguageConfig,
         item_name: str | None,
-        import_source_path: str,
     ) -> Any:
-        if data_type == DataType.LANGUAGE and language_type == LanguageConfig.STRING:
-            return source_data
-
         try:
             return source_data.numpy()
         except Exception as exc:
@@ -289,25 +288,68 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
     def _record_step(self, step_data: dict, timestamp: float) -> None:
         """Record a single step to Neuracore."""
         for data_type, import_config in self.dataset_config.data_import_config.items():
-            # Get the data based on the source path
+            source_prefix = import_config.source
 
             for item in import_config.mapping:
-
                 source_data = self._extract_source_data(
                     source=step_data,
                     item=item,
-                    import_source_path=import_config.source,
+                    import_source_path=source_prefix,
                     data_type=data_type,
                 )
 
-                source_data = self._convert_source_data(
-                    source_data=source_data,
-                    data_type=data_type,
-                    language_type=import_config.format.language_type,
-                    item_name=item.name,
-                    import_source_path=import_config.source,
-                )
+                if not (
+                    data_type == DataType.LANGUAGE
+                    and import_config.format.language_type == LanguageConfig.STRING
+                ):
+                    source_data = self._convert_source_data(
+                        source_data=source_data,
+                        data_type=data_type,
+                        item_name=item.name,
+                    )
+
+                extrinsics, intrinsics = None, None
+                if isinstance(
+                    item,
+                    (
+                        RGBCameraDataMappingItem,
+                        DepthCameraDataMappingItem,
+                        PointCloudDataMappingItem,
+                    ),
+                ):
+                    if item.extrinsics_source is not None:
+                        key = (
+                            f"{source_prefix}.{item.extrinsics_source}"
+                            if source_prefix
+                            else item.extrinsics_source
+                        )
+                        extrinsics = item.extrinsics_transforms(
+                            self._convert_source_data(
+                                source_data=step_data[key],
+                                data_type=data_type,
+                                item_name=item.extrinsics_source,
+                            )
+                        )
+                    if item.intrinsics_source is not None:
+                        key = (
+                            f"{source_prefix}.{item.intrinsics_source}"
+                            if source_prefix
+                            else item.intrinsics_source
+                        )
+                        intrinsics = item.intrinsics_transforms(
+                            self._convert_source_data(
+                                source_data=step_data[key],
+                                data_type=data_type,
+                                item_name=item.intrinsics_source,
+                            )
+                        )
 
                 self._log_data(
-                    data_type, source_data, item, import_config.format, timestamp
+                    data_type,
+                    source_data,
+                    item,
+                    import_config.format,
+                    timestamp,
+                    extrinsics=extrinsics,
+                    intrinsics=intrinsics,
                 )

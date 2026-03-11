@@ -15,6 +15,7 @@ from pathlib import Path
 from queue import Empty
 from typing import Any
 
+import numpy as np
 from neuracore_types.importer.config import JointPositionTypeConfig
 from neuracore_types.importer.data_config import DataFormat
 from neuracore_types.nc_data import DatasetImportConfig, DataType
@@ -206,6 +207,9 @@ class NeuracoreDatasetImporter(ABC):
         item: MappingItem,
         format: DataFormat,
         timestamp: float,
+        *,
+        extrinsics: np.ndarray | None = None,
+        intrinsics: np.ndarray | None = None,
     ) -> None:
         """Log a single data point to Neuracore.
 
@@ -219,6 +223,8 @@ class NeuracoreDatasetImporter(ABC):
             item: The mapping item to use for naming and transformation.
             format: The data format to use for validation.
             timestamp: Time when the data was logged.
+            extrinsics: Optional 4x4 camera extrinsics matrix for camera streams.
+            intrinsics: Optional 3x3 camera intrinsics matrix for camera streams.
         """
         try:
             if (
@@ -285,7 +291,12 @@ class NeuracoreDatasetImporter(ABC):
                     )
             else:
                 self._log_transformed_data(
-                    data_type, transformed_data, item.name, timestamp
+                    data_type,
+                    transformed_data,
+                    item.name,
+                    timestamp,
+                    extrinsics=extrinsics,
+                    intrinsics=intrinsics,
                 )
         except Exception as e:
             self.logger.error(
@@ -294,7 +305,14 @@ class NeuracoreDatasetImporter(ABC):
             raise
 
     def _log_transformed_data(
-        self, data_type: DataType, transformed_data: Any, name: str, timestamp: float
+        self,
+        data_type: DataType,
+        transformed_data: Any,
+        name: str,
+        timestamp: float,
+        *,
+        extrinsics: np.ndarray | None = None,
+        intrinsics: np.ndarray | None = None,
     ) -> None:
         """Log transformed data to Neuracore.
 
@@ -303,11 +321,15 @@ class NeuracoreDatasetImporter(ABC):
             transformed_data: The transformed data to log.
             name: The name of the data.
             timestamp: The timestamp of the data.
+            extrinsics: Optional 4x4 camera extrinsics matrix for camera streams.
+            intrinsics: Optional 3x3 camera intrinsics matrix for camera streams.
         """
         if data_type == DataType.RGB_IMAGES:
             nc.log_rgb(
                 name=name,
                 rgb=transformed_data,
+                extrinsics=extrinsics,
+                intrinsics=intrinsics,
                 robot_name=self.dataset_config.robot.name,
                 instance=self._worker_id,
                 timestamp=timestamp,
@@ -317,6 +339,8 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_depth(
                 name=name,
                 depth=transformed_data,
+                extrinsics=extrinsics,
+                intrinsics=intrinsics,
                 robot_name=self.dataset_config.robot.name,
                 instance=self._worker_id,
                 timestamp=timestamp,
@@ -326,6 +350,8 @@ class NeuracoreDatasetImporter(ABC):
             nc.log_point_cloud(
                 name=name,
                 points=transformed_data,
+                extrinsics=extrinsics,
+                intrinsics=intrinsics,
                 robot_name=self.dataset_config.robot.name,
                 instance=self._worker_id,
                 timestamp=timestamp,

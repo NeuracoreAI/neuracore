@@ -6,13 +6,18 @@ import numpy as np
 import pytest
 from neuracore_types import DataType
 from neuracore_types.importer.config import (
+    AngleConfig,
+    EulerOrderConfig,
     ImageConventionConfig,
+    IntrinsicsConfig,
     LanguageConfig,
     OrientationConfig,
     PoseConfig,
+    QuaternionOrderConfig,
     RotationConfig,
 )
 from neuracore_types.importer.data_config import DataFormat
+from neuracore_types.importer.transform import ExtrinsicsToMatrix, IntrinsicsToMatrix
 from neuracore_types.nc_data.nc_data import MappingItem
 
 from neuracore.core.robot import JointInfo, JointLimits
@@ -494,3 +499,255 @@ class TestLogData:
 
         mock_mapping_item.transforms.assert_called_once_with(source_data)
         mock_nc.log_joint_position.assert_called_once()
+
+    @patch("neuracore.importer.core.base.nc")
+    def test_log_data_rgb_with_extrinsics_and_intrinsics(
+        self, mock_nc, importer, mock_mapping_item
+    ):
+        """Test if extrinsics and intrinsics are passed to nc.log_rgb."""
+        format = DataFormat(
+            image_convention=ImageConventionConfig.CHANNELS_LAST,
+            normalized_pixel_values=False,
+        )
+        source_data = np.zeros((100, 100, 3), dtype=np.uint8)
+        timestamp = 1234567890.0
+        extrinsics = np.eye(4, dtype=np.float32)
+        intrinsics = np.eye(3, dtype=np.float32)
+
+        importer._log_data(
+            DataType.RGB_IMAGES,
+            source_data,
+            mock_mapping_item,
+            format,
+            timestamp,
+            extrinsics=extrinsics,
+            intrinsics=intrinsics,
+        )
+
+        mock_nc.log_rgb.assert_called_once()
+        call_kwargs = mock_nc.log_rgb.call_args.kwargs
+        np.testing.assert_array_equal(call_kwargs["extrinsics"], extrinsics)
+        np.testing.assert_array_equal(call_kwargs["intrinsics"], intrinsics)
+
+    @patch("neuracore.importer.core.base.nc")
+    def test_log_data_depth_with_extrinsics_and_intrinsics(
+        self, mock_nc, importer, mock_mapping_item
+    ):
+        """Test if extrinsics and intrinsics are passed to nc.log_depth."""
+        format = DataFormat()
+        source_data = np.zeros((100, 100), dtype=np.float32)
+        timestamp = 1234567890.0
+        extrinsics = np.eye(4, dtype=np.float32)
+        intrinsics = np.eye(3, dtype=np.float32)
+
+        importer._log_data(
+            DataType.DEPTH_IMAGES,
+            source_data,
+            mock_mapping_item,
+            format,
+            timestamp,
+            extrinsics=extrinsics,
+            intrinsics=intrinsics,
+        )
+
+        mock_nc.log_depth.assert_called_once()
+        call_kwargs = mock_nc.log_depth.call_args.kwargs
+        np.testing.assert_array_equal(call_kwargs["extrinsics"], extrinsics)
+        np.testing.assert_array_equal(call_kwargs["intrinsics"], intrinsics)
+
+    @patch("neuracore.importer.core.base.nc")
+    def test_log_data_point_cloud_with_extrinsics_and_intrinsics(
+        self, mock_nc, importer, mock_mapping_item
+    ):
+        """Test if extrinsics and intrinsics are passed to nc.log_point_cloud."""
+        format = DataFormat()
+        source_data = np.zeros((100, 3), dtype=np.float32)
+        timestamp = 1234567890.0
+        extrinsics = np.eye(4, dtype=np.float32)
+        intrinsics = np.eye(3, dtype=np.float32)
+
+        importer._log_data(
+            DataType.POINT_CLOUDS,
+            source_data,
+            mock_mapping_item,
+            format,
+            timestamp,
+            extrinsics=extrinsics,
+            intrinsics=intrinsics,
+        )
+
+        mock_nc.log_point_cloud.assert_called_once()
+        call_kwargs = mock_nc.log_point_cloud.call_args.kwargs
+        np.testing.assert_array_equal(call_kwargs["extrinsics"], extrinsics)
+        np.testing.assert_array_equal(call_kwargs["intrinsics"], intrinsics)
+
+    @patch("neuracore.importer.core.base.nc")
+    def test_log_data_without_camera_params_passes_none(
+        self, mock_nc, importer, mock_mapping_item
+    ):
+        """Test that omitting extrinsics/intrinsics passes None to the logging call."""
+        format = DataFormat(
+            image_convention=ImageConventionConfig.CHANNELS_LAST,
+            normalized_pixel_values=False,
+        )
+        source_data = np.zeros((100, 100, 3), dtype=np.uint8)
+        timestamp = 1234567890.0
+
+        importer._log_data(
+            DataType.RGB_IMAGES, source_data, mock_mapping_item, format, timestamp
+        )
+
+        mock_nc.log_rgb.assert_called_once()
+        call_kwargs = mock_nc.log_rgb.call_args.kwargs
+        assert call_kwargs["extrinsics"] is None
+        assert call_kwargs["intrinsics"] is None
+
+
+class TestConvertExtrinsics:
+    """Tests for ExtrinsicsToMatrix transform."""
+
+    def test_convert_matrix_format(self):
+        """Test converting a flat 16-element array to 4x4 matrix."""
+        raw = np.eye(4).flatten()
+
+        result = ExtrinsicsToMatrix(extrinsics_format=PoseConfig.MATRIX)(raw)
+
+        assert result.shape == (4, 4)
+        np.testing.assert_array_almost_equal(result, np.eye(4))
+
+    def test_convert_position_quaternion_xyzw(self):
+        """Test converting position + quaternion (XYZW) to 4x4 matrix."""
+        # Identity rotation quaternion (XYZW) = [0, 0, 0, 1]
+        raw = np.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0])
+
+        result = ExtrinsicsToMatrix(
+            extrinsics_format=PoseConfig.POSITION_ORIENTATION,
+            extrinsics_orientation=OrientationConfig(
+                type=RotationConfig.QUATERNION,
+                quaternion_order=QuaternionOrderConfig.XYZW,
+            ),
+        )(raw)
+
+        assert result.shape == (4, 4)
+        np.testing.assert_array_almost_equal(result[:3, 3], [1.0, 2.0, 3.0])
+        np.testing.assert_array_almost_equal(result[:3, :3], np.eye(3))
+        np.testing.assert_array_almost_equal(result[3, :], [0, 0, 0, 1])
+
+    def test_convert_position_quaternion_wxyz(self):
+        """Test converting position + quaternion (WXYZ) to 4x4 matrix."""
+        # Identity rotation quaternion (WXYZ) = [1, 0, 0, 0]
+        raw = np.array([1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0])
+
+        result = ExtrinsicsToMatrix(
+            extrinsics_format=PoseConfig.POSITION_ORIENTATION,
+            extrinsics_orientation=OrientationConfig(
+                type=RotationConfig.QUATERNION,
+                quaternion_order=QuaternionOrderConfig.WXYZ,
+            ),
+        )(raw)
+
+        assert result.shape == (4, 4)
+        np.testing.assert_array_almost_equal(result[:3, 3], [1.0, 2.0, 3.0])
+        np.testing.assert_array_almost_equal(result[:3, :3], np.eye(3))
+
+    def test_convert_position_quaternion_xyzw_90deg_x(self):
+        """Test non-trivial 90-degree X rotation with XYZW quaternion."""
+        # 90 deg around X: quat XYZW = [sin(45), 0, 0, cos(45)]
+        s = np.sin(np.pi / 4)
+        c = np.cos(np.pi / 4)
+        raw = np.array([1.0, 2.0, 3.0, s, 0.0, 0.0, c])
+
+        result = ExtrinsicsToMatrix(
+            extrinsics_format=PoseConfig.POSITION_ORIENTATION,
+            extrinsics_orientation=OrientationConfig(
+                type=RotationConfig.QUATERNION,
+                quaternion_order=QuaternionOrderConfig.XYZW,
+            ),
+        )(raw)
+
+        # 90 deg rotation around X: Y→Z, Z→-Y
+        expected_rot = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float64)
+        np.testing.assert_array_almost_equal(result[:3, :3], expected_rot)
+        np.testing.assert_array_almost_equal(result[:3, 3], [1.0, 2.0, 3.0])
+
+    def test_convert_position_quaternion_wxyz_90deg_x(self):
+        """Test non-trivial 90-degree X rotation with WXYZ quaternion."""
+        # Same rotation but in WXYZ order: [cos(45), sin(45), 0, 0]
+        s = np.sin(np.pi / 4)
+        c = np.cos(np.pi / 4)
+        raw = np.array([1.0, 2.0, 3.0, c, s, 0.0, 0.0])
+
+        result = ExtrinsicsToMatrix(
+            extrinsics_format=PoseConfig.POSITION_ORIENTATION,
+            extrinsics_orientation=OrientationConfig(
+                type=RotationConfig.QUATERNION,
+                quaternion_order=QuaternionOrderConfig.WXYZ,
+            ),
+        )(raw)
+
+        # Should produce the same rotation matrix as the XYZW test
+        expected_rot = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float64)
+        np.testing.assert_array_almost_equal(result[:3, :3], expected_rot)
+        np.testing.assert_array_almost_equal(result[:3, 3], [1.0, 2.0, 3.0])
+
+    def test_convert_position_euler_radians(self):
+        """Test converting position + euler angles (radians) to 4x4 matrix."""
+        raw = np.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
+
+        result = ExtrinsicsToMatrix(
+            extrinsics_format=PoseConfig.POSITION_ORIENTATION,
+            extrinsics_orientation=OrientationConfig(
+                type=RotationConfig.EULER,
+                euler_order=EulerOrderConfig.XYZ,
+                angle_units=AngleConfig.RADIANS,
+            ),
+        )(raw)
+
+        assert result.shape == (4, 4)
+        np.testing.assert_array_almost_equal(result[:3, 3], [1.0, 2.0, 3.0])
+        np.testing.assert_array_almost_equal(result[:3, :3], np.eye(3))
+
+    def test_convert_position_euler_degrees(self):
+        """Test converting position + euler angles (degrees) to 4x4 matrix."""
+        raw = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 90.0])
+
+        result = ExtrinsicsToMatrix(
+            extrinsics_format=PoseConfig.POSITION_ORIENTATION,
+            extrinsics_orientation=OrientationConfig(
+                type=RotationConfig.EULER,
+                euler_order=EulerOrderConfig.XYZ,
+                angle_units=AngleConfig.DEGREES,
+            ),
+        )(raw)
+
+        assert result.shape == (4, 4)
+        # 90 degree rotation around Z axis
+        expected_rot = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]], dtype=np.float64)
+        np.testing.assert_array_almost_equal(result[:3, :3], expected_rot)
+
+
+class TestConvertIntrinsics:
+    """Tests for IntrinsicsToMatrix transform."""
+
+    def test_convert_matrix_format(self):
+        """Test converting a flat 9-element array to 3x3 matrix."""
+        raw = np.eye(3).flatten()
+
+        result = IntrinsicsToMatrix(intrinsics_format=IntrinsicsConfig.MATRIX)(raw)
+
+        assert result.shape == (3, 3)
+        np.testing.assert_array_almost_equal(result, np.eye(3))
+
+    def test_convert_flat_format(self):
+        """Test converting [fx, fy, cx, cy] to 3x3 intrinsics matrix."""
+        raw = np.array([500.0, 500.0, 320.0, 240.0])
+
+        result = IntrinsicsToMatrix(intrinsics_format=IntrinsicsConfig.FLAT)(raw)
+
+        expected = np.array([
+            [500.0, 0.0, 320.0],
+            [0.0, 500.0, 240.0],
+            [0.0, 0.0, 1.0],
+        ])
+        assert result.shape == (3, 3)
+        np.testing.assert_array_almost_equal(result, expected)
