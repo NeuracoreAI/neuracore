@@ -8,6 +8,7 @@ import re
 import sys
 import time
 import traceback
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -532,10 +533,17 @@ def run_training(
             cfg, model_init_description
         )
 
+        training_metadata = {
+            "neuracore_version": version("neuracore"),
+            "neuracore_types_version": version("neuracore-types"),
+            "dataset_sync_frequency": cfg.frequency,
+        }
+
         training_storage_handler = TrainingStorageHandler(
             local_dir=cfg.local_output_dir,
             training_job_id=cfg.training_id,
             algorithm_config=algorithm_config,
+            training_metadata=training_metadata,
         )
 
         # Only start log streamer on rank 0 to avoid multiple processes

@@ -10,7 +10,6 @@ import json
 import logging
 import tempfile
 import zipfile
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -24,30 +23,12 @@ from neuracore.ml.utils.device_utils import get_default_device
 logger = logging.getLogger(__name__)
 
 
-def _build_archive_metadata() -> dict[str, str | None]:
-    """Build archive metadata with installed package versions."""
-    try:
-        nc_types_version = version("neuracore-types")
-    except PackageNotFoundError:
-        logger.warning(
-            "Could not determine installed version for package 'neuracore-types'."
-        )
-        nc_types_version = None
-
-    try:
-        nc_version = version("neuracore")
-    except PackageNotFoundError:
-        logger.warning("Could not determine installed version for package 'neuracore'.")
-        nc_version = None
-
-    return {
-        "neuracore_version": nc_version,
-        "neuracore_types_version": nc_types_version,
-    }
-
-
 def create_nc_archive(
-    model: NeuracoreModel, output_dir: Path, algorithm_config: dict = {}
+    model: NeuracoreModel,
+    output_dir: Path,
+    algorithm_config: dict = {},
+    *,
+    training_metadata: dict = {},
 ) -> Path:
     """Create a Neuracore model archive (NC.ZIP) file from a Neuracore model.
 
@@ -59,6 +40,9 @@ def create_nc_archive(
         model: Trained Neuracore model instance to package for deployment.
         output_dir: Directory path where the NC.ZIP file will be created.
         algorithm_config: Custom configuration for the algorithm.
+        training_metadata: Metadata to embed in the archive (e.g. package
+            versions, sync frequency). Caller is responsible for populating
+            this with all relevant context.
 
     Returns:
         Path to the created NC.ZIP file.
@@ -92,7 +76,7 @@ def create_nc_archive(
 
         # Save archive metadata
         with open(temp_path / "metadata", "w") as f:
-            json.dump(_build_archive_metadata(), f, indent=2)
+            json.dump(training_metadata, f, indent=2)
 
         # Create the ZIP archive
         with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zip_file:

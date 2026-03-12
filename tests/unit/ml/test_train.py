@@ -397,6 +397,7 @@ def mock_cfg_training(temp_output_dir) -> DictConfig:
         "max_delay_s": 0.5,
         "allow_duplicates": True,
         "trim_start_end": True,
+        "frequency": 10.0,
     })
 
 
@@ -1169,6 +1170,10 @@ class TestRunTraining:
         monkeypatch,
     ):
         mock_cfg_training.training_id = "test-training-id"
+        monkeypatch.setattr(
+            "neuracore.ml.train.version",
+            lambda pkg: {"neuracore": "1.0.0", "neuracore-types": "0.5.0"}[pkg],
+        )
         setup = RunTrainingTestSetup(
             monkeypatch,
             model_init_description,
@@ -1178,14 +1183,16 @@ class TestRunTraining:
 
         setup.call_run_training(mock_cfg_training, mock_dataset)
 
-        # Verify TrainingStorageHandler was instantiated correctly
         setup.mock_storage_handler.assert_called_once()
         call_kwargs = setup.mock_storage_handler.call_args[1]
         assert call_kwargs["local_dir"] == mock_cfg_training.local_output_dir
         assert call_kwargs["training_job_id"] == "test-training-id"
-        # Verify algorithm_config is passed (empty dict when no custom params)
-        assert "algorithm_config" in call_kwargs
         assert isinstance(call_kwargs["algorithm_config"], dict)
+        assert call_kwargs["training_metadata"] == {
+            "neuracore_version": "1.0.0",
+            "neuracore_types_version": "0.5.0",
+            "dataset_sync_frequency": mock_cfg_training.frequency,
+        }
 
     def test_run_training_logs_model_parameter_count(
         self,

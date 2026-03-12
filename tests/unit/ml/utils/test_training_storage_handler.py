@@ -81,6 +81,11 @@ class TestInit:
         handler_with_default_dir = TrainingStorageHandler(local_dir=None)
         assert handler_with_default_dir.local_dir == Path("./output")
 
+    def test_init_stores_training_metadata(self, tmp_path, mock_auth, mock_org):
+        metadata = {"dataset_sync_frequency": 50.0}
+        h = TrainingStorageHandler(local_dir=str(tmp_path), training_metadata=metadata)
+        assert h.training_metadata == metadata
+
 
 class TestGetUploadUrl:
     def test_get_upload_url_returns_signed_url_from_response(
@@ -314,6 +319,29 @@ class TestSaveModelArtifacts:
             model=mock_model,
             output_dir=artifacts_dir,
             algorithm_config={},
+            training_metadata={},
+        )
+
+    def test_save_model_artifacts_passes_training_metadata_to_create_nc_archive(
+        self, tmp_path, mock_auth, mock_org
+    ):
+        metadata = {"dataset_sync_frequency": 30.0}
+        handler_with_meta = TrainingStorageHandler(
+            local_dir=str(tmp_path), training_metadata=metadata
+        )
+        mock_model = MagicMock()
+        output_dir = Path("run_1")
+
+        with patch(
+            "neuracore.ml.utils.training_storage_handler.create_nc_archive"
+        ) as mock_archive:
+            handler_with_meta.save_model_artifacts(mock_model, output_dir)
+
+        mock_archive.assert_called_once_with(
+            model=mock_model,
+            output_dir=tmp_path / output_dir / "artifacts",
+            algorithm_config={},
+            training_metadata=metadata,
         )
 
     def test_save_model_artifacts_uploads_each_artifact_file_to_cloud(
@@ -327,7 +355,7 @@ class TestSaveModelArtifacts:
         )
         requests_mock.put(SIGNED_URL, status_code=200)
 
-        def fake_archive(model, output_dir, algorithm_config):
+        def fake_archive(model, output_dir, algorithm_config, training_metadata):
             (output_dir / "model.pt").write_bytes(b"model_data")
             (output_dir / "config.json").write_bytes(b"{}")
 

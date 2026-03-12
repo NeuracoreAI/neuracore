@@ -26,6 +26,7 @@ class TrainingStorageHandler(UploadStorageMixin):
         local_dir: str | None,
         training_job_id: str | None = None,
         algorithm_config: dict = {},
+        training_metadata: dict = {},
     ) -> None:
         """Initialize the storage handler.
 
@@ -33,10 +34,13 @@ class TrainingStorageHandler(UploadStorageMixin):
             local_dir: Local directory to save artifacts and checkpoints.
             training_job_id: Optional ID of the training job for cloud logging.
             algorithm_config: Optional configuration for the algorithm.
+            training_metadata: Arbitrary training context to embed in the
+                nc.zip archive metadata (e.g. ``{"dataset_sync_frequency": 10}``).
         """
         self.local_dir = Path(local_dir or "./output")
         self.training_job_id = training_job_id
         self.algorithm_config = algorithm_config
+        self.training_metadata = training_metadata
         self.log_to_cloud = self.training_job_id is not None
         self.org_id = get_current_org()
         if self.log_to_cloud:
@@ -224,6 +228,7 @@ class TrainingStorageHandler(UploadStorageMixin):
             model=model,
             output_dir=artifacts_dir,
             algorithm_config=self.algorithm_config,
+            training_metadata=self.training_metadata,
         )
         if self.log_to_cloud:
             for file_path in artifacts_dir.glob("*"):
