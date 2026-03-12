@@ -14,6 +14,11 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 from neuracore_types import DataType
 from neuracore_types.importer.config import LanguageConfig
+from neuracore_types.importer.data_config import (
+    DepthCameraDataMappingItem,
+    PointCloudDataMappingItem,
+    RGBCameraDataMappingItem,
+)
 from neuracore_types.nc_data import DatasetImportConfig
 
 import neuracore as nc
@@ -103,8 +108,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         self._episode_iter = None
 
         self.logger.info(
-            "Initialized %s importer for '%s' "
-            "(split=%s, episodes=%s, freq=%s, dir=%s)",
+            "Initialized %s importer for '%s' (split=%s, episodes=%s, freq=%s, dir=%s)",
             self.dataset_label,
             self.dataset_name,
             self.split,
@@ -449,15 +453,54 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                     data_type=data_type,
                 )
 
-                source_data = self._convert_source_data(
-                    source_data=source_data,
-                    data_type=data_type,
-                    language_type=import_config.format.language_type,
-                    item_name=item.name,
-                    import_source_path=import_config.source,
-                )
+                if not (
+                    data_type == DataType.LANGUAGE
+                    and import_config.format.language_type == LanguageConfig.STRING
+                ):
+                    source_data = self._convert_source_data(
+                        source_data=source_data,
+                        data_type=data_type,
+                        item_name=item.name,
+                    )
+
+                extrinsics, intrinsics = None, None
+                if isinstance(
+                    item,
+                    (
+                        RGBCameraDataMappingItem,
+                        DepthCameraDataMappingItem,
+                        PointCloudDataMappingItem,
+                    ),
+                ):
+                    if item.extrinsics_source is not None:
+                        extrinsics = item.extrinsics_transforms(
+                            self._convert_source_data(
+                                source_data=self._resolve_source_path(
+                                    source, item.extrinsics_source
+                                ),
+                                data_type=data_type,
+                                item_name=item.extrinsics_source,
+                            )
+                        )
+                    if item.intrinsics_source is not None:
+                        intrinsics = item.intrinsics_transforms(
+                            self._convert_source_data(
+                                source_data=self._resolve_source_path(
+                                    source, item.intrinsics_source
+                                ),
+                                data_type=data_type,
+                                item_name=item.intrinsics_source,
+                            )
+                        )
+
                 self._log_data(
-                    data_type, source_data, item, import_config.format, timestamp
+                    data_type,
+                    source_data,
+                    item,
+                    import_config.format,
+                    timestamp,
+                    extrinsics=extrinsics,
+                    intrinsics=intrinsics,
                 )
 
     def _extract_source_data(
@@ -493,13 +536,8 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         self,
         source_data: Any,
         data_type: DataType,
-        language_type: LanguageConfig,
         item_name: str | None,
-        import_source_path: str,
     ) -> Any:
-        if data_type == DataType.LANGUAGE and language_type == LanguageConfig.STRING:
-            return source_data
-
         try:
             return source_data.numpy()
         except Exception as exc:
