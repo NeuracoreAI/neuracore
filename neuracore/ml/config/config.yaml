@@ -42,32 +42,10 @@ output_data_types:
 # Dict[str, Dict[DataType, List[str]], e.g., {"my_robot": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...]}}
 # You can also pass in an empty dict {} to use all available data for all robots
 input_cross_embodiment_description: {
-  "MyRobot1": {
-    "JOINT_POSITIONS": {
-      0: "joint1",
-      1: "joint2",
-    }
-  },
-   "MyRobot2": {
-    "JOINT_POSITIONS": {
-      0: "joint1",
-      1: "joint2",
-    }
-  },
+
 }
 output_cross_embodiment_description: {
-  "MyRobot1": {
-    "JOINT_POSITIONS": {
-      0: "joint1",
-      1: "joint2",
-    }
-  },
-   "MyRobot2": {
-    "JOINT_POSITIONS": {
-      0: "joint1",
-      1: "joint2",
-    }
-  },
+
 }
 
 # Paths and IDs (for cloud vs local training)
