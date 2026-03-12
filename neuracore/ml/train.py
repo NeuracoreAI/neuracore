@@ -430,7 +430,6 @@ def determine_optimal_batch_size(
         output_data_types=extract_data_types(output_cross_embodiment_description),
         output_prediction_horizon=cfg.output_prediction_horizon,
     )
-    breakpoint()
     model, algorithm_config = get_model_and_algorithm_config(
         cfg, model_init_description
     )
@@ -446,8 +445,6 @@ def determine_optimal_batch_size(
         f"min_batch_size: {min_batch_size}, "
         f"num_workers: {num_workers}"
     )
-
-    breakpoint()
 
     # Determine per-GPU batch size
     optimal_batch_size = find_optimal_batch_size(
@@ -777,6 +774,8 @@ def _main(cfg: DictConfig) -> None:
         dataset=dataset,
         field_name="output_cross_embodiment_description",
     )
+
+    breakpoint()
 
     input_cross_embodiment_description = (
         convert_cross_embodiment_description_names_to_ids(
