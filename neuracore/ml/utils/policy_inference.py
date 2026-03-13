@@ -231,6 +231,6 @@ class PolicyInference:
         sync_point = sync_point.order(self.model_input_order)
         self._validate_input_sync_point(sync_point)
         batch = self._preprocess(sync_point)
-        with torch.no_grad():
+        with torch.inference_mode():
             batch_output: dict[DataType, list[BatchedNCData]] = self.model(batch)
             return self._assign_names_to_model_outputs(batch_output)

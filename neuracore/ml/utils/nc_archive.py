@@ -10,6 +10,7 @@ import json
 import logging
 import tempfile
 import zipfile
+from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.device_utils import get_default_device
 
 logger = logging.getLogger(__name__)
+_ARCHIVE_CACHE_ROOT = Path(tempfile.gettempdir()) / "neuracore_nc_archives"
 
 
 def _build_archive_metadata() -> dict[str, str | None]:
@@ -128,6 +130,27 @@ def create_nc_archive(
     return archive_path
 
 
+@lru_cache(maxsize=128)
+def _get_cached_extract_dir(
+    archive_path: str, archive_size: int, archive_mtime_ns: int
+) -> Path:
+    """Build a stable extraction directory for an archive version."""
+    archive_name = Path(archive_path).stem.replace(".", "_")
+    fingerprint = f"{archive_size:x}-{archive_mtime_ns:x}"
+    return _ARCHIVE_CACHE_ROOT / f"{archive_name}-{fingerprint}"
+
+
+def _archive_fully_extracted(
+    zip_ref: zipfile.ZipFile, output_dir: Path, *, cache_only: bool
+) -> bool:
+    """Check whether all archive members already exist on disk."""
+    if not cache_only or not output_dir.exists():
+        return False
+    return all(
+        (output_dir / file_info.filename).exists() for file_info in zip_ref.filelist
+    )
+
+
 def extract_nc_archive(archive_file: Path, output_dir: Path) -> dict[str, Path]:
     """Extract all contents from a Neuracore model archive (NC.ZIP) file.
 
@@ -148,12 +171,18 @@ def extract_nc_archive(archive_file: Path, output_dir: Path) -> dict[str, Path]:
     if not archive_file.exists():
         raise FileNotFoundError(f"Archive file not found: {archive_file}")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     extracted_files: dict[str, Any] = {}
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(archive_file, "r") as zip_ref:
-        # Extract all files
-        zip_ref.extractall(output_dir)
+        should_reuse_existing = output_dir.is_relative_to(_ARCHIVE_CACHE_ROOT)
+        if _archive_fully_extracted(
+            zip_ref, output_dir, cache_only=should_reuse_existing
+        ):
+            logger.info("Reusing extracted NC archive at %s", output_dir)
+        else:
+            logger.info("Extracting NC archive to %s", output_dir)
+            zip_ref.extractall(output_dir)
 
         # Catalog the extracted files
         for file_info in zip_ref.filelist:
@@ -189,70 +218,76 @@ def load_model_from_nc_archive(
     Args:
         archive_file: Path to the NC.ZIP file.
         extract_to: Optional directory to extract files to.
-            If None, uses a temporary directory.
+            If None, reuses a stable cache directory under the system temp dir.
         device: Optional device model to be loaded on
 
     Returns:
         NeuracoreModel: The reconstructed model instance ready for inference.
     """
-    use_temp_dir = extract_to is None
-
-    if use_temp_dir:
-        temp_dir_context = tempfile.TemporaryDirectory()
-        extract_to = Path(temp_dir_context.__enter__())
-    else:
-        temp_dir_context = None
+    if extract_to is None:
+        archive_file = archive_file.resolve()
+        archive_stat = archive_file.stat()
+        extract_to = _get_cached_extract_dir(
+            str(archive_file),
+            archive_stat.st_size,
+            archive_stat.st_mtime_ns,
+        )
 
     assert extract_to is not None
 
-    try:
-        # Extract the archive file
-        extracted_files = extract_nc_archive(archive_file, extract_to)
+    # Extract the archive file
+    extracted_files = extract_nc_archive(archive_file, extract_to)
 
-        # Load model initialization description
-        if "model_init_description" not in extracted_files:
-            raise FileNotFoundError("model_init_description.json not found in archive")
+    # Load model initialization description
+    if "model_init_description" not in extracted_files:
+        raise FileNotFoundError("model_init_description.json not found in archive")
 
-        with open(extracted_files["model_init_description"]) as f:
-            model_init_description = json.load(f)
-        model_init_description = ModelInitDescription.model_validate(
-            model_init_description
+    with open(extracted_files["model_init_description"]) as f:
+        model_init_description = json.load(f)
+    model_init_description = ModelInitDescription.model_validate(model_init_description)
+
+    # Load algorithm config if present
+    algorithm_config = {}
+    if "algorithm_config" in extracted_files:
+        with open(extracted_files["algorithm_config"]) as f:
+            algorithm_config = json.load(f)
+
+    if "model_weights" in extracted_files and algorithm_config.get(
+        "use_pretrained_weights"
+    ):
+        algorithm_config = {
+            **algorithm_config,
+            "use_pretrained_weights": False,
+        }
+        logger.info(
+            "Skipping pretrained base weight load because the NC archive already "
+            "contains a full model state_dict."
         )
 
-        # Load algorithm config if present
-        algorithm_config = {}
-        if "algorithm_config" in extracted_files:
-            with open(extracted_files["algorithm_config"]) as f:
-                algorithm_config = json.load(f)
+    # Find the algorithm directory
+    algorithm_dir = extract_to / "algorithm"
+    if not algorithm_dir.exists():
+        raise FileNotFoundError("Algorithm directory not found in archive")
 
-        # Find the algorithm directory
-        algorithm_dir = extract_to / "algorithm"
-        if not algorithm_dir.exists():
-            raise FileNotFoundError("Algorithm directory not found in archive")
+    # Load the algorithm using AlgorithmLoader
+    algorithm_loader = AlgorithmLoader(algorithm_dir)
+    model_class = algorithm_loader.load_model()
 
-        # Load the algorithm using AlgorithmLoader
-        algorithm_loader = AlgorithmLoader(algorithm_dir)
-        model_class = algorithm_loader.load_model()
+    # Create model instance
+    if device:
+        device = torch.device(device)
+    else:
+        device = get_default_device()
+    model = model_class(model_init_description, **algorithm_config)
+    model = model.to(device)
 
-        # Create model instance
-        if device:
-            device = torch.device(device)
-        else:
-            device = get_default_device()
-        model = model_class(model_init_description, **algorithm_config)
-        model = model.to(device)
+    # Load trained weights if present
+    if "model_weights" in extracted_files:
+        state_dict = torch.load(
+            extracted_files["model_weights"],
+            map_location=model.device,
+            weights_only=True,
+        )
+        model.load_state_dict(state_dict)
 
-        # Load trained weights if present
-        if "model_weights" in extracted_files:
-            state_dict = torch.load(
-                extracted_files["model_weights"],
-                map_location=model.device,
-                weights_only=True,
-            )
-            model.load_state_dict(state_dict)
-
-        return model
-
-    finally:
-        if use_temp_dir and temp_dir_context:
-            temp_dir_context.__exit__(None, None, None)
+    return model

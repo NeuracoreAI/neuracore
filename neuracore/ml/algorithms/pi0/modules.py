@@ -425,7 +425,7 @@ class PI0Policy(nn.Module):
         v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
         return F.mse_loss(u_t, v_t, reduction="none")
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def sample_actions(
         self,
         images: list[Tensor],
