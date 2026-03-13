@@ -11,6 +11,7 @@ from sqlalchemy.exc import OperationalError
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.const import (
     API_URL,
     BACKEND_API_MAX_BACKOFF_SECONDS,
@@ -53,9 +54,10 @@ class StateManager:
     _FAILED_TRACE_MAX_AGE_S = 60 * 60 * 4  # 4 hours
     _EMPTY_RECORDING_MAX_AGE_HOURS = 24
 
-    def __init__(self, store: StateStore) -> None:
+    def __init__(self, store: StateStore, config: DaemonConfig | None = None) -> None:
         """Initialize with a persistence backend."""
         self._store = store
+        self._config = config
         self._trace_written_retry_queue: asyncio.Queue[tuple[str, str, int, int]] = (
             asyncio.Queue()
         )
@@ -710,6 +712,9 @@ class StateManager:
         if not recording_id:
             return False
         if recording_id in self.expected_trace_count_reporting:
+            return False
+
+        if self._config and self._config.offline:
             return False
 
         self.expected_trace_count_reporting[recording_id] = True
