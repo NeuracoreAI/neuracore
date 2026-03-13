@@ -100,7 +100,7 @@ def run_episode(
             joint_action = action_to_joint_action_dict(
                 step.info["demo_action"], JOINT_ACTUATORS
             )
-            nc.log_joint_target_positions(joint_action)
+            nc.log_joint_target_positions(joint_action, timestamp=t)
 
             # Check outcome
             if terminated and not truncated:
