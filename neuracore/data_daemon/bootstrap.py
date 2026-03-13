@@ -97,7 +97,7 @@ async def bootstrap_async_services(
     logger.debug("SqliteStateStore initialized at %s", db_path)
     await state_store.reset_retrying_to_written()
 
-    state_manager = StateManager(state_store)
+    state_manager = StateManager(state_store, config)
     await state_manager.recover_startup_state()
     logger.debug("StateManager initialized")
 
@@ -105,8 +105,9 @@ async def bootstrap_async_services(
         client_session=client_session,
         state_api=state_manager,
     )
-    registration_manager.start()
-    logger.debug("RegistrationManager started")
+    if not config.offline:
+        registration_manager.start()
+        logger.debug("RegistrationManager started")
 
     upload_manager = UploadManager(config, client_session)
     logger.debug("UploadManager initialized")

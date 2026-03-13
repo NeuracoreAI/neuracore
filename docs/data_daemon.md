@@ -366,6 +366,29 @@ nc-data-daemon update   [--storage-limit <bytes|unit>]   [--bandwidth-limit <byt
 
 ---
 
+## Offline Recordings
+
+### Single node
+
+Set `offline: true` in your profile, then launch the daemon with that profile as usual. Record normally, all data is stored locally. When you have internet access again, relaunch the daemon without offline mode and it will automatically upload your recordings to Neuracore.
+
+```bash
+# Set offline mode
+nc-data-daemon profile update --name my_profile --offline
+
+# Record offline
+nc-data-daemon launch --profile my_profile
+
+# Back online, relaunch daemon without the offline mode and it will start uploading automatically
+nc-data-daemon launch --profile my_profile  
+```
+
+### Multi node
+
+For multi-node offline setups, collect your data using a data distribution system like ROS across multiple nodes, then use a single node to import your collected data into Neuracore.
+
+---
+
 ## Troubleshooting
 
 ### Daemon already running
