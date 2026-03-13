@@ -102,29 +102,48 @@ def _make_sync_point(obs) -> SynchronizedPoint:
 
 
 def _collect_demo_data(
-    robot_name: str, dataset_name: str, num_episodes: int = 3
+    robot_name: str, dataset_name: str, num_episodes: int = 3, instance_id: int = 0
 ) -> Dataset:
-    """Collect scripted demonstrations and log them to neuracore."""
+    """Collect scripted demonstrations and log them to neuracore.
+
+    Use different instances for different tests since they are run in parallel.
+    """
     nc.connect_robot(
-        robot_name, urdf_path=str(BIMANUAL_VIPERX_URDF_PATH), overwrite=False
+        robot_name,
+        instance=instance_id,
+        urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
+        overwrite=False,
     )
     dataset = nc.create_dataset(dataset_name)
 
     for ep_idx in range(num_episodes):
         logger.info(f"Collecting episode {ep_idx + 1}/{num_episodes}")
         action_traj = rollout_policy()
-        nc.start_recording()
+        nc.start_recording(robot_name=robot_name, instance=instance_id)
         for frame_idx, action_dict in enumerate(action_traj):
             t = time.time()
             joint_positions = {
                 k: v for k, v in action_dict.items() if "gripper" not in k
             }
-            nc.log_joint_positions(joint_positions, timestamp=t)
+            nc.log_joint_positions(
+                joint_positions,
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
             img = np.zeros((480, 640, 3), dtype=np.uint8)
             img.fill(50 + frame_idx % 200)
-            nc.log_rgb(NC_CAM_NAME, img, timestamp=t)
-            nc.log_joint_target_positions(action_dict, timestamp=t)
-        nc.stop_recording(wait=True)
+            nc.log_rgb(
+                NC_CAM_NAME,
+                img,
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+            nc.log_joint_target_positions(
+                action_dict, timestamp=t, robot_name=robot_name, instance=instance_id
+            )
+        nc.stop_recording(wait=True, robot_name=robot_name, instance=instance_id)
         logger.info(f"Episode {ep_idx + 1} recorded ({len(action_traj)} frames)")
     return dataset
 
@@ -202,7 +221,7 @@ def test_training_flow():
         # ------------------------------------------------------------------
         try:
             collected_dataset = _collect_demo_data(
-                ROBOT_NAME, collected_dataset_name, num_episodes=3
+                ROBOT_NAME, collected_dataset_name, num_episodes=3, instance_id=0
             )
         except Exception as e:
             pytest.fail(f"Step 1 (collect demo data) failed: {e}")
@@ -432,7 +451,9 @@ def test_training_failure_error_reporting():
         # Collect minimal demo data (1 episode is enough)
         # ------------------------------------------------------------------
         try:
-            dataset = _collect_demo_data(ROBOT_NAME, dataset_name, num_episodes=1)
+            dataset = _collect_demo_data(
+                ROBOT_NAME, dataset_name, num_episodes=1, instance_id=1
+            )
         except Exception as e:
             pytest.fail(f"Data collection failed: {e}")
 
