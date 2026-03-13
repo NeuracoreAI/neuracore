@@ -15,7 +15,11 @@ import hydra
 import torch
 import torch.multiprocessing as mp
 from names_generator import generate_name
-from neuracore_types import BatchedNCData, ModelInitDescription
+from neuracore_types import (
+    BatchedNCData,
+    CrossEmbodimentDescription,
+    ModelInitDescription,
+)
 from neuracore_types.nc_data import DataType
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler, random_split
@@ -24,10 +28,10 @@ import neuracore as nc
 from neuracore.api.training import _get_algorithms
 from neuracore.core.const import DEFAULT_CACHE_DIR, DEFAULT_RECORDING_CACHE_DIR
 from neuracore.core.utils.robot_data_spec_utils import (
-    convert_robot_data_spec_names_to_ids,
-    convert_str_to_robot_data_spec,
+    convert_cross_embodiment_description_names_to_ids,
+    convert_omegaconf_to_cross_embodiment_description,
     extract_data_types,
-    merge_robot_data_spec,
+    merge_cross_embodiment_description,
 )
 from neuracore.core.utils.training_input_args_validation import (
     get_algorithm_name,
@@ -216,11 +220,11 @@ def _select_worst_case_sample(
 
 
 def _serialize_robot_data_spec(
-    robot_data_spec: dict[str, dict[DataType, list[str]]],
-) -> dict[str, dict[str, list[str]]]:
+    cross_embodiment_description: CrossEmbodimentDescription,
+) -> CrossEmbodimentDescription:
     """Convert robot data spec to JSON-serializable form."""
-    serializable: dict[str, dict[str, list[str]]] = {}
-    for robot_id, data_types in robot_data_spec.items():
+    serializable: CrossEmbodimentDescription = {}
+    for robot_id, data_types in cross_embodiment_description.items():
         serializable[robot_id] = {}
         for data_type, names in data_types.items():
             key = data_type.name if hasattr(data_type, "name") else str(data_type)
@@ -228,11 +232,63 @@ def _serialize_robot_data_spec(
     return serializable
 
 
+def _resolve_cross_embodiment_description(
+    cross_embodiment_description_cfg: DictConfig | None,
+    data_types_cfg: list[str],
+    dataset: Any,
+    field_name: str,
+) -> CrossEmbodimentDescription:
+    """Resolve a cross-embodiment description from config or dataset.
+
+    Args:
+        cross_embodiment_description_cfg: Optional configuration for the
+            cross-embodiment description.
+        data_types_cfg: Data types to include if
+            ``cross_embodiment_description_cfg`` is not provided.
+        dataset: The dataset to extract data specifications from if needed.
+        field_name: Name of the field being resolved, used in errors.
+
+    Returns:
+        A cross-embodiment description resolved from configuration or
+        constructed from the dataset.
+
+    Raises:
+        ValueError: If ``cross_embodiment_description_cfg`` is invalid.
+    """
+    # if cross_embodiment_description is provided
+    if cross_embodiment_description_cfg is not None:
+        if not isinstance(cross_embodiment_description_cfg, DictConfig):
+            raise ValueError(
+                f"'{field_name}' must either be None or a dictionary mapping robot "
+                "names to dictionaries of data types to lists of data names."
+            )
+        return convert_omegaconf_to_cross_embodiment_description(
+            cross_embodiment_description_cfg
+        )
+
+    if data_types_cfg is not None:
+        data_types = [DataType(data_type) for data_type in data_types_cfg]
+        cross_embodiment_description: CrossEmbodimentDescription = {}
+
+        for robot_id in dataset.robot_ids:
+            robot_full_spec = dataset.get_full_data_spec(robot_id)
+            cross_embodiment_description[robot_id] = {
+                data_type: list(robot_full_spec.get(data_type.value, []))
+                for data_type in data_types
+            }
+        return cross_embodiment_description
+
+    raise ValueError(
+        f"Either '{field_name}' or the corresponding data_types "
+        "configuration must be provided."
+    )
+
+
 def _save_local_training_metadata(
     cfg: DictConfig,
     algorithm_name: str,
-    input_robot_data_spec: dict[str, dict[DataType, list[str]]],
-    output_robot_data_spec: dict[str, dict[DataType, list[str]]],
+    input_cross_embodiment_description: CrossEmbodimentDescription,
+    output_cross_embodiment_description: CrossEmbodimentDescription,
 ) -> None:
     """Persist basic training run metadata locally for local runs."""
     training_id = getattr(cfg, "training_id", None)
@@ -255,8 +311,12 @@ def _save_local_training_metadata(
         "launch_time": time.time(),
         "local_output_dir": str(output_dir),
         "org_id": getattr(cfg, "org_id", None),
-        "input_robot_data_spec": _serialize_robot_data_spec(input_robot_data_spec),
-        "output_robot_data_spec": _serialize_robot_data_spec(output_robot_data_spec),
+        "input_cross_embodiment_description": _serialize_robot_data_spec(
+            input_cross_embodiment_description
+        ),
+        "output_cross_embodiment_description": _serialize_robot_data_spec(
+            output_cross_embodiment_description
+        ),
         "frequency": getattr(cfg, "frequency", None),
         "output_prediction_horizon": getattr(cfg, "output_prediction_horizon", None),
         # Align with cloud run schema for inspect output
@@ -348,8 +408,8 @@ def get_model_and_algorithm_config(
 
 def determine_optimal_batch_size(
     cfg: DictConfig,
-    input_robot_data_spec: dict[str, dict[DataType, list[str]]],
-    output_robot_data_spec: dict[str, dict[DataType, list[str]]],
+    input_cross_embodiment_description: CrossEmbodimentDescription,
+    output_cross_embodiment_description: CrossEmbodimentDescription,
     dataset: SingleSampleDataset,
     device: torch.device | None = None,
 ) -> int:
@@ -366,11 +426,10 @@ def determine_optimal_batch_size(
 
     model_init_description = ModelInitDescription(
         dataset_statistics=dataset.dataset_statistics,
-        input_data_types=extract_data_types(input_robot_data_spec),
-        output_data_types=extract_data_types(output_robot_data_spec),
+        input_data_types=extract_data_types(input_cross_embodiment_description),
+        output_data_types=extract_data_types(output_cross_embodiment_description),
         output_prediction_horizon=cfg.output_prediction_horizon,
     )
-
     model, algorithm_config = get_model_and_algorithm_config(
         cfg, model_init_description
     )
@@ -417,8 +476,8 @@ def run_training(
     world_size: int,
     cfg: DictConfig,
     batch_size: int,
-    input_robot_data_spec: dict[str, dict[DataType, list[str]]],
-    output_robot_data_spec: dict[str, dict[DataType, list[str]]],
+    input_cross_embodiment_description: dict[str, dict[DataType, list[str]]],
+    output_cross_embodiment_description: dict[str, dict[DataType, list[str]]],
     dataset: PytorchSynchronizedDataset,
     device: torch.device | None = None,
 ) -> None:
@@ -441,7 +500,9 @@ def run_training(
         logger.info(f"Using batch size: {batch_size}")
 
         # Merge data_types for synchronization
-        merge_robot_data_spec(input_robot_data_spec, output_robot_data_spec)
+        merge_cross_embodiment_description(
+            input_cross_embodiment_description, output_cross_embodiment_description
+        )
 
         # Split dataset
         dataset_size = len(dataset)
@@ -519,8 +580,8 @@ def run_training(
         )
 
         # Model doesn't need to know about ids or names, just data types
-        input_data_types = extract_data_types(input_robot_data_spec)
-        output_data_types = extract_data_types(output_robot_data_spec)
+        input_data_types = extract_data_types(input_cross_embodiment_description)
+        output_data_types = extract_data_types(output_cross_embodiment_description)
         model_init_description = ModelInitDescription(
             dataset_statistics=dataset.dataset_statistics,
             input_data_types=input_data_types,
@@ -661,6 +722,7 @@ def _main(cfg: DictConfig) -> None:
     logger.info("Training configuration:")
     logger.info(OmegaConf.to_yaml(cfg, resolve=True))
 
+    # Validate algorithm
     if "algorithm" in cfg and cfg.algorithm_id is not None:
         raise ValueError(
             "Both 'algorithm' and 'algorithm_id' are provided. "
@@ -671,6 +733,7 @@ def _main(cfg: DictConfig) -> None:
             "Neither 'algorithm' nor 'algorithm_id' is provided. " "Please specify one."
         )
 
+    # Validate dataset specification
     if cfg.dataset_id is None and cfg.dataset_name is None:
         raise ValueError("Either 'dataset_id' or 'dataset_name' must be provided.")
     if cfg.dataset_id is not None and cfg.dataset_name is not None:
@@ -679,11 +742,16 @@ def _main(cfg: DictConfig) -> None:
             "Please specify only one."
         )
 
+    # TODO: make sure only the data_types or cross_embodiment_description
+    # is provided for both input and output,
+    # and that they are consistent with each other
+
     # Login and get dataset
     nc.login()
     if cfg.org_id is not None:
         nc.set_organization(cfg.org_id)
 
+    # Dataset retrieval and preparation
     if cfg.dataset_id is not None:
         dataset = nc.get_dataset(id=cfg.dataset_id)
     elif cfg.dataset_name is not None:
@@ -693,50 +761,31 @@ def _main(cfg: DictConfig) -> None:
     dataset.cache_dir = _resolve_recording_cache_dir(cfg)
     dataset.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # Sort out data specs
-    if cfg.input_robot_data_spec is not None:
-        if not isinstance(cfg.input_robot_data_spec, DictConfig):
-            raise ValueError(
-                "'input_robot_data_spec' must be a dictionary "
-                "mapping robot names to dictionary of data types to "
-                "lists of data names."
-            )
-        input_robot_data_spec = convert_str_to_robot_data_spec(
-            cfg.input_robot_data_spec
-        )
-    else:
-        input_data_types = [DataType(data_type) for data_type in cfg.input_data_types]
-        input_robot_data_spec = {}
-        for robot_id in dataset.robot_ids:
-            robot_full_spec = dataset.get_full_data_spec(robot_id)
-            input_robot_data_spec[robot_id] = {
-                data_type: list(robot_full_spec.get(data_type.value, []))
-                for data_type in input_data_types
-            }
-    if cfg.output_robot_data_spec is not None:
-        if not isinstance(cfg.output_robot_data_spec, DictConfig):
-            raise ValueError(
-                "'output_robot_data_spec' must either be None or a dictionary "
-                "mapping robot names to dictions of data types to lists of data names."
-            )
-        output_robot_data_spec = convert_str_to_robot_data_spec(
-            cfg.output_robot_data_spec
-        )
-    else:
-        output_data_types = [DataType(data_type) for data_type in cfg.output_data_types]
-        output_robot_data_spec = {}
-        for robot_id in dataset.robot_ids:
-            robot_full_spec = dataset.get_full_data_spec(robot_id)
-            output_robot_data_spec[robot_id] = {
-                data_type: list(robot_full_spec.get(data_type.value, []))
-                for data_type in output_data_types
-            }
-
-    input_robot_data_spec_with_id = convert_robot_data_spec_names_to_ids(
-        input_robot_data_spec
+    # Convert data_types to the final cross_embodiment_description
+    input_cross_embodiment_description = _resolve_cross_embodiment_description(
+        cross_embodiment_description_cfg=cfg.input_cross_embodiment_description,
+        data_types_cfg=cfg.input_data_types,
+        dataset=dataset,
+        field_name="input_cross_embodiment_description",
     )
-    output_robot_data_spec_with_id = convert_robot_data_spec_names_to_ids(
-        output_robot_data_spec
+    output_cross_embodiment_description = _resolve_cross_embodiment_description(
+        cross_embodiment_description_cfg=cfg.output_cross_embodiment_description,
+        data_types_cfg=cfg.output_data_types,
+        dataset=dataset,
+        field_name="output_cross_embodiment_description",
+    )
+
+    breakpoint()
+
+    input_cross_embodiment_description = (
+        convert_cross_embodiment_description_names_to_ids(
+            input_cross_embodiment_description
+        )
+    )
+    output_cross_embodiment_description = (
+        convert_cross_embodiment_description_names_to_ids(
+            output_cross_embodiment_description
+        )
     )
 
     # =========================================================
@@ -745,6 +794,7 @@ def _main(cfg: DictConfig) -> None:
 
     batch_size = cfg.batch_size
 
+    # Get algorithm JSONs parameters
     algorithms_jsons = _get_algorithms()
     if cfg.algorithm_id is not None:
         algorithm_name = get_algorithm_name(
@@ -754,31 +804,34 @@ def _main(cfg: DictConfig) -> None:
     else:
         algorithm_name = cfg.algorithm._target_.rsplit(".", 1)[-1]
 
+    # Validate that the provided parameters are consistent and sufficient
     validate_training_params(
         dataset,
         dataset_name=cfg.dataset_name if cfg.dataset_name is not None else "",
         algorithm_name=algorithm_name,
-        input_robot_data_spec=input_robot_data_spec_with_id,
-        output_robot_data_spec=output_robot_data_spec_with_id,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
         algorithm_jsons=algorithms_jsons,
     )
 
     # Prepare data types for synchronization
-    robot_data_spec = merge_robot_data_spec(
-        input_robot_data_spec_with_id, output_robot_data_spec_with_id
+    cross_embodiment_union: dict[str, dict[DataType, list[str]]] = (
+        merge_cross_embodiment_description(
+            input_cross_embodiment_description, output_cross_embodiment_description
+        )
     )
 
     # Save local metadata so CLI can inspect local runs without cloud access
     _save_local_training_metadata(
         cfg=cfg,
         algorithm_name=algorithm_name,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
     )
 
     synchronized_dataset = dataset.synchronize(
         frequency=cfg.frequency,
-        robot_data_spec=robot_data_spec,
+        cross_embodiment_union=cross_embodiment_union,
         prefetch_videos=True,
         max_prefetch_workers=cfg.max_prefetch_workers,
         max_delay_s=(
@@ -815,8 +868,8 @@ def _main(cfg: DictConfig) -> None:
     # for batch size autotuning, if used.
     pytorch_dataset = PytorchSynchronizedDataset(
         synchronized_dataset=synchronized_dataset,
-        input_robot_data_spec=input_robot_data_spec_with_id,
-        output_robot_data_spec=output_robot_data_spec_with_id,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
         output_prediction_horizon=cfg.output_prediction_horizon,
     )
 
@@ -828,8 +881,8 @@ def _main(cfg: DictConfig) -> None:
         )
         single_sample_dataset = SingleSampleDataset(
             sample=sample,
-            input_robot_data_spec=input_robot_data_spec_with_id,
-            output_robot_data_spec=output_robot_data_spec_with_id,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
             output_prediction_horizon=cfg.output_prediction_horizon,
             dataset_statistics=pytorch_dataset.dataset_statistics,
             num_recordings=len(pytorch_dataset),
@@ -837,8 +890,8 @@ def _main(cfg: DictConfig) -> None:
 
         optimal_batch_size = determine_optimal_batch_size(
             cfg=cfg,
-            input_robot_data_spec=input_robot_data_spec_with_id,
-            output_robot_data_spec=output_robot_data_spec_with_id,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
             dataset=single_sample_dataset,
             device=device,
         )
@@ -855,8 +908,8 @@ def _main(cfg: DictConfig) -> None:
                 world_size,
                 cfg,
                 batch_size,
-                input_robot_data_spec_with_id,
-                output_robot_data_spec_with_id,
+                input_cross_embodiment_description,
+                output_cross_embodiment_description,
                 pytorch_dataset,
                 device,
             ),
@@ -870,8 +923,8 @@ def _main(cfg: DictConfig) -> None:
             1,
             cfg,
             batch_size,
-            input_robot_data_spec_with_id,
-            output_robot_data_spec_with_id,
+            input_cross_embodiment_description,
+            output_cross_embodiment_description,
             pytorch_dataset,
             device,
         )

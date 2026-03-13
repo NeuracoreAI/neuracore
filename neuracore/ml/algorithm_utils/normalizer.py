@@ -108,7 +108,7 @@ class MeanStdNormalizer(Normalizer):
         """Normalize using mean/std normalization.
 
         Args:
-            name: Name of the normalizer to use.
+            data: Input tensor to normalize.
 
         Returns:
             Normalized tensor.
@@ -116,6 +116,7 @@ class MeanStdNormalizer(Normalizer):
         mean = getattr(self, f"{self._name}_mean")
         std = getattr(self, f"{self._name}_std")
         std = torch.clamp(std, min=1e-6)
+
         return (data - mean) / std
 
     def unnormalize(self, data: torch.Tensor) -> torch.Tensor:

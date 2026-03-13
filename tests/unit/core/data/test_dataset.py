@@ -420,14 +420,17 @@ class TestDatasetRetrieval:
         )
 
         # Execute
-        data_spec = dataset.get_full_data_spec(robot_id)
+        embodiment_description = dataset.get_full_data_spec(robot_id)
 
         # Verify
-        assert data_spec == expected_data_spec
-        assert DataType.RGB_IMAGES.value in data_spec
-        assert DataType.JOINT_POSITIONS.value in data_spec
-        assert data_spec[DataType.RGB_IMAGES.value] == ["camera_left", "camera_right"]
-        assert data_spec[DataType.JOINT_POSITIONS.value] == [
+        assert embodiment_description == expected_data_spec
+        assert DataType.RGB_IMAGES.value in embodiment_description
+        assert DataType.JOINT_POSITIONS.value in embodiment_description
+        assert embodiment_description[DataType.RGB_IMAGES.value] == [
+            "camera_left",
+            "camera_right",
+        ]
+        assert embodiment_description[DataType.JOINT_POSITIONS.value] == [
             "joint_pos_1",
             "joint_pos_2",
         ]
@@ -857,16 +860,20 @@ class TestDatasetSynchronization:
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
         dataset._robot_ids = [TEST_ROBOT_ID]
 
-        robot_data_spec = {
+        cross_embodiment_description = {
             TEST_ROBOT_ID: {
                 DataType.RGB_IMAGES: [],
                 DataType.DEPTH_IMAGES: [],
                 DataType.JOINT_POSITIONS: [],
             }
         }
-        synced = dataset.synchronize(frequency=30, robot_data_spec=robot_data_spec)
+        synced = dataset.synchronize(
+            frequency=30, cross_embodiment_description=cross_embodiment_description
+        )
 
-        assert synced.robot_data_spec == {TEST_ROBOT_ID: robot_data_spec[TEST_ROBOT_ID]}
+        assert synced.cross_embodiment_description == {
+            TEST_ROBOT_ID: cross_embodiment_description[TEST_ROBOT_ID]
+        }
 
     def test_synchronize_raises_when_backend_reports_failed_recordings(
         self, mock_data_requests, dataset_dict, recordings_list, monkeypatch

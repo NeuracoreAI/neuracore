@@ -9,10 +9,17 @@ import logging
 from abc import ABC, abstractmethod
 
 import torch
-from neuracore_types import BatchedNCData, DataType, NCDataStats, RobotDataSpec
+from neuracore_types import (
+    BatchedNCData,
+    CrossEmbodimentDescription,
+    DataType,
+    NCDataStats,
+)
 from torch.utils.data import Dataset
 
-from neuracore.core.utils.robot_data_spec_utils import merge_robot_data_spec
+from neuracore.core.utils.robot_data_spec_utils import (
+    merge_cross_embodiment_description,
+)
 from neuracore.ml import BatchedTrainingSamples
 
 logger = logging.getLogger(__name__)
@@ -33,33 +40,39 @@ class PytorchNeuracoreDataset(Dataset, ABC):
     def __init__(
         self,
         num_recordings: int,
-        input_robot_data_spec: RobotDataSpec,
-        output_robot_data_spec: RobotDataSpec,
+        input_cross_embodiment_description: CrossEmbodimentDescription,
+        output_cross_embodiment_description: CrossEmbodimentDescription,
         output_prediction_horizon: int = 5,
     ):
         """Initialize the dataset with data type specifications and preprocessing.
 
         Args:
-            input_robot_data_spec: List of data types to include as model inputs
-                (e.g., RGB images, joint positions).
-            output_robot_data_spec: List of data types to include as model outputs
-                (e.g., joint target positions, actions).
+            input_cross_embodiment_description: List of data types to include
+                as model inputs (e.g., RGB images, joint positions).
+            output_cross_embodiment_description: List of data types to include
+                as model outputs (e.g., joint target positions, actions).
             output_prediction_horizon: Number of future timesteps to predict
                 for sequential output tasks.
 
         Raises:
             ValueError: If language data is requested but no tokenizer is provided.
         """
-        if len(input_robot_data_spec) == 0 and len(output_robot_data_spec) == 0:
+        if (
+            len(input_cross_embodiment_description) == 0
+            and len(output_cross_embodiment_description) == 0
+        ):
             raise ValueError(
                 "Must supply both input and output data types for the dataset"
             )
         self.num_recordings = num_recordings
-        self.input_robot_data_spec = input_robot_data_spec
-        self.output_robot_data_spec = output_robot_data_spec
+        self.input_cross_embodiment_description = input_cross_embodiment_description
+        self.output_cross_embodiment_description = output_cross_embodiment_description
         self.output_prediction_horizon = output_prediction_horizon
-        self.robot_data_spec = merge_robot_data_spec(
-            self.input_robot_data_spec, self.output_robot_data_spec
+        self.merged_cross_embodiment_description: dict[
+            str, dict[DataType, list[str]]
+        ] = merge_cross_embodiment_description(
+            self.input_cross_embodiment_description,
+            self.output_cross_embodiment_description,
         )
 
     @abstractmethod

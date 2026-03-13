@@ -13,10 +13,10 @@ from neuracore_types import (
     DATA_TYPE_TO_BATCHED_NC_DATA_CLASS,
     DATA_TYPE_TO_NC_DATA_CLASS,
     BatchedNCData,
+    CrossEmbodimentDescription,
     DataType,
     NCData,
     NCDataStats,
-    RobotDataSpec,
 )
 
 from neuracore.core.robot import Robot
@@ -43,8 +43,8 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
 
     def __init__(
         self,
-        input_robot_data_spec: RobotDataSpec,
-        output_robot_data_spec: RobotDataSpec,
+        input_cross_embodiment_description: CrossEmbodimentDescription,
+        output_cross_embodiment_description: CrossEmbodimentDescription,
         num_samples: int = 50,
         num_episodes: int = 10,
         output_prediction_horizon: int = 5,
@@ -52,9 +52,9 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         """Initialize the dummy dataset with specified data types and dimensions.
 
         Args:
-            input_robot_data_spec: Mapping from robot_id
+            input_cross_embodiment_description: Mapping from robot_id
                 to data spec for model inputs.
-            output_robot_data_spec: Mapping from robot_id
+            output_cross_embodiment_description: Mapping from robot_id
                 to data spec for model outputs.
             num_samples: Total number of training samples to generate.
             num_episodes: Number of distinct episodes in the dataset.
@@ -62,8 +62,8 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         """
         super().__init__(
             num_recordings=num_episodes,
-            input_robot_data_spec=input_robot_data_spec,
-            output_robot_data_spec=output_robot_data_spec,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
             output_prediction_horizon=output_prediction_horizon,
         )
         self.num_samples = num_samples
@@ -88,9 +88,12 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         inputs_and_outputs_mask: dict[DataType, torch.Tensor] = {}
 
         # Generate data for all data types in the merged spec
-        # robot_data_spec is dict[robot_id, dict[DataType, list[str]]]
-        for robot_id, data_spec in self.robot_data_spec.items():
-            for data_type, data_names in data_spec.items():
+        # cross_embodiment_description is dict[robot_id, dict[DataType, list[str]]]
+        for (
+            robot_id,
+            embodiment_description,
+        ) in self.cross_embodiment_description.items():
+            for data_type, data_names in embodiment_description.items():
                 num_items = (
                     len(data_names) if len(data_names) > 0 else MAX_LEN_PER_DATA_TYPE
                 )
@@ -136,15 +139,21 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         outputs_mask: dict[DataType, torch.Tensor] = {}
 
         # Collect input data types from all robots
-        for robot_id, data_spec in self.input_robot_data_spec.items():
-            for data_type in data_spec.keys():
+        for (
+            robot_id,
+            embodiment_description,
+        ) in self.input_cross_embodiment_description.items():
+            for data_type in embodiment_description.keys():
                 if data_type not in inputs:
                     inputs[data_type] = inputs_and_outputs[data_type]
                     inputs_mask[data_type] = inputs_and_outputs_mask[data_type]
 
         # Collect output data types from all robots
-        for robot_id, data_spec in self.output_robot_data_spec.items():
-            for data_type in data_spec.keys():
+        for (
+            robot_id,
+            embodiment_description,
+        ) in self.output_cross_embodiment_description.items():
+            for data_type in embodiment_description.keys():
                 if data_type not in outputs:
                     # Extend output temporal dimension by prediction horizon
                     outputs[data_type] = []

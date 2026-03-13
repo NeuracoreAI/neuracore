@@ -13,8 +13,8 @@ import neuracore as nc
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import TrainingRunError
 from neuracore.ml.cli.training_runs_cloud import (
+    _format_cross_embodiment_description,
     _format_duration,
-    _format_robot_data_spec,
     _format_timestamp,
     _get_model_artifact_path,
     get_training_run,
@@ -53,13 +53,13 @@ def training_jobs_response():
             "previous_training_time": None,
             "error": None,
             "resume_points": [1704070000.0, 1704070500.0],
-            "input_robot_data_spec": {
+            "input_cross_embodiment_description": {
                 "robot_1": {
                     "RGB_IMAGES": ["front_camera", "side_camera"],
                     "JOINT_POSITIONS": ["joint_1", "joint_2"],
                 }
             },
-            "output_robot_data_spec": {
+            "output_cross_embodiment_description": {
                 "robot_1": {
                     "JOINT_TARGET_POSITIONS": ["joint_1", "joint_2"],
                 }
@@ -68,7 +68,7 @@ def training_jobs_response():
                 "frequency": 10,
                 "max_delay_s": 0.5,
                 "allow_duplicates": True,
-                "robot_data_spec": {},
+                "cross_embodiment_description": {},
             },
         },
         {
@@ -93,13 +93,13 @@ def training_jobs_response():
             "previous_training_time": None,
             "error": None,
             "resume_points": [],
-            "input_robot_data_spec": {},
-            "output_robot_data_spec": {},
+            "input_cross_embodiment_description": {},
+            "output_cross_embodiment_description": {},
             "synchronization_details": {
                 "frequency": 20,
                 "max_delay_s": 1e20,
                 "allow_duplicates": False,
-                "robot_data_spec": {},
+                "cross_embodiment_description": {},
             },
         },
         {
@@ -124,13 +124,13 @@ def training_jobs_response():
             "previous_training_time": None,
             "error": "Out of memory",
             "resume_points": [],
-            "input_robot_data_spec": {},
-            "output_robot_data_spec": {},
+            "input_cross_embodiment_description": {},
+            "output_cross_embodiment_description": {},
             "synchronization_details": {
                 "frequency": 10,
                 "max_delay_s": 1.0,
                 "allow_duplicates": True,
-                "robot_data_spec": {},
+                "cross_embodiment_description": {},
             },
         },
     ]
@@ -177,7 +177,7 @@ class TestHelperFunctions:
 
     def test_format_robot_data_spec_empty(self):
         """Test formatting empty robot data spec."""
-        result = _format_robot_data_spec({})
+        result = _format_cross_embodiment_description({})
         assert "(none)" in result
 
     def test_format_robot_data_spec_with_data(self):
@@ -188,7 +188,7 @@ class TestHelperFunctions:
                 "JOINT_POSITIONS": ["j1"],
             }
         }
-        result = _format_robot_data_spec(spec)
+        result = _format_cross_embodiment_description(spec)
         assert "robot_1" in result
         assert "RGB_IMAGES" in result
         assert "cam1" in result

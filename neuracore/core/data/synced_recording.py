@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 import requests
 import wget
-from neuracore_types import CameraData, DataType, RobotDataSpec, SynchronizationDetails
+from neuracore_types import CameraData, DataType, SynchronizationDetails
 from neuracore_types import SynchronizedEpisode as SynchronizedEpisodeModel
 from neuracore_types import SynchronizedPoint, SynchronizeRecordingRequest
 from PIL import Image
@@ -44,7 +44,7 @@ class SynchronizedRecording:
         robot_id: str,
         instance: int,
         frequency: int = 0,
-        robot_data_spec: RobotDataSpec | None = None,
+        cross_embodiment_union: dict[str, dict[DataType, list[str]]] | None = None,
         prefetch_videos: bool = False,
     ):
         """Initialize episode iterator for a specific recording.
@@ -56,14 +56,15 @@ class SynchronizedRecording:
             robot_id: The robot that created this recording.
             instance: The instance of the robot that created this recording.
             frequency: Frequency at which to synchronize the recording.
-            robot_data_spec: Robot data specification for synchronization.
+            cross_embodiment_union: Union of robot data specifications for
+                synchronization.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
         """
         self.dataset = dataset
         self.id = recording_id
         self.name = recording_name
         self.frequency = frequency
-        self.robot_data_spec = robot_data_spec
+        self.cross_embodiment_union = cross_embodiment_union
         self.cache_dir: Path = dataset.cache_dir
         self.robot_id = robot_id
         self.instance = instance
@@ -104,7 +105,7 @@ class SynchronizedRecording:
                 recording_id=self.id,
                 synchronization_details=SynchronizationDetails(
                     frequency=self.frequency,
-                    robot_data_spec=self.robot_data_spec,
+                    cross_embodiment_union=self.cross_embodiment_union,
                     max_delay_s=sys.float_info.max,
                     allow_duplicates=True,
                 ),

@@ -63,6 +63,12 @@ PROPRIO_DATA_TYPES = [
     DataType.JOINT_TORQUES,
     DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
 ]
+CANONICAL_OUTPUT_DATA_TYPE_ORDER = [
+    DataType.JOINT_TARGET_POSITIONS,
+    DataType.JOINT_POSITIONS,
+    DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+]
 
 
 class CNNMLP(NeuracoreModel):
@@ -76,6 +82,72 @@ class CNNMLP(NeuracoreModel):
     sequence of future actions, making it suitable for action chunking
     approaches in robot manipulation.
     """
+
+    @staticmethod
+    def _combine_joint_stats(stats: list[JointDataStats]) -> DataItemStats:
+        combined_stats = DataItemStats()
+        for stat in stats:
+            combined_stats = combined_stats.concatenate(stat.value)
+        return combined_stats
+
+    @staticmethod
+    def _combine_gripper_stats(
+        stats: list[ParallelGripperOpenAmountDataStats],
+    ) -> DataItemStats:
+        combined_stats = DataItemStats()
+        for stat in stats:
+            combined_stats = combined_stats.concatenate(stat.open_amount)
+        return combined_stats
+
+    def _get_combined_input_stats(self, data_type: DataType) -> DataItemStats:
+        if data_type not in self.input_dataset_statistics:
+            raise ValueError(
+                f"Missing input dataset statistics for data type: {data_type}"
+            )
+        raw_stats = self.input_dataset_statistics[data_type]
+
+        if data_type in {
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_TARGET_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+        }:
+            return self._combine_joint_stats(cast(list[JointDataStats], raw_stats))
+        if data_type in {
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+        }:
+            return self._combine_gripper_stats(
+                cast(list[ParallelGripperOpenAmountDataStats], raw_stats)
+            )
+        raise ValueError(
+            f"Unsupported input stats data type for combination: {data_type}"
+        )
+
+    def _get_combined_output_stats(self, data_type: DataType) -> DataItemStats:
+        if data_type not in self.output_dataset_statistics:
+            raise ValueError(
+                f"Missing output dataset statistics for data type: {data_type}"
+            )
+        raw_stats = self.output_dataset_statistics[data_type]
+
+        if data_type in {
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_TARGET_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+        }:
+            return self._combine_joint_stats(cast(list[JointDataStats], raw_stats))
+        if data_type in {
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+        }:
+            return self._combine_gripper_stats(
+                cast(list[ParallelGripperOpenAmountDataStats], raw_stats)
+            )
+        raise ValueError(
+            f"Unsupported output stats data type for combination: {data_type}"
+        )
 
     def __init__(
         self,
@@ -116,84 +188,36 @@ class CNNMLP(NeuracoreModel):
         self.weight_decay = weight_decay
         self.encoders = nn.ModuleDict()
         self.encoder_output_dims: dict[DataType, int] = {}
+        self.input_combined_stats: dict[DataType, DataItemStats] = {}
+        self.output_combined_stats: dict[DataType, DataItemStats] = {}
+        self.ordered_output_data_types = [
+            data_type
+            for data_type in CANONICAL_OUTPUT_DATA_TYPE_ORDER
+            if data_type in self.output_data_types
+        ]
+        if len(self.ordered_output_data_types) != len(self.output_data_types):
+            missing_output_types = set(self.output_data_types) - set(
+                self.ordered_output_data_types
+            )
+            raise ValueError(
+                "Encountered output data types without canonical order entries: "
+                f"{missing_output_types}"
+            )
+        self.output_layout: list[tuple[DataType, int]] = []
 
-        data_stats: dict[DataType, DataItemStats] = {}
-
-        if DataType.JOINT_POSITIONS in self.data_types:
-            stats = self.dataset_statistics[DataType.JOINT_POSITIONS]
-            stats = cast(list[JointDataStats], stats)
-            combined_stats = DataItemStats()
-            for stat in stats:
-                combined_stats = combined_stats.concatenate(stat.value)
-            data_stats[DataType.JOINT_POSITIONS] = combined_stats
-            if DataType.JOINT_POSITIONS in self.input_data_types:
-                self.encoder_output_dims[DataType.JOINT_POSITIONS] = cnn_output_dim
-                self.encoders[DataType.JOINT_POSITIONS] = nn.Linear(
-                    len(stats), cnn_output_dim
-                )
-
-        if DataType.JOINT_TARGET_POSITIONS in self.data_types:
-            stats = self.dataset_statistics[DataType.JOINT_TARGET_POSITIONS]
-            stats = cast(list[JointDataStats], stats)
-            combined_stats = DataItemStats()
-            for stat in stats:
-                combined_stats = combined_stats.concatenate(stat.value)
-            data_stats[DataType.JOINT_TARGET_POSITIONS] = combined_stats
-
-        if DataType.JOINT_VELOCITIES in self.data_types:
-            stats = self.dataset_statistics[DataType.JOINT_VELOCITIES]
-            stats = cast(list[JointDataStats], stats)
-            combined_stats = DataItemStats()
-            for stat in stats:
-                combined_stats = combined_stats.concatenate(stat.value)
-            data_stats[DataType.JOINT_VELOCITIES] = combined_stats
-            if DataType.JOINT_VELOCITIES in self.input_data_types:
-                self.encoder_output_dims[DataType.JOINT_VELOCITIES] = cnn_output_dim
-                self.encoders[DataType.JOINT_VELOCITIES] = nn.Linear(
-                    len(stats), cnn_output_dim
-                )
-
-        if DataType.JOINT_TORQUES in self.data_types:
-            stats = self.dataset_statistics[DataType.JOINT_TORQUES]
-            stats = cast(list[JointDataStats], stats)
-            combined_stats = DataItemStats()
-            for stat in stats:
-                combined_stats = combined_stats.concatenate(stat.value)
-            data_stats[DataType.JOINT_TORQUES] = combined_stats
-            if DataType.JOINT_TORQUES in self.input_data_types:
-                self.encoder_output_dims[DataType.JOINT_TORQUES] = cnn_output_dim
-                self.encoders[DataType.JOINT_TORQUES] = nn.Linear(
-                    len(stats), cnn_output_dim
-                )
-
-        if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.data_types:
-            stats = self.dataset_statistics[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS]
-            stats = cast(list[ParallelGripperOpenAmountDataStats], stats)
-            combined_stats = DataItemStats()
-            for stat in stats:
-                combined_stats = combined_stats.concatenate(stat.open_amount)
-            data_stats[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS] = combined_stats
-            if DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in self.input_data_types:
-                self.encoder_output_dims[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS] = (
-                    cnn_output_dim
-                )
-                self.encoders[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS] = nn.Linear(
-                    len(stats), cnn_output_dim
-                )
-
-        if DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS in self.data_types:
-            stats = self.dataset_statistics[
-                DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS
-            ]
-            stats = cast(list[ParallelGripperOpenAmountDataStats], stats)
-            combined_stats = DataItemStats()
-            for stat in stats:
-                combined_stats = combined_stats.concatenate(stat.open_amount)
-            data_stats[DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS] = combined_stats
+        for data_type in PROPRIO_DATA_TYPES:
+            if data_type not in self.input_data_types:
+                continue
+            combined_stats = self._get_combined_input_stats(data_type)
+            self.input_combined_stats[data_type] = combined_stats
+            stats = self.input_dataset_statistics[data_type]
+            self.encoder_output_dims[data_type] = cnn_output_dim
+            self.encoders[data_type] = nn.Linear(len(stats), cnn_output_dim)
 
         if DataType.RGB_IMAGES in self.input_data_types:
             stats = cast(
-                list[CameraDataStats], self.dataset_statistics[DataType.RGB_IMAGES]
+                list[CameraDataStats],
+                self.input_dataset_statistics[DataType.RGB_IMAGES],
             )
             max_cameras = len(stats)
             self.encoder_output_dims[DataType.RGB_IMAGES] = max_cameras * cnn_output_dim
@@ -215,7 +239,8 @@ class CNNMLP(NeuracoreModel):
 
         if DataType.DEPTH_IMAGES in self.input_data_types:
             stats = cast(
-                list[CameraDataStats], self.dataset_statistics[DataType.DEPTH_IMAGES]
+                list[CameraDataStats],
+                self.input_dataset_statistics[DataType.DEPTH_IMAGES],
             )
             max_cameras = len(stats)
             self.encoder_output_dims[DataType.DEPTH_IMAGES] = (
@@ -232,7 +257,7 @@ class CNNMLP(NeuracoreModel):
         if DataType.POINT_CLOUDS in self.input_data_types:
             stats = cast(
                 list[PointCloudDataStats],
-                self.dataset_statistics[DataType.POINT_CLOUDS],
+                self.input_dataset_statistics[DataType.POINT_CLOUDS],
             )
             max_pcs = len(stats)
             self.encoder_output_dims[DataType.POINT_CLOUDS] = max_pcs * cnn_output_dim
@@ -243,7 +268,7 @@ class CNNMLP(NeuracoreModel):
 
         # All poses will share the same encoder
         if DataType.POSES in self.input_data_types:
-            stats = self.dataset_statistics[DataType.POSES]
+            stats = self.input_dataset_statistics[DataType.POSES]
             stats = cast(list[DataItemStats], stats)
             max_poses = len(stats)
             self.encoder_output_dims[DataType.POSES] = cnn_output_dim
@@ -269,12 +294,13 @@ class CNNMLP(NeuracoreModel):
         )
         mlp_input_dim = hidden_dim
 
-        self.max_output_size = 0
         output_stats = []
-        # Flatten norm_means into single parameters for outputs
-        for data_type in self.output_data_types:
-            output_stats.append(data_stats[data_type])
-            self.max_output_size += len(self.dataset_statistics[data_type])
+        for data_type in self.ordered_output_data_types:
+            combined_stats = self._get_combined_output_stats(data_type)
+            self.output_combined_stats[data_type] = combined_stats
+            output_stats.append(combined_stats)
+            self.output_layout.append((data_type, len(combined_stats.mean)))
+        self.max_output_size = sum(width for _, width in self.output_layout)
 
         input_stats = []
         self.proprio_dims = {}
@@ -282,10 +308,11 @@ class CNNMLP(NeuracoreModel):
         for data_type in PROPRIO_DATA_TYPES:
             if data_type not in self.input_data_types:
                 continue
-            if data_type not in data_stats:
+            if data_type not in self.input_combined_stats:
                 continue
-            input_stats.append(data_stats[data_type])
-            dim = len(data_stats[data_type].mean)
+            combined_stats = self.input_combined_stats[data_type]
+            input_stats.append(combined_stats)
+            dim = len(combined_stats.mean)
             self.proprio_dims[data_type] = (current_dim, current_dim + dim)
             current_dim += dim
 
@@ -444,6 +471,7 @@ class CNNMLP(NeuracoreModel):
         if not proprio_list:
             return {}
 
+        # Shape is (B, total_proprio_dim)
         all_proprio = torch.cat(proprio_list, dim=-1)
 
         # Normalize once on all proprio
@@ -639,14 +667,14 @@ class CNNMLP(NeuracoreModel):
 
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
         start_slice_idx = 0
-        for data_type in self.output_data_types:
-            end_slice_idx = start_slice_idx + len(self.dataset_statistics[data_type])
+        for data_type, output_width in self.output_layout:
+            end_slice_idx = start_slice_idx + output_width
             dt_preds = predictions[
                 :, :, start_slice_idx:end_slice_idx
             ]  # (B, T, dt_size)
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 batched_outputs = []
-                for i in range(len(self.dataset_statistics[data_type])):
+                for i in range(output_width):
                     joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
                     batched_outputs.append(BatchedJointData(value=joint_preds))
                 output_tensors[data_type] = batched_outputs
@@ -655,7 +683,7 @@ class CNNMLP(NeuracoreModel):
                 DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             ]:
                 batched_outputs = []
-                for i in range(len(self.dataset_statistics[data_type])):
+                for i in range(output_width):
                     gripper_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
                     batched_outputs.append(
                         BatchedParallelGripperOpenAmountData(open_amount=gripper_preds)
@@ -691,7 +719,7 @@ class CNNMLP(NeuracoreModel):
             )
 
         action_targets = []
-        for i, data_type in enumerate(self.output_data_types):
+        for data_type in self.ordered_output_data_types:
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 batched_joints = cast(list[BatchedJointData], batch.outputs[data_type])
                 action_targets.extend([bjd.value for bjd in batched_joints])
@@ -716,7 +744,10 @@ class CNNMLP(NeuracoreModel):
         # Build a per-dimension action mask from output masks so missing robot
         # channels in mixed-robot batches do not contribute to loss.
         action_mask = torch.cat(
-            [batch.outputs_mask[data_type] for data_type in self.output_data_types],
+            [
+                batch.outputs_mask[data_type]
+                for data_type in self.ordered_output_data_types
+            ],
             dim=-1,
         ).unsqueeze(1)
         action_mask = action_mask.expand(-1, self.output_prediction_horizon, -1)

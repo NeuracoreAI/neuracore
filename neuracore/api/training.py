@@ -10,16 +10,15 @@ from typing import Any, cast
 
 import requests
 from neuracore_types import (
+    CrossEmbodimentDescription,
     GPUType,
-    RobotDataSpec,
     SynchronizationDetails,
     TrainingJobRequest,
 )
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.utils.robot_data_spec_utils import (
-    convert_robot_data_spec_names_to_ids,
-    merge_robot_data_spec,
+    merge_cross_embodiment_description,
 )
 from neuracore.core.utils.training_input_args_validation import (
     get_algorithm_id,
@@ -101,8 +100,8 @@ def start_training_run(
     gpu_type: str,
     num_gpus: int,
     frequency: int,
-    input_robot_data_spec: RobotDataSpec,
-    output_robot_data_spec: RobotDataSpec,
+    input_cross_embodiment_description: CrossEmbodimentDescription | None = None,
+    output_cross_embodiment_description: CrossEmbodimentDescription | None = None,
     max_delay_s: float = sys.float_info.max,
     allow_duplicates: bool = True,
     name_auto_increment: bool = False,
@@ -117,8 +116,10 @@ def start_training_run(
         gpu_type: Type of GPU to use for training (e.g., "A100", "V100")
         num_gpus: Number of GPUs to use for training
         frequency: Frequency to sync training data to (in Hz)
-        input_robot_data_spec: Input robot data specification.
-        output_robot_data_spec: Output robot data specification.
+        input_cross_embodiment_description: Input robot data specification.
+            Preferred over input_robot_data_spec.
+        output_cross_embodiment_description: Output robot data specification.
+            Preferred over output_robot_data_spec.
         max_delay_s: Maximum allowable delay for data synchronization (in seconds)
         allow_duplicates: Whether to allow duplicate data during synchronization
         name_auto_increment: If True and a job with this name already exists, use
@@ -140,23 +141,19 @@ def start_training_run(
 
     dataset = cast(Dataset, Dataset.get_by_name(dataset_name))
     dataset_id = dataset.id
-    input_robot_data_spec_with_ids = convert_robot_data_spec_names_to_ids(
-        input_robot_data_spec,
-    )
-    output_robot_data_spec_with_ids = convert_robot_data_spec_names_to_ids(
-        output_robot_data_spec,
-    )
 
     # Get algorithm id
     algorithm_jsons = _get_algorithms()
     algorithm_id = get_algorithm_id(algorithm_name, algorithm_jsons)
 
+    breakpoint()
+
     validate_training_params(
         dataset,
         dataset_name,
         algorithm_name,
-        input_robot_data_spec_with_ids,
-        output_robot_data_spec_with_ids,
+        input_cross_embodiment_description,
+        output_cross_embodiment_description,
         algorithm_jsons,
     )
 
@@ -171,12 +168,12 @@ def start_training_run(
             frequency=frequency,
             max_delay_s=max_delay_s,
             allow_duplicates=allow_duplicates,
-            robot_data_spec=merge_robot_data_spec(
-                input_robot_data_spec_with_ids, output_robot_data_spec_with_ids
+            cross_embodiment_union=merge_cross_embodiment_description(
+                input_cross_embodiment_description, output_cross_embodiment_description
             ),
         ),
-        input_robot_data_spec=input_robot_data_spec_with_ids,
-        output_robot_data_spec=output_robot_data_spec_with_ids,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
     )
 
     auth = get_auth()
