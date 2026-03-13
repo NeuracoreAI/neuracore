@@ -16,7 +16,14 @@
   Join our community!
 </p>
 <p align="center">
-  <a target="_blank" href="https://discord.gg/DF5m8V6nbD"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
+  <a target="_blank" href="https://discord.gg/DF5m8V6nbD"><img src="https://dcbadge.limes.pink/api/server/DF5m8V6nbD" alt="Discord" /></a>
+</p>
+
+<p align="center">
+  Getting started
+</p>
+<p align="center">
+  <a target="_blank" href="https://www.neuracore.com/try-on-colab"><img src="https://img.shields.io/badge/Try%20on%20Google%20Colab-303030?style=for-the-badge&logo=googlecolab" alt="Discord" /></a>
 </p>
 
 <div align="center">
@@ -65,7 +72,8 @@ pip install neuracore[examples]
 ```
 
 # 🍰 A Short Taste
-Here is a short taste on what neuracore can do, for a detailed walk-through, please refer to the [tutorial](./docs/tutorial.md) and [documentation](#-documentation).
+Here is a short taste on what neuracore can do.
+For a detailed walk-through, please refer to the [tutorial](./docs/tutorial.md) and [documentation](#-documentation), or [try it yourself on Google Colab](https://www.neuracore.com/try-on-colab).
 ```python
 import neuracore as nc # pip install neuracore
 import time
