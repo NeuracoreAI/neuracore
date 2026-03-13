@@ -6,36 +6,36 @@ from bigym.utils.observation_config import CameraConfig, ObservationConfig
 FREQUENCY = 20
 
 JOINT_NAMES: list[str] = [
-    "left_shoulder_pitch",
-    "left_shoulder_roll",
-    "left_shoulder_yaw",
-    "left_elbow",
-    "right_driver_joint",
-    "right_coupler_joint",
-    "right_spring_link_joint",
-    "right_follower_joint",
-    "left_driver_joint",
-    "left_coupler_joint",
-    "left_spring_link_joint",
-    "left_follower_joint",
-    "left_wrist",
-    "right_shoulder_pitch",
-    "right_shoulder_roll",
-    "right_shoulder_yaw",
-    "right_elbow",
-    "right_driver_joint",
-    "right_coupler_joint",
-    "right_spring_link_joint",
-    "right_follower_joint",
-    "left_driver_joint",
-    "left_coupler_joint",
-    "left_spring_link_joint",
-    "left_follower_joint",
-    "right_wrist",
-    "pelvis_x",
-    "pelvis_y",
-    "pelvis_rz",
-    "h1_floating_base",
+    "left_shoulder_pitch",  # [ 0]
+    "left_shoulder_roll",  # [ 1]
+    "left_shoulder_yaw",  # [ 2]
+    "left_elbow",  # [ 3]
+    "left_gripper_right_driver",  # [ 4]  robotiq_2f85_left/right_driver_joint
+    "left_gripper_right_coupler",  # [ 5]  robotiq_2f85_left/right_coupler_joint
+    "left_gripper_right_spring",  # [ 6]  robotiq_2f85_left/right_spring_link_joint
+    "left_gripper_right_follower",  # [ 7]  robotiq_2f85_left/right_follower_joint
+    "left_gripper_left_driver",  # [ 8]  robotiq_2f85_left/left_driver_joint
+    "left_gripper_left_coupler",  # [ 9]  robotiq_2f85_left/left_coupler_joint
+    "left_gripper_left_spring",  # [10]  robotiq_2f85_left/left_spring_link_joint
+    "left_gripper_left_follower",  # [11]  robotiq_2f85_left/left_follower_joint
+    "left_wrist",  # [12]
+    "right_shoulder_pitch",  # [13]
+    "right_shoulder_roll",  # [14]
+    "right_shoulder_yaw",  # [15]
+    "right_elbow",  # [16]
+    "right_gripper_right_driver",  # [17]  robotiq_2f85_right/right_driver_joint
+    "right_gripper_right_coupler",  # [18]  robotiq_2f85_right/right_coupler_joint
+    "right_gripper_right_spring",  # [19]  robotiq_2f85_right/right_spring_link_joint
+    "right_gripper_right_follower",  # [20]  robotiq_2f85_right/right_follower_joint
+    "right_gripper_left_driver",  # [21]  robotiq_2f85_right/left_driver_joint
+    "right_gripper_left_coupler",  # [22]  robotiq_2f85_right/left_coupler_joint
+    "right_gripper_left_spring",  # [23]  robotiq_2f85_right/left_spring_link_joint
+    "right_gripper_left_follower",  # [24]  robotiq_2f85_right/left_follower_joint
+    "right_wrist",  # [25]
+    "pelvis_x",  # [26]
+    "pelvis_y",  # [27]
+    "pelvis_rz",  # [28]
+    # "h1_floating_base",           # [29]  beyond obs len=29, never reached by zip()
 ]
 
 JOINT_ACTUATORS: list[str] = [
