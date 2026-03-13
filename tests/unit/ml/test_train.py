@@ -185,6 +185,16 @@ class MainTestSetup:
             self.monkeypatch.setattr("torch.multiprocessing.spawn", self.mock_mp_spawn)
 
 
+class LocalValidationAlgorithm:
+    @staticmethod
+    def get_supported_input_data_types() -> set[DataType]:
+        return {DataType.JOINT_POSITIONS}
+
+    @staticmethod
+    def get_supported_output_data_types() -> set[DataType]:
+        return {DataType.JOINT_TARGET_POSITIONS}
+
+
 class RunTrainingTestSetup:
     def __init__(
         self,
@@ -1422,6 +1432,45 @@ class TestMain:
         main(cfg)
 
         setup.mock_storage_handler_class.assert_not_called()
+
+    def test_main_uses_local_algorithm_contract_when_not_in_cloud_registry(
+        self, monkeypatch, temp_output_dir
+    ):
+        cfg = OmegaConf.create({
+            "algorithm": {
+                "_target_": "tests.unit.ml.test_train.LocalValidationAlgorithm",
+            },
+            "algorithm_id": None,
+            "dataset_id": "test-dataset-id",
+            "dataset_name": None,
+            "org_id": None,
+            "device": None,
+            "local_output_dir": str(temp_output_dir),
+            "batch_size": 8,
+            "input_robot_data_spec": INPUT_ROBOT_DATA_SPEC,
+            "output_robot_data_spec": OUTPUT_ROBOT_DATA_SPEC,
+            "output_prediction_horizon": 5,
+            "frequency": 30,
+            "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
+        })
+
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+        setup.mock_get_algorithms.return_value = []
+
+        main(cfg)
+
+        call_kwargs = setup.mock_validate_training_params.call_args.kwargs
+        algorithm_jsons = call_kwargs["algorithm_jsons"]
+        assert algorithm_jsons == [{
+            "id": "__local_algorithm__",
+            "name": "LocalValidationAlgorithm",
+            "supported_input_data_types": [DataType.JOINT_POSITIONS.value],
+            "supported_output_data_types": [DataType.JOINT_TARGET_POSITIONS.value],
+        }]
 
     def test_main_uses_default_device_when_device_is_none(
         self, monkeypatch, temp_output_dir

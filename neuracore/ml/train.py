@@ -30,6 +30,7 @@ from neuracore.core.utils.robot_data_spec_utils import (
     merge_robot_data_spec,
 )
 from neuracore.core.utils.training_input_args_validation import (
+    get_algorithm_id,
     get_algorithm_name,
     validate_training_params,
 )
@@ -751,8 +752,45 @@ def _main(cfg: DictConfig) -> None:
             algorithm_id=cfg.algorithm_id,
             algorithm_jsons=algorithms_jsons,
         )
+        validation_algorithm_jsons = algorithms_jsons
     else:
         algorithm_name = cfg.algorithm._target_.rsplit(".", 1)[-1]
+        validation_algorithm_jsons = algorithms_jsons
+        resolved_algorithm_id = get_algorithm_id(algorithm_name, algorithms_jsons)
+        if resolved_algorithm_id is None:
+            # Local algorithm configs may not exist in cloud algorithm metadata.
+            # In that case, validate data specs against the model class contract.
+            try:
+                algorithm_obj = hydra.utils.get_object(cfg.algorithm._target_)
+            except Exception as e:
+                raise ImportError(
+                    f"Failed to import algorithm '{algorithm_name}' "
+                    f"from '{cfg.algorithm._target_}': {e}"
+                ) from e
+
+            local_data_type_contract = (
+                algorithm_obj is not None
+                and hasattr(algorithm_obj, "get_supported_input_data_types")
+                and hasattr(algorithm_obj, "get_supported_output_data_types")
+            )
+            if local_data_type_contract:
+                validation_algorithm_jsons = algorithms_jsons + [{
+                    "id": "__local_algorithm__",
+                    "name": algorithm_name,
+                    "supported_input_data_types": [
+                        data_type.value
+                        for data_type in algorithm_obj.get_supported_input_data_types()
+                    ],
+                    "supported_output_data_types": [
+                        data_type.value
+                        for data_type in algorithm_obj.get_supported_output_data_types()
+                    ],
+                }]
+                logger.info(
+                    "Algorithm %s not found in cloud metadata; validating against "
+                    "local model class supported data types.",
+                    algorithm_name,
+                )
 
     validate_training_params(
         dataset,
@@ -760,7 +798,7 @@ def _main(cfg: DictConfig) -> None:
         algorithm_name=algorithm_name,
         input_robot_data_spec=input_robot_data_spec_with_id,
         output_robot_data_spec=output_robot_data_spec_with_id,
-        algorithm_jsons=algorithms_jsons,
+        algorithm_jsons=validation_algorithm_jsons,
     )
 
     # Prepare data types for synchronization
