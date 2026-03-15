@@ -701,6 +701,24 @@ class Robot:
         finally:
             self._daemon_recording_context = None
 
+    def delete(self) -> None:
+        """Delete the robot from the server."""
+        try:
+            response = requests.delete(
+                f"{API_URL}/org/{self.org_id}/robots/{self.id}",
+                headers=self._auth.get_headers(),
+            )
+            response.raise_for_status()
+        except requests.exceptions.ConnectionError:
+            raise RobotError(
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            )
+        except requests.exceptions.RequestException as e:
+            raise RobotError(f"Failed to delete robot: {str(e)}")
+        finally:
+            self.close()
+
     def close(self) -> None:
         """Release local resources owned by this Robot instance."""
         self._cleanup_daemon_recording_context()

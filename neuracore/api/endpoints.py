@@ -6,9 +6,14 @@ including deployment, status monitoring, and deletion operations.
 """
 
 import requests
-from neuracore_types import DataSpec, DataType, DeploymentRequest, SynchronizedPoint
+from neuracore_types import (
+    DataSpec,
+    DataType,
+    DeploymentRequest,
+    GPUType,
+    SynchronizedPoint,
+)
 from neuracore_types.endpoints.endpoint_requests import DeploymentConfig
-from neuracore_types.training.training import GPUType
 
 from neuracore.api.core import _get_robot
 from neuracore.core.auth import get_auth
