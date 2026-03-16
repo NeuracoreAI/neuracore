@@ -174,7 +174,7 @@ def _run_policy_inference(policy: Policy) -> None:
 
 
 def test_training_flow():
-    """End-to-end training flow: collect → merge → train → logs → infer → deploy.
+    """End-to-end flow: collect → merge → train → logs → resume → infer → deploy.
 
     Steps (each reports a clear failure message):
       1. Collect demonstration data
@@ -182,9 +182,10 @@ def test_training_flow():
       3. Train CNNMLP with auto batch sizing
       4. Retrieve and validate training logs while RUNNING
       5. Assert training COMPLETED
-      6. Direct in-process policy inference
-      7. Local server policy inference
-      8. Deploy remote endpoint and verify active
+      6. Resume training with additional epochs and verify completion
+      7. Direct in-process policy inference
+      8. Local server policy inference
+      9. Deploy remote endpoint and verify active
     """
     nc.login()
 
@@ -334,7 +335,45 @@ def test_training_flow():
             pytest.fail(f"Step 5 (training completion) failed: {e}")
 
         # ------------------------------------------------------------------
-        # Step 6: Direct in-process policy inference
+        # Step 6: Resume training with additional epochs
+        # ------------------------------------------------------------------
+        try:
+            initial_epoch = nc.get_training_job_data(job_id).get("epoch", 0)
+            resumed_job = nc.resume_training_run(job_id, additional_epochs=1)
+            logger.info(f"Resume response: {resumed_job}")
+            assert resumed_job["status"] in {
+                "PENDING",
+                "RUNNING",
+            }, f"Expected PENDING/RUNNING after resume, got: {resumed_job['status']!r}"
+            assert resumed_job.get(
+                "resume_points"
+            ), "Expected non-empty resume_points after resume"
+            assert (
+                resumed_job.get("resumed_at") is not None
+            ), "Expected resumed_at to be set after resume"
+
+            final_resumed_status = _wait_for_training(job_id)
+            assert final_resumed_status == "COMPLETED", (
+                f"Resumed training ended with non-COMPLETED status: "
+                f"{final_resumed_status}"
+            )
+            resumed_data = nc.get_training_job_data(job_id)
+            assert (resumed_data.get("epoch") or 0) > initial_epoch, (
+                f"Expected epoch to increase after resume, "
+                f"was {initial_epoch}, now {resumed_data.get('epoch')}"
+            )
+            assert (
+                resumed_data.get("previous_training_time") is not None
+            ), "Expected previous_training_time to be set after resume"
+            logger.info(
+                "Step 6 passed — resumed job completed at epoch %s",
+                resumed_data.get("epoch"),
+            )
+        except Exception as e:
+            pytest.fail(f"Step 6 (resume training) failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Step 7: Direct in-process policy inference
         # ------------------------------------------------------------------
         try:
             nc.connect_robot(MUJOCO_ROBOT_NAME)
@@ -345,10 +384,10 @@ def test_training_flow():
             )
             _run_policy_inference(policy)
         except Exception as e:
-            pytest.fail(f"Step 6 (direct policy inference) failed: {e}")
+            pytest.fail(f"Step 7 (direct policy inference) failed: {e}")
 
         # ------------------------------------------------------------------
-        # Step 7: Local server policy inference
+        # Step 8: Local server policy inference
         # ------------------------------------------------------------------
         try:
             policy = nc.policy_local_server(
@@ -359,10 +398,10 @@ def test_training_flow():
             )
             _run_policy_inference(policy)
         except Exception as e:
-            pytest.fail(f"Step 7 (local server inference) failed: {e}")
+            pytest.fail(f"Step 8 (local server inference) failed: {e}")
 
         # ------------------------------------------------------------------
-        # Step 8: Deploy remote endpoint and verify active
+        # Step 9: Deploy remote endpoint and verify active
         # ------------------------------------------------------------------
         try:
             endpoint_name = _unique_name("flow_endpoint")
@@ -378,9 +417,9 @@ def test_training_flow():
             assert (
                 final_endpoint_status == "active"
             ), f"Endpoint did not become active, status: {final_endpoint_status!r}"
-            logger.info(f"Step 8 passed — endpoint {endpoint_id} is active")
+            logger.info(f"Step 9 passed — endpoint {endpoint_id} is active")
         except Exception as e:
-            pytest.fail(f"Step 8 (remote endpoint deployment) failed: {e}")
+            pytest.fail(f"Step 9 (remote endpoint deployment) failed: {e}")
 
     finally:
         if endpoint_id:

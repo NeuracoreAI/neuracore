@@ -559,3 +559,161 @@ def test_failed_training_job_request(
     # Attempt to get job data should raise an exception
     with pytest.raises(ValueError, match="Error accessing job"):
         nc.get_training_job_data("train_job_123")
+
+
+def test_resume_training_run(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    training_job_response,
+    mocked_org_id,
+):
+    """Successful resume returns the updated job dict."""
+    nc.login("test_api_key")
+
+    resumed_response = {
+        **training_job_response,
+        "status": "PENDING",
+        "resumed_at": 1704070800.0,
+        "resume_points": [1],
+        "previous_training_time": None,
+    }
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/resume/2",
+        json=resumed_response,
+        status_code=200,
+    )
+
+    result = nc.resume_training_run("train_job_123", additional_epochs=2)
+
+    assert result["id"] == "train_job_123"
+    assert result["status"] == "PENDING"
+    assert result["resumed_at"] == 1704070800.0
+    assert result["resume_points"] == [1]
+
+    post_requests = [
+        r
+        for r in mock_auth_requests.request_history
+        if r.method == "POST" and "/resume/" in r.url
+    ]
+    assert len(post_requests) == 1
+    assert post_requests[0].url == (
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/resume/2"
+    )
+
+
+def test_resume_training_run_not_found(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """A 404 from the backend is surfaced as a ValueError."""
+    nc.login("test_api_key")
+
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/nonexistent/resume/1",
+        status_code=404,
+        json={"detail": "Training job not found"},
+    )
+
+    with pytest.raises(ValueError, match="Error resuming job nonexistent"):
+        nc.resume_training_run("nonexistent", additional_epochs=1)
+
+
+def test_resume_training_run_server_error(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """A 500 from the backend is surfaced as a ValueError."""
+    nc.login("test_api_key")
+
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/resume/1",
+        status_code=500,
+        text="Internal Server Error",
+    )
+
+    with pytest.raises(ValueError, match="Error resuming job train_job_123"):
+        nc.resume_training_run("train_job_123", additional_epochs=1)
+
+
+# ---------------------------------------------------------------------------
+# get_training_job_logs
+# ---------------------------------------------------------------------------
+
+MOCK_LOGS_RESPONSE = {
+    "job_id": "train_job_123",
+    "logs": [
+        {"message": "Epoch 1 started", "severity": "INFO", "timestamp": "2024-01-01"},
+        {"message": "Loss: 0.42", "severity": "INFO", "timestamp": "2024-01-01"},
+    ],
+    "total_entries": 2,
+    "retrieved_at": "2024-01-01T01:00:00Z",
+}
+
+
+def test_get_training_job_logs(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """Logs are returned with the expected structure."""
+    nc.login("test_api_key")
+
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/logs",
+        json=MOCK_LOGS_RESPONSE,
+        status_code=200,
+    )
+
+    logs = nc.get_training_job_logs("train_job_123", max_entries=50)
+
+    assert logs["job_id"] == "train_job_123"
+    assert isinstance(logs["logs"], list)
+    assert len(logs["logs"]) == 2
+    assert logs["total_entries"] == 2
+    assert "retrieved_at" in logs
+
+    get_requests = [
+        r
+        for r in mock_auth_requests.request_history
+        if r.method == "GET" and "/logs" in r.url
+    ]
+    assert len(get_requests) == 1
+    assert "max_entries=50" in get_requests[0].url
+
+
+def test_get_training_job_logs_with_severity_filter(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """Severity filter is forwarded as a query parameter."""
+    nc.login("test_api_key")
+
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/logs",
+        json={**MOCK_LOGS_RESPONSE, "logs": [], "total_entries": 0},
+        status_code=200,
+    )
+
+    logs = nc.get_training_job_logs(
+        "train_job_123", max_entries=10, severity_filter="ERROR"
+    )
+
+    assert isinstance(logs["logs"], list)
+    get_requests = [
+        r
+        for r in mock_auth_requests.request_history
+        if r.method == "GET" and "/logs" in r.url
+    ]
+    assert "severity_filter=ERROR" in get_requests[0].url
+
+
+def test_get_training_job_logs_error(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """A backend error is surfaced as a ValueError."""
+    nc.login("test_api_key")
+
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/logs",
+        status_code=404,
+        json={"detail": "Job not found"},
+    )
+
+    with pytest.raises(ValueError, match="Error getting training job logs"):
+        nc.get_training_job_logs("train_job_123")

@@ -193,6 +193,34 @@ def start_training_run(
     return job_data
 
 
+def resume_training_run(job_id: str, additional_epochs: int) -> dict:
+    """Resume a training run.
+
+    Args:
+        job_id: The ID of the training job
+        additional_epochs: The number of additional epochs to run
+
+    Returns:
+        dict: Training job data including job ID and status
+
+    Raises:
+        ValueError: If the job is not found or there is an error accessing the job
+        requests.exceptions.HTTPError: If the API request returns an error code
+        requests.exceptions.RequestException: If there is a problem with the request
+    """
+    auth = get_auth()
+    org_id = get_current_org()
+    try:
+        response = requests.post(
+            f"{API_URL}/org/{org_id}/training/jobs/{job_id}/resume/{additional_epochs}",
+            headers=auth.get_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        raise ValueError(f"Error resuming job {job_id}: {e}")
+
+
 def get_training_jobs() -> list[dict]:
     """List all training jobs for the current organization.
 
