@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -57,6 +60,13 @@ class SqliteStateStore(StateStore):
             f"sqlite+aiosqlite:///{db_path}",
             future=True,
         )
+        self._write_semaphore = asyncio.Semaphore(1)
+
+    @asynccontextmanager
+    async def _write_lock(self) -> AsyncIterator[AsyncConnection]:
+        async with self._write_semaphore:
+            async with self._engine.begin() as conn:
+                yield conn
 
     async def init_async_store(self) -> None:
         """Apply pragmas and ensure schema."""
@@ -71,7 +81,7 @@ class SqliteStateStore(StateStore):
         database changes are written to disk immediately. Sets the synchronous
         mode to NORMAL to prevent the database from blocking on disk I/O.
         """
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await conn.execute(text("PRAGMA journal_mode=WAL;"))
             await conn.execute(text("PRAGMA synchronous=NORMAL;"))
             await conn.execute(text("PRAGMA busy_timeout=1000;"))
@@ -82,7 +92,7 @@ class SqliteStateStore(StateStore):
         Calls :meth:`sqlalchemy.Meta.create_all` on the :attr:`_engine` to create
         the database schema if it does not already exist.
         """
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await self._migrate_legacy_traces_schema_if_needed(conn)
             await conn.run_sync(metadata.create_all)
             await self._ensure_recordings_trace_count_col(conn)
@@ -365,7 +375,7 @@ class SqliteStateStore(StateStore):
     async def _ensure_recording_row(self, recording_id: str) -> None:
         """Ensure a recording row exists for the given recording_id."""
         now = _utc_now()
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             stmt = insert(recordings).values(
                 recording_id=recording_id,
                 expected_trace_count=0,
@@ -383,7 +393,7 @@ class SqliteStateStore(StateStore):
     async def _refresh_recording_counters(self, recording_id: str) -> None:
         """Refresh aggregate trace counters for one recording."""
         now = _utc_now()
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             row = (
                 (
                     await conn.execute(
@@ -434,7 +444,7 @@ class SqliteStateStore(StateStore):
     async def reconcile_recordings_from_traces(self) -> None:
         """Rebuild recording rows from trace rows (startup reconciliation)."""
         now = _utc_now()
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             existing_rows = (
                 (
                     await conn.execute(
@@ -550,7 +560,7 @@ class SqliteStateStore(StateStore):
         if max_age_hours < 0:
             return 0
         cutoff = _utc_now() - timedelta(hours=max_age_hours)
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             result = await conn.execute(
                 delete(recordings)
                 .where(recordings.c.last_updated <= cutoff)
@@ -621,7 +631,7 @@ class SqliteStateStore(StateStore):
         """Set expected trace count and mark it as needing report."""
         now = _utc_now()
         await self._ensure_recording_row(recording_id)
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             current_expected = (
                 await conn.execute(
                     select(recordings.c.expected_trace_count).where(
@@ -644,7 +654,7 @@ class SqliteStateStore(StateStore):
         """Set recording-level stopped_at for a recording."""
         now = _utc_now()
         await self._ensure_recording_row(recording_id)
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await conn.execute(
                 update(recordings)
                 .where(recordings.c.recording_id == recording_id)
@@ -659,7 +669,7 @@ class SqliteStateStore(StateStore):
             bytes_uploaded (int): number of bytes uploaded.
         """
         now = _utc_now()
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await conn.execute(
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
@@ -798,7 +808,7 @@ class SqliteStateStore(StateStore):
     ) -> None:
         """Update one lifecycle status column for a trace."""
         now = _utc_now()
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             result = await conn.execute(
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
@@ -833,7 +843,7 @@ class SqliteStateStore(StateStore):
         # Keep only IDs that currently exist; caller can drop the rest from
         # subsequent workflow steps.
         unique_ids = list(dict.fromkeys(trace_ids))
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             existing_rows = (
                 (
                     await conn.execute(
@@ -850,7 +860,7 @@ class SqliteStateStore(StateStore):
             return []
 
         now = _utc_now()
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await conn.execute(
                 update(traces)
                 .where(traces.c.trace_id.in_(existing_ids))
@@ -885,7 +895,7 @@ class SqliteStateStore(StateStore):
         """Increment uploaded trace count for a recording."""
         now = _utc_now()
         await self._ensure_recording_row(recording_id)
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await conn.execute(
                 update(recordings)
                 .where(recordings.c.recording_id == recording_id)
@@ -910,7 +920,7 @@ class SqliteStateStore(StateStore):
             error, by default None.
         """
         now = _utc_now()
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await conn.execute(
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
@@ -927,7 +937,7 @@ class SqliteStateStore(StateStore):
         Args:
             trace_id (str): Unique identifier for the trace to delete.
         """
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await conn.execute(delete(traces).where(traces.c.trace_id == trace_id))
 
     async def find_ready_traces(self) -> list[TraceRecord]:
@@ -994,7 +1004,7 @@ class SqliteStateStore(StateStore):
             return []
 
         now = _utc_now()
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             candidate_rows = (
                 await conn.execute(
                     select(traces.c.trace_id, traces.c.last_updated)
@@ -1117,7 +1127,7 @@ class SqliteStateStore(StateStore):
         """Mark a recording as progress-reported."""
         now = _utc_now()
         await self._ensure_recording_row(recording_id)
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await conn.execute(
                 update(recordings)
                 .where(recordings.c.recording_id == recording_id)
@@ -1131,7 +1141,7 @@ class SqliteStateStore(StateStore):
         """Atomically move recording progress state from PENDING to REPORTING."""
         now = _utc_now()
         await self._ensure_recording_row(recording_id)
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             result = await conn.execute(
                 update(recordings)
                 .where(recordings.c.recording_id == recording_id)
@@ -1147,7 +1157,7 @@ class SqliteStateStore(StateStore):
         """Set recording progress state to PENDING."""
         now = _utc_now()
         await self._ensure_recording_row(recording_id)
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await conn.execute(
                 update(recordings)
                 .where(recordings.c.recording_id == recording_id)
@@ -1160,7 +1170,7 @@ class SqliteStateStore(StateStore):
     async def reset_reporting_recordings_to_pending(self) -> int:
         """Reset in-flight REPORTING rows to PENDING and return affected count."""
         now = _utc_now()
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             result = await conn.execute(
                 update(recordings)
                 .where(recordings.c.progress_reported == ProgressReportStatus.REPORTING)
@@ -1185,7 +1195,7 @@ class SqliteStateStore(StateStore):
 
     async def delete_uploaded_traces_for_recording(self, recording_id: str) -> int:
         """Delete all UPLOADED traces for one recording and return deleted count."""
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             result = await conn.execute(
                 delete(traces)
                 .where(traces.c.recording_id == recording_id)
@@ -1197,7 +1207,7 @@ class SqliteStateStore(StateStore):
         self, recording_id: str
     ) -> bool:
         """Delete recording and all traces when expected uploads are complete."""
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             should_delete = (
                 await conn.execute(
                     select(recordings.c.recording_id).where(
@@ -1239,7 +1249,7 @@ class SqliteStateStore(StateStore):
         """Mark a recording's expected trace count as reported."""
         now = _utc_now()
         await self._ensure_recording_row(recording_id)
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await conn.execute(
                 update(recordings)
                 .where(recordings.c.recording_id == recording_id)
@@ -1249,7 +1259,7 @@ class SqliteStateStore(StateStore):
     async def reset_failed_trace_for_retry(self, trace_id: str) -> None:
         """Reset a failed trace back to WRITTEN for retry."""
         now = _utc_now()
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await conn.execute(
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
@@ -1404,7 +1414,7 @@ class SqliteStateStore(StateStore):
             index_elements=["trace_id"],
             set_=update_set,
         )
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             return await self._execute_trace_upsert_and_update_counters(
                 conn=conn,
                 stmt=stmt,
@@ -1462,7 +1472,7 @@ class SqliteStateStore(StateStore):
                 ),
             },
         )
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             return await self._execute_trace_upsert_and_update_counters(
                 conn=conn,
                 stmt=stmt,
@@ -1494,7 +1504,7 @@ class SqliteStateStore(StateStore):
             ValueError: If the trace does not exist.
         """
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await conn.execute(
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
@@ -1539,7 +1549,7 @@ class SqliteStateStore(StateStore):
             ValueError: If the trace does not exist.
         """
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             await conn.execute(
                 update(traces)
                 .where(traces.c.trace_id == trace_id)
@@ -1566,7 +1576,7 @@ class SqliteStateStore(StateStore):
     async def reset_retrying_to_written(self) -> int:
         """Reset RETRYING/UPLOADING traces back to upload PENDING."""
         now = _utc_now()
-        async with self._engine.begin() as conn:
+        async with self._write_lock() as conn:
             result = await conn.execute(
                 update(traces)
                 .where(

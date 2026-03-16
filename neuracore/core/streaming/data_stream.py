@@ -17,9 +17,6 @@ from dataclasses import dataclass
 import numpy as np
 from neuracore_types import CameraData, DataType, NCData
 
-from neuracore.data_daemon.communications_management.management_channel import (
-    ManagementChannel,
-)
 from neuracore.data_daemon.communications_management.producer import Producer
 
 logger = logging.getLogger(__name__)
@@ -65,8 +62,6 @@ class DataStream(ABC):
         self._data_type = data_type
         self._stream_name = stream_name
         self._producer: Producer | None = None
-        self.lock = threading.Lock()
-        self._management_channel = ManagementChannel()
 
     def start_recording(self, context: DataRecordingContext) -> None:
         """Start recording data for this stream.
@@ -102,9 +97,7 @@ class DataStream(ABC):
         if self._producer is None:
             producer_id = f"{self._data_type.value}:\
             {self._stream_name}:{uuid.uuid4().hex[:8]}"
-            self._producer = self._management_channel.get_nc_context(
-                producer_id=producer_id, recording_id=context.recording_id
-            )
+            self._producer = Producer(id=producer_id, recording_id=context.recording_id)
             self._producer.initialize_new_producer()
             return
         if (

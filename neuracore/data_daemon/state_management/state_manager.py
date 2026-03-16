@@ -7,7 +7,6 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
-from sqlalchemy.exc import OperationalError
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -42,15 +41,6 @@ logger = logging.getLogger(__name__)
 class StateManager:
     """Domain-facing API for trace state."""
 
-    _TRACE_WRITTEN_LOCK_MAX_RETRIES = 5
-    _TRACE_WRITTEN_LOCK_BASE_DELAY_S = 0.1
-    _TRACE_WRITTEN_LOCK_MAX_DELAY_S = 2.0
-    _START_TRACE_LOCK_MAX_RETRIES = 5
-    _START_TRACE_LOCK_BASE_DELAY_S = 0.1
-    _START_TRACE_LOCK_MAX_DELAY_S = 2.0
-    _UPLOAD_STATE_LOCK_MAX_RETRIES = 5
-    _UPLOAD_STATE_LOCK_BASE_DELAY_S = 0.1
-    _UPLOAD_STATE_LOCK_MAX_DELAY_S = 2.0
     _FAILED_TRACE_MAX_AGE_S = 60 * 60 * 4  # 4 hours
     _EMPTY_RECORDING_MAX_AGE_HOURS = 24
 
@@ -58,38 +48,7 @@ class StateManager:
         """Initialize with a persistence backend."""
         self._store = store
         self._config = config
-        self._trace_written_retry_queue: asyncio.Queue[tuple[str, str, int, int]] = (
-            asyncio.Queue()
-        )
-        self._trace_written_retry_task: asyncio.Task | None = None
-        self._start_trace_retry_queue: asyncio.Queue[
-            tuple[
-                str,
-                str,
-                DataType,
-                str,
-                int,
-                str | None,
-                str | None,
-                str | None,
-                str | None,
-                str,
-                int,
-            ]
-        ] = asyncio.Queue()
-        self._start_trace_retry_task: asyncio.Task | None = None
-        self._upload_started_retry_queue: asyncio.Queue[tuple[str, int]] = (
-            asyncio.Queue()
-        )
-        self._upload_started_retry_task: asyncio.Task | None = None
-        self._uploaded_bytes_retry_queue: asyncio.Queue[tuple[str, int, int]] = (
-            asyncio.Queue()
-        )
-        self._uploaded_bytes_retry_task: asyncio.Task | None = None
-        self._upload_complete_retry_queue: asyncio.Queue[tuple[str, int]] = (
-            asyncio.Queue()
-        )
-        self._upload_complete_retry_task: asyncio.Task | None = None
+
         self.expected_trace_count_reporting: dict[str, bool] = {}
 
         self._emitter = get_emitter()
@@ -132,34 +91,18 @@ class StateManager:
         - If trace doesn't exist: creates with INITIALIZING status
         - If trace exists with PENDING_METADATA: transitions to WRITTEN
         """
-        try:
-            await self._process_start_trace(
-                trace_id,
-                recording_id,
-                data_type,
-                data_type_name,
-                robot_instance,
-                dataset_id,
-                dataset_name,
-                robot_name,
-                robot_id,
-                path,
-            )
-        except OperationalError as exc:
-            if "database is locked" not in str(exc).lower():
-                raise
-            await self._enqueue_start_trace_retry(
-                trace_id,
-                recording_id,
-                data_type,
-                data_type_name,
-                robot_instance,
-                dataset_id,
-                dataset_name,
-                robot_name,
-                robot_id,
-                path,
-            )
+        await self._process_start_trace(
+            trace_id,
+            recording_id,
+            data_type,
+            data_type_name,
+            robot_instance,
+            dataset_id,
+            dataset_name,
+            robot_name,
+            robot_id,
+            path,
+        )
 
     async def _process_start_trace(
         self,
@@ -190,96 +133,6 @@ class StateManager:
             robot_instance=robot_instance,
             path=path,
         )
-
-    async def _enqueue_start_trace_retry(
-        self,
-        trace_id: str,
-        recording_id: str,
-        data_type: DataType,
-        data_type_name: str,
-        robot_instance: int,
-        dataset_id: str | None,
-        dataset_name: str | None,
-        robot_name: str | None,
-        robot_id: str | None,
-        path: str,
-    ) -> None:
-        self._ensure_start_trace_retry_worker()
-        await self._start_trace_retry_queue.put((
-            trace_id,
-            recording_id,
-            data_type,
-            data_type_name,
-            robot_instance,
-            dataset_id,
-            dataset_name,
-            robot_name,
-            robot_id,
-            path,
-            1,
-        ))
-
-    def _ensure_start_trace_retry_worker(self) -> None:
-        if self._start_trace_retry_task is not None:
-            return
-        loop = asyncio.get_running_loop()
-        self._start_trace_retry_task = loop.create_task(
-            self._start_trace_retry_worker()
-        )
-
-    async def _start_trace_retry_worker(self) -> None:
-        while True:
-            (
-                trace_id,
-                recording_id,
-                data_type,
-                data_type_name,
-                robot_instance,
-                dataset_id,
-                dataset_name,
-                robot_name,
-                robot_id,
-                path,
-                attempt,
-            ) = await self._start_trace_retry_queue.get()
-            try:
-                await self._process_start_trace(
-                    trace_id,
-                    recording_id,
-                    data_type,
-                    data_type_name,
-                    robot_instance,
-                    dataset_id,
-                    dataset_name,
-                    robot_name,
-                    robot_id,
-                    path,
-                )
-            except OperationalError as exc:
-                if (
-                    "database is locked" in str(exc).lower()
-                    and attempt < self._START_TRACE_LOCK_MAX_RETRIES
-                ):
-                    delay = min(
-                        self._START_TRACE_LOCK_BASE_DELAY_S * (2 ** (attempt - 1)),
-                        self._START_TRACE_LOCK_MAX_DELAY_S,
-                    )
-                    await asyncio.sleep(delay)
-                    await self._start_trace_retry_queue.put((
-                        trace_id,
-                        recording_id,
-                        data_type,
-                        data_type_name,
-                        robot_instance,
-                        dataset_id,
-                        dataset_name,
-                        robot_name,
-                        robot_id,
-                        path,
-                        attempt + 1,
-                    ))
-            finally:
-                self._start_trace_retry_queue.task_done()
 
     async def handle_stop_recording_requested(self, recording_id: str) -> None:
         """Handle phase-1 stop event from the data bridge.
@@ -437,12 +290,7 @@ class StateManager:
         Local trace data is deleted immediately, while DB metadata can be
         retained until progress reporting completes.
         """
-        try:
-            await self._process_upload_complete(trace_id)
-        except OperationalError as exc:
-            if "database is locked" not in str(exc).lower():
-                raise
-            await self._enqueue_upload_complete_retry(trace_id)
+        await self._process_upload_complete(trace_id)
 
     async def _process_upload_complete(self, trace_id: str) -> None:
         trace_record = await self._store.get_trace(trace_id)
@@ -475,37 +323,6 @@ class StateManager:
                 trace_record.recording_id
             )
 
-    async def _enqueue_upload_complete_retry(self, trace_id: str) -> None:
-        self._ensure_upload_complete_retry_worker()
-        await self._upload_complete_retry_queue.put((trace_id, 1))
-
-    def _ensure_upload_complete_retry_worker(self) -> None:
-        if self._upload_complete_retry_task is not None:
-            return
-        loop = asyncio.get_running_loop()
-        self._upload_complete_retry_task = loop.create_task(
-            self._upload_complete_retry_worker()
-        )
-
-    async def _upload_complete_retry_worker(self) -> None:
-        while True:
-            trace_id, attempt = await self._upload_complete_retry_queue.get()
-            try:
-                await self._process_upload_complete(trace_id)
-            except OperationalError as exc:
-                if (
-                    "database is locked" in str(exc).lower()
-                    and attempt < self._UPLOAD_STATE_LOCK_MAX_RETRIES
-                ):
-                    delay = min(
-                        self._UPLOAD_STATE_LOCK_BASE_DELAY_S * (2 ** (attempt - 1)),
-                        self._UPLOAD_STATE_LOCK_MAX_DELAY_S,
-                    )
-                    await asyncio.sleep(delay)
-                    await self._upload_complete_retry_queue.put((trace_id, attempt + 1))
-            finally:
-                self._upload_complete_retry_queue.task_done()
-
     async def _handle_trace_written(
         self, trace_id: str, recording_id: str, bytes_written: int
     ) -> None:
@@ -517,12 +334,6 @@ class StateManager:
         """
         try:
             await self._process_trace_written(trace_id, recording_id, bytes_written)
-        except OperationalError as exc:
-            if "database is locked" not in str(exc).lower():
-                raise
-            await self._enqueue_trace_written_retry(
-                trace_id, recording_id, bytes_written
-            )
         except Exception:
             logger.exception("Failed to process TRACE_WRITTEN event")
             raise
@@ -538,88 +349,9 @@ class StateManager:
         if trace.write_status == TraceWriteStatus.WRITTEN:
             await self._finalize_trace(trace)
 
-    async def _enqueue_trace_written_retry(
-        self, trace_id: str, recording_id: str, bytes_written: int
-    ) -> None:
-        self._ensure_trace_written_retry_worker()
-        await self._trace_written_retry_queue.put(
-            (trace_id, recording_id, bytes_written, 1)
-        )
-
-    def _ensure_trace_written_retry_worker(self) -> None:
-        if self._trace_written_retry_task is not None:
-            return
-        loop = asyncio.get_running_loop()
-        self._trace_written_retry_task = loop.create_task(
-            self._trace_written_retry_worker()
-        )
-
-    async def _trace_written_retry_worker(self) -> None:
-        while True:
-            trace_id, recording_id, bytes_written, attempt = (
-                await self._trace_written_retry_queue.get()
-            )
-            try:
-                await self._process_trace_written(trace_id, recording_id, bytes_written)
-            except OperationalError as exc:
-                if (
-                    "database is locked" in str(exc).lower()
-                    and attempt < self._TRACE_WRITTEN_LOCK_MAX_RETRIES
-                ):
-                    delay = min(
-                        self._TRACE_WRITTEN_LOCK_BASE_DELAY_S * (2 ** (attempt - 1)),
-                        self._TRACE_WRITTEN_LOCK_MAX_DELAY_S,
-                    )
-                    await asyncio.sleep(delay)
-                    await self._trace_written_retry_queue.put(
-                        (trace_id, recording_id, bytes_written, attempt + 1)
-                    )
-            finally:
-                self._trace_written_retry_queue.task_done()
-
     async def handle_upload_started(self, trace_id: str) -> None:
         """Mark a trace as uploading once the uploader starts."""
-        try:
-            await self._store.update_upload_status(
-                trace_id, TraceUploadStatus.UPLOADING
-            )
-        except OperationalError as exc:
-            if "database is locked" not in str(exc).lower():
-                raise
-            await self._enqueue_upload_started_retry(trace_id)
-
-    async def _enqueue_upload_started_retry(self, trace_id: str) -> None:
-        self._ensure_upload_started_retry_worker()
-        await self._upload_started_retry_queue.put((trace_id, 1))
-
-    def _ensure_upload_started_retry_worker(self) -> None:
-        if self._upload_started_retry_task is not None:
-            return
-        loop = asyncio.get_running_loop()
-        self._upload_started_retry_task = loop.create_task(
-            self._upload_started_retry_worker()
-        )
-
-    async def _upload_started_retry_worker(self) -> None:
-        while True:
-            trace_id, attempt = await self._upload_started_retry_queue.get()
-            try:
-                await self._store.update_upload_status(
-                    trace_id, TraceUploadStatus.UPLOADING
-                )
-            except OperationalError as exc:
-                if (
-                    "database is locked" in str(exc).lower()
-                    and attempt < self._UPLOAD_STATE_LOCK_MAX_RETRIES
-                ):
-                    delay = min(
-                        self._UPLOAD_STATE_LOCK_BASE_DELAY_S * (2 ** (attempt - 1)),
-                        self._UPLOAD_STATE_LOCK_MAX_DELAY_S,
-                    )
-                    await asyncio.sleep(delay)
-                    await self._upload_started_retry_queue.put((trace_id, attempt + 1))
-            finally:
-                self._upload_started_retry_queue.task_done()
+        await self._store.update_upload_status(trace_id, TraceUploadStatus.UPLOADING)
 
     def _emit_trace_registration_available(self) -> None:
         self._emitter.emit(Emitter.TRACE_REGISTRATION_AVAILABLE)
@@ -819,49 +551,7 @@ class StateManager:
 
     async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
         """Increment uploaded byte count for a trace."""
-        try:
-            await self._store.update_bytes_uploaded(trace_id, bytes_uploaded)
-        except OperationalError as exc:
-            if "database is locked" not in str(exc).lower():
-                raise
-            await self._enqueue_uploaded_bytes_retry(trace_id, bytes_uploaded)
-
-    async def _enqueue_uploaded_bytes_retry(
-        self, trace_id: str, bytes_uploaded: int
-    ) -> None:
-        self._ensure_uploaded_bytes_retry_worker()
-        await self._uploaded_bytes_retry_queue.put((trace_id, bytes_uploaded, 1))
-
-    def _ensure_uploaded_bytes_retry_worker(self) -> None:
-        if self._uploaded_bytes_retry_task is not None:
-            return
-        loop = asyncio.get_running_loop()
-        self._uploaded_bytes_retry_task = loop.create_task(
-            self._uploaded_bytes_retry_worker()
-        )
-
-    async def _uploaded_bytes_retry_worker(self) -> None:
-        while True:
-            trace_id, bytes_uploaded, attempt = (
-                await self._uploaded_bytes_retry_queue.get()
-            )
-            try:
-                await self._store.update_bytes_uploaded(trace_id, bytes_uploaded)
-            except OperationalError as exc:
-                if (
-                    "database is locked" in str(exc).lower()
-                    and attempt < self._UPLOAD_STATE_LOCK_MAX_RETRIES
-                ):
-                    delay = min(
-                        self._UPLOAD_STATE_LOCK_BASE_DELAY_S * (2 ** (attempt - 1)),
-                        self._UPLOAD_STATE_LOCK_MAX_DELAY_S,
-                    )
-                    await asyncio.sleep(delay)
-                    await self._uploaded_bytes_retry_queue.put(
-                        (trace_id, bytes_uploaded, attempt + 1)
-                    )
-            finally:
-                self._uploaded_bytes_retry_queue.task_done()
+        await self._store.update_bytes_uploaded(trace_id, bytes_uploaded)
 
     async def mark_traces_registering(self, trace_ids: list[str]) -> list[str]:
         """Batch mark traces as currently registering with the backend."""

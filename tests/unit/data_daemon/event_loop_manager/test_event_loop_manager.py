@@ -41,7 +41,6 @@ def running_loop_manager(loop_manager: EventLoopManager) -> EventLoopManager:
 
 
 def test_initial_state(loop_manager: EventLoopManager):
-    assert loop_manager.encoder_loop is None
     assert loop_manager.general_loop is None
     assert not loop_manager.is_running()
     assert not loop_manager._started
@@ -50,9 +49,7 @@ def test_initial_state(loop_manager: EventLoopManager):
 def test_start_creates_loops(loop_manager: EventLoopManager):
     loop_manager.start()
 
-    assert loop_manager.encoder_loop is not None
     assert loop_manager.general_loop is not None
-    assert loop_manager.encoder_loop.is_running()
     assert loop_manager.general_loop.is_running()
     assert loop_manager.is_running()
     assert loop_manager._started
@@ -63,9 +60,7 @@ def test_start_creates_loops(loop_manager: EventLoopManager):
 def test_start_creates_threads(loop_manager: EventLoopManager):
     loop_manager.start()
 
-    assert loop_manager._encoder_thread is not None
     assert loop_manager._general_thread is not None
-    assert loop_manager._encoder_thread.is_alive()
     assert loop_manager._general_thread.is_alive()
 
     loop_manager.stop(timeout=2.0)
@@ -89,8 +84,6 @@ def test_stop_terminates_loops(running_loop_manager: EventLoopManager):
     assert not running_loop_manager._started
 
     time.sleep(0.1)
-    if running_loop_manager._encoder_thread:
-        assert not running_loop_manager._encoder_thread.is_alive()
     if running_loop_manager._general_thread:
         assert not running_loop_manager._general_thread.is_alive()
 
@@ -106,9 +99,7 @@ def test_start_stop_start_cycle(loop_manager: EventLoopManager):
     loop_manager.stop(timeout=2.0)
     assert not loop_manager.is_running()
 
-    loop_manager._encoder_ready.clear()
     loop_manager._general_ready.clear()
-    loop_manager._encoder_shutdown.clear()
     loop_manager._general_shutdown.clear()
 
     # Reset emitter for the second start
