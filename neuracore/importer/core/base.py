@@ -383,8 +383,19 @@ class NeuracoreDatasetImporter(ABC):
             data_type == DataType.JOINT_TARGET_POSITIONS
             and format.action_type == ActionTypeConfig.RELATIVE
         )
+        absolute_action_requested = (
+            data_type == DataType.JOINT_TARGET_POSITIONS
+            and format.action_type == ActionTypeConfig.ABSOLUTE
+        )
         try:
-            if not (ik_requested or fk_requested):
+            if absolute_action_requested:
+                if format.action_space == ActionSpaceConfig.END_EFFECTOR:
+                    self._validate_input_data(
+                        DataType.END_EFFECTOR_POSES, source_data, format
+                    )
+                elif format.action_space == ActionSpaceConfig.JOINT:
+                    self._validate_input_data(data_type, source_data, format)
+            elif not (ik_requested or fk_requested):
                 self._validate_input_data(data_type, source_data, format)
         except DataValidationWarning as w:
             if not self.suppress_warnings:
@@ -422,6 +433,22 @@ class NeuracoreDatasetImporter(ABC):
                 transformed_data = self.robot.joint_positions_to_end_effector_pose(
                     self.curr_joint_positions, item.name
                 )
+            elif absolute_action_requested:
+                if format.action_space == ActionSpaceConfig.END_EFFECTOR:
+                    if self.robot is None:
+                        raise ImporterError(
+                            "Failed to convert action in end effector space "
+                            "to joint space: Robot utilities are not initialized"
+                        )
+                    transformed_data = self.robot.end_effector_to_joint_positions(
+                        transformed_data,
+                        item.name,
+                        list(self.curr_joint_positions.values()),
+                    )
+                    for name, position in transformed_data.items():
+                        self._validate_joint_data(data_type, position, name)
+                elif format.action_space == ActionSpaceConfig.JOINT:
+                    self._validate_joint_data(data_type, transformed_data, item.name)
             elif relative_action_requested:
                 if format.action_space == ActionSpaceConfig.END_EFFECTOR:
                     if item.name not in self.curr_end_effector_poses:
@@ -433,8 +460,8 @@ class NeuracoreDatasetImporter(ABC):
                     # Get joint positions using IK from the end effector pose
                     if self.robot is None:
                         raise ImporterError(
-                            "Failed to convert end effector pose to joint positions: "
-                            "Robot utilities are not initialized"
+                            "Failed to convert action in end effector space "
+                            "to joint space: Robot utilities are not initialized"
                         )
                     transformed_data = self.robot.end_effector_to_joint_positions(
                         transformed_data, item.name, self.prev_ik_solution
@@ -470,10 +497,7 @@ class NeuracoreDatasetImporter(ABC):
             raise
 
         try:
-            if ik_requested or (
-                relative_action_requested
-                and format.action_space == ActionSpaceConfig.END_EFFECTOR
-            ):
+            if ik_requested or format.action_space == ActionSpaceConfig.END_EFFECTOR:
                 for name, position in transformed_data.items():
                     self._log_transformed_data(
                         DataType.JOINT_POSITIONS,
