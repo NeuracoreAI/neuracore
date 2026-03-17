@@ -328,3 +328,12 @@ ylabel
 yourdfpy
 ZBWs
 znear
+imageio
+plotly
+checkpointing
+bfloat
+metafunc
+fixturenames
+reraises
+pyav
+rawvideo
