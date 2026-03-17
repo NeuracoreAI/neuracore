@@ -157,16 +157,17 @@ def validate_training_params(
     algorithm_name: str,
     input_robot_data_spec: RobotDataSpec,
     output_robot_data_spec: RobotDataSpec,
-    algorithm_jsons: list[dict],
+    supported_input_data_types: set[DataType],
+    supported_output_data_types: set[DataType],
 ) -> None:
     """Validate all training parameters.
 
-    This performs the following checks:
-      1) The algorithm name resolves to a known algorithm ID.
-      2) All robots referenced in input/output specs exist in the dataset.
-      3) All requested input data types are supported by the algorithm and present
+    This applies for both cloud and local algorithms and performs the
+    following checks:
+      1) All robots referenced in input/output specs exist in the dataset.
+      2) All requested input data types are supported by the algorithm and present
          in the dataset.
-      4) All requested output data types are supported by the algorithm and present
+      3) All requested output data types are supported by the algorithm and present
          in the dataset.
 
     Args:
@@ -175,25 +176,18 @@ def validate_training_params(
         algorithm_name: Algorithm name.
         input_robot_data_spec: Input robot data specification keyed by robot ID.
         output_robot_data_spec: Output robot data specification keyed by robot ID.
-        algorithm_jsons: List of algorithm metadata dictionaries.
+        supported_input_data_types: Supported input data types.
+        supported_output_data_types: Supported output data types.
 
     Raises:
         ValueError: If any validation check fails.
     """
-    algorithm_id = get_algorithm_id(algorithm_name, algorithm_jsons)
-    _validate_algorithm_exists(algorithm_id, algorithm_name)
-
-    supported_inputs, supported_outputs = _get_data_types_for_algorithms(
-        algorithm_name,
-        algorithm_jsons,
-    )
-
     _validate_data_specs(
         dataset=dataset,
         dataset_name=dataset_name,
         algorithm_name=algorithm_name,
         robot_data_spec=input_robot_data_spec,
-        supported_data_types=supported_inputs,
+        supported_data_types=supported_input_data_types,
         spec_kind="input",
     )
 
@@ -202,6 +196,6 @@ def validate_training_params(
         dataset_name=dataset_name,
         algorithm_name=algorithm_name,
         robot_data_spec=output_robot_data_spec,
-        supported_data_types=supported_outputs,
+        supported_data_types=supported_output_data_types,
         spec_kind="output",
     )

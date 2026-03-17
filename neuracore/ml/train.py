@@ -30,6 +30,7 @@ from neuracore.core.utils.robot_data_spec_utils import (
     merge_robot_data_spec,
 )
 from neuracore.core.utils.training_input_args_validation import (
+    _get_data_types_for_algorithms,
     get_algorithm_name,
     validate_training_params,
 )
@@ -643,6 +644,64 @@ def _try_report_error_to_cloud(cfg: DictConfig, error_msg: str) -> None:
         logger.error("Failed to report training error to cloud.", exc_info=True)
 
 
+def _resolve_algorithm_name_and_supported_data_types(
+    cfg: DictConfig, algorithms_jsons: list[dict]
+) -> tuple[str, set[DataType], set[DataType]]:
+    """Resolve algorithm name and supported input and output data types.
+
+    If ``algorithm_id`` is provided (cloud case), use the algorithm ID to get
+    the algorithm name and supported data types. If ``algorithm_id`` is not
+    provided (local case), use the algorithm class to get the supported data
+    types.
+
+    Args:
+        cfg: Hydra configuration.
+        algorithms_jsons: List of algorithm metadata dictionaries.
+
+    Returns:
+        A tuple containing:
+          - Algorithm name.
+          - Supported input data types.
+          - Supported output data types.
+
+    Raises:
+        ValueError: If the algorithm does not have supported input or output data types.
+    """
+    if cfg.algorithm_id is not None:
+        algorithm_name = get_algorithm_name(
+            algorithm_id=cfg.algorithm_id,
+            algorithm_jsons=algorithms_jsons,
+        )
+        (
+            supported_input_data_types,
+            supported_output_data_types,
+        ) = _get_data_types_for_algorithms(
+            algorithm_name=algorithm_name,
+            algorithm_jsons=algorithms_jsons,
+        )
+        return (
+            algorithm_name,
+            supported_input_data_types,
+            supported_output_data_types,
+        )
+
+    # Local case: use the algorithm class to get the supported data types.
+    algorithm_name = cfg.algorithm._target_.rsplit(".", 1)[-1]
+    algorithm_cls = hydra.utils.get_object(cfg.algorithm._target_)
+    supported_input_data_types = algorithm_cls.get_supported_input_data_types()
+    supported_output_data_types = algorithm_cls.get_supported_output_data_types()
+    if (
+        supported_input_data_types is not None
+        and supported_output_data_types is not None
+    ):
+        return algorithm_name, supported_input_data_types, supported_output_data_types
+
+    raise ValueError(
+        f"Algorithm {algorithm_name} does not have supported input or output "
+        "data types, please check the algorithm class."
+    )
+
+
 def _main(cfg: DictConfig) -> None:
     """Inner implementation of main.
 
@@ -746,13 +805,9 @@ def _main(cfg: DictConfig) -> None:
     batch_size = cfg.batch_size
 
     algorithms_jsons = _get_algorithms()
-    if cfg.algorithm_id is not None:
-        algorithm_name = get_algorithm_name(
-            algorithm_id=cfg.algorithm_id,
-            algorithm_jsons=algorithms_jsons,
-        )
-    else:
-        algorithm_name = cfg.algorithm._target_.rsplit(".", 1)[-1]
+    algorithm_name, supported_input_data_types, supported_output_data_types = (
+        _resolve_algorithm_name_and_supported_data_types(cfg, algorithms_jsons)
+    )
 
     validate_training_params(
         dataset,
@@ -760,7 +815,8 @@ def _main(cfg: DictConfig) -> None:
         algorithm_name=algorithm_name,
         input_robot_data_spec=input_robot_data_spec_with_id,
         output_robot_data_spec=output_robot_data_spec_with_id,
-        algorithm_jsons=algorithms_jsons,
+        supported_input_data_types=supported_input_data_types,
+        supported_output_data_types=supported_output_data_types,
     )
 
     # Prepare data types for synchronization
