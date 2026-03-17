@@ -35,7 +35,7 @@ class CommunicationsManager:
     def __init__(self, context: zmq.Context | None = None) -> None:
         """Initialize the CommunicationsManager."""
         self._owns_context = context is None
-        self.context = context or zmq.Context()
+        self.context = context or zmq.Context.instance()
         self.consumer_socket: zmq.Socket | None = None
         self.publisher_socket: zmq.Socket | None = None
         self._consumer_endpoint: str | None = None
