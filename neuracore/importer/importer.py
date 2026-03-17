@@ -9,7 +9,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from neuracore_types import DataType
-from neuracore_types.importer.config import DatasetTypeConfig, JointPositionTypeConfig
+from neuracore_types.importer.config import (
+    DatasetTypeConfig,
+    JointPositionInputTypeConfig,
+)
 from neuracore_types.nc_data import DatasetImportConfig
 from rich.logging import RichHandler
 
@@ -254,8 +257,8 @@ def _run_import(
                 DataType.JOINT_POSITIONS
             ].format
             if (
-                format_config.joint_position_type
-                == JointPositionTypeConfig.END_EFFECTOR
+                format_config.joint_position_input_type
+                == JointPositionInputTypeConfig.END_EFFECTOR
             ):
                 ik_init_config = format_config.ik_init_config
                 try:

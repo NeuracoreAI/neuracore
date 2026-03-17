@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from neuracore_types import DataType, JointPositionTypeConfig
+from neuracore_types import DataType, JointPositionInputTypeConfig
 from neuracore_types.importer.config import LanguageConfig
 
 from neuracore.importer.core.base import ImportItem, WorkerError
@@ -121,8 +121,8 @@ def test_rlds_record_step_converts_tensor_to_numpy_for_non_language():
     )
     import_format = SimpleNamespace(
         language_type=LanguageConfig.STRING,
-        joint_position_type=JointPositionTypeConfig.CUSTOM,
-        ee_pose_type=None,
+        joint_position_input_type=JointPositionInputTypeConfig.CUSTOM,
+        ee_pose_input_type=None,
     )
     import_config = SimpleNamespace(
         source="",

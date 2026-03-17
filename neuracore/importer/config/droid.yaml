@@ -68,7 +68,7 @@ data_import_config:
   VISUAL_JOINT_POSITIONS:
     source: observation.gripper_position
     format:
-      visual_joint_type: GRIPPER
+      visual_joint_input_type: GRIPPER
       invert_gripper_amount: true
     mapping:
       - name: panda_finger_joint1

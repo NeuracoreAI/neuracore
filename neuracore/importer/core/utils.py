@@ -2,7 +2,7 @@
 
 import re
 
-from neuracore_types.importer.config import VisualJointTypeConfig
+from neuracore_types.importer.config import VisualJointInputTypeConfig
 from neuracore_types.importer.transform import Unnormalize
 from neuracore_types.nc_data import DatasetImportConfig, DataType
 
@@ -43,7 +43,8 @@ def populate_robot_info(
     for data_type, import_config in dataconfig.data_import_config.items():
         if (
             data_type == DataType.VISUAL_JOINT_POSITIONS
-            and import_config.format.visual_joint_type == VisualJointTypeConfig.GRIPPER
+            and import_config.format.visual_joint_input_type
+            == VisualJointInputTypeConfig.GRIPPER
         ):
             for item in import_config.mapping:
                 if item.name is not None:

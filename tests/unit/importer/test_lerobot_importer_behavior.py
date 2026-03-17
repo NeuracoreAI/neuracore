@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
-from neuracore_types import DataType, JointPositionTypeConfig
+from neuracore_types import DataType, JointPositionInputTypeConfig
 from neuracore_types.importer.config import LanguageConfig
 
 from neuracore.importer.core.base import ImportItem, WorkerError
@@ -247,8 +247,8 @@ def test_lerobot_record_step_reads_dotted_source_key_and_converts_tensor():
     )
     import_format = SimpleNamespace(
         language_type=LanguageConfig.STRING,
-        joint_position_type=JointPositionTypeConfig.CUSTOM,
-        ee_pose_type=None,
+        joint_position_input_type=JointPositionInputTypeConfig.CUSTOM,
+        ee_pose_input_type=None,
     )
     import_config = SimpleNamespace(
         source="observation",

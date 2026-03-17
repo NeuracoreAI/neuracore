@@ -6,7 +6,7 @@ from neuracore_types import JointData
 from neuracore_types.importer.config import (
     ActionSpaceConfig,
     ImageConventionConfig,
-    JointPositionTypeConfig,
+    JointPositionInputTypeConfig,
     LanguageConfig,
     PoseConfig,
     RotationConfig,
@@ -264,8 +264,8 @@ def validate_dataset_config_against_robot_model(
         if data_type in JOINT_DATA_TYPES:
             # No need to check joint names if converting from end effector
             if not (
-                import_config.format.joint_position_type
-                == JointPositionTypeConfig.END_EFFECTOR
+                import_config.format.joint_position_input_type
+                == JointPositionInputTypeConfig.END_EFFECTOR
                 or import_config.format.action_space == ActionSpaceConfig.END_EFFECTOR
             ):
                 for item in import_config.mapping:

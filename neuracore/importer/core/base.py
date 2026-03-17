@@ -21,8 +21,8 @@ import numpy as np
 from neuracore_types.importer.config import (
     ActionSpaceConfig,
     ActionTypeConfig,
-    EndEffectorPoseTypeConfig,
-    JointPositionTypeConfig,
+    EndEffectorPoseInputTypeConfig,
+    JointPositionInputTypeConfig,
 )
 from neuracore_types.importer.data_config import DataFormat
 from neuracore_types.nc_data import DatasetImportConfig, DataType, NCDataImportConfig
@@ -219,15 +219,15 @@ class NeuracoreDatasetImporter(ABC):
             fk_requested = False
         else:
             fk_requested = (
-                end_effector_pose_config.format.ee_pose_type
-                == EndEffectorPoseTypeConfig.JOINT_POSITIONS
+                end_effector_pose_config.format.ee_pose_input_type
+                == EndEffectorPoseInputTypeConfig.JOINT_POSITIONS
             )
         if joint_position_config is None:
             ik_requested = False
         else:
             ik_requested = (
-                joint_position_config.format.joint_position_type
-                == JointPositionTypeConfig.END_EFFECTOR
+                joint_position_config.format.joint_position_input_type
+                == JointPositionInputTypeConfig.END_EFFECTOR
             )
 
         ordered_items = list(data_import_config.items())
@@ -373,11 +373,13 @@ class NeuracoreDatasetImporter(ABC):
         """
         ik_requested = (
             data_type == DataType.JOINT_POSITIONS
-            and format.joint_position_type == JointPositionTypeConfig.END_EFFECTOR
+            and format.joint_position_input_type
+            == JointPositionInputTypeConfig.END_EFFECTOR
         )
         fk_requested = (
             data_type == DataType.END_EFFECTOR_POSES
-            and format.ee_pose_type == EndEffectorPoseTypeConfig.JOINT_POSITIONS
+            and format.ee_pose_input_type
+            == EndEffectorPoseInputTypeConfig.JOINT_POSITIONS
         )
         relative_action_requested = (
             data_type == DataType.JOINT_TARGET_POSITIONS

@@ -104,7 +104,7 @@ data_import_config:
   VISUAL_JOINT_POSITIONS:
     source: observation.state
     format:
-      visual_joint_type: GRIPPER
+      visual_joint_input_type: GRIPPER
     mapping:
       - name: fl_left_finger
         index: 6

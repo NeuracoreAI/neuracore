@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
-from neuracore_types import DataType, EndEffectorPoseTypeConfig, JointPositionTypeConfig
+from neuracore_types import (
+    DataType,
+    EndEffectorPoseInputTypeConfig,
+    JointPositionInputTypeConfig,
+)
 from neuracore_types.importer.config import LanguageConfig
 from neuracore_types.importer.data_config import (
     DepthCameraDataMappingItem,
@@ -299,13 +303,13 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
 
             ik_requested = (
                 data_type == DataType.JOINT_POSITIONS
-                and import_config.format.joint_position_type
-                == JointPositionTypeConfig.END_EFFECTOR
+                and import_config.format.joint_position_input_type
+                == JointPositionInputTypeConfig.END_EFFECTOR
             )
             fk_requested = (
                 data_type == DataType.END_EFFECTOR_POSES
-                and import_config.format.ee_pose_type
-                == EndEffectorPoseTypeConfig.JOINT_POSITIONS
+                and import_config.format.ee_pose_input_type
+                == EndEffectorPoseInputTypeConfig.JOINT_POSITIONS
             )
 
             for item in import_config.mapping:
