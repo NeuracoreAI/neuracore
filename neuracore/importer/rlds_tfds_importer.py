@@ -70,6 +70,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         skip_on_error: str = "episode",
         storage_limit: int = 5 * 1024**3,
         random_sample: int | None = None,
+        shared: bool = False,
     ):
         """Initialize the RLDS/TFDS dataset importer.
 
@@ -88,6 +89,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                 failing steps; "all" to abort on the first error.
             random_sample: If set, import only this many episodes chosen at random.
             storage_limit: If set, pause when disk usage reaches this (bytes).
+            shared: Whether the dataset should be shared/open-source.
         """
         super().__init__(
             dataset_dir=dataset_dir,
@@ -102,6 +104,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             skip_on_error=skip_on_error,
             random_sample=random_sample,
             storage_limit=storage_limit,
+            shared=shared,
         )
         self.dataset_name = input_dataset_name
         self.builder_dir = self._resolve_builder_dir()
@@ -600,6 +603,7 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
         skip_on_error: str = "episode",
         storage_limit: int = 5 * 1024**3,
         random_sample: int | None = None,
+        shared: bool = False,
     ):
         """Initialize the RLDS/TFDS dataset importer.
 
@@ -618,6 +622,7 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
                 failing steps; "all" to abort on the first error.
             random_sample: If set, import only this many episodes chosen at random.
             storage_limit: If set, pause when disk usage reaches this (bytes).
+            shared: Whether the dataset should be shared/open-source.
         """
         super().__init__(
             input_dataset_name=input_dataset_name,
@@ -633,6 +638,7 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             skip_on_error=skip_on_error,
             random_sample=random_sample,
             storage_limit=storage_limit,
+            shared=shared,
         )
 
 

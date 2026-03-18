@@ -54,6 +54,11 @@ def import_dataset(
         "--overwrite",
         help="Delete the dataset before importing if it already exists.",
     ),
+    shared: bool = typer.Option(
+        False,
+        "--shared",
+        help="Create the output dataset as shared (if it does not already exist).",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -108,6 +113,7 @@ def import_dataset(
             dataset_dir=dataset_dir,
             robot_dir=robot_dir,
             overwrite=overwrite,
+            shared=shared,
             dry_run=dry_run,
             skip_on_error=skip_on_error,
             suppress_validation_warnings=no_validation_warnings,

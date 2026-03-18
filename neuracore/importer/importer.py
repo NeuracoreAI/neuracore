@@ -143,6 +143,7 @@ def _run_import(
     dataset_dir: Path,
     robot_dir: Path,
     overwrite: bool = False,
+    shared: bool = False,
     dry_run: bool = False,
     skip_on_error: str = "episode",
     suppress_validation_warnings: bool = False,
@@ -156,6 +157,7 @@ def _run_import(
         dataset_dir=dataset_dir,
         robot_dir=robot_dir,
         overwrite=overwrite,
+        shared=shared,
         dry_run=dry_run,
         skip_on_error=skip_on_error,
         no_validation_warnings=suppress_validation_warnings,
@@ -210,8 +212,14 @@ def _run_import(
             name=dataset_name,
             description=dataconfig.output_dataset.description,
             tags=dataconfig.output_dataset.tags,
+            shared=args.shared,
         )
-    logger.info("Output dataset ready: %s (id=%s)", dataset.name, dataset.id)
+    logger.info(
+        "Output dataset ready: %s (id=%s), shared=%s",
+        dataset.name,
+        dataset.id,
+        dataset.is_shared,
+    )
 
     robot_config = dataconfig.robot
     urdf_path, mjcf_path = _resolve_robot_descriptions(
@@ -242,9 +250,12 @@ def _run_import(
         urdf_path=urdf_path,
         mjcf_path=mjcf_path,
         overwrite=robot_config.overwrite_existing,
+        shared=args.shared,
     )
     urdf_path = robot.urdf_path
-    logger.info("Using robot model: %s (id=%s)", robot.name, robot.id)
+    logger.info(
+        "Using robot model: %s (id=%s), shared=%s", robot.name, robot.id, robot.shared
+    )
 
     if robot.joint_info:
         validate_dataset_config_against_robot_model(dataconfig, robot.joint_info)
@@ -289,6 +300,7 @@ def _run_import(
             skip_on_error=skip_on_error,
             random_sample=args.random_sample,
             storage_limit=args.storage_limit,
+            shared=args.shared,
         )
         importer.import_all()
     elif dataset_type == DatasetTypeConfig.RLDS:
@@ -307,6 +319,7 @@ def _run_import(
             skip_on_error=skip_on_error,
             random_sample=args.random_sample,
             storage_limit=args.storage_limit,
+            shared=args.shared,
         )
         importer.import_all()
     elif dataset_type == DatasetTypeConfig.LEROBOT:
@@ -325,6 +338,7 @@ def _run_import(
             skip_on_error=skip_on_error,
             random_sample=args.random_sample,
             storage_limit=args.storage_limit,
+            shared=args.shared,
         )
         importer.import_all()
     else:

@@ -120,6 +120,7 @@ class NeuracoreDatasetImporter(ABC):
         suppress_warnings: bool = False,
         storage_limit: int = 5 * 1024**3,
         random_sample: int | None = None,
+        shared: bool = False,
     ) -> None:
         """Initialize the base dataset importer.
 
@@ -140,6 +141,7 @@ class NeuracoreDatasetImporter(ABC):
             storage_limit: Pause workers when disk usage (used bytes)
                 on the recording filesystem reaches this value (bytes).
             random_sample: If set, import only this many items chosen at random.
+            shared: Whether the dataset should be shared/open-source.
         """
         self.dataset_dir = Path(dataset_dir)
         self.dataset_config = dataset_config
@@ -155,7 +157,7 @@ class NeuracoreDatasetImporter(ABC):
         self.prev_ik_solution: list[float] | None = None
         self.curr_joint_positions: dict[str, float] = {}
         self.curr_end_effector_poses: dict[str, list[float]] = {}
-
+        self.shared = shared
         if skip_on_error not in {"episode", "step", "all"}:
             raise ValueError("skip_on_error must be one of: 'episode', 'step', 'all'")
 
@@ -686,7 +688,7 @@ class NeuracoreDatasetImporter(ABC):
     ) -> None:
         """Log in and connect to Neuracore dataset for the worker."""
         nc.login()
-        nc.connect_robot(self.robot_name, instance=worker_id)
+        nc.connect_robot(self.robot_name, instance=worker_id, shared=self.shared)
         nc.get_dataset(self.output_dataset_name)
         if self.urdf_path is not None:
             urdf_packages_dir = os.path.dirname(self.urdf_path)

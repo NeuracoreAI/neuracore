@@ -50,6 +50,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         skip_on_error: str = "episode",
         storage_limit: int = 5 * 1024**3,
         random_sample: int | None = None,
+        shared: bool = False,
     ) -> None:
         """Initialize the LeRobot dataset importer.
 
@@ -68,6 +69,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 failing steps; "all" to abort on the first error.
             random_sample: If set, import only this many episodes chosen at random.
             storage_limit: If set, pause when disk usage reaches this (bytes).
+            shared: Whether the dataset should be shared/open-source.
         """
         super().__init__(
             dataset_dir=dataset_dir,
@@ -82,6 +84,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             skip_on_error=skip_on_error,
             random_sample=random_sample,
             storage_limit=storage_limit,
+            shared=shared,
         )
         self.dataset_name = input_dataset_name
         self.dataset_dir = Path(dataset_dir)
