@@ -15,7 +15,7 @@ from types import FrameType
 
 import filelock
 
-from neuracore.data_daemon.const import RECORDING_EVENTS_SOCKET_PATH, SOCKET_PATH
+from neuracore.data_daemon.const import SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
 from neuracore.data_daemon.models import TraceErrorCode, TraceUploadStatus
 from neuracore.data_daemon.state_management.state_store import StateStore
@@ -54,48 +54,6 @@ def pid_is_running(pid_value: int) -> bool:
         return False
     except PermissionError:
         return True
-
-
-def wait_for_socket_paths(
-    socket_paths: Sequence[str],
-    *,
-    timeout_s: float = 5.0,
-    poll_s: float = 0.05,
-    process: subprocess.Popen | None = None,
-) -> None:
-    """Wait for daemon socket files to be created.
-
-    Polls the filesystem until all `socket_paths` exist or the timeout elapses.
-    If `process` is provided, the wait fails fast if the process exits before
-    the sockets are created.
-
-    Args:
-        socket_paths: Paths that must exist before the daemon is considered ready.
-        timeout_s: Maximum seconds to wait before raising.
-        poll_s: Poll interval in seconds.
-        process: Optional subprocess handle for the daemon.
-
-    Raises:
-        RuntimeError: If the daemon process exits early (when `process` is given),
-            or if the sockets are not created within `timeout_s`.
-    """
-    deadline = time.time() + timeout_s
-
-    while time.time() < deadline:
-        if process is not None and process.poll() is not None:
-            raise RuntimeError(
-                "Data daemon exited before becoming ready. To get full error trace, "
-                "run daemon directly with `nc-data-daemon launch`."
-            )
-
-        if all(Path(p).exists() for p in socket_paths):
-            return
-
-        time.sleep(poll_s)
-
-    raise RuntimeError(
-        "Data daemon did not become ready: expected sockets not created."
-    )
 
 
 def cleanup_stale_client_state(
@@ -168,12 +126,6 @@ def launch_daemon_subprocess(
     except OSError as exc:
         raise RuntimeError(f"Failed to start daemon: {exc}") from exc
 
-    wait_for_socket_paths(
-        (str(SOCKET_PATH), str(RECORDING_EVENTS_SOCKET_PATH)),
-        timeout_s=timeout_s,
-        process=proc,
-    )
-
     pid_path.write_text(str(proc.pid), encoding="utf-8")
     return proc.pid
 
@@ -197,16 +149,12 @@ def ensure_daemon_running(*, timeout_s: float = 5.0) -> int:
     with filelock.FileLock(pid_file_lock):
         existing_pid = read_pid_from_file(pid_path)
         if existing_pid is not None and pid_is_running(existing_pid):
-            wait_for_socket_paths(
-                (str(SOCKET_PATH), str(RECORDING_EVENTS_SOCKET_PATH)),
-                timeout_s=timeout_s,
-            )
             return existing_pid
 
         cleanup_stale_client_state(
             pid_path=pid_path,
             db_path=db_path,
-            socket_paths=(str(SOCKET_PATH), str(RECORDING_EVENTS_SOCKET_PATH)),
+            socket_paths=(str(SOCKET_PATH),),
         )
         return launch_daemon_subprocess(
             pid_path=pid_path, db_path=db_path, timeout_s=timeout_s

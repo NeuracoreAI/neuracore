@@ -208,7 +208,7 @@ class Daemon:
 
         self._running = True
         self.comm.start_consumer()
-        self.comm.start_publisher()
+
         logger.info("Daemon started and ready to receive messages...")
         try:
             while self._running:

@@ -8,11 +8,7 @@ from pathlib import Path
 
 import zmq
 
-from neuracore.data_daemon.const import (
-    BASE_DIR,
-    RECORDING_EVENTS_SOCKET_PATH,
-    SOCKET_PATH,
-)
+from neuracore.data_daemon.const import BASE_DIR, SOCKET_PATH
 from neuracore.data_daemon.models import MessageEnvelope
 
 logger = logging.getLogger(__name__)
@@ -35,11 +31,11 @@ class CommunicationsManager:
     def __init__(self, context: zmq.Context | None = None) -> None:
         """Initialize the CommunicationsManager."""
         self._owns_context = context is None
-        self.context = context or zmq.Context.instance()
-        self.consumer_socket: zmq.Socket | None = None
-        self.publisher_socket: zmq.Socket | None = None
-        self._consumer_endpoint: str | None = None
-        self._publisher_endpoint: str | None = None
+        self._context = context or zmq.Context.instance()
+
+        self._consumer_socket: zmq.Socket | None = None
+
+        self._producer_socket: zmq.Socket | None = None
 
     def _endpoint(self, socket_path: Path | str) -> str:
         """Build a ZMQ endpoint from a socket path or address."""
@@ -49,10 +45,6 @@ class CommunicationsManager:
             return socket_path
         return f"tcp://{socket_path}"
 
-    def _is_path(self, socket_path: Path | str) -> bool:
-        """Return True if the socket path represents a filesystem path."""
-        return isinstance(socket_path, Path)
-
     def start_consumer(self) -> None:
         """Bind a PULL socket for the daemon.
 
@@ -60,14 +52,18 @@ class CommunicationsManager:
         """
         if isinstance(BASE_DIR, Path):
             BASE_DIR.mkdir(parents=True, exist_ok=True)
-
-        if not isinstance(self.consumer_socket, zmq.Socket):
-            self.consumer_socket = self.context.socket(zmq.PULL)
+        if isinstance(self._producer_socket, zmq.Socket):
+            raise RuntimeError((
+                "Producer socket already initialized.",
+                "this is either a producer or a daemon process",
+            ))
+        if not isinstance(self._consumer_socket, zmq.Socket):
+            self._consumer_socket = self._context.socket(zmq.PULL)
 
         endpoint = _build_endpoint(SOCKET_PATH)
 
         try:
-            self.consumer_socket.bind(endpoint)
+            self._consumer_socket.bind(endpoint)
         except zmq.error.ZMQError as e:
             if e.errno == zmq.EADDRINUSE:
                 if isinstance(SOCKET_PATH, Path) and SOCKET_PATH.exists():
@@ -83,7 +79,7 @@ class CommunicationsManager:
                         )
                         sys.exit(1)
                     try:
-                        self.consumer_socket.bind(endpoint)
+                        self._consumer_socket.bind(endpoint)
                     except zmq.error.ZMQError as retry_err:
                         if retry_err.errno == zmq.EADDRINUSE:
                             logger.warning("Daemon already running! Exiting...")
@@ -95,107 +91,66 @@ class CommunicationsManager:
                     sys.exit(1)
             raise
 
-        self._consumer_endpoint = endpoint
         logger.info("Daemon (PULL) bound to %s", endpoint)
 
     def receive_raw(self) -> bytes | None:
         """Receive a raw message from the consumer socket."""
-        if self.consumer_socket is None:
+        if self._consumer_socket is None:
             raise RuntimeError("Consumer socket not initialized")
-        if not self.consumer_socket.poll(timeout=10):
+        if not self._consumer_socket.poll(timeout=10):
             return None
-        return self.consumer_socket.recv()
+        return self._consumer_socket.recv()
 
-    def start_publisher(self) -> None:
-        """Bind a PUB socket for recording control messages."""
-        if isinstance(BASE_DIR, Path):
-            BASE_DIR.mkdir(parents=True, exist_ok=True)
-        self.publisher_socket = self.context.socket(zmq.PUB)
-        endpoint = _build_endpoint(RECORDING_EVENTS_SOCKET_PATH)
-        self.publisher_socket.bind(endpoint)
-        self._publisher_endpoint = endpoint
-        logger.info("Daemon (PUB) bound to %s", endpoint)
+    def create_producer_socket(self) -> None:
+        """Create a PUSH socket to send messages to the daemon."""
+        if self._consumer_socket is not None:
+            raise RuntimeError((
+                "Consumer socket already initialized. ",
+                "this is either a producer or a daemon process",
+            ))
+        if isinstance(self._producer_socket, zmq.Socket):
+            return
 
-    def create_subscriber_socket(self) -> zmq.Socket | None:
-        """Create a SUB socket to receive daemon control messages."""
-        if isinstance(RECORDING_EVENTS_SOCKET_PATH, Path):
-            if not RECORDING_EVENTS_SOCKET_PATH.exists():
-                logger.warning(
-                    "Recording events socket does not exist. Cannot connect."
-                )
-                return None
-        socket = self.context.socket(zmq.SUB)
-        socket.setsockopt(zmq.SUBSCRIBE, b"")
-        endpoint = _build_endpoint(RECORDING_EVENTS_SOCKET_PATH)
-        socket.connect(endpoint)
-        logger.debug("Producer subscribed to %s", endpoint)
-        return socket
+        self._producer_socket = self._context.socket(zmq.PUSH)
 
-    def create_producer_socket(self) -> zmq.Socket | None:
-        """Create a PUSH socket to send messages to the daemon.
+        # Do not allow sends until connected
+        self._producer_socket.setsockopt(zmq.IMMEDIATE, 1)
+        # 1 second timeout for backwards compatibility
+        self._producer_socket.setsockopt(zmq.LINGER, 1)
 
-        Returns:
-            The socket if connection is possible, otherwise None.
-        """
-        if isinstance(SOCKET_PATH, Path):
-            if not SOCKET_PATH.exists():
-                logger.warning("Daemon socket does not exist. Cannot connect.")
-                return None
-
-        socket = self.context.socket(zmq.PUSH)
         endpoint = _build_endpoint(SOCKET_PATH)
-        socket.connect(endpoint)
+        self._producer_socket.connect(endpoint)
         logger.debug(f"Producer connected to {endpoint}")
-        return socket
 
-    def send_message(self, socket: zmq.Socket | None, message: MessageEnvelope) -> None:
+    def send_message(self, message: MessageEnvelope) -> None:
         """Serialize and send a ManagementMessage."""
-        if socket is None:
-            logger.warning("No consumer available to send message")
-            return
-        socket.send(message.to_bytes())
+        if self._producer_socket is None:
+            raise RuntimeError(
+                "Producer socket not initialized, use create_producer_socket()"
+            )
 
-    def publish_message(self, message: MessageEnvelope) -> None:
-        """Publish a control message to all subscribers."""
-        if self.publisher_socket is None:
-            logger.warning("No publisher available to send message")
-            return
-        self.publisher_socket.send(message.to_bytes())
+        self._producer_socket.send(message.to_bytes())
 
     def cleanup_daemon(self) -> None:
-        """Cleanup function for the daemon process.
-
-        Closes the consumer socket, removes the IPC socket file,
-        and terminates the ZMQ context.
-        """
-        if self.consumer_socket is not None:
-            self.consumer_socket.close(0)
-            self.consumer_socket = None
-        if self.publisher_socket is not None:
-            self.publisher_socket.close(0)
-            self.publisher_socket = None
+        """Cleanup function for the daemon process."""
+        if self._consumer_socket is not None:
+            self._consumer_socket.close(0)
+            self._consumer_socket = None
 
         if isinstance(SOCKET_PATH, Path) and SOCKET_PATH.exists():
             try:
                 SOCKET_PATH.unlink()
             except OSError as e:
                 logger.warning(f"Failed to remove socket file: {e}")
-        if (
-            isinstance(RECORDING_EVENTS_SOCKET_PATH, Path)
-            and RECORDING_EVENTS_SOCKET_PATH.exists()
-        ):
-            try:
-                RECORDING_EVENTS_SOCKET_PATH.unlink()
-            except OSError as e:
-                logger.warning(f"Failed to remove recording events socket: {e}")
 
         if self._owns_context:
-            self.context.term()
+            self._context.term()
 
     def cleanup_producer(self) -> None:
-        """Cleanup for a producer.
+        """Cleanup for a producer."""
+        if self._producer_socket is not None:
+            self._producer_socket.close(0)
+            self._producer_socket = None
 
-        Producers should NOT delete the socket file; they only close their context.
-        """
         if self._owns_context:
-            self.context.term()
+            self._context.term()

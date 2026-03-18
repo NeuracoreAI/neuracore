@@ -21,7 +21,7 @@ from neuracore.data_daemon.config_manager.profiles import (
     ProfileManager,
     ProfileNotFound,
 )
-from neuracore.data_daemon.const import RECORDING_EVENTS_SOCKET_PATH, SOCKET_PATH
+from neuracore.data_daemon.const import SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
 from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
     cleanup_stale_client_state,
@@ -302,10 +302,7 @@ def handle_stop(args: argparse.Namespace) -> None:
     if not pid_is_running(pid_value):
         shutdown(
             pid_path=pid_path,
-            socket_paths=(
-                Path(str(SOCKET_PATH)),
-                Path(str(RECORDING_EVENTS_SOCKET_PATH)),
-            ),
+            socket_paths=(Path(str(SOCKET_PATH)),),
             db_path=db_path,
         )
         print("Daemon stopped.")
@@ -317,10 +314,7 @@ def handle_stop(args: argparse.Namespace) -> None:
     if wait_for_exit(pid_value, timeout_s=10.0):
         shutdown(
             pid_path=pid_path,
-            socket_paths=(
-                Path(str(SOCKET_PATH)),
-                Path(str(RECORDING_EVENTS_SOCKET_PATH)),
-            ),
+            socket_paths=(Path(str(SOCKET_PATH)),),
             db_path=db_path,
         )
         print("Daemon stopped.")
@@ -332,10 +326,7 @@ def handle_stop(args: argparse.Namespace) -> None:
     if wait_for_exit(pid_value, timeout_s=5.0):
         shutdown(
             pid_path=pid_path,
-            socket_paths=(
-                Path(str(SOCKET_PATH)),
-                Path(str(RECORDING_EVENTS_SOCKET_PATH)),
-            ),
+            socket_paths=(Path(str(SOCKET_PATH)),),
             db_path=db_path,
         )
         print("Daemon stopped (forced).")
@@ -359,7 +350,7 @@ def handle_status(args: argparse.Namespace) -> None:
         cleanup_stale_client_state(
             pid_path=pid_path,
             db_path=db_path,
-            socket_paths=(str(SOCKET_PATH), str(RECORDING_EVENTS_SOCKET_PATH)),
+            socket_paths=(str(SOCKET_PATH),),
         )
         print("Daemon not running.")
         return

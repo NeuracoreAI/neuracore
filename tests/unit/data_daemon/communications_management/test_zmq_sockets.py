@@ -58,16 +58,15 @@ def _run_daemon_loop(
 ) -> None:
     try:
         comm.start_consumer()
-        comm.start_publisher()
     except BaseException as exc:
         error_bucket.append(exc)
         ready_event.set()
         return
     ready_event.set()
-    if comm.consumer_socket is None:
+    if comm._consumer_socket is None:
         raise RuntimeError("consumer socket not initialized")
-    comm.consumer_socket.setsockopt(zmq.RCVTIMEO, 200)
-    comm.consumer_socket.setsockopt(zmq.LINGER, 0)
+    comm._consumer_socket.setsockopt(zmq.RCVTIMEO, 200)
+    comm._consumer_socket.setsockopt(zmq.LINGER, 0)
 
     while not stop_event.is_set():
         daemon._finalize_closing_recordings()
@@ -87,17 +86,15 @@ def _run_daemon_loop(
 def ipc_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     base_dir = tmp_path / "ndd"
     socket_path = f"inproc://daemon-{uuid4().hex}"
-    events_path = f"inproc://events-{uuid4().hex}"
+    f"inproc://events-{uuid4().hex}"
 
     mpsa = monkeypatch.setattr
 
     mpsa(const_module, "BASE_DIR", base_dir)
     mpsa(const_module, "SOCKET_PATH", socket_path)
-    mpsa(const_module, "RECORDING_EVENTS_SOCKET_PATH", events_path)
     mpsa(const_module, "HEARTBEAT_TIMEOUT_SECS", TEST_HEARTBEAT_TIMEOUT_SECS)
     mpsa(comms_module, "BASE_DIR", base_dir)
     mpsa(comms_module, "SOCKET_PATH", socket_path)
-    mpsa(comms_module, "RECORDING_EVENTS_SOCKET_PATH", events_path)
     mpsa(data_bridge_module, "HEARTBEAT_TIMEOUT_SECS", TEST_HEARTBEAT_TIMEOUT_SECS)
 
     yield
@@ -174,21 +171,20 @@ def test_zmq_socket_establishment_and_teardown() -> None:
     function properly closes the sockets and terminates the ZMQ context.
     """
     context = zmq.Context()
-    comm = CommunicationsManager(context=context)
-    comm.start_consumer()
-    comm.start_publisher()
+    consumer_manager = CommunicationsManager(context=context)
+    consumer_manager.start_consumer()
 
-    producer_socket = comm.create_producer_socket()
-    assert producer_socket is not None
-    producer_socket.close(0)
-    subscriber_socket = comm.create_subscriber_socket()
-    assert subscriber_socket is not None
-    subscriber_socket.close(0)
+    producer_manager = CommunicationsManager()
+    producer_manager.create_producer_socket()
 
-    comm.cleanup_daemon()
+    assert consumer_manager._consumer_socket is not None
+    assert producer_manager._producer_socket is not None
+    producer_manager.cleanup_producer()
+    assert producer_manager._producer_socket is None
 
-    assert comm.consumer_socket is None
-    assert comm.publisher_socket is None
+    consumer_manager.cleanup_daemon()
+
+    assert consumer_manager._consumer_socket is None
     context.term()
 
 
@@ -247,15 +243,12 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
         recording_id=recording_id, comm_manager=recording_comm
     )
     recording_context.stop_recording()
-    if recording_context.socket is not None:
-        recording_context.socket.close(0)
+
     recording_comm.cleanup_producer()
 
     assert _wait_for(lambda: recording_id in daemon._closed_recordings, timeout=0.5)
 
     producer.stop_producer()
-    if producer.socket is not None:
-        producer.socket.close(0)
 
 
 def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_detection(
@@ -310,8 +303,6 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
     get_emitter().on(Emitter.TRACE_WRITTEN, on_trace_written)
     try:
         producer._stop_event.set()
-        if producer.socket is not None:
-            producer.socket.close(0)
 
         start = time.monotonic()
         assert _wait_for(
@@ -350,8 +341,6 @@ def test_socket_cleanup_on_disconnect(daemon_runtime) -> None:
     assert _wait_for(lambda: producer.producer_id in daemon.channels, timeout=0.5)
 
     producer._stop_event.set()
-    if producer.socket is not None:
-        producer.socket.close(0)
 
     assert _wait_for(
         lambda: producer.producer_id not in daemon.channels,
