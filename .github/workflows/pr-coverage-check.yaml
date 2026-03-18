@@ -1,4 +1,4 @@
-name: Coverage Comment
+name: PR Coverage Comment
 
 on:
   workflow_run:
@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: coverage-artifacts
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -28,6 +28,7 @@ jobs:
           junitxml-path: pytest.xml
           report-only-changed-files: true
           xml-skip-covered: true
+          issue-number: ${{ github.event.inputs.pr_number }}
 
       - name: Coverage Change PR Comment
         uses: actions/github-script@v7
@@ -108,9 +109,7 @@ jobs:
                   body
                 })
               }
-            }
-
-            else {
+            } else {
               if (existing) {
                 const body = positiveComment()
 
