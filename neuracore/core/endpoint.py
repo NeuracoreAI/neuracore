@@ -626,15 +626,18 @@ def policy_remote_server(
         response.raise_for_status()
 
         endpoints = response.json()
-        endpoint = next((e for e in endpoints if e["name"] == endpoint_name), None)
-        if not endpoint:
+        matching_endpoints = [e for e in endpoints if e["name"] == endpoint_name]
+        if not matching_endpoints:
             raise EndpointError(f"No endpoint found with name: {endpoint_name}")
 
-        # Verify endpoint is active
-        if endpoint["status"] != "active":
+        active_endpoints = [e for e in matching_endpoints if e["status"] == "active"]
+        if not active_endpoints:
+            raise EndpointError(f"Endpoint {endpoint_name} is not active")
+        if len(active_endpoints) > 1:
             raise EndpointError(
-                f"Endpoint {endpoint_name} is not active (status: {endpoint['status']})"
+                f"Multiple active endpoints found with name {endpoint_name} "
             )
+        endpoint = active_endpoints[0]
 
         return RemoteServerPolicy(
             base_url=f"{API_URL}/org/{org_id}/models/endpoints/{endpoint['id']}",
