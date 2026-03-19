@@ -7,6 +7,7 @@ import logging
 import multiprocessing as mp
 import os
 import random
+import re
 import threading
 import time
 import traceback
@@ -180,6 +181,7 @@ class NeuracoreDatasetImporter(ABC):
         self._progress_queue: mp.Queue[ProgressUpdate] | None = None
         self._worker_id: int = -1
         self._error_queue: mp.Queue[WorkerError] | None = None
+        self.completed_items_file = self._resolve_completed_items_file()
 
     @abstractmethod
     def build_work_items(self) -> Sequence[ImportItem]:
@@ -711,6 +713,26 @@ class NeuracoreDatasetImporter(ABC):
             self.logger.info("No import items found; nothing to do.")
             return
 
+        completed_keys = self._load_completed_item_keys()
+        if completed_keys:
+            original_count = len(items)
+            items = [
+                item for item in items if self._item_key(item) not in completed_keys
+            ]
+            skipped_count = original_count - len(items)
+            if skipped_count > 0:
+                self.logger.info(
+                    "Skipping %s previously completed episode(s) from %s.",
+                    skipped_count,
+                    self.completed_items_file,
+                )
+            if not items:
+                self.logger.info(
+                    "All episodes are already completed according to %s.",
+                    self.completed_items_file,
+                )
+                return
+
         if self.random_sample is not None:
             n = min(self.random_sample, len(items))
             items = random.sample(items, n)
@@ -794,6 +816,7 @@ class NeuracoreDatasetImporter(ABC):
         ctx = mp.get_context("spawn")
         error_queue: mp.Queue[WorkerError] = ctx.Queue()
         progress_queue: mp.Queue[ProgressUpdate] = ctx.Queue()
+        completed_queue: mp.Queue[str] = ctx.Queue()
         pause_event = ctx.Event()  # when set, workers pause at next item boundary
         precheck_result_queue: mp.Queue[bool] | None = (
             ctx.Queue() if use_precheck_result_queue else None
@@ -811,6 +834,7 @@ class NeuracoreDatasetImporter(ABC):
                     worker_id,
                     error_queue,
                     progress_queue,
+                    completed_queue,
                     ready_barrier,
                     pause_event,
                     precheck_result_queue,
@@ -819,14 +843,22 @@ class NeuracoreDatasetImporter(ABC):
             process.start()
             processes.append(process)
 
-        self._monitor_progress(processes, progress_queue, len(items), pause_event)
+        self._monitor_progress(
+            processes, progress_queue, len(items), pause_event, completed_queue
+        )
 
         for process in processes:
             process.join()
         progress_queue.close()
         progress_queue.join_thread()
+        completed_queue.close()
+        completed_queue.join_thread()
 
-        return (self._collect_errors(error_queue), processes, precheck_result_queue)
+        return (
+            self._collect_errors(error_queue),
+            processes,
+            precheck_result_queue,
+        )
 
     def _resolve_worker_count(self, total_items: int) -> int:
         """Pick a worker count similar to the archived scripts."""
@@ -863,6 +895,7 @@ class NeuracoreDatasetImporter(ABC):
         worker_id: int,
         error_queue: mp.Queue,
         progress_queue: mp.Queue | None,
+        completed_queue: mp.Queue[str] | None,
         ready_barrier: mp.synchronize.Barrier | None = None,
         pause_event: mp.synchronize.Event | None = None,
         precheck_result_queue: mp.Queue[bool] | None = None,
@@ -911,7 +944,14 @@ class NeuracoreDatasetImporter(ABC):
             while pause_event is not None and pause_event.is_set():
                 time.sleep(1)
             try:
-                self._step(item, worker_id, idx, len(chunk), error_queue)
+                self._step(
+                    item,
+                    worker_id,
+                    idx,
+                    len(chunk),
+                    error_queue,
+                    completed_queue,
+                )
             except Exception as exc:  # noqa: BLE001 - keep traceback for summary
                 if error_queue:
                     tb = traceback.format_exc()
@@ -949,6 +989,7 @@ class NeuracoreDatasetImporter(ABC):
         local_index: int,
         chunk_length: int,
         error_queue: mp.Queue,
+        completed_queue: mp.Queue[str] | None,
     ) -> None:
         """Centralized step handler for progress and error capture."""
         self._error_queue = error_queue
@@ -971,6 +1012,9 @@ class NeuracoreDatasetImporter(ABC):
             self._log_worker_error(worker_id, item.index, str(exc))
             raise
 
+        if completed_queue is not None and not self.dry_run and not self.pre_check:
+            completed_queue.put(self._item_key(item))
+
         # Progress bar already shows ongoing status; skip per-interval info logs.
 
     def _collect_errors(self, error_queue: mp.Queue) -> list[WorkerError]:
@@ -982,6 +1026,46 @@ class NeuracoreDatasetImporter(ABC):
         except Empty:
             pass
         return errors
+
+    def _resolve_completed_items_file(self) -> Path:
+        """Return the file path used to persist completed imports."""
+        safe_dataset_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.output_dataset_name)
+        return self.dataset_dir / f".neuracore_import_completed_{safe_dataset_name}.txt"
+
+    def _item_key(self, item: ImportItem) -> str:
+        """Build a stable key for an import item."""
+        split = item.split if item.split is not None else ""
+        return f"{split}:{item.index}"
+
+    def _load_completed_item_keys(self) -> set[str]:
+        """Load completed item keys from disk."""
+        if not self.completed_items_file.exists():
+            return set()
+        try:
+            with self.completed_items_file.open("r", encoding="utf-8") as file:
+                return {line.strip() for line in file if line.strip()}
+        except Exception as exc:  # noqa: BLE001 - best effort
+            self.logger.warning(
+                "Failed to read completed imports file '%s': %s",
+                self.completed_items_file,
+                exc,
+            )
+            return set()
+
+    def _append_completed_item_keys(self, keys: Iterable[str]) -> None:
+        """Append completed item keys to disk immediately.
+
+        Used to periodically persist resume state while workers run.
+        """
+        if self.dry_run or self.pre_check:
+            return
+        keys = list(keys)
+        if not keys:
+            return
+        self.completed_items_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.completed_items_file.open("a", encoding="utf-8") as file:
+            for key in keys:
+                file.write(f"{key}\n")
 
     def _report_process_status(
         self, processes: Iterable[mp.context.SpawnProcess]
@@ -1102,11 +1186,13 @@ class NeuracoreDatasetImporter(ABC):
         progress_queue: mp.Queue[ProgressUpdate],
         total_items: int,
         pause_event: mp.synchronize.Event | None = None,
+        completed_queue: mp.Queue[str] | None = None,
     ) -> None:
         """Render a progress bar by aggregating all worker updates.
 
         Workers are paused when disk usage reaches storage_limit until
-        usage drops below it.
+        usage drops below it. Completed item keys from completed_queue
+        are appended to the resume file periodically.
         """
         if not processes:
             return
@@ -1115,6 +1201,18 @@ class NeuracoreDatasetImporter(ABC):
         worker_states: dict[int, ProgressUpdate] = {}
         last_disk_check = 0.0
         workers_paused = False
+
+        def flush_completed_queue() -> None:
+            if completed_queue is None:
+                return
+            batch: list[str] = []
+            try:
+                while True:
+                    batch.append(completed_queue.get_nowait())
+            except Empty:
+                pass
+            if batch:
+                self._append_completed_item_keys(batch)
 
         with Progress(
             SpinnerColumn(style="cyan"),
@@ -1130,6 +1228,8 @@ class NeuracoreDatasetImporter(ABC):
             overall_task = progress.add_task("Importing episodes", total=total_items)
 
             while True:
+                flush_completed_queue()
+
                 now = time.monotonic()
                 if now - last_disk_check >= self.DISK_CHECK_INTERVAL_SECS:
                     last_disk_check = now
@@ -1208,6 +1308,7 @@ class NeuracoreDatasetImporter(ABC):
                             worker_states,
                             update,
                         )
+                    flush_completed_queue()
                     progress.update(overall_task, completed=total_items)
                     return
 

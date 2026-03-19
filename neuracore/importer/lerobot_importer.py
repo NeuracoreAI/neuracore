@@ -181,9 +181,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 episode_label=str(episode_id),
             )
         if not self.dry_run:
-            nc.stop_recording(
-                robot_name=self.robot_name, instance=self._worker_id, wait=True
-            )
+            nc.stop_recording(robot_name=self.robot_name, instance=self._worker_id)
         self.logger.info("[%s] Completed episode %s", worker_label, episode_id)
 
     def _load_metadata(self) -> LeRobotDatasetMetadata:
