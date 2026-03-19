@@ -27,29 +27,23 @@ def test_cleanup_daemon_removes_socket_files(
 ) -> None:
     base_dir = tmp_path / "ndd"
     socket_path = base_dir / "management.sock"
-    events_path = base_dir / "recording_events.sock"
+
     base_dir.mkdir(parents=True)
     socket_path.write_text("stale")
-    events_path.write_text("stale")
 
     mpsa = monkeypatch.setattr
 
     mpsa(comms_module, "BASE_DIR", base_dir)
     mpsa(comms_module, "SOCKET_PATH", socket_path)
-    mpsa(comms_module, "RECORDING_EVENTS_SOCKET_PATH", events_path)
 
     comm = CommunicationsManager(context=MagicMock())
     consumer = MagicMock()
-    publisher = MagicMock()
-    comm.consumer_socket = consumer
-    comm.publisher_socket = publisher
+    comm._consumer_socket = consumer
 
     comm.cleanup_daemon()
 
     assert not socket_path.exists()
-    assert not events_path.exists()
     consumer.close.assert_called_once_with(0)
-    publisher.close.assert_called_once_with(0)
 
 
 def test_start_consumer_removes_stale_socket_and_retries(

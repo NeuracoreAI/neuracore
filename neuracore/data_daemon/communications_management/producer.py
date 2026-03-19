@@ -29,14 +29,7 @@ class RecordingContext:
         """Initialize the recording context."""
         self.recording_id = recording_id
         self._comm = comm_manager or CommunicationsManager()
-        self.socket = self._comm.create_producer_socket()
-
-        if self.socket is None:
-            raise RuntimeError(
-                "RecordingContext could not connect to daemon. "
-                "Start the daemon with `nc-data-daemon launch` before recording. "
-                "Data cannot be captured without a running daemon."
-            )
+        self._comm.create_producer_socket()
 
     def set_recording_id(self, recording_id: str | None) -> None:
         """Set or clear the recording identifier for this context."""
@@ -67,9 +60,6 @@ class RecordingContext:
 
     def close(self) -> None:
         """Close sockets and cleanup context resources owned by this instance."""
-        if self.socket is not None:
-            self.socket.close(0)
-            self.socket = None
         self._comm.cleanup_producer()
 
     def _send(self, command: CommandType, payload: dict | None = None) -> None:
@@ -88,7 +78,7 @@ class RecordingContext:
             command=command,
             payload=payload or {},
         )
-        self._comm.send_message(self.socket, envelope)
+        self._comm.send_message(envelope)
 
 
 class Producer:
@@ -103,7 +93,7 @@ class Producer:
     ) -> None:
         """Initialize the producer."""
         self._comm = comm_manager or CommunicationsManager()
-        self.socket = self._comm.create_producer_socket()
+        self._comm.create_producer_socket()
         self.producer_id = id or str(uuid.uuid4())
         self.chunk_size = chunk_size
         self.trace_id: str | None = None
@@ -118,13 +108,6 @@ class Producer:
         self._last_enqueued_sequence_number = 0
         self._last_socket_sent_sequence_number = 0
         self._sequence_cv = threading.Condition()
-
-        if self.socket is None:
-            raise RuntimeError(
-                "Producer could not connect to daemon. "
-                "Start the daemon with `nc-data-daemon launch` before logging data. "
-                "Data cannot be captured without a running daemon."
-            )
 
         self._sender_thread = threading.Thread(
             target=self._sender_loop, name="producer-sender", daemon=True
@@ -142,26 +125,24 @@ class Producer:
             try:
                 if envelope is None:
                     break
-                if self.socket is not None:
-                    try:
-                        self._comm.send_message(self.socket, envelope)
-                        if envelope.sequence_number is not None:
-                            with self._sequence_cv:
-                                if (
+
+                try:
+                    self._comm.send_message(envelope)
+                    if envelope.sequence_number is not None:
+                        with self._sequence_cv:
+                            if (
+                                envelope.sequence_number
+                                > self._last_socket_sent_sequence_number
+                            ):
+                                self._last_socket_sent_sequence_number = (
                                     envelope.sequence_number
-                                    > self._last_socket_sent_sequence_number
-                                ):
-                                    self._last_socket_sent_sequence_number = (
-                                        envelope.sequence_number
-                                    )
-                                self._sequence_cv.notify_all()
-                    except Exception as exc:
-                        logger.warning("Send failed: %s", exc)
+                                )
+                            self._sequence_cv.notify_all()
+                except Exception as exc:
+                    logger.warning("Send failed: %s", exc)
             finally:
                 self._send_queue.task_done()
-        if self.socket is not None:
-            self.socket.close(0)
-            self.socket = None
+
         with self._sequence_cv:
             self._sequence_cv.notify_all()
 
@@ -314,18 +295,6 @@ class Producer:
                     return False
                 self._sequence_cv.wait()
             return True
-
-    def has_consumer(self) -> bool:
-        """Check if the producer has a consumer.
-
-        This method checks if the producer has a consumer associated with it.
-        If the producer has a consumer, this method returns `True`. Otherwise, it
-        returns `False`.
-
-        Returns:
-            bool: Whether the producer has a consumer.
-        """
-        return self.socket is not None
 
     def open_ring_buffer(self, size: int = DEFAULT_RING_BUFFER_SIZE) -> None:
         """Open a ring buffer for sending data chunks to the daemon.

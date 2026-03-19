@@ -39,10 +39,8 @@ def ipc_paths(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     mpsa(const_module, "BASE_DIR", base_dir)
     mpsa(const_module, "SOCKET_PATH", socket_path)
-    mpsa(const_module, "RECORDING_EVENTS_SOCKET_PATH", events_path)
     mpsa(comms_module, "BASE_DIR", base_dir)
     mpsa(comms_module, "SOCKET_PATH", socket_path)
-    mpsa(comms_module, "RECORDING_EVENTS_SOCKET_PATH", events_path)
 
     yield
 
@@ -71,13 +69,13 @@ def _drain_messages(
     timeout: float = 2.0,
 ) -> None:
     poller = zmq.Poller()
-    poller.register(comm.consumer_socket, zmq.POLLIN)
+    poller.register(comm._consumer_socket, zmq.POLLIN)
     received = 0
     deadline = time.monotonic() + timeout
     while received < expected and time.monotonic() < deadline:
         remaining = max(0.0, deadline - time.monotonic())
         events = dict(poller.poll(remaining * 1000))
-        if comm.consumer_socket in events:
+        if comm._consumer_socket in events:
             raw = comm.receive_raw()
             if raw is None:
                 continue
@@ -98,11 +96,11 @@ def test_daemon_singleton_socket_enforced(zmq_context: zmq.Context) -> None:
         assert exc.value.code == 1
     finally:
         daemon_comm.cleanup_daemon()
-        if second_comm.consumer_socket is not None:
-            second_comm.consumer_socket.close(0)
+        if second_comm._consumer_socket is not None:
+            second_comm._consumer_socket.close(0)
 
 
-def test_create_producer_socket_returns_none_without_daemon(
+def test_create_producer_socket_returns_continues_without_daemon(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     socket_path = tmp_path / "ndd" / "management.sock"
@@ -111,7 +109,11 @@ def test_create_producer_socket_returns_none_without_daemon(
 
     comm = CommunicationsManager()
     assert not socket_path.exists()
-    assert comm.create_producer_socket() is None
+    comm.create_producer_socket()
+    assert isinstance(comm._producer_socket, zmq.Socket)
+    assert (
+        comm._producer_socket.getsockopt(zmq.IMMEDIATE) == 1
+    ), "Socket should be setup in IMMEDIATE mode"
     comm.cleanup_producer()
 
 
@@ -129,16 +131,16 @@ def test_message_envelope_round_trip_bytes() -> None:
 
 def test_pub_sub_recording_stopped_event(zmq_context: zmq.Context) -> None:
     daemon_comm = CommunicationsManager(context=zmq_context)
-    daemon_comm.start_publisher()
+    daemon_comm.start_consumer()
 
     producer_comm = CommunicationsManager(context=zmq_context)
-    subscriber = producer_comm.create_subscriber_socket()
+    producer_comm.create_producer_socket()
 
-    assert subscriber is not None
+    assert producer_comm._producer_socket is not None
     time.sleep(0.05)
 
     payload = {"recording_stopped": {"recording_id": "rec-1"}}
-    daemon_comm.publish_message(
+    producer_comm.send_message(
         MessageEnvelope(
             producer_id=None,
             command=CommandType.RECORDING_STOPPED,
@@ -147,16 +149,15 @@ def test_pub_sub_recording_stopped_event(zmq_context: zmq.Context) -> None:
     )
 
     poller = zmq.Poller()
-    poller.register(subscriber, zmq.POLLIN)
+    poller.register(daemon_comm._consumer_socket, zmq.POLLIN)
     events = dict(poller.poll(1000))
-    assert subscriber in events
+    assert daemon_comm._consumer_socket in events
 
-    raw = subscriber.recv()
+    raw = daemon_comm.receive_raw()
     parsed = MessageEnvelope.from_bytes(raw)
     assert parsed.command == CommandType.RECORDING_STOPPED
     assert parsed.payload == payload
 
-    subscriber.close(0)
     producer_comm.cleanup_producer()
     daemon_comm.cleanup_daemon()
 
@@ -273,16 +274,11 @@ def test_interleaved_chunks_reassemble_per_producer(zmq_context: zmq.Context) ->
     producer_a_comm = CommunicationsManager(context=zmq_context)
     producer_b_comm = CommunicationsManager(context=zmq_context)
 
-    producer_a_socket = producer_a_comm.create_producer_socket()
-    producer_b_socket = producer_b_comm.create_producer_socket()
-    assert producer_a_socket is not None
-    assert producer_b_socket is not None
+    producer_a_comm.create_producer_socket()
+    producer_b_comm.create_producer_socket()
 
-    def send_open(
-        comm: CommunicationsManager, socket: zmq.Socket, producer_id: str
-    ) -> None:
+    def send_open(comm: CommunicationsManager, producer_id: str) -> None:
         comm.send_message(
-            socket,
             MessageEnvelope(
                 producer_id=producer_id,
                 command=CommandType.OPEN_RING_BUFFER,
@@ -290,8 +286,8 @@ def test_interleaved_chunks_reassemble_per_producer(zmq_context: zmq.Context) ->
             ),
         )
 
-    send_open(producer_a_comm, producer_a_socket, "producer-a")
-    send_open(producer_b_comm, producer_b_socket, "producer-b")
+    send_open(producer_a_comm, "producer-a")
+    send_open(producer_b_comm, "producer-b")
     _drain_messages(daemon, daemon_comm, expected=2)
 
     payload_a = b"AAAAAA"
@@ -332,17 +328,15 @@ def test_interleaved_chunks_reassemble_per_producer(zmq_context: zmq.Context) ->
     for idx in range(3):
         interleaved.append((
             producer_a_comm,
-            producer_a_socket,
             make_chunk("producer-a", "rec-a", "trace-a", idx, 3, chunks_a[idx]),
         ))
         interleaved.append((
             producer_b_comm,
-            producer_b_socket,
             make_chunk("producer-b", "rec-b", "trace-b", idx, 3, chunks_b[idx]),
         ))
 
-    for comm, socket, envelope in interleaved:
-        comm.send_message(socket, envelope)
+    for comm, envelope in interleaved:
+        comm.send_message(envelope)
 
     _drain_messages(daemon, daemon_comm, expected=len(interleaved))
 
@@ -350,8 +344,6 @@ def test_interleaved_chunks_reassemble_per_producer(zmq_context: zmq.Context) ->
     assert by_producer["producer-a"] == payload_a
     assert by_producer["producer-b"] == payload_b
 
-    producer_a_socket.close(0)
-    producer_b_socket.close(0)
     producer_a_comm.cleanup_producer()
     producer_b_comm.cleanup_producer()
     daemon_comm.cleanup_daemon()
@@ -439,16 +431,16 @@ def test_garbage_messages_are_logged_and_daemon_survives(
 
     with caplog.at_level(logging.ERROR):
         sender.send(b"{not-json")
-        raw = daemon_comm.consumer_socket.recv()
+        raw = daemon_comm._consumer_socket.recv()
         daemon.process_raw_message(raw)
         assert "Failed to parse incoming message bytes" in caplog.text
 
         sender.send(b'{"producer_id": "prod"}')
-        raw = daemon_comm.consumer_socket.recv()
+        raw = daemon_comm._consumer_socket.recv()
         daemon.process_raw_message(raw)
 
         sender.send(b'{"producer_id": "prod", "command": 123}')
-        raw = daemon_comm.consumer_socket.recv()
+        raw = daemon_comm._consumer_socket.recv()
         daemon.process_raw_message(raw)
 
     assert handled_messages == []
@@ -460,7 +452,7 @@ def test_garbage_messages_are_logged_and_daemon_survives(
             payload={"open_ring_buffer": {"size": 1024}},
         ).to_bytes()
     )
-    raw = daemon_comm.consumer_socket.recv()
+    raw = daemon_comm._consumer_socket.recv()
     daemon.process_raw_message(raw)
     assert len(handled_messages) == 1
     assert daemon.channels["prod"].ring_buffer is not None

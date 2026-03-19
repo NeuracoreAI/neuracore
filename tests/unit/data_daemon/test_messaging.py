@@ -141,7 +141,7 @@ class DummyComm:
     def create_subscriber_socket(self):
         return None
 
-    def send_message(self, socket, message):
+    def send_message(self, message):
         self.messages.append(message)
 
     def cleanup_producer(self):
