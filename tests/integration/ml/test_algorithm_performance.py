@@ -33,11 +33,11 @@ import torch
 from neuracore_types import (
     BatchedJointData,
     DataType,
+    GPUType,
     JointData,
     RGBCameraData,
     SynchronizedPoint,
 )
-from neuracore_types.training.training import GPUType
 
 import neuracore as nc
 from neuracore.core.endpoint import Policy
