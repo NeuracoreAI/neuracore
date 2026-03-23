@@ -338,3 +338,4 @@ fixturenames
 reraises
 pyav
 rawvideo
+rtype
