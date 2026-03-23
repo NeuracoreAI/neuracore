@@ -2,16 +2,26 @@ import logging
 import math
 import multiprocessing
 import os
+import signal
+import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
 
 import numpy as np
+import psutil
 import pytest
 from neuracore_types import DataType
 from PIL import Image
 
 import neuracore as nc
+from neuracore.data_daemon.const import RECORDING_EVENTS_SOCKET_PATH, SOCKET_PATH
+from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
+from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
+    ensure_daemon_running,
+    pid_is_running,
+)
 
 # Add examples dir to path
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -160,6 +170,52 @@ class TestConfig:
         )
 
 
+def daemon_cleanup():
+    pid_path = get_daemon_pid_path()
+    db_path = get_daemon_db_path()
+    socket_paths = (Path(SOCKET_PATH), Path(RECORDING_EVENTS_SOCKET_PATH))
+    daemon_pids = set(get_runner_pids())
+
+    if pid_path.exists():
+        try:
+            daemon_pids.add(int(pid_path.read_text(encoding="utf-8").strip()))
+        except (OSError, ValueError):
+            pass
+
+    for pid in daemon_pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            subprocess.run(["kill", "-9", str(pid)], check=False)
+
+    for path in socket_paths + (pid_path, db_path):
+        try:
+            path.unlink(missing_ok=True)
+        except IsADirectoryError:
+            pass
+
+    for suffix in (".shm", ".wal"):
+        try:
+            db_path.with_suffix(db_path.suffix + suffix).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def get_runner_pids() -> set[int]:
+    output = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True)
+    runner_pids: set[int] = set()
+    for line in output.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid_text, args = parts
+        if "neuracore.data_daemon.runner_entry" in args:
+            runner_pids.add(int(pid_text))
+    return runner_pids
+
+
 def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
     """Create an image with the frame number encoded in the top-left pixels
 
@@ -185,6 +241,17 @@ def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
                 img[i, j, 2] = pixel_value // 2
 
     return img
+
+
+def get_daemon_process_pids():
+    return get_runner_pids()
+
+
+@pytest.fixture(autouse=True)
+def daemon_setup_teardown():
+    daemon_cleanup()
+    yield
+    daemon_cleanup()
 
 
 def decode_frame_number(img: np.ndarray) -> int:
@@ -477,7 +544,6 @@ def run_streaming_test(config: TestConfig):
     assert len(results["missing_frames"]) == 0
     assert len(results["duplicate_frames"]) == 0
     assert len(results["joint_mismatches"]) == 0
-
     return results
 
 
@@ -493,7 +559,6 @@ def run_before_and_after_tests():
     yield
 
 
-# p
 def test_basic_streaming():
     config = TestConfig(
         fps=10,
@@ -506,7 +571,6 @@ def test_basic_streaming():
     run_streaming_test(config)
 
 
-# p
 def test_basic_streaming_fast_mode():
     """Fast smoke test for daemon recording flow with minimal payload."""
     config = TestConfig(
@@ -606,7 +670,6 @@ def test_basic_streaming_fast_mode():
     assert found_rgb, "Expected at least one RGB frame in synchronized dataset"
 
 
-# p
 def test_high_framerate():
     config = TestConfig(
         fps=200,
@@ -619,7 +682,6 @@ def test_high_framerate():
     run_streaming_test(config)
 
 
-# p
 def test_multiple_cameras():
     config = TestConfig(
         fps=30,
@@ -634,7 +696,6 @@ def test_multiple_cameras():
     run_streaming_test(config)
 
 
-# p
 def test_with_depth():
     config = TestConfig(
         fps=30,
@@ -676,7 +737,6 @@ def test_multiple_concurrent_robots():
         assert len(results["joint_mismatches"]) == 0
 
 
-# p
 def test_stop_start_sequences():
     config = TestConfig(
         fps=30,
@@ -772,7 +832,6 @@ def test_stop_start_sequences():
     assert len(results["joint_mismatches"]) == 0
 
 
-# p
 def test_high_bandwidth():
     """Test high-throughput streaming with elevated daemon upload bandwidth."""
     previous_bandwidth_limit = os.environ.get("NCD_BANDWIDTH_LIMIT")
@@ -840,3 +899,50 @@ def test_high_bandwidth():
             os.environ.pop("NCD_NUM_THREADS", None)
         else:
             os.environ["NCD_NUM_THREADS"] = previous_num_threads
+
+
+def test_ensure_single_daemon_process():
+    """Ensure repeated startup calls do not create multiple daemon processes."""
+    nc.login()
+
+    def worker(barrier, results, i):
+        barrier.wait()
+        logger.info("worker %d", i)
+        pid = ensure_daemon_running()
+        results[i] = pid
+
+    core_count = psutil.cpu_count(logical=False) or 4
+    barrier = multiprocessing.Barrier(core_count)
+    manager = multiprocessing.Manager()
+    results = manager.dict()
+    processes = []
+
+    for i in range(core_count):
+        p = multiprocessing.Process(
+            target=worker,
+            args=(barrier, results, i),
+        )
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join(timeout=25)
+        assert not p.is_alive(), f"worker process {p.pid} did not finish before timeout"
+        assert p.exitcode == 0, f"worker process {p.pid} exited with code {p.exitcode}"
+
+    pids = list(results.values())
+    assert len(pids) == core_count
+    assert len(set(pids)) == 1
+    pid = pids[0]
+
+    pid_path = get_daemon_pid_path()
+
+    assert pid_path.exists()
+    assert pid_is_running(pid)
+    assert pid_path.read_text(encoding="utf-8").strip() == str(pid)
+
+    runner_pids = get_runner_pids()
+    assert pid in runner_pids
+    assert (
+        len(runner_pids) == 1
+    ), f"Expected exactly one daemon runner process, found pids={sorted(runner_pids)}"
