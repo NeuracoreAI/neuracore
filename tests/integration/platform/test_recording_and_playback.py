@@ -3,10 +3,12 @@ import math
 import multiprocessing
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -16,7 +18,7 @@ from neuracore_types import DataType
 from PIL import Image
 
 import neuracore as nc
-from neuracore.data_daemon.const import RECORDING_EVENTS_SOCKET_PATH, SOCKET_PATH
+from neuracore.data_daemon.const import SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
 from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
     ensure_daemon_running,
@@ -66,6 +68,10 @@ logger = logging.getLogger(__name__)
 # low default daemon upload bandwidth derived from local disk size.
 os.environ.setdefault("NCD_BANDWIDTH_LIMIT", str(200 * 1024 * 1024))  # 200 MiB/s
 os.environ.setdefault("NCD_MAX_CONCURRENT_UPLOADS", "30")
+
+# Track daemon profile files created by these integration tests so they
+# can be cleaned even when a test fails midway.
+_TEST_PROFILE_PATHS: set[Path] = set()
 
 
 class Timer:
@@ -173,7 +179,7 @@ class TestConfig:
 def daemon_cleanup():
     pid_path = get_daemon_pid_path()
     db_path = get_daemon_db_path()
-    socket_paths = (Path(SOCKET_PATH), Path(RECORDING_EVENTS_SOCKET_PATH))
+    socket_path = Path(SOCKET_PATH)
     daemon_pids = set(get_runner_pids())
 
     if pid_path.exists():
@@ -190,7 +196,7 @@ def daemon_cleanup():
         except PermissionError:
             subprocess.run(["kill", "-9", str(pid)], check=False)
 
-    for path in socket_paths + (pid_path, db_path):
+    for path in (pid_path, db_path, socket_path):
         try:
             path.unlink(missing_ok=True)
         except IsADirectoryError:
@@ -557,6 +563,18 @@ def _mp_stream_robot_data(config):
 @pytest.fixture(autouse=True)
 def run_before_and_after_tests():
     yield
+
+
+@pytest.fixture(autouse=True)
+def cleanup_test_profiles():
+    yield
+
+    for profile_path in list(_TEST_PROFILE_PATHS):
+        try:
+            profile_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Failed to remove test profile: %s", profile_path)
+    _TEST_PROFILE_PATHS.clear()
 
 
 def test_basic_streaming():
@@ -946,3 +964,283 @@ def test_ensure_single_daemon_process():
     assert (
         len(runner_pids) == 1
     ), f"Expected exactly one daemon runner process, found pids={sorted(runner_pids)}"
+
+
+def _stop_data_daemon() -> None:
+    subprocess.run(
+        [sys.executable, "-m", "neuracore.data_daemon", "stop"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+@contextmanager
+def _use_offline_daemon_profile():
+    profile_name = f"offline_profile_{uuid.uuid4().hex[:8]}"
+    profile_path = (
+        Path.home() / ".neuracore" / "data_daemon" / "profiles" / f"{profile_name}.yaml"
+    )
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text("offline: true\n", encoding="utf-8")
+    _TEST_PROFILE_PATHS.add(profile_path)
+
+    previous_profile = os.environ.get("NEURACORE_DAEMON_PROFILE")
+    os.environ["NEURACORE_DAEMON_PROFILE"] = profile_name
+    _stop_data_daemon()
+
+    try:
+        yield
+    finally:
+        _stop_data_daemon()
+        if previous_profile is None:
+            os.environ.pop("NEURACORE_DAEMON_PROFILE", None)
+        else:
+            os.environ["NEURACORE_DAEMON_PROFILE"] = previous_profile
+
+
+def _run_minimal_recording_flow(label_prefix: str = "offline") -> str:
+    config = TestConfig(
+        fps=2,
+        duration_sec=1,
+        image_width=64,
+        image_height=64,
+        num_cameras=1,
+        use_depth=False,
+        num_joints=1,
+        synched_time=True,
+        stop_wait_timeout_s=LEAST_TIME_TO_STOP_S,
+    )
+
+    with Timer(
+        max_time=config.start_wait_timeout_s,
+        label=f"{label_prefix}.nc.login",
+        always_log=True,
+    ):
+        nc.login()
+    with Timer(
+        max_time=config.start_wait_timeout_s,
+        label=f"{label_prefix}.nc.connect_robot",
+        always_log=True,
+    ):
+        robot = nc.connect_robot(
+            config.robot_name,
+            urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
+            overwrite=False,
+        )
+    with Timer(
+        max_time=config.start_wait_timeout_s,
+        label=f"{label_prefix}.nc.create_dataset",
+        always_log=True,
+    ):
+        nc.create_dataset(config.dataset_name)
+    with Timer(
+        max_time=config.start_wait_timeout_s,
+        label=f"{label_prefix}.nc.start_recording",
+        always_log=True,
+    ):
+        nc.start_recording()
+
+    recording_id = robot.get_current_recording_id()
+    assert recording_id is not None
+
+    frame = encode_frame_number(0, config.image_width, config.image_height)
+    with Timer(max_time=config.log_wait_timeout_s, label=f"{label_prefix}.nc.log_rgb"):
+        nc.log_rgb("camera_0", frame, timestamp=0.0)
+
+    with Timer(
+        max_time=config.log_wait_timeout_s,
+        label=f"{label_prefix}.nc.log_joint_positions",
+    ):
+        nc.log_joint_positions(
+            generate_joint_positions(0, config.fps, config.num_joints),
+            timestamp=0.0,
+        )
+
+    with Timer(
+        max_time=config.stop_wait_timeout_s,
+        label=f"{label_prefix}.nc.stop_recording(wait=False)",
+        always_log=True,
+    ):
+        nc.stop_recording(wait=False)
+
+    return recording_id
+
+
+def _fetch_trace_registration_stats(recording_id: str) -> tuple[int, int]:
+    db_path = get_daemon_db_path()
+    with sqlite3.connect(db_path) as conn:
+        total_traces = conn.execute(
+            "SELECT COUNT(*) FROM traces WHERE recording_id = ?",
+            (recording_id,),
+        ).fetchone()[0]
+        non_pending = conn.execute(
+            "SELECT COUNT(*) FROM traces "
+            "WHERE recording_id = ? AND registration_status != 'pending'",
+            (recording_id,),
+        ).fetchone()[0]
+    return int(total_traces), int(non_pending)
+
+
+def _fetch_expected_trace_count_reported(recording_id: str) -> int | None:
+    db_path = get_daemon_db_path()
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT expected_trace_count_reported FROM "
+            "recordings WHERE recording_id = ?",
+            (recording_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return int(row[0])
+
+
+def _wait_for_recording_to_exist_in_db(
+    recording_id: str, timeout_s: float = 15.0
+) -> None:
+    deadline = time.time() + timeout_s
+    poll = 0
+    while time.time() < deadline:
+        poll += 1
+        total_traces, _ = _fetch_trace_registration_stats(recording_id)
+        reported = _fetch_expected_trace_count_reported(recording_id)
+        if total_traces > 0 and reported is not None:
+            return
+        time.sleep(0.2)
+
+    pytest.fail(f"Recording {recording_id} did not appear in daemon DB before timeout")
+
+
+def _fetch_recording_recovery_stats(recording_id: str) -> dict[str, int | str | None]:
+    db_path = get_daemon_db_path()
+    with sqlite3.connect(db_path) as conn:
+        recording_row = conn.execute(
+            "SELECT expected_trace_count, expected_trace_count_reported, "
+            "progress_reported "
+            "FROM recordings WHERE recording_id = ?",
+            (recording_id,),
+        ).fetchone()
+
+        trace_row = conn.execute(
+            "SELECT "
+            "COUNT(*) AS total_traces, "
+            "SUM(CASE WHEN registration_status != 'pending' THEN 1 ELSE 0 END) "
+            "AS non_pending_registration_traces, "
+            "SUM(CASE WHEN registration_status = 'registered' THEN 1 ELSE 0 END) "
+            "AS registered_traces, "
+            "SUM(CASE WHEN upload_status IN ('queued', 'uploading', 'uploaded') "
+            "THEN 1 ELSE 0 END) AS upload_progress_traces, "
+            "SUM(CASE WHEN upload_status = 'uploaded' THEN 1 ELSE 0 END) "
+            "AS uploaded_traces "
+            "FROM traces WHERE recording_id = ?",
+            (recording_id,),
+        ).fetchone()
+
+    expected_trace_count = None
+    expected_trace_count_reported = None
+    progress_reported = None
+    if recording_row is not None:
+        expected_trace_count = int(recording_row[0])
+        expected_trace_count_reported = int(recording_row[1])
+        progress_reported = recording_row[2]
+
+    return {
+        "expected_trace_count": expected_trace_count,
+        "expected_trace_count_reported": expected_trace_count_reported,
+        "progress_reported": progress_reported,
+        "total_traces": int(trace_row[0]),
+        "non_pending_registration_traces": int(trace_row[1] or 0),
+        "registered_traces": int(trace_row[2] or 0),
+        "upload_progress_traces": int(trace_row[3] or 0),
+        "uploaded_traces": int(trace_row[4] or 0),
+    }
+
+
+def _wait_for_online_recovery(recording_id: str, timeout_s: float = 90.0) -> None:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        stats = _fetch_recording_recovery_stats(recording_id)
+
+        fully_uploaded = (
+            stats["total_traces"] == 0 and stats["progress_reported"] == "reported"
+        )
+        registration_attempted_or_done = stats["non_pending_registration_traces"] > 0
+        expected_count_locally_set = (stats["expected_trace_count"] or 0) > 0
+
+        if (
+            fully_uploaded
+            or registration_attempted_or_done
+            or expected_count_locally_set
+        ):
+            return
+
+        time.sleep(0.5)
+
+    stats = _fetch_recording_recovery_stats(recording_id)
+    pytest.fail(
+        "Online recovery did not progress for recording "
+        f"{recording_id}; stats={stats}"
+    )
+
+
+@pytest.mark.usefixtures("run_before_and_after_tests")
+class TestOfflineProfileBehavior:
+    def test_offline_profile_does_not_register_traces(self):
+        with _use_offline_daemon_profile():
+            recording_id = _run_minimal_recording_flow(
+                label_prefix="offline.registration"
+            )
+            _wait_for_recording_to_exist_in_db(recording_id)
+
+            total_traces, non_pending = _fetch_trace_registration_stats(recording_id)
+            assert total_traces > 0
+            assert non_pending == 0
+
+    def test_offline_profile_does_not_report_expected_trace_count(self):
+        with _use_offline_daemon_profile():
+            recording_id = _run_minimal_recording_flow(
+                label_prefix="offline.expected_trace_count"
+            )
+            _wait_for_recording_to_exist_in_db(recording_id)
+
+            expected_trace_count_reported = _fetch_expected_trace_count_reported(
+                recording_id
+            )
+            assert expected_trace_count_reported == 0
+
+    def test_offline_pending_data_recovers_when_online(self):
+        with _use_offline_daemon_profile():
+            recording_id = _run_minimal_recording_flow(
+                label_prefix="offline.recovery_seed"
+            )
+            _wait_for_recording_to_exist_in_db(recording_id)
+
+            total_traces, non_pending = _fetch_trace_registration_stats(recording_id)
+            assert total_traces > 0
+            assert non_pending == 0
+
+            expected_trace_count_reported = _fetch_expected_trace_count_reported(
+                recording_id
+            )
+            assert expected_trace_count_reported == 0
+
+        previous_profile = os.environ.get("NEURACORE_DAEMON_PROFILE")
+        try:
+            os.environ.pop("NEURACORE_DAEMON_PROFILE", None)
+            _stop_data_daemon()
+
+            with Timer(max_time=MAX_TIME_TO_START_S, label="recovery.nc.login"):
+                nc.login()
+            with Timer(max_time=MAX_TIME_TO_START_S, label="recovery.nc.connect_robot"):
+                nc.connect_robot(
+                    f"recovery_robot_{uuid.uuid4().hex[:8]}",
+                    urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
+                    overwrite=False,
+                )
+
+            _wait_for_online_recovery(recording_id)
+        finally:
+            if previous_profile is None:
+                os.environ.pop("NEURACORE_DAEMON_PROFILE", None)
+            else:
+                os.environ["NEURACORE_DAEMON_PROFILE"] = previous_profile
