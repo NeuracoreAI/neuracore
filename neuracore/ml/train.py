@@ -370,6 +370,7 @@ def determine_optimal_batch_size(
         input_data_types=extract_data_types(input_robot_data_spec),
         output_data_types=extract_data_types(output_robot_data_spec),
         output_prediction_horizon=cfg.output_prediction_horizon,
+        frequency=cfg.frequency,
     )
 
     model, algorithm_config = get_model_and_algorithm_config(
@@ -527,6 +528,7 @@ def run_training(
             input_data_types=input_data_types,
             output_data_types=output_data_types,
             output_prediction_horizon=cfg.output_prediction_horizon,
+            frequency=cfg.frequency,
         )
 
         model, algorithm_config = get_model_and_algorithm_config(

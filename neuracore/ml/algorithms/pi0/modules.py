@@ -259,7 +259,9 @@ class PI0Policy(nn.Module):
         Args:
         state: Proprioceptive state [B, state_dim], or None to omit state input.
             noisy_actions: Noisy action sequence [B, chunk_size, action_dim]
-            timestep: Diffusion timestep [B]
+            timestep: Diffusion timestep. Shape [B] for a shared scalar time
+                per sample (standard training), or [B, chunk_size] for a
+                per-step time (RTC training).
 
         Returns:
             Tuple of (embeddings, padding_masks, attention_masks, adarms_cond).
@@ -293,20 +295,37 @@ class PI0Policy(nn.Module):
         pad_masks.append(state_mask)
         att_masks += [1 if has_state else 0]
 
-        time_emb = _create_sinusoidal_pos_embedding(
-            timestep,
-            self.action_in_proj.out_features,
-            min_period=self.config.min_period,
-            max_period=self.config.max_period,
-            device=timestep.device,
-        )
-        time_emb = time_emb.type(dtype=timestep.dtype)
-
         def action_proj_func(noisy_actions: Tensor) -> Tensor:
             return self.action_in_proj(noisy_actions)
 
         action_emb = self._apply_checkpoint(action_proj_func, noisy_actions)
-        time_emb = time_emb[:, None, :].expand_as(action_emb)
+
+        if timestep.ndim == 2:
+            # Per-step time: [B, chunk_size] — used for RTC training
+            B, T = timestep.shape
+            time_flat = timestep.reshape(B * T)
+            time_emb_flat = _create_sinusoidal_pos_embedding(
+                time_flat,
+                self.action_in_proj.out_features,
+                min_period=self.config.min_period,
+                max_period=self.config.max_period,
+                device=timestep.device,
+            )
+            time_emb = time_emb_flat.reshape(B, T, -1)
+        else:
+            # Scalar time: [B] — standard training
+            time_emb = _create_sinusoidal_pos_embedding(
+                timestep,
+                self.action_in_proj.out_features,
+                min_period=self.config.min_period,
+                max_period=self.config.max_period,
+                device=timestep.device,
+            )
+            time_emb = time_emb[:, None, :].expand_as(action_emb)
+
+        time_emb = time_emb.type(
+            dtype=timestep.dtype if timestep.ndim == 1 else action_emb.dtype
+        )
         action_time_emb = torch.cat([action_emb, time_emb], dim=2)
 
         def mlp_func(action_time_emb: Tensor) -> Tensor:
@@ -354,7 +373,8 @@ class PI0Policy(nn.Module):
             state: Proprioceptive state [B, state_dim], or None to omit state input.
             actions: Target action sequence [B, chunk_size, action_dim]
             noise: Optional pre-sampled noise
-            time: Optional pre-sampled diffusion time
+            time: Optional pre-sampled diffusion time. Shape [B] for scalar
+                time (standard), or [B, chunk_size] for per-step time (RTC).
 
         Returns:
             Per-element MSE loss [B, chunk_size, action_dim].
@@ -364,7 +384,13 @@ class PI0Policy(nn.Module):
         if time is None:
             time = self._sample_time(actions.shape[0], actions.device)
 
-        time_expanded = time[:, None, None]
+        # Support per-step time [B, chunk_size] for RTC training, in addition
+        # to the standard scalar-per-sample time [B].
+        if time.ndim == 2:
+            time_expanded = time[:, :, None]  # [B, chunk_size, 1]
+        else:
+            time_expanded = time[:, None, None]  # [B, 1, 1] → broadcasts
+
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 

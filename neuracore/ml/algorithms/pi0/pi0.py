@@ -37,6 +37,12 @@ from neuracore.ml import (
     NeuracoreModel,
 )
 from neuracore.ml.algorithm_utils.normalizer import MeanStdNormalizer
+from neuracore.ml.algorithm_utils.rtc import (
+    RTCTrainingConfig,
+    apply_rtc_training_time,
+    compute_rtc_loss,
+    sample_rtc_delay,
+)
 
 from .modules import PI0Policy
 from .utils import PI0Config, build_lr_lambda, pad_vector, resize_with_pad_torch
@@ -89,6 +95,7 @@ class Pi0(NeuracoreModel):
         lr_scheduler_decay_lr: float = 2.5e-6,
         finetune_action_expert_only: bool = False,
         freeze_language_model_only: bool = False,
+        rtc_training_config: RTCTrainingConfig | None = None,
     ):
         """Initialize the Pi0 model.
 
@@ -120,6 +127,9 @@ class Pi0(NeuracoreModel):
             lr_scheduler_decay_lr: Final learning rate after decay
             finetune_action_expert_only: Only train action expert parameters
             freeze_language_model_only: Freeze language model, train vision+action
+            rtc_training_config: Optional RTC training configuration. When set
+                and enabled, applies Real-Time Control conditioning during
+                training (prefix masking + delay sampling). None disables RTC.
         """
         super().__init__(model_init_description)
 
@@ -147,6 +157,14 @@ class Pi0(NeuracoreModel):
         self.pretrained_name_or_path = pretrained_name_or_path
         self.finetune_action_expert_only = finetune_action_expert_only
         self.freeze_language_model_only = freeze_language_model_only
+        self.rtc_training_config = rtc_training_config
+        if (
+            self.rtc_training_config is not None
+            and self.rtc_training_config.frequency_hz is None
+        ):
+            self.rtc_training_config.frequency_hz = float(
+                model_init_description.frequency
+            )
 
         data_stats: dict[DataType, DataItemStats] = {}
         # Track per-data-type feature sizes to preserve ordering when splitting
@@ -633,18 +651,53 @@ class Pi0(NeuracoreModel):
         # Pad to the max action dim after normalization to avoid padding artifacts
         target_actions = pad_vector(target_actions, self.max_action_dim).to(self.device)
 
-        mse_losses = self.model.forward(
-            images, image_masks, lang_tokens, lang_masks, proprios, target_actions
+        use_rtc = (
+            self.rtc_training_config is not None
+            and self.rtc_training_config.enabled
+            and self.training
         )
-        # Mask to the real action dims
-        loss = mse_losses[:, :, : self.action_dim].mean()
 
-        losses = {
-            "mse_loss": loss,
-        }
-        metrics = {
-            "mse_loss": loss,
-        }
+        if use_rtc:
+            cfg = self.rtc_training_config
+            assert cfg is not None
+            batch_size = target_actions.shape[0]
+            chunk_size = target_actions.shape[1]
+
+            # Sample scalar time [B] then delay [B], then build per-step time
+            time = self.model._sample_time(batch_size, self.device)
+            delay = sample_rtc_delay(cfg, batch_size, chunk_size, self.device)
+            time_per_step, postfix_mask = apply_rtc_training_time(
+                time, delay, chunk_size
+            )
+
+            mse_losses = self.model.forward(
+                images,
+                image_masks,
+                lang_tokens,
+                lang_masks,
+                proprios,
+                target_actions,
+                time=time_per_step,
+            )
+            # Loss on postfix steps only, restricted to real action dims
+            loss = compute_rtc_loss(mse_losses[:, :, : self.action_dim], postfix_mask)
+            assert cfg.frequency_hz is not None
+            metrics = {
+                "mse_loss": loss,
+                "rtc_mean_delay_steps": delay.float().mean(),
+                "rtc_mean_delay_s": delay.float().mean() / cfg.frequency_hz,
+            }
+        else:
+            mse_losses = self.model.forward(
+                images, image_masks, lang_tokens, lang_masks, proprios, target_actions
+            )
+            # Mask to the real action dims
+            loss = mse_losses[:, :, : self.action_dim].mean()
+            metrics = {
+                "mse_loss": loss,
+            }
+
+        losses = {"mse_loss": loss}
         return BatchedTrainingOutputs(
             losses=losses,
             metrics=metrics,
