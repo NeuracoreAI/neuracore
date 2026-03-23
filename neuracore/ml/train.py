@@ -192,28 +192,59 @@ def _select_worst_case_sample(
     if len(dataset) == 0:
         raise ValueError("Cannot autotune batch size with an empty dataset.")
 
-    search_space = range(min(MAX_AUTOTUNE_SAMPLE_CANDIDATES, len(dataset) - 1))
+    num_candidates = min(MAX_AUTOTUNE_SAMPLE_CANDIDATES, len(dataset) - 1)
+    search_space = range(num_candidates)
     heaviest_sample: BatchedTrainingSamples | None = None
     heaviest_bytes = -1
     heaviest_idx = -1
 
-    for idx in search_space:
+    print(
+        f"[DEBUG] _select_worst_case_sample: scanning {num_candidates} candidates "
+        f"from dataset of size {len(dataset)}, target device={device}"
+    )
+    logger.info(
+        "[DEBUG] _select_worst_case_sample: scanning %s candidates, "
+        "dataset size=%s, device=%s",
+        num_candidates,
+        len(dataset),
+        device,
+    )
 
-        candidate = dataset[idx]
+    for idx in search_space:
+        try:
+            candidate = dataset[idx]
+        except Exception:
+            print(f"[DEBUG] _select_worst_case_sample: FAILED to load sample {idx}")
+            logger.error(
+                "[DEBUG] _select_worst_case_sample: failed to load sample %s",
+                idx,
+                exc_info=True,
+            )
+            raise
         candidate_bytes = _estimate_sample_tensor_bytes(candidate)
         if candidate_bytes > heaviest_bytes:
             heaviest_bytes = candidate_bytes
             heaviest_sample = candidate
             heaviest_idx = idx
 
-    assert heaviest_sample is not None
-    logger.info(
-        "Selected sample %s as worst-case for autotuning (approx %.2f MB of tensors)",
-        heaviest_idx,
-        heaviest_bytes / (1024**2),
-    )
+        if idx % 100 == 0:
+            print(
+                f"[DEBUG] _select_worst_case_sample: scanned {idx}/{num_candidates}, "
+                f"current heaviest={heaviest_idx} ({heaviest_bytes / (1024**2):.2f} MB)"
+            )
 
-    return heaviest_sample.to(device)
+    assert heaviest_sample is not None
+    msg = (
+        f"Selected sample {heaviest_idx} as worst-case for autotuning "
+        f"(approx {heaviest_bytes / (1024**2):.2f} MB of tensors)"
+    )
+    logger.info(msg)
+    print(f"[DEBUG] {msg}")
+
+    print(f"[DEBUG] Moving worst-case sample to device={device}...")
+    result = heaviest_sample.to(device)
+    print("[DEBUG] Sample moved to device successfully")
+    return result
 
 
 def _serialize_robot_data_spec(
@@ -355,6 +386,28 @@ def determine_optimal_batch_size(
     device: torch.device | None = None,
 ) -> int:
     """Run batch size autotuning on a single GPU and return the result."""
+    print("[DEBUG] determine_optimal_batch_size: ENTERED")
+    print(f"[DEBUG]   torch.cuda.is_available() = {torch.cuda.is_available()}")
+    print(f"[DEBUG]   device arg = {device}")
+    if torch.cuda.is_available():
+        print(f"[DEBUG]   torch.cuda.device_count() = {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            print(
+                f"[DEBUG]   GPU {i}: {props.name}, "
+                f"total_memory={props.total_memory / (1024**3):.2f} GB, "
+                f"major={props.major}, minor={props.minor}"
+            )
+        print(
+            f"[DEBUG]   CUDA memory allocated: "
+            f"{torch.cuda.memory_allocated() / (1024**3):.4f} GB"
+        )
+        print(
+            f"[DEBUG]   CUDA memory reserved: "
+            f"{torch.cuda.memory_reserved() / (1024**3):.4f} GB"
+        )
+    logger.info("[DEBUG] determine_optimal_batch_size: ENTERED")
+
     if not torch.cuda.is_available() or (
         device is not None and "cuda" not in device.type
     ):
@@ -364,41 +417,89 @@ def determine_optimal_batch_size(
         device = get_default_device()
 
     logger.info(f"Starting batch size autotuning on {device}...")
+    print(f"[DEBUG] Starting batch size autotuning on {device}...")
 
+    print("[DEBUG] Building ModelInitDescription...")
     model_init_description = ModelInitDescription(
         dataset_statistics=dataset.dataset_statistics,
         input_data_types=extract_data_types(input_robot_data_spec),
         output_data_types=extract_data_types(output_robot_data_spec),
         output_prediction_horizon=cfg.output_prediction_horizon,
     )
-
-    model, algorithm_config = get_model_and_algorithm_config(
-        cfg, model_init_description
+    print(
+        f"[DEBUG] ModelInitDescription built: "
+        f"input_data_types={model_init_description.input_data_types}, "
+        f"output_data_types={model_init_description.output_data_types}, "
+        f"output_prediction_horizon={cfg.output_prediction_horizon}"
     )
 
-    model = model.to(device)
+    print("[DEBUG] Creating model via get_model_and_algorithm_config...")
+    try:
+        model, algorithm_config = get_model_and_algorithm_config(
+            cfg, model_init_description
+        )
+        print(
+            f"[DEBUG] Model created: {type(model).__name__}, "
+            f"params={sum(p.numel() for p in model.parameters()):,}"
+        )
+    except Exception:
+        print("[DEBUG] FAILED to create model")
+        logger.error("[DEBUG] Model creation failed", exc_info=True)
+        raise
+
+    print(f"[DEBUG] Moving model to {device}...")
+    try:
+        model = model.to(device)
+        print("[DEBUG] Model moved to device successfully")
+        if torch.cuda.is_available():
+            print(
+                f"[DEBUG] GPU memory after model.to(device): "
+                f"allocated={torch.cuda.memory_allocated(device) / (1024**3):.4f} GB, "
+                f"reserved={torch.cuda.memory_reserved(device) / (1024**3):.4f} GB"
+            )
+    except Exception:
+        print(f"[DEBUG] FAILED to move model to {device}")
+        logger.error("[DEBUG] model.to(device) failed", exc_info=True)
+        raise
 
     max_batch_size = cfg.max_batch_size if "max_batch_size" in cfg else len(dataset)
     min_batch_size = cfg.min_batch_size if "min_batch_size" in cfg else 2
     num_workers = cfg.batch_size_autotuning_num_workers
 
+    import psutil
+
+    ram = psutil.virtual_memory()
+    print(
+        f"[DEBUG] Batch size search range: min={min_batch_size}, max={max_batch_size}, "
+        f"dataset_len={len(dataset)}, num_workers={num_workers}"
+    )
+    print(
+        f"[DEBUG] System RAM: used={ram.used / (1024**3):.2f} GB / "
+        f"total={ram.total / (1024**3):.2f} GB ({ram.percent}%)"
+    )
     logger.info(
         f"using max_batch_size: {max_batch_size}, "
         f"min_batch_size: {min_batch_size}, "
         f"num_workers: {num_workers}"
     )
 
-    # Determine per-GPU batch size
-    optimal_batch_size = find_optimal_batch_size(
-        dataset=dataset,
-        model=model,
-        model_kwargs=algorithm_config,
-        min_batch_size=min_batch_size,
-        max_batch_size=max_batch_size,
-        dataloader_kwargs={
-            "collate_fn": dataset.collate_fn,
-        },
-    )
+    print("[DEBUG] Calling find_optimal_batch_size (binary search)...")
+    try:
+        optimal_batch_size = find_optimal_batch_size(
+            dataset=dataset,
+            model=model,
+            model_kwargs=algorithm_config,
+            min_batch_size=min_batch_size,
+            max_batch_size=max_batch_size,
+            dataloader_kwargs={
+                "collate_fn": dataset.collate_fn,
+            },
+        )
+        print(f"[DEBUG] find_optimal_batch_size returned: {optimal_batch_size}")
+    except Exception as e:
+        print(f"[DEBUG] find_optimal_batch_size FAILED: {type(e).__name__}: {e}")
+        logger.error("[DEBUG] find_optimal_batch_size failed", exc_info=True)
+        raise
 
     # Clean up
     del model
@@ -408,6 +509,9 @@ def determine_optimal_batch_size(
 
     logger.info(
         f"Autotuning complete. Optimal batch size per GPU: {optimal_batch_size}"
+    )
+    print(
+        f"[DEBUG] Autotuning complete. Optimal batch size per GPU: {optimal_batch_size}"
     )
 
     return optimal_batch_size
@@ -711,6 +815,56 @@ def _main(cfg: DictConfig) -> None:
     Args:
         cfg: Fully resolved Hydra configuration.
     """
+    # ---- DEBUG: environment snapshot (stdout-visible before logging is set up) ----
+    import platform
+    import subprocess
+
+    import psutil
+
+    print("=" * 80)
+    print("[DEBUG] ===== NEURACORE TRAIN.PY — ENVIRONMENT SNAPSHOT =====")
+    print(f"[DEBUG] Python: {sys.executable} ({platform.python_version()})")
+    print(f"[DEBUG] Platform: {platform.platform()}")
+    print(f"[DEBUG] PyTorch: {torch.__version__}")
+    print(f"[DEBUG] CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"[DEBUG] CUDA version: {torch.version.cuda}")
+        print(f"[DEBUG] cuDNN version: {torch.backends.cudnn.version()}")
+        print(f"[DEBUG] GPU count: {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            print(
+                f"[DEBUG]   GPU {i}: {props.name}, "
+                f"total_mem={props.total_memory / (1024**3):.2f} GB"
+            )
+    else:
+        print("[DEBUG] *** NO CUDA AVAILABLE — autotuning will FAIL ***")
+    ram = psutil.virtual_memory()
+    print(
+        f"[DEBUG] System RAM: {ram.total / (1024**3):.1f} GB total, "
+        f"{ram.available / (1024**3):.1f} GB available"
+    )
+    print(f"[DEBUG] CPU count: {psutil.cpu_count()}")
+    try:
+        nvidia_smi = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total,memory.free,driver_version",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        print(f"[DEBUG] nvidia-smi: {nvidia_smi.stdout.strip()}")
+        if nvidia_smi.returncode != 0:
+            print(f"[DEBUG] nvidia-smi stderr: {nvidia_smi.stderr.strip()}")
+    except Exception as e:
+        print(f"[DEBUG] nvidia-smi failed: {e}")
+    print("=" * 80)
+    sys.stdout.flush()
+    # ---- END DEBUG ----
+
     # Resolve the configuration
     OmegaConf.resolve(cfg)
 
@@ -877,11 +1031,38 @@ def _main(cfg: DictConfig) -> None:
     )
 
     # Handle batch size configuration
+    print(
+        f"[DEBUG] batch_size config value: {batch_size!r} "
+        f"(type={type(batch_size).__name__})"
+    )
+    logger.info(
+        "[DEBUG] batch_size config value: %r (type=%s)",
+        batch_size,
+        type(batch_size).__name__,
+    )
+
     if isinstance(batch_size, str) and batch_size.lower() == "auto":
+        print("[DEBUG] batch_size is 'auto' — entering autotuning path")
+        print(f"[DEBUG] device={device}, pytorch_dataset length={len(pytorch_dataset)}")
+
+        if torch.cuda.is_available():
+            print(
+                f"[DEBUG] Pre-autotuning GPU state: "
+                f"allocated={torch.cuda.memory_allocated(device) / (1024**3):.4f} GB, "
+                f"reserved={torch.cuda.memory_reserved(device) / (1024**3):.4f} GB"
+            )
+
+        print("[DEBUG] Calling _select_worst_case_sample...")
         sample = _select_worst_case_sample(
             dataset=pytorch_dataset,
             device=device,
         )
+        print(
+            f"[DEBUG] _select_worst_case_sample returned sample with "
+            f"batch_size={sample.batch_size}"
+        )
+
+        print("[DEBUG] Creating SingleSampleDataset...")
         single_sample_dataset = SingleSampleDataset(
             sample=sample,
             input_robot_data_spec=input_robot_data_spec_with_id,
@@ -890,7 +1071,11 @@ def _main(cfg: DictConfig) -> None:
             dataset_statistics=pytorch_dataset.dataset_statistics,
             num_recordings=len(pytorch_dataset),
         )
+        print(
+            f"[DEBUG] SingleSampleDataset created: " f"len={len(single_sample_dataset)}"
+        )
 
+        print("[DEBUG] Calling determine_optimal_batch_size...")
         optimal_batch_size = determine_optimal_batch_size(
             cfg=cfg,
             input_robot_data_spec=input_robot_data_spec_with_id,
@@ -899,9 +1084,11 @@ def _main(cfg: DictConfig) -> None:
             device=device,
         )
         batch_size = optimal_batch_size
-
+        logger.info(f"Automatically tuned batch size: {batch_size}")
+        print(f"[DEBUG] Automatically tuned batch size: {batch_size}")
     else:
         batch_size = int(batch_size)
+        print(f"[DEBUG] Using explicit batch_size={batch_size}")
 
     if world_size > 1:
         # Use multiprocessing to launch multiple processes
