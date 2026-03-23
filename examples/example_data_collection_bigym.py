@@ -4,8 +4,7 @@ and record it to Neuracore."""
 import argparse
 import time
 from pathlib import Path
-
-import numpy as np
+from typing import Any
 
 try:
     import bigym
@@ -18,6 +17,7 @@ try:
         obs_to_imgs,
         obs_to_joint_dict,
     )
+    from demonstrations.demo import Demo
     from demonstrations.demo_store import DemoStore
     from demonstrations.utils import Metadata
 except ImportError:
@@ -27,25 +27,16 @@ except ImportError:
         "from the Github repository."
     )
 
-
 import neuracore as nc
 
 DT = 1.0 / FREQUENCY
 
 
 def run_episode(
-    episode_idx: int,
-    record: bool,
-    demo_store: DemoStore,
+    episode_idx: int, record: bool, demo: Demo, env: Any, render: bool
 ) -> bool:
     """Run one demonstration episode and optionally record it."""
     print(f"\n=== Starting Episode {episode_idx} ===")
-
-    env = make_env()  # Create ReachTarget Bigym environment
-    metadata = Metadata.from_env(env)
-
-    # Get a single demo trajectory at the correct frequency
-    demo = demo_store.get_demos(metadata, amount=1, frequency=FREQUENCY)[0]
 
     obs, info = env.reset(seed=demo.seed)
     success = False
@@ -56,43 +47,13 @@ def run_episode(
         if record:
             nc.start_recording()
 
-        # Log example custom metadata
-        nc.log_custom_1d("my_custom_data", np.array([1, 2, 3, 4, 5]), timestamp=t)
-
-        # Initial joint + camera logging
-        qpos, qvel = obs_to_joint_dict(obs, JOINT_NAMES)
-        nc.log_joint_positions(qpos, timestamp=t)
-        nc.log_joint_velocities(qvel, timestamp=t)
-
-        images = obs_to_imgs(obs)
-        nc.log_rgb("head", images["head"], timestamp=t)
-
-        nc.log_language(
-            "instruction",
-            "Move two plates simultaneously from one draining rack to the other.",
-            timestamp=t,
-        )
-
         for step in demo._steps:
-            # Apply demo action
-            obs, reward, terminated, truncated, info = env.step(
-                step.info["demo_action"]
-            )
-            print(
-                f"Reward={reward}, terminated={terminated}, "
-                f"truncated={truncated}, info={info}"
-            )
-
-            # Increment timestamp
-            t += DT
-
-            # Logging at each step
-            nc.log_custom_1d("my_custom_data", np.array([1, 2, 3, 4, 5]), timestamp=t)
-
+            # Log current joint positions and velocities
             qpos, qvel = obs_to_joint_dict(obs, JOINT_NAMES)
             nc.log_joint_positions(qpos, timestamp=t)
             nc.log_joint_velocities(qvel, timestamp=t)
 
+            # Log current camera observation
             images = obs_to_imgs(obs)
             nc.log_rgb("head", images["head"], timestamp=t)
 
@@ -101,6 +62,22 @@ def run_episode(
                 step.info["demo_action"], JOINT_ACTUATORS
             )
             nc.log_joint_target_positions(joint_action, timestamp=t)
+
+            # Apply demo action
+            obs, reward, terminated, truncated, info = env.step(
+                step.info["demo_action"]
+            )
+
+            print(
+                f"Reward={reward}, terminated={terminated}, "
+                f"truncated={truncated}, info={info}"
+            )
+
+            if render:
+                env.render()
+
+            # Increment timestamp
+            t += DT
 
             # Check outcome
             if terminated and not truncated:
@@ -121,13 +98,11 @@ def run_episode(
                 print("Episode failed → cancelling recording...")
                 nc.cancel_recording()
 
-        env.close()
-
     print(f"=== Episode {episode_idx} done | success={success} ===")
     return success
 
 
-def main(num_episodes: int, record: bool, recording_name: str) -> None:
+def main(num_episodes: int, record: bool, recording_name: str, render: bool) -> None:
     nc.login()
 
     # Connect to virtual robot (Get MJCF path from installed bigym package)
@@ -151,7 +126,13 @@ def main(num_episodes: int, record: bool, recording_name: str) -> None:
         )
         print("Created dataset.")
 
+    # Create ReachTarget Bigym environment
+    env = make_env()
+    metadata = Metadata.from_env(env)
+
+    # Retrieve `num_episodes` expert demonstrations from Bigym
     demo_store = DemoStore()
+    demos = demo_store.get_demos(metadata, amount=num_episodes, frequency=FREQUENCY)
 
     success_count = 0
 
@@ -160,8 +141,11 @@ def main(num_episodes: int, record: bool, recording_name: str) -> None:
             success = run_episode(
                 episode_idx=episode_idx,
                 record=record,
-                demo_store=demo_store,
+                demo=demos[episode_idx],
+                env=env,
+                render=render,
             )
+
             if success:
                 success_count += 1
                 print(f"Successful demos: {success_count}/{episode_idx + 1}")
@@ -171,6 +155,7 @@ def main(num_episodes: int, record: bool, recording_name: str) -> None:
         if record:
             nc.cancel_recording()
     finally:
+        env.close()
         print(
             f"\nFinished running {num_episodes} episodes → "
             f"{success_count} succeeded."
@@ -180,6 +165,12 @@ def main(num_episodes: int, record: bool, recording_name: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Run Bigym demo logging into neuracore."
+    )
+    parser.add_argument(
+        "--render",
+        action="store_true",
+        default=False,
+        help="Render the environment.",
     )
     parser.add_argument(
         "--num_episodes", type=int, default=50, help="Number of episodes to run."
@@ -202,4 +193,5 @@ if __name__ == "__main__":
         num_episodes=args.num_episodes,
         record=args.record,
         recording_name=args.recording_name,
+        render=args.render,
     )
