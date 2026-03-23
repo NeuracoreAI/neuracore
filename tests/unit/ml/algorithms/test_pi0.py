@@ -18,70 +18,13 @@ from neuracore.ml.core.ml_types import BatchedTrainingOutputs
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
 from neuracore.ml.utils.validate import run_validation
 
-PI0_DEP_PACKAGES = ["transformers", "tokenizers", "huggingface-hub"]
-
-
-# This is a workaround to avoid the issue of different versions of transformers being
-# installed. For tests we will have pi0 use a separate subprocess and install the
-# specific requirements.
-def _resolve_pi0_requirements_file() -> Path:
-    repo_root = Path(__file__).resolve().parents[4]
-
-    requirements_file = repo_root / "neuracore/ml/algorithms/pi0/requirements.txt"
-
-    if not requirements_file.exists():
-        raise FileNotFoundError(
-            f"Could not find pi0 requirements.txt at {requirements_file}"
-        )
-    return requirements_file
-
-
-def _pip_uninstall_packages(packages: list[str]) -> None:
-    # Best-effort cleanup to avoid mixed package files across version switches.
-    subprocess.run(
-        [sys.executable, "-m", "pip", "uninstall", "-y", *packages],
-        check=False,
-    )
-
-
-def install_pi0_requirements() -> None:
-    """Install requirements.txt from the pi0 folder."""
-    requirements_file = _resolve_pi0_requirements_file()
-    _pip_uninstall_packages(PI0_DEP_PACKAGES)
-
-    # Force a clean reinstall to avoid mixed transformers files from previous versions.
-    subprocess.check_call([
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "--no-cache-dir",
-        "--upgrade",
-        "--force-reinstall",
-        "--ignore-installed",
-        "-r",
-        str(requirements_file),
-    ])
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _pi0_env():
-    install_pi0_requirements()
-
-
-@pytest.fixture(scope="module")
-def Pi0(_pi0_env):  # noqa: N802
-    from neuracore.ml.algorithms.pi0.pi0 import Pi0 as Pi0Model
-
-    return Pi0Model
-
+PI0_DEP_PACKAGES = ["transformers", "tokenizers", "huggingface-hub", "safetensors"]
 
 BS = 1
 OUTPUT_PREDICTION_HORIZON = 1
 
 # Use cpu because the model takes a lot of vram
 DEVICE = torch.device("cpu")
-
 
 PI0_TEST_ARGS: dict[str, Any] = {
     "paligemma_variant": "gemma_tiny",
@@ -92,6 +35,56 @@ PI0_TEST_ARGS: dict[str, Any] = {
     "compile_model": False,
     "gradient_checkpointing": False,
 }
+
+
+def _clear_pi0_dep_modules() -> None:
+    """Clear cached dependency modules so imports use freshly installed files."""
+    # Pip package names use hyphens; top-level import paths use underscores.
+    module_prefixes = [p.replace("-", "_") for p in PI0_DEP_PACKAGES]
+    for module_name in list(sys.modules):
+        if any(module_name.startswith(prefix) for prefix in module_prefixes):
+            sys.modules.pop(module_name, None)
+
+
+def _install_pi0_requirements() -> None:
+    """Force a clean reinstall of pi0 deps.
+
+    This avoids mixed files from previous versions.
+    """
+    requirements_file = (
+        Path(__file__).resolve().parents[4]
+        / "neuracore/ml/algorithms/pi0/requirements.txt"
+    )
+    if not requirements_file.exists():
+        raise FileNotFoundError(
+            f"Could not find pi0 requirements.txt at {requirements_file}"
+        )
+
+    _clear_pi0_dep_modules()
+    # Best-effort cleanup to avoid mixed package files across version switches.
+    subprocess.run(
+        [sys.executable, "-m", "pip", "uninstall", "-y", *PI0_DEP_PACKAGES], check=False
+    )
+    subprocess.check_call([
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-cache-dir",
+        "--upgrade",
+        "--force-reinstall",
+        "-r",
+        str(requirements_file),
+    ])
+    _clear_pi0_dep_modules()
+
+
+@pytest.fixture(scope="module")
+def Pi0():  # noqa: N802
+    _install_pi0_requirements()
+    from neuracore.ml.algorithms.pi0.pi0 import Pi0 as Pi0Model
+
+    return Pi0Model
 
 
 @pytest.fixture
