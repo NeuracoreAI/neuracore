@@ -105,9 +105,21 @@ class AlgorithmLoader:
             raise RequirementsInstallError(error_msg)
 
         # Try uv first, fall back to pip
+        # --reinstall ensures algorithm-specific versions overwrite .[ml] versions
         install_commands = [
-            (["uv", "pip", "install", "-r", str(req_file)], "uv pip"),
-            ([sys.executable, "-m", "pip", "install", "-Ir", str(req_file)], "pip"),
+            (["uv", "pip", "install", "--reinstall", "-r", str(req_file)], "uv pip"),
+            (
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--reinstall",
+                    "-r",
+                    str(req_file),
+                ],
+                "pip",
+            ),
         ]
 
         errors = []
