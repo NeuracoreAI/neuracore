@@ -829,13 +829,17 @@ def _main(cfg: DictConfig) -> None:
     print(f"[DEBUG] CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"[DEBUG] CUDA version: {torch.version.cuda}")
-        print(f"[DEBUG] cuDNN version: {torch.backends.cudnn.version()}")
+        try:
+            print(f"[DEBUG] cuDNN version: {torch.backends.cudnn.version()}")
+        except RuntimeError as e:
+            print(f"[DEBUG] cuDNN version check FAILED: {e}")
         print(f"[DEBUG] GPU count: {torch.cuda.device_count()}")
         for i in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(i)
             print(
                 f"[DEBUG]   GPU {i}: {props.name}, "
-                f"total_mem={props.total_memory / (1024**3):.2f} GB"
+                f"total_mem={props.total_memory / (1024**3):.2f} GB, "
+                f"SM={props.major}.{props.minor}"
             )
     else:
         print("[DEBUG] *** NO CUDA AVAILABLE — autotuning will FAIL ***")
