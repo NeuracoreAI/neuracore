@@ -46,9 +46,12 @@ def test_import_command_invokes_run_import_with_defaults(monkeypatch, tmp_path):
     assert called["dataset_dir"] == dataset_dir
     assert called["robot_dir"] == robot_dir
     assert called["overwrite"] is False
+    assert called["shared"] is False
     assert called["dry_run"] is False
     assert called["skip_on_error"] == "episode"
     assert called["suppress_validation_warnings"] is False
+    assert called["random_sample"] is None
+    assert called["storage_limit"] == 5 * 1024**3
 
 
 def test_import_command_propagates_flags(monkeypatch, tmp_path):
@@ -77,19 +80,27 @@ def test_import_command_propagates_flags(monkeypatch, tmp_path):
             "--robot-dir",
             str(robot_dir),
             "--overwrite",
+            "--shared",
             "--dry-run",
             "--skip-on-error",
             "step",
             "--no-validation-warnings",
+            "--random-sample",
+            "3",
+            "--storage-limit",
+            "500mb",
         ],
         env={"TERM": "dumb", "NO_COLOR": "1"},
     )
 
     assert result.exit_code == 0
     assert captured["overwrite"] is True
+    assert captured["shared"] is True
     assert captured["dry_run"] is True
     assert captured["skip_on_error"] == "step"
     assert captured["suppress_validation_warnings"] is True
+    assert captured["random_sample"] == 3
+    assert captured["storage_limit"] == 500 * 1024**2
 
 
 def test_import_command_handles_cli_error(monkeypatch, tmp_path, caplog):

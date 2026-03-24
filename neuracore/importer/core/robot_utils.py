@@ -1,4 +1,4 @@
-"""Utility functions for Inverse Kinematics (IK) calculations."""
+"""Utility functions for kinematics calculations."""
 
 import numpy as np
 import pink
@@ -9,8 +9,8 @@ from pinocchio.robot_wrapper import RobotWrapper
 from scipy.spatial.transform import Rotation as R
 
 
-class InverseKinematics:
-    """Utility class for Inverse Kinematics (IK) calculations."""
+class RobotUtils:
+    """Utility class for kinematics calculations."""
 
     def __init__(self, urdf_path: str, packages_dir: str):
         """Initialize robot with specified URDF path.
@@ -83,6 +83,39 @@ class InverseKinematics:
             j: q.item() for j, q in zip(self.robot.model.names[1:], configuration.q[:])
         }
 
+    def joint_positions_to_end_effector_pose(
+        self,
+        joint_positions: dict[str, float],
+        ee_frame: str,
+    ) -> list[float]:
+        """Compute end-effector pose from joint positions using forward kinematics.
+
+        Args:
+            joint_positions: Dictionary mapping joint names to joint positions.
+            ee_frame: End-effector frame name.
+
+        Returns:
+            numpy array containing [x, y, z, qx, qy, qz, qw] (position and quaternion
+            in xyzw order).
+        """
+        q_default = pinocchio.neutral(self.robot.model)
+        q = np.array([
+            joint_positions.get(name, q_default[i])
+            for i, name in enumerate(self.robot.model.names[1:])
+        ])
+        pinocchio.forwardKinematics(self.robot.model, self.robot.data, q)
+        pinocchio.updateFramePlacements(self.robot.model, self.robot.data)
+
+        frame_id = self.robot.model.getFrameId(ee_frame)
+        if frame_id >= len(self.robot.data.oMf):
+            raise ValueError(f"Unknown frame: {ee_frame}")
+
+        placement = self.robot.data.oMf[frame_id]
+        xyz = placement.translation
+        quat_xyzw = R.from_matrix(placement.rotation).as_quat()
+
+        return np.concatenate([xyz, quat_xyzw])
+
     def end_effector_to_joint_positions(
         self,
         end_effector_pose: list,
@@ -92,7 +125,7 @@ class InverseKinematics:
         """Convert end effector pose to joint positions using IK.
 
         Args:
-            end_effector_pose: List containing [x, y, z, qw, qx, qy, qz]
+            end_effector_pose: List containing [x, y, z, qx, qy, qz, qw]
             ee_frame: End-effector frame name
             prev_ik_solution: Previous IK solution to use as initial guess
 

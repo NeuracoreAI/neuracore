@@ -14,6 +14,7 @@ from neuracore.importer.core.exceptions import (
     DatasetOperationError,
     ImporterError,
 )
+from neuracore.importer.core.utils import parse_storage_size
 from neuracore.importer.importer import _run_import
 
 app = typer.Typer(
@@ -53,6 +54,14 @@ def import_dataset(
         "--overwrite",
         help="Delete the dataset before importing if it already exists.",
     ),
+    shared: bool = typer.Option(
+        False,
+        "--shared",
+        help=(
+            "Create the output dataset as shared "
+            "(only available for administrators)."
+        ),
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -80,18 +89,40 @@ def import_dataset(
         help="Maximum number of worker processes to use.",
         min=1,
     ),
+    random_sample: int | None = typer.Option(
+        None,
+        "--random-sample",
+        help="If set, import only this many episodes chosen at random for sampling.",
+        min=1,
+    ),
+    storage_limit: str = typer.Option(
+        "5gb",
+        "--storage-limit",
+        help=(
+            "Pause import when disk usage reaches this limit. "
+            "Accepts size with unit: kb, mb, gb (e.g. 10gb, 500mb). "
+            "[default: 5gb]"
+        ),
+    ),
 ) -> None:
     """Import a dataset into Neuracore using the provided configuration."""
+    try:
+        storage_limit_bytes = parse_storage_size(storage_limit)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     try:
         _run_import(
             dataset_config=dataset_config,
             dataset_dir=dataset_dir,
             robot_dir=robot_dir,
             overwrite=overwrite,
+            shared=shared,
             dry_run=dry_run,
             skip_on_error=skip_on_error,
             suppress_validation_warnings=no_validation_warnings,
             max_workers=max_workers,
+            random_sample=random_sample,
+            storage_limit=storage_limit_bytes,
         )
     except (
         CLIError,

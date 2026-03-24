@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
-from neuracore_types import DataType
+from neuracore_types import DataType, JointPositionInputTypeConfig
 from neuracore_types.importer.config import LanguageConfig
 
 from neuracore.importer.core.base import ImportItem, WorkerError
@@ -133,9 +133,7 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
         call(0, step=0, total_steps=2, episode_label="123"),
         call(0, step=2, total_steps=2, episode_label="123"),
     ])
-    stop_recording.assert_called_once_with(
-        robot_name="test_robot", instance=2, wait=True
-    )
+    stop_recording.assert_called_once_with(robot_name="test_robot", instance=2)
 
 
 def test_lerobot_import_item_non_step_mode_re_raises():
@@ -220,6 +218,7 @@ def test_lerobot_record_step_supports_empty_source_path_for_language():
     importer.dataset_config = SimpleNamespace(
         data_import_config={DataType.LANGUAGE: import_config}
     )
+    importer.ordered_import_configs = [(DataType.LANGUAGE, import_config)]
     importer._log_data = MagicMock()
 
     importer._record_step({"instruction": "close gripper"}, timestamp=7.5)
@@ -244,7 +243,11 @@ def test_lerobot_record_step_reads_dotted_source_key_and_converts_tensor():
         index_range=None,
         name="joint_positions",
     )
-    import_format = SimpleNamespace(language_type=LanguageConfig.STRING)
+    import_format = SimpleNamespace(
+        language_type=LanguageConfig.STRING,
+        joint_position_input_type=JointPositionInputTypeConfig.CUSTOM,
+        ee_pose_input_type=None,
+    )
     import_config = SimpleNamespace(
         source="observation",
         mapping=[mapping_item],
@@ -253,6 +256,7 @@ def test_lerobot_record_step_reads_dotted_source_key_and_converts_tensor():
     importer.dataset_config = SimpleNamespace(
         data_import_config={DataType.JOINT_POSITIONS: import_config}
     )
+    importer.ordered_import_configs = [(DataType.JOINT_POSITIONS, import_config)]
     importer._log_data = MagicMock()
 
     importer._record_step(
@@ -295,14 +299,14 @@ def test_lerobot_init_forwards_ik_args_to_base(monkeypatch):
         dataset_dir=".",
         dataset_config=SimpleNamespace(),
         joint_info={},
-        ik_urdf_path="/tmp/robot.urdf",
+        urdf_path="/tmp/robot.urdf",
         ik_init_config=[0.0, 1.0],
         dry_run=True,
         suppress_warnings=True,
         skip_on_error="step",
     )
 
-    assert captured["ik_urdf_path"] == "/tmp/robot.urdf"
+    assert captured["urdf_path"] == "/tmp/robot.urdf"
     assert captured["ik_init_config"] == [0.0, 1.0]
     assert captured["skip_on_error"] == "step"
     assert importer.num_episodes == 4

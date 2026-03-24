@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
-from neuracore_types import DataType
+from neuracore_types import (
+    DataType,
+    EndEffectorPoseInputTypeConfig,
+    JointPositionInputTypeConfig,
+)
 from neuracore_types.importer.config import LanguageConfig
 from neuracore_types.importer.data_config import (
     DepthCameraDataMappingItem,
@@ -38,12 +42,15 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         dataset_dir: Path,
         dataset_config: DatasetImportConfig,
         joint_info: dict[str, JointInfo] = {},
-        ik_urdf_path: str | None = None,
+        urdf_path: str | None = None,
         ik_init_config: list[float] | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
         max_workers: int | None = 1,
         skip_on_error: str = "episode",
+        storage_limit: int = 5 * 1024**3,
+        random_sample: int | None = None,
+        shared: bool = False,
     ) -> None:
         """Initialize the LeRobot dataset importer.
 
@@ -53,13 +60,16 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             dataset_dir: Directory containing the dataset.
             dataset_config: Dataset configuration.
             joint_info: Joint info to use for validation.
-            ik_urdf_path: URDF path for IK (used to recreate IK in worker processes).
+            urdf_path: URDF path for robot utilities.
             ik_init_config: Initial joint configuration for IK.
             dry_run: If True, skip actual logging (validation only).
             suppress_warnings: If True, suppress warning messages.
             max_workers: Maximum number of worker processes.
             skip_on_error: "episode" to skip a failed episode; "step" to skip only
                 failing steps; "all" to abort on the first error.
+            random_sample: If set, import only this many episodes chosen at random.
+            storage_limit: If set, pause when disk usage reaches this (bytes).
+            shared: Whether the dataset should be shared/open-source.
         """
         super().__init__(
             dataset_dir=dataset_dir,
@@ -67,11 +77,14 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             output_dataset_name=output_dataset_name,
             max_workers=max_workers,
             joint_info=joint_info,
-            ik_urdf_path=ik_urdf_path,
+            urdf_path=urdf_path,
             ik_init_config=ik_init_config,
             dry_run=dry_run,
             suppress_warnings=suppress_warnings,
             skip_on_error=skip_on_error,
+            random_sample=random_sample,
+            storage_limit=storage_limit,
+            shared=shared,
         )
         self.dataset_name = input_dataset_name
         self.dataset_dir = Path(dataset_dir)
@@ -141,6 +154,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             item.index, step=0, total_steps=total_steps, episode_label=str(episode_id)
         )
         for step_idx, step_data in enumerate(step_iter, start=1):
+            self._reset_step_state()
             timestamp = base_time + (step_idx / self.frequency)
             try:
                 self._record_step(step_data, timestamp)
@@ -167,9 +181,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 episode_label=str(episode_id),
             )
         if not self.dry_run:
-            nc.stop_recording(
-                robot_name=self.robot_name, instance=self._worker_id, wait=True
-            )
+            nc.stop_recording(robot_name=self.robot_name, instance=self._worker_id)
         self.logger.info("[%s] Completed episode %s", worker_label, episode_id)
 
     def _load_metadata(self) -> LeRobotDatasetMetadata:
@@ -251,10 +263,10 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 source_data = source[import_source_path]
 
         try:
-            if item.index is not None:
-                source_data = source_data[item.index]
-            elif item.index_range is not None:
+            if item.index_range is not None:
                 source_data = source_data[item.index_range.start : item.index_range.end]
+            elif item.index is not None:
+                source_data = source_data[item.index]
         except Exception as exc:
             shape_str = (
                 f" with shape {source_data.shape}"
@@ -287,69 +299,89 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
 
     def _record_step(self, step_data: dict, timestamp: float) -> None:
         """Record a single step to Neuracore."""
-        for data_type, import_config in self.dataset_config.data_import_config.items():
+        for data_type, import_config in self.ordered_import_configs:
             source_prefix = import_config.source
 
-            for item in import_config.mapping:
-                source_data = self._extract_source_data(
-                    source=step_data,
-                    item=item,
-                    import_source_path=source_prefix,
-                    data_type=data_type,
-                )
+            ik_requested = (
+                data_type == DataType.JOINT_POSITIONS
+                and import_config.format.joint_position_input_type
+                == JointPositionInputTypeConfig.END_EFFECTOR
+            )
+            fk_requested = (
+                data_type == DataType.END_EFFECTOR_POSES
+                and import_config.format.ee_pose_input_type
+                == EndEffectorPoseInputTypeConfig.JOINT_POSITIONS
+            )
 
-                if not (
-                    data_type == DataType.LANGUAGE
-                    and import_config.format.language_type == LanguageConfig.STRING
-                ):
-                    source_data = self._convert_source_data(
-                        source_data=source_data,
+            for item in import_config.mapping:
+                if ik_requested or fk_requested:
+                    self._log_data(
+                        data_type,
+                        None,
+                        item,
+                        import_config.format,
+                        timestamp,
+                    )
+                else:
+                    source_data = self._extract_source_data(
+                        source=step_data,
+                        item=item,
+                        import_source_path=source_prefix,
                         data_type=data_type,
-                        item_name=item.name,
                     )
 
-                extrinsics, intrinsics = None, None
-                if isinstance(
-                    item,
-                    (
-                        RGBCameraDataMappingItem,
-                        DepthCameraDataMappingItem,
-                        PointCloudDataMappingItem,
-                    ),
-                ):
-                    if item.extrinsics_source is not None:
-                        key = (
-                            f"{source_prefix}.{item.extrinsics_source}"
-                            if source_prefix
-                            else item.extrinsics_source
-                        )
-                        extrinsics = item.extrinsics_transforms(
-                            self._convert_source_data(
-                                source_data=step_data[key],
-                                data_type=data_type,
-                                item_name=item.extrinsics_source,
-                            )
-                        )
-                    if item.intrinsics_source is not None:
-                        key = (
-                            f"{source_prefix}.{item.intrinsics_source}"
-                            if source_prefix
-                            else item.intrinsics_source
-                        )
-                        intrinsics = item.intrinsics_transforms(
-                            self._convert_source_data(
-                                source_data=step_data[key],
-                                data_type=data_type,
-                                item_name=item.intrinsics_source,
-                            )
+                    if not (
+                        data_type == DataType.LANGUAGE
+                        and import_config.format.language_type == LanguageConfig.STRING
+                    ):
+                        source_data = self._convert_source_data(
+                            source_data=source_data,
+                            data_type=data_type,
+                            item_name=item.name,
                         )
 
-                self._log_data(
-                    data_type,
-                    source_data,
-                    item,
-                    import_config.format,
-                    timestamp,
-                    extrinsics=extrinsics,
-                    intrinsics=intrinsics,
-                )
+                    extrinsics, intrinsics = None, None
+                    if isinstance(
+                        item,
+                        (
+                            RGBCameraDataMappingItem,
+                            DepthCameraDataMappingItem,
+                            PointCloudDataMappingItem,
+                        ),
+                    ):
+                        if item.extrinsics_source is not None:
+                            key = (
+                                f"{source_prefix}.{item.extrinsics_source}"
+                                if source_prefix
+                                else item.extrinsics_source
+                            )
+                            extrinsics = item.extrinsics_transforms(
+                                self._convert_source_data(
+                                    source_data=step_data[key],
+                                    data_type=data_type,
+                                    item_name=item.extrinsics_source,
+                                )
+                            )
+                        if item.intrinsics_source is not None:
+                            key = (
+                                f"{source_prefix}.{item.intrinsics_source}"
+                                if source_prefix
+                                else item.intrinsics_source
+                            )
+                            intrinsics = item.intrinsics_transforms(
+                                self._convert_source_data(
+                                    source_data=step_data[key],
+                                    data_type=data_type,
+                                    item_name=item.intrinsics_source,
+                                )
+                            )
+
+                    self._log_data(
+                        data_type,
+                        source_data,
+                        item,
+                        import_config.format,
+                        timestamp,
+                        extrinsics=extrinsics,
+                        intrinsics=intrinsics,
+                    )

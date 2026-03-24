@@ -61,7 +61,7 @@ data_import_config:
   VISUAL_JOINT_POSITIONS:
     source: observation.state # path to the data in the input dataset
     format:
-      visual_joint_type: GRIPPER
+      visual_joint_input_type: GRIPPER
     mapping:
       - name: gripper_prismatic_joint_1
         index: 6

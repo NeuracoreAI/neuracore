@@ -62,7 +62,28 @@ data_import_config:
   JOINT_POSITIONS: 
     source: observation.pose
     format:
-      joint_position_type: END_EFFECTOR # END_EFFECTOR | CUSTOM, When using END_EFFECTOR, we will use the inverse kinematics to convert the end effector pose to joint positions.
+      joint_position_input_type: END_EFFECTOR # END_EFFECTOR | CUSTOM, When using END_EFFECTOR, we will use the inverse kinematics to convert the end effector pose to joint positions.
+      ik_init_config: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # initial joint configuration for the inverse kinematics
+    mapping:
+      - name: end_effector
+        source_name: end_effector
+    
+  JOINT_TARGET_POSITIONS:
+    source: action.target_joints # path to the data in the input dataset
+    format:
+      action_type: ABSOLUTE # ABSOLUTE | RELATIVE
+      angle_units: RADIANS # RADIANS | DEGREES
+    mapping:
+      - name: joint_1
+      - name: joint_2
+      - name: joint_3
+      - name: joint_4
+  
+  JOINT_TARGET_POSITIONS:
+    source: action.target_pose # path to the data in the input dataset
+    format:
+      action_type: ABSOLUTE # ABSOLUTE | RELATIVE
+      joint_position_input_type: END_EFFECTOR # END_EFFECTOR | CUSTOM, When using END_EFFECTOR, we will use the inverse kinematics to convert the end effector pose to joint positions.
       ik_init_config: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # initial joint configuration for the inverse kinematics
       pose_type: POSITION_ORIENTATION # POSITION_ORIENTATION | MATRIX
       orientation:
@@ -74,7 +95,7 @@ data_import_config:
         index_range:
           start: 0
           end: 7
-
+  
   JOINT_VELOCITIES:
     source: observation.state_vel # path to the data in the input dataset
     format:
@@ -126,7 +147,7 @@ data_import_config:
   VISUAL_JOINT_POSITIONS:
     source: observation.state # path to the data in the input dataset
     format:
-      visual_joint_type: GRIPPER
+      visual_joint_input_type: GRIPPER
     mapping:
       - name: finger_joint1
         index: 6
@@ -138,7 +159,7 @@ data_import_config:
   VISUAL_JOINT_POSITIONS:
     source: observation.state # path to the data in the input dataset
     format:
-      visual_joint_type: CUSTOM
+      visual_joint_input_type: CUSTOM
     mapping:
       - name: finger_joint1
         index: 8

@@ -47,6 +47,10 @@ neuracore importer import \
   - `step`: Skip only the failing step and continue with the episode
   - `all`: Abort on the first error
 - `--no-validation-warnings`: Suppress warning messages from data validation
+- `--shared`: Create the output dataset as shared (only available for administrators)
+- `--max-workers`: Maximum number of worker processes to use (default: `1`, minimum: `1`)
+- `--random-sample`: If set, import only this many episodes, chosen at random (useful for sampling subsets)
+- `--storage-limit`: Pause the import when disk usage reaches this limit. Accepts a size with unit: `kb`, `mb`, or `gb` (for example `10gb`, `500mb`). Default: `5gb`
 
 ### Configuration File
 
@@ -71,9 +75,9 @@ Each data type mapping supports:
     - `quaternion_order`: `XYZW` (default) | `WXYZ` - Quaternion component order (when `type: QUATERNION`)
     - `euler_order`: `XYZ` (default) | `ZYX` | `YXZ` | `XZY` | `YZX` | `ZXY` - Euler angle order (when `type: EULER`)
     - `angle_units`: `RADIANS` (default) | `DEGREES` - Angle unit for orientation
-  - `joint_position_type`: `CUSTOM` (default) | `END_EFFECTOR` - Use custom joint positions or convert from end effector pose via IK (for JOINT_POSITIONS)
-  - `ik_init_config`: `list[float] | None` - Initial joint configuration for inverse kinematics (can be provided when `joint_position_type: END_EFFECTOR`)
-  - `visual_joint_type`: `CUSTOM` (default) | `GRIPPER` - Use custom visual joints or populate from gripper open amounts (for VISUAL_JOINT_POSITIONS)
+  - `joint_position_input_type`: `CUSTOM` (default) | `END_EFFECTOR` - Use custom joint positions or convert from end effector pose via IK (for JOINT_POSITIONS)
+  - `ik_init_config`: `list[float] | None` - Initial joint configuration for inverse kinematics (can be provided when `joint_position_input_type: END_EFFECTOR`)
+  - `visual_joint_input_type`: `CUSTOM` (default) | `GRIPPER` - Use custom visual joints or populate from gripper open amounts (for VISUAL_JOINT_POSITIONS)
   - `invert_gripper_amount`: `false` (default) | `true` - Convert from close amount to open amount (for PARALLEL_GRIPPER_OPEN_AMOUNTS, PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS)
   - `normalize`: Configuration object (optional, for PARALLEL_GRIPPER_OPEN_AMOUNTS, PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS):
     - `min`: `float` (default: `0.0`) - Minimum value for normalization
@@ -176,7 +180,6 @@ The importer supports the following data types:
 - **JOINT_POSITIONS**: Robot joint positions with angle unit conversion and IK support
   
   ```yaml
-  # Example 1: Direct joint positions from state array
   JOINT_POSITIONS:
     source: observation.state
     format:
@@ -190,23 +193,6 @@ The importer supports the following data types:
         index: 1
         offset: -1.5707963267948966  # -π/2
         inverted: true
-  
-  # Example 2: Joint positions from end effector pose using inverse kinematics
-  JOINT_POSITIONS:
-    source: observation.pose
-    format:
-      joint_position_type: END_EFFECTOR  # Use IK to convert pose to joint positions
-      ik_init_config: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      pose_type: POSITION_ORIENTATION
-      orientation:
-        type: QUATERNION
-        quaternion_order: XYZW
-        angle_units: RADIANS
-    mapping:
-      - name: end_effector
-        index_range:
-          start: 0
-          end: 7
   ```
 
 - **JOINT_VELOCITIES**: Robot joint velocities with angle unit conversion
@@ -241,12 +227,13 @@ The importer supports the following data types:
         inverted: true
   ```
 
-- **JOINT_TARGET_POSITIONS**: Target joint positions issued to the robot
+- **JOINT_TARGET_POSITIONS**: Target joint positions issued to the robot (if action type is relative, the action values will be added on top of the current joint positions)
   
   ```yaml
   JOINT_TARGET_POSITIONS:
     source: action.target_joints
     format:
+      action_type: ABSOLUTE # ABSOLUTE | RELATIVE
       angle_units: RADIANS
     mapping:
       - name: joint_1
@@ -262,7 +249,7 @@ The importer supports the following data types:
   VISUAL_JOINT_POSITIONS:
     source: observation.state
     format:
-      visual_joint_type: GRIPPER
+      visual_joint_input_type: GRIPPER
     mapping:
       - name: finger_joint1
         index: 6
@@ -275,7 +262,7 @@ The importer supports the following data types:
   VISUAL_JOINT_POSITIONS:
     source: observation.state
     format:
-      visual_joint_type: CUSTOM
+      visual_joint_input_type: CUSTOM
     mapping:
       - name: finger_joint1
         index: 10
@@ -437,34 +424,69 @@ Poses can be represented in multiple formats:
   
 **Inverse Kinematics (IK) for Joint Positions**
 
-When `joint_position_type: END_EFFECTOR` is specified, the importer uses inverse kinematics to convert end-effector poses to joint positions. This requires:
+When `joint_position_input_type: END_EFFECTOR` is specified, the importer uses inverse kinematics to convert end-effector poses to joint positions. This requires:
 
 - A valid URDF or MJCF file with the robot model
 - An end-effector frame name (obtained from mapping `name`)
 - Optional joint configuration to initiate inverse kinematics (`ik_init_config`)
+- End-effector poses being imported
 
 ```yaml
+# End-effector pose to convert from
+END_EFFECTOR_POSES:
+    source: observation.state
+    mapping:
+      - name: ee_name
+        index_range:
+          start: 0
+          end: 7
+
+# Joint position calculated using Inverse Kinematics
 JOINT_POSITIONS:
-  source: observation.pose
+  source: observation.state
   format:
-    joint_position_type: END_EFFECTOR  # Use IK to convert pose to joint positions
+    joint_position_input_type: END_EFFECTOR  # Use IK to convert pose to joint positions
     ik_init_config: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # Initial joint config
-    pose_type: POSITION_ORIENTATION
-    orientation:
-      type: QUATERNION
-      quaternion_order: XYZW
-      angle_units: RADIANS
   mapping:
-    - name: end_effector
-      index_range:
-        start: 0
-        end: 7
+    - name: ee_frame_name
+      source_name: ee_name
 ```
 
+**Forward Kinematics (FK) for End-effector Poses**
+
+When `ee_pose_input_type: JOINT_POSITIONS` is specified, the importer uses forward kinematics to convert joint positions to end-effector poses. This requires:
+
+- A valid URDF or MJCF file with the robot model
+- An end-effector frame name (obtained from mapping `name`)
+- Joint positions being imported
+
+```yaml
+# Joint positions to convert from
+JOINT_POSITIONS:
+  source: observation.state
+  format:
+    angle_units: RADIANS
+  mapping:
+    - name: joint_1
+    - name: joint_2
+    - name: joint_3
+    - name: joint_4
+    - name: joint_5
+    - name: joint_6
+    - name: joint_7
+
+# End-effector pose calculated using Forward Kinematics
+END_EFFECTOR_POSES:
+  source: observation.state
+  format:
+    ee_pose_input_type: JOINT_POSITIONS
+  mapping:
+    - name: ee_frame_name
+```
 
 **Visual Joint Positions from Gripper**
 
-When `visual_joint_type: GRIPPER` is specified, the importer automatically converts gripper open amounts to visual joint positions. This is useful for populating visual joint positions that are used for URDF visualization but not for training. This requires:
+When `visual_joint_input_type: GRIPPER` is specified, the importer automatically converts gripper open amounts to visual joint positions. This is useful for populating visual joint positions that are used for URDF visualization but not for training. This requires:
 
 - A valid URDF or MJCF file with the robot model
 - Joint names in the mapping that exist in the robot model
@@ -472,15 +494,57 @@ When `visual_joint_type: GRIPPER` is specified, the importer automatically conve
 - Gripper open amounts data (typically from `PARALLEL_GRIPPER_OPEN_AMOUNTS`)
 
 ```yaml
+# Converting gripper open amounts (0-1) to individual gripper finger positions
 VISUAL_JOINT_POSITIONS:
   source: observation.state
   format:
-    visual_joint_type: GRIPPER
+    visual_joint_input_type: GRIPPER
   mapping:
     - name: finger_joint1
       index: 6
     - name: finger_joint2
       index: 6
+```
+
+**Relative Joint Target Positions**
+
+Joint target positions can be specified as delta values relative to the current robot state in either joint space or end-effector space. The current robot state will be processed first and the extracted delta values will be added to the current robot state to form the joint target positions. This requires:
+
+- If working in end-effector space, must be importing end-effector pose
+- If working in joint space, must be importing joint positions
+
+```yaml
+# Example 1: Relative action in pose space
+JOINT_TARGET_POSITIONS:
+  source: action
+  format:
+    action_type: RELATIVE
+    action_space: END_EFFECTOR
+    pose_type: POSITION_ORIENTATION
+    orientation:
+      type: EULER
+      euler_order: XYZ
+      angle_units: RADIANS
+  mapping:
+    - name: ee_frame_name
+      index_range:
+        start: 7
+        end: 13
+
+# Example 2: Relative action in joint space
+  JOINT_TARGET_POSITIONS:
+    source: action
+    format:
+      action_type: RELATIVE
+      action_space: JOINT
+    mapping:
+    - name: joint_1
+    - name: joint_2
+    - name: joint_3
+    - name: joint_4
+    - name: joint_5
+    - name: joint_6
+    - name: joint_7
 ```
 
 ## Example Workflow

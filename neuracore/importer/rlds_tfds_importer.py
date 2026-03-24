@@ -12,7 +12,11 @@ from typing import Any
 
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from neuracore_types import DataType
+from neuracore_types import (
+    DataType,
+    EndEffectorPoseInputTypeConfig,
+    JointPositionInputTypeConfig,
+)
 from neuracore_types.importer.config import LanguageConfig
 from neuracore_types.importer.data_config import (
     DepthCameraDataMappingItem,
@@ -58,12 +62,15 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         dataset_dir: Path,
         dataset_config: DatasetImportConfig,
         joint_info: dict[str, JointInfo] = {},
-        ik_urdf_path: str | None = None,
+        urdf_path: str | None = None,
         ik_init_config: list[float] | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
         max_workers: int | None = 1,
         skip_on_error: str = "episode",
+        storage_limit: int = 5 * 1024**3,
+        random_sample: int | None = None,
+        shared: bool = False,
     ):
         """Initialize the RLDS/TFDS dataset importer.
 
@@ -73,13 +80,16 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             dataset_dir: Directory containing the dataset.
             dataset_config: Dataset configuration.
             joint_info: Joint info to use for validation.
-            ik_urdf_path: URDF path for IK (used to recreate IK in worker processes).
+            urdf_path: URDF path for robot utilities.
             ik_init_config: Initial joint configuration for IK.
             dry_run: If True, skip actual logging (validation only).
             suppress_warnings: If True, suppress warning messages.
             max_workers: Maximum number of worker processes.
             skip_on_error: "episode" to skip a failed episode; "step" to skip only
                 failing steps; "all" to abort on the first error.
+            random_sample: If set, import only this many episodes chosen at random.
+            storage_limit: If set, pause when disk usage reaches this (bytes).
+            shared: Whether the dataset should be shared/open-source.
         """
         super().__init__(
             dataset_dir=dataset_dir,
@@ -87,11 +97,14 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             output_dataset_name=output_dataset_name,
             max_workers=max_workers,
             joint_info=joint_info,
-            ik_urdf_path=ik_urdf_path,
+            urdf_path=urdf_path,
             ik_init_config=ik_init_config,
             dry_run=dry_run,
             suppress_warnings=suppress_warnings,
             skip_on_error=skip_on_error,
+            random_sample=random_sample,
+            storage_limit=storage_limit,
+            shared=shared,
         )
         self.dataset_name = input_dataset_name
         self.builder_dir = self._resolve_builder_dir()
@@ -189,6 +202,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
 
     def import_item(self, item: ImportItem) -> None:
         """Import a single episode to the dataset importer."""
+        self._reset_episode_state()
         if self._episode_iter is None:
             raise ImportError("Worker dataset iterator was not initialized.")
 
@@ -224,6 +238,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             item.index, step=0, total_steps=total_steps, episode_label=episode_label
         )
         for idx, step in enumerate(steps, start=1):
+            self._reset_step_state()
             timestamp = base_time + (idx / self.frequency)
             try:
                 self._record_step(step, timestamp)
@@ -238,9 +253,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                 episode_label=episode_label,
             )
         if not self.dry_run:
-            nc.stop_recording(
-                robot_name=self.robot_name, instance=self._worker_id, wait=True
-            )
+            nc.stop_recording(robot_name=self.robot_name, instance=self._worker_id)
         self.logger.info("[%s] Completed %s", worker_label, episode_label)
 
     def _handle_step_error(
@@ -442,66 +455,86 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
 
     def _record_step(self, step_data: dict, timestamp: float) -> None:
         """Record a single step to Neuracore."""
-        for data_type, import_config in self.dataset_config.data_import_config.items():
+        for data_type, import_config in self.ordered_import_configs:
             source = self._resolve_source_path(step_data, import_config.source)
 
-            for item in import_config.mapping:
-                source_data = self._extract_source_data(
-                    source=source,
-                    item=item,
-                    import_source_path=import_config.source,
-                    data_type=data_type,
-                )
+            ik_requested = (
+                data_type == DataType.JOINT_POSITIONS
+                and import_config.format.joint_position_input_type
+                == JointPositionInputTypeConfig.END_EFFECTOR
+            )
+            fk_requested = (
+                data_type == DataType.END_EFFECTOR_POSES
+                and import_config.format.ee_pose_input_type
+                == EndEffectorPoseInputTypeConfig.JOINT_POSITIONS
+            )
 
-                if not (
-                    data_type == DataType.LANGUAGE
-                    and import_config.format.language_type == LanguageConfig.STRING
-                ):
-                    source_data = self._convert_source_data(
-                        source_data=source_data,
+            for item in import_config.mapping:
+                if ik_requested or fk_requested:
+                    self._log_data(
+                        data_type,
+                        None,
+                        item,
+                        import_config.format,
+                        timestamp,
+                    )
+                else:
+                    source_data = self._extract_source_data(
+                        source=source,
+                        item=item,
+                        import_source_path=import_config.source,
                         data_type=data_type,
-                        item_name=item.name,
                     )
 
-                extrinsics, intrinsics = None, None
-                if isinstance(
-                    item,
-                    (
-                        RGBCameraDataMappingItem,
-                        DepthCameraDataMappingItem,
-                        PointCloudDataMappingItem,
-                    ),
-                ):
-                    if item.extrinsics_source is not None:
-                        extrinsics = item.extrinsics_transforms(
-                            self._convert_source_data(
-                                source_data=self._resolve_source_path(
-                                    source, item.extrinsics_source
-                                ),
-                                data_type=data_type,
-                                item_name=item.extrinsics_source,
-                            )
-                        )
-                    if item.intrinsics_source is not None:
-                        intrinsics = item.intrinsics_transforms(
-                            self._convert_source_data(
-                                source_data=self._resolve_source_path(
-                                    source, item.intrinsics_source
-                                ),
-                                data_type=data_type,
-                                item_name=item.intrinsics_source,
-                            )
+                    if not (
+                        data_type == DataType.LANGUAGE
+                        and import_config.format.language_type == LanguageConfig.STRING
+                    ):
+                        source_data = self._convert_source_data(
+                            source_data=source_data,
+                            data_type=data_type,
+                            item_name=item.name,
                         )
 
-                self._log_data(
-                    data_type,
-                    source_data,
-                    item,
-                    import_config.format,
-                    timestamp,
-                    extrinsics=extrinsics,
-                    intrinsics=intrinsics,
-                )
+                    extrinsics, intrinsics = None, None
+                    if isinstance(
+                        item,
+                        (
+                            RGBCameraDataMappingItem,
+                            DepthCameraDataMappingItem,
+                            PointCloudDataMappingItem,
+                        ),
+                    ):
+                        if item.extrinsics_source is not None:
+                            extrinsics = item.extrinsics_transforms(
+                                self._convert_source_data(
+                                    source_data=self._resolve_source_path(
+                                        source, item.extrinsics_source
+                                    ),
+                                    data_type=data_type,
+                                    item_name=item.extrinsics_source,
+                                )
+                            )
+                        if item.intrinsics_source is not None:
+                            intrinsics = item.intrinsics_transforms(
+                                self._convert_source_data(
+                                    source_data=self._resolve_source_path(
+                                        source, item.intrinsics_source
+                                    ),
+                                    data_type=data_type,
+                                    item_name=item.intrinsics_source,
+                                )
+                            )
+
+                    self._log_data(
+                        data_type,
+                        source_data,
+                        item,
+                        import_config.format,
+                        timestamp,
+                        extrinsics=extrinsics,
+                        intrinsics=intrinsics,
+                    )
 
     def _extract_source_data(
         self,
@@ -513,10 +546,10 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         source_data = self._resolve_source_path(source, item.source_name)
 
         try:
-            if item.index is not None:
-                source_data = source_data[item.index]
-            elif item.index_range is not None:
+            if item.index_range is not None:
                 source_data = source_data[item.index_range.start : item.index_range.end]
+            elif item.index is not None:
+                source_data = source_data[item.index]
         except Exception as exc:
             shape_str = (
                 f" with shape {source_data.shape}"
@@ -560,12 +593,15 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
         dataset_dir: Path,
         dataset_config: DatasetImportConfig,
         joint_info: dict[str, JointInfo] = {},
-        ik_urdf_path: str | None = None,
+        urdf_path: str | None = None,
         ik_init_config: list[float] | None = None,
         dry_run: bool = False,
         suppress_warnings: bool = False,
         max_workers: int | None = 1,
         skip_on_error: str = "episode",
+        storage_limit: int = 5 * 1024**3,
+        random_sample: int | None = None,
+        shared: bool = False,
     ):
         """Initialize the RLDS/TFDS dataset importer.
 
@@ -575,13 +611,16 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             dataset_dir: Directory containing the dataset.
             dataset_config: Dataset configuration.
             joint_info: Joint info to use for validation.
-            ik_urdf_path: URDF path for IK (used to recreate IK in worker processes).
+            urdf_path: URDF path for robot utilities.
             ik_init_config: Initial joint configuration for IK.
             dry_run: If True, skip actual logging (validation only).
             suppress_warnings: If True, suppress warning messages.
             max_workers: Maximum number of worker processes.
             skip_on_error: "episode" to skip a failed episode; "step" to skip only
                 failing steps; "all" to abort on the first error.
+            random_sample: If set, import only this many episodes chosen at random.
+            storage_limit: If set, pause when disk usage reaches this (bytes).
+            shared: Whether the dataset should be shared/open-source.
         """
         super().__init__(
             input_dataset_name=input_dataset_name,
@@ -589,12 +628,15 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             dataset_dir=dataset_dir,
             dataset_config=dataset_config,
             joint_info=joint_info,
-            ik_urdf_path=ik_urdf_path,
+            urdf_path=urdf_path,
             ik_init_config=ik_init_config,
             dry_run=dry_run,
             suppress_warnings=suppress_warnings,
             max_workers=max_workers,
             skip_on_error=skip_on_error,
+            random_sample=random_sample,
+            storage_limit=storage_limit,
+            shared=shared,
         )
 
 
