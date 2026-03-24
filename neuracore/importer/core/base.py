@@ -43,7 +43,7 @@ from rich.progress import (
 import neuracore as nc
 from neuracore.core.robot import JointInfo
 from neuracore.data_daemon.const import DEFAULT_RECORDING_ROOT_PATH
-from neuracore.importer.core.robot_utils import Robot
+from neuracore.importer.core.robot_utils import RobotUtils
 from neuracore.importer.core.validation import (
     JOINT_DATA_TYPES,
     validate_depth_images,
@@ -154,7 +154,7 @@ class NeuracoreDatasetImporter(ABC):
         self.joint_info = joint_info
         self.urdf_path = urdf_path
         self.ik_init_config = ik_init_config
-        self.robot: Robot | None = None
+        self.robot_utils: RobotUtils | None = None
         self.prev_ik_solution: list[float] | None = None
         self.curr_joint_positions: dict[str, float] = {}
         self.curr_end_effector_poses: dict[str, list[float]] = {}
@@ -202,6 +202,7 @@ class NeuracoreDatasetImporter(ABC):
     def _reset_step_state(self) -> None:
         """Reset step-specific state at the start of each step."""
         self.curr_joint_positions = {}
+        self.curr_end_effector_poses = {}
 
     def _get_ordered_import_configs(self) -> list[tuple[DataType, NCDataImportConfig]]:
         """Get the ordered import configurations for the dataset.
@@ -260,6 +261,10 @@ class NeuracoreDatasetImporter(ABC):
     def _save_pre_check_data(self, data_type: DataType, name: str, data: float) -> None:
         """Save pre-check data for a joint.
 
+        Pre-check data is used to determine if joint target positions should be
+        skipped. Joint target positions are skipped if they match joint positions
+        in the next step.
+
         Args:
             data_type: The type of data to save.
             name: The name of the joint or end-effector.
@@ -286,7 +291,7 @@ class NeuracoreDatasetImporter(ABC):
         Returns:
             True if joint target positions should be skipped, False otherwise.
         """
-        skip_joint_target_positions = False
+        skip_joint_target_positions = True
         if DataType.JOINT_TARGET_POSITIONS in [
             config[0] for config in self.ordered_import_configs
         ]:
@@ -296,10 +301,13 @@ class NeuracoreDatasetImporter(ABC):
             for name, positions in self.pre_check_joint_positions.items():
                 targets = self.pre_check_joint_target_positions[name]
                 assert len(positions) == len(targets)
+                # Align targets in the current step with positions in the next step.
                 positions.pop(0)
                 targets.pop(-1)
-                if np.allclose(positions, targets, atol=JOINT_TARGET_CHECK_TOLERANCE):
-                    skip_joint_target_positions = True
+                if not (
+                    np.allclose(positions, targets, atol=JOINT_TARGET_CHECK_TOLERANCE)
+                ):
+                    skip_joint_target_positions = False
                     break
         return skip_joint_target_positions
 
@@ -417,12 +425,12 @@ class NeuracoreDatasetImporter(ABC):
                 transformed_data = item.transforms(source_data)
 
             if ik_requested:
-                if self.robot is None:
+                if self.robot_utils is None:
                     raise ImporterError(
                         "Failed to convert end effector pose to joint positions: "
                         "Robot utilities are not initialized"
                     )
-                transformed_data = self.robot.end_effector_to_joint_positions(
+                transformed_data = self.robot_utils.end_effector_to_joint_positions(
                     self.curr_end_effector_poses[item.source_name],
                     item.name,
                     self.prev_ik_solution,
@@ -431,22 +439,24 @@ class NeuracoreDatasetImporter(ABC):
                 for name, position in transformed_data.items():
                     self._validate_joint_data(data_type, position, name)
             elif fk_requested:
-                if self.robot is None:
+                if self.robot_utils is None:
                     raise ImporterError(
                         "Failed to convert joint positions to end effector pose: "
                         "Robot utilities are not initialized"
                     )
-                transformed_data = self.robot.joint_positions_to_end_effector_pose(
-                    self.curr_joint_positions, item.name
+                transformed_data = (
+                    self.robot_utils.joint_positions_to_end_effector_pose(
+                        self.curr_joint_positions, item.name
+                    )
                 )
             elif absolute_action_requested:
                 if format.action_space == ActionSpaceConfig.END_EFFECTOR:
-                    if self.robot is None:
+                    if self.robot_utils is None:
                         raise ImporterError(
                             "Failed to convert action in end effector space "
                             "to joint space: Robot utilities are not initialized"
                         )
-                    transformed_data = self.robot.end_effector_to_joint_positions(
+                    transformed_data = self.robot_utils.end_effector_to_joint_positions(
                         transformed_data,
                         item.name,
                         list(self.curr_joint_positions.values()),
@@ -464,12 +474,12 @@ class NeuracoreDatasetImporter(ABC):
                         )
                     transformed_data += self.curr_end_effector_poses[item.name]
                     # Get joint positions using IK from the end effector pose
-                    if self.robot is None:
+                    if self.robot_utils is None:
                         raise ImporterError(
                             "Failed to convert action in end effector space "
                             "to joint space: Robot utilities are not initialized"
                         )
-                    transformed_data = self.robot.end_effector_to_joint_positions(
+                    transformed_data = self.robot_utils.end_effector_to_joint_positions(
                         transformed_data, item.name, self.prev_ik_solution
                     )
                     self.prev_ik_solution = list(transformed_data.values())
@@ -694,7 +704,7 @@ class NeuracoreDatasetImporter(ABC):
         nc.get_dataset(self.output_dataset_name)
         if self.urdf_path is not None:
             urdf_packages_dir = os.path.dirname(self.urdf_path)
-            self.robot = Robot(self.urdf_path, urdf_packages_dir)
+            self.robot_utils = RobotUtils(self.urdf_path, urdf_packages_dir)
 
     def import_all(self) -> None:
         """Run imports across workers while aggregating errors.
@@ -713,9 +723,9 @@ class NeuracoreDatasetImporter(ABC):
             self.logger.info("No import items found; nothing to do.")
             return
 
+        original_count = len(items)
         completed_keys = self._load_completed_item_keys()
         if completed_keys:
-            original_count = len(items)
             items = [
                 item for item in items if self._item_key(item) not in completed_keys
             ]
@@ -739,7 +749,7 @@ class NeuracoreDatasetImporter(ABC):
             self.logger.info(
                 "Sampling %s random episode(s) from %s episodes.",
                 n,
-                len(items),
+                original_count,
             )
 
         # Pre-check: dry run to check for errors

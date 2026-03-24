@@ -47,6 +47,10 @@ neuracore importer import \
   - `step`: Skip only the failing step and continue with the episode
   - `all`: Abort on the first error
 - `--no-validation-warnings`: Suppress warning messages from data validation
+- `--shared`: Create the output dataset as shared (only available for administrators)
+- `--max-workers`: Maximum number of worker processes to use (default: `1`, minimum: `1`)
+- `--random-sample`: If set, import only this many episodes, chosen at random (useful for sampling subsets)
+- `--storage-limit`: Pause the import when disk usage reaches this limit. Accepts a size with unit: `kb`, `mb`, or `gb` (for example `10gb`, `500mb`). Default: `5gb`
 
 ### Configuration File
 
@@ -176,7 +180,6 @@ The importer supports the following data types:
 - **JOINT_POSITIONS**: Robot joint positions with angle unit conversion and IK support
   
   ```yaml
-  # Example 1: Direct joint positions from state array
   JOINT_POSITIONS:
     source: observation.state
     format:
@@ -190,23 +193,6 @@ The importer supports the following data types:
         index: 1
         offset: -1.5707963267948966  # -π/2
         inverted: true
-  
-  # Example 2: Joint positions from end effector pose using inverse kinematics
-  JOINT_POSITIONS:
-    source: observation.pose
-    format:
-      joint_position_input_type: END_EFFECTOR  # Use IK to convert pose to joint positions
-      ik_init_config: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      pose_type: POSITION_ORIENTATION
-      orientation:
-        type: QUATERNION
-        quaternion_order: XYZW
-        angle_units: RADIANS
-    mapping:
-      - name: end_effector
-        index_range:
-          start: 0
-          end: 7
   ```
 
 - **JOINT_VELOCITIES**: Robot joint velocities with angle unit conversion

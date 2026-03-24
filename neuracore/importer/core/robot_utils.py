@@ -9,7 +9,7 @@ from pinocchio.robot_wrapper import RobotWrapper
 from scipy.spatial.transform import Rotation as R
 
 
-class Robot:
+class RobotUtils:
     """Utility class for kinematics calculations."""
 
     def __init__(self, urdf_path: str, packages_dir: str):
@@ -96,7 +96,7 @@ class Robot:
 
         Returns:
             numpy array containing [x, y, z, qx, qy, qz, qw] (position and quaternion
-            in wxyz order).
+            in xyzw order).
         """
         q_default = pinocchio.neutral(self.robot.model)
         q = np.array([

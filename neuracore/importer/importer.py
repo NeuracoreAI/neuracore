@@ -29,7 +29,7 @@ from neuracore.importer.core.exceptions import (
     DatasetOperationError,
     ImporterError,
 )
-from neuracore.importer.core.robot_utils import Robot
+from neuracore.importer.core.robot_utils import RobotUtils
 from neuracore.importer.core.utils import populate_robot_info
 from neuracore.importer.core.validation import (
     validate_dataset_config_against_robot_model,
@@ -245,6 +245,10 @@ def _run_import(
             f"Searched: {searched_locations}."
         )
 
+    if urdf_path is not None and mjcf_path is not None:
+        logger.warning("Both URDF and MJCF files found. Using URDF file.")
+        mjcf_path = None
+
     robot = nc.connect_robot(
         robot_name=robot_config.name,
         urdf_path=urdf_path,
@@ -274,7 +278,7 @@ def _run_import(
                 ik_init_config = format_config.ik_init_config
                 try:
                     urdf_packages_dir = os.path.dirname(urdf_path)
-                    Robot(urdf_path, urdf_packages_dir)
+                    RobotUtils(urdf_path, urdf_packages_dir)
                 except Exception as exc:
                     raise ConfigLoadError(
                         f"Failed to initialize Inverse Kinematics: {exc}"

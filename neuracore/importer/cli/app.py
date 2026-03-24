@@ -57,7 +57,10 @@ def import_dataset(
     shared: bool = typer.Option(
         False,
         "--shared",
-        help="Create the output dataset as shared (if it does not already exist).",
+        help=(
+            "Create the output dataset as shared "
+            "(only available for administrators)."
+        ),
     ),
     dry_run: bool = typer.Option(
         False,
