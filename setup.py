@@ -15,7 +15,7 @@ setup(
     name="neuracore",
     version=version,
     author="Stephen James",
-    author_email="stephen@neuracore.com",
+    author_email="support@neuracore.com",
     description="Neuracore Client Library",
     long_description=long_description,
     long_description_content_type="text/markdown",
