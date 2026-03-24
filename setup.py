@@ -70,8 +70,8 @@ setup(
             "mujoco>3",
         ],
         "ml": [
-            "torch",
-            "torchvision",
+            "torch==2.7.1",
+            "torchvision==0.22.1",
             "transformers==4.57.3",
             "huggingface-hub>0.34.0,<0.36.0",
             "diffusers==0.35.1",
