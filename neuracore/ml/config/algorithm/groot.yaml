@@ -1,0 +1,55 @@
+# @package _global_
+algorithm:
+  _target_: neuracore.ml.algorithms.groot.groot.Groot
+
+  # Pretrained checkpoint path (HuggingFace model ID or local directory)
+  model_path: "nvidia/GR00T-N1.6-3B"
+
+  # Denoising configuration
+  num_denoising_steps: 4
+  use_relative_deltas: false  # Predict state-relative deltas and convert to absolute at output; false = predict absolute positions directly.
+  add_action_step_positional_encoding: true  # Add learned action-step positions across the predicted chunk, matching upstream GR00T behavior.
+  use_alternate_vl_dit: true  # Alternate cross-attention over non-image vs image VLM tokens, matching upstream GR00T N1.6.
+  attend_text_every_n_blocks: 2  # AlternateVLDiT schedule.
+
+  # Universal MLP dimensions (supports robots with up to 32 DOF)
+  max_state_dim: 64
+  max_action_dim: 64
+
+  # Learning rates
+  lr: 1e-4
+  weight_decay: 1e-5             # AdamW weight decay
+  dit_lr_scale: 0.1              # DiT trains at lr * dit_lr_scale
+  vlm_lr_scale: 0.01             # VLM components train at lr * vlm_lr_scale (when enabled)
+
+  # LR scheduler
+  warmup_ratio: 0.05
+
+  # Fine-tuning component control (mirrors Isaac-GR00T tune_* flags)
+  finetune_state_action_projector: true  # Train action head projector MLPs (proprio, action enc/dec, connector)
+  finetune_action_expert: true           # Train DiT action head
+  finetune_vision_encoder: false         # Unfreeze visual encoder — only if visual domain differs significantly
+  finetune_top_llm_layer: 0             # Unfreeze top N LLM layers (0 = fully frozen, NVIDIA uses 4 in N1.6 pretraining)
+
+  # Flow matching time sampling (Beta distribution parameters)
+  noise_beta_alpha: 1.5
+  noise_beta_beta: 1.0
+  noise_s: 0.999
+  num_timestep_buckets: 1000
+
+  # Training speed / memory optimizations
+  gradient_checkpointing: true  # Saves VRAM (~30% extra compute). Enable if OOM during training.
+  use_torch_compile: false       # JIT-compile the DiT (PyTorch 2.0+). One-time compile overhead on first step.
+  torch_compile_mode: "default"  # "max-autotune" for inference deployments; "default" is safe for training.
+  load_backbone_bf16: true      # Cast VLM backbone to bf16 (~halves memory). Trainable VLM modules (vision encoder, top LLM layers) also train in bf16.
+
+  # State augmentation (regularization, both default off)
+  state_dropout_prob: 0.0   # Replace proprio token with learned mask token at this rate.
+  state_noise_scale: 0.0    # Std of Gaussian noise added to proprio embedding during training.
+
+  # Architecture hyperparameters (used when use_pretrained_weights is false)
+  num_dit_layers: 32
+  num_attention_heads: 32
+  attention_head_dim: 48
+  dit_output_dim: 1024
+  backbone_embedding_dim: 2048

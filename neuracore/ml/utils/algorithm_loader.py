@@ -104,10 +104,28 @@ class AlgorithmLoader:
             error_msg = f"Failed to process requirements.txt: {e}"
             raise RequirementsInstallError(error_msg)
 
-        # Try uv first, fall back to pip
+        # Check if all requirements are already satisfied before installing
+        if self._requirements_satisfied(req_file):
+            logger.info("All requirements already satisfied, skipping install")
+            return True
+
+        # Try uv first, fall back to pip. Pass --python explicitly so uv
+        # targets the current interpreter (required in conda envs and other
+        # non-uv-managed environments where VIRTUAL_ENV is not set).
         install_commands = [
-            (["uv", "pip", "install", "-r", str(req_file)], "uv pip"),
-            ([sys.executable, "-m", "pip", "install", "-Ir", str(req_file)], "pip"),
+            (
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--python",
+                    sys.executable,
+                    "-r",
+                    str(req_file),
+                ],
+                "uv pip",
+            ),
+            ([sys.executable, "-m", "pip", "install", "-r", str(req_file)], "pip"),
         ]
 
         errors = []
@@ -144,13 +162,70 @@ class AlgorithmLoader:
         logger.error(error_msg)
         raise RequirementsInstallError(error_msg)
 
-    def get_all_files(self) -> list[Path]:
-        """Get all Python files in the algorithm directory recursively.
+    @staticmethod
+    def _requirements_satisfied(req_file: Path) -> bool:
+        """Check if all requirements in req_file are already installed.
 
-        Scans the algorithm directory and all subdirectories for Python files.
+        Tries uv pip first, falls back to pip if uv is not available.
+        """
+        check_commands = [
+            (
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--dry-run",
+                    "--python",
+                    sys.executable,
+                    "-r",
+                    str(req_file),
+                ],
+                "uv pip",
+            ),
+            (
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--dry-run",
+                    "-r",
+                    str(req_file),
+                ],
+                "pip",
+            ),
+        ]
+
+        for cmd, name in check_commands:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                )
+            except FileNotFoundError:
+                logger.debug(f"{name} not found, trying next option")
+                continue
+            except Exception:
+                return False
+
+            # uv writes to stderr; pip writes to stdout. Check both.
+            combined_output = (result.stdout or "") + (result.stderr or "")
+            # If dry-run shows "Would install" then something is missing
+            if "Would install" in combined_output:
+                return False
+            return result.returncode == 0
+
+        return False
+
+    def get_all_files(self) -> list[Path]:
+        """Get all algorithm files in the algorithm directory recursively.
+
+        Scans the algorithm directory and all subdirectories for Python and
+        JSON files (e.g. model config files required by transformers).
 
         Returns:
-            List of Path objects representing all Python files found.
+            List of Path objects representing all algorithm files found.
         """
         files = []
         for root, _, filenames in os.walk(self.algorithm_dir):

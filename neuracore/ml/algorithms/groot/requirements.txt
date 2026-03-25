@@ -1,0 +1,9 @@
+diffusers>=0.35.1
+transformers==4.53.2
+huggingface-hub==0.36.0
+safetensors==0.7.0
+peft>=0.13.0,<1.0.0
+Pillow>=10.0.0,<13.0.0
+
+# flash-attn is optional but preferred; if installed, flash_attention_2 is used automatically.
+# Otherwise falls back to SDPA (PyTorch native efficient kernels).
