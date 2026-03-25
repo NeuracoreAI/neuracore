@@ -9,6 +9,7 @@ daemon-based data persistence.
 import json
 import logging
 import struct
+import threading
 import uuid
 from abc import ABC
 from dataclasses import dataclass
@@ -56,6 +57,7 @@ class DataStream(ABC):
             This must be kept lightweight and not perform any blocking operations.
         """
         self._recording = False
+        self._recording_mutex = threading.Lock()
         self._context: DataRecordingContext | None = None
         self._latest_data: NCData | None = None
         self._data_type = data_type
@@ -78,7 +80,8 @@ class DataStream(ABC):
         """
         if self.is_recording():
             self.stop_recording()
-        self._recording = True
+        with self._recording_mutex:
+            self._recording = True
         self._context = context
         self._handle_ensure_producer(context)
 
@@ -113,7 +116,8 @@ class DataStream(ABC):
 
     def stop_recording(self) -> None:
         """Stop recording data and end trace if producer exists."""
-        self._recording = False
+        with self._recording_mutex:
+            self._recording = False
         if isinstance(self._producer, Producer) and self._producer.trace_id:
             self._producer.cleanup_producer()
 
@@ -123,7 +127,8 @@ class DataStream(ABC):
         Returns:
             bool: True if currently recording, False otherwise
         """
-        return self._recording
+        with self._recording_mutex:
+            return self._recording
 
     def get_latest_data(self) -> NCData | None:
         """Get the latest data from the stream.
