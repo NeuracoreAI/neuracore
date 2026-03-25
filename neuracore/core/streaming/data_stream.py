@@ -9,7 +9,6 @@ daemon-based data persistence.
 import json
 import logging
 import struct
-import threading
 import uuid
 from abc import ABC
 from dataclasses import dataclass
@@ -112,16 +111,11 @@ class DataStream(ABC):
         self._producer.open_ring_buffer()
         self._producer.start_new_trace()
 
-    def stop_recording(self) -> list[threading.Thread]:
-        """Stop recording data and end trace if producer exists.
-
-        Returns:
-            List[threading.Thread]: Empty list (no upload threads needed with daemon).
-        """
+    def stop_recording(self) -> None:
+        """Stop recording data and end trace if producer exists."""
         self._recording = False
         if isinstance(self._producer, Producer) and self._producer.trace_id:
             self._producer.cleanup_producer()
-        return []
 
     def is_recording(self) -> bool:
         """Check if recording is active.
