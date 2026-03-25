@@ -1,8 +1,6 @@
 import inspect
 import os
 import random
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -17,8 +15,6 @@ from neuracore.ml import BatchedInferenceInputs, BatchedTrainingSamples
 from neuracore.ml.core.ml_types import BatchedTrainingOutputs
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
 from neuracore.ml.utils.validate import run_validation
-
-PI0_DEP_PACKAGES = ["transformers", "tokenizers", "huggingface-hub", "safetensors"]
 
 BS = 1
 OUTPUT_PREDICTION_HORIZON = 1
@@ -37,51 +33,8 @@ PI0_TEST_ARGS: dict[str, Any] = {
 }
 
 
-def _clear_pi0_dep_modules() -> None:
-    """Clear cached dependency modules so imports use freshly installed files."""
-    # Pip package names use hyphens; top-level import paths use underscores.
-    module_prefixes = [p.replace("-", "_") for p in PI0_DEP_PACKAGES]
-    for module_name in list(sys.modules):
-        if any(module_name.startswith(prefix) for prefix in module_prefixes):
-            sys.modules.pop(module_name, None)
-
-
-def _install_pi0_requirements() -> None:
-    """Force a clean reinstall of pi0 deps.
-
-    This avoids mixed files from previous versions.
-    """
-    requirements_file = (
-        Path(__file__).resolve().parents[4]
-        / "neuracore/ml/algorithms/pi0/requirements.txt"
-    )
-    if not requirements_file.exists():
-        raise FileNotFoundError(
-            f"Could not find pi0 requirements.txt at {requirements_file}"
-        )
-
-    _clear_pi0_dep_modules()
-    # Best-effort cleanup to avoid mixed package files across version switches.
-    subprocess.run(
-        [sys.executable, "-m", "pip", "uninstall", "-y", *PI0_DEP_PACKAGES], check=False
-    )
-    subprocess.check_call([
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "--no-cache-dir",
-        "--upgrade",
-        "--force-reinstall",
-        "-r",
-        str(requirements_file),
-    ])
-    _clear_pi0_dep_modules()
-
-
 @pytest.fixture(scope="module")
 def Pi0():  # noqa: N802
-    _install_pi0_requirements()
     from neuracore.ml.algorithms.pi0.pi0 import Pi0 as Pi0Model
 
     return Pi0Model
