@@ -61,6 +61,7 @@ DDIM
 ddpm
 DDPM
 denoise
+denoised
 denoising
 diaginertia
 dinov
@@ -203,6 +204,8 @@ nprocs
 numpy
 offsamples
 opencv
+OPENPI
+openpi
 optim
 osmesa
 outc
@@ -269,6 +272,7 @@ sess
 setsid
 shadowsize
 siglip
+silu
 softmax
 solimp
 solref

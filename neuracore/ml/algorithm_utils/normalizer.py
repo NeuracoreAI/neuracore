@@ -277,11 +277,15 @@ class QuantileNormalizer(Normalizer):
         q01 = getattr(self, f"{self._name}_q01")
         q99 = getattr(self, f"{self._name}_q99")
         denom = torch.clamp(q99 - q01, min=1e-6)
-        return (data - q01) / denom * 2.0 - 1.0
+        normalized = (data - q01) / denom * 2.0 - 1.0
+        # Quantile normalization is consumed by models that assume bounded
+        # inputs/targets in [-1, 1]. Saturate outliers instead of extrapolating.
+        return torch.clamp(normalized, min=-1.0, max=1.0)
 
     def unnormalize(self, data: torch.Tensor) -> torch.Tensor:
         """Unnormalize using quantile-based scaling from [-1, 1]."""
         q01 = getattr(self, f"{self._name}_q01")
         q99 = getattr(self, f"{self._name}_q99")
         denom = torch.clamp(q99 - q01, min=1e-6)
+        data = torch.clamp(data, min=-1.0, max=1.0)
         return (data + 1.0) / 2.0 * denom + q01
