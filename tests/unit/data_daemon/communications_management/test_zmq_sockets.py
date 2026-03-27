@@ -23,8 +23,10 @@ from neuracore.data_daemon.communications_management.communications_manager impo
     CommunicationsManager,
 )
 from neuracore.data_daemon.communications_management.data_bridge import Daemon
-from neuracore.data_daemon.communications_management.producer import (
-    Producer,
+from neuracore.data_daemon.communications_management.producer_channel import (
+    ProducerChannel,
+)
+from neuracore.data_daemon.communications_management.recording_context import (
     RecordingContext,
 )
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
@@ -200,15 +202,15 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
 
     producer_comm = CommunicationsManager(context=context)
     recording_id = "rec-zmq-commands"
-    producer = Producer(
+    producer = ProducerChannel(
         comm_manager=producer_comm, chunk_size=16, recording_id=recording_id
     )
 
     producer.start_new_trace()
     producer.open_ring_buffer(size=2048)
 
-    assert _wait_for(lambda: producer.producer_id in daemon.channels, timeout=0.5)
-    channel = daemon.channels[producer.producer_id]
+    assert _wait_for(lambda: producer.channel_id in daemon.channels, timeout=0.5)
+    channel = daemon.channels[producer.channel_id]
     assert channel.ring_buffer is not None
     assert channel.ring_buffer.size == 2048
 
@@ -248,7 +250,7 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
 
     assert _wait_for(lambda: recording_id in daemon._closed_recordings, timeout=0.5)
 
-    producer.stop_producer()
+    producer.stop_producer_channel()
 
 
 def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_detection(
@@ -265,14 +267,14 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
 
     producer_comm = CommunicationsManager(context=context)
     recording_id = "rec-zmq-timeout"
-    producer = Producer(
+    producer = ProducerChannel(
         comm_manager=producer_comm, chunk_size=16, recording_id=recording_id
     )
 
     producer.start_new_trace()
     producer.open_ring_buffer(size=1024)
 
-    assert _wait_for(lambda: producer.producer_id in daemon.channels, timeout=0.5)
+    assert _wait_for(lambda: producer.channel_id in daemon.channels, timeout=0.5)
 
     payload = json.dumps({"seq": 1}).encode("utf-8")
     producer.send_data(
@@ -283,12 +285,12 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
         robot_id="robot-1",
         dataset_id="dataset-1",
     )
-    # Producer uses a sender thread; ensure daemon received DATA_CHUNK before we
+    # ProducerChannel uses a sender thread; ensure daemon received DATA_CHUNK before we
     # simulate crash (otherwise _trace_recordings stays empty and no TRACE_WRITTEN).
     assert _wait_for(
         lambda: (
-            producer.producer_id in daemon.channels
-            and daemon.channels[producer.producer_id].trace_id is not None
+            producer.channel_id in daemon.channels
+            and daemon.channels[producer.channel_id].trace_id is not None
         ),
         timeout=1,
     )
@@ -306,7 +308,7 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
 
         start = time.monotonic()
         assert _wait_for(
-            lambda: producer.producer_id not in daemon.channels,
+            lambda: producer.channel_id not in daemon.channels,
             timeout=TEST_HEARTBEAT_TIMEOUT_SECS + 1,
         )
         elapsed = time.monotonic() - start
@@ -332,18 +334,18 @@ def test_socket_cleanup_on_disconnect(daemon_runtime) -> None:
     daemon, _, context = daemon_runtime
 
     producer_comm = CommunicationsManager(context=context)
-    producer = Producer(
+    producer = ProducerChannel(
         comm_manager=producer_comm, chunk_size=16, recording_id="rec-disconnect"
     )
     producer.start_new_trace()
     producer.open_ring_buffer(size=512)
 
-    assert _wait_for(lambda: producer.producer_id in daemon.channels, timeout=0.5)
+    assert _wait_for(lambda: producer.channel_id in daemon.channels, timeout=0.5)
 
     producer._stop_event.set()
 
     assert _wait_for(
-        lambda: producer.producer_id not in daemon.channels,
+        lambda: producer.channel_id not in daemon.channels,
         timeout=TEST_HEARTBEAT_TIMEOUT_SECS + 1,
     )
 
@@ -677,7 +679,7 @@ def test_channel_expires_after_timeout_without_recording_stopped(
         7. Assert: Ring buffer was cleaned up
 
     Why This Matters:
-        Producer crashes are inevitable in robotics systems. Hardware
+        ProducerChannel crashes are inevitable in robotics systems. Hardware
         failures, network partitions, and software bugs all cause
         unexpected disconnections. The daemon must handle these gracefully:
         - Detect dead producers via timeout

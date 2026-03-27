@@ -17,7 +17,9 @@ from neuracore.data_daemon.communications_management.communications_manager impo
     CommunicationsManager,
 )
 from neuracore.data_daemon.communications_management.data_bridge import Daemon
-from neuracore.data_daemon.communications_management.producer import Producer
+from neuracore.data_daemon.communications_management.producer_channel import (
+    ProducerChannel,
+)
 from neuracore.data_daemon.models import CommandType, DataChunkPayload, MessageEnvelope
 
 
@@ -169,7 +171,7 @@ def test_large_payload_chunked_round_trip_over_ipc(zmq_context: zmq.Context) -> 
     daemon = Daemon(comm_manager=daemon_comm, recording_disk_manager=rdm)
 
     producer_comm = CommunicationsManager(context=zmq_context)
-    producer = Producer(
+    producer = ProducerChannel(
         id="producer-large",
         comm_manager=producer_comm,
         chunk_size=16 * 1024,
@@ -199,7 +201,7 @@ def test_large_payload_chunked_round_trip_over_ipc(zmq_context: zmq.Context) -> 
     encoded = rdm.enqueued[0].data
     assert base64.b64decode(encoded) == payload
 
-    producer.stop_producer()
+    producer.stop_producer_channel()
     daemon_comm.cleanup_daemon()
 
 
@@ -212,13 +214,13 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context) -> None:
     producer_a_comm = CommunicationsManager(context=zmq_context)
     producer_b_comm = CommunicationsManager(context=zmq_context)
 
-    producer_a = Producer(
+    producer_a = ProducerChannel(
         id="producer-a",
         comm_manager=producer_a_comm,
         chunk_size=8,
         recording_id="rec-a",
     )
-    producer_b = Producer(
+    producer_b = ProducerChannel(
         id="producer-b",
         comm_manager=producer_b_comm,
         chunk_size=8,
@@ -260,8 +262,8 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context) -> None:
     assert by_producer["producer-a"] == payload_a
     assert by_producer["producer-b"] == payload_b
 
-    producer_a.stop_producer()
-    producer_b.stop_producer()
+    producer_a.stop_producer_channel()
+    producer_b.stop_producer_channel()
     daemon_comm.cleanup_daemon()
 
 
@@ -352,7 +354,7 @@ def test_interleaved_chunks_reassemble_per_producer(zmq_context: zmq.Context) ->
 def test_trace_id_required_on_send_data() -> None:
     """send_data() requires start_new_trace() to be called first."""
     producer_comm = CommunicationsManager()
-    producer = Producer(comm_manager=producer_comm, recording_id="rec-1")
+    producer = ProducerChannel(comm_manager=producer_comm, recording_id="rec-1")
 
     with pytest.raises(ValueError, match="Trace ID required"):
         producer.send_data(
@@ -364,18 +366,18 @@ def test_trace_id_required_on_send_data() -> None:
             dataset_id="dataset",
         )
 
-    producer.stop_producer()
+    producer.stop_producer_channel()
 
 
 def test_recording_id_required_on_start_new_trace() -> None:
     """start_new_trace() requires recording_id to be set on init."""
     producer_comm = CommunicationsManager()
-    producer = Producer(comm_manager=producer_comm)
+    producer = ProducerChannel(comm_manager=producer_comm)
 
     with pytest.raises(ValueError, match="recording_id is required"):
         producer.start_new_trace()
 
-    producer.stop_producer()
+    producer.stop_producer_channel()
 
 
 def test_unknown_command_logs_warning_and_continues(

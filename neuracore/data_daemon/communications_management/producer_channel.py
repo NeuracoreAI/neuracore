@@ -1,4 +1,4 @@
-"""High-level wrapper exposing NC / NDD contexts."""
+"""High-level wrapper for a producer channel to the data daemon."""
 
 from __future__ import annotations
 
@@ -18,71 +18,8 @@ from neuracore.data_daemon.models import CommandType, DataChunkPayload, DataType
 logger = logging.getLogger(__name__)
 
 
-class RecordingContext:
-    """Recording-scoped context for sending recording control messages."""
-
-    def __init__(
-        self,
-        recording_id: str | None = None,
-        comm_manager: CommunicationsManager | None = None,
-    ) -> None:
-        """Initialize the recording context."""
-        self.recording_id = recording_id
-        self._comm = comm_manager or CommunicationsManager()
-        self._comm.create_producer_socket()
-
-    def set_recording_id(self, recording_id: str | None) -> None:
-        """Set or clear the recording identifier for this context."""
-        self.recording_id = recording_id
-
-    def stop_recording(
-        self,
-        recording_id: str | None = None,
-        producer_stop_sequence_numbers: dict[str, int] | None = None,
-    ) -> None:
-        """Send a recording-stopped control message."""
-        effective_recording_id = recording_id or self.recording_id
-        if not effective_recording_id:
-            raise ValueError("recording_id is required to stop a recording.")
-
-        recording_stopped_payload: dict[str, object] = {
-            "recording_id": effective_recording_id
-        }
-        if producer_stop_sequence_numbers:
-            recording_stopped_payload["producer_stop_sequence_numbers"] = (
-                producer_stop_sequence_numbers
-            )
-        self._send(
-            CommandType.RECORDING_STOPPED,
-            {"recording_stopped": recording_stopped_payload},
-        )
-        self.recording_id = effective_recording_id
-
-    def close(self) -> None:
-        """Close sockets and cleanup context resources owned by this instance."""
-        self._comm.cleanup_producer()
-
-    def _send(self, command: CommandType, payload: dict | None = None) -> None:
-        """Send a management message to the daemon.
-
-        Args:
-            command: The CommandType to send to the daemon.
-            payload: A dictionary containing any additional data required by the daemon
-                to process the message.
-
-        Returns:
-            None
-        """
-        envelope = MessageEnvelope(
-            producer_id=None,
-            command=command,
-            payload=payload or {},
-        )
-        self._comm.send_message(envelope)
-
-
-class Producer:
-    """High-level wrapper exposing NC / NDD contexts."""
+class ProducerChannel:
+    """High-level wrapper for a producer channel to the data daemon."""
 
     def __init__(
         self,
@@ -91,15 +28,14 @@ class Producer:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         recording_id: str | None = None,
     ) -> None:
-        """Initialize the producer."""
+        """Initialize the producer channel."""
         self._comm = comm_manager or CommunicationsManager()
         self._comm.create_producer_socket()
-        self.producer_id = id or str(uuid.uuid4())
+        self.channel_id = id or str(uuid.uuid4())
         self.chunk_size = chunk_size
         self.trace_id: str | None = None
         self._stop_event = threading.Event()
         self.recording_id: str | None = recording_id
-        self.id = id or str(uuid.uuid4())
         self._heartbeat_interval = 1.0
         self._heartbeat_thread: threading.Thread | None = None
         self._send_queue: queue.Queue[MessageEnvelope | None] = queue.Queue()
@@ -110,7 +46,7 @@ class Producer:
         self._sequence_cv = threading.Condition()
 
         self._sender_thread = threading.Thread(
-            target=self._sender_loop, name="producer-sender", daemon=True
+            target=self._sender_loop, name="producer-channel-sender", daemon=True
         )
         self._sender_thread.start()
 
@@ -146,8 +82,8 @@ class Producer:
         with self._sequence_cv:
             self._sequence_cv.notify_all()
 
-    def start_producer(self) -> None:
-        """Starts the producer's heartbeat loop.
+    def start_producer_channel(self) -> None:
+        """Starts the producer channel's heartbeat loop.
 
         This function starts a separate thread which is responsible for sending
         periodic heartbeats to the daemon. If a heartbeat fails, it will log
@@ -159,7 +95,7 @@ class Producer:
 
         self._stop_event.clear()
         self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop, name="producer-heartbeat", daemon=True
+            target=self._heartbeat_loop, name="producer-channel-heartbeat", daemon=True
         )
         self._heartbeat_thread.start()
 
@@ -209,7 +145,7 @@ class Producer:
     def start_new_trace(self) -> None:
         """Start a new trace for the given recording."""
         if not self.recording_id:
-            raise ValueError("recording_id is required; set on Producer init.")
+            raise ValueError("recording_id is required; set on ProducerChannel init.")
         self.trace_id = str(uuid.uuid4())
 
     def end_trace(self) -> None:
@@ -231,8 +167,8 @@ class Producer:
             },
         )
 
-    def stop_producer(self) -> None:
-        """Stops the producer and cleans up any associated resources."""
+    def stop_producer_channel(self) -> None:
+        """Stops the producer channel and cleans up any associated resources."""
         self._stop_event.set()
         self._send_queue.put(None)  # poison pill: sender thread closes socket and exits
         if self._sender_thread is not None:
@@ -264,7 +200,7 @@ class Producer:
             self._next_sequence_number += 1
             self._last_enqueued_sequence_number = sequence_number
         envelope = MessageEnvelope(
-            producer_id=self.producer_id,
+            producer_id=self.channel_id,
             command=command,
             payload=payload or {},
             sequence_number=sequence_number,
@@ -355,7 +291,7 @@ class Producer:
             chunk = data[start:end]
 
             payload = DataChunkPayload(
-                channel_id=self.producer_id,
+                channel_id=self.channel_id,
                 recording_id=recording_id,
                 trace_id=trace_id,
                 chunk_index=idx,
@@ -371,19 +307,19 @@ class Producer:
             )
             self._send(CommandType.DATA_CHUNK, {"data_chunk": payload.to_dict()})
 
-    def initialize_new_producer(self) -> None:
-        """Initialize a new producer.
+    def initialize_new_producer_channel(self) -> None:
+        """Initialize a new producer channel.
 
         This method starts a new trace and opens a ring buffer.
         """
         if not self.trace_id:
             self.start_new_trace()
 
-        self.start_producer()
+        self.start_producer_channel()
         self.open_ring_buffer()
 
-    def cleanup_producer(self) -> None:
-        """Clean up the producer.
+    def cleanup_producer_channel(self) -> None:
+        """Clean up the producer channel.
 
         This method stops the trace and closes the ring buffer, releasing any
         associated resources.

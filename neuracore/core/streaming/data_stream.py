@@ -16,7 +16,9 @@ from dataclasses import dataclass
 import numpy as np
 from neuracore_types import CameraData, DataType, NCData
 
-from neuracore.data_daemon.communications_management.producer import Producer
+from neuracore.data_daemon.communications_management.producer_channel import (
+    ProducerChannel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,7 @@ class DataStream(ABC):
 
     Provides common functionality for managing recording state and data
     storage across different types of sensor data streams. Each stream
-    has its own Producer for sending data to the daemon.
+    has its own ProducerChannel for sending data to the daemon.
     """
 
     def __init__(self, data_type: DataType, stream_name: str) -> None:
@@ -50,7 +52,7 @@ class DataStream(ABC):
 
         Args:
             data_type: The type of data this stream handles.
-            stream_name: Unique name for this stream (used as producer ID).
+            stream_name: Unique name for this stream (used as channel ID).
 
         Note:
             This must be kept lightweight and not perform any blocking operations.
@@ -60,7 +62,7 @@ class DataStream(ABC):
         self._latest_data: NCData | None = None
         self._data_type = data_type
         self._stream_name = stream_name
-        self._producer: Producer | None = None
+        self._producer_channel: ProducerChannel | None = None
 
     def start_recording(self, context: DataRecordingContext) -> None:
         """Start recording data for this stream.
@@ -80,9 +82,9 @@ class DataStream(ABC):
             self.stop_recording()
         self._recording = True
         self._context = context
-        self._handle_ensure_producer(context)
+        self._handle_ensure_producer_channel(context)
 
-    def _handle_ensure_producer(self, context: DataRecordingContext) -> None:
+    def _handle_ensure_producer_channel(self, context: DataRecordingContext) -> None:
         """Ensures a producer is available for this data stream.
 
         If the producer does not exist, it is created with the given context.
@@ -93,29 +95,34 @@ class DataStream(ABC):
             context: Recording context containing identifiers for
                 the recording session, robot, and dataset.
         """
-        if self._producer is None:
-            producer_id = f"{self._data_type.value}:\
+        if self._producer_channel is None:
+            channel_id = f"{self._data_type.value}:\
             {self._stream_name}:{uuid.uuid4().hex[:8]}"
-            self._producer = Producer(id=producer_id, recording_id=context.recording_id)
-            self._producer.initialize_new_producer()
+            self._producer_channel = ProducerChannel(
+                id=channel_id, recording_id=context.recording_id
+            )
+            self._producer_channel.initialize_new_producer_channel()
             return
         if (
-            self._producer.recording_id is None
-            or self._producer.recording_id != context.recording_id
+            self._producer_channel.recording_id is None
+            or self._producer_channel.recording_id != context.recording_id
         ):
-            self._producer.set_recording_id(context.recording_id)
+            self._producer_channel.set_recording_id(context.recording_id)
 
         # Reopen producer channel state for each new recording in case
-        # the daemon expired the channel while this producer object was idle.
-        self._producer.start_producer()
-        self._producer.open_ring_buffer()
-        self._producer.start_new_trace()
+        # the daemon expired the channel while this producer channel was idle.
+        self._producer_channel.start_producer_channel()
+        self._producer_channel.open_ring_buffer()
+        self._producer_channel.start_new_trace()
 
     def stop_recording(self) -> None:
         """Stop recording data and end trace if producer exists."""
         self._recording = False
-        if isinstance(self._producer, Producer) and self._producer.trace_id:
-            self._producer.cleanup_producer()
+        if (
+            isinstance(self._producer_channel, ProducerChannel)
+            and self._producer_channel.trace_id
+        ):
+            self._producer_channel.cleanup_producer_channel()
 
     def is_recording(self) -> bool:
         """Check if recording is active.
@@ -139,9 +146,9 @@ class DataStream(ABC):
         Args:
             data: Serialized data bytes to send.
         """
-        if self._producer is None or self._context is None:
+        if self._producer_channel is None or self._context is None:
             return
-        self._producer.send_data(
+        self._producer_channel.send_data(
             data=data,
             data_type=self._data_type,
             robot_instance=self._context.robot_instance,
