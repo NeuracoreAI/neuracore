@@ -22,8 +22,10 @@ from neuracore_types import RobotInstanceIdentifier
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
-from neuracore.data_daemon.communications_management.producer import Producer
-from neuracore.data_daemon.communications_management.producer import (
+from neuracore.data_daemon.communications_management.producer_channel import (
+    ProducerChannel,
+)
+from neuracore.data_daemon.communications_management.recording_context import (
     RecordingContext as DaemonRecordingContext,
 )
 
@@ -352,24 +354,28 @@ class Robot:
         for stream_id, stream in self._data_streams.items():
             try:
                 stream.stop_recording()
-                producer = getattr(stream, "_producer", None)
-                if isinstance(producer, Producer):
+                producer_channel = getattr(stream, "_producer_channel", None)
+                if isinstance(producer_channel, ProducerChannel):
                     cutoff_sequence_number = (
-                        producer.get_last_enqueued_sequence_number()
+                        producer_channel.get_last_enqueued_sequence_number()
                     )
-                    drained = producer.wait_until_sequence_sent(cutoff_sequence_number)
+                    drained = producer_channel.wait_until_sequence_sent(
+                        cutoff_sequence_number
+                    )
                     if not drained:
-                        sent_sequence_number = producer.get_last_sent_sequence_number()
+                        sent_sequence_number = (
+                            producer_channel.get_last_sent_sequence_number()
+                        )
                         logger.warning(
-                            "Producer %s sender stopped before draining cutoff "
+                            "ProducerChannel %s sender stopped before draining cutoff "
                             "(requested=%s sent=%s); using sent cutoff",
-                            producer.producer_id,
+                            producer_channel.channel_id,
                             cutoff_sequence_number,
                             sent_sequence_number,
                         )
                         cutoff_sequence_number = sent_sequence_number
 
-                    producer_stop_sequence_numbers[producer.producer_id] = (
+                    producer_stop_sequence_numbers[producer_channel.channel_id] = (
                         cutoff_sequence_number
                     )
             except Exception:

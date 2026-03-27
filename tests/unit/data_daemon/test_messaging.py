@@ -12,7 +12,9 @@ from neuracore.data_daemon.communications_management.data_bridge import (
     ChannelState,
     Daemon,
 )
-from neuracore.data_daemon.communications_management.producer import Producer
+from neuracore.data_daemon.communications_management.producer_channel import (
+    ProducerChannel,
+)
 from neuracore.data_daemon.communications_management.ring_buffer import RingBuffer
 from neuracore.data_daemon.const import (
     CHUNK_HEADER_FORMAT,
@@ -149,7 +151,7 @@ class DummyComm:
 
 
 def _wait_for_messages(comm: DummyComm, expected: int, timeout: float = 1.0) -> None:
-    """Wait for Producer's sender thread to flush messages to DummyComm."""
+    """Wait for ProducerChannel's sender thread to flush messages to DummyComm."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if len(comm.messages) >= expected:
@@ -160,7 +162,7 @@ def _wait_for_messages(comm: DummyComm, expected: int, timeout: float = 1.0) -> 
 
 def test_producer_open_ring_buffer_sends_payload() -> None:
     comm = DummyComm()
-    producer = Producer(comm_manager=comm)
+    producer = ProducerChannel(comm_manager=comm)
 
     assert comm.socket_requested is True
     producer.open_ring_buffer(size=2048)
@@ -174,7 +176,7 @@ def test_producer_open_ring_buffer_sends_payload() -> None:
 
 def test_producer_send_data_chunks_and_base64() -> None:
     comm = DummyComm()
-    producer = Producer(comm_manager=comm, chunk_size=2, recording_id="rec-1")
+    producer = ProducerChannel(comm_manager=comm, chunk_size=2, recording_id="rec-1")
 
     assert comm.socket_requested is True
     producer.start_new_trace()
