@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import pathlib
 import subprocess
 import threading
@@ -21,6 +22,7 @@ PTS_FRACT = 1000000
 CHUNK_MULTIPLE = 256 * 1024
 MB_CHUNK = 4 * CHUNK_MULTIPLE
 CHUNK_SIZE = 64 * MB_CHUNK
+FFMPEG_PIPE_WRITE_CHUNK_SIZE = 1024 * 1024
 
 LOSSY_VIDEO_NAME = "lossy.mp4"
 LOSSLESS_VIDEO_NAME = "lossless.mp4"
@@ -149,7 +151,7 @@ class PyAVDiskVideoEncoder(BaseDiskVideoEncoder):
             frame = self._av.VideoFrame.from_ndarray(np_frame, format="rgb24")
             frame = frame.reformat(format=self.pixel_format)
             frame.pts = pts
-
+            # Memory spike 4k videos
             for packet in self.stream.encode(frame):
                 self.container.mux(packet)
 
@@ -324,6 +326,10 @@ class FfmpegDiskVideoEncoder(BaseDiskVideoEncoder):
             "-y",
             "-loglevel",
             "error",
+            "-fflags",
+            "nobuffer",
+            "-avioflags",
+            "direct",
             "-f",
             "rawvideo",
             "-pix_fmt",
@@ -344,6 +350,8 @@ class FfmpegDiskVideoEncoder(BaseDiskVideoEncoder):
         cmd.extend([
             "-movflags",
             "frag_keyframe+empty_moov",
+            "-flush_packets",
+            "1",
             str(filepath),
         ])
 
@@ -352,6 +360,7 @@ class FfmpegDiskVideoEncoder(BaseDiskVideoEncoder):
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            bufsize=0,
         )
 
     def add_frame(self, *, timestamp: float, np_frame: np.ndarray) -> None:
@@ -371,8 +380,11 @@ class FfmpegDiskVideoEncoder(BaseDiskVideoEncoder):
                     "Unexpected frame shape for ffmpeg encoder: "
                     f"got={frame.shape} expected={(self.height, self.width, 3)}"
                 )
+            if not frame.flags.c_contiguous:
+                frame = np.ascontiguousarray(frame)
+
             try:
-                self._proc.stdin.write(frame.tobytes())
+                self._write_frame(frame)
             except BrokenPipeError as exc:
                 stderr_msg = ""
                 if self._proc.stderr is not None:
@@ -380,6 +392,22 @@ class FfmpegDiskVideoEncoder(BaseDiskVideoEncoder):
                 raise RuntimeError(
                     f"ffmpeg encoder process closed stdin unexpectedly: {stderr_msg}"
                 ) from exc
+
+    def _write_frame(self, frame: np.ndarray) -> None:
+        """Write a frame to ffmpeg without allocating a new bytes object."""
+        if self._proc.stdin is None:
+            raise RuntimeError("ffmpeg encoder stdin is not available")
+
+        fd = self._proc.stdin.fileno()
+        frame_view = memoryview(frame).cast("B")
+        bytes_written = 0
+
+        while bytes_written < len(frame_view):
+            chunk_end = bytes_written + FFMPEG_PIPE_WRITE_CHUNK_SIZE
+            wrote = os.write(fd, frame_view[bytes_written:chunk_end])
+            if wrote <= 0:
+                raise BrokenPipeError("ffmpeg encoder write returned no progress")
+            bytes_written += wrote
 
     def finish(self) -> None:
         """Close ffmpeg stdin and wait for process completion."""

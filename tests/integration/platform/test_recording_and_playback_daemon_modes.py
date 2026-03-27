@@ -1,4 +1,6 @@
 import os
+import threading
+import time
 import uuid
 
 import psutil
@@ -23,6 +25,63 @@ from recording_playback_shared import (
 import neuracore as nc
 from neuracore.data_daemon.helpers import get_daemon_pid_path
 from neuracore.data_daemon.lifecycle.daemon_lifecycle import pid_is_running
+
+FOUR_K_WIDTH = 3840
+FOUR_K_HEIGHT = 2160
+MAX_6X4K_PEAK_RSS_GROWTH_BYTES = 1024 * 1024 * 1024
+MAX_6X4K_FINAL_RSS_GROWTH_BYTES = 512 * 1024 * 1024
+
+
+def _bytes_to_mib(value: int) -> float:
+    return value / (1024 * 1024)
+
+
+def _process_tree_rss_bytes(root_pid: int) -> int:
+    try:
+        root_proc = psutil.Process(root_pid)
+    except psutil.Error:
+        return 0
+
+    processes = [root_proc]
+    try:
+        processes.extend(root_proc.children(recursive=True))
+    except psutil.Error:
+        pass
+
+    total_rss_bytes = 0
+    seen_pids: set[int] = set()
+    for proc in processes:
+        if proc.pid in seen_pids:
+            continue
+        seen_pids.add(proc.pid)
+        try:
+            total_rss_bytes += int(proc.memory_info().rss)
+        except psutil.Error:
+            continue
+
+    return total_rss_bytes
+
+
+def _monitor_process_tree_rss_while(root_pid: int, work, sample_interval_s: float = 0.1):
+    rss_samples: list[int] = []
+    stop_event = threading.Event()
+
+    def _sample_loop() -> None:
+        while not stop_event.is_set():
+            rss_samples.append(_process_tree_rss_bytes(root_pid))
+            time.sleep(sample_interval_s)
+        rss_samples.append(_process_tree_rss_bytes(root_pid))
+
+    sample_thread = threading.Thread(target=_sample_loop, daemon=True)
+    sample_thread.start()
+
+    try:
+        result = work()
+    finally:
+        stop_event.set()
+        sample_thread.join(timeout=5.0)
+
+    return result, rss_samples
 
 
 def test_ensure_single_daemon_process():
@@ -233,6 +292,84 @@ def test_multiple_producers_lots_of_data_online():
     for result in results:
         wait_for_dataset_ready(
             result["dataset_name"],
+            expected_recording_count=1,
+            timeout_s=HIGH_TIME_TO_DATASET_READY_S,
+        )
+        assert_dataset_isolation(result)
+
+
+def test_six_4k_rgb_producers_do_not_build_up_daemon_ram(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Record six concurrent 4K RGB traces and ensure daemon RSS stays bounded.
+
+    This exercises the full offline local-disk path, including the ffmpeg stage,
+    while summing RSS across the daemon process tree so ffmpeg child processes are
+    included in the measurement. After the offline run, the test switches back
+    online and verifies all recordings recover and remain isolated.
+    """
+
+    specs = build_multi_producer_specs(
+        num_producers=6,
+        wait=True,
+        with_video=True,
+        fps=2,
+        duration_sec=2.5,
+        image_width=FOUR_K_WIDTH,
+        image_height=FOUR_K_HEIGHT,
+    )
+
+    monkeypatch.setenv("NCD_NUM_THREADS", "8")
+
+    offline_results: list[dict[str, object]] = []
+
+    nc.login()
+    with daemon_mode(offline=True):
+        runner_pids = get_runner_pids()
+        assert len(runner_pids) == 1, (
+            "Expected exactly one daemon runner process during 6x4K test, "
+            f"found pids={sorted(runner_pids)}"
+        )
+        daemon_pid = next(iter(runner_pids))
+
+        baseline_rss_bytes = _process_tree_rss_bytes(daemon_pid)
+        offline_results, rss_samples = _monitor_process_tree_rss_while(
+            daemon_pid,
+            lambda: run_multi_producers(specs),
+            sample_interval_s=0.1,
+        )
+
+        assert len(offline_results) == len(specs)
+        assert rss_samples, "Expected at least one daemon RSS sample during 6x4K run"
+
+        peak_rss_bytes = max(rss_samples)
+        final_rss_bytes = _process_tree_rss_bytes(daemon_pid)
+        peak_growth_bytes = max(0, peak_rss_bytes - baseline_rss_bytes)
+        final_growth_bytes = max(0, final_rss_bytes - baseline_rss_bytes)
+
+        assert peak_growth_bytes <= MAX_6X4K_PEAK_RSS_GROWTH_BYTES, (
+            "Daemon RSS grew too much during 6x4K offline recording: "
+            f"baseline={_bytes_to_mib(baseline_rss_bytes):.1f} MiB "
+            f"peak={_bytes_to_mib(peak_rss_bytes):.1f} MiB "
+            f"growth={_bytes_to_mib(peak_growth_bytes):.1f} MiB "
+            f"limit={_bytes_to_mib(MAX_6X4K_PEAK_RSS_GROWTH_BYTES):.1f} MiB"
+        )
+        assert final_growth_bytes <= MAX_6X4K_FINAL_RSS_GROWTH_BYTES, (
+            "Daemon RSS did not drain after 6x4K offline recording completed: "
+            f"baseline={_bytes_to_mib(baseline_rss_bytes):.1f} MiB "
+            f"final={_bytes_to_mib(final_rss_bytes):.1f} MiB "
+            f"growth={_bytes_to_mib(final_growth_bytes):.1f} MiB "
+            f"limit={_bytes_to_mib(MAX_6X4K_FINAL_RSS_GROWTH_BYTES):.1f} MiB"
+        )
+
+        for result in offline_results:
+            recording_id = str(result["recording_id"])
+            wait_for_recording_to_exist_in_db(recording_id, timeout_s=30.0)
+
+    nc.login()
+    for result in offline_results:
+        wait_for_dataset_ready(
+            str(result["dataset_name"]),
             expected_recording_count=1,
             timeout_s=HIGH_TIME_TO_DATASET_READY_S,
         )

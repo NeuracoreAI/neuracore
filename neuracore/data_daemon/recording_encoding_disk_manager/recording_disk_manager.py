@@ -10,6 +10,8 @@ from typing import Any
 from neuracore.data_daemon.config_manager.helpers import calculate_storage_limit
 from neuracore.data_daemon.const import (
     DEFAULT_FLUSH_BYTES,
+    DEFAULT_RGB_FLUSH_BYTES,
+    DEFAULT_TRACE_MESSAGE_QUEUE_MAXSIZE,
     DEFAULT_STORAGE_FREE_FRACTION,
     MIN_FREE_DISK_BYTES,
     SENTINEL,
@@ -44,6 +46,8 @@ class RecordingDiskManager:
         loop_manager: EventLoopManager,
         emitter: Emitter,
         flush_bytes: int | None = None,
+        rgb_flush_bytes: int | None = None,
+        trace_message_queue_maxsize: int = DEFAULT_TRACE_MESSAGE_QUEUE_MAXSIZE,
         storage_limit_bytes: int | None = None,
         recordings_root: str | None = None,
     ) -> None:
@@ -53,11 +57,20 @@ class RecordingDiskManager:
             loop_manager: EventLoopManager instance for scheduling workers.
             emitter: Event emitter for cross-component signaling.
             flush_bytes: Flush threshold for buffered raw writes.
+            rgb_flush_bytes: Flush threshold for buffered RGB batch writes.
+            trace_message_queue_maxsize: Max complete messages buffered between
+                the daemon and disk writer before upstream backpressure applies.
             storage_limit_bytes: Max bytes allowed for on-disk trace storage.
             recordings_root: Root directory for per-recording trace folders.
         """
         self._emitter = emitter
         self.flush_bytes = flush_bytes or DEFAULT_FLUSH_BYTES
+        self.rgb_flush_bytes = (
+            rgb_flush_bytes
+            if rgb_flush_bytes is not None
+            else DEFAULT_RGB_FLUSH_BYTES
+        )
+        self.trace_message_queue_maxsize = max(1, int(trace_message_queue_maxsize))
         self.storage_limit_bytes = storage_limit_bytes
         self._recordings_root = (
             Path(recordings_root)
@@ -66,7 +79,7 @@ class RecordingDiskManager:
         )
 
         self.trace_message_queue: asyncio.Queue[CompleteMessage | object] = (
-            asyncio.Queue()
+            asyncio.Queue(maxsize=self.trace_message_queue_maxsize)
         )
 
         self.recording_traces: dict[str, dict[str, Any]] = {}
@@ -126,6 +139,7 @@ class RecordingDiskManager:
 
         self._writer = _RawBatchWriter(
             flush_bytes=self.flush_bytes,
+            rgb_flush_bytes=self.rgb_flush_bytes,
             trace_message_queue=self.trace_message_queue,
             filesystem=self._filesystem,
             storage_budget=self._storage_budget,
@@ -173,9 +187,13 @@ class RecordingDiskManager:
         """
         if self._loop_manager is None:
             raise RuntimeError("RecordingDiskManager not started")
-        self._loop_manager.schedule_on_general_loop(
+        future = self._loop_manager.schedule_on_general_loop(
             self.trace_message_queue.put(complete_message)
         )
+        # Block until the queue accepts the item so a slow disk writer applies
+        # backpressure to the daemon instead of allowing complete messages to
+        # accumulate unbounded in RAM.
+        future.result()
 
     async def request_stop(self) -> None:
         """Request a graceful stop of the worker tasks.

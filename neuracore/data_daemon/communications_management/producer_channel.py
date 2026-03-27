@@ -7,6 +7,7 @@ import math
 import queue
 import threading
 import uuid
+from collections.abc import Sequence
 
 from neuracore.data_daemon.communications_management.communications_manager import (
     CommunicationsManager,
@@ -17,6 +18,8 @@ from neuracore.data_daemon.models import CommandType, DataChunkPayload, DataType
 
 logger = logging.getLogger(__name__)
 
+BytePart = bytes | bytearray | memoryview
+
 
 class ProducerChannel:
     """High-level wrapper for a producer channel to the data daemon."""
@@ -26,6 +29,7 @@ class ProducerChannel:
         id: str | None = None,
         comm_manager: CommunicationsManager | None = None,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
+        send_queue_maxsize: int = 0,
         recording_id: str | None = None,
     ) -> None:
         """Initialize the producer channel."""
@@ -33,17 +37,21 @@ class ProducerChannel:
         self._comm.create_producer_socket()
         self.channel_id = id or str(uuid.uuid4())
         self.chunk_size = chunk_size
+        self.send_queue_maxsize = max(0, int(send_queue_maxsize))
         self.trace_id: str | None = None
         self._stop_event = threading.Event()
         self.recording_id: str | None = recording_id
         self._heartbeat_interval = 1.0
         self._heartbeat_thread: threading.Thread | None = None
-        self._send_queue: queue.Queue[MessageEnvelope | None] = queue.Queue()
+        self._send_queue: queue.Queue[MessageEnvelope | None] = queue.Queue(
+            maxsize=self.send_queue_maxsize
+        )
         self._sender_thread: threading.Thread | None = None
         self._next_sequence_number = 1
         self._last_enqueued_sequence_number = 0
         self._last_socket_sent_sequence_number = 0
         self._sequence_cv = threading.Condition()
+        self._enqueue_lock = threading.Lock()
 
         self._sender_thread = threading.Thread(
             target=self._sender_loop, name="producer-channel-sender", daemon=True
@@ -271,6 +279,89 @@ class ProducerChannel:
         if not data:
             return
 
+        self.send_data_parts(
+            (memoryview(data),),
+            total_bytes=len(data),
+            data_type=data_type,
+            robot_instance=robot_instance,
+            data_type_name=data_type_name,
+            robot_id=robot_id,
+            robot_name=robot_name,
+            dataset_id=dataset_id,
+            dataset_name=dataset_name,
+        )
+
+    @staticmethod
+    def _normalise_parts(parts: Sequence[BytePart]) -> list[memoryview]:
+        views: list[memoryview] = []
+        for part in parts:
+            view = part if isinstance(part, memoryview) else memoryview(part)
+            if view.ndim != 1 or view.itemsize != 1 or view.format != "B":
+                view = view.cast("B")
+            if len(view) > 0:
+                views.append(view)
+        return views
+
+    def _iter_chunk_views(
+        self,
+        parts: Sequence[memoryview],
+    ) -> list[bytes | memoryview]:
+        if not parts:
+            return []
+
+        chunks: list[bytes | memoryview] = []
+        chunk_parts: list[memoryview] = []
+        remaining = self.chunk_size
+
+        for part in parts:
+            start = 0
+            part_len = len(part)
+            while start < part_len:
+                take = min(remaining, part_len - start)
+                chunk_parts.append(part[start : start + take])
+                start += take
+                remaining -= take
+
+                if remaining == 0:
+                    chunks.append(
+                        chunk_parts[0]
+                        if len(chunk_parts) == 1
+                        else b"".join(chunk_parts)
+                    )
+                    chunk_parts = []
+                    remaining = self.chunk_size
+
+        if chunk_parts:
+            chunks.append(
+                chunk_parts[0] if len(chunk_parts) == 1 else b"".join(chunk_parts)
+            )
+
+        return chunks
+
+    def send_data_parts(
+        self,
+        parts: Sequence[BytePart],
+        *,
+        total_bytes: int | None = None,
+        data_type: DataType,
+        robot_instance: int,
+        data_type_name: str,
+        robot_id: str | None = None,
+        robot_name: str | None = None,
+        dataset_id: str | None = None,
+        dataset_name: str | None = None,
+    ) -> None:
+        """Send a logical payload assembled from multiple byte-like parts.
+
+        This avoids materializing a large contiguous payload in memory before
+        chunking it for transport.
+        """
+        normalised_parts = self._normalise_parts(parts)
+        if total_bytes is None:
+            total_bytes = sum(len(view) for view in normalised_parts)
+        if total_bytes <= 0:
+            return
+
         trace_id = self.trace_id
         recording_id = self.recording_id
         if not trace_id or not recording_id:
@@ -284,11 +375,14 @@ class ProducerChannel:
         if not dataset_id and not dataset_name:
             raise ValueError("Dataset ID or name required")
 
-        total_chunks = math.ceil(len(data) / self.chunk_size)
-        for idx in range(total_chunks):
-            start = idx * self.chunk_size
-            end = min(start + self.chunk_size, len(data))
-            chunk = data[start:end]
+        total_chunks = math.ceil(total_bytes / self.chunk_size)
+        chunks = self._iter_chunk_views(normalised_parts)
+        if len(chunks) != total_chunks:
+            raise RuntimeError(
+                "Chunk count mismatch while serializing payload for transport"
+            )
+
+        for idx, chunk in enumerate(chunks):
 
             payload = DataChunkPayload(
                 channel_id=self.channel_id,

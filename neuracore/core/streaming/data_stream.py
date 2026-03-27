@@ -17,7 +17,12 @@ import numpy as np
 from neuracore_types import CameraData, DataType, NCData
 
 from neuracore.data_daemon.communications_management.producer_channel import (
-    ProducerChannel,
+    ProducerChannel
+)
+from neuracore.data_daemon.const import (
+    DEFAULT_VIDEO_CHUNK_SIZE,
+    DEFAULT_VIDEO_RING_BUFFER_SIZE,
+    DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
 )
 
 logger = logging.getLogger(__name__)
@@ -159,6 +164,27 @@ class DataStream(ABC):
             dataset_name=self._context.dataset_name,
         )
 
+    def _send_to_daemon_parts(
+        self,
+        parts: tuple[bytes | memoryview, ...],
+        *,
+        total_bytes: int,
+    ) -> None:
+        """Send a logical payload assembled from multiple byte-like parts."""
+        if self._producer is None or self._context is None:
+            return
+        self._producer.send_data_parts(
+            parts=parts,
+            total_bytes=total_bytes,
+            data_type=self._data_type,
+            robot_instance=self._context.robot_instance,
+            data_type_name=self._stream_name,
+            robot_id=self._context.robot_id,
+            robot_name=self._context.robot_name,
+            dataset_id=self._context.dataset_id,
+            dataset_name=self._context.dataset_name,
+        )
+
 
 class JsonDataStream(DataStream):
     """Stream that logs and sends structured JSON data to the daemon.
@@ -214,6 +240,12 @@ class VideoDataStream(DataStream):
         self.camera_id = camera_id
         self.width = width
         self.height = height
+        self._producer_chunk_size = DEFAULT_VIDEO_CHUNK_SIZE
+        self._producer_ring_buffer_size = max(
+            DEFAULT_VIDEO_RING_BUFFER_SIZE,
+            self._producer_chunk_size * 4,
+        )
+        self._producer_send_queue_maxsize = DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE
 
     def log(self, metadata: CameraData, frame: np.ndarray) -> None:
         """Log video frame data.
@@ -236,10 +268,17 @@ class VideoDataStream(DataStream):
         metadata_json = json.dumps(metadata_dict).encode("utf-8")
 
         # Pack: [metadata_len (4 bytes)] [metadata_json] [frame_bytes]
-        frame_bytes = frame.tobytes()
         header = struct.pack("<I", len(metadata_json))
-        data = header + metadata_json + frame_bytes
-        self._send_to_daemon(data)
+
+        # Chunk across the header, metadata, and frame buffer directly so we do
+        # not materialize another full-frame copy before transport.
+        frame_source = frame if frame.flags.c_contiguous else np.ascontiguousarray(frame)
+        frame_view = memoryview(frame_source).cast("B")
+        total_bytes = len(header) + len(metadata_json) + len(frame_view)
+        self._send_to_daemon_parts(
+            (header, metadata_json, frame_view),
+            total_bytes=total_bytes,
+        )
 
 
 class DepthDataStream(VideoDataStream):

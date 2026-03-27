@@ -21,6 +21,7 @@ from neuracore.data_daemon.recording_encoding_disk_manager.encoding.json_trace i
 )
 from neuracore.data_daemon.recording_encoding_disk_manager.encoding.video_trace import (
     VideoTrace,
+    rgb_batch_metadata_path,
 )
 
 from ..core.trace_filesystem import _TraceFilesystem
@@ -250,19 +251,25 @@ class _BatchEncoderWorker:
     @staticmethod
     async def _remove_file(path: Path) -> None:
         """Remove a file, ignoring if it doesn't exist."""
-        try:
-            await aiofiles.os.remove(path)
-        except FileNotFoundError:
-            pass
-        except RuntimeError as exc:
-            if _is_executor_shutdown_runtime_error(exc):
-                logger.debug(
-                    "Skipping batch file cleanup during executor shutdown: %s", path
-                )
-                return
-            logger.warning("Failed to remove batch file: %s", path, exc_info=True)
-        except OSError:
-            logger.warning("Failed to remove batch file: %s", path, exc_info=True)
+        paths = [path]
+        if path.suffix == ".rgb":
+            paths.append(rgb_batch_metadata_path(path))
+
+        for target in paths:
+            try:
+                await aiofiles.os.remove(target)
+            except FileNotFoundError:
+                pass
+            except RuntimeError as exc:
+                if _is_executor_shutdown_runtime_error(exc):
+                    logger.debug(
+                        "Skipping batch file cleanup during executor shutdown: %s",
+                        target,
+                    )
+                    return
+                logger.warning("Failed to remove batch file: %s", target, exc_info=True)
+            except OSError:
+                logger.warning("Failed to remove batch file: %s", target, exc_info=True)
 
     @staticmethod
     def _batch_index(path: Path) -> int:
@@ -324,6 +331,10 @@ class _BatchEncoderWorker:
                 otherwise False (trace aborted).
         """
         try:
+            if batch_job.batch_path.suffix == ".rgb" and hasattr(encoder, "add_rgb_batch"):
+                encoder.add_rgb_batch(batch_job.batch_path)
+                return True
+
             async with aiofiles.open(batch_job.batch_path, "rb") as f:
                 raw_bytes = await f.read()
             for raw_line in raw_bytes.splitlines():

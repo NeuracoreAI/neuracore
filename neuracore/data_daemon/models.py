@@ -432,7 +432,7 @@ class CompleteMessage:
     data_type_name: str
     robot_instance: int
     received_at: str
-    data: str
+    data: bytes
     final_chunk: bool
 
     @classmethod
@@ -481,7 +481,7 @@ class CompleteMessage:
             robot_instance=robot_instance,
             final_chunk=final_chunk,
             received_at=datetime.now(timezone.utc).isoformat(),
-            data=base64.b64encode(data).decode("ascii"),
+            data=bytes(data),
         )
 
     def to_dict(self) -> dict:
@@ -508,7 +508,7 @@ class CompleteMessage:
             "data_type_name": self.data_type_name,
             "robot_instance": self.robot_instance,
             "received_at": self.received_at,
-            "data": self.data,
+            "data": base64.b64encode(self.data).decode("ascii"),
             "final_chunk": self.final_chunk,
         }
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import struct
 import threading
 import time
 import uuid
@@ -51,6 +52,32 @@ class FakeVideoTrace:
 
         self._frames += 1
 
+    def add_rgb_batch(self, batch_path: Path) -> None:
+        meta_path = batch_path.with_suffix(".meta.jsonl")
+        with meta_path.open("rb") as meta_f, batch_path.open("rb") as rgb_f:
+            for raw_line in meta_f:
+                meta_line = raw_line.strip()
+                if not meta_line:
+                    continue
+                parsed = json.loads(meta_line.decode("utf-8"))
+                frame_nbytes = 0
+                frame_only = False
+                if isinstance(parsed, dict):
+                    frame_only = bool(parsed.get("__raw_frame_only"))
+                    raw_frame_nbytes = parsed.get("frame_nbytes")
+                    if isinstance(raw_frame_nbytes, int) and raw_frame_nbytes >= 0:
+                        frame_nbytes = raw_frame_nbytes
+                if not frame_only:
+                    self.add_payload(
+                        json.dumps(
+                            parsed,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    )
+                if frame_nbytes > 0:
+                    self.add_payload(rgb_f.read(frame_nbytes))
+
     def finish(self) -> None:
         (self.output_dir / "lossy.mp4").write_bytes(b"lossy")
         (self.output_dir / "lossless.mp4").write_bytes(b"lossless")
@@ -77,6 +104,19 @@ def _make_rgb24_frame_bytes(frame_index: int, width: int, height: int) -> bytes:
             buf[i + 2] = (x + y + shift) & 0xFF
             i += 3
     return bytes(buf)
+
+
+def _make_combined_video_payload(
+    *, width: int, height: int, timestamp: float, frame: bytes
+) -> bytes:
+    metadata = {
+        "width": width,
+        "height": height,
+        "timestamp": timestamp,
+        "frame_nbytes": len(frame),
+    }
+    metadata_json = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+    return struct.pack("<I", len(metadata_json)) + metadata_json + frame
 
 
 def _wait_for(pred: Callable[[], bool], timeout: float) -> bool:
@@ -132,13 +172,23 @@ def rdm_factory(
     loop_manager, rdm_emitter = loop_manager_with_emitter
     rdm_instances = []
 
-    def _make(*, storage_limit: int | None, flush_bytes: int = 1):
+    def _make(
+        *,
+        storage_limit: int | None,
+        flush_bytes: int = 1,
+        rgb_flush_bytes: int | None = None,
+        trace_message_queue_maxsize: int = 1,
+    ):
         recordings_root = tmp_path / "recordings"
 
         rdm = rdm_module.RecordingDiskManager(
             loop_manager=loop_manager,
             emitter=rdm_emitter,
             flush_bytes=flush_bytes,
+            rgb_flush_bytes=(
+                flush_bytes if rgb_flush_bytes is None else rgb_flush_bytes
+            ),
+            trace_message_queue_maxsize=trace_message_queue_maxsize,
             storage_limit_bytes=storage_limit,
             recordings_root=str(recordings_root),
         )
@@ -411,3 +461,120 @@ def test_rdm_encoder_creation_failure_aborts_one_trace_but_other_completes(
     assert set(by_trace) == {bad_trace_id, good_trace_id}
     assert max(by_trace[bad_trace_id]) == 0
     assert max(by_trace[good_trace_id]) > 0
+
+
+def test_rdm_rgb_trace_uses_rgb_batch_flow(
+    rdm_factory,
+) -> None:
+    rdm, recordings_root = rdm_factory(storage_limit=None, flush_bytes=1)
+
+    recording_id = str(uuid.uuid4())
+    trace_id = "camera_front"
+    width, height = 4, 3
+    frame = _make_rgb24_frame_bytes(0, width, height)
+    payload = _make_combined_video_payload(
+        width=width,
+        height=height,
+        timestamp=1.0,
+        frame=frame,
+    )
+
+    rdm.enqueue(
+        CompleteMessage.from_bytes(
+            producer_id="p",
+            recording_id=recording_id,
+            trace_id=trace_id,
+            data_type=DataType.RGB_IMAGES,
+            data_type_name="camera_front",
+            robot_instance=0,
+            data=payload,
+            final_chunk=True,
+        )
+    )
+
+    trace_dir = recordings_root / recording_id / "RGB_IMAGES" / trace_id
+    assert _wait_for(lambda: (trace_dir / "trace.json").is_file(), timeout=10.0) is True
+    assert (trace_dir / "lossy.mp4").is_file()
+    assert (trace_dir / "lossless.mp4").is_file()
+
+
+def test_rdm_enqueue_blocks_when_rgb_writer_queue_is_full(
+    monkeypatch: pytest.MonkeyPatch,
+    rdm_factory,
+) -> None:
+    from neuracore.data_daemon.recording_encoding_disk_manager.workers import (
+        raw_batch_writer as raw_batch_writer_module,
+    )
+
+    started = threading.Event()
+    allow_continue = threading.Event()
+
+    real_append_rgb_payload = raw_batch_writer_module._RawBatchWriter._append_rgb_payload
+
+    async def blocked_append_rgb_payload(self, writer_state, payload_bytes):
+        if not started.is_set():
+            started.set()
+            await asyncio.to_thread(allow_continue.wait)
+        return await real_append_rgb_payload(self, writer_state, payload_bytes)
+
+    monkeypatch.setattr(
+        raw_batch_writer_module._RawBatchWriter,
+        "_append_rgb_payload",
+        blocked_append_rgb_payload,
+        raising=True,
+    )
+
+    rdm, _recordings_root = rdm_factory(
+        storage_limit=None,
+        flush_bytes=1024 * 1024,
+        trace_message_queue_maxsize=1,
+    )
+
+    recording_id = str(uuid.uuid4())
+    trace_id = "camera_front"
+    width, height = 4, 3
+
+    def _message(frame_index: int) -> CompleteMessage:
+        return CompleteMessage.from_bytes(
+            producer_id="p",
+            recording_id=recording_id,
+            trace_id=trace_id,
+            data_type=DataType.RGB_IMAGES,
+            data_type_name="camera_front",
+            robot_instance=0,
+            data=_make_combined_video_payload(
+                width=width,
+                height=height,
+                timestamp=float(frame_index),
+                frame=_make_rgb24_frame_bytes(frame_index, width, height),
+            ),
+            final_chunk=False,
+        )
+
+    rdm.enqueue(_message(0))
+    assert started.wait(timeout=5.0) is True
+
+    rdm.enqueue(_message(1))
+
+    third_enqueue_finished = threading.Event()
+    third_enqueue_errors: list[BaseException] = []
+
+    def _enqueue_third_message() -> None:
+        try:
+            rdm.enqueue(_message(2))
+        except BaseException as exc:  # pragma: no cover - surfaced in assertion
+            third_enqueue_errors.append(exc)
+        finally:
+            third_enqueue_finished.set()
+
+    enqueue_thread = threading.Thread(target=_enqueue_third_message, daemon=True)
+    enqueue_thread.start()
+
+    time.sleep(0.15)
+    assert third_enqueue_finished.is_set() is False
+
+    allow_continue.set()
+
+    assert third_enqueue_finished.wait(timeout=5.0) is True
+    enqueue_thread.join(timeout=1.0)
+    assert third_enqueue_errors == []

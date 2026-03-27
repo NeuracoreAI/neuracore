@@ -255,3 +255,34 @@ def test_video_trace_accepts_depth_float32_payload(
     assert (out_dir / "lossy.mp4").is_file()
     assert (out_dir / "lossless.mp4").is_file()
     assert (out_dir / "trace.json").is_file()
+
+
+def test_video_trace_add_rgb_batch_streams_metadata_and_frames(
+    tmp_path: Path,
+    patched_video_trace,
+) -> None:
+    VideoTrace = patched_video_trace.VideoTrace
+    out_dir = tmp_path / "video_batch"
+    vt = VideoTrace(output_dir=out_dir)
+
+    batch_path = tmp_path / "batch_000000.rgb"
+    meta_path = patched_video_trace.rgb_batch_metadata_path(batch_path)
+
+    meta = {"width": 4, "height": 3, "timestamp": 1.0, "frame_nbytes": 36}
+    frame = bytes([10, 20, 30] * 12)
+
+    batch_path.write_bytes(frame)
+    meta_path.write_bytes(
+        json.dumps(meta, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        + b"\n"
+    )
+
+    vt.add_rgb_batch(batch_path)
+    vt.finish()
+
+    assert (out_dir / "lossy.mp4").is_file()
+    assert (out_dir / "lossless.mp4").is_file()
+    trace = json.loads((out_dir / "trace.json").read_text(encoding="utf-8"))
+    assert trace[0]["width"] == 4
+    assert trace[0]["height"] == 3
+    assert trace[0]["frame_idx"] == 0

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pathlib
 from dataclasses import dataclass
+from typing import Any
 
 from neuracore_types import DataType
 
@@ -31,8 +32,10 @@ class _WriteState:
         trace_key: Key identifying the trace.
         trace_dir: Directory where trace files are written.
         batch_index: Current batch index for raw batch files.
-        buffer: Buffered newline-delimited message envelopes.
+        buffer: Buffered newline-delimited message envelopes for non-RGB traces.
         trace_done: Whether the trace has received its final chunk.
+        rgb_batch_bytes: Bytes already appended to the active RGB batch.
+        rgb_batch_started: Whether the active RGB batch file exists on disk.
     """
 
     trace_key: _TraceKey
@@ -40,6 +43,10 @@ class _WriteState:
     batch_index: int
     buffer: bytearray
     trace_done: bool
+    rgb_batch_bytes: int = 0
+    rgb_batch_started: bool = False
+    rgb_batch_file: Any | None = None
+    rgb_metadata_file: Any | None = None
 
 
 @dataclass

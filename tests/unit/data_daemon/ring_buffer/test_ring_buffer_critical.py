@@ -126,7 +126,7 @@ def test_end_to_end_data_integrity(emitter) -> None:
     daemon._drain_channel_messages()
 
     assert len(mock_rdm.enqueued) == 1
-    received_data = base64.b64decode(mock_rdm.enqueued[0].data)
+    received_data = mock_rdm.enqueued[0].data
     assert received_data == original_data
 
 
@@ -184,7 +184,7 @@ def test_multi_chunk_reassembly_integrity(emitter) -> None:
     daemon._drain_channel_messages()
 
     assert len(mock_rdm.enqueued) == 1
-    reassembled = base64.b64decode(mock_rdm.enqueued[0].data)
+    reassembled = mock_rdm.enqueued[0].data
     assert reassembled == original_data
 
 
@@ -232,7 +232,7 @@ def test_binary_payload_through_pipeline(emitter) -> None:
     daemon._drain_channel_messages()
 
     assert len(mock_rdm.enqueued) == 1
-    received = base64.b64decode(mock_rdm.enqueued[0].data)
+    received = mock_rdm.enqueued[0].data
     assert received == binary_data
 
 
@@ -525,6 +525,6 @@ def test_concurrent_traces_isolation(emitter) -> None:
 
     assert len(mock_rdm.enqueued) == 2
 
-    results = {msg.trace_id: base64.b64decode(msg.data) for msg in mock_rdm.enqueued}
+    results = {msg.trace_id: msg.data for msg in mock_rdm.enqueued}
     assert results["trace-X"] == b"X0X1"
     assert results["trace-Y"] == b"Y0Y1"

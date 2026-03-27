@@ -25,7 +25,7 @@ class EventLoopManager:
     ensuring proper startup, cross-loop communication, and graceful shutdown.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, num_threads: int | None = None) -> None:
         """Initialize the event loop manager."""
         # Event loops
         self.general_loop: asyncio.AbstractEventLoop | None = None
@@ -40,6 +40,7 @@ class EventLoopManager:
         self._general_ready: threading.Event = threading.Event()
 
         self._started = False
+        self._num_threads = max(2, int(num_threads or 2))
 
     def start(self) -> Emitter:
         """Start both event loops in separate threads.
@@ -127,7 +128,8 @@ class EventLoopManager:
         try:
             loop = asyncio.new_event_loop()
             executor = ThreadPoolExecutor(
-                max_workers=2, thread_name_prefix="ndd-general-async-executor"
+                max_workers=self._num_threads,
+                thread_name_prefix="ndd-general-async-executor",
             )
             loop.set_default_executor(executor)
             asyncio.set_event_loop(loop)

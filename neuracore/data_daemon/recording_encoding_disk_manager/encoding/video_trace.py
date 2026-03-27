@@ -29,8 +29,79 @@ CHUNK_SIZE = 64 * MB_CHUNK
 LOSSY_VIDEO_NAME = "lossy.mp4"
 LOSSLESS_VIDEO_NAME = "lossless.mp4"
 TRACE_FILE = "trace.json"
+RGB_BATCH_FRAME_ONLY_MARKER = "__raw_frame_only"
 
 logger = logging.getLogger(__name__)
+
+
+def rgb_batch_metadata_path(batch_path: pathlib.Path) -> pathlib.Path:
+    """Return the sidecar metadata path for a raw RGB batch file."""
+    return batch_path.with_suffix(".meta.jsonl")
+
+
+def _try_parse_json_bytes(payload: bytes) -> Any | None:
+    """Attempt to parse UTF-8 JSON bytes, returning None on failure."""
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def _encode_json_bytes(obj: Any) -> bytes:
+    """Encode JSON using the compact wire format used by the daemon."""
+    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+
+
+def split_video_payload_for_rgb_batch(payload: bytes) -> tuple[bytes | None, bytes | None]:
+    """Split a video payload into metadata bytes and raw frame bytes for disk spooling."""
+    parsed = _try_parse_json_bytes(payload)
+    if parsed is not None:
+        return _encode_json_bytes(parsed), None
+
+    if len(payload) >= 4:
+        metadata_len = struct.unpack("<I", payload[:4])[0]
+        if 0 < metadata_len <= len(payload) - 4:
+            json_bytes = payload[4 : 4 + metadata_len]
+            parsed = _try_parse_json_bytes(json_bytes)
+            if parsed is not None:
+                frame_start = 4 + metadata_len
+                frame_nbytes: int | None = None
+                if isinstance(parsed, dict):
+                    frame_nbytes_raw = parsed.get("frame_nbytes")
+                    if isinstance(frame_nbytes_raw, int) and frame_nbytes_raw >= 0:
+                        frame_nbytes = frame_nbytes_raw
+
+                if frame_nbytes is None:
+                    frame_bytes = payload[frame_start:]
+                else:
+                    frame_end = frame_start + frame_nbytes
+                    if frame_end > len(payload):
+                        raise ValueError(
+                            "Combined packet shorter than declared frame_nbytes: "
+                            f"frame_start={frame_start} frame_nbytes={frame_nbytes} "
+                            f"payload_len={len(payload)}"
+                        )
+                    if frame_end != len(payload):
+                        raise ValueError(
+                            "Combined packet has trailing bytes after frame payload: "
+                            f"declared_frame_nbytes={frame_nbytes} "
+                            f"trailing_bytes={len(payload) - frame_end}"
+                        )
+                    frame_bytes = payload[frame_start:frame_end]
+
+                if isinstance(parsed, dict) and parsed.get("frame_nbytes") != len(frame_bytes):
+                    parsed = dict(parsed)
+                    parsed["frame_nbytes"] = len(frame_bytes)
+
+                return _encode_json_bytes(parsed), frame_bytes
+
+    frame_only_meta = {
+        RGB_BATCH_FRAME_ONLY_MARKER: True,
+        "frame_nbytes": len(payload),
+    }
+    return _encode_json_bytes(frame_only_meta), payload
 
 
 class VideoTrace:
@@ -103,6 +174,48 @@ class VideoTrace:
 
         self._handle_frame_bytes(payload)
 
+    def add_rgb_batch(self, batch_path: pathlib.Path) -> None:
+        """Consume a raw RGB batch file and its metadata sidecar from disk."""
+        metadata_path = rgb_batch_metadata_path(batch_path)
+
+        with metadata_path.open("rb") as meta_fh, batch_path.open("rb") as rgb_fh:
+            for raw_line in meta_fh:
+                meta_line = raw_line.strip()
+                if not meta_line:
+                    continue
+
+                parsed = self._try_parse_json(meta_line)
+                if parsed is None:
+                    raise ValueError(f"Invalid RGB batch metadata line in {metadata_path}")
+
+                frame_nbytes = 0
+                is_frame_only = False
+                if isinstance(parsed, dict):
+                    is_frame_only = bool(parsed.get(RGB_BATCH_FRAME_ONLY_MARKER))
+                    frame_nbytes_raw = parsed.get("frame_nbytes")
+                    if isinstance(frame_nbytes_raw, int) and frame_nbytes_raw >= 0:
+                        frame_nbytes = frame_nbytes_raw
+
+                if not is_frame_only:
+                    self._handle_metadata(parsed)
+
+                if frame_nbytes > 0:
+                    frame_bytes = rgb_fh.read(frame_nbytes)
+                    if len(frame_bytes) != frame_nbytes:
+                        raise ValueError(
+                            "RGB batch shorter than declared frame_nbytes: "
+                            f"batch_path={batch_path} expected={frame_nbytes} "
+                            f"actual={len(frame_bytes)}"
+                        )
+                    self._handle_frame_bytes(frame_bytes)
+
+            trailing = rgb_fh.read(1)
+            if trailing:
+                raise ValueError(
+                    "RGB batch has trailing bytes after consuming metadata entries: "
+                    f"batch_path={batch_path}"
+                )
+
     def _try_handle_combined_packet(self, payload: bytes) -> bool:
         """Try to parse payload as combined [4B len][JSON][frame] format.
 
@@ -166,10 +279,7 @@ class VideoTrace:
         Returns:
             Parsed JSON object if parsing succeeds, otherwise None.
         """
-        try:
-            return json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return None
+        return _try_parse_json_bytes(payload)
 
     def _handle_metadata(self, obj: Any) -> None:
         """Handle a decoded metadata object and store it.
@@ -218,7 +328,12 @@ class VideoTrace:
                 height=self.height,
                 codec="libx264",
                 pixel_format="yuv444p10le",
-                codec_context_options={"qp": "0", "preset": "ultrafast"},
+                codec_context_options={
+                    "qp": "0",
+                    "preset": "ultrafast",
+                    "tune": "zerolatency",
+                    "flush_packets": "1",
+                },
                 chunk_size=self.chunk_size,
             )
 
@@ -229,7 +344,12 @@ class VideoTrace:
                 height=self.height,
                 codec="libx264",
                 pixel_format="yuv420p",
-                codec_context_options={"qp": "23", "preset": "ultrafast"},
+                codec_context_options={
+                    "qp": "23",
+                    "preset": "ultrafast",
+                    "tune": "zerolatency",
+                    "flush_packets": "1",
+                },
                 chunk_size=self.chunk_size,
             )
 
@@ -262,7 +382,6 @@ class VideoTrace:
             np_frame_lossless = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
                 (self.height, self.width, 3)
             )
-            # For RGB, use the same frame for lossless and lossy encoding
             np_frame_lossy = np_frame_lossless
         elif len(frame_bytes) in (depth_f16_size, depth_f32_size):
             depth_dtype = (
@@ -274,11 +393,9 @@ class VideoTrace:
             depth_frame = np.nan_to_num(depth_frame, nan=0.0, posinf=0.0, neginf=0.0)
             depth_frame = np.clip(depth_frame, 0, MAX_DEPTH)
 
-            # On first depth frame, save max depth for this recording
             if self._depth_max is None:
                 self._depth_max = float(np.max(depth_frame))
 
-            # For depth, ensure maximum precision for lossless storage
             np_frame_lossless = depth_to_rgb_storage(depth_frame)
             np_frame_lossy = depth_to_rgb_visualization(
                 depth_frame, max_depth=self._depth_max
