@@ -132,6 +132,7 @@ def _attach_legacy_upload_manager_compat(manager: UploadManager) -> None:
         data_type_name: str,
         recording_id: str,
         bytes_uploaded: int,
+        session_uris: dict[str, str] | None = None,
     ) -> bool:
         external_trace_id = await manager._register_data_trace(
             recording_id, trace_id, data_type, data_type_name
