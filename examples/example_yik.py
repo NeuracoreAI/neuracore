@@ -88,7 +88,7 @@ def main(args):
             # Stop recording if enabled
             if record:
                 print("Finishing recording...")
-                nc.stop_recording()
+                nc.stop_recording(wait=False)
                 print("Finished recording!")
 
             print(f"Episode {episode_idx} done")

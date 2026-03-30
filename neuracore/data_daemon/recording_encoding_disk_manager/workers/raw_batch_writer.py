@@ -340,7 +340,18 @@ class _RawBatchWriter:
 
             if isinstance(queue_item, _StopRecording):
                 recording_id = queue_item.recording_id
+                already_stopped = recording_id in self._stopped_recordings
                 self._stopped_recordings.add(recording_id)
+
+                if not already_stopped:
+                    # Freeze the expected trace count from the trace ids this
+                    # worker has actually accepted on its queue. The recording
+                    # row's trace_count still advances later from TRACE_WRITTEN.
+                    self._emitter.emit(
+                        Emitter.SET_EXPECTED_TRACE_COUNT,
+                        recording_id,
+                        len(self.recording_traces.get(recording_id, {})),
+                    )
 
                 writer_states_to_flush = [
                     ws

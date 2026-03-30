@@ -203,17 +203,20 @@ class ProducerChannel:
         Returns:
             None
         """
-        with self._sequence_cv:
-            sequence_number = self._next_sequence_number
-            self._next_sequence_number += 1
-            self._last_enqueued_sequence_number = sequence_number
-        envelope = MessageEnvelope(
-            producer_id=self.channel_id,
-            command=command,
-            payload=payload or {},
-            sequence_number=sequence_number,
-        )
-        self._send_queue.put(envelope)
+        # Serialize sequence assignment with queue insertion so concurrent
+        # heartbeat/data senders cannot enqueue messages out of sequence order.
+        with self._enqueue_lock:
+            with self._sequence_cv:
+                sequence_number = self._next_sequence_number
+                self._next_sequence_number += 1
+                self._last_enqueued_sequence_number = sequence_number
+            envelope = MessageEnvelope(
+                producer_id=self.channel_id,
+                command=command,
+                payload=payload or {},
+                sequence_number=sequence_number,
+            )
+            self._send_queue.put(envelope)
 
     def get_last_sent_sequence_number(self) -> int:
         """Return the most recent sequence number successfully sent on the socket."""
@@ -401,7 +404,10 @@ class ProducerChannel:
             )
             self._send(CommandType.DATA_CHUNK, {"data_chunk": payload.to_dict()})
 
-    def initialize_new_producer_channel(self) -> None:
+    def initialize_new_producer_channel(
+        self,
+        ring_buffer_size: int = DEFAULT_RING_BUFFER_SIZE,
+    ) -> None:
         """Initialize a new producer channel.
 
         This method starts a new trace and opens a ring buffer.
@@ -410,7 +416,7 @@ class ProducerChannel:
             self.start_new_trace()
 
         self.start_producer_channel()
-        self.open_ring_buffer()
+        self.open_ring_buffer(size=ring_buffer_size)
 
     def cleanup_producer_channel(self) -> None:
         """Clean up the producer channel.

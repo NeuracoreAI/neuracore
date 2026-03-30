@@ -20,12 +20,48 @@ from neuracore.data_daemon.communications_management.producer_channel import (
     ProducerChannel
 )
 from neuracore.data_daemon.const import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_RING_BUFFER_SIZE,
     DEFAULT_VIDEO_CHUNK_SIZE,
     DEFAULT_VIDEO_RING_BUFFER_SIZE,
     DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _ProducerTransportConfig:
+    chunk_size: int
+    ring_buffer_size: int
+    send_queue_maxsize: int
+
+
+_DEFAULT_PRODUCER_TRANSPORT_CONFIG = _ProducerTransportConfig(
+    chunk_size=DEFAULT_CHUNK_SIZE,
+    ring_buffer_size=DEFAULT_RING_BUFFER_SIZE,
+    send_queue_maxsize=0,
+)
+
+_VIDEO_PRODUCER_TRANSPORT_CONFIG = _ProducerTransportConfig(
+    chunk_size=DEFAULT_VIDEO_CHUNK_SIZE,
+    ring_buffer_size=max(DEFAULT_VIDEO_RING_BUFFER_SIZE, DEFAULT_VIDEO_CHUNK_SIZE * 4),
+    send_queue_maxsize=DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
+)
+
+_PRODUCER_TRANSPORT_CONFIG_BY_DATA_TYPE = {
+    DataType.RGB_IMAGES: _VIDEO_PRODUCER_TRANSPORT_CONFIG,
+    DataType.DEPTH_IMAGES: _VIDEO_PRODUCER_TRANSPORT_CONFIG,
+}
+
+
+def _producer_transport_config_for_data_type(
+    data_type: DataType,
+) -> _ProducerTransportConfig:
+    return _PRODUCER_TRANSPORT_CONFIG_BY_DATA_TYPE.get(
+        data_type,
+        _DEFAULT_PRODUCER_TRANSPORT_CONFIG,
+    )
 
 
 @dataclass
@@ -68,6 +104,9 @@ class DataStream(ABC):
         self._data_type = data_type
         self._stream_name = stream_name
         self._producer_channel: ProducerChannel | None = None
+        self._producer_transport_config = _producer_transport_config_for_data_type(
+            data_type
+        )
 
     def start_recording(self, context: DataRecordingContext) -> None:
         """Start recording data for this stream.
@@ -104,9 +143,14 @@ class DataStream(ABC):
             channel_id = f"{self._data_type.value}:\
             {self._stream_name}:{uuid.uuid4().hex[:8]}"
             self._producer_channel = ProducerChannel(
-                id=channel_id, recording_id=context.recording_id
+                id=channel_id,
+                recording_id=context.recording_id,
+                chunk_size=self._producer_transport_config.chunk_size,
+                send_queue_maxsize=self._producer_transport_config.send_queue_maxsize,
             )
-            self._producer_channel.initialize_new_producer_channel()
+            self._producer_channel.initialize_new_producer_channel(
+                ring_buffer_size=self._producer_transport_config.ring_buffer_size
+            )
             return
         if (
             self._producer_channel.recording_id is None
@@ -117,7 +161,9 @@ class DataStream(ABC):
         # Reopen producer channel state for each new recording in case
         # the daemon expired the channel while this producer channel was idle.
         self._producer_channel.start_producer_channel()
-        self._producer_channel.open_ring_buffer()
+        self._producer_channel.open_ring_buffer(
+            size=self._producer_transport_config.ring_buffer_size
+        )
         self._producer_channel.start_new_trace()
 
     def stop_recording(self) -> None:
@@ -171,9 +217,9 @@ class DataStream(ABC):
         total_bytes: int,
     ) -> None:
         """Send a logical payload assembled from multiple byte-like parts."""
-        if self._producer is None or self._context is None:
+        if self._producer_channel is None or self._context is None:
             return
-        self._producer.send_data_parts(
+        self._producer_channel.send_data_parts(
             parts=parts,
             total_bytes=total_bytes,
             data_type=self._data_type,

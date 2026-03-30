@@ -214,7 +214,9 @@ def test_producer_send_data_chunks_and_base64() -> None:
 
 def test_producer_send_data_parts_chunks_across_multiple_buffers() -> None:
     comm = DummyComm()
-    producer = Producer(comm_manager=comm, chunk_size=3, recording_id="rec-1")
+    producer = ProducerChannel(
+        comm_manager=comm, chunk_size=3, recording_id="rec-1"
+    )
 
     assert comm.socket_requested is True
     producer.start_new_trace()
@@ -243,7 +245,7 @@ def test_producer_sequences_follow_enqueue_order_under_concurrent_senders(
     monkeypatch,
 ) -> None:
     comm = DummyComm()
-    producer = Producer(comm_manager=comm, recording_id="rec-1")
+    producer = ProducerChannel(comm_manager=comm, recording_id="rec-1")
 
     first_put_entered = threading.Event()
     allow_first_put = threading.Event()
@@ -295,7 +297,7 @@ def test_producer_sequences_follow_enqueue_order_under_concurrent_senders(
         _wait_for_messages(comm, 2)
     finally:
         allow_first_put.set()
-        producer.stop_producer()
+        producer.stop_producer_channel()
 
     assert thread_errors == []
     assert [message.sequence_number for message in comm.messages] == [1, 2]

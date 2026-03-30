@@ -371,6 +371,46 @@ async def test_upsert_trace_bytes_backfills_missing_total_bytes(
 
 
 @pytest.mark.asyncio
+async def test_upsert_trace_write_progress_transitions_to_writing_then_written(
+    store: SqliteStateStore,
+) -> None:
+    await store.upsert_trace_metadata(
+        trace_id="trace-writing-1",
+        recording_id="rec-writing-1",
+        data_type=PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-writing-1.bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+
+    trace = await store.upsert_trace_write_progress(
+        trace_id="trace-writing-1",
+        recording_id="rec-writing-1",
+        bytes_written=128,
+    )
+
+    assert trace.write_status == TraceWriteStatus.WRITING
+    row = await _get_trace_row(store, "trace-writing-1")
+    assert row is not None
+    assert row["bytes_written"] == 128
+    assert row["total_bytes"] is None
+    assert row["write_status"] == TraceWriteStatus.WRITING
+
+    trace = await store.upsert_trace_bytes(
+        trace_id="trace-writing-1",
+        recording_id="rec-writing-1",
+        bytes_written=64,
+    )
+
+    assert trace.write_status == TraceWriteStatus.WRITTEN
+    row = await _get_trace_row(store, "trace-writing-1")
+    assert row is not None
+    assert row["bytes_written"] == 64
+    assert row["total_bytes"] == 64
+    assert row["write_status"] == TraceWriteStatus.WRITTEN
+
+
+@pytest.mark.asyncio
 async def test_update_bytes_uploaded_sets_value(store: SqliteStateStore) -> None:
     await store.upsert_trace_metadata(
         trace_id="trace-3",

@@ -333,6 +333,136 @@ def test_rdm_delete_trace_event_deletes_trace_dir(
         emitter.remove_listener(RdmEmitter.TRACE_WRITTEN, _on_trace_written)
 
 
+def test_rdm_emits_trace_write_progress(
+    rdm_module,
+    rdm_factory,
+) -> None:
+    Emitter = rdm_module.Emitter
+
+    rdm, _recordings_root = rdm_factory(storage_limit=None, flush_bytes=1)
+
+    recording_id = str(uuid.uuid4())
+    trace_id = "progress_trace"
+
+    progress_events: list[tuple[str, int]] = []
+    progress_seen = threading.Event()
+    written_seen = threading.Event()
+
+    emitter = get_emitter()
+
+    @emitter.on(Emitter.TRACE_WRITE_PROGRESS)
+    def on_progress(tid: str, rid: str, bytes_written: int) -> None:
+        if tid == trace_id and rid == recording_id:
+            progress_events.append((tid, bytes_written))
+            progress_seen.set()
+
+    @emitter.on(Emitter.TRACE_WRITTEN)
+    def on_written(tid: str, rid: str, _bytes_written: int) -> None:
+        if tid == trace_id and rid == recording_id:
+            written_seen.set()
+
+    try:
+        rdm.enqueue(
+            CompleteMessage.from_bytes(
+                producer_id="p",
+                recording_id=recording_id,
+                trace_id=trace_id,
+                data_type=DataType.JOINT_POSITIONS,
+                data_type_name="joint_position",
+                robot_instance=0,
+                data=_json_bytes({"x": 1}),
+                final_chunk=False,
+            )
+        )
+
+        assert progress_seen.wait(timeout=5.0) is True
+
+        emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
+        assert written_seen.wait(timeout=5.0) is True
+
+        assert progress_events
+    finally:
+        emitter.remove_listener(Emitter.TRACE_WRITE_PROGRESS, on_progress)
+        emitter.remove_listener(Emitter.TRACE_WRITTEN, on_written)
+
+
+def test_rdm_sets_expected_trace_count_from_writer_traces_on_stop(
+    rdm_module,
+    rdm_factory,
+) -> None:
+    Emitter = rdm_module.Emitter
+
+    rdm, _recordings_root = rdm_factory(storage_limit=None, flush_bytes=1)
+
+    recording_id = str(uuid.uuid4())
+    joint_trace_id = "elbow_joint"
+    rgb_trace_id = "camera_front"
+    width, height = 4, 3
+
+    expected_counts: list[int] = []
+    expected_seen = threading.Event()
+    written_trace_ids: set[str] = set()
+    written_seen = threading.Event()
+
+    emitter = get_emitter()
+
+    @emitter.on(Emitter.SET_EXPECTED_TRACE_COUNT)
+    def on_expected(rec_id: str, expected_trace_count: int) -> None:
+        if rec_id == recording_id:
+            expected_counts.append(expected_trace_count)
+            expected_seen.set()
+
+    @emitter.on(Emitter.TRACE_WRITTEN)
+    def on_written(tid: str, rid: str, bytes_written: int) -> None:
+        if rid != recording_id or bytes_written <= 0:
+            return
+        written_trace_ids.add(tid)
+        if written_trace_ids == {joint_trace_id, rgb_trace_id}:
+            written_seen.set()
+
+    try:
+        rdm.enqueue(
+            CompleteMessage.from_bytes(
+                producer_id="p",
+                recording_id=recording_id,
+                trace_id=joint_trace_id,
+                data_type=DataType.JOINT_POSITIONS,
+                data_type_name="joint_position",
+                robot_instance=0,
+                data=_json_bytes({"x": 1}),
+                final_chunk=False,
+            )
+        )
+        rdm.enqueue(
+            CompleteMessage.from_bytes(
+                producer_id="p",
+                recording_id=recording_id,
+                trace_id=rgb_trace_id,
+                data_type=DataType.RGB_IMAGES,
+                data_type_name="camera_front",
+                robot_instance=0,
+                data=_make_combined_video_payload(
+                    width=width,
+                    height=height,
+                    timestamp=1.0,
+                    frame=_make_rgb24_frame_bytes(0, width, height),
+                ),
+                final_chunk=True,
+            )
+        )
+
+        time.sleep(0.1)
+        emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
+
+        assert expected_seen.wait(timeout=5.0) is True
+        assert set(rdm.recording_traces[recording_id]) == {joint_trace_id, rgb_trace_id}
+        assert expected_counts == [2]
+        assert written_seen.wait(timeout=10.0) is True
+    finally:
+        emitter.remove_listener(Emitter.SET_EXPECTED_TRACE_COUNT, on_expected)
+        emitter.remove_listener(Emitter.TRACE_WRITTEN, on_written)
+
+
 def test_rdm_storage_limit_aborts_trace_and_emits_trace_written_zero(
     rdm_module,
     rdm_factory,

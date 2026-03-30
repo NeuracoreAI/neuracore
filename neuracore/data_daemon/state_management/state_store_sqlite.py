@@ -1495,7 +1495,7 @@ class SqliteStateStore(StateStore):
 
         State transitions:
         - If trace doesn't exist: creates with PENDING_METADATA status
-        - If trace exists with INITIALIZING: transitions to WRITTEN
+        - If trace exists with INITIALIZING/WRITING: transitions to WRITTEN
         - If trace exists with other status: updates bytes only
 
         Returns the trace record after upsert.
@@ -1527,8 +1527,71 @@ class SqliteStateStore(StateStore):
                 "last_updated": now,
                 "write_status": case(
                     (
-                        traces.c.write_status == TraceWriteStatus.INITIALIZING,
+                        traces.c.write_status.in_(
+                            (
+                                TraceWriteStatus.INITIALIZING,
+                                TraceWriteStatus.WRITING,
+                            )
+                        ),
                         TraceWriteStatus.WRITTEN,
+                    ),
+                    else_=traces.c.write_status,
+                ),
+            },
+        )
+        async with self._write_lock() as conn:
+            return await self._execute_trace_upsert_and_update_counters(
+                conn=conn,
+                stmt=stmt,
+                trace_id=trace_id,
+                recording_id=recording_id,
+                now=now,
+            )
+
+    async def upsert_trace_write_progress(
+        self,
+        trace_id: str,
+        recording_id: str,
+        bytes_written: int,
+    ) -> TraceRecord:
+        """Insert or update trace write progress from TRACE_WRITE_PROGRESS.
+
+        State transitions:
+        - If trace doesn't exist: creates with WRITING status
+        - If trace exists with INITIALIZING/PENDING_METADATA: transitions to WRITING
+        - If trace exists with WRITTEN/FAILED: preserves terminal status
+
+        Returns the trace record after upsert.
+        """
+        now = _utc_now()
+        stmt = insert(traces).values(
+            trace_id=trace_id,
+            recording_id=recording_id,
+            bytes_written=bytes_written,
+            total_bytes=None,
+            write_status=TraceWriteStatus.WRITING,
+            registration_status=TraceRegistrationStatus.PENDING,
+            upload_status=TraceUploadStatus.PENDING,
+            bytes_uploaded=0,
+            created_at=now,
+            last_updated=now,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["trace_id"],
+            set_={
+                "bytes_written": bytes_written,
+                "last_updated": now,
+                "write_status": case(
+                    (
+                        traces.c.write_status.in_(
+                            (
+                                TraceWriteStatus.PENDING,
+                                TraceWriteStatus.INITIALIZING,
+                                TraceWriteStatus.PENDING_METADATA,
+                                TraceWriteStatus.WRITING,
+                            )
+                        ),
+                        TraceWriteStatus.WRITING,
                     ),
                     else_=traces.c.write_status,
                 ),

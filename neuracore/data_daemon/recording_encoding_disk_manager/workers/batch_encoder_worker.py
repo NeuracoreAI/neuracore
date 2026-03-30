@@ -201,6 +201,8 @@ class _BatchEncoderWorker:
 
             ok = await self._process_batch_into_encoder(next_job, encoder)
             await self._remove_file(next_job.batch_path)
+            if ok and key not in self._aborted_traces and key not in self._finalised_traces:
+                self._emit_trace_write_progress(key)
             if not ok:
                 self._aborted_traces.add(key)
 
@@ -216,6 +218,15 @@ class _BatchEncoderWorker:
             self._trace_pending.pop(key, None)
         else:
             self._trace_pending[key] = pending
+
+    def _emit_trace_write_progress(self, trace_key: _TraceKey) -> None:
+        bytes_written = self._filesystem.trace_bytes_on_disk(trace_key)
+        self._emitter.emit(
+            Emitter.TRACE_WRITE_PROGRESS,
+            trace_key.trace_id,
+            trace_key.recording_id,
+            bytes_written,
+        )
 
     def _try_finalize_trace_after_ordered_batches(self, key: _TraceKey) -> None:
         """Finalize trace if the terminal batch has been processed and none remain."""

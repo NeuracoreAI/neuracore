@@ -221,6 +221,23 @@ class StateStore(Protocol):
         """
         ...
 
+    async def upsert_trace_write_progress(
+        self,
+        trace_id: str,
+        recording_id: str,
+        bytes_written: int,
+    ) -> TraceRecord:
+        """Insert or update trace write progress from TRACE_WRITE_PROGRESS.
+
+        State transitions:
+        - If trace doesn't exist: creates with WRITING status
+        - If trace exists with INITIALIZING/PENDING_METADATA: transitions to WRITING
+        - If trace already exists with WRITTEN/FAILED: preserves terminal status
+
+        Returns the trace record after upsert.
+        """
+        ...
+
     async def upsert_trace_bytes(
         self,
         trace_id: str,

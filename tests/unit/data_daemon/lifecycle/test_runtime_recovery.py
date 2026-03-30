@@ -13,6 +13,7 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import (
 )
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
     cleanup_socket_files,
+    finalize_writing_traces_from_filesystem,
     reconcile_state_with_filesystem,
     shutdown,
     validate_or_recover_sqlite,
@@ -61,6 +62,21 @@ class _InMemoryStore:
 
     async def get_trace(self, trace_id: str) -> TraceRecord | None:
         return self._traces.get(trace_id)
+
+    async def upsert_trace_bytes(
+        self, trace_id: str, recording_id: str, bytes_written: int
+    ) -> TraceRecord:
+        trace = self._traces[trace_id]
+        updated = replace(
+            trace,
+            recording_id=recording_id,
+            write_status=TraceWriteStatus.WRITTEN,
+            bytes_written=bytes_written,
+            total_bytes=bytes_written,
+            last_updated=datetime.now(),
+        )
+        self._traces[trace_id] = updated
+        return updated
 
 
 def test_cleanup_socket_files_removes_paths(tmp_path: Path) -> None:
@@ -268,6 +284,54 @@ def test_reconcile_pauses_uploading_traces(tmp_path: Path) -> None:
     updated = asyncio.run(store.get_trace("trace-upload"))
     assert updated is not None
     assert updated.upload_status == TraceUploadStatus.PAUSED
+
+
+def test_finalize_writing_traces_from_filesystem_marks_trace_written(
+    tmp_path: Path,
+) -> None:
+    trace_path = tmp_path / "recordings" / "rec-4" / "CUSTOM_1D" / "trace-writing"
+    trace_path.mkdir(parents=True, exist_ok=True)
+    payload = b"hello writing"
+    (trace_path / "trace.json").write_bytes(payload)
+
+    now = datetime.now()
+    trace = TraceRecord(
+        trace_id="trace-writing",
+        write_status=TraceWriteStatus.WRITING,
+        registration_status=TraceRegistrationStatus.PENDING,
+        upload_status=TraceUploadStatus.PENDING,
+        recording_id="rec-4",
+        data_type=DataType.CUSTOM_1D,
+        data_type_name="custom",
+        dataset_id=None,
+        dataset_name=None,
+        robot_name=None,
+        robot_id=None,
+        robot_instance=1,
+        path=str(trace_path),
+        bytes_written=3,
+        total_bytes=None,
+        bytes_uploaded=0,
+        progress_reported=ProgressReportStatus.PENDING,
+        expected_trace_count_reported=0,
+        error_code=None,
+        error_message=None,
+        created_at=now,
+        last_updated=now,
+        num_upload_attempts=0,
+        next_retry_at=None,
+        stopped_at=None,
+    )
+    store = _InMemoryStore([trace])
+
+    finalized = asyncio.run(finalize_writing_traces_from_filesystem(store))
+
+    assert finalized == 1
+    updated = asyncio.run(store.get_trace("trace-writing"))
+    assert updated is not None
+    assert updated.write_status == TraceWriteStatus.WRITTEN
+    assert updated.total_bytes == len(payload)
+    assert updated.bytes_written == len(payload)
 
 
 def test_reconcile_marks_empty_trace_dir_as_incomplete(tmp_path: Path) -> None:
