@@ -167,11 +167,11 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
     emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
     emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
     try:
-        before_second = datetime.now()
+        before_second = datetime.now(timezone.utc)
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-1", "rec-1", 10)
         emitter.emit(Emitter.TRACE_WRITTEN, "trace-2", "rec-1", 10)
         await asyncio.sleep(0.2)
-        after_second = datetime.now()
+        after_second = datetime.now(timezone.utc)
 
         assert len(ready_events) == 0
 
@@ -179,13 +179,18 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
             await asyncio.wait_for(progress_event.wait(), timeout=1.0)
         except asyncio.TimeoutError:
             pass
+
         if progress_events:
             recording_id, start_time, end_time, trace_map, total_bytes = (
                 progress_events[0]
             )
+            expected_start_time = created_early.replace(tzinfo=None).timestamp()
+            expected_before = before_second.replace(tzinfo=None).timestamp()
+            expected_after = after_second.replace(tzinfo=None).timestamp()
+
             assert recording_id == "rec-1"
-            assert start_time == created_early.timestamp()
-            assert before_second.timestamp() <= end_time <= after_second.timestamp()
+            assert start_time == expected_start_time
+            assert expected_before <= end_time <= expected_after
             assert set(trace_map.keys()) == {"trace-1", "trace-2"}
             assert total_bytes == 20
     finally:

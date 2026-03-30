@@ -16,6 +16,7 @@ from neuracore.data_daemon.const import (
     BACKEND_API_MAX_BACKOFF_SECONDS,
     BACKEND_API_MAX_RETRIES,
     BACKEND_API_RETRYABLE_STATUS_CODES,
+    COMPLETED_RECORDING_RETENTION_HOURS,
     UPLOAD_MAX_RETRIES,
     UPLOAD_RETRY_BASE_SECONDS,
     UPLOAD_RETRY_MAX_SECONDS,
@@ -190,6 +191,18 @@ class StateManager:
             )
         await self._resume_reporting_work_on_reconnect()
 
+        # delete recording older the expiration window
+        deleted_count = await self._store.delete_expired_completed_recordings(
+            COMPLETED_RECORDING_RETENTION_HOURS
+        )
+        if deleted_count:
+            logger.info(
+                "Deleted expired completed recordings on reconnect "
+                "(count=%d, max_age_hours=%d)",
+                deleted_count,
+                COMPLETED_RECORDING_RETENTION_HOURS,
+            )
+
         # Wake registration worker after connectivity is restored.
         self._emit_trace_registration_available()
         await self._reconcile_failed_traces()
@@ -322,9 +335,6 @@ class StateManager:
         # these can be deleted if progress has bee reported
         if await self._store.recording_has_reported_progress(trace_record.recording_id):
             await self._store.delete_uploaded_traces_for_recording(
-                trace_record.recording_id
-            )
-            await self._store.delete_recording_and_traces_if_fully_uploaded(
                 trace_record.recording_id
             )
 
@@ -550,9 +560,6 @@ class StateManager:
         await self._store.mark_recording_reported(recording_id)
         if await self._store.is_expected_trace_count_reported(recording_id):
             await self._store.delete_uploaded_traces_for_recording(recording_id)
-            await self._store.delete_recording_and_traces_if_fully_uploaded(
-                recording_id
-            )
 
     async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
         """Increment uploaded byte count for a trace."""

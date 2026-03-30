@@ -442,38 +442,36 @@ class SqliteStateStore(StateStore):
             )
 
     async def reconcile_recordings_from_traces(self) -> None:
-        """Rebuild recording rows from trace rows (startup reconciliation)."""
+        """Rebuild trace-backed recording aggregates without deleting retained rows."""
         now = _utc_now()
         async with self._write_lock() as conn:
-            existing_rows = (
-                (
-                    await conn.execute(
-                        select(
-                            recordings.c.recording_id,
-                            recordings.c.expected_trace_count,
-                            recordings.c.expected_trace_count_reported,
-                            recordings.c.uploaded_trace_count,
-                            recordings.c.progress_reported,
-                            recordings.c.stopped_at,
-                        )
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            existing_by_recording_id = {
-                str(row["recording_id"]): row for row in existing_rows
-            }
-            await conn.execute(delete(recordings))
-
             recording_rows = (
                 (await conn.execute(select(func.distinct(traces.c.recording_id))))
                 .scalars()
                 .all()
             )
+
             for recording_id_raw in recording_rows:
                 recording_id = str(recording_id_raw)
-                existing_row = existing_by_recording_id.get(recording_id)
+
+                existing_row = (
+                    (
+                        await conn.execute(
+                            select(
+                                recordings.c.recording_id,
+                                recordings.c.expected_trace_count,
+                                recordings.c.expected_trace_count_reported,
+                                recordings.c.uploaded_trace_count,
+                                recordings.c.progress_reported,
+                                recordings.c.stopped_at,
+                                recordings.c.created_at,
+                            ).where(recordings.c.recording_id == recording_id)
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+
                 uploaded_trace_count = int(
                     (
                         await conn.execute(
@@ -493,18 +491,7 @@ class SqliteStateStore(StateStore):
                     ).scalar_one_or_none()
                     or 0
                 )
-                expected_trace_count = int(
-                    (
-                        await conn.execute(
-                            select(func.count()).where(
-                                traces.c.recording_id == recording_id,
-                                traces.c.write_status == TraceWriteStatus.WRITTEN,
-                                traces.c.total_bytes.is_not(None),
-                                traces.c.total_bytes > 0,
-                            )
-                        )
-                    ).scalar_one()
-                )
+
                 trace_count = int(
                     (
                         await conn.execute(
@@ -517,13 +504,18 @@ class SqliteStateStore(StateStore):
                         )
                     ).scalar_one()
                 )
+
+                expected_trace_count = trace_count
+
+                existing_expected_trace_count = (
+                    int(existing_row["expected_trace_count"] or 0)
+                    if existing_row is not None
+                    else 0
+                )
                 existing_uploaded_trace_count = (
                     int(existing_row["uploaded_trace_count"] or 0)
                     if existing_row is not None
                     else 0
-                )
-                uploaded_trace_count = max(
-                    uploaded_trace_count, existing_uploaded_trace_count
                 )
                 expected_reported = (
                     int(existing_row["expected_trace_count_reported"] or 0)
@@ -538,20 +530,50 @@ class SqliteStateStore(StateStore):
                 stopped_at_value = (
                     existing_row["stopped_at"] if existing_row is not None else None
                 )
+                created_at_value = (
+                    existing_row["created_at"] if existing_row is not None else now
+                )
 
                 await conn.execute(
-                    insert(recordings).values(
+                    insert(recordings)
+                    .values(
                         recording_id=recording_id,
-                        expected_trace_count=expected_trace_count,
+                        expected_trace_count=max(
+                            expected_trace_count,
+                            existing_expected_trace_count,
+                        ),
                         trace_count=trace_count,
                         expected_trace_count_reported=expected_reported,
-                        uploaded_trace_count=uploaded_trace_count,
+                        uploaded_trace_count=max(
+                            uploaded_trace_count,
+                            existing_uploaded_trace_count,
+                        ),
                         progress_reported=_parse_progress_status(
                             progress_reported_value
                         ),
                         stopped_at=stopped_at_value,
-                        created_at=now,
+                        created_at=created_at_value,
                         last_updated=now,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=["recording_id"],
+                        set_={
+                            "expected_trace_count": max(
+                                expected_trace_count,
+                                existing_expected_trace_count,
+                            ),
+                            "trace_count": trace_count,
+                            "expected_trace_count_reported": expected_reported,
+                            "uploaded_trace_count": max(
+                                uploaded_trace_count,
+                                existing_uploaded_trace_count,
+                            ),
+                            "progress_reported": _parse_progress_status(
+                                progress_reported_value
+                            ),
+                            "stopped_at": stopped_at_value,
+                            "last_updated": now,
+                        },
                     )
                 )
 
@@ -1203,31 +1225,33 @@ class SqliteStateStore(StateStore):
             )
         return int(result.rowcount or 0)
 
-    async def delete_recording_and_traces_if_fully_uploaded(
-        self, recording_id: str
-    ) -> bool:
-        """Delete recording and all traces when expected uploads are complete."""
+    async def delete_traces_for_recording(self, recording_id: str) -> int:
+        """Delete all trace rows for a recording and return deleted count."""
         async with self._write_lock() as conn:
-            should_delete = (
-                await conn.execute(
-                    select(recordings.c.recording_id).where(
-                        recordings.c.recording_id == recording_id,
-                        recordings.c.progress_reported == ProgressReportStatus.REPORTED,
-                        recordings.c.expected_trace_count
-                        == recordings.c.uploaded_trace_count,
-                    )
-                )
-            ).scalar_one_or_none()
-            if should_delete is None:
-                return False
-
-            await conn.execute(
+            result = await conn.execute(
                 delete(traces).where(traces.c.recording_id == recording_id)
             )
+        return int(result.rowcount or 0)
+
+    async def delete_expired_completed_recordings(self, max_age_hours: int) -> int:
+        """Delete completed recording rows older than the retention window."""
+        if max_age_hours < 0:
+            return 0
+
+        cutoff = _utc_now() - timedelta(hours=max_age_hours)
+
+        async with self._write_lock() as conn:
             result = await conn.execute(
-                delete(recordings).where(recordings.c.recording_id == recording_id)
+                delete(recordings).where(
+                    recordings.c.progress_reported == ProgressReportStatus.REPORTED,
+                    recordings.c.expected_trace_count
+                    == recordings.c.uploaded_trace_count,
+                    recordings.c.stopped_at.is_not(None),
+                    recordings.c.stopped_at <= cutoff,
+                )
             )
-        return bool(result.rowcount)
+
+        return int(result.rowcount or 0)
 
     async def list_recording_ids_with_stopped_traces(self) -> list[str]:
         """Return recording IDs that already have at least one stopped trace."""

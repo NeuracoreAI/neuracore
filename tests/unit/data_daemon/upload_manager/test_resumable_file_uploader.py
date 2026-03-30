@@ -942,18 +942,18 @@ class TestBandwidthThrottling:
         self, test_file: Path, mock_auth, client_session: aiohttp.ClientSession
     ) -> None:
         """Test that should call bandwidth_limiter.acquire for each chunk."""
-        from aiolimiter import AsyncLimiter
-
-        md5_b64 = _compute_file_md5_b64(test_file)
         file_size = 5 * 1024 * 1024
+        md5_b64 = _compute_file_md5_b64(test_file)
 
-        limiter = AsyncLimiter(1 * 1024 * 1024)
-        acquire_calls: list[int] = []
+        class FakeLimiter:
+            def __init__(self, max_rate: int) -> None:
+                self.max_rate = max_rate
+                self.calls: list[int] = []
 
-        async def mock_acquire(n_bytes: int) -> None:
-            acquire_calls.append(n_bytes)
+            async def acquire(self, n_bytes: int) -> None:
+                self.calls.append(n_bytes)
 
-        limiter.acquire = mock_acquire
+        limiter = FakeLimiter(max_rate=1 * 1024 * 1024)
 
         uploader = ResumableFileUploader(
             recording_id="rec-123",
@@ -984,8 +984,8 @@ class TestBandwidthThrottling:
                 success, _, _ = await uploader.upload()
 
         assert success is True
-        assert sum(acquire_calls) == file_size
-        assert all(c <= 1 * 1024 * 1024 for c in acquire_calls)
+        assert sum(limiter.calls) == file_size
+        assert all(call <= limiter.max_rate for call in limiter.calls)
 
     @pytest.mark.asyncio
     async def test_no_throttle_when_limiter_none(

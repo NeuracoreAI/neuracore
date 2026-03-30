@@ -21,6 +21,7 @@ from neuracore.data_daemon.bootstrap import (
     shutdown_async_services,
 )
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
+from neuracore.data_daemon.const import COMPLETED_RECORDING_RETENTION_HOURS
 from neuracore.data_daemon.state_management.state_manager import StateManager
 from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
 
@@ -80,6 +81,52 @@ def _mock_registration_manager_ctor():
 
 class TestBootstrapAsyncServices:
     """Tests for bootstrap_async_services() function."""
+
+    @pytest.mark.asyncio
+    async def test_b2_bootstrap_deletes_expired_completed_recordings_on_startup(
+        self,
+        mock_config: DaemonConfig,
+        temp_db_path: Path,
+    ) -> None:
+        with (
+            patch("neuracore.data_daemon.bootstrap.ConnectionManager") as MockConnMgr,
+            patch("neuracore.data_daemon.bootstrap.UploadManager") as MockUploadMgr,
+            patch(
+                "neuracore.data_daemon.bootstrap.ProgressReporter"
+            ) as MockProgressReporter,
+            patch("neuracore.data_daemon.bootstrap.SqliteStateStore") as MockStateStore,
+            patch("neuracore.data_daemon.bootstrap.StateManager") as MockStateMgr,
+        ):
+            mock_conn_instance = AsyncMock()
+            mock_conn_instance.start = AsyncMock()
+            MockConnMgr.return_value = mock_conn_instance
+
+            mock_upload_instance = MagicMock()
+            MockUploadMgr.return_value = mock_upload_instance
+
+            mock_progress_instance = MagicMock()
+            MockProgressReporter.return_value = mock_progress_instance
+
+            mock_state_store_instance = AsyncMock()
+            mock_state_store_instance.init_async_store = AsyncMock()
+            mock_state_store_instance.reset_retrying_to_written = AsyncMock()
+            mock_state_store_instance.delete_expired_completed_recordings = AsyncMock(
+                return_value=0
+            )
+            MockStateStore.return_value = mock_state_store_instance
+
+            mock_state_manager_instance = MagicMock()
+            mock_state_manager_instance.recover_startup_state = AsyncMock()
+            MockStateMgr.return_value = mock_state_manager_instance
+
+            services = await bootstrap_async_services(mock_config, temp_db_path)
+
+            assert services is not None
+            mock_state_store_instance.delete_expired_completed_recordings.assert_awaited_once_with(
+                COMPLETED_RECORDING_RETENTION_HOURS
+            )
+
+            await services.client_session.close()
 
     @pytest.mark.asyncio
     async def test_b1_happy_path_all_services_initialize(
