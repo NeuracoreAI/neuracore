@@ -382,6 +382,7 @@ async def test_upsert_trace_write_progress_transitions_to_writing_then_written(
         path="/tmp/trace-writing-1.bin",
         robot_instance=ROBOT_INSTANCE,
     )
+    assert await _get_recording_row(store, "rec-writing-1") is None
 
     trace = await store.upsert_trace_write_progress(
         trace_id="trace-writing-1",
@@ -395,6 +396,9 @@ async def test_upsert_trace_write_progress_transitions_to_writing_then_written(
     assert row["bytes_written"] == 128
     assert row["total_bytes"] is None
     assert row["write_status"] == TraceWriteStatus.WRITING
+    recording_row = await _get_recording_row(store, "rec-writing-1")
+    assert recording_row is not None
+    assert int(recording_row["trace_count"]) == 0
 
     trace = await store.upsert_trace_bytes(
         trace_id="trace-writing-1",
@@ -408,6 +412,9 @@ async def test_upsert_trace_write_progress_transitions_to_writing_then_written(
     assert row["bytes_written"] == 64
     assert row["total_bytes"] == 64
     assert row["write_status"] == TraceWriteStatus.WRITTEN
+    recording_row = await _get_recording_row(store, "rec-writing-1")
+    assert recording_row is not None
+    assert int(recording_row["trace_count"]) == 1
 
 
 @pytest.mark.asyncio

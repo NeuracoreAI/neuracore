@@ -385,25 +385,25 @@ class SqliteStateStore(StateStore):
             return
         logger.info("Adding missing recordings.org_id column")
         await conn.execute(text("ALTER TABLE recordings " "ADD COLUMN org_id TEXT"))
+    @staticmethod
+    def _recording_row_insert_stmt(recording_id: str, now: datetime) -> Any:
+        return insert(recordings).values(
+            recording_id=recording_id,
+            expected_trace_count=0,
+            trace_count=0,
+            expected_trace_count_reported=0,
+            uploaded_trace_count=0,
+            progress_reported=ProgressReportStatus.PENDING,
+            stopped_at=None,
+            created_at=now,
+            last_updated=now,
+        ).on_conflict_do_nothing(index_elements=["recording_id"])
 
     async def _ensure_recording_row(self, recording_id: str) -> None:
         """Ensure a recording row exists for the given recording_id."""
         now = _utc_now()
         async with self._write_lock() as conn:
-            stmt = insert(recordings).values(
-                recording_id=recording_id,
-                org_id=None,
-                expected_trace_count=0,
-                trace_count=0,
-                expected_trace_count_reported=0,
-                uploaded_trace_count=0,
-                progress_reported=ProgressReportStatus.PENDING,
-                stopped_at=None,
-                created_at=now,
-                last_updated=now,
-            )
-            stmt = stmt.on_conflict_do_nothing(index_elements=["recording_id"])
-            await conn.execute(stmt)
+            await conn.execute(self._recording_row_insert_stmt(recording_id, now))
 
     async def _refresh_recording_counters(self, recording_id: str) -> None:
         """Refresh aggregate trace counters for one recording."""
@@ -1346,7 +1346,7 @@ class SqliteStateStore(StateStore):
         current_total_bytes: Any,
         now: datetime,
     ) -> None:
-        """Increment expected count when a trace first becomes WRITTEN with data."""
+        """Increment trace_count when a trace first becomes WRITTEN with data."""
         if previous_write_status == TraceWriteStatus.WRITTEN:
             return
         if current_write_status != TraceWriteStatus.WRITTEN:
@@ -1354,22 +1354,7 @@ class SqliteStateStore(StateStore):
         if current_total_bytes is None or int(current_total_bytes) <= 0:
             return
 
-        await conn.execute(
-            insert(recordings)
-            .values(
-                recording_id=recording_id,
-                org_id=None,
-                expected_trace_count=0,
-                trace_count=0,
-                expected_trace_count_reported=0,
-                uploaded_trace_count=0,
-                progress_reported=ProgressReportStatus.PENDING,
-                stopped_at=None,
-                created_at=now,
-                last_updated=now,
-            )
-            .on_conflict_do_nothing(index_elements=["recording_id"])
-        )
+        await conn.execute(self._recording_row_insert_stmt(recording_id, now))
         await conn.execute(
             update(recordings)
             .where(recordings.c.recording_id == recording_id)
@@ -1400,6 +1385,39 @@ class SqliteStateStore(StateStore):
             .mappings()
             .one()
         )
+        await self._increment_trace_count_if_new_write_with_data(
+            conn=conn,
+            recording_id=recording_id,
+            previous_write_status=previous_write_status,
+            current_write_status=row["write_status"],
+            current_total_bytes=row["total_bytes"],
+            now=now,
+        )
+        return TraceRecord.from_row(dict(row))
+
+    async def _execute_trace_write_progress_upsert(
+        self,
+        *,
+        conn: AsyncConnection,
+        stmt: Any,
+        trace_id: str,
+        recording_id: str,
+        now: datetime,
+    ) -> TraceRecord:
+        """Run TRACE_WRITE_PROGRESS upsert and create recording row if needed."""
+        previous_write_status = (
+            await conn.execute(
+                select(traces.c.write_status).where(traces.c.trace_id == trace_id)
+            )
+        ).scalar_one_or_none()
+        await conn.execute(stmt)
+        row = (
+            (await conn.execute(select(traces).where(traces.c.trace_id == trace_id)))
+            .mappings()
+            .one()
+        )
+        if row["write_status"] == TraceWriteStatus.WRITING:
+            await conn.execute(self._recording_row_insert_stmt(recording_id, now))
         await self._increment_trace_count_if_new_write_with_data(
             conn=conn,
             recording_id=recording_id,
@@ -1598,7 +1616,7 @@ class SqliteStateStore(StateStore):
             },
         )
         async with self._write_lock() as conn:
-            return await self._execute_trace_upsert_and_update_counters(
+            return await self._execute_trace_write_progress_upsert(
                 conn=conn,
                 stmt=stmt,
                 trace_id=trace_id,
