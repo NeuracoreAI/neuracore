@@ -1,3 +1,4 @@
+import logging
 import multiprocessing
 import os
 import signal
@@ -36,8 +37,60 @@ from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
 MAX_TIME_TO_START_S = 20
 LEAST_TIME_TO_STOP_S = 10
 HIGH_TIME_TO_DATASET_READY_S = 500
+MAX_TIME_TO_LOG_S = 0.5
 
 TEST_PROFILE_PATHS: set[Path] = set()
+
+MATRIX_SESSION_RUNS: list[dict[str, object]] = []
+
+logger = logging.getLogger(__name__)
+
+
+class Timer:
+    """Context manager that asserts a block of code completes within a time limit.
+
+    Tracks per-label statistics (count, total, max) across all uses.
+    Per-call logging is suppressed; use ``_log_run_analysis`` to emit a
+    summary of averages at the end of a test run.
+    """
+
+    _stats: dict[str, dict[str, float]] = {}
+
+    def __init__(
+        self,
+        max_time: float = MAX_TIME_TO_LOG_S,
+        label: str | None = None,
+        always_log: bool = False,
+        log_threshold: float | None = None,
+    ) -> None:
+        self.max_time = max_time
+        self.label = label
+
+    def __enter__(self) -> "Timer":
+        self.start = time.perf_counter()
+        return self
+
+    def __exit__(self, *args: object) -> bool | None:
+        self.end = time.perf_counter()
+        self.interval = self.end - self.start
+        had_exception = len(args) > 0 and args[0] is not None
+
+        if self.label:
+            stats = self._stats.setdefault(
+                self.label, {"count": 0, "total": 0.0, "max": 0.0}
+            )
+            stats["count"] += 1
+            stats["total"] += self.interval
+            stats["max"] = max(stats["max"], self.interval)
+
+        if had_exception:
+            return False
+
+        assert self.interval < self.max_time, (
+            f"{self.label or 'Function'} took too long: "
+            f"{self.interval:.3f}s >= {self.max_time:.3f}s"
+        )
+        return None
 
 
 def get_runner_pids() -> set[int]:

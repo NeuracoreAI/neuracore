@@ -3,20 +3,26 @@ import math
 import multiprocessing
 import os
 import sys
-import time
 import uuid
 
 import numpy as np
+import psutil
 import pytest
 from neuracore_types import DataType
 from PIL import Image
 from recording_playback_shared import (
+    MAX_TIME_TO_LOG_S,
+    Timer,
+    collect_daemon_pids_from_parallel_startup,
     decode_frame_number,
     encode_frame_number,
+    get_runner_pids,
     wait_for_dataset_ready,
 )
 
 import neuracore as nc
+from neuracore.data_daemon.helpers import get_daemon_pid_path
+from neuracore.data_daemon.lifecycle.daemon_lifecycle import pid_is_running
 
 # Add examples dir to path
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,7 +30,6 @@ sys.path.append(os.path.join(THIS_DIR, "..", "..", "..", "examples"))
 # ruff: noqa: E402
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
 
-MAX_TIME_TO_LOG_S = 0.5
 LEAST_TIME_TO_STOP_S = 10
 MAX_TIME_TO_STOP_S = 20
 HIGH_TIME_TO_STOP_S = 30
@@ -61,65 +66,6 @@ logger = logging.getLogger(__name__)
 # low default daemon upload bandwidth derived from local disk size.
 os.environ.setdefault("NCD_BANDWIDTH_LIMIT", str(200 * 1024 * 1024))  # 200 MiB/s
 os.environ.setdefault("NCD_MAX_CONCURRENT_UPLOADS", "30")
-
-
-class Timer:
-    _stats = {}
-
-    def __init__(
-        self,
-        max_time=MAX_TIME_TO_LOG_S,
-        label=None,
-        always_log=False,
-        log_threshold=None,
-    ):
-        self.max_time = max_time
-        self.label = label
-        self.always_log = always_log
-        self.log_threshold = log_threshold
-
-    def __enter__(self):
-        self.start = time.perf_counter()
-        return self
-
-    def __exit__(self, *args):
-        self.end = time.perf_counter()
-        self.interval = self.end - self.start
-        had_exception = len(args) > 0 and args[0] is not None
-        if self.label:
-            stats = self._stats.setdefault(
-                self.label, {"count": 0, "total": 0.0, "max": 0.0}
-            )
-            stats["count"] += 1
-            stats["total"] += self.interval
-            stats["max"] = max(stats["max"], self.interval)
-
-            should_log = self.always_log
-            if self.log_threshold is not None and self.interval >= self.log_threshold:
-                should_log = True
-            if self.interval >= self.max_time:
-                should_log = True
-
-            if should_log:
-                level = (
-                    logging.WARNING if self.interval >= self.max_time else logging.INFO
-                )
-                logger.log(
-                    level,
-                    "Timer %-32s %.3fs (limit=%.3fs)",
-                    self.label,
-                    self.interval,
-                    self.max_time,
-                )
-
-        # Don't mask real exceptions raised inside the timed block.
-        if had_exception:
-            return False
-
-        assert self.interval < self.max_time, (
-            f"{self.label or 'Function'} took too long: "
-            f"{self.interval:.3f}s >= {self.max_time:.3f}s"
-        )
 
 
 class TestConfig:
@@ -411,6 +357,29 @@ def _mp_stream_robot_data(config):
     nc.connect_robot(config.robot_name)
     nc.create_dataset(config.dataset_name)
     return stream_data(config)
+
+
+def test_ensure_single_daemon_process() -> None:
+    """Verify that only one daemon process is spawned regardless of concurrency."""
+    nc.login()
+
+    core_count = psutil.cpu_count(logical=False) or 4
+    pids = collect_daemon_pids_from_parallel_startup(core_count)
+
+    assert len(pids) == core_count
+    assert len(set(pids)) == 1
+    pid = pids[0]
+
+    pid_path = get_daemon_pid_path()
+    assert pid_path.exists()
+    assert pid_is_running(pid)
+    assert pid_path.read_text(encoding="utf-8").strip() == str(pid)
+
+    runner_pids = get_runner_pids()
+    assert pid in runner_pids
+    assert (
+        len(runner_pids) == 1
+    ), f"Expected exactly one daemon runner process, found pids={sorted(runner_pids)}"
 
 
 def test_basic_streaming():
