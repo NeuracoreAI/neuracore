@@ -65,6 +65,7 @@ class RecordingPlaybackMatrixCase:
     video_count: int
     image_width: int | None
     image_height: int | None
+    wait: bool
 
     @property
     def has_video(self) -> bool:
@@ -95,39 +96,47 @@ def _build_matrix_cases() -> list[RecordingPlaybackMatrixCase]:
                 for mode in modes:
                     for joint_count in (10, 30):
                         for producer_channels in ("synchronous", "per_thread"):
-                            cases.append(
-                                RecordingPlaybackMatrixCase(
-                                    duration_sec=duration_sec,
-                                    parallel_contexts=parallel_contexts,
-                                    recording_count=recording_count,
-                                    mode=mode,
-                                    data_type="joints_only",
-                                    joint_count=joint_count,
-                                    producer_channels=producer_channels,
-                                    video_count=0,
-                                    image_width=None,
-                                    image_height=None,
-                                )
-                            )
-                            for video_count in (1, 6):
-                                for image_width, image_height in (
-                                    (64, 64),
-                                    (1920, 1080),
-                                ):
-                                    cases.append(
-                                        RecordingPlaybackMatrixCase(
-                                            duration_sec=duration_sec,
-                                            parallel_contexts=parallel_contexts,
-                                            recording_count=recording_count,
-                                            mode=mode,
-                                            data_type="all",
-                                            joint_count=joint_count,
-                                            producer_channels=producer_channels,
-                                            video_count=video_count,
-                                            image_width=image_width,
-                                            image_height=image_height,
-                                        )
+                            for wait in (True, False):
+                                cases.append(
+                                    RecordingPlaybackMatrixCase(
+                                        duration_sec=duration_sec,
+                                        parallel_contexts=parallel_contexts,
+                                        recording_count=recording_count,
+                                        mode=mode,
+                                        data_type="joints_only",
+                                        joint_count=joint_count,
+                                        producer_channels=producer_channels,
+                                        video_count=0,
+                                        image_width=None,
+                                        image_height=None,
+                                        wait=wait,
                                     )
+                                )
+                                for video_count in (1, 6):
+                                    for image_width, image_height in (
+                                        (64, 64),
+                                        (1920, 1080),
+                                    ):
+                                        if video_count == 6 and (
+                                            image_width,
+                                            image_height,
+                                        ) == (1920, 1080):
+                                            continue
+                                        cases.append(
+                                            RecordingPlaybackMatrixCase(
+                                                duration_sec=duration_sec,
+                                                parallel_contexts=parallel_contexts,
+                                                recording_count=recording_count,
+                                                mode=mode,
+                                                data_type="all",
+                                                joint_count=joint_count,
+                                                producer_channels=producer_channels,
+                                                video_count=video_count,
+                                                image_width=image_width,
+                                                image_height=image_height,
+                                                wait=wait,
+                                            )
+                                        )
     return cases
 
 
@@ -150,6 +159,8 @@ def _case_id(case: RecordingPlaybackMatrixCase) -> str:
     if case.has_video:
         parts.append(f"{case.video_count}cam")
         parts.append(f"{case.image_width}x{case.image_height}")
+    if not case.wait:
+        parts.append("nowait")
     return "-".join(parts)
 
 
@@ -226,6 +237,7 @@ def _build_context_specs(case: RecordingPlaybackMatrixCase) -> list[dict[str, ob
                 "image_width": case.image_width,
                 "image_height": case.image_height,
                 "fps": case.fps,
+                "wait": case.wait,
             },
             "context_index": context_index,
             "robot_name": f"matrix_robot_{uuid.uuid4().hex[:10]}",
@@ -492,11 +504,11 @@ def _matrix_context_worker(spec: dict[str, object]) -> dict[str, object]:
                 )
 
         with Timer(
-            duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC + MAX_TIME_TO_START_S,
+            duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
             label="matrix.nc.stop_recording",
             always_log=True,
         ):
-            nc.stop_recording(robot_name=robot_name, wait=True)
+            nc.stop_recording(robot_name=robot_name, wait=bool(case["wait"]))
         wall_stopped_at = time.time()
 
     return {
