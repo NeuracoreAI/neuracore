@@ -77,12 +77,17 @@ JOINT_NAMES = (
     + BimanualViperXTask.RIGHT_GRIPPER_JOINT_NAMES
 )
 
+
+def _indexed_names(names: list[str] | tuple[str, ...]) -> dict[int, str]:
+    return {index: name for index, name in enumerate(names)}
+
+
 INPUT_DATA_SPEC = {
-    DataType.RGB_IMAGES: [NC_CAM_NAME],
-    DataType.JOINT_POSITIONS: JOINT_NAMES,
+    DataType.RGB_IMAGES: _indexed_names([NC_CAM_NAME]),
+    DataType.JOINT_POSITIONS: _indexed_names(JOINT_NAMES),
 }
 OUTPUT_DATA_SPEC = {
-    DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
+    DataType.JOINT_TARGET_POSITIONS: _indexed_names(BimanualViperXTask.ACTION_KEYS),
 }
 
 
@@ -189,8 +194,8 @@ class TestAlgorithmPerformance:
             algorithm_name=algorithm_name,
             dataset_name=DATASET_NAME,
             algorithm_config=algorithm_config_entry["algorithm_config"],
-            input_robot_data_spec={robot_id: INPUT_DATA_SPEC},
-            output_robot_data_spec={robot_id: OUTPUT_DATA_SPEC},
+            input_cross_embodiment_description={robot_id: INPUT_DATA_SPEC},
+            output_cross_embodiment_description={robot_id: OUTPUT_DATA_SPEC},
         )
         training_job_id = job_data["id"]
         logger.info(f"[{algorithm_name}] Training job started: {training_job_id}")
@@ -251,8 +256,8 @@ class TestAlgorithmPerformance:
             endpoint_data = nc.deploy_model(
                 job_id=training_job_id,
                 name=endpoint_name,
-                model_input_order=INPUT_DATA_SPEC,
-                model_output_order=OUTPUT_DATA_SPEC,
+                input_embodiment_description=INPUT_DATA_SPEC,
+                output_embodiment_description=OUTPUT_DATA_SPEC,
                 ttl=60 * 30,
                 gpu_type=GPUType.NVIDIA_TESLA_V100,
             )

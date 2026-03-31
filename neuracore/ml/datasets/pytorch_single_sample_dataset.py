@@ -1,6 +1,6 @@
 """Dataset that returns the same sample from a real dataset for quick testing."""
 
-from neuracore_types import DataType, NCDataStats, RobotDataSpec
+from neuracore_types import CrossEmbodimentDescription, DataType, NCDataStats
 
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
@@ -16,17 +16,17 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
     def __init__(
         self,
         sample: BatchedTrainingSamples,
-        input_robot_data_spec: RobotDataSpec,
-        output_robot_data_spec: RobotDataSpec,
+        input_cross_embodiment_description: CrossEmbodimentDescription,
+        output_cross_embodiment_description: CrossEmbodimentDescription,
         output_prediction_horizon: int,
         num_recordings: int,
-        dataset_statistics: dict[DataType, list[NCDataStats]],
+        dataset_statistics: dict[str, dict[DataType, list[NCDataStats]]],
     ):
         """Initialize the decoy dataset."""
         super().__init__(
             num_recordings=num_recordings,
-            input_robot_data_spec=input_robot_data_spec,
-            output_robot_data_spec=output_robot_data_spec,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
             output_prediction_horizon=output_prediction_horizon,
         )
 
@@ -53,6 +53,6 @@ class SingleSampleDataset(PytorchNeuracoreDataset):
         return self._sample
 
     @property
-    def dataset_statistics(self) -> dict[DataType, list[NCDataStats]]:
+    def dataset_statistics(self) -> dict[str, dict[DataType, list[NCDataStats]]]:
         """Return the dataset description."""
         return self._dataset_statistics

@@ -52,6 +52,12 @@ class AlgorithmCheck(BaseModel):
     successfully_launched_endpoint: bool = False
 
 
+def _indexed_names(data_type: DataType) -> dict[int, str]:
+    return {
+        index: f"{data_type.value}_{index}" for index in range(MAX_LEN_PER_DATA_TYPE)
+    }
+
+
 def setup_logging(output_dir: Path) -> None:
     """Configure logging for validation process with file output only.
 
@@ -141,26 +147,22 @@ def run_validation(
         logger.info(f"Supported output data types: {supported_output_data_types}")
 
         # Create dummy robot data specs
-        input_robot_data_spec = {
+        input_cross_embodiment_description = {
             "robot_1": {
-                data_type: [
-                    f"{data_type.value}_{i}" for i in range(MAX_LEN_PER_DATA_TYPE)
-                ]
+                data_type: _indexed_names(data_type)
                 for data_type in supported_input_data_types
             }
         }
-        output_robot_data_spec = {
+        output_cross_embodiment_description = {
             "robot_1": {
-                data_type: [
-                    f"{data_type.value}_{i}" for i in range(MAX_LEN_PER_DATA_TYPE)
-                ]
+                data_type: _indexed_names(data_type)
                 for data_type in supported_output_data_types
             }
         }
 
         dataset = PytorchDummyDataset(
-            input_robot_data_spec=input_robot_data_spec,
-            output_robot_data_spec=output_robot_data_spec,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
             num_samples=5,
         )
 
@@ -173,7 +175,8 @@ def run_validation(
         model_init_description = ModelInitDescription(
             input_data_types=supported_input_data_types,
             output_data_types=supported_output_data_types,
-            dataset_statistics=dataset._dataset_statistics,
+            input_dataset_statistics=dataset._dataset_statistics["input"],
+            output_dataset_statistics=dataset._dataset_statistics["output"],
             output_prediction_horizon=dataset.output_prediction_horizon,
         )
 
@@ -259,25 +262,19 @@ def run_validation(
             else:
                 policy = None
                 try:
-                    model_input_order = {
-                        data_type: [
-                            f"{data_type.value}_{i}"
-                            for i in range(MAX_LEN_PER_DATA_TYPE)
-                        ]
+                    input_embodiment_description = {
+                        data_type: _indexed_names(data_type)
                         for data_type in supported_input_data_types
                     }
-                    model_output_order = {
-                        data_type: [
-                            f"{data_type.value}_{i}"
-                            for i in range(MAX_LEN_PER_DATA_TYPE)
-                        ]
+                    output_embodiment_description = {
+                        data_type: _indexed_names(data_type)
                         for data_type in supported_output_data_types
                     }
 
                     # Check if the exported model can be loaded
                     policy = nc.policy_local_server(
-                        model_input_order=model_input_order,
-                        model_output_order=model_output_order,
+                        input_embodiment_description=input_embodiment_description,
+                        output_embodiment_description=output_embodiment_description,
                         model_file=str(artifacts_dir / "model.nc.zip"),
                         port=port,
                         device=str(device),
@@ -294,9 +291,9 @@ def run_validation(
                     t = time.time()
                     sync_data: dict[DataType, dict[str, NCData]] = {}
                     for data_type, list_batched_nc_data in batch.inputs.items():
-                        names = model_input_order[data_type]
+                        names = input_embodiment_description[data_type]
                         sync_data[data_type] = {}
-                        for name in names:
+                        for name in names.values():
                             sync_data[data_type][name] = DATA_TYPE_TO_NC_DATA_CLASS[
                                 data_type
                             ].sample()

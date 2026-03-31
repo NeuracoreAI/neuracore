@@ -34,8 +34,8 @@ neuracore training inspect --training-name <RUN_NAME_OR_ID>
 4) **Launch a local policy server to sanity-check inference**
 ```bash
 neuracore launch-server \
-  --model_input_order '{"RGB_IMAGES": ["front_cam"]}' \
-  --model_output_order '{"JOINT_TARGET_POSITIONS": ["arm"]}' \
+  --input_embodiment_description '{"RGB_IMAGES": {0:"front_cam"}}' \
+  --output_embodiment_description '{"JOINT_TARGET_POSITIONS": {0:"arm"}' \
   --job_id <RUN_ID> \
   --org_id <ORG_ID> \
   --port 8080
@@ -59,7 +59,7 @@ neuracore training delete --training-name <RUN_NAME_OR_ID> --yes
 - `neuracore training delete --training-name <RUN> [--cloud | --local] [--root <DIR>] [--yes]`  
   - Cloud is the default; add `--local` to remove a run directory under `--root`. Prompts unless `--yes` is used.
 - `neuracore training start` — currently a placeholder; use the SDK to launch training and return here to monitor.
-- `neuracore launch-server --model_input_order '<JSON>' --model_output_order '<JSON>' [--job_id <RUN_ID>] [--org_id <ORG_ID>] [--host <HOST>] [--port <PORT>]`  
+- `neuracore launch-server --input_embodiment_description '<JSON>' --output_embodiment_description '<JSON>' [--job_id <RUN_ID>] [--org_id <ORG_ID>] [--host <HOST>] [--port <PORT>]`  
   - JSON must map DataType strings (e.g., `"RGB_IMAGES"`) to ordered name lists.
 
 

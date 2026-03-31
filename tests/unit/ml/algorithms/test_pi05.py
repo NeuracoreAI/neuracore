@@ -13,7 +13,10 @@ from torch.utils.data import DataLoader
 from neuracore.core.utils.robot_data_spec_utils import extract_data_types
 from neuracore.ml import BatchedInferenceInputs, BatchedTrainingSamples
 from neuracore.ml.core.ml_types import BatchedTrainingOutputs
-from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
+from neuracore.ml.datasets.pytorch_dummy_dataset import (
+    MAX_LEN_PER_DATA_TYPE,
+    PytorchDummyDataset,
+)
 from neuracore.ml.utils.validate import run_validation
 
 PI05_DEP_PACKAGES = ["transformers", "tokenizers", "huggingface-hub"]
@@ -45,21 +48,27 @@ PI05_TEST_ARGS: dict[str, Any] = {
 }
 
 
+def _indexed_names(data_type: DataType) -> dict[int, str]:
+    return {
+        index: f"{data_type.value}_{index}" for index in range(MAX_LEN_PER_DATA_TYPE)
+    }
+
+
 @pytest.fixture
 def pytorch_dummy_dataset(Pi05) -> PytorchDummyDataset:  # noqa: N803
     input_data_types = Pi05.get_supported_input_data_types()
     output_data_types = Pi05.get_supported_output_data_types()
-    input_robot_data_spec = {
+    input_cross_embodiment_description = {
         "robot_1": {data_type: [] for data_type in input_data_types}
     }
-    output_robot_data_spec = {
+    output_cross_embodiment_description = {
         "robot_1": {data_type: [] for data_type in output_data_types}
     }
 
     dataset = PytorchDummyDataset(
         num_samples=5,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
         output_prediction_horizon=OUTPUT_PREDICTION_HORIZON,
     )
     return dataset
@@ -69,12 +78,17 @@ def pytorch_dummy_dataset(Pi05) -> PytorchDummyDataset:  # noqa: N803
 def model_init_description(
     pytorch_dummy_dataset: PytorchDummyDataset,
 ) -> ModelInitDescription:
-    input_data_types = extract_data_types(pytorch_dummy_dataset.input_robot_data_spec)
-    output_data_types = extract_data_types(pytorch_dummy_dataset.output_robot_data_spec)
+    input_data_types = extract_data_types(
+        pytorch_dummy_dataset.input_cross_embodiment_description
+    )
+    output_data_types = extract_data_types(
+        pytorch_dummy_dataset.output_cross_embodiment_description
+    )
     return ModelInitDescription(
         input_data_types=input_data_types,
         output_data_types=output_data_types,
-        dataset_statistics=pytorch_dummy_dataset.dataset_statistics,
+        input_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["input"],
+        output_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["output"],
         output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
     )
 

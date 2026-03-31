@@ -19,6 +19,10 @@ from neuracore.core.exceptions import DatasetError
 TEST_ROBOT_ID = "20a621b7-2f9b-4699-a08e-7d080488a5a3"
 
 
+def _indexed_names(*names: str) -> dict[int, str]:
+    return dict(enumerate(names))
+
+
 @pytest.fixture
 def dataset_response() -> Dataset:
     """Create a mock dataset response."""
@@ -396,41 +400,47 @@ class TestDatasetRetrieval:
         result = Dataset.get_by_id("nonexistent", non_exist_ok=True)
         assert result is None
 
-    def test_get_full_data_spec(
+    def test_get_full_embodiment_description(
         self,
         mock_data_requests,
         dataset_dict,
         recordings_list,
         mocked_org_id,
     ):
-        """Test getting full data spec for a robot ID in the dataset."""
+        """Test getting full embodiment description for a robot ID in the dataset."""
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
         robot_id = "test-robot-id"
 
-        # Mock the API response for get_full_data_spec
+        # Mock the API response for get_full_embodiment_description
         expected_data_spec = {
-            DataType.RGB_IMAGES.value: ["camera_left", "camera_right"],
-            DataType.JOINT_POSITIONS.value: ["joint_pos_1", "joint_pos_2"],
+            DataType.RGB_IMAGES.value: _indexed_names("camera_left", "camera_right"),
+            DataType.JOINT_POSITIONS.value: _indexed_names(
+                "joint_pos_1", "joint_pos_2"
+            ),
         }
 
         mock_data_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset.id}/full-data-spec/{robot_id}",
+            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset.id}/full-embodiment-description/{robot_id}",
             json=expected_data_spec,
             status_code=200,
         )
 
         # Execute
-        data_spec = dataset.get_full_data_spec(robot_id)
+        embodiment_description = dataset.get_full_embodiment_description(robot_id)
 
         # Verify
-        assert data_spec == expected_data_spec
-        assert DataType.RGB_IMAGES.value in data_spec
-        assert DataType.JOINT_POSITIONS.value in data_spec
-        assert data_spec[DataType.RGB_IMAGES.value] == ["camera_left", "camera_right"]
-        assert data_spec[DataType.JOINT_POSITIONS.value] == [
-            "joint_pos_1",
-            "joint_pos_2",
-        ]
+        assert embodiment_description == {
+            DataType.RGB_IMAGES: _indexed_names("camera_left", "camera_right"),
+            DataType.JOINT_POSITIONS: _indexed_names("joint_pos_1", "joint_pos_2"),
+        }
+        assert DataType.RGB_IMAGES in embodiment_description
+        assert DataType.JOINT_POSITIONS in embodiment_description
+        assert embodiment_description[DataType.RGB_IMAGES] == _indexed_names(
+            "camera_left", "camera_right"
+        )
+        assert embodiment_description[DataType.JOINT_POSITIONS] == _indexed_names(
+            "joint_pos_1", "joint_pos_2"
+        )
 
 
 class TestDatasetCreation:
@@ -857,16 +867,20 @@ class TestDatasetSynchronization:
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
         dataset._robot_ids = [TEST_ROBOT_ID]
 
-        robot_data_spec = {
+        cross_embodiment_union = {
             TEST_ROBOT_ID: {
                 DataType.RGB_IMAGES: [],
                 DataType.DEPTH_IMAGES: [],
                 DataType.JOINT_POSITIONS: [],
             }
         }
-        synced = dataset.synchronize(frequency=30, robot_data_spec=robot_data_spec)
+        synced = dataset.synchronize(
+            frequency=30, cross_embodiment_union=cross_embodiment_union
+        )
 
-        assert synced.robot_data_spec == {TEST_ROBOT_ID: robot_data_spec[TEST_ROBOT_ID]}
+        assert synced.cross_embodiment_union == {
+            TEST_ROBOT_ID: cross_embodiment_union[TEST_ROBOT_ID]
+        }
 
     def test_synchronize_raises_when_backend_reports_failed_recordings(
         self, mock_data_requests, dataset_dict, recordings_list, monkeypatch

@@ -12,7 +12,12 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from neuracore_types import BatchedNCDataUnion, DataType, SynchronizedPoint
+from neuracore_types import (
+    BatchedNCDataUnion,
+    DataType,
+    EmbodimentDescription,
+    SynchronizedPoint,
+)
 from pydantic import BaseModel
 
 from neuracore.core.const import (
@@ -36,8 +41,8 @@ class ModelServer:
 
     def __init__(
         self,
-        model_input_order: dict[DataType, list[str]],
-        model_output_order: dict[DataType, list[str]],
+        input_embodiment_description: EmbodimentDescription,
+        output_embodiment_description: EmbodimentDescription,
         model_file: Path,
         org_id: str,
         job_id: str | None = None,
@@ -46,8 +51,8 @@ class ModelServer:
         """Initialize the model server.
 
         Args:
-            model_input_order: Model input order
-            model_output_order: Model output order
+            input_embodiment_description: Model input data order
+            output_embodiment_description: Model output data order
             model_file: Path to the .nc.zip model archive
             org_id: Organization ID for the model
             job_id: Job ID for the model
@@ -57,8 +62,8 @@ class ModelServer:
         from neuracore.ml.utils.policy_inference import PolicyInference
 
         self.policy_inference = PolicyInference(
-            model_input_order=model_input_order,
-            model_output_order=model_output_order,
+            input_embodiment_description=input_embodiment_description,
+            output_embodiment_description=output_embodiment_description,
             org_id=org_id,
             job_id=job_id,
             model_file=model_file,
@@ -138,8 +143,8 @@ class ModelServer:
 
 
 def start_server(
-    model_input_order: dict[DataType, list[str]],
-    model_output_order: dict[DataType, list[str]],
+    input_embodiment_description: EmbodimentDescription,
+    output_embodiment_description: EmbodimentDescription,
     model_file: Path,
     org_id: str,
     job_id: str | None = None,
@@ -163,8 +168,8 @@ def start_server(
         ModelServer instance
     """
     server = ModelServer(
-        model_input_order=model_input_order,
-        model_output_order=model_output_order,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         model_file=model_file,
         org_id=org_id,
         job_id=job_id,
@@ -179,18 +184,18 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Start Neuracore Model Server")
     parser.add_argument(
-        "--model-input-order",
+        "--input-embodiment-description",
         required=True,
         help=(
-            "Model input order consisting of json dump of "
+            "Input embodiment description consisting of json dump of "
             "dict mapping DataType to list of strings"
         ),
     )
     parser.add_argument(
-        "--model-output-order",
+        "--output-embodiment-description",
         required=True,
         help=(
-            "Model output order consisting of json dump of "
+            "Output embodiment description consisting of json dump of "
             "dict mapping DataType to list of strings"
         ),
     )
@@ -206,16 +211,17 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    model_input_order = {
-        DataType(k): v for k, v in json.loads(str(args.model_input_order)).items()
+    input_embodiment_description = {
+        DataType(k): v
+        for k, v in json.loads(str(args.input_embodiment_description)).items()
     }
-    model_output_order = {
-        DataType(k): v for k, v in json.loads(str(args.model_output_order)).items()
+    output_embodiment_description = {
+        DataType(k): v
+        for k, v in json.loads(str(args.output_embodiment_description)).items()
     }
-
     start_server(
-        model_input_order=model_input_order,
-        model_output_order=model_output_order,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         model_file=Path(args.model_file),
         org_id=args.org_id,
         job_id=args.job_id,

@@ -26,17 +26,17 @@ OUTPUT_PREDICTION_HORIZON = 5
 def pytorch_dummy_dataset() -> PytorchDummyDataset:
     input_data_types = ACT.get_supported_input_data_types()
     output_data_types = ACT.get_supported_output_data_types()
-    input_robot_data_spec = {
-        "robot_1": {data_type: [] for data_type in input_data_types}
+    input_cross_embodiment_description = {
+        "robot_1": {data_type: {} for data_type in input_data_types}
     }
-    output_robot_data_spec = {
-        "robot_1": {data_type: [] for data_type in output_data_types}
+    output_cross_embodiment_description = {
+        "robot_1": {data_type: {} for data_type in output_data_types}
     }
 
     dataset = PytorchDummyDataset(
         num_samples=5,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
         output_prediction_horizon=OUTPUT_PREDICTION_HORIZON,
     )
     return dataset
@@ -46,12 +46,17 @@ def pytorch_dummy_dataset() -> PytorchDummyDataset:
 def model_init_description(
     pytorch_dummy_dataset: PytorchDummyDataset,
 ) -> ModelInitDescription:
-    input_data_types = extract_data_types(pytorch_dummy_dataset.input_robot_data_spec)
-    output_data_types = extract_data_types(pytorch_dummy_dataset.output_robot_data_spec)
+    input_data_types = extract_data_types(
+        pytorch_dummy_dataset.input_cross_embodiment_description
+    )
+    output_data_types = extract_data_types(
+        pytorch_dummy_dataset.output_cross_embodiment_description
+    )
     return ModelInitDescription(
         input_data_types=input_data_types,
         output_data_types=output_data_types,
-        dataset_statistics=pytorch_dummy_dataset.dataset_statistics,
+        input_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["input"],
+        output_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["output"],
         output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
     )
 

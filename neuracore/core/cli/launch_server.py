@@ -19,19 +19,19 @@ logger = logging.getLogger(__name__)
 
 
 def run(
-    model_input_order: str = typer.Option(
+    input_embodiment_description: str = typer.Option(
         ...,
-        "--model_input_order",
+        "--input_embodiment_description",
         help=(
-            "Model input order consisting of json dump of "
+            "Input embodiment description consisting of json dump of "
             "dict mapping DataType to list of strings"
         ),
     ),
-    model_output_order: str = typer.Option(
+    output_embodiment_description: str = typer.Option(
         ...,
-        "--model_output_order",
+        "--output_embodiment_description",
         help=(
-            "Model output order consisting of json dump of "
+            "Output embodiment description consisting of json dump of "
             "dict mapping DataType to list of strings"
         ),
     ),
@@ -42,15 +42,19 @@ def run(
 ) -> None:
     """Launch a local policy server."""
     try:
-        input_order_raw = json.loads(model_input_order)
-        output_order_raw = json.loads(model_output_order)
+        input_order_raw = json.loads(input_embodiment_description)
+        output_order_raw = json.loads(output_embodiment_description)
     except json.JSONDecodeError as exc:
         raise typer.BadParameter(
             "Expected JSON strings for model input/output."
         ) from exc
 
-    model_input_order_map = {DataType(k): v for k, v in input_order_raw.items()}
-    model_output_order_map = {DataType(k): v for k, v in output_order_raw.items()}
+    input_embodiment_description_map = {
+        DataType(k): v for k, v in input_order_raw.items()
+    }
+    output_embodiment_description_map = {
+        DataType(k): v for k, v in output_order_raw.items()
+    }
 
     nc.login()
 
@@ -58,8 +62,8 @@ def run(
         nc.set_organization(org_id)
 
     policy = policy_local_server(
-        model_input_order=model_input_order_map,
-        model_output_order=model_output_order_map,
+        input_embodiment_description=input_embodiment_description_map,
+        output_embodiment_description=output_embodiment_description_map,
         train_run_name="",  # Use job id instead
         port=port,
         host=host,

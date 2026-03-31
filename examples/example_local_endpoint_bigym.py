@@ -17,8 +17,8 @@ from bigym_utils.utils import (
 from neuracore_types import (
     BatchedJointData,
     BatchedNCData,
-    DataSpec,
     DataType,
+    EmbodimentDescription,
     JointData,
     RGBCameraData,
     SynchronizedPoint,
@@ -31,13 +31,15 @@ ROBOT_NAME = "Mujoco UnitreeH1 Example"
 CAMERA_NAMES = ["head"]
 
 # Specification of the order that will be fed into the model
-MODEL_INPUT_ORDER: DataSpec = {
-    DataType.JOINT_POSITIONS: JOINT_NAMES[:-1],
-    DataType.RGB_IMAGES: CAMERA_NAMES,
+INPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
+    DataType.JOINT_POSITIONS: {i: name for i, name in enumerate(JOINT_NAMES[:-1])},
+    DataType.RGB_IMAGES: {i: name for i, name in enumerate(CAMERA_NAMES)},
 }
 
-MODEL_OUTPUT_ORDER: DataSpec = {
-    DataType.JOINT_TARGET_POSITIONS: JOINT_ACTUATORS,
+OUTPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
+    DataType.JOINT_TARGET_POSITIONS: {
+        i: name for i, name in enumerate(JOINT_ACTUATORS)
+    },
 }
 
 
@@ -139,8 +141,8 @@ def main(
     # you can use it directly without connecting to a robot
     policy = nc.policy(
         model_file="PATH/TO/MODEL.nc.zip",
-        model_input_order=MODEL_INPUT_ORDER,
-        model_output_order=MODEL_OUTPUT_ORDER,
+        input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+        output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
     )
 
     # Optional. Set the checkpoint to the last epoch.

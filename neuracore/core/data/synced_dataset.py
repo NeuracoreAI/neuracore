@@ -5,7 +5,11 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Union, cast
 
 import requests
-from neuracore_types import RobotDataSpec, SynchronizedDatasetStatistics
+from neuracore_types import (
+    CrossEmbodimentDescription,
+    CrossEmbodimentUnion,
+    SynchronizedDatasetStatistics,
+)
 from tqdm import tqdm
 
 from neuracore.core.auth import get_auth
@@ -28,7 +32,7 @@ class SynchronizedDataset:
         id: str,
         dataset: "Dataset",
         frequency: int,
-        robot_data_spec: RobotDataSpec | None,
+        cross_embodiment_union: CrossEmbodimentUnion | None = None,
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 1,
     ):
@@ -38,14 +42,14 @@ class SynchronizedDataset:
             id: Identifier for the synchronized dataset.
             dataset: Dataset object containing recordings.
             frequency: Frequency of the dataset in Hz.
-            robot_data_spec: Robot data specification for synchronization.
+            cross_embodiment_union: Cross-embodiment union for synchronization.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
             max_prefetch_workers: Number of threads to use for prefetching videos.
         """
         self.id = id
         self.dataset = dataset
         self.frequency = frequency
-        self.robot_data_spec = robot_data_spec
+        self.cross_embodiment_union = cross_embodiment_union
         self._prefetch_videos = prefetch_videos
         self._recording_idx = 0
         self._synced_recording_cache: dict[int, SynchronizedRecording] = {}
@@ -129,7 +133,7 @@ class SynchronizedDataset:
                 id=self.id,
                 dataset=cast("Dataset", dataset),
                 frequency=self.frequency,
-                robot_data_spec=self.robot_data_spec,
+                cross_embodiment_union=self.cross_embodiment_union,
                 prefetch_videos=False,  # Avoid prefetching again
             )
         else:
@@ -148,7 +152,7 @@ class SynchronizedDataset:
                         robot_id=rec.robot_id,
                         instance=rec.instance,
                         frequency=self.frequency,
-                        robot_data_spec=self.robot_data_spec,
+                        cross_embodiment_union=self.cross_embodiment_union,
                         prefetch_videos=self._prefetch_videos,
                     )
                     self._synced_recording_cache[idx] = synced_recording
@@ -179,7 +183,7 @@ class SynchronizedDataset:
                     robot_id=recording.robot_id,
                     instance=recording.instance,
                     frequency=self.frequency,
-                    robot_data_spec=self.robot_data_spec,
+                    cross_embodiment_union=self.cross_embodiment_union,
                     prefetch_videos=self._prefetch_videos,
                 )
                 self._synced_recording_cache[self._recording_idx] = s
@@ -189,13 +193,17 @@ class SynchronizedDataset:
         return to_return
 
     def calculate_statistics(
-        self, robot_data_spec: RobotDataSpec
+        self,
+        input_cross_embodiment_description: CrossEmbodimentDescription,
+        output_cross_embodiment_description: CrossEmbodimentDescription,
     ) -> SynchronizedDatasetStatistics:
         """Calculate statistics for each data type in the synchronized dataset.
 
         Args:
-            robot_data_spec: Configuration dict specifying
-                the order of data types for each robot ID.
+            input_cross_embodiment_description: Cross-embodiment
+            description for input data types.
+            output_cross_embodiment_description: Cross-embodiment
+            description for output data types.
 
         Returns:
             SynchronizedDatasetStatistics containing the calculated statistics.
@@ -204,7 +212,8 @@ class SynchronizedDataset:
             f"{API_URL}/org/{self.dataset.org_id}/synchronized-dataset/calculate-dataset-statistics",
             json=SynchronizedDatasetStatistics(
                 synchronized_dataset_id=self.id,
-                robot_data_spec=robot_data_spec,
+                input_cross_embodiment_description=input_cross_embodiment_description,
+                output_cross_embodiment_description=output_cross_embodiment_description,
             ).model_dump(mode="json"),
             headers=get_auth().get_headers(),
         )

@@ -7,7 +7,12 @@ import matplotlib.pyplot as plt
 import torch
 from common.base_env import BimanualViperXTask
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, BOX_POSE, make_sim_env
-from neuracore_types import BatchedJointData, BatchedNCData, DataSpec, DataType
+from neuracore_types import (
+    BatchedJointData,
+    BatchedNCData,
+    DataType,
+    EmbodimentDescription,
+)
 
 import neuracore as nc
 
@@ -16,18 +21,29 @@ TRAINING_JOB_NAME = "MyTrainingJob"
 CAMERA_NAMES = ["angle"]
 
 # Specification of the order that will be fed into the model
-MODEL_INPUT_ORDER: DataSpec = {
-    DataType.JOINT_POSITIONS: (
-        BimanualViperXTask.LEFT_ARM_JOINT_NAMES
-        + BimanualViperXTask.LEFT_GRIPPER_JOINT_NAMES
-        + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
-        + BimanualViperXTask.RIGHT_GRIPPER_JOINT_NAMES
-    ),
-    DataType.RGB_IMAGES: CAMERA_NAMES,
+INPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
+    DataType.JOINT_POSITIONS: {
+        i: name
+        for i, name in enumerate(
+            BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+            + BimanualViperXTask.LEFT_GRIPPER_JOINT_NAMES
+            + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+            + BimanualViperXTask.RIGHT_GRIPPER_JOINT_NAMES
+        )
+    },
+    DataType.RGB_IMAGES: {i: name for i, name in enumerate(CAMERA_NAMES)},
 }
 
-MODEL_OUTPUT_ORDER: DataSpec = {
-    DataType.JOINT_TARGET_POSITIONS: BimanualViperXTask.ACTION_KEYS,
+OUTPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
+    DataType.JOINT_TARGET_POSITIONS: {
+        i: name
+        for i, name in enumerate(
+            BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+            + [BimanualViperXTask.LEFT_GRIPPER_OPEN]
+            + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+            + [BimanualViperXTask.RIGHT_GRIPPER_OPEN]
+        )
+    },
 }
 
 
@@ -41,22 +57,22 @@ def main():
     # If you have a train run name, you can use it to connect to a local. E.g.:
     policy = nc.policy(
         train_run_name=TRAINING_JOB_NAME,
-        model_input_order=MODEL_INPUT_ORDER,
-        model_output_order=MODEL_OUTPUT_ORDER,
+        input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+        output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
     )
 
     # If you know the path to the local model.nc.zip file, you can use it directly as:
     # policy = nc.policy(
     #     model_file="PATH/TO/MODEL.nc.zip",
-    #     model_input_order=MODEL_INPUT_ORDER,
-    #     model_output_order=MODEL_OUTPUT_ORDER,
+    #     input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+    #     output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
     # )
 
     # Alternatively, you can connect to a local endpoint that has been started
     # policy = nc.policy_local_server(
     #     train_run_name=TRAINING_JOB_NAME,
-    #     model_input_order=MODEL_INPUT_ORDER,
-    #     model_output_order=MODEL_OUTPUT_ORDER,
+    #     input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+    #     output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
     # )
 
     # Optional. Set the checkpoint to the last epoch.
@@ -97,6 +113,7 @@ def main():
                 predictions: dict[DataType, dict[str, BatchedNCData]] = policy.predict(
                     timeout=5
                 )
+
                 joint_target_positions = cast(
                     dict[str, BatchedJointData],
                     predictions[DataType.JOINT_TARGET_POSITIONS],
