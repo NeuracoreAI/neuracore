@@ -19,7 +19,7 @@ from neuracore.data_daemon.config_manager.profiles import ProfileManager
 from neuracore.data_daemon.connection_management.connection_manager import (
     ConnectionManager,
 )
-from neuracore.data_daemon.const import CONFIG_DIR
+from neuracore.data_daemon.const import COMPLETED_RECORDING_RETENTION_HOURS, CONFIG_DIR
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.progress_reporter import ProgressReporter
 from neuracore.data_daemon.recording_encoding_disk_manager import (
@@ -99,6 +99,9 @@ async def bootstrap_async_services(
 
     state_manager = StateManager(state_store, config)
     await state_manager.recover_startup_state()
+    await state_store.delete_expired_completed_recordings(
+        COMPLETED_RECORDING_RETENTION_HOURS
+    )
     logger.debug("StateManager initialized")
 
     registration_manager = RegistrationManager(

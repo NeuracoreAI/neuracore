@@ -119,6 +119,17 @@ class FakeStateStore:
         self._traces_by_recording[recording_id] = keep
         return deleted_count
 
+    async def delete_traces_for_recording(self, recording_id: str) -> int:
+        traces = self._traces_by_recording.get(recording_id, [])
+        for trace in traces:
+            self.deleted.append(trace.trace_id)
+            self._traces_by_id.pop(trace.trace_id, None)
+        self._traces_by_recording[recording_id] = []
+        return len(traces)
+
+    async def delete_expired_completed_recordings(self, max_age_hours: int) -> int:
+        return 0
+
     async def list_recording_ids_with_stopped_traces(self) -> list[str]:
         return [
             recording_id

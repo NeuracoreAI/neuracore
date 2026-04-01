@@ -91,10 +91,12 @@ class StateStore(Protocol):
         """Delete all UPLOADED traces for one recording and return deleted count."""
         ...
 
-    async def delete_recording_and_traces_if_fully_uploaded(
-        self, recording_id: str
-    ) -> bool:
-        """Delete recording and all remaining traces when upload is fully complete."""
+    async def delete_traces_for_recording(self, recording_id: str) -> int:
+        """Delete all remaining trace rows for a recording and return deleted count."""
+        ...
+
+    async def delete_expired_completed_recordings(self, max_age_hours: int) -> int:
+        """Delete completed recording rows older than the retention window."""
         ...
 
     async def list_recording_ids_with_stopped_traces(self) -> list[str]:

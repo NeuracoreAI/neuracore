@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 
 from neuracore.data_daemon.models import (
     DATA_TYPE_CONTENT_MAPPING,
@@ -957,3 +957,118 @@ async def test_find_ready_traces_excludes_future_retries(
 
     ready = await store.find_ready_traces()
     assert "trace-future-retry" not in {t.trace_id for t in ready}
+
+
+@pytest.mark.asyncio
+async def test_delete_expired_completed_recordings_deletes_old_completed_rows(
+    store: SqliteStateStore,
+) -> None:
+    await store.set_expected_trace_count("rec-old", 2)
+    await store.mark_expected_trace_count_reported("rec-old")
+    await store.mark_recording_reported("rec-old")
+
+    old_stopped_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        hours=(24 * 30) + 1
+    )
+
+    async with store._engine.begin() as conn:
+        await conn.execute(
+            update(recordings)
+            .where(recordings.c.recording_id == "rec-old")
+            .values(
+                expected_trace_count=2,
+                uploaded_trace_count=2,
+                stopped_at=old_stopped_at,
+            )
+        )
+
+    deleted = await store.delete_expired_completed_recordings(24 * 30)
+
+    assert deleted == 1
+    assert await _get_recording_row(store, "rec-old") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_expired_completed_recordings_keeps_recent_completed_rows(
+    store: SqliteStateStore,
+) -> None:
+    await store.set_expected_trace_count("rec-recent", 2)
+    await store.mark_expected_trace_count_reported("rec-recent")
+    await store.mark_recording_reported("rec-recent")
+
+    recent_stopped_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        hours=(24 * 30) - 1
+    )
+
+    async with store._engine.begin() as conn:
+        await conn.execute(
+            update(recordings)
+            .where(recordings.c.recording_id == "rec-recent")
+            .values(
+                expected_trace_count=2,
+                uploaded_trace_count=2,
+                stopped_at=recent_stopped_at,
+            )
+        )
+
+    deleted = await store.delete_expired_completed_recordings(24 * 30)
+
+    assert deleted == 0
+    assert await _get_recording_row(store, "rec-recent") is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_expired_completed_recordings_keeps_unreported_rows(
+    store: SqliteStateStore,
+) -> None:
+    await store.set_expected_trace_count("rec-unreported", 2)
+
+    old_stopped_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        hours=(24 * 30) + 1
+    )
+
+    async with store._engine.begin() as conn:
+        await conn.execute(
+            update(recordings)
+            .where(recordings.c.recording_id == "rec-unreported")
+            .values(
+                expected_trace_count=2,
+                uploaded_trace_count=2,
+                progress_reported=ProgressReportStatus.PENDING,
+                stopped_at=old_stopped_at,
+            )
+        )
+
+    deleted = await store.delete_expired_completed_recordings(24 * 30)
+
+    assert deleted == 0
+    assert await _get_recording_row(store, "rec-unreported") is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_expired_completed_recordings_keeps_incomplete_rows(
+    store: SqliteStateStore,
+) -> None:
+    await store.set_expected_trace_count("rec-incomplete", 3)
+    await store.mark_expected_trace_count_reported("rec-incomplete")
+    await store.mark_recording_reported("rec-incomplete")
+
+    old_stopped_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        hours=(24 * 30) + 1
+    )
+
+    async with store._engine.begin() as conn:
+        await conn.execute(
+            update(recordings)
+            .where(recordings.c.recording_id == "rec-incomplete")
+            .values(
+                expected_trace_count=3,
+                uploaded_trace_count=2,
+                stopped_at=old_stopped_at,
+            )
+        )
+
+    deleted = await store.delete_expired_completed_recordings(24 * 30)
+
+    assert deleted == 0
+    assert await _get_recording_row(store, "rec-incomplete") is not None
