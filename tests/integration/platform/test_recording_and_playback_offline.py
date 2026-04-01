@@ -6,7 +6,6 @@ from recording_playback_shared import (
     HIGH_TIME_TO_DATASET_READY_S,
     assert_dataset_isolation,
     build_multi_producer_specs,
-    daemon_mode,
     fetch_expected_trace_count_reported,
     fetch_trace_registration_stats,
     run_minimal_recording_flow,
@@ -122,7 +121,7 @@ def test_multiple_producers_offline_record_then_online_upload():
     )
 
     nc.login()
-    with daemon_mode(offline=True):
+    with use_offline_daemon_profile(restore_online_on_exit=True):
         offline_results = run_multi_producers(specs)
         for result in offline_results:
             with pytest.raises(TimeoutError):

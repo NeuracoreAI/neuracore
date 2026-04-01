@@ -118,3 +118,6 @@ examples/logs/
 *.log
 *.log.gz
 examples/test_streaming/
+
+# Integration test daemon state
+tests/integration/platform/test_data_daemon_state/

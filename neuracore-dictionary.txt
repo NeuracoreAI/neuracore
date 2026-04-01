@@ -1,6 +1,7 @@
 adarms
 ADARMS
 addfinalizer
+addoption
 agilex
 aiolimiter
 aiortc
@@ -60,6 +61,7 @@ ddim
 DDIM
 ddpm
 DDPM
+dedup
 denoise
 denoised
 denoising
@@ -68,6 +70,7 @@ dinov
 dinov2
 distilbert
 docstrings
+dotenv
 dtype
 EADDRINUSE
 embs
@@ -83,6 +86,7 @@ facecolor
 facenum
 feedforward
 figsize
+finalizer
 finetuning
 finfo
 fixturenames
@@ -105,10 +109,12 @@ geomid
 geomnum
 getbuffer
 getpgid
+getplugin
 getpid
 ghjdidnia
 gptj
 GPTJ
+hookwrapper
 hparams
 hstack
 huggingface
@@ -161,9 +167,11 @@ llava
 Llava
 loglik
 logsigmoid
+longreprtext
 logvar
 maxpool
 maxs
+makereport
 meanpooling
 meshgrid
 metadatas
@@ -198,6 +206,7 @@ ndarray
 neginf
 neuraco
 neuracore
+nodeid
 nhead
 nheads
 nprocs
@@ -223,6 +232,7 @@ pgoa
 Pieb
 pinnochio
 PJRT
+pluginmanager
 plotly
 plotly
 pointcloud

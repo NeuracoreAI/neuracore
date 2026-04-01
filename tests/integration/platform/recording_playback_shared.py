@@ -9,7 +9,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pytest
@@ -39,6 +39,10 @@ LEAST_TIME_TO_STOP_S = 10
 HIGH_TIME_TO_DATASET_READY_S = 500
 MAX_TIME_TO_LOG_S = 0.5
 
+TEST_DAEMON_STATE_DIR = THIS_DIR / "test_data_daemon_state"
+OFFLINE_RECORDINGS_ROOT = TEST_DAEMON_STATE_DIR / "recordings"
+OFFLINE_DB_PATH = TEST_DAEMON_STATE_DIR / "state.db"
+
 TEST_PROFILE_PATHS: set[Path] = set()
 
 MATRIX_SESSION_RUNS: list[dict[str, object]] = []
@@ -49,7 +53,7 @@ logger = logging.getLogger(__name__)
 class Timer:
     """Context manager that asserts a block of code completes within a time limit.
 
-    Tracks per-label statistics (count, total, max) across all uses.
+    Tracks per-label statistics (count, total, max, limit) across all uses.
     Per-call logging is suppressed; use ``_log_run_analysis`` to emit a
     summary of averages at the end of a test run.
     """
@@ -77,11 +81,13 @@ class Timer:
 
         if self.label:
             stats = self._stats.setdefault(
-                self.label, {"count": 0, "total": 0.0, "max": 0.0}
+                self.label,
+                {"count": 0, "total": 0.0, "max": 0.0, "limit": self.max_time},
             )
             stats["count"] += 1
             stats["total"] += self.interval
             stats["max"] = max(stats["max"], self.interval)
+            stats["limit"] = self.max_time
 
         if had_exception:
             return False
@@ -111,15 +117,46 @@ def get_runner_pids() -> set[int]:
     return runner_pids
 
 
-def daemon_cleanup() -> None:
-    """Cleanup the data daemon by killing all runner processes and removing
-    the pid file, SQLite database file, and socket file.
+def _empty_state_db(db_path: Path) -> None:
+    """Delete all rows from user tables in the daemon SQLite database."""
+    if not db_path.exists():
+        return
+
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("PRAGMA foreign_keys=OFF")
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            for (table_name,) in rows:
+                escaped_name = str(table_name).replace('"', '""')
+                conn.execute(f'DELETE FROM "{escaped_name}"')
+            try:
+                conn.execute("DELETE FROM sqlite_sequence")
+            except sqlite3.OperationalError:
+                pass
+            conn.commit()
+    except sqlite3.DatabaseError:
+        return
+
+
+def daemon_cleanup(
+    *,
+    state_db_action: Literal["preserve", "empty", "delete"] = "empty",
+) -> None:
+    """Cleanup the data daemon by killing runner processes and removing files.
+
+    By default, the daemon PID and socket files are removed while SQLite state
+    files are preserved. Set ``state_db_action='empty'`` to clear table rows
+    while keeping the database file, or ``state_db_action='delete'`` to remove
+    the SQLite database and its sidecar files.
 
     This function is idempotent and can be safely called multiple times.
     """
     pid_path = get_daemon_pid_path()
     db_path = get_daemon_db_path()
-    socket_path = Path(SOCKET_PATH)
+    Path(SOCKET_PATH)
     daemon_pids = set(get_runner_pids())
 
     if pid_path.exists():
@@ -130,23 +167,41 @@ def daemon_cleanup() -> None:
 
     for pid in daemon_pids:
         try:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
         except PermissionError:
-            subprocess.run(["kill", "-9", str(pid)], check=False)
+            subprocess.run(["kill", "-15", str(pid)], check=False)
 
-    for path in (pid_path, db_path, socket_path):
-        try:
-            path.unlink(missing_ok=True)
-        except IsADirectoryError:
-            pass
+    for pid in daemon_pids:
+        if not wait_for_exit(pid, timeout_s=5.0):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
-    for suffix in (".shm", ".wal"):
-        try:
-            db_path.with_suffix(db_path.suffix + suffix).unlink(missing_ok=True)
-        except OSError:
-            pass
+    if state_db_action == "delete":
+        for path in (
+            db_path,
+            db_path.with_suffix(db_path.suffix + ".wal"),
+            db_path.with_suffix(db_path.suffix + ".shm"),
+        ):
+            try:
+                path.unlink(missing_ok=True)
+            except IsADirectoryError:
+                pass
+        return
+
+    if state_db_action == "empty":
+        _empty_state_db(db_path)
+        for path in (
+            db_path.with_suffix(db_path.suffix + ".wal"),
+            db_path.with_suffix(db_path.suffix + ".shm"),
+        ):
+            try:
+                path.unlink(missing_ok=True)
+            except IsADirectoryError:
+                pass
 
 
 FRAME_BYTE_LENGTH = 16
@@ -662,55 +717,18 @@ def stop_daemon_for_mode_switch() -> None:
 
 
 @contextmanager
-def daemon_mode(*, offline: bool):
-    """Context manager for temporarily switching modes.
+def use_offline_daemon_profile(*, restore_online_on_exit: bool = False):
+    """Temporarily route the daemon through a temporary offline profile.
 
-    When entering the context manager, the daemon is
-    stopped and then restarted in offline
-    mode if offline is True. When exiting the context manager,
-    the daemon is stopped again and then restarted in online mode.
+    This context manager creates a temporary profile with ``offline: true`` and
+    points ``NEURACORE_DAEMON_PROFILE`` to it for the body of the context.
 
-    This context manager is useful for tests that
-    require the daemon to be in offline mode,
-    such as tests that record data directly to disk.
+    On exit, the previous profile is restored. If ``restore_online_on_exit`` is
+    True, the daemon is restarted online immediately after restoring the profile.
 
-    :param offline: Whether to switch the daemon into offline mode
-    :type offline: bool
-    :yield: None
-    :rtype: None
-    """
-    previous_offline = os.environ.get("NCD_OFFLINE")
-
-    stop_daemon_for_mode_switch()
-    os.environ["NCD_OFFLINE"] = "1" if offline else "0"
-    ensure_daemon_running(timeout_s=10.0)
-    try:
-        yield
-    finally:
-        stop_daemon_for_mode_switch()
-        if previous_offline is None:
-            os.environ.pop("NCD_OFFLINE", None)
-        else:
-            os.environ["NCD_OFFLINE"] = previous_offline
-        ensure_daemon_running(timeout_s=10.0)
-
-
-@contextmanager
-def use_offline_daemon_profile():
-    """Context manager for temporarily using an offline data daemon profile.
-
-    This context manager creates a temporary offline profile,
-    sets the environment variable
-    to point to it, stops the data daemon, and then restarts it.
-      When exiting the context
-    manager, it stops the data daemon again and then resets
-    the environment variable to its
-    previous value.
-
-    This context manager is useful for tests that require the
-    daemon to be in offline mode,
-    such as tests that record data directly to disk.
-
+    :param restore_online_on_exit: Whether to restart the daemon after restoring
+        the previous profile so subsequent steps can immediately run online.
+    :type restore_online_on_exit: bool
     :yield: None
     :rtype: None
     """
@@ -724,15 +742,18 @@ def use_offline_daemon_profile():
 
     previous_profile = os.environ.get("NEURACORE_DAEMON_PROFILE")
     os.environ["NEURACORE_DAEMON_PROFILE"] = profile_name
-    stop_data_daemon()
+    stop_daemon_for_mode_switch()
+    ensure_daemon_running(timeout_s=10.0)
     try:
         yield
     finally:
-        stop_data_daemon()
+        stop_daemon_for_mode_switch()
         if previous_profile is None:
             os.environ.pop("NEURACORE_DAEMON_PROFILE", None)
         else:
             os.environ["NEURACORE_DAEMON_PROFILE"] = previous_profile
+        if restore_online_on_exit:
+            ensure_daemon_running(timeout_s=10.0)
 
 
 def run_minimal_recording_flow(label_prefix: str = "offline") -> str:
