@@ -1,0 +1,12 @@
+name: Trigger docs deployment
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  trigger-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Neuracore frontend rebuild
+        run: curl -sX POST "${{ secrets.NEURACORE_FRONTEND_DEPLOY_HOOK }}"
