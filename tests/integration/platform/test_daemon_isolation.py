@@ -66,7 +66,7 @@ OFFLINE_ISOLATION_DIMENSION_CONFIG = MatrixDimensionConfig(
     producer_channel_options=("synchronous", "per_thread"),
     video_counts=(0, 1),
     image_dimensions=((64, 64), (1920, 1080)),
-    kill_daemon_between_tests=False,
+    kill_daemon_between_tests=True,
     state_db_action="empty",
 )
 ONLINE_ISOLATION_DIMENSION_CONFIG = MatrixDimensionConfig(
