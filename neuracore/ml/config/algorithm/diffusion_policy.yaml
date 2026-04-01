@@ -1,26 +1,36 @@
 # @package _global_
 algorithm:
   _target_: neuracore.ml.algorithms.diffusion_policy.diffusion_policy.DiffusionPolicy
-  unet_down_dims: [256, 512, 1024]
-  unet_kernel_size: 5
-  unet_n_groups: 8
-  unet_diffusion_step_embed_dim: 128
-  hidden_dim: 64 # spatial_softmax_num_keypoints * 2
-  spatial_softmax_num_keypoints: 32
-  unet_use_film_scale_modulation: true
-  use_pretrained_weights: true
-  noise_scheduler_type: "DDPM"
-  num_train_timesteps: 100
-  num_inference_steps: 100
-  beta_start: 0.0001
-  beta_end: 0.02
-  beta_schedule: "squaredcos_cap_v2"
-  clip_sample: true
-  clip_sample_range: 1.0
-  lr: 1e-4 # default value for batch size 16
-  freeze_backbone: false
-  lr_backbone: 1e-4 # default value for batch size 16
-  weight_decay: 2e-6
-  optimizer_betas: [0.95, 0.999]
-  optimizer_eps: 1e-8
-  prediction_type: "epsilon"
+
+  # UNet architecture
+  unet_down_dims: [256, 512, 1024]       # Downsampling channel dimensions for each UNet stage
+  unet_kernel_size: 5                     # Kernel size for UNet convolutions
+  unet_n_groups: 8                        # Number of groups for group normalization
+  unet_diffusion_step_embed_dim: 128      # Dimension of diffusion step embeddings
+  unet_use_film_scale_modulation: true    # Use FiLM scale modulation in UNet
+
+  # Vision encoder
+  hidden_dim: 64                          # Output dim per image encoder (spatial_softmax_num_keypoints * 2)
+  spatial_softmax_num_keypoints: 32       # Number of keypoints for spatial softmax pooling
+  use_pretrained_weights: true            # Load pretrained ResNet weights
+
+  # Noise scheduler
+  noise_scheduler_type: "DDPM"            # Noise scheduler type ("DDPM" or "DDIM")
+  num_train_timesteps: 100                # Number of diffusion timesteps for training
+  num_inference_steps: 100                # Number of diffusion timesteps for inference
+  prediction_type: "epsilon"              # Prediction target ("epsilon" or "sample")
+  beta_start: 0.0001                      # Starting beta value for noise schedule
+  beta_end: 0.02                          # Ending beta value for noise schedule
+  beta_schedule: "squaredcos_cap_v2"      # Beta schedule type
+  clip_sample: true                       # Whether to clip denoised samples
+  clip_sample_range: 1.0                  # Clip range for denoised samples
+
+  # Learning rates
+  lr: 1e-4                                # Learning rate for main parameters
+  lr_backbone: 1e-4                       # Learning rate for backbone parameters
+  weight_decay: 2e-6                      # AdamW weight decay
+  optimizer_betas: [0.95, 0.999]          # Adam beta parameters
+  optimizer_eps: 1e-8                     # Adam epsilon
+
+  # Backbone
+  freeze_backbone: false                  # Whether to freeze image encoder backbone
