@@ -1,31 +1,48 @@
 # @package _global_
-# cspell:ignore bfloat checkpointing finetune
 algorithm:
   _target_: neuracore.ml.algorithms.pi05.pi05.Pi05
-  vlm_max_text_tokens: 200
-  num_inference_steps: 10
-  dtype: "bfloat16"
-  paligemma_variant: "gemma_2b"
-  action_expert_variant: "gemma_300m"
-  use_pretrained_weights: True
+
+  # Pretrained checkpoint (HuggingFace model ID or local directory)
   pretrained_name_or_path: "lerobot/pi05_base"
-  time_sampling_beta_alpha: 1.5
-  time_sampling_beta_beta: 1.0
-  time_sampling_scale: 0.999
-  time_sampling_offset: 0.001
-  min_period: 4e-3
-  max_period: 4.0
-  gradient_checkpointing: True
-  compile_model: False
-  compile_mode: "max-autotune"
-  optimizer_lr: 2.5e-5
-  optimizer_betas: [0.9, 0.95]
-  optimizer_eps: 1e-8
-  optimizer_weight_decay: 0.01
-  clip_grad_norm: 1.0
-  lr_scheduler_warmup_steps: 1000
-  lr_scheduler_num_decay_steps: 30000
-  lr_scheduler_decay_lr: 2.5e-6
-  finetune_action_expert_only: False
-  finetune_vision_encoder_and_action_expert: True
-  discrete_state_input: True
+  use_pretrained_weights: True
+
+  # Model architecture
+  paligemma_variant: "gemma_2b"        # VLM backbone size ("gemma_300m" or "gemma_2b")
+  action_expert_variant: "gemma_300m"  # Action expert size ("gemma_300m" or "gemma_2b")
+  vlm_max_text_tokens: 200             # Maximum number of language tokens
+  dtype: "bfloat16"                    # Model precision ("bfloat16" or "float32")
+  discrete_state_input: True           # Encode proprio state into prompt text instead of continuous input
+
+  # Denoising configuration
+  num_inference_steps: 10              # Number of Euler denoising steps at inference
+
+  # Flow matching time sampling (Beta distribution parameters)
+  time_sampling_beta_alpha: 1.5        # Alpha for beta distribution time sampling
+  time_sampling_beta_beta: 1.0         # Beta for beta distribution time sampling
+  time_sampling_scale: 0.999           # Scale factor for sampled time values
+  time_sampling_offset: 0.001          # Offset added to sampled time values
+
+  # Sinusoidal time embeddings
+  min_period: 4e-3                     # Minimum period for sinusoidal time embeddings
+  max_period: 4.0                      # Maximum period for sinusoidal time embeddings
+
+  # Optimizer
+  optimizer_lr: 2.5e-5                 # Learning rate
+  optimizer_betas: [0.9, 0.95]         # Adam beta parameters
+  optimizer_eps: 1e-8                  # Adam epsilon
+  optimizer_weight_decay: 0.01         # AdamW weight decay
+  clip_grad_norm: 1.0                  # Gradient clipping norm
+
+  # LR scheduler
+  lr_scheduler_warmup_steps: 1000      # Number of linear warmup steps
+  lr_scheduler_num_decay_steps: 30000  # Number of cosine decay steps
+  lr_scheduler_decay_lr: 2.5e-6       # Final learning rate after decay
+
+  # Fine-tuning control
+  finetune_action_expert_only: False                  # Only train action expert parameters
+  finetune_vision_encoder_and_action_expert: True     # Train vision encoder and action expert
+
+  # Training speed / memory optimizations
+  gradient_checkpointing: True         # Saves VRAM (~30% extra compute). Enable if OOM during training.
+  compile_model: False                 # JIT-compile model (PyTorch 2.0+). One-time compile overhead on first step.
+  compile_mode: "max-autotune"         # "max-autotune" for inference deployments; "default" is safe for training.

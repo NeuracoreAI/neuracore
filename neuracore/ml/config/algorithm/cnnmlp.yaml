@@ -1,12 +1,18 @@
 # @package _global_
 algorithm:
   _target_: neuracore.ml.algorithms.cnnmlp.cnnmlp.CNNMLP
-  image_backbone: "resnet18"
-  use_resnet_stats: true
-  hidden_dim: 512
-  cnn_output_dim: 512
-  num_layers: 3
-  lr: 1e-4
-  freeze_backbone: false
-  lr_backbone: 1e-5
-  weight_decay: 1e-4
+
+  # Architecture
+  image_backbone: "resnet18"   # Backbone architecture for image encoders
+  use_resnet_stats: true       # Use ImageNet normalization statistics for ResNet
+  hidden_dim: 512              # Hidden dimension for MLP layers
+  cnn_output_dim: 512          # Output dimension for CNN encoders
+  num_layers: 3                # Number of MLP layers
+
+  # Learning rates
+  lr: 1e-4                     # Learning rate for main parameters
+  lr_backbone: 1e-5            # Learning rate for CNN backbone
+  weight_decay: 1e-4           # AdamW weight decay
+
+  # Backbone
+  freeze_backbone: false       # Whether to freeze image encoder backbone
