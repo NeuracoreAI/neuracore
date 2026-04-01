@@ -104,6 +104,7 @@ class UploadManager:
         data_type: DataType,
         data_type_name: str,
         bytes_uploaded: int,
+        session_uris: dict[str, str] | None = None,
     ) -> None:
         """Handle READY_FOR_UPLOAD event from state manager.
 
@@ -114,6 +115,7 @@ class UploadManager:
             data_type: Data type
             data_type_name: Data type name
             bytes_uploaded: Starting offset for resume
+            session_uris: Pre-fetched upload session URIs keyed by cloud filepath.
         """
         active_uploads = self._active_uploads.get(trace_id)
         if active_uploads is not None:
@@ -139,6 +141,7 @@ class UploadManager:
                 data_type_name,
                 recording_id,
                 bytes_uploaded,
+                session_uris=session_uris,
             )
         )
 
@@ -337,6 +340,7 @@ class UploadManager:
         recording_id: str,
         file_bytes_uploaded: int,
         progress_callback: Callable[[int], Awaitable[None]],
+        session_uri: str | None = None,
     ) -> tuple[bool, int, str | None]:
         """Upload a single file using ResumableFileUploader.
 
@@ -346,6 +350,7 @@ class UploadManager:
             recording_id: Recording identifier.
             file_bytes_uploaded: Bytes already uploaded for this file (for resume).
             progress_callback: Callback for progress updates.
+            session_uri: Pre-fetched resumable upload session URI.
 
         Returns:
             Tuple of (success, total_bytes, error_message).
@@ -360,6 +365,7 @@ class UploadManager:
             bytes_uploaded=file_bytes_uploaded,
             progress_callback=progress_callback,
             bandwidth_limiter=self._bandwidth_limiter,
+            session_uri=session_uri,
         )
         return await uploader.upload()
 
@@ -371,6 +377,7 @@ class UploadManager:
         data_type_name: str,
         recording_id: str,
         bytes_uploaded: int,
+        session_uris: dict[str, str] | None = None,
     ) -> bool:
         """Upload all files in a trace directory.
 
@@ -381,6 +388,7 @@ class UploadManager:
             data_type_name: Data type name.
             recording_id: Recording identifier.
             bytes_uploaded: Cumulative bytes already uploaded (for resume).
+            session_uris: Pre-fetched upload session URIs keyed by cloud filepath.
 
         Returns:
             True if all files uploaded successfully, False otherwise.
@@ -431,12 +439,16 @@ class UploadManager:
                         progress_state,
                     )
 
+                    file_session_uri = (
+                        session_uris.get(cloud_filepath) if session_uris else None
+                    )
                     success, file_total_bytes, error_message = await self._upload_file(
                         file,
                         cloud_filepath,
                         recording_id,
                         file_bytes_uploaded,
                         progress_callback,
+                        session_uri=file_session_uri,
                     )
 
                     if not success:

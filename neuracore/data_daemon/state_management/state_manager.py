@@ -221,7 +221,11 @@ class StateManager:
 
             await self._emit_progress_report_if_last_trace_written(recording_id)
 
-    async def _emit_ready_for_upload_from_trace(self, trace: TraceRecord) -> None:
+    async def _emit_ready_for_upload_from_trace(
+        self,
+        trace: TraceRecord,
+        session_uris: dict[str, str] | None = None,
+    ) -> None:
         if (
             trace.path is None
             or trace.data_type is None
@@ -240,6 +244,7 @@ class StateManager:
             trace.data_type,
             trace.data_type_name,
             trace.bytes_uploaded,
+            session_uris,
         )
 
     async def _reconcile_failed_traces(self) -> None:
@@ -298,8 +303,8 @@ class StateManager:
             logger.warning("Trace record not found: %s", trace_id)
             return
 
-        await self._store.increment_uploaded_trace_count(trace_record.recording_id)
         await self._store.update_upload_status(trace_id, TraceUploadStatus.UPLOADED)
+        await self._store.increment_uploaded_trace_count(trace_record.recording_id)
         await self._emit_progress_report_if_last_trace_written(
             trace_record.recording_id
         )
@@ -573,7 +578,7 @@ class StateManager:
         candidates: list[RegistrationCandidate] = []
         skipped_missing_data_type = 0
         for trace in records:
-            if trace.data_type is None:
+            if trace.data_type is None or trace.data_type_name is None:
                 logger.warning(
                     "Skipping registration claim for trace %s: missing data_type",
                     trace.trace_id,
@@ -585,6 +590,7 @@ class StateManager:
                     trace_id=trace.trace_id,
                     recording_id=trace.recording_id,
                     data_type=trace.data_type,
+                    data_type_name=trace.data_type_name,
                 )
             )
         return candidates
@@ -618,7 +624,11 @@ class StateManager:
             )
         self._emit_trace_registration_available()
 
-    async def emit_ready_for_upload(self, trace_ids: list[str]) -> None:
+    async def emit_ready_for_upload(
+        self,
+        trace_ids: list[str],
+        upload_session_uris: dict[str, dict[str, str]] | None = None,
+    ) -> None:
         """Emit READY_FOR_UPLOAD for trace IDs that are upload-eligible."""
         if not trace_ids:
             return
@@ -630,7 +640,10 @@ class StateManager:
                     trace_id,
                 )
                 continue
-            await self._emit_ready_for_upload_from_trace(trace)
+            trace_uris = (
+                upload_session_uris.get(trace_id) if upload_session_uris else None
+            )
+            await self._emit_ready_for_upload_from_trace(trace, trace_uris)
 
     async def handle_upload_failed(
         self,

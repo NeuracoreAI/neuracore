@@ -20,7 +20,7 @@ from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.data_daemon.const import API_URL
 from neuracore.data_daemon.event_emitter import Emitter, get_emitter
-from neuracore.data_daemon.models import TraceRegistrationErrorCode
+from neuracore.data_daemon.models import TraceRegistrationErrorCode, get_content_type
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +35,32 @@ REGISTRATION_MAX_RETRIES = 5
 REGISTRATION_MAX_BACKOFF_SECONDS = 16
 REGISTRATION_RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 
+LOSSY_VIDEO_NAME = "lossy.mp4"
+LOSSLESS_VIDEO_NAME = "lossless.mp4"
+TRACE_FILE = "trace.json"
+
 # Backend contract for batch registration response.
-REGISTERED_IDS_KEY = "registered_trace_ids"
-FAILED_IDS_KEY = "failed_trace_ids"
+REGISTERED_TRACES_KEY = "registered_traces"
+FAILED_TRACES_KEY = "failed_traces"
+
+
+def get_cloud_file_list(
+    data_type: DataType, data_type_name: str
+) -> list[dict[str, str]]:
+    """Derive the cloud file list for a trace from its data type."""
+    prefix = f"{data_type.value}/{data_type_name}"
+    files = []
+    if get_content_type(data_type) == "RGB":
+        files.append(
+            {"filepath": f"{prefix}/{LOSSY_VIDEO_NAME}", "content_type": "video/mp4"}
+        )
+        files.append(
+            {"filepath": f"{prefix}/{LOSSLESS_VIDEO_NAME}", "content_type": "video/mp4"}
+        )
+    files.append(
+        {"filepath": f"{prefix}/{TRACE_FILE}", "content_type": "application/json"}
+    )
+    return files
 
 
 @dataclass(frozen=True)
@@ -47,6 +70,7 @@ class RegistrationCandidate:
     trace_id: str
     recording_id: str
     data_type: DataType
+    data_type_name: str
 
 
 @dataclass(frozen=True)
@@ -57,6 +81,7 @@ class RegistrationBatchOutcome:
     failed_trace_ids: list[str]
     error_code: TraceRegistrationErrorCode | None = None
     error_message: str | None = None
+    upload_session_uris: dict[str, dict[str, str]] | None = None
 
 
 class RegistrationStateAPI(Protocol):
@@ -75,7 +100,11 @@ class RegistrationStateAPI(Protocol):
     ) -> None:
         """Mark traces as registration failed/retrying."""
 
-    async def emit_ready_for_upload(self, trace_ids: list[str]) -> None:
+    async def emit_ready_for_upload(
+        self,
+        trace_ids: list[str],
+        upload_session_uris: dict[str, dict[str, str]] | None = None,
+    ) -> None:
         """Emit upload-ready events for traces that passed registration."""
 
     async def mark_traces_registering(self, trace_ids: list[str]) -> list[str]:
@@ -250,6 +279,9 @@ class RegistrationManager:
                         "recording_id": trace.recording_id,
                         "data_type": trace.data_type.value,
                         "trace_id": str(trace.trace_id),
+                        "cloud_files": get_cloud_file_list(
+                            trace.data_type, trace.data_type_name
+                        ),
                     }
                     for trace in traces
                 ]
@@ -316,18 +348,31 @@ class RegistrationManager:
                                 ),
                             )
 
-                        registered_raw = response_payload.get(REGISTERED_IDS_KEY, [])
-                        failed_raw = response_payload.get(FAILED_IDS_KEY, [])
+                        registered_traces = response_payload.get(
+                            REGISTERED_TRACES_KEY, []
+                        )
+                        failed_traces = response_payload.get(FAILED_TRACES_KEY, [])
 
                         registered_trace_ids = [
-                            str(trace_id)
-                            for trace_id in registered_raw
-                            if str(trace_id) in requested_trace_ids
+                            str(entry["trace_id"])
+                            for entry in registered_traces
+                            if str(entry.get("trace_id")) in requested_trace_ids
                         ]
+                        upload_session_uris: dict[str, dict[str, str]] = {
+                            str(entry["trace_id"]): entry["upload_session_uris"]
+                            for entry in registered_traces
+                            if str(entry.get("trace_id")) in requested_trace_ids
+                            and entry.get("upload_session_uris")
+                        }
                         failed_trace_ids = [
-                            str(trace_id)
-                            for trace_id in failed_raw
-                            if str(trace_id) in requested_trace_ids
+                            str(entry["trace_id"])
+                            for entry in failed_traces
+                            if str(entry.get("trace_id")) in requested_trace_ids
+                        ]
+                        failed_errors = [
+                            entry.get("error", "Unknown error")
+                            for entry in failed_traces
+                            if str(entry.get("trace_id")) in requested_trace_ids
                         ]
 
                         unresolved = (
@@ -338,6 +383,10 @@ class RegistrationManager:
                         if unresolved:
                             failed_trace_ids.extend(sorted(unresolved))
 
+                        error_summary = (
+                            "; ".join(failed_errors) if failed_errors else None
+                        )
+
                         return RegistrationBatchOutcome(
                             registered_trace_ids=registered_trace_ids,
                             failed_trace_ids=failed_trace_ids,
@@ -346,11 +395,8 @@ class RegistrationManager:
                                 if failed_trace_ids
                                 else None
                             ),
-                            error_message=(
-                                "Batch registration returned failed trace IDs"
-                                if failed_trace_ids
-                                else None
-                            ),
+                            error_message=(error_summary if failed_trace_ids else None),
+                            upload_session_uris=upload_session_uris or None,
                         )
                 except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                     logger.warning(
@@ -430,7 +476,9 @@ class RegistrationManager:
                 registered_ids[:5],
             )
             if registered_ids:
-                await self._state_api.emit_ready_for_upload(registered_ids)
+                await self._state_api.emit_ready_for_upload(
+                    registered_ids, outcome.upload_session_uris
+                )
                 logger.debug(
                     "Emitted READY_FOR_UPLOAD for registered traces (count=%d)",
                     len(registered_ids),

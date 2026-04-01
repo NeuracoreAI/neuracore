@@ -650,6 +650,7 @@ async def test_status_is_uploading_during_active_upload(
             DataType.CUSTOM_1D,
             "custom",
             0,
+            None,
         )
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)

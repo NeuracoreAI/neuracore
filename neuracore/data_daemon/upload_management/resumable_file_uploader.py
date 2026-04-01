@@ -64,6 +64,7 @@ class ResumableFileUploader:
         bytes_uploaded: int = 0,
         progress_callback: Callable[[int], Awaitable[None]] | None = None,
         bandwidth_limiter: AsyncLimiter | None = None,
+        session_uri: str | None = None,
     ) -> None:
         """Initialize the file uploader.
 
@@ -76,6 +77,7 @@ class ResumableFileUploader:
             bytes_uploaded: Starting offset for resume
             progress_callback: Called after each chunk to report progress
             bandwidth_limiter: Shared token-bucket limiter; None means unlimited.
+            session_uri: Pre-fetched resumable upload session URI
         """
         self._recording_id = recording_id
         self._filepath = filepath
@@ -86,7 +88,7 @@ class ResumableFileUploader:
         self._progress_callback = progress_callback
         self._bandwidth_limiter = bandwidth_limiter
 
-        self._session_uri: str | None = None
+        self._session_uri: str | None = session_uri
         self._total_bytes = 0
 
     async def _get_upload_session_uri(self) -> str:
