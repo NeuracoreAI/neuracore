@@ -187,7 +187,7 @@ class ProducerChannel:
             self._heartbeat_thread = None
         self._comm.cleanup_producer()
 
-    def _send(self, command: CommandType, payload: dict | None = None) -> None:
+    def _send(self, command: CommandType, payload: dict | None = None) -> int:
         """Send a message to the daemon.
 
         This method serializes the message into a JSON bytes
@@ -201,7 +201,7 @@ class ProducerChannel:
                 to process the message.
 
         Returns:
-            None
+            The sequence number assigned to the enqueued message.
         """
         # Serialize sequence assignment with queue insertion so concurrent
         # heartbeat/data senders cannot enqueue messages out of sequence order.
@@ -217,6 +217,7 @@ class ProducerChannel:
                 sequence_number=sequence_number,
             )
             self._send_queue.put(envelope)
+            return sequence_number
 
     def get_last_sent_sequence_number(self) -> int:
         """Return the most recent sequence number successfully sent on the socket."""
@@ -239,6 +240,14 @@ class ProducerChannel:
             while self._last_socket_sent_sequence_number < sequence_number:
                 sender_thread = self._sender_thread
                 if sender_thread is None or not sender_thread.is_alive():
+                    logger.warning(
+                        "ProducerChannel %s sender stopped before sequence %s "
+                        "was sent (last_sent=%s last_enqueued=%s)",
+                        self.channel_id,
+                        sequence_number,
+                        self._last_socket_sent_sequence_number,
+                        self._last_enqueued_sequence_number,
+                    )
                     return False
                 self._sequence_cv.wait()
             return True

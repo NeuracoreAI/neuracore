@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import struct
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -14,6 +16,7 @@ from neuracore.data_daemon.communications_management.channel_reader import (
     CHUNK_HEADER_FORMAT,
     ChannelMessageReader,
 )
+from neuracore.data_daemon.communications_management.bridge_spool import BridgeSpool
 from neuracore.data_daemon.communications_management.communications_manager import (
     CommunicationsManager,
 )
@@ -26,7 +29,10 @@ from neuracore.data_daemon.const import (
     TRACE_ID_FIELD_SIZE,
 )
 from neuracore.data_daemon.event_emitter import Emitter
-from neuracore.data_daemon.helpers import utc_now
+from neuracore.data_daemon.helpers import (
+    get_daemon_recordings_root_path,
+    utc_now,
+)
 from neuracore.data_daemon.models import (
     CommandType,
     CompleteMessage,
@@ -40,6 +46,8 @@ from neuracore.data_daemon.recording_encoding_disk_manager import (
 RecordingDiskManager = rdm_module.RecordingDiskManager
 
 logger = logging.getLogger(__name__)
+_BRIDGE_DRAIN_IDLE_SLEEP_S = 0.001
+_BRIDGE_FORWARD_WAIT_TIMEOUT_S = 0.05
 
 
 def _str_or_none(value: str | int | None) -> str | None:
@@ -64,6 +72,7 @@ class ChannelState:
     last_sequence_number: int = 0
     opened_at: datetime | None = None
     heartbeat_expired_at: datetime | None = None
+    drain_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def is_opened(self) -> bool:
         """Check if the channel has been opened with a ring buffer."""
@@ -179,6 +188,13 @@ class Daemon:
         self._closed_recordings: set[str] = set()
         self._closing_recordings: dict[str, RecordingClosingState] = {}
         self._producer_last_sequence_numbers: dict[str, int] = {}
+        self._state_lock = threading.RLock()
+        self._worker_stop_event = threading.Event()
+        self._drain_thread: threading.Thread | None = None
+        self._forward_thread: threading.Thread | None = None
+        self._bridge_spool = BridgeSpool(
+            get_daemon_recordings_root_path() / ".bridge_spool"
+        )
         self._command_handlers: dict[CommandType, CommandHandler] = {
             CommandType.OPEN_RING_BUFFER: self._handle_open_ring_buffer,
             CommandType.DATA_CHUNK: self._handle_write_data_chunk,
@@ -208,7 +224,9 @@ class Daemon:
             raise RuntimeError("Daemon is already running")
 
         self._running = True
+        self._worker_stop_event.clear()
         self.comm.start_consumer()
+        self._start_background_workers()
 
         logger.info("Daemon started and ready to receive messages...")
         try:
@@ -218,10 +236,11 @@ class Daemon:
                 if raw:
                     self.process_raw_message(raw)
                 self._cleanup_expired_channels()
-                self._drain_channel_messages()
         except KeyboardInterrupt:
             logger.info("Shutting down daemon...")
         finally:
+            self._stop_background_workers()
+            self._bridge_spool.cleanup()
             self.comm.cleanup_daemon()
 
     def stop(
@@ -233,6 +252,74 @@ class Daemon:
         to exit on the next iteration.
         """
         self._running = False
+        self._worker_stop_event.set()
+
+    def _start_background_workers(self) -> None:
+        """Start daemon-owned drain and forward worker loops."""
+        if self._drain_thread is None or not self._drain_thread.is_alive():
+            self._drain_thread = threading.Thread(
+                target=self._drain_loop,
+                name="daemon-bridge-drain",
+                daemon=True,
+            )
+            self._drain_thread.start()
+
+        if self._forward_thread is None or not self._forward_thread.is_alive():
+            self._forward_thread = threading.Thread(
+                target=self._forward_loop,
+                name="daemon-bridge-forward",
+                daemon=True,
+            )
+            self._forward_thread.start()
+
+    def _stop_background_workers(self) -> None:
+        """Stop daemon-owned worker loops and wait for them to exit."""
+        self._worker_stop_event.set()
+        self._bridge_spool.wait_for_item(timeout_s=0.0)
+
+        if self._drain_thread is not None:
+            self._drain_thread.join(timeout=2.0)
+            self._drain_thread = None
+
+        if self._forward_thread is not None:
+            self._forward_thread.join(timeout=2.0)
+            self._forward_thread = None
+
+    def _drain_loop(self) -> None:
+        """Drain complete channel messages into the bridge spool."""
+        while not self._worker_stop_event.is_set():
+            drained_any = self._drain_channel_messages()
+            if not drained_any:
+                time.sleep(_BRIDGE_DRAIN_IDLE_SLEEP_S)
+
+    def _forward_loop(self) -> None:
+        """Forward spooled messages into the recording disk manager."""
+        while not self._worker_stop_event.is_set():
+            if not self._bridge_spool.wait_for_item(
+                timeout_s=_BRIDGE_FORWARD_WAIT_TIMEOUT_S
+            ):
+                continue
+            self._forward_spool_once()
+
+    def _forward_spool_once(self) -> bool:
+        """Forward a single spooled message to the recording disk manager."""
+        message = self._bridge_spool.peek()
+        if message is None:
+            return False
+
+        try:
+            self.recording_disk_manager.enqueue(message)
+        except Exception:
+            logger.exception(
+                "Failed to forward spooled message for trace_id=%s producer_id=%s",
+                message.trace_id,
+                message.producer_id,
+            )
+            time.sleep(_BRIDGE_DRAIN_IDLE_SLEEP_S)
+            return False
+
+        self._bridge_spool.ack()
+        return True
 
     def process_raw_message(self, raw: bytes) -> None:
         """Process a raw message from a producer.
@@ -289,12 +376,13 @@ class Daemon:
         ):
             self._closed_producers.discard(producer_id)
 
-        existing = self.channels.get(producer_id)
-        if existing is None:
-            existing = ChannelState(producer_id=producer_id)
-            self.channels[producer_id] = existing
-        channel = existing
-        channel.touch()
+        with self._state_lock:
+            existing = self.channels.get(producer_id)
+            if existing is None:
+                existing = ChannelState(producer_id=producer_id)
+                self.channels[producer_id] = existing
+            channel = existing
+            channel.touch()
 
         handler = self._command_handlers.get(cmd)
         if handler is None:
@@ -302,18 +390,19 @@ class Daemon:
             return
 
         if message.sequence_number is not None:
-            if message.sequence_number > channel.last_sequence_number:
-                channel.last_sequence_number = message.sequence_number
-                self._producer_last_sequence_numbers[producer_id] = (
-                    channel.last_sequence_number
-                )
-            else:
-                logger.warning(
-                    "Non-monotonic sequence_number=%s for producer_id=%s (last=%s)",
-                    message.sequence_number,
-                    producer_id,
-                    channel.last_sequence_number,
-                )
+            with self._state_lock:
+                if message.sequence_number > channel.last_sequence_number:
+                    channel.last_sequence_number = message.sequence_number
+                    self._producer_last_sequence_numbers[producer_id] = (
+                        channel.last_sequence_number
+                    )
+                else:
+                    logger.warning(
+                        "Non-monotonic sequence_number=%s for producer_id=%s (last=%s)",
+                        message.sequence_number,
+                        producer_id,
+                        channel.last_sequence_number,
+                    )
         try:
             handler(channel, message)
         except Exception:
@@ -353,54 +442,66 @@ class Daemon:
         channel.set_ring_buffer(RingBuffer(size))
 
     # Consumer
-    def _drain_channel_messages(self) -> None:
+    def _drain_channel_messages(self) -> bool:
         """Poll all channels for completed messages and handle them."""
-        for channel in self.channels.values():
-            self._drain_single_channel_messages(channel)
+        with self._state_lock:
+            channels = list(self.channels.values())
 
-    def _drain_single_channel_messages(self, channel: ChannelState) -> None:
+        drained_any = False
+        for channel in channels:
+            if self._drain_single_channel_messages(channel):
+                drained_any = True
+        return drained_any
+
+    def _drain_single_channel_messages(self, channel: ChannelState) -> bool:
         """Drain all currently-complete messages for a single channel."""
-        # guard against uninitialised channels
         if channel.reader is None or channel.ring_buffer is None:
-            return
+            return False
 
-        while True:
-            result = channel.reader.poll_one()
-            if result is None:
-                break
+        drained_any = False
+        with channel.drain_lock:
+            while True:
+                result = channel.reader.poll_one()
+                if result is None:
+                    break
 
-            trace_id, data_type, payload = result
-            recording_id = self._trace_recordings.get(trace_id)
-            if not recording_id:
-                logger.warning(
-                    "No recording_id found for trace_id=%s, dropping message",
-                    trace_id,
+                trace_id, data_type, payload = result
+                with self._state_lock:
+                    recording_id = self._trace_recordings.get(trace_id)
+                if not recording_id:
+                    logger.warning(
+                        "No recording_id found for trace_id=%s, dropping message",
+                        trace_id,
+                    )
+                    continue
+                self._on_complete_message(
+                    channel, trace_id, data_type, payload, recording_id
                 )
-                continue
-            self._on_complete_message(
-                channel, trace_id, data_type, payload, recording_id
-            )
+                drained_any = True
+
+        return drained_any
 
     def _channel_stop_cutoff_sequence_number(
         self, producer_id: str, channel: ChannelState
     ) -> int | None:
         """Return stop cutoff sequence for the channel's active trace, if known."""
-        trace_id = channel.trace_id
-        if trace_id is None:
-            return None
-        recording_id = self._trace_recordings.get(trace_id)
-        if recording_id is None:
-            return None
-        closing_state = self._closing_recordings.get(recording_id)
-        if closing_state is None:
-            return None
-        cutoffs = closing_state.producer_stop_sequence_numbers
-        if not cutoffs:
-            return None
-        cutoff = cutoffs.get(producer_id)
-        if cutoff is None:
-            return None
-        return int(cutoff)
+        with self._state_lock:
+            trace_id = channel.trace_id
+            if trace_id is None:
+                return None
+            recording_id = self._trace_recordings.get(trace_id)
+            if recording_id is None:
+                return None
+            closing_state = self._closing_recordings.get(recording_id)
+            if closing_state is None:
+                return None
+            cutoffs = closing_state.producer_stop_sequence_numbers
+            if not cutoffs:
+                return None
+            cutoff = cutoffs.get(producer_id)
+            if cutoff is None:
+                return None
+            return int(cutoff)
 
     def _on_complete_message(
         self,
@@ -424,31 +525,51 @@ class Daemon:
         :param recording_id: The recording ID (from immutable _trace_recordings).
         :param final_chunk: Whether this is the final chunk for the trace.
         """
-        metadata = self._trace_metadata.get(trace_id, {})
-        robot_instance = int(metadata.get("robot_instance") or 0)
+        complete_message = self._build_complete_message(
+            channel=channel,
+            trace_id=trace_id,
+            recording_id=recording_id,
+            data_type=data_type,
+            data=data,
+            final_chunk=final_chunk,
+        )
         try:
-            self.recording_disk_manager.enqueue(
-                CompleteMessage.from_bytes(
-                    producer_id=channel.producer_id,
-                    trace_id=trace_id,
-                    recording_id=recording_id,
-                    final_chunk=final_chunk,
-                    data_type=data_type,
-                    data_type_name=str(metadata.get("data_type_name") or ""),
-                    robot_instance=robot_instance,
-                    data=data,
-                    dataset_id=_str_or_none(metadata.get("dataset_id")),
-                    dataset_name=_str_or_none(metadata.get("dataset_name")),
-                    robot_name=_str_or_none(metadata.get("robot_name")),
-                    robot_id=_str_or_none(metadata.get("robot_id")),
-                )
-            )
+            self._bridge_spool.append(complete_message)
         except Exception:
             logger.exception(
-                "Failed to enqueue message for trace_id=%s producer_id=%s",
+                "Failed to append spooled message for trace_id=%s producer_id=%s",
                 trace_id,
                 channel.producer_id,
             )
+
+    def _build_complete_message(
+        self,
+        *,
+        channel: ChannelState,
+        trace_id: str,
+        recording_id: str,
+        data_type: DataType,
+        data: bytes,
+        final_chunk: bool,
+    ) -> CompleteMessage:
+        """Construct a complete message using the latest registered metadata."""
+        with self._state_lock:
+            metadata = dict(self._trace_metadata.get(trace_id, {}))
+
+        return CompleteMessage.from_bytes(
+            producer_id=channel.producer_id,
+            trace_id=trace_id,
+            recording_id=recording_id,
+            final_chunk=final_chunk,
+            data_type=data_type,
+            data_type_name=str(metadata.get("data_type_name") or ""),
+            robot_instance=int(metadata.get("robot_instance") or 0),
+            data=data,
+            dataset_id=_str_or_none(metadata.get("dataset_id")),
+            dataset_name=_str_or_none(metadata.get("dataset_name")),
+            robot_name=_str_or_none(metadata.get("robot_name")),
+            robot_id=_str_or_none(metadata.get("robot_id")),
+        )
 
     def _handle_heartbeat(self, channel: ChannelState, _: MessageEnvelope) -> None:
         """Update the heartbeat timestamp for a producer.
@@ -468,17 +589,18 @@ class Daemon:
         :param recording_id: The recording ID to register the trace to.
         :param trace_id: The trace ID to register.
         """
-        existing = self._trace_recordings.get(trace_id)
-        if existing and existing != recording_id:
-            logger.warning(
-                "Trace %s moved from recording %s to %s",
-                trace_id,
-                existing,
-                recording_id,
-            )
-            self._recording_traces.get(existing, set()).discard(trace_id)
-        self._trace_recordings[trace_id] = recording_id
-        self._recording_traces.setdefault(recording_id, set()).add(trace_id)
+        with self._state_lock:
+            existing = self._trace_recordings.get(trace_id)
+            if existing and existing != recording_id:
+                logger.warning(
+                    "Trace %s moved from recording %s to %s",
+                    trace_id,
+                    existing,
+                    recording_id,
+                )
+                self._recording_traces.get(existing, set()).discard(trace_id)
+            self._trace_recordings[trace_id] = recording_id
+            self._recording_traces.setdefault(recording_id, set()).add(trace_id)
 
     def _register_trace_metadata(
         self, trace_id: str, metadata: dict[str, str | int | None]
@@ -493,21 +615,22 @@ class Daemon:
         :param trace_id: The trace ID to register metadata for.
         :param metadata: A dictionary of metadata to register.
         """
-        existing = self._trace_metadata.get(trace_id)
-        if existing is None:
-            self._trace_metadata[trace_id] = dict(metadata)
-            return
-        for key, value in metadata.items():
-            if existing.get(key) is None and value is not None:
-                existing[key] = value
-            elif value is not None and existing.get(key) not in (None, value):
-                logger.warning(
-                    "Trace %s metadata mismatch for %s (%s -> %s)",
-                    trace_id,
-                    key,
-                    existing.get(key),
-                    value,
-                )
+        with self._state_lock:
+            existing = self._trace_metadata.get(trace_id)
+            if existing is None:
+                self._trace_metadata[trace_id] = dict(metadata)
+                return
+            for key, value in metadata.items():
+                if existing.get(key) is None and value is not None:
+                    existing[key] = value
+                elif value is not None and existing.get(key) not in (None, value):
+                    logger.warning(
+                        "Trace %s metadata mismatch for %s (%s -> %s)",
+                        trace_id,
+                        key,
+                        existing.get(key),
+                        value,
+                    )
 
     def _remove_trace(self, recording_id: str, trace_id: str) -> None:
         """Remove a trace from the recording-trace mapping.
@@ -520,14 +643,15 @@ class Daemon:
         :param recording_id: The recording ID to remove the trace from.
         :param trace_id: The trace ID to remove.
         """
-        self._trace_recordings.pop(trace_id, None)
-        self._trace_metadata.pop(trace_id, None)
-        traces = self._recording_traces.get(recording_id)
-        if traces is None:
-            return
-        traces.discard(trace_id)
-        if not traces:
-            self._recording_traces.pop(recording_id, None)
+        with self._state_lock:
+            self._trace_recordings.pop(trace_id, None)
+            self._trace_metadata.pop(trace_id, None)
+            traces = self._recording_traces.get(recording_id)
+            if traces is None:
+                return
+            traces.discard(trace_id)
+            if not traces:
+                self._recording_traces.pop(recording_id, None)
 
     def _handle_write_data_chunk(
         self, channel: ChannelState, message: MessageEnvelope
@@ -578,23 +702,24 @@ class Daemon:
             return
 
         trace_id = data_chunk.trace_id
-        if channel.trace_id != trace_id and channel.trace_id is not None:
-            logger.warning(
-                "DATA_CHUNK trace_id=%s does not match channel trace_id=%s",
-                data_chunk.trace_id,
-                channel.trace_id,
-            )
-        channel.set_trace_id(trace_id)
+        with self._state_lock:
+            if channel.trace_id != trace_id and channel.trace_id is not None:
+                logger.warning(
+                    "DATA_CHUNK trace_id=%s does not match channel trace_id=%s",
+                    data_chunk.trace_id,
+                    channel.trace_id,
+                )
+            channel.set_trace_id(trace_id)
 
-        if recording_id in self._closed_recordings:
-            logger.warning(
-                "Dropping data for closed recording_id=%s trace_id=%s",
-                recording_id,
-                trace_id,
-            )
-            return
+            if recording_id in self._closed_recordings:
+                logger.warning(
+                    "Dropping data for closed recording_id=%s trace_id=%s",
+                    recording_id,
+                    trace_id,
+                )
+                return
 
-        closing_state = self._closing_recordings.get(recording_id)
+            closing_state = self._closing_recordings.get(recording_id)
         if closing_state is not None and closing_state.producer_stop_sequence_numbers:
             cutoff_sequence_number = closing_state.producer_stop_sequence_numbers.get(
                 channel.producer_id
@@ -705,12 +830,21 @@ class Daemon:
         if not trace_id:
             return
 
-        recording_id = self._trace_recordings.get(str(trace_id))
+        with self._state_lock:
+            recording_id = self._trace_recordings.get(str(trace_id))
         if not recording_id:
+            logger.warning(
+                "TRACE_END received without recording for producer_id=%s trace_id=%s "
+                "sequence_number=%s",
+                channel.producer_id,
+                trace_id,
+                message.sequence_number,
+            )
             return
 
         # Get metadata before removing the trace
-        metadata = self._trace_metadata.get(str(trace_id), {})
+        with self._state_lock:
+            metadata = dict(self._trace_metadata.get(str(trace_id), {}))
         data_type_str = metadata.get("data_type")
         if data_type_str:
             try:
@@ -783,10 +917,11 @@ class Daemon:
                 "recording_stopped.producer_stop_sequence_numbers must be a dict"
             )
 
-        self._closing_recordings[recording_id] = RecordingClosingState(
-            producer_stop_sequence_numbers=producer_stop_sequence_numbers,
-            stop_requested_at=utc_now(),
-        )
+        with self._state_lock:
+            self._closing_recordings[recording_id] = RecordingClosingState(
+                producer_stop_sequence_numbers=producer_stop_sequence_numbers,
+                stop_requested_at=utc_now(),
+            )
 
         self._emitter.emit(Emitter.STOP_RECORDING_REQUESTED, recording_id)
 
@@ -800,20 +935,29 @@ class Daemon:
         :return: None
         """
         to_close: list[str] = []
-        for recording_id, closing_state in self._closing_recordings.items():
+        with self._state_lock:
+            closing_items = list(self._closing_recordings.items())
+
+        for recording_id, closing_state in closing_items:
+            with self._state_lock:
+                traces = set(self._recording_traces.get(recording_id, set()))
+            spool_pending_count = self._bridge_spool.pending_count_for_recording(
+                recording_id
+            )
+            cutoffs_reached = self._has_reached_sequence_cutoffs(closing_state)
+
             # Not processed all chunks up to stop yet
-            if not self._has_reached_sequence_cutoffs(closing_state):
+            if not cutoffs_reached:
                 continue
 
-            traces = self._recording_traces.get(recording_id, set())
-            # traces have been processed and removed
-            if not traces:
+            if not traces and spool_pending_count == 0:
                 to_close.append(recording_id)
 
         # Only stop recording (signal flush RDM) when all traces have been processed
         for recording_id in to_close:
-            self._closing_recordings.pop(recording_id, None)
-            self._closed_recordings.add(recording_id)
+            with self._state_lock:
+                self._closing_recordings.pop(recording_id, None)
+                self._closed_recordings.add(recording_id)
             self._emitter.emit(Emitter.STOP_RECORDING, recording_id)
 
     def _has_reached_sequence_cutoffs(
@@ -827,13 +971,16 @@ class Daemon:
         if not stop_cutoffs:
             return True
 
-        for producer_id, cutoff_sequence_number in stop_cutoffs.items():
-            last_sequence_number = self._producer_last_sequence_numbers.get(producer_id)
-            if (
-                last_sequence_number is None
-                or last_sequence_number < cutoff_sequence_number
-            ):
-                return False
+        with self._state_lock:
+            for producer_id, cutoff_sequence_number in stop_cutoffs.items():
+                last_sequence_number = self._producer_last_sequence_numbers.get(
+                    producer_id
+                )
+                if (
+                    last_sequence_number is None
+                    or last_sequence_number < cutoff_sequence_number
+                ):
+                    return False
         return True
 
     def cleanup_channel_on_trace_written(
@@ -851,14 +998,11 @@ class Daemon:
         :param trace_id: ID of the trace to clean up
         :param bytes_written: total number of bytes written for the trace (unused)
         """
-        recording_id = self._trace_recordings.get(trace_id)
-        if recording_id:
-            self._remove_trace(str(recording_id), str(trace_id))
-
-        channel = next(
-            (ch for ch in self.channels.values() if ch.trace_id == trace_id),
-            None,
-        )
+        with self._state_lock:
+            channel = next(
+                (ch for ch in self.channels.values() if ch.trace_id == trace_id),
+                None,
+            )
         if channel is not None:
             channel.trace_id = None
 
@@ -866,8 +1010,10 @@ class Daemon:
         """Remove channels whose heartbeat has not been seen within the timeout."""
         now = utc_now()
         to_remove: list[str] = []
+        with self._state_lock:
+            channel_items = list(self.channels.items())
 
-        for producer_id, state in self.channels.items():
+        for producer_id, state in channel_items:
             if state.is_stale_unopened(now):
                 to_remove.append(producer_id)
                 continue
@@ -899,11 +1045,13 @@ class Daemon:
             to_remove.append(producer_id)
 
         for producer_id in to_remove:
-            channel = self.channels.get(producer_id)
+            with self._state_lock:
+                channel = self.channels.get(producer_id)
             if channel is None:
                 continue
             if channel is not None and channel.trace_id is not None:
-                recording_id = self._trace_recordings.get(channel.trace_id)
+                with self._state_lock:
+                    recording_id = self._trace_recordings.get(channel.trace_id)
                 self._handle_end_trace(
                     channel,
                     MessageEnvelope(
@@ -918,9 +1066,13 @@ class Daemon:
                     ),
                     reason="heartbeat_expiry",
                 )
-                self._producer_last_sequence_numbers[channel.producer_id] = max(
-                    self._producer_last_sequence_numbers.get(channel.producer_id, 0),
-                    channel.last_sequence_number,
-                )
-            del self.channels[producer_id]
-            self._closed_producers.add(producer_id)
+                with self._state_lock:
+                    self._producer_last_sequence_numbers[channel.producer_id] = max(
+                        self._producer_last_sequence_numbers.get(
+                            channel.producer_id, 0
+                        ),
+                        channel.last_sequence_number,
+                    )
+            with self._state_lock:
+                self.channels.pop(producer_id, None)
+                self._closed_producers.add(producer_id)

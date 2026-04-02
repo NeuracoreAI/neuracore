@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import json
 import struct
 import threading
@@ -386,7 +387,7 @@ def test_rdm_emits_trace_write_progress(
         emitter.remove_listener(Emitter.TRACE_WRITTEN, on_written)
 
 
-def test_rdm_sets_expected_trace_count_from_writer_traces_on_stop(
+def test_rdm_sets_expected_trace_count_from_queue_accepted_traces_on_stop(
     rdm_module,
     rdm_factory,
 ) -> None:
@@ -455,9 +456,9 @@ def test_rdm_sets_expected_trace_count_from_writer_traces_on_stop(
         emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
 
         assert expected_seen.wait(timeout=5.0) is True
-        assert set(rdm.recording_traces[recording_id]) == {joint_trace_id, rgb_trace_id}
         assert expected_counts == [2]
         assert written_seen.wait(timeout=10.0) is True
+        assert set(rdm.recording_traces[recording_id]) == {joint_trace_id, rgb_trace_id}
     finally:
         emitter.remove_listener(Emitter.SET_EXPECTED_TRACE_COUNT, on_expected)
         emitter.remove_listener(Emitter.TRACE_WRITTEN, on_written)
@@ -626,6 +627,66 @@ def test_rdm_rgb_trace_uses_rgb_batch_flow(
     assert _wait_for(lambda: (trace_dir / "trace.json").is_file(), timeout=10.0) is True
     assert (trace_dir / "lossy.mp4").is_file()
     assert (trace_dir / "lossless.mp4").is_file()
+
+
+def test_rdm_rgb_trace_writes_trace_pipeline_csv(
+    rdm_factory,
+) -> None:
+    rdm, recordings_root = rdm_factory(storage_limit=None, flush_bytes=1)
+
+    recording_id = str(uuid.uuid4())
+    trace_id = "camera_front_csv"
+    width, height = 4, 3
+    frame = _make_rgb24_frame_bytes(0, width, height)
+    payload = _make_combined_video_payload(
+        width=width,
+        height=height,
+        timestamp=1.0,
+        frame=frame,
+    )
+
+    rdm.enqueue(
+        CompleteMessage.from_bytes(
+            producer_id="p",
+            recording_id=recording_id,
+            trace_id=trace_id,
+            data_type=DataType.RGB_IMAGES,
+            data_type_name="camera_front_csv",
+            robot_instance=0,
+            data=payload,
+            final_chunk=True,
+        )
+    )
+
+    metrics_csv = recordings_root / "trace_pipeline_metrics.csv"
+    assert _wait_for(lambda: metrics_csv.is_file(), timeout=10.0) is True
+
+    with metrics_csv.open("r", newline="", encoding="utf-8") as csv_f:
+        rows = [
+            row
+            for row in csv.DictReader(csv_f)
+            if row["recording_id"] == recording_id and row["trace_id"] == trace_id
+        ]
+
+    events = {row["event"] for row in rows}
+    assert {
+        "batch_ready_emitted",
+        "batch_ready_received",
+        "batch_processed",
+        "trace_written",
+    }.issubset(events)
+
+    batch_ready_emitted = next(row for row in rows if row["event"] == "batch_ready_emitted")
+    assert batch_ready_emitted["data_type"] == DataType.RGB_IMAGES.value
+    assert batch_ready_emitted["batch_bytes"] != ""
+
+    batch_processed = next(row for row in rows if row["event"] == "batch_processed")
+    assert batch_processed["since_batch_ready_ms"] != ""
+    assert batch_processed["in_flight_rgb"] != ""
+
+    trace_written = next(row for row in rows if row["event"] == "trace_written")
+    assert trace_written["trace_bytes_written"] != ""
+    assert trace_written["since_batch_processed_ms"] != ""
 
 
 def test_rdm_enqueue_blocks_when_rgb_writer_queue_is_full(

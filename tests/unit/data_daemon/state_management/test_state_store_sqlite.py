@@ -418,6 +418,35 @@ async def test_upsert_trace_write_progress_transitions_to_writing_then_written(
 
 
 @pytest.mark.asyncio
+async def test_upsert_trace_write_progress_keeps_bytes_written_monotonic(
+    store: SqliteStateStore,
+) -> None:
+    trace = await store.upsert_trace_write_progress(
+        trace_id="trace-writing-monotonic",
+        recording_id="rec-writing-monotonic",
+        bytes_written=128,
+    )
+
+    assert trace.write_status == TraceWriteStatus.WRITING
+    assert trace.bytes_written == 128
+
+    trace = await store.upsert_trace_write_progress(
+        trace_id="trace-writing-monotonic",
+        recording_id="rec-writing-monotonic",
+        bytes_written=64,
+    )
+
+    assert trace.write_status == TraceWriteStatus.WRITING
+    assert trace.bytes_written == 128
+
+    row = await _get_trace_row(store, "trace-writing-monotonic")
+    assert row is not None
+    assert row["bytes_written"] == 128
+    assert row["total_bytes"] is None
+    assert row["write_status"] == TraceWriteStatus.WRITING
+
+
+@pytest.mark.asyncio
 async def test_update_bytes_uploaded_sets_value(store: SqliteStateStore) -> None:
     await store.upsert_trace_metadata(
         trace_id="trace-3",
@@ -823,6 +852,76 @@ async def test_state_recovery_after_restart(tmp_path: Path) -> None:
         assert updated.upload_status == TraceUploadStatus.UPLOADING
     finally:
         await recovered_store._engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recordings_resets_reported_expected_count_when_written_count_grows(
+    store: SqliteStateStore,
+) -> None:
+    await store.upsert_trace_metadata(
+        trace_id="trace-expected-1",
+        recording_id="rec-expected",
+        data_type=PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-expected-1.bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+    await store.upsert_trace_bytes(
+        trace_id="trace-expected-1",
+        recording_id="rec-expected",
+        bytes_written=32,
+    )
+    await store.set_expected_trace_count("rec-expected", 1)
+    await store.mark_expected_trace_count_reported("rec-expected")
+
+    await store.upsert_trace_metadata(
+        trace_id="trace-expected-2",
+        recording_id="rec-expected",
+        data_type=PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-expected-2.bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+    await store.upsert_trace_bytes(
+        trace_id="trace-expected-2",
+        recording_id="rec-expected",
+        bytes_written=48,
+    )
+
+    await store.recover_and_finalize_recording_fields()
+
+    recording = await _get_recording_row(store, "rec-expected")
+    assert recording is not None
+    assert int(recording["trace_count"]) == 2
+    assert int(recording["expected_trace_count"]) == 2
+    assert int(recording["expected_trace_count_reported"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_reset_registering_to_pending_resets_inflight_registration(
+    store: SqliteStateStore,
+) -> None:
+    await store.upsert_trace_metadata(
+        trace_id="trace-registering",
+        recording_id="rec-registering",
+        data_type=PRIMARY_DATA_TYPE,
+        data_type_name="primary",
+        path="/tmp/trace-registering.bin",
+        robot_instance=ROBOT_INSTANCE,
+    )
+    await store.upsert_trace_bytes(
+        trace_id="trace-registering",
+        recording_id="rec-registering",
+        bytes_written=64,
+    )
+    await store.mark_traces_as_registering(["trace-registering"])
+
+    reset_count = await store.reset_registering_traces_to_pending()
+
+    assert reset_count == 1
+    row = await _get_trace_row(store, "trace-registering")
+    assert row is not None
+    assert row["registration_status"] == TraceRegistrationStatus.PENDING
 
 
 @pytest.mark.asyncio

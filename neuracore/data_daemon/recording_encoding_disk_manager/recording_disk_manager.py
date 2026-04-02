@@ -83,6 +83,8 @@ class RecordingDiskManager:
         )
 
         self.recording_traces: dict[str, dict[str, Any]] = {}
+        self._accepted_recording_trace_ids: dict[str, set[str]] = {}
+        self._expected_trace_count_frozen_recordings: set[str] = set()
 
         self._stop_requested = False
 
@@ -194,6 +196,34 @@ class RecordingDiskManager:
         # backpressure to the daemon instead of allowing complete messages to
         # accumulate unbounded in RAM.
         future.result()
+        self._record_accepted_trace(complete_message)
+
+    def _record_accepted_trace(self, complete_message: CompleteMessage) -> None:
+        """Track traces once their messages are accepted onto the RDM queue."""
+        recording_id = str(complete_message.recording_id)
+        trace_id = str(complete_message.trace_id)
+
+        accepted_trace_ids = self._accepted_recording_trace_ids.setdefault(
+            recording_id, set()
+        )
+        accepted_trace_ids.add(trace_id)
+
+    def _emit_expected_trace_count(self, recording_id: str) -> None:
+        """Freeze expected trace count from traces accepted onto the RDM queue."""
+        recording_id = str(recording_id)
+        if recording_id in self._expected_trace_count_frozen_recordings:
+            return
+
+        expected_trace_count = len(
+            self._accepted_recording_trace_ids.get(recording_id, set())
+        )
+
+        self._expected_trace_count_frozen_recordings.add(recording_id)
+        self._emitter.emit(
+            Emitter.SET_EXPECTED_TRACE_COUNT,
+            recording_id,
+            expected_trace_count,
+        )
 
     async def request_stop(self) -> None:
         """Request a graceful stop of the worker tasks.
@@ -238,6 +268,7 @@ class RecordingDiskManager:
         if self._controller is None:
             raise RuntimeError("RecordingDiskManager not initialised correctly")
 
+        self._emit_expected_trace_count(recording_id)
         self._controller.on_stop_all_traces_for_recording(recording_id)
 
     def _on_delete_trace(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import csv
 import importlib
 import json
 from collections.abc import Callable
@@ -107,6 +108,7 @@ class _FakeJsonTrace:
 class _FakeFilesystem:
     def __init__(self, root: Path) -> None:
         self.root = root
+        self.recordings_root = root
 
     def trace_dir_for(self, trace_key: Any) -> Path:
         return (
@@ -167,10 +169,16 @@ def _write_video_batch_file(path: Path, payloads: list[bytes]) -> None:
                     json.dumps(
                         {"__raw_frame_only": True, "frame_nbytes": len(payload)},
                         separators=(",", ":"),
-                    ).encode("utf-8")
+                ).encode("utf-8")
                     + b"\n"
                 )
                 rgb_f.write(payload)
+
+
+def _read_trace_pipeline_metrics(root: Path) -> list[dict[str, str]]:
+    metrics_path = root / "trace_pipeline_metrics.csv"
+    with metrics_path.open("r", newline="", encoding="utf-8") as csv_f:
+        return list(csv.DictReader(csv_f))
 
 
 @dataclass(frozen=True)
@@ -345,6 +353,41 @@ async def test_finalises_only_after_all_pending_batches_complete(
         e for e in fake_emitter.emitted if e[0] == worker_module.Emitter.TRACE_WRITTEN
     ]
     assert len(emitted) == 1
+
+
+def test_emit_trace_write_progress_keeps_emitted_bytes_monotonic(
+    make_worker,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_emitter: _FakeEmitter,
+) -> None:
+    worker, _, filesystem, _, _, worker_module, _ = make_worker
+
+    key = _LocalTraceKey(
+        recording_id="r-progress", data_type=DataType.RGB_IMAGES, trace_id="t-progress"
+    )
+    observed = iter([120, 80, 140])
+
+    monkeypatch.setattr(
+        filesystem,
+        "trace_bytes_on_disk",
+        lambda _trace_key: next(observed),
+        raising=True,
+    )
+
+    worker._emit_trace_write_progress(key)
+    worker._emit_trace_write_progress(key)
+    worker._emit_trace_write_progress(key)
+
+    emitted = [
+        args
+        for event, args in fake_emitter.emitted
+        if event == worker_module.Emitter.TRACE_WRITE_PROGRESS
+    ]
+    assert emitted == [
+        ("t-progress", "r-progress", 120),
+        ("t-progress", "r-progress", 120),
+        ("t-progress", "r-progress", 140),
+    ]
 
 
 @pytest.mark.asyncio
@@ -525,3 +568,65 @@ async def test_in_flight_count_balances_on_success_and_failure(
     await t_bad
     assert worker.in_flight_count == 0
     assert aborted and aborted[-1] == key_bad
+
+
+@pytest.mark.asyncio
+async def test_batch_encoder_writes_csv_metrics_for_rgb_trace(
+    make_worker,
+    tmp_path: Path,
+) -> None:
+    worker, _, filesystem, _, aborted, _, _ = make_worker
+
+    key = _LocalTraceKey(
+        recording_id="r_csv", data_type=DataType.RGB_IMAGES, trace_id="t_csv"
+    )
+    batch_path = tmp_path / "batches" / "batch_0.rgb"
+
+    meta = json.dumps({"width": 2, "height": 2, "timestamp": 1.0}).encode("utf-8")
+    frame = b"\x00" * 12
+    _write_video_batch_file(batch_path, [meta, frame])
+    expected_batch_bytes = batch_path.stat().st_size + batch_path.with_suffix(
+        ".meta.jsonl"
+    ).stat().st_size
+
+    job = _LocalBatchJob(trace_key=key, batch_path=batch_path, trace_done=True)
+    await worker._on_batch_ready(job)
+
+    assert aborted == []
+
+    rows = _read_trace_pipeline_metrics(filesystem.recordings_root)
+    events = [row["event"] for row in rows]
+    assert events == [
+        "batch_ready_received",
+        "batch_processed",
+        "trace_write_progress",
+        "trace_finalize_ready",
+        "trace_written",
+    ]
+
+    batch_ready_row = rows[0]
+    assert batch_ready_row["trace_id"] == "t_csv"
+    assert batch_ready_row["data_type"] == DataType.RGB_IMAGES.value
+    assert batch_ready_row["batch_bytes"] == str(expected_batch_bytes)
+    assert batch_ready_row["batch_file_bytes"] != ""
+    assert batch_ready_row["batch_metadata_bytes"] != ""
+    assert batch_ready_row["in_flight_rgb"] == "1"
+
+    batch_processed_row = rows[1]
+    assert batch_processed_row["batch_index"] == "0"
+    assert batch_processed_row["batch_bytes"] == str(expected_batch_bytes)
+    assert batch_processed_row["since_batch_ready_ms"] != ""
+    assert batch_processed_row["stage_elapsed_ms"] != ""
+
+    progress_row = rows[2]
+    assert progress_row["trace_id"] == "t_csv"
+    assert progress_row["trace_bytes_written"] != ""
+
+    finalize_ready_row = rows[3]
+    assert finalize_ready_row["trace_id"] == "t_csv"
+    assert finalize_ready_row["next_index"] == "1"
+
+    trace_written_row = rows[4]
+    assert trace_written_row["trace_id"] == "t_csv"
+    assert trace_written_row["trace_bytes_written"] != ""
+    assert trace_written_row["since_batch_processed_ms"] != ""

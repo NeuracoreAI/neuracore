@@ -72,6 +72,10 @@ def _create_daemon(
         emitter=emitter,
     )
     return daemon, resolved_comm_manager, resolved_recording_disk_manager
+def _forward_all_spooled_messages(daemon: Daemon) -> None:
+    """Forward every currently spooled message into the mock RDM."""
+    while daemon._forward_spool_once():
+        pass
 
 
 class TestDaemonInit:
@@ -109,6 +113,8 @@ class TestOnCompleteMessage:
             final_chunk=False,
         )
 
+        _forward_all_spooled_messages(daemon)
+
         assert len(mock_rdm.enqueued) == 1
         msg = mock_rdm.enqueued[0]
         assert msg.producer_id == "test-producer"
@@ -131,6 +137,8 @@ class TestOnCompleteMessage:
             recording_id="rec-123",
             final_chunk=True,
         )
+
+        _forward_all_spooled_messages(daemon)
 
         assert len(mock_rdm.enqueued) == 1
         msg = mock_rdm.enqueued[0]
@@ -161,6 +169,8 @@ class TestOnCompleteMessage:
             final_chunk=False,
         )
 
+        _forward_all_spooled_messages(daemon)
+
         assert len(mock_rdm.enqueued) == 1
         msg = mock_rdm.enqueued[0]
         assert msg.dataset_id == "ds-001"
@@ -185,6 +195,8 @@ class TestOnCompleteMessage:
             recording_id="rec-123",
             final_chunk=False,
         )
+
+        _forward_all_spooled_messages(daemon)
 
         assert len(mock_rdm.enqueued) == 1
         msg = mock_rdm.enqueued[0]
@@ -225,6 +237,8 @@ class TestHandleEndTrace:
         )
 
         daemon._handle_end_trace(channel, message)
+
+        _forward_all_spooled_messages(daemon)
 
         assert len(mock_rdm.enqueued) == 1
         msg = mock_rdm.enqueued[0]
@@ -309,6 +323,8 @@ class TestHandleEndTrace:
         )
 
         daemon._handle_end_trace(channel, message)
+
+        _forward_all_spooled_messages(daemon)
 
         assert "trace-456" not in daemon._trace_recordings
         assert "trace-456" not in daemon._trace_metadata
@@ -419,6 +435,8 @@ class TestDrainChannelMessages:
 
         daemon._drain_channel_messages()
 
+        _forward_all_spooled_messages(daemon)
+
         assert len(mock_rdm.enqueued) == 1
         msg = mock_rdm.enqueued[0]
         assert msg.trace_id == "trace-789"
@@ -464,6 +482,8 @@ class TestDrainChannelMessages:
         )
 
         daemon._drain_channel_messages()
+
+        _forward_all_spooled_messages(daemon)
 
         assert len(mock_rdm.enqueued) == 1
         msg = mock_rdm.enqueued[0]
@@ -534,6 +554,8 @@ class TestDataTypeHandling:
             final_chunk=False,
         )
 
+        _forward_all_spooled_messages(daemon)
+
         assert len(mock_rdm.enqueued) == 1
         msg = mock_rdm.enqueued[0]
         assert msg.data_type == data_type
@@ -569,6 +591,8 @@ class TestExpiredChannelCleanup:
         daemon._recording_traces["rec-expired"] = {"trace-expired"}
 
         daemon._cleanup_expired_channels()
+
+        _forward_all_spooled_messages(daemon)
 
         assert len(mock_rdm.enqueued) == 1
         msg = mock_rdm.enqueued[0]
@@ -652,7 +676,9 @@ class TestRDMEnqueueErrorHandling:
             final_chunk=False,
         )
 
-    def test_daemon_continues_after_enqueue_failure(self, emitter) -> None:
+        assert daemon._forward_spool_once() is False
+
+    def test_daemon_continues_after_enqueue_failure(self) -> None:
         """Daemon should continue processing after RDM.enqueue() failure."""
 
         class FailOnceThenSucceedRDM:
@@ -693,5 +719,11 @@ class TestRDMEnqueueErrorHandling:
             final_chunk=False,
         )
 
-        assert len(rdm.enqueued) == 1
-        assert rdm.enqueued[0].trace_id == "trace-2"
+        assert daemon._forward_spool_once() is False
+        _forward_all_spooled_messages(daemon)
+
+        assert len(rdm.enqueued) == 2
+        assert [message.trace_id for message in rdm.enqueued] == [
+            "trace-1",
+            "trace-2",
+        ]

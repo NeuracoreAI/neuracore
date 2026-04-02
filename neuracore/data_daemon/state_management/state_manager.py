@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import aiohttp
 
@@ -30,6 +31,9 @@ from neuracore.data_daemon.models import (
     TraceUploadStatus,
     TraceWriteStatus,
 )
+from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
+    scan_dir_bytes,
+)
 from neuracore.data_daemon.registration_management.registration_manager import (
     RegistrationCandidate,
 )
@@ -37,6 +41,26 @@ from neuracore.data_daemon.registration_management.registration_manager import (
 from .state_store import StateStore
 
 logger = logging.getLogger(__name__)
+
+
+def _trace_path_has_payload(trace_path: Path) -> bool:
+    """Return True when a recovered trace path still has bytes on disk."""
+    if trace_path.is_file():
+        try:
+            return trace_path.stat().st_size > 0
+        except OSError:
+            return False
+    try:
+        return any(trace_path.iterdir())
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        return False
+
+
+def _scan_trace_path_bytes(trace_path: Path) -> int:
+    """Return the current payload size for a recovered trace path."""
+    if trace_path.is_file():
+        return int(trace_path.stat().st_size)
+    return scan_dir_bytes(trace_path)
 
 
 class StateManager:
@@ -51,6 +75,7 @@ class StateManager:
         """Initialize with a persistence backend."""
         self._store = store
         self._config = config
+        self._is_connected = False
 
         self.expected_trace_count_reporting: dict[str, bool] = {}
 
@@ -162,80 +187,95 @@ class StateManager:
 
     async def handle_is_connected(self, is_connected: bool) -> None:
         """Handle a connection status event from the data bridge."""
-        if not is_connected:
+        self._is_connected = is_connected
+        await self._reset_in_flight_resumable_states()
+
+        if not is_connected and not self._config.offline:
             return
 
-        # Reconcile in flight states on reconnect
-        reset_count = await self._store.reset_retrying_to_written()
-        if reset_count:
-            logger.info(
-                "Reset transient upload statuses on reconnect (count=%d)", reset_count
-            )
-        reset_reporting_count = (
-            await self._store.reset_reporting_recordings_to_pending()
-        )
-        if reset_reporting_count:
-            logger.info(
-                "Reset reporting recordings to pending on reconnect (count=%d)",
-                reset_reporting_count,
-            )
-        await self._store.reconcile_recordings_from_traces()
-        pruned_count = await self._store.prune_old_empty_recordings(
-            self._EMPTY_RECORDING_MAX_AGE_HOURS
-        )
-        if pruned_count:
-            logger.info(
-                (
-                    "Pruned stale empty recordings on reconnect "
-                    "(count=%d, max_age_hours=%d)"
-                ),
-                pruned_count,
-                self._EMPTY_RECORDING_MAX_AGE_HOURS,
-            )
-        await self._resume_reporting_work_on_reconnect()
-
-        # delete recording older the expiration window
-        deleted_count = await self._store.delete_expired_completed_recordings(
-            COMPLETED_RECORDING_RETENTION_HOURS
-        )
-        if deleted_count:
-            logger.info(
-                "Deleted expired completed recordings on reconnect "
-                "(count=%d, max_age_hours=%d)",
-                deleted_count,
-                COMPLETED_RECORDING_RETENTION_HOURS,
-            )
-
-        # Wake registration worker after connectivity is restored.
-        self._emit_trace_registration_available()
         await self._reconcile_failed_traces()
-
-        traces = await self._store.find_ready_traces()
-        for trace in traces:
-            await self._emit_ready_for_upload_from_trace(trace)
+        await self._resume_work_on_reconnect()
 
     async def recover_startup_state(self) -> None:
         """Run one-time startup recovery that does not require connectivity."""
+        await self._db_startup_only_recovery()
+        if self._is_connected and not self._config.offline:
+            await self._resume_work_on_reconnect()
+
+    async def _db_startup_only_recovery(self) -> None:
+        """Run crash-recovery repairs that only make sense at process startup."""
+        await self._reset_in_flight_resumable_states()
+        await self._store.reset_writing_status_to_written()
+        await self._ensure_trace_bytes_written_accuracy()
+        await self._store.mark_all_unstopped_recordings_stopped()
+        await self._reconcile_failed_traces()
+        await self._store.recover_and_finalize_recording_fields()
+        await self._store.prune_old_empty_recordings(
+            self._EMPTY_RECORDING_MAX_AGE_HOURS
+        )
+
+       
+
+    async def _reset_in_flight_resumable_states(self) -> None:
+        """Reset transient remote-work states back to stable resumable states."""
+        # Traces
+        await self._store.reset_registering_traces_to_pending()
+        await self._store.reset_uploading_to_paused_or_pending()
+        # Recordings
+        await self._store.reset_reporting_recordings_to_pending()
+
+    async def _ensure_trace_bytes_written_accuracy(self) -> int:
+        """Ensure all bytes written are accurate and paths valid"""
+        for trace in await self._store.list_writing_traces_with_path():
+            trace_path = Path(trace.path)
+            if not trace_path.exists() or not _trace_path_has_payload(trace_path):
+                self._store.record_error(
+                    trace.trace_id,
+                    f"Trace path {trace_path} does not exist or is empty",
+                    error_code=TraceErrorCode.WRITE_FAILED,
+                )
+                continue
+
+            await self._store.upsert_trace_bytes(
+                trace_id=trace.trace_id,
+                recording_id=trace.recording_id,
+                bytes_written=_scan_trace_path_bytes(trace_path),
+            )
+
+
+    async def _list_recording_ids_with_traces(self) -> list[str]:
+        """Return sorted recording IDs currently present in the trace store."""
         traces = await self._store.list_traces()
-        recording_ids = sorted({str(trace.recording_id) for trace in traces})
-        if not recording_ids:
-            return
+        return sorted({str(trace.recording_id) for trace in traces})
 
-        for recording_id in recording_ids:
-            if not await self._store.is_recording_stopped(recording_id):
-                await self._store.set_stopped_at(recording_id)
+    async def _resume_work_on_reconnect(self) -> None:
+        """Reboot per-recording processing after startup recovery or reconnect."""
+        await self._emit_ready_upload_backlog()
+        for recording in await self._store.list_recordings():
+            # All traces must be written to start uploading flow on reconnect
+            if not await self._store.are_all_traces_written_for_recording(
+                recording.recording_id
+            ):
+                continue
+                
+            expected_trace_count_reported =  await self._store.is_expected_trace_count_reported(recording.recording_id)
+            expected_trace_count = await self._store.get_expected_trace_count(recording.recording_id)
+            if not expected_trace_count_reported:
+                if expected_trace_count > 0:
+                    await self._set_expected_trace_count(recording.recording_id, expected_trace_count)
+            await self._emit_progress_report_if_last_trace_written(recording.recording_id)
+            self._emit_trace_registration_available()
 
-    async def _resume_reporting_work_on_reconnect(self) -> None:
-        """Resume backend-dependent reporting tasks when connectivity returns."""
-        traces = await self._store.list_traces()
-        recording_ids = sorted({str(trace.recording_id) for trace in traces})
-        for recording_id in recording_ids:
-            if not await self._store.is_expected_trace_count_reported(recording_id):
-                trace_count = await self._store.count_traces_for_recording(recording_id)
-                await self._store.set_expected_trace_count(recording_id, trace_count)
-                await self._set_expected_trace_count(recording_id, trace_count)
 
-            await self._emit_progress_report_if_last_trace_written(recording_id)
+    async def _ensure_recording_marked_stopped(self, recording_id: str) -> None:
+        """Ensure recording-level stop state exists before recovery resumes work."""
+        if not await self._store.is_recording_stopped(recording_id):
+            await self._store.set_stopped_at(recording_id)
+
+    async def _emit_ready_upload_backlog(self) -> None:
+        """Re-emit upload-ready work for traces that are already eligible."""
+        for trace in await self._store.find_ready_traces():
+            await self._emit_ready_for_upload_from_trace(trace)
 
     async def _emit_ready_for_upload_from_trace(
         self,
@@ -344,17 +384,19 @@ class StateManager:
     async def _handle_trace_written(
         self, trace_id: str, recording_id: str, bytes_written: int
     ) -> None:
-        """Handle TRACE_WRITTEN event - upsert trace bytes.
-
-        State transitions:
-        - If trace doesn't exist: creates with PENDING_METADATA status
-        - If trace exists with INITIALIZING: transitions to WRITTEN
-        """
-        try:
-            await self._process_trace_written(trace_id, recording_id, bytes_written)
-        except Exception:
-            logger.exception("Failed to process TRACE_WRITTEN event")
-            raise
+        """Handle TRACE_WRITTEN by marking a trace as written."""
+        trace = await self._store.upsert_trace_bytes(
+            trace_id=trace_id,
+            recording_id=recording_id,
+            bytes_written=bytes_written,
+        )
+        expected_trace_count_reported = await self._store.is_expected_trace_count_reported(recording_id)
+        if not expected_trace_count_reported:
+            return 
+        if not self._store.are_all_traces_written_for_recording(recording_id):
+            return
+        await self._emit_progress_report_if_last_trace_written(recording_id)
+        await self._finalize_trace(trace)
 
     async def _handle_trace_write_progress(
         self, trace_id: str, recording_id: str, bytes_written: int
@@ -369,17 +411,7 @@ class StateManager:
         except Exception:
             logger.exception("Failed to process TRACE_WRITE_PROGRESS event")
             raise
-
-    async def _process_trace_written(
-        self, trace_id: str, recording_id: str, bytes_written: int
-    ) -> None:
-        trace = await self._store.upsert_trace_bytes(
-            trace_id=trace_id,
-            recording_id=recording_id,
-            bytes_written=bytes_written,
-        )
-        if trace.write_status == TraceWriteStatus.WRITTEN:
-            await self._finalize_trace(trace)
+        
 
     async def handle_upload_started(self, trace_id: str) -> None:
         """Mark a trace as uploading once the uploader starts."""
@@ -400,6 +432,8 @@ class StateManager:
             recording_id (str): The ID of the recording to check.
         """
         if await self._store.recording_has_reported_progress(recording_id):
+            return
+        if not await self._store.is_recording_stopped(recording_id):
             return
         if not await self._store.is_expected_trace_count_reported(recording_id):
             return
@@ -434,40 +468,19 @@ class StateManager:
     async def _handle_set_expected_trace_count(
         self, recording_id: str, expected_trace_count: int
     ) -> None:
-        """Handle an expected trace count update event.
+        """Handle set expected trace count for a recording.
 
-        When an expected trace count is updated, this method updates the
-        local expected trace count and schedules a progress report if the
-        recording has been stopped and progress reporting has not been
-        claimed.
-
-        Args:
-            recording_id (str): The ID of the recording to update.
-            expected_trace_count (int): The new expected trace count.
+        :param recording_id: The ID of the recording to handle.
+        :param expected_trace_count: The expected trace count to set.
+        :return: None
         """
         await self._store.set_expected_trace_count(recording_id, expected_trace_count)
-        await self._set_expected_trace_count(recording_id, expected_trace_count)
-        self._emit_trace_registration_available()
 
-        # Possibly all channels drained before expected trace count set
-        await self._emit_progress_report_if_last_trace_written(recording_id)
-
-    async def _finalize_trace(self, trace: TraceRecord) -> None:
-        """Finalize trace for upload."""
-        # If recording stopped at not set, set it
-        if not await self._store.is_recording_stopped(trace.recording_id):
-            await self._store.set_stopped_at(trace.recording_id)
-
-        # Trace finished writing but buffer states not flushed
-        # so possibly still unsure of expected_trace_count at this stage
-        if not await self._store.is_expected_trace_count_reported(trace.recording_id):
-            return
-
-        # Start registering loop if not started yet
-        self._emit_trace_registration_available()
-
-        # Possibly last trace to be written, so check if progress can be reported
-        await self._emit_progress_report_if_last_trace_written(trace.recording_id)
+        if not self._is_connected or self._config.offline:
+            return 
+        
+        if await self._set_expected_trace_count(recording_id, expected_trace_count):
+            self._emit_trace_registration_available()
 
     async def _set_expected_trace_count(
         self, recording_id: str, expected_trace_count: int

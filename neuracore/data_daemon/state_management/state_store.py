@@ -7,6 +7,7 @@ from typing import Protocol
 
 from neuracore.data_daemon.models import (
     DataType,
+    RecordingRecord,
     TraceErrorCode,
     TraceRecord,
     TraceRegistrationStatus,
@@ -79,10 +80,6 @@ class StateStore(Protocol):
         """Set recording progress state to PENDING."""
         ...
 
-    async def reset_reporting_recordings_to_pending(self) -> int:
-        """Reset in-flight REPORTING rows to PENDING and return affected count."""
-        ...
-
     async def recording_has_reported_progress(self, recording_id: str) -> bool:
         """Return True when recording progress status is REPORTED."""
         ...
@@ -98,12 +95,15 @@ class StateStore(Protocol):
     async def delete_expired_completed_recordings(self, max_age_hours: int) -> int:
         """Delete completed recording rows older than the retention window."""
         ...
+    async def list_recordings(self) -> list[RecordingRecord]:
+        """Return all recording records."""
+        ...
 
     async def list_recording_ids_with_stopped_traces(self) -> list[str]:
         """Return recording IDs that already have at least one stopped trace."""
         ...
 
-    async def reconcile_recordings_from_traces(self) -> None:
+    async def recover_and_finalize_recording_fields(self) -> None:
         """Rebuild recording rows from trace rows (startup reconciliation)."""
         ...
 
@@ -125,6 +125,10 @@ class StateStore(Protocol):
 
     async def count_traces_for_recording(self, recording_id: str) -> int:
         """Return trace count for a recording."""
+        ...
+
+    async def are_all_traces_written_for_recording(self, recording_id: str) -> bool:
+        """Return True when a recording has traces and every trace is WRITTEN."""
         ...
 
     async def set_expected_trace_count(
@@ -276,10 +280,28 @@ class StateStore(Protocol):
         """Mark retries exhausted and persist final failure details."""
         ...
 
-    async def reset_retrying_to_written(self) -> int:
+    async def reset_writing_status_to_written(self) -> None:
         """Reset RETRYING/UPLOADING traces back to upload PENDING."""
         ...
 
     async def set_recording_org_id(self, recording_id: str, org_id: str) -> None:
         """Backfill org_id for a recording when it becomes known."""
+    async def reset_uploading_to_paused_or_pending(self) -> None:
+        """Reset UPLOADING traces back to PAUSED or PENDING."""
+        ...
+    
+    async def reset_reporting_recordings_to_pending(self) -> int:
+        """Reset in-flight REPORTING rows to PENDING and return affected count."""
+        ...
+
+    async def reset_registering_traces_to_pending(self) -> int:
+        """Reset in-flight REGISTERING traces back to registration PENDING."""
+        ...
+
+    async def list_writing_traces_with_path(self) -> list[TraceRecord]:
+        """Return all traces marked as WRITING with path."""
+        ...
+
+    async def mark_all_unstopped_recordings_stopped(self) -> None:
+        """Mark all recordings without stopped_at set as stopped."""
         ...

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from neuracore.data_daemon.models import (
     DataType,
     ProgressReportStatus,
+    RecordingRecord,
     TraceErrorCode,
     TraceRecord,
     TraceRegistrationStatus,
@@ -72,7 +73,6 @@ class SqliteStateStore(StateStore):
         """Apply pragmas and ensure schema."""
         await self._apply_pragmas()
         await self._ensure_schema()
-        await self.reconcile_recordings_from_traces()
 
     async def _apply_pragmas(self) -> None:
         """Apply database pragmas for better performance.
@@ -456,8 +456,8 @@ class SqliteStateStore(StateStore):
                 )
             )
 
-    async def reconcile_recordings_from_traces(self) -> None:
-        """Rebuild trace-backed recording aggregates without deleting retained rows."""
+    async def recover_and_finalize_recording_fields(self) -> None:
+        """Rebuild recording rows from trace rows (startup reconciliation)."""
         now = _utc_now()
         async with self._write_lock() as conn:
             recording_rows = (
@@ -507,15 +507,12 @@ class SqliteStateStore(StateStore):
                     ).scalar_one_or_none()
                     or 0
                 )
-
                 trace_count = int(
                     (
                         await conn.execute(
                             select(func.count()).where(
                                 traces.c.recording_id == recording_id,
-                                traces.c.write_status == TraceWriteStatus.WRITTEN,
-                                traces.c.total_bytes.is_not(None),
-                                traces.c.total_bytes > 0,
+                                traces.c.write_status in (TraceWriteStatus.WRITTEN, TraceWriteStatus.WRITING),
                             )
                         )
                     ).scalar_one()
@@ -538,13 +535,16 @@ class SqliteStateStore(StateStore):
                     if existing_row is not None
                     else 0
                 )
+                if not expected_reported:
+                    expected_trace_count = trace_count
+                
                 progress_reported_value = (
                     existing_row["progress_reported"]
                     if existing_row is not None
                     else ProgressReportStatus.PENDING
                 )
                 stopped_at_value = (
-                    existing_row["stopped_at"] if existing_row is not None else None
+                    existing_row["stopped_at"] if existing_row is not None else now
                 )
                 created_at_value = (
                     existing_row["created_at"] if existing_row is not None else now
@@ -668,6 +668,30 @@ class SqliteStateStore(StateStore):
                 )
             ).scalar_one()
         return int(trace_count or 0)
+
+    async def are_all_traces_written_for_recording(self, recording_id: str) -> bool:
+        """Return True when a recording has traces and every trace is WRITTEN."""
+        async with self._engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    select(
+                        func.count().label("total_count"),
+                        func.sum(
+                            case(
+                                (
+                                    traces.c.write_status == TraceWriteStatus.WRITTEN,
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ).label("written_count"),
+                    ).where(traces.c.recording_id == recording_id)
+                )
+            ).mappings().one()
+
+        total_count = int(row["total_count"] or 0)
+        written_count = int(row["written_count"] or 0)
+        return total_count > 0 and total_count == written_count
 
     async def set_expected_trace_count(
         self, recording_id: str, expected_trace_count: int
@@ -1239,6 +1263,19 @@ class SqliteStateStore(StateStore):
                 )
             )
         return int(result.rowcount or 0)
+    
+    async def reset_uploading_to_paused_or_pending(self) -> None:
+        """Reset UPLOADING traces back to PAUSED or PENDING."""
+        now = _utc_now()
+        async with self._write_lock() as conn:
+            await conn.execute(
+                update(traces)
+                .where(traces.c.upload_status == TraceUploadStatus.UPLOADING)
+                .values(
+                    upload_status=TraceUploadStatus.PAUSED,
+                    last_updated=now,
+                )
+            )
 
     async def recording_has_reported_progress(self, recording_id: str) -> bool:
         """Return True when recording progress status is REPORTED."""
@@ -1316,6 +1353,23 @@ class SqliteStateStore(StateStore):
                 .where(recordings.c.recording_id == recording_id)
                 .values(expected_trace_count_reported=1, last_updated=now)
             )
+
+    async def reset_registering_traces_to_pending(self) -> int:
+        """Reset transient REGISTERING traces back to registration PENDING."""
+        now = _utc_now()
+        async with self._write_lock() as conn:
+            result = await conn.execute(
+                update(traces)
+                .where(
+                    traces.c.registration_status
+                    == TraceRegistrationStatus.REGISTERING
+                )
+                .values(
+                    registration_status=TraceRegistrationStatus.PENDING,
+                    last_updated=now,
+                )
+            )
+        return int(result.rowcount or 0)
 
     async def reset_failed_trace_for_retry(self, trace_id: str) -> None:
         """Reset a failed trace back to WRITTEN for retry."""
@@ -1597,7 +1651,13 @@ class SqliteStateStore(StateStore):
         stmt = stmt.on_conflict_do_update(
             index_elements=["trace_id"],
             set_={
-                "bytes_written": bytes_written,
+                "bytes_written": case(
+                    (
+                        traces.c.bytes_written.is_(None),
+                        bytes_written,
+                    ),
+                    else_=func.max(traces.c.bytes_written, bytes_written),
+                ),
                 "last_updated": now,
                 "write_status": case(
                     (
@@ -1716,11 +1776,11 @@ class SqliteStateStore(StateStore):
             raise ValueError(f"Trace not found: {trace_id}")
         return int(attempts)
 
-    async def reset_retrying_to_written(self) -> int:
+    async def reset_writing_status_to_written(self) -> None:
         """Reset RETRYING/UPLOADING traces back to upload PENDING."""
         now = _utc_now()
         async with self._write_lock() as conn:
-            result = await conn.execute(
+            await conn.execute(
                 update(traces)
                 .where(
                     traces.c.upload_status.in_(
@@ -1732,7 +1792,6 @@ class SqliteStateStore(StateStore):
                     last_updated=now,
                 )
             )
-        return int(result.rowcount or 0)
 
     async def close(self) -> None:
         """Close the database connection and dispose of the engine.
@@ -1741,3 +1800,44 @@ class SqliteStateStore(StateStore):
         aiosqlite worker thread exceptions.
         """
         await self._engine.dispose()
+
+    async def list_writing_traces_with_path(self) -> list[TraceRecord]:
+        """Return all traces marked as WRITING with non-zero total bytes."""
+        async with self._write_lock() as conn:
+            rows = (
+                await conn.execute(
+                    select(traces)
+                    .where(
+                        traces.c.upload_status == TraceWriteStatus.WRITING,
+                        traces.c.trace_path.is_not(None),
+                    )
+                )
+            ).mappings().all()
+        return [TraceRecord.from_row(dict(row)) for row in rows]
+    
+    async def mark_all_unstopped_recordings_stopped(self) -> None:
+        """Mark all recordings without stopped_at set as stopped."""
+        now = _utc_now()
+        async with self._write_lock() as conn:
+            await conn.execute(
+                update(recordings)
+                .where(
+                    recordings.c.stopped_at.is_(None),
+                )
+                .values(
+                    stopped_at=now,
+                )
+            )
+
+    async def list_recordings(self) -> list[RecordingRecord]:
+        """Return all recording records."""
+        async with self._write_lock() as conn:
+            rows = (
+                await conn.execute(
+                    select(recordings).order_by(
+                        recordings.c.created_at,
+                        recordings.c.recording_id,
+                    )
+                )
+            ).mappings().all()
+        return [RecordingRecord.from_row(dict(row)) for row in rows]

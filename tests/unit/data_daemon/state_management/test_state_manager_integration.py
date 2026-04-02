@@ -19,7 +19,7 @@ from neuracore.data_daemon.models import (
 )
 from neuracore.data_daemon.state_management.state_manager import StateManager
 from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
-from neuracore.data_daemon.state_management.tables import traces
+from neuracore.data_daemon.state_management.tables import recordings, traces
 
 
 @pytest_asyncio.fixture
@@ -81,6 +81,20 @@ async def _get_trace_row(store, trace_id: str):
     async with store._engine.begin() as conn:
         row = (
             (await conn.execute(select(traces).where(traces.c.trace_id == trace_id)))
+            .mappings()
+            .one()
+        )
+    return dict(row)
+
+
+async def _get_recording_row(store, recording_id: str):
+    async with store._engine.begin() as conn:
+        row = (
+            (
+                await conn.execute(
+                    select(recordings).where(recordings.c.recording_id == recording_id)
+                )
+            )
             .mappings()
             .one()
         )
@@ -390,29 +404,167 @@ async def test_state_recovery_after_restart(tmp_path, emitter: Emitter) -> None:
         await store.mark_traces_as_registered(["trace-recover"])
         await store.set_expected_trace_count("rec-recover", 1)
         await store.mark_expected_trace_count_reported("rec-recover")
+        await store.update_upload_status("trace-recover", TraceUploadStatus.UPLOADING)
     finally:
         await store.close()
 
     recovered_store = SqliteStateStore(db_path)
     await recovered_store.init_async_store()
+    recovered_manager = StateManager(recovered_store)
+    ready_events: list[tuple] = []
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
     try:
+        await recovered_manager.recover_startup_state()
+
         recovered_trace = await recovered_store.get_trace("trace-recover")
         assert recovered_trace is not None
         assert recovered_trace.write_status == TraceWriteStatus.WRITTEN
+        assert recovered_trace.upload_status == TraceUploadStatus.PENDING
 
         ready = await recovered_store.find_ready_traces()
         assert [trace.trace_id for trace in ready] == ["trace-recover"]
-
-        await recovered_store.update_upload_status(
-            "trace-recover", TraceUploadStatus.UPLOADING
-        )
-        await recovered_store.update_upload_status(
-            "trace-recover", TraceUploadStatus.UPLOADED
-        )
-        updated = await recovered_store.get_trace("trace-recover")
-        assert updated is not None
-        assert updated.upload_status == TraceUploadStatus.UPLOADED
+        assert [event[0] for event in ready_events] == ["trace-recover"]
     finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+        await recovered_store.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_finalizes_writing_traces_and_rebuilds_expected_counts(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    recordings_root = tmp_path / "recordings"
+    trace_written_path = recordings_root / "rec-restart" / "trace-written"
+    trace_writing_path = recordings_root / "rec-restart" / "trace-writing"
+    trace_written_path.mkdir(parents=True, exist_ok=True)
+    trace_writing_path.mkdir(parents=True, exist_ok=True)
+    written_payload = b"done"
+    writing_payload = b"restart-payload"
+    (trace_written_path / "payload.bin").write_bytes(written_payload)
+    (trace_writing_path / "payload.bin").write_bytes(writing_payload)
+
+    store = SqliteStateStore(db_path)
+    await store.init_async_store()
+    manager = StateManager(store)
+    try:
+        await manager._handle_start_trace(
+            "trace-written",
+            "rec-restart",
+            DataType.CUSTOM_1D,
+            "custom",
+            1,
+            None,
+            None,
+            None,
+            None,
+            path=str(trace_written_path),
+        )
+        await manager._handle_trace_written(
+            "trace-written",
+            "rec-restart",
+            len(written_payload),
+        )
+        await store.mark_traces_as_registered(["trace-written"])
+        await store.set_expected_trace_count("rec-restart", 1)
+        await store.mark_expected_trace_count_reported("rec-restart")
+
+        await manager._handle_start_trace(
+            "trace-writing",
+            "rec-restart",
+            DataType.CUSTOM_1D,
+            "custom",
+            1,
+            None,
+            None,
+            None,
+            None,
+            path=str(trace_writing_path),
+        )
+        await manager._handle_trace_write_progress(
+            "trace-writing",
+            "rec-restart",
+            3,
+        )
+        await store.mark_traces_as_registering(["trace-writing"])
+    finally:
+        await store.close()
+
+    recovered_store = SqliteStateStore(db_path)
+    await recovered_store.init_async_store()
+    recovered_manager = StateManager(recovered_store)
+    try:
+        await recovered_manager.recover_startup_state()
+
+        recovered_trace = await recovered_store.get_trace("trace-writing")
+        assert recovered_trace is not None
+        assert recovered_trace.write_status == TraceWriteStatus.WRITTEN
+        assert recovered_trace.total_bytes == len(writing_payload)
+        assert recovered_trace.registration_status == TraceRegistrationStatus.PENDING
+
+        recording_row = await _get_recording_row(recovered_store, "rec-restart")
+        assert int(recording_row["trace_count"]) == 2
+        assert int(recording_row["expected_trace_count"]) == 2
+        assert int(recording_row["expected_trace_count_reported"]) == 0
+        assert recording_row["stopped_at"] is not None
+    finally:
+        await recovered_store.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_emits_progress_report_for_completed_recording(
+    tmp_path,
+) -> None:
+    emitter = get_emitter()
+    db_path = tmp_path / "state.db"
+    store = SqliteStateStore(db_path)
+    await store.init_async_store()
+    manager = StateManager(store)
+    try:
+        await manager._handle_start_trace(
+            "trace-progress",
+            "rec-progress",
+            DataType.CUSTOM_1D,
+            "custom",
+            1,
+            None,
+            None,
+            None,
+            None,
+            path="/tmp/trace-progress.bin",
+        )
+        await manager._handle_trace_written(
+            "trace-progress",
+            "rec-progress",
+            12,
+        )
+        await store.set_expected_trace_count("rec-progress", 1)
+        await store.mark_expected_trace_count_reported("rec-progress")
+    finally:
+        await store.close()
+
+    recovered_store = SqliteStateStore(db_path)
+    await recovered_store.init_async_store()
+    recovered_manager = StateManager(recovered_store)
+    progress_events: list[tuple] = []
+
+    def progress_handler(*args) -> None:
+        progress_events.append(args)
+
+    emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
+    try:
+        await recovered_manager.recover_startup_state()
+
+        assert len(progress_events) == 1
+        assert progress_events[0][0] == "rec-progress"
+        assert progress_events[0][3] == {"trace-progress": 12}
+        assert progress_events[0][4] == 12
+    finally:
+        emitter.remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
         await recovered_store.close()
 
 

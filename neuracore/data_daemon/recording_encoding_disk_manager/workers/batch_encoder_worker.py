@@ -79,8 +79,7 @@ class _BatchEncoderWorker:
         self._trace_locks: dict[_TraceKey, asyncio.Lock] = {}
         self._trace_buffers: dict[_TraceKey, dict[int, _BatchJob]] = {}
         self._trace_next_index: dict[_TraceKey, int] = {}
-        self._trace_out_of_order_arrivals: dict[_TraceKey, int] = {}
-        self._trace_max_buffered_batches: dict[_TraceKey, int] = {}
+        self._trace_last_progress_bytes: dict[_TraceKey, int] = {}
 
         self._trace_pending: dict[_TraceKey, int] = {}
 
@@ -105,9 +104,8 @@ class _BatchEncoderWorker:
         self._trace_pending.pop(trace_key, None)
         self._trace_buffers.pop(trace_key, None)
         self._trace_next_index.pop(trace_key, None)
-        self._trace_out_of_order_arrivals.pop(trace_key, None)
-        self._trace_max_buffered_batches.pop(trace_key, None)
         self._finalised_traces.add(trace_key)
+        self._trace_last_progress_bytes.pop(trace_key, None)
 
     async def _on_batch_ready(self, batch_job: _BatchJob) -> None:
         """Handle BATCH_READY event.
@@ -116,10 +114,9 @@ class _BatchEncoderWorker:
             batch_job: The batch work item (trace_key, batch_path, trace_done).
         """
         self._in_flight_count += 1
-        key = batch_job.trace_key
 
         try:
-            lock = self._trace_locks.setdefault(key, asyncio.Lock())
+            lock = self._trace_locks.setdefault(batch_job.trace_key, asyncio.Lock())
             async with lock:
                 await self._queue_and_process_trace_batches_locked(batch_job)
 
@@ -157,23 +154,6 @@ class _BatchEncoderWorker:
         trace_buffer[batch_index] = batch_job
         self._trace_pending[key] = self._trace_pending.get(key, 0) + 1
         next_index = self._trace_next_index.setdefault(key, 0)
-        if batch_index > next_index:
-            self._trace_out_of_order_arrivals[key] = (
-                self._trace_out_of_order_arrivals.get(key, 0) + 1
-            )
-            if key.data_type.value == "RGB_IMAGES":
-                logger.warning(
-                    "RGB batch arrived out of order for trace %s "
-                    "(arrived=%d expected=%d buffered=%d)",
-                    key,
-                    batch_index,
-                    next_index,
-                    len(trace_buffer),
-                )
-        self._trace_max_buffered_batches[key] = max(
-            self._trace_max_buffered_batches.get(key, 0),
-            len(trace_buffer),
-        )
 
         while True:
             next_job = trace_buffer.pop(next_index, None)
@@ -192,6 +172,11 @@ class _BatchEncoderWorker:
 
             encoder = self._encoder_manager.safe_get_encoder(key)
             if encoder is None:
+                logger.warning(
+                    "Missing encoder for trace %s; dropping batch %s",
+                    key,
+                    next_job.batch_path,
+                )
                 await self._remove_file(next_job.batch_path)
                 self._aborted_traces.add(key)
                 self._decrement_trace_pending(key)
@@ -221,6 +206,11 @@ class _BatchEncoderWorker:
 
     def _emit_trace_write_progress(self, trace_key: _TraceKey) -> None:
         bytes_written = self._filesystem.trace_bytes_on_disk(trace_key)
+        bytes_written = max(
+            bytes_written,
+            self._trace_last_progress_bytes.get(trace_key, 0),
+        )
+        self._trace_last_progress_bytes[trace_key] = bytes_written
         self._emitter.emit(
             Emitter.TRACE_WRITE_PROGRESS,
             trace_key.trace_id,
@@ -234,30 +224,20 @@ class _BatchEncoderWorker:
             return
         if key not in self._trace_done_seen:
             return
-        if key in self._trace_pending:
-            return
-        if self._trace_buffers.get(key):
+        pending = self._trace_pending.get(key, 0)
+        buffered = len(self._trace_buffers.get(key, {}))
+        if pending > 0 or buffered > 0:
             return
 
         enc = self._encoder_manager.pop_encoder(key)
         if enc is not None:
             self._finalise_trace_encoder(key, enc)
 
-        if key.data_type.value == "RGB_IMAGES":
-            logger.debug(
-                "RGB batch ordering summary trace=%s out_of_order_arrivals=%d "
-                "max_buffered_batches=%d",
-                key,
-                self._trace_out_of_order_arrivals.get(key, 0),
-                self._trace_max_buffered_batches.get(key, 0),
-            )
-
         self._finalised_traces.add(key)
         self._trace_done_seen.discard(key)
         self._trace_buffers.pop(key, None)
         self._trace_next_index.pop(key, None)
-        self._trace_out_of_order_arrivals.pop(key, None)
-        self._trace_max_buffered_batches.pop(key, None)
+        self._trace_last_progress_bytes.pop(key, None)
 
     @staticmethod
     async def _remove_file(path: Path) -> None:

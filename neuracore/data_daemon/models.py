@@ -245,6 +245,38 @@ class TraceRecord:
         )
 
 
+@dataclass(frozen=True)
+class RecordingRecord:
+    """Typed representation of a recording row in the state store."""
+
+    recording_id: str
+    expected_trace_count: int
+    trace_count: int
+    expected_trace_count_reported: int
+    uploaded_trace_count: int
+    progress_reported: ProgressReportStatus
+    stopped_at: datetime | None
+    created_at: datetime
+    last_updated: datetime
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "RecordingRecord":
+        """Build a RecordingRecord from a SQLAlchemy mapping row."""
+        return cls(
+            recording_id=str(row["recording_id"]),
+            expected_trace_count=int(row.get("expected_trace_count", 0)),
+            trace_count=int(row.get("trace_count", 0)),
+            expected_trace_count_reported=int(
+                row.get("expected_trace_count_reported", 0)
+            ),
+            uploaded_trace_count=int(row.get("uploaded_trace_count", 0)),
+            progress_reported=_parse_progress_reported(row.get("progress_reported")),
+            stopped_at=row.get("stopped_at"),
+            created_at=row["created_at"],
+            last_updated=row["last_updated"],
+        )
+
+
 class OpenRingBufferModel(BaseModel):
     """Model for the OPEN_RING_BUFFER command."""
 

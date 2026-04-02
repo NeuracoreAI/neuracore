@@ -79,6 +79,7 @@ def _run_daemon_loop(
 
         daemon._cleanup_expired_channels()
         daemon._drain_channel_messages()
+        daemon._forward_spool_once()
 
     comm.cleanup_daemon()
 
@@ -182,6 +183,7 @@ def test_zmq_socket_establishment_and_teardown() -> None:
 
     assert consumer_manager._consumer_socket is not None
     assert producer_manager._producer_socket is not None
+    assert producer_manager._producer_socket.getsockopt(zmq.LINGER) == 1000
     producer_manager.cleanup_producer()
     assert producer_manager._producer_socket is None
 
@@ -256,6 +258,47 @@ def test_zmq_commands_and_message_flow(
     assert _wait_for(lambda: recording_id in daemon._closed_recordings, timeout=0.5)
 
     producer.stop_producer_channel()
+
+
+def test_recording_context_flushes_stop_control_socket() -> None:
+    """Recording stop control messages are flushed before the caller returns."""
+    context = zmq.Context()
+    comm = CommunicationsManager(context=context)
+    recording_context = RecordingContext(recording_id="rec-1", comm_manager=comm)
+
+    sent_messages: list[MessageEnvelope] = []
+
+    def fake_send_message(message: MessageEnvelope) -> None:
+        sent_messages.append(message)
+
+    original_create_producer_socket = comm.create_producer_socket
+    recreated_socket_calls = 0
+
+    try:
+        comm.send_message = fake_send_message  # type: ignore[method-assign]
+
+        recording_context.stop_recording()
+
+        assert len(sent_messages) == 1
+        assert sent_messages[0].producer_id is None
+        assert comm._producer_socket is None
+
+        def wrapped_create_producer_socket() -> None:
+            nonlocal recreated_socket_calls
+            recreated_socket_calls += 1
+            original_create_producer_socket()
+
+        comm.create_producer_socket = wrapped_create_producer_socket  # type: ignore[method-assign]
+
+        recording_context.stop_recording(recording_id="rec-2")
+
+        assert recreated_socket_calls == 1
+        assert len(sent_messages) == 2
+        assert sent_messages[1].producer_id is None
+        assert comm._producer_socket is None
+    finally:
+        comm.cleanup_producer()
+        context.term()
 
 
 def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_detection(
@@ -738,6 +781,7 @@ def test_channel_expires_after_timeout_without_recording_stopped(
     assert producer_id in daemon.channels
 
     daemon._cleanup_expired_channels()
+    daemon._forward_spool_once()
 
     assert producer_id not in daemon.channels
 
