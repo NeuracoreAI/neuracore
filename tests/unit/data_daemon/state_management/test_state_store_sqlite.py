@@ -1072,3 +1072,90 @@ async def test_delete_expired_completed_recordings_keeps_incomplete_rows(
 
     assert deleted == 0
     assert await _get_recording_row(store, "rec-incomplete") is not None
+
+
+@pytest.mark.asyncio
+async def test_init_async_store_adds_missing_recordings_org_id_column(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    store = SqliteStateStore(db_path)
+
+    async with store._engine.begin() as conn:
+        await conn.execute(
+            text(
+                """
+            CREATE TABLE recordings (
+                recording_id TEXT PRIMARY KEY,
+                expected_trace_count INTEGER NOT NULL DEFAULT 0,
+                trace_count INTEGER NOT NULL DEFAULT 0,
+                expected_trace_count_reported INTEGER NOT NULL DEFAULT 0,
+                uploaded_trace_count INTEGER NOT NULL DEFAULT 0,
+                progress_reported TEXT NOT NULL DEFAULT 'pending',
+                stopped_at DATETIME,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+            INSERT INTO recordings (
+                recording_id,
+                expected_trace_count,
+                trace_count,
+                expected_trace_count_reported,
+                uploaded_trace_count,
+                progress_reported
+            ) VALUES (
+                'rec-old', 1, 1, 0, 0, 'pending'
+            )
+        """
+            )
+        )
+
+    await store.init_async_store()
+
+    async with store._engine.begin() as conn:
+        columns = (
+            (await conn.execute(text("PRAGMA table_info(recordings)"))).mappings().all()
+        )
+        column_names = {str(row["name"]) for row in columns}
+        assert "org_id" in column_names
+
+        row = (
+            (
+                await conn.execute(
+                    text("SELECT org_id FROM recordings WHERE recording_id = 'rec-old'")
+                )
+            )
+            .mappings()
+            .one()
+        )
+
+    assert row["org_id"] is None
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_set_recording_org_id_sets_only_when_missing(tmp_path) -> None:
+    store = SqliteStateStore(tmp_path / "state.db")
+    await store.init_async_store()
+
+    await store.set_expected_trace_count("rec-1", 2)
+    await store.set_recording_org_id("rec-1", "org-123")
+    await store.set_recording_org_id("rec-1", "org-456")
+
+    async with store._engine.begin() as conn:
+        row = (
+            (
+                await conn.execute(
+                    text("SELECT org_id FROM recordings WHERE recording_id = 'rec-1'")
+                )
+            )
+            .mappings()
+            .one()
+        )
+
+    assert row["org_id"] == "org-123"
+    await store.close()

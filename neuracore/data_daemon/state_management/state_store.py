@@ -262,3 +262,7 @@ class StateStore(Protocol):
     async def reset_retrying_to_written(self) -> int:
         """Reset RETRYING/UPLOADING traces back to upload PENDING."""
         ...
+
+    async def set_recording_org_id(self, recording_id: str, org_id: str) -> None:
+        """Backfill org_id for a recording when it becomes known."""
+        ...

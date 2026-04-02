@@ -28,6 +28,7 @@ recordings = Table(
     "recordings",
     metadata,
     Column("recording_id", Text, primary_key=True),
+    Column("org_id", Text, nullable=True),
     Column("expected_trace_count", Integer, nullable=False, default=0),
     Column("trace_count", Integer, nullable=False, default=0),
     Column("expected_trace_count_reported", Integer, nullable=False, default=0),
