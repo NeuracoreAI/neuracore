@@ -471,6 +471,7 @@ class StateManager:
         try:
             try:
                 org_id = await loop.run_in_executor(None, get_current_org)
+                await self._store.set_recording_org_id(recording_id, str(org_id))
                 headers = await loop.run_in_executor(None, auth.get_headers)
             except Exception:
                 logger.exception(

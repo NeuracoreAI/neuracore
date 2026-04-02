@@ -96,6 +96,7 @@ class SqliteStateStore(StateStore):
             await self._migrate_legacy_traces_schema_if_needed(conn)
             await conn.run_sync(metadata.create_all)
             await self._ensure_recordings_trace_count_col(conn)
+            await self._ensure_recordings_org_id_col(conn)
 
     async def _table_exists(self, conn: AsyncConnection, table_name: str) -> bool:
         """Return True when a SQLite table exists."""
@@ -172,6 +173,7 @@ class SqliteStateStore(StateStore):
                 """
                 CREATE TABLE recordings_migrated (
                     recording_id TEXT PRIMARY KEY,
+                    org_id TEXT,
                     expected_trace_count INTEGER NOT NULL DEFAULT 0,
                     trace_count INTEGER NOT NULL DEFAULT 0,
                     expected_trace_count_reported INTEGER NOT NULL DEFAULT 0,
@@ -268,6 +270,7 @@ class SqliteStateStore(StateStore):
                 """
                 INSERT INTO recordings_migrated (
                     recording_id,
+                    org_id,
                     expected_trace_count,
                     trace_count,
                     expected_trace_count_reported,
@@ -279,6 +282,7 @@ class SqliteStateStore(StateStore):
                 )
                 SELECT
                     recording_id,
+                    NULL AS org_id,
                     SUM(
                         CASE
                             WHEN total_bytes IS NOT NULL
@@ -372,12 +376,23 @@ class SqliteStateStore(StateStore):
             )
         )
 
+    async def _ensure_recordings_org_id_col(self, conn: AsyncConnection) -> None:
+        """Add recordings.org_id for pre-column databases."""
+        if not await self._table_exists(conn, "recordings"):
+            return
+        recording_columns = await self._table_column_names(conn, "recordings")
+        if "org_id" in recording_columns:
+            return
+        logger.info("Adding missing recordings.org_id column")
+        await conn.execute(text("ALTER TABLE recordings " "ADD COLUMN org_id TEXT"))
+
     async def _ensure_recording_row(self, recording_id: str) -> None:
         """Ensure a recording row exists for the given recording_id."""
         now = _utc_now()
         async with self._write_lock() as conn:
             stmt = insert(recordings).values(
                 recording_id=recording_id,
+                org_id=None,
                 expected_trace_count=0,
                 trace_count=0,
                 expected_trace_count_reported=0,
@@ -459,6 +474,7 @@ class SqliteStateStore(StateStore):
                         await conn.execute(
                             select(
                                 recordings.c.recording_id,
+                                recordings.c.org_id,
                                 recordings.c.expected_trace_count,
                                 recordings.c.expected_trace_count_reported,
                                 recordings.c.uploaded_trace_count,
@@ -534,10 +550,15 @@ class SqliteStateStore(StateStore):
                     existing_row["created_at"] if existing_row is not None else now
                 )
 
+                org_id_value = (
+                    existing_row["org_id"] if existing_row is not None else None
+                )
+
                 await conn.execute(
                     insert(recordings)
                     .values(
                         recording_id=recording_id,
+                        org_id=org_id_value,
                         expected_trace_count=max(
                             expected_trace_count,
                             existing_expected_trace_count,
@@ -558,6 +579,7 @@ class SqliteStateStore(StateStore):
                     .on_conflict_do_update(
                         index_elements=["recording_id"],
                         set_={
+                            "org_id": org_id_value,
                             "expected_trace_count": max(
                                 expected_trace_count,
                                 existing_expected_trace_count,
@@ -681,6 +703,21 @@ class SqliteStateStore(StateStore):
                 update(recordings)
                 .where(recordings.c.recording_id == recording_id)
                 .values(stopped_at=now, last_updated=now)
+            )
+
+    async def set_recording_org_id(self, recording_id: str, org_id: str) -> None:
+        """Backfill org_id for a recording when it becomes known."""
+        now = _utc_now()
+        await self._ensure_recording_row(recording_id)
+        async with self._write_lock() as conn:
+            await conn.execute(
+                update(recordings)
+                .where(recordings.c.recording_id == recording_id)
+                .where(recordings.c.org_id.is_(None))
+                .values(
+                    org_id=org_id,
+                    last_updated=now,
+                )
             )
 
     async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
@@ -1321,6 +1358,7 @@ class SqliteStateStore(StateStore):
             insert(recordings)
             .values(
                 recording_id=recording_id,
+                org_id=None,
                 expected_trace_count=0,
                 trace_count=0,
                 expected_trace_count_reported=0,
