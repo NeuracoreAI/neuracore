@@ -12,7 +12,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import cast
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 import pytest
@@ -31,7 +31,6 @@ from omegaconf import DictConfig, OmegaConf
 from neuracore.core.const import DEFAULT_RECORDING_CACHE_DIR
 from neuracore.core.utils.robot_data_spec_utils import extract_data_types
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
-from neuracore.ml.datasets.pytorch_single_sample_dataset import SingleSampleDataset
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
@@ -45,6 +44,7 @@ from neuracore.ml.train import (
     run_training,
     setup_logging,
 )
+from neuracore.ml.trainers.batch_autotuner import find_optimal_batch_size
 
 SKIP_TEST = (
     os.environ.get("CI", "false").lower() == "true" or not torch.cuda.is_available()
@@ -359,25 +359,6 @@ def mock_model_class() -> NeuracoreModel:
 
 
 @pytest.fixture
-def mock_single_sample_dataset(
-    model_init_description: ModelInitDescription,
-) -> SingleSampleDataset:
-    sample = Mock()
-    sample.inputs = Mock()
-    sample.outputs = Mock()
-
-    dataset = Mock(spec=SingleSampleDataset)
-    dataset.dataset_statistics = {
-        "input": model_init_description.input_dataset_statistics,
-        "output": model_init_description.output_dataset_statistics,
-    }
-    dataset.load_sample.return_value = sample
-    dataset.__len__ = Mock(return_value=100)
-    dataset.collate_fn = lambda x: x
-    return dataset
-
-
-@pytest.fixture
 def mock_cfg_batch_size(temp_output_dir):
     return OmegaConf.create({
         "algorithm_id": "test-algorithm-id",
@@ -428,8 +409,8 @@ def mock_dataset(
         "input": model_init_description.input_dataset_statistics,
         "output": model_init_description.output_dataset_statistics,
     }
-    dataset.collate_fn = lambda x: x
     dataset.__len__ = Mock(return_value=100)
+    dataset.collate_fn = lambda x: x
     return dataset
 
 
@@ -670,7 +651,7 @@ class TestDetermineOptimalBatchSize:
     def test_determine_optimal_batch_size_on_gpu_returns_optimal_size(
         self,
         mock_cfg_batch_size,
-        mock_single_sample_dataset,
+        mock_dataset,
         model_init_description,
         mock_model_class,
         monkeypatch,
@@ -692,16 +673,18 @@ class TestDetermineOptimalBatchSize:
 
         result = determine_optimal_batch_size(
             mock_cfg_batch_size,
+            mock_dataset,
             mock_cfg_batch_size.input_cross_embodiment_description,
-            mock_cfg_batch_size.output_cross_embodiment_description,
-            mock_single_sample_dataset,
+            mock_cfg_batch_size.output_cross_embodiment_description
         )
 
         assert result == 16
         mock_find_optimal.assert_called_once()
+        # kwargs = mock_find_optimal.call_args.kwargs
+        # assert set(kwargs.keys()) == {"cfg", "model", "dataset", "device"}
 
     def test_determine_optimal_batch_size_raises_error_when_no_gpu(
-        self, mock_cfg_batch_size, mock_single_sample_dataset, monkeypatch
+        self, mock_cfg_batch_size, mock_dataset, monkeypatch
     ):
         mock_get_device = Mock(return_value=torch.device("cpu"))
         monkeypatch.setattr("neuracore.ml.train.get_default_device", mock_get_device)
@@ -710,16 +693,16 @@ class TestDetermineOptimalBatchSize:
         with pytest.raises(ValueError, match="Autotuning is only supported on GPUs"):
             determine_optimal_batch_size(
                 mock_cfg_batch_size,
+                mock_dataset,
                 mock_cfg_batch_size.input_cross_embodiment_description,
-                mock_cfg_batch_size.output_cross_embodiment_description,
-                mock_single_sample_dataset,
+                mock_cfg_batch_size.output_cross_embodiment_description
             )
 
     @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
     def test_determine_optimal_batch_size_with_explicit_device(
         self,
         mock_cfg_batch_size,
-        mock_single_sample_dataset,
+        mock_dataset,
         model_init_description,
         mock_model_class,
         monkeypatch,
@@ -740,65 +723,21 @@ class TestDetermineOptimalBatchSize:
         device = torch.device("cuda:0")
         result = determine_optimal_batch_size(
             mock_cfg_batch_size,
+            mock_dataset,
             mock_cfg_batch_size.input_cross_embodiment_description,
             mock_cfg_batch_size.output_cross_embodiment_description,
-            mock_single_sample_dataset,
             device=device,
         )
 
         assert result == 8
         mock_find_optimal.assert_called_once()
-
-    @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
-    def test_determine_optimal_batch_size_uses_default_min_max_when_not_specified(
-        self,
-        mock_single_sample_dataset,
-        model_init_description,
-        mock_model_class,
-        monkeypatch,
-    ):
-        cfg = OmegaConf.create({
-            "algorithm_id": "test-algorithm-id",
-            "local_output_dir": "/tmp/test",
-            "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
-            "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
-            "output_prediction_horizon": 5,
-            "batch_size_autotuning_num_workers": 0,
-        })
-        mock_get_device = Mock(return_value=torch.device("cuda:0"))
-        mock_find_optimal = Mock(return_value=4)
-        mock_get_model_config = Mock(
-            return_value=(mock_model_class(model_init_description), {})
-        )
-
-        monkeypatch.setattr("neuracore.ml.train.get_default_device", mock_get_device)
-        monkeypatch.setattr(
-            "neuracore.ml.train.find_optimal_batch_size", mock_find_optimal
-        )
-        monkeypatch.setattr(
-            "neuracore.ml.train.get_model_and_algorithm_config", mock_get_model_config
-        )
-        monkeypatch.setattr("torch.cuda.is_available", lambda: True)
-
-        mock_single_sample_dataset.__len__ = Mock(return_value=100)
-
-        result = determine_optimal_batch_size(
-            cfg,
-            cfg.input_cross_embodiment_description,
-            cfg.output_cross_embodiment_description,
-            mock_single_sample_dataset,
-        )
-
-        assert result == 4
-        call_kwargs = mock_find_optimal.call_args[1]
-        assert call_kwargs["min_batch_size"] == 2
-        assert call_kwargs["max_batch_size"] == 100
+        assert mock_find_optimal.call_args.kwargs["device"] is device
 
     @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
     def test_determine_optimal_batch_size_calls_gc_and_cuda_cleanup(
         self,
         mock_cfg_batch_size,
-        mock_single_sample_dataset,
+        mock_dataset,
         model_init_description,
         mock_model_class,
         monkeypatch,
@@ -835,9 +774,9 @@ class TestDetermineOptimalBatchSize:
 
         result = determine_optimal_batch_size(
             mock_cfg_batch_size,
+            mock_dataset,
             mock_cfg_batch_size.input_cross_embodiment_description,
-            mock_cfg_batch_size.output_cross_embodiment_description,
-            mock_single_sample_dataset,
+            mock_cfg_batch_size.output_cross_embodiment_description
         )
 
         assert result == 16
@@ -848,7 +787,7 @@ class TestDetermineOptimalBatchSize:
     def test_determine_optimal_batch_size_uses_default_device_when_none_provided(
         self,
         mock_cfg_batch_size,
-        mock_single_sample_dataset,
+        mock_dataset,
         model_init_description,
         mock_model_class,
         monkeypatch,
@@ -870,9 +809,9 @@ class TestDetermineOptimalBatchSize:
 
         result = determine_optimal_batch_size(
             mock_cfg_batch_size,
+            mock_dataset,
             mock_cfg_batch_size.input_cross_embodiment_description,
             mock_cfg_batch_size.output_cross_embodiment_description,
-            mock_single_sample_dataset,
         )
 
         assert result == 16
@@ -880,7 +819,7 @@ class TestDetermineOptimalBatchSize:
         mock_find_optimal.assert_called_once()
 
     def test_determine_optimal_batch_size_raises_error_when_cpu_device_provided(
-        self, mock_cfg_batch_size, mock_single_sample_dataset, monkeypatch
+        self, mock_cfg_batch_size, mock_dataset, monkeypatch
     ):
         monkeypatch.setattr("torch.cuda.is_available", lambda: True)
 
@@ -888,9 +827,9 @@ class TestDetermineOptimalBatchSize:
         with pytest.raises(ValueError, match="Autotuning is only supported on GPUs"):
             determine_optimal_batch_size(
                 mock_cfg_batch_size,
+                mock_dataset,
                 mock_cfg_batch_size.input_cross_embodiment_description,
                 mock_cfg_batch_size.output_cross_embodiment_description,
-                mock_single_sample_dataset,
                 device=device,
             )
 
@@ -1295,6 +1234,104 @@ class TestRunTraining:
             80,
             20,
         ]  # train_size=80, val_size=20 for 100 samples with 0.2 split
+
+    def test_autotune_and_training_use_same_dataloader_worker_counts(
+        self,
+        mock_cfg_training,
+        mock_dataset,
+        model_init_description,
+        mock_model_class,
+        monkeypatch,
+    ):
+        """Autotuning and run_training both use min(cfg.*_workers, cpu_count())."""
+        train_workers_cfg = 5
+        val_workers_cfg = 3
+        mock_cfg_training.num_train_workers = train_workers_cfg
+        mock_cfg_training.num_val_workers = val_workers_cfg
+
+        def fixed_cpu_count() -> int:
+            return 100
+
+        monkeypatch.setattr("neuracore.ml.train.cpu_count", fixed_cpu_count)
+        monkeypatch.setattr(
+            "neuracore.ml.trainers.batch_autotuner.cpu_count",
+            fixed_cpu_count,
+        )
+
+        mock_sync_ds = Mock(spec=PytorchSynchronizedDataset)
+        mock_sync_ds.__len__ = Mock(return_value=100)
+        mock_sync_ds.collate_fn = lambda x: x
+
+        device = torch.device("cuda:0")
+        autotune_model = mock_model_class(model_init_description)
+
+        def fake_random_split_autotune(dataset, lengths, generator=None):
+            return (
+                torch.utils.data.TensorDataset(torch.zeros(lengths[0], 1)),
+                torch.utils.data.TensorDataset(torch.zeros(lengths[1], 1)),
+            )
+
+        mock_autotuner_instance = MagicMock()
+        mock_autotuner_instance.find_optimal_batch_size.return_value = 4
+
+        with (
+            patch("torch.cuda.is_available", return_value=True),
+            patch.object(autotune_model, "to", return_value=autotune_model),
+            patch(
+                "neuracore.ml.trainers.batch_autotuner.random_split",
+                side_effect=fake_random_split_autotune,
+            ),
+            patch(
+                "neuracore.ml.trainers.batch_autotuner.BatchSizeAutotuner",
+                return_value=mock_autotuner_instance,
+            ) as mock_autotuner_cls,
+        ):
+            find_optimal_batch_size(
+                mock_cfg_training,
+                autotune_model,
+                mock_sync_ds,
+                device,
+            )
+
+        autotune_kwargs = mock_autotuner_cls.call_args.kwargs
+        autotune_train_w = autotune_kwargs["train_dataloader_kwargs"]["num_workers"]
+        autotune_val_w = autotune_kwargs["val_dataloader_kwargs"]["num_workers"]
+        assert autotune_train_w == train_workers_cfg
+        assert autotune_val_w == val_workers_cfg
+
+        dataloader_num_workers: list[int | None] = []
+
+        def tracking_dataloader(*args, **kwargs):
+            dataloader_num_workers.append(kwargs.get("num_workers"))
+            return MagicMock()
+
+        mock_dataset.__len__ = Mock(return_value=100)
+        mock_train_dataset = Mock(unsafe=True)
+        mock_train_dataset.__len__ = Mock(return_value=80)
+        mock_val_dataset = Mock(unsafe=True)
+        mock_val_dataset.__len__ = Mock(return_value=20)
+
+        def mock_random_split_train(dataset, lengths, generator=None):
+            return (mock_train_dataset, mock_val_dataset)
+
+        monkeypatch.setattr("neuracore.ml.train.DataLoader", tracking_dataloader)
+        monkeypatch.setattr(
+            "neuracore.ml.train.random_split",
+            Mock(side_effect=mock_random_split_train),
+        )
+
+        setup = RunTrainingTestSetup(
+            monkeypatch,
+            model_init_description,
+            mock_model_class,
+        )
+        setup.setup_mocks()
+
+        setup.call_run_training(mock_cfg_training, mock_dataset)
+
+        assert dataloader_num_workers == [train_workers_cfg, val_workers_cfg]
+        assert autotune_train_w == dataloader_num_workers[0]
+        assert autotune_val_w == dataloader_num_workers[1]
 
 
 class TestMain:
@@ -2021,16 +2058,6 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
         setup = MainTestSetup(monkeypatch)
         setup.setup_mocks(include_determine_optimal_batch_size=True)
 
-        # Mock SingleSampleDataset
-        mock_single_sample_dataset = Mock(spec=SingleSampleDataset)
-        mock_single_sample_dataset_class = Mock(return_value=mock_single_sample_dataset)
-        monkeypatch.setattr(
-            "neuracore.ml.train.SingleSampleDataset", mock_single_sample_dataset_class
-        )
-
-        # Mock sample for load_sample
-        mock_sample = Mock()
-        setup.mock_pytorch_dataset.load_sample.return_value = mock_sample
         setup.mock_pytorch_dataset.__len__ = Mock(return_value=100)
 
         # Mock get_default_device
@@ -2043,10 +2070,10 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
 
         main(cfg)
 
-        # Verify SingleSampleDataset was created
-        mock_single_sample_dataset_class.assert_called_once()
-        # Verify determine_optimal_batch_size was called
         setup.mock_determine_optimal_batch_size.assert_called_once()
+        det_kwargs = setup.mock_determine_optimal_batch_size.call_args.kwargs
+        assert det_kwargs["dataset"] is setup.mock_pytorch_dataset
+        assert det_kwargs["cfg"] is cfg
         # Verify run_training was called with the optimal batch size
         assert setup.mock_run_training.call_args[0][3] == 16
 

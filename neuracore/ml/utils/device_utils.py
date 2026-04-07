@@ -1,5 +1,6 @@
 """Device allocation utils."""
 
+import psutil
 import torch
 
 
@@ -17,3 +18,8 @@ def get_default_device(gpu_index: int | None = None) -> torch.device:
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def cpu_count() -> int:
+    """Return a positive CPU count even if psutil reports None."""
+    return psutil.cpu_count() or 1

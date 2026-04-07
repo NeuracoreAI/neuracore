@@ -1,5 +1,6 @@
 """Hydra-based training script for Neuracore models."""
 
+import copy
 import gc
 import json
 import logging
@@ -40,7 +41,6 @@ from neuracore.core.utils.training_input_args_validation import (
     validate_training_params,
 )
 from neuracore.ml import BatchedTrainingSamples, NeuracoreModel
-from neuracore.ml.datasets.pytorch_single_sample_dataset import SingleSampleDataset
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
@@ -56,7 +56,7 @@ from neuracore.ml.trainers.distributed_trainer import (
 )
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
-from neuracore.ml.utils.device_utils import get_default_device
+from neuracore.ml.utils.device_utils import cpu_count, get_default_device
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
 # Environment setup
@@ -188,37 +188,6 @@ def _estimate_sample_tensor_bytes(sample: BatchedTrainingSamples) -> int:
         "outputs": sample.outputs,
         "outputs_mask": sample.outputs_mask,
     })
-
-
-def _select_worst_case_sample(
-    dataset: PytorchSynchronizedDataset, device: torch.device
-) -> BatchedTrainingSamples:
-    """Pick the heaviest sample (by tensor bytes) from a subset of the dataset."""
-    if len(dataset) == 0:
-        raise ValueError("Cannot autotune batch size with an empty dataset.")
-
-    search_space = range(min(MAX_AUTOTUNE_SAMPLE_CANDIDATES, len(dataset) - 1))
-    heaviest_sample: BatchedTrainingSamples | None = None
-    heaviest_bytes = -1
-    heaviest_idx = -1
-
-    for idx in search_space:
-
-        candidate = dataset[idx]
-        candidate_bytes = _estimate_sample_tensor_bytes(candidate)
-        if candidate_bytes > heaviest_bytes:
-            heaviest_bytes = candidate_bytes
-            heaviest_sample = candidate
-            heaviest_idx = idx
-
-    assert heaviest_sample is not None
-    logger.info(
-        "Selected sample %s as worst-case for autotuning (approx %.2f MB of tensors)",
-        heaviest_idx,
-        heaviest_bytes / (1024**2),
-    )
-
-    return heaviest_sample.to(device)
 
 
 def _serialize_robot_data_spec(
@@ -429,9 +398,9 @@ def get_model_and_algorithm_config(
 
 def determine_optimal_batch_size(
     cfg: DictConfig,
+    dataset: PytorchSynchronizedDataset,
     input_cross_embodiment_description: CrossEmbodimentDescription,
     output_cross_embodiment_description: CrossEmbodimentDescription,
-    dataset: SingleSampleDataset,
     device: torch.device | None = None,
 ) -> int:
     """Run batch size autotuning on a single GPU and return the result."""
@@ -444,8 +413,11 @@ def determine_optimal_batch_size(
         device = get_default_device()
 
     logger.info(f"Starting batch size autotuning on {device}...")
+    
+    # Avoid altering the original dataset
+    autotuning_dataset = copy.deepcopy(dataset)
 
-    dataset_statistics_by_role = dataset.dataset_statistics
+    dataset_statistics_by_role = autotuning_dataset.dataset_statistics
     model_init_description = ModelInitDescription(
         input_dataset_statistics=dataset_statistics_by_role["input"],
         output_dataset_statistics=dataset_statistics_by_role["output"],
@@ -457,32 +429,16 @@ def determine_optimal_batch_size(
         cfg, model_init_description
     )
 
-    model = model.to(device)
-
-    max_batch_size = cfg.max_batch_size if "max_batch_size" in cfg else len(dataset)
-    min_batch_size = cfg.min_batch_size if "min_batch_size" in cfg else 2
-    num_workers = cfg.batch_size_autotuning_num_workers
-
-    logger.info(
-        f"using max_batch_size: {max_batch_size}, "
-        f"min_batch_size: {min_batch_size}, "
-        f"num_workers: {num_workers}"
-    )
-
-    # Determine per-GPU batch size
     optimal_batch_size = find_optimal_batch_size(
-        dataset=dataset,
+        cfg=cfg,
         model=model,
-        model_kwargs=algorithm_config,
-        min_batch_size=min_batch_size,
-        max_batch_size=max_batch_size,
-        dataloader_kwargs={
-            "collate_fn": dataset.collate_fn,
-        },
+        dataset=autotuning_dataset,
+        device=device,
     )
 
     # Clean up
     del model
+    del autotuning_dataset
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
@@ -539,6 +495,9 @@ def run_training(
             dataset, [train_size, val_size], generator=generator
         )
 
+        num_train_workers = min(cfg.num_train_workers, cpu_count())
+        num_val_workers = min(cfg.num_val_workers, cpu_count())
+
         if world_size > 1:
             train_sampler = DistributedSampler(
                 train_dataset,
@@ -559,9 +518,9 @@ def run_training(
                 train_dataset,
                 batch_size=batch_size,
                 sampler=train_sampler,
-                num_workers=cfg.num_train_workers,
+                num_workers=num_train_workers,
                 pin_memory=True,
-                persistent_workers=cfg.num_train_workers > 0,
+                persistent_workers=num_train_workers > 0,
                 collate_fn=dataset.collate_fn,
             )
 
@@ -569,9 +528,9 @@ def run_training(
                 val_dataset,
                 batch_size=batch_size,
                 sampler=val_sampler,
-                num_workers=cfg.num_val_workers,
+                num_workers=num_val_workers,
                 pin_memory=True,
-                persistent_workers=cfg.num_val_workers > 0,
+                persistent_workers=num_val_workers > 0,
                 collate_fn=dataset.collate_fn,
             )
         else:
@@ -580,9 +539,9 @@ def run_training(
                 train_dataset,
                 batch_size=batch_size,
                 shuffle=True,
-                num_workers=cfg.num_train_workers,
+                num_workers=num_train_workers,
                 pin_memory=True,
-                persistent_workers=cfg.num_train_workers > 0,
+                persistent_workers=num_train_workers > 0,
                 collate_fn=dataset.collate_fn,
             )
 
@@ -590,9 +549,9 @@ def run_training(
                 val_dataset,
                 batch_size=batch_size,
                 shuffle=False,
-                num_workers=cfg.num_val_workers,
+                num_workers=num_val_workers,
                 pin_memory=True,
-                persistent_workers=cfg.num_val_workers > 0,
+                persistent_workers=num_val_workers > 0,
                 collate_fn=dataset.collate_fn,
             )
 
@@ -952,28 +911,15 @@ def _main(cfg: DictConfig) -> None:
 
     # Handle batch size configuration
     if isinstance(batch_size, str) and batch_size.lower() == "auto":
-        sample = _select_worst_case_sample(
-            dataset=pytorch_dataset,
-            device=device,
-        )
-        single_sample_dataset = SingleSampleDataset(
-            sample=sample,
-            input_cross_embodiment_description=input_cross_embodiment_description,
-            output_cross_embodiment_description=output_cross_embodiment_description,
-            output_prediction_horizon=cfg.output_prediction_horizon,
-            dataset_statistics=pytorch_dataset.dataset_statistics,
-            num_recordings=len(pytorch_dataset),
-        )
-
         optimal_batch_size = determine_optimal_batch_size(
             cfg=cfg,
+            dataset=pytorch_dataset,
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
-            dataset=single_sample_dataset,
             device=device,
         )
-        batch_size = optimal_batch_size
 
+        batch_size = optimal_batch_size
     else:
         batch_size = int(batch_size)
 
