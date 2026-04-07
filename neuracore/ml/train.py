@@ -61,6 +61,10 @@ from neuracore.ml.trainers.distributed_trainer import (
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
 from neuracore.ml.utils.device_utils import cpu_count, get_default_device
+from neuracore.ml.utils.preprocessing_utils import (
+    PreprocessingConfiguration,
+    resolve_preprocessing_config,
+)
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
 # Environment setup
@@ -539,6 +543,8 @@ def run_training(
     batch_size: int,
     input_cross_embodiment_description: CrossEmbodimentDescription,
     output_cross_embodiment_description: CrossEmbodimentDescription,
+    input_preprocessing_config: PreprocessingConfiguration,
+    output_preprocessing_config: PreprocessingConfiguration,
     dataset: PytorchSynchronizedDataset,
     device: torch.device | None = None,
 ) -> None:
@@ -663,6 +669,8 @@ def run_training(
             algorithm_config=algorithm_config,
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
+            input_preprocessing_config=input_preprocessing_config,
+            output_preprocessing_config=output_preprocessing_config,
         )
 
         logger.info(
@@ -983,6 +991,27 @@ def _main(cfg: DictConfig) -> None:
         else:
             device = get_default_device()
 
+        preprocessing_dictconfig = cfg.get("preprocessing", {})
+        if not preprocessing_dictconfig:
+            raise ValueError(
+                "Preprocessing configuration is missing ! Please provide a "
+                "preprocessing configuration."
+            )
+
+        input_preprocessing_config_serialized = OmegaConf.to_container(
+            preprocessing_dictconfig.get("input", OmegaConf.create({})), resolve=True
+        )
+        input_preprocessing_config = resolve_preprocessing_config(
+            input_preprocessing_config_serialized
+        )
+
+        output_preprocessing_config_serialized = OmegaConf.to_container(
+            preprocessing_dictconfig.get("output", OmegaConf.create({})), resolve=True
+        )
+        output_preprocessing_config = resolve_preprocessing_config(
+            output_preprocessing_config_serialized
+        )
+
         # Create a pytorch synchronized dataset
         # NOTE: we are creating it here, and not in training to access the first sample
         # for batch size autotuning, if used.
@@ -991,6 +1020,8 @@ def _main(cfg: DictConfig) -> None:
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
             output_prediction_horizon=cfg.output_prediction_horizon,
+            input_preprocessing_config=input_preprocessing_config,
+            output_preprocessing_config=output_preprocessing_config,
         )
 
         # Handle batch size configuration
@@ -1028,6 +1059,8 @@ def _main(cfg: DictConfig) -> None:
                     batch_size,
                     input_cross_embodiment_description,
                     output_cross_embodiment_description,
+                    input_preprocessing_config,
+                    output_preprocessing_config,
                     pytorch_dataset,
                     device,
                 ),
@@ -1043,6 +1076,8 @@ def _main(cfg: DictConfig) -> None:
                 batch_size,
                 input_cross_embodiment_description,
                 output_cross_embodiment_description,
+                input_preprocessing_config,
+                output_preprocessing_config,
                 pytorch_dataset,
                 device,
             )

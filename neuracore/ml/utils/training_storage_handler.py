@@ -14,6 +14,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.utils.http_session import get_session
 from neuracore.ml.utils.nc_archive import create_nc_archive
+from neuracore.ml.utils.preprocessing_utils import PreprocessingConfiguration
 from neuracore.ml.utils.upload_storage_mixin import UploadStorageMixin
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,8 @@ class TrainingStorageHandler(UploadStorageMixin):
         algorithm_config: dict = {},
         input_cross_embodiment_description: dict[str, Any] = {},
         output_cross_embodiment_description: dict[str, Any] = {},
+        input_preprocessing_config: PreprocessingConfiguration = {},
+        output_preprocessing_config: PreprocessingConfiguration = {},
     ) -> None:
         """Initialize the storage handler.
 
@@ -40,12 +43,18 @@ class TrainingStorageHandler(UploadStorageMixin):
                 to persist with model artifacts.
             output_cross_embodiment_description: Output embodiment mapping
                 to persist with model artifacts.
+            input_preprocessing_config: preprocessing configuration for the input
+                data.
+            output_preprocessing_config: preprocessing configuration for the output
+                data.
         """
         self.local_dir = Path(local_dir or "./output")
         self.training_job_id = training_job_id
         self.algorithm_config = algorithm_config
         self.input_cross_embodiment_description = input_cross_embodiment_description
         self.output_cross_embodiment_description = output_cross_embodiment_description
+        self.input_preprocessing_config = input_preprocessing_config
+        self.output_preprocessing_config = output_preprocessing_config
         self.log_to_cloud = self.training_job_id is not None
         self.org_id = get_current_org()
         if self.log_to_cloud:
@@ -235,6 +244,8 @@ class TrainingStorageHandler(UploadStorageMixin):
             algorithm_config=self.algorithm_config,
             input_cross_embodiment_description=self.input_cross_embodiment_description,
             output_cross_embodiment_description=self.output_cross_embodiment_description,
+            input_preprocessing_config=self.input_preprocessing_config,
+            output_preprocessing_config=self.output_preprocessing_config,
         )
         if self.log_to_cloud:
             for file_path in artifacts_dir.glob("*"):

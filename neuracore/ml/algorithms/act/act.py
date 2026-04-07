@@ -212,6 +212,7 @@ class ACT(NeuracoreModel):
                 self.input_dataset_statistics[DataType.RGB_IMAGES],
             )
             max_cameras = len(stats)
+            self.image_normalizers = nn.ModuleList()
             self.image_encoders = nn.ModuleList()
             for i in range(max_cameras):
                 if use_resnet_stats:
@@ -220,15 +221,8 @@ class ACT(NeuracoreModel):
                     mean_c_h_w, std_c_h_w = stats[i].frame.mean, stats[i].frame.std
                     mean = mean_c_h_w.mean(axis=(1, 2)).tolist()
                     std = std_c_h_w.mean(axis=(1, 2)).tolist()
-
-                encoder = nn.ModuleDict({
-                    "transform": torch.nn.Sequential(
-                        T.Resize((224, 224)),
-                        T.Normalize(mean=mean, std=std),
-                    ),
-                    "encoder": ACTImageEncoder(output_dim=hidden_dim),
-                })
-                self.image_encoders.append(encoder)
+                self.image_normalizers.append(T.Normalize(mean=mean, std=std))
+                self.image_encoders.append(ACTImageEncoder(output_dim=hidden_dim))
 
         # CLS token embedding for latent encoder
         self.cls_embed = nn.Parameter(torch.randn(1, 1, hidden_dim))
@@ -473,12 +467,12 @@ class ACT(NeuracoreModel):
         # Process images
         image_features = []
         image_pos = []
-        for cam_id, (encoder_dict, input_rgb) in enumerate(
-            zip(self.image_encoders, batched_rgb_data)
+        for cam_id, (normalizer, encoder, input_rgb) in enumerate(
+            zip(self.image_normalizers, self.image_encoders, batched_rgb_data)
         ):
             last_frame = input_rgb.frame[:, -1, :, :, :]  # (B, 3, H, W)
-            transformed = encoder_dict["transform"](last_frame)
-            features, pos = encoder_dict["encoder"](
+            transformed = normalizer(last_frame)
+            features, pos = encoder(
                 transformed
             )  # Vision backbone provides features and pos
             features *= camera_images_mask[:, cam_id].view(batch_size, 1, 1, 1)

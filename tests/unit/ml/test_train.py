@@ -47,6 +47,7 @@ from neuracore.ml.train import (
     setup_logging,
 )
 from neuracore.ml.trainers.batch_autotuner import find_optimal_batch_size
+from neuracore.ml.utils.preprocessing_utils import resolve_preprocessing_config
 
 SKIP_TEST = (
     os.environ.get("CI", "false").lower() == "true" or not torch.cuda.is_available()
@@ -90,6 +91,153 @@ OUTPUT_CROSS_EMBODIMENT_SPEC = {
     },
 }
 
+MINIMAL_PREPROCESSING_CFG = {
+    "input": {
+        "RGB_IMAGES": [{
+            "_target_": "neuracore.ml.preprocessing.methods.resize_pad.ResizePad",
+            "size": [224, 224],
+        }]
+    },
+    "output": {
+        "RGB_IMAGES": [{
+            "_target_": "neuracore.ml.preprocessing.methods.resize_pad.ResizePad",
+            "size": [224, 224],
+        }]
+    },
+}
+
+
+class TestResolvePreprocessingConfig:
+    def test_resolves_input_preprocessing_config(self):
+        cfg = OmegaConf.create({
+            "preprocessing": {
+                "input": {
+                    "RGB_IMAGES": [{
+                        "_target_": (
+                            "neuracore.ml.preprocessing.methods.resize_pad.ResizePad"
+                        ),
+                        "size": [224, 224],
+                    }],
+                    "DEPTH_IMAGES": [{
+                        "_target_": (
+                            "neuracore.ml.preprocessing.methods.resize_pad.ResizePad"
+                        ),
+                        "size": [200, 300],
+                    }],
+                }
+            }
+        })
+
+        resolved = resolve_preprocessing_config(
+            OmegaConf.to_container(cfg.preprocessing.input, resolve=True)
+        )
+
+        assert set(resolved.keys()) == {DataType.RGB_IMAGES, DataType.DEPTH_IMAGES}
+        assert len(resolved[DataType.RGB_IMAGES]) == 1
+        assert len(resolved[DataType.DEPTH_IMAGES]) == 1
+        assert resolved[DataType.RGB_IMAGES][0].__class__.__name__ == "ResizePad"
+        assert resolved[DataType.DEPTH_IMAGES][0].__class__.__name__ == "ResizePad"
+        assert tuple(resolved[DataType.RGB_IMAGES][0].size) == (224, 224)
+        assert tuple(resolved[DataType.DEPTH_IMAGES][0].size) == (200, 300)
+
+    def test_resolves_output_preprocessing_config(self):
+        cfg = OmegaConf.create({
+            "preprocessing": {
+                "output": {
+                    "RGB_IMAGES": [{
+                        "_target_": (
+                            "neuracore.ml.preprocessing.methods.resize_pad.ResizePad"
+                        ),
+                        "size": [160, 200],
+                    }]
+                }
+            }
+        })
+
+        resolved = resolve_preprocessing_config(
+            OmegaConf.to_container(cfg.preprocessing.output, resolve=True)
+        )
+
+        assert set(resolved.keys()) == {DataType.RGB_IMAGES}
+        assert resolved[DataType.RGB_IMAGES][0].__class__.__name__ == "ResizePad"
+        assert tuple(resolved[DataType.RGB_IMAGES][0].size) == (160, 200)
+
+    def test_raises_when_preprocessing_section_missing(self):
+        cfg = OmegaConf.create({})
+
+        with pytest.raises(
+            ValueError,
+            match="Missing preprocessing configuration",
+        ):
+            resolve_preprocessing_config(OmegaConf.to_container(cfg, resolve=True))
+
+    def test_raises_when_role_block_missing(self):
+        cfg = OmegaConf.create({"preprocessing": {"output": {"RGB_IMAGES": []}}})
+
+        with pytest.raises(
+            ValueError,
+            match="Missing preprocessing configuration",
+        ):
+            resolve_preprocessing_config(
+                OmegaConf.to_container(
+                    cfg.preprocessing.get("input", OmegaConf.create({})), resolve=True
+                )
+            )
+
+    def test_raises_when_role_block_empty(self):
+        cfg = OmegaConf.create({"preprocessing": {"input": {}}})
+
+        with pytest.raises(
+            ValueError,
+            match="Missing preprocessing configuration",
+        ):
+            resolve_preprocessing_config(
+                OmegaConf.to_container(cfg.preprocessing.input, resolve=True)
+            )
+
+    def test_raises_when_method_entry_missing_target(self):
+        cfg = OmegaConf.create(
+            {
+                "preprocessing": {
+                    "input": {
+                        "RGB_IMAGES": [{
+                            "size": [224, 224],
+                        }]
+                    }
+                }
+            }
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="requires a '_target_' field",
+        ):
+            resolve_preprocessing_config(
+                OmegaConf.to_container(cfg.preprocessing.input, resolve=True)
+            )
+
+    def test_raises_when_methods_for_data_type_not_list(self):
+        cfg = OmegaConf.create({
+            "preprocessing": {
+                "input": {
+                    "RGB_IMAGES": {
+                        "_target_": (
+                            "neuracore.ml.preprocessing.methods.resize_pad.ResizePad"
+                        ),
+                        "size": [224, 224],
+                    }
+                }
+            }
+        })
+
+        with pytest.raises(
+            ValueError,
+            match="must be a list of methods",
+        ):
+            resolve_preprocessing_config(
+                OmegaConf.to_container(cfg.preprocessing.input, resolve=True)
+            )
+
 
 class MainTestSetup:
     def __init__(self, monkeypatch, cuda_device_count=1):
@@ -116,6 +264,7 @@ class MainTestSetup:
             return_value=self.mock_synchronized_dataset
         )
         self.mock_pytorch_dataset_class = Mock(return_value=self.mock_pytorch_dataset)
+        self.mock_resolve_preprocessing_config = Mock(return_value={})
         self.mock_run_training = Mock()
         self.mock_cuda_device_count = Mock(return_value=self.cuda_device_count)
         self.mock_storage_handler = Mock()
@@ -155,6 +304,10 @@ class MainTestSetup:
         self.monkeypatch.setattr(
             "neuracore.ml.train.validate_training_params",
             self.mock_validate_training_params,
+        )
+        self.monkeypatch.setattr(
+            "neuracore.ml.train.resolve_preprocessing_config",
+            self.mock_resolve_preprocessing_config,
         )
         self.monkeypatch.setattr(
             "neuracore.ml.train.PytorchSynchronizedDataset",
@@ -293,6 +446,12 @@ class RunTrainingTestSetup:
 
     def call_run_training(self, cfg, dataset):
         """Call run_training with the configured parameters."""
+        input_preprocessing_config = resolve_preprocessing_config(
+            OmegaConf.to_container(cfg.preprocessing.input, resolve=True)
+        )
+        output_preprocessing_config = resolve_preprocessing_config(
+            OmegaConf.to_container(cfg.preprocessing.output, resolve=True)
+        )
         return run_training(
             self.rank,
             self.world_size,
@@ -300,6 +459,8 @@ class RunTrainingTestSetup:
             self.batch_size,
             cfg.input_cross_embodiment_description,
             cfg.output_cross_embodiment_description,
+            input_preprocessing_config,
+            output_preprocessing_config,
             dataset,
         )
 
@@ -395,6 +556,36 @@ def mock_cfg_batch_size(temp_output_dir):
         "max_delay_s": 0.5,
         "allow_duplicates": True,
         "trim_start_end": True,
+        "preprocessing": {
+            "input": {
+                "RGB_IMAGES": [{
+                    "_target_": (
+                        "neuracore.ml.preprocessing.methods.resize_pad.ResizePad"
+                    ),
+                    "size": [224, 224],
+                }],
+                "DEPTH_IMAGES": [{
+                    "_target_": (
+                        "neuracore.ml.preprocessing.methods.resize_pad.ResizePad"
+                    ),
+                    "size": [224, 224],
+                }],
+            },
+            "output": {
+                "RGB_IMAGES": [{
+                    "_target_": (
+                        "neuracore.ml.preprocessing.methods.resize_pad.ResizePad"
+                    ),
+                    "size": [224, 224],
+                }],
+                "DEPTH_IMAGES": [{
+                    "_target_": (
+                        "neuracore.ml.preprocessing.methods.resize_pad.ResizePad"
+                    ),
+                    "size": [224, 224],
+                }],
+            },
+        },
     })
 
 
@@ -419,7 +610,56 @@ def mock_cfg_training(temp_output_dir) -> DictConfig:
         "max_delay_s": 0.5,
         "allow_duplicates": True,
         "trim_start_end": True,
+        "preprocessing": {
+            "input": {
+                "RGB_IMAGES": [{
+                    "_target_": (
+                        "neuracore.ml.preprocessing.methods.resize_pad.ResizePad"
+                    ),
+                    "size": [224, 224],
+                }],
+                "DEPTH_IMAGES": [{
+                    "_target_": (
+                        "neuracore.ml.preprocessing.methods.resize_pad.ResizePad"
+                    ),
+                    "size": [224, 224],
+                }],
+            },
+            "output": {
+                "RGB_IMAGES": [{
+                    "_target_": (
+                        "neuracore.ml.preprocessing.methods.resize_pad.ResizePad"
+                    ),
+                    "size": [224, 224],
+                }],
+                "DEPTH_IMAGES": [{
+                    "_target_": (
+                        "neuracore.ml.preprocessing.methods.resize_pad.ResizePad"
+                    ),
+                    "size": [224, 224],
+                }],
+            },
+        },
     })
+
+
+@pytest.fixture
+def mock_preprocessing_configs_batch_size(
+    mock_cfg_batch_size: DictConfig,
+) -> tuple[dict[DataType, list], dict[DataType, list]]:
+    """Resolve preprocessing once for batch-size tests."""
+    return (
+        resolve_preprocessing_config(
+            OmegaConf.to_container(
+                mock_cfg_batch_size.preprocessing.input, resolve=True
+            )
+        ),
+        resolve_preprocessing_config(
+            OmegaConf.to_container(
+                mock_cfg_batch_size.preprocessing.output, resolve=True
+            )
+        ),
+    )
 
 
 @pytest.fixture
@@ -784,7 +1024,10 @@ class TestDetermineOptimalBatchSize:
         # assert set(kwargs.keys()) == {"cfg", "model", "dataset", "device"}
 
     def test_determine_optimal_batch_size_raises_error_when_no_gpu(
-        self, mock_cfg_batch_size, mock_dataset, monkeypatch
+        self,
+        mock_cfg_batch_size,
+        mock_dataset,
+        monkeypatch,
     ):
         mock_get_device = Mock(return_value=torch.device("cpu"))
         monkeypatch.setattr("neuracore.ml.train.get_default_device", mock_get_device)
@@ -919,7 +1162,10 @@ class TestDetermineOptimalBatchSize:
         mock_find_optimal.assert_called_once()
 
     def test_determine_optimal_batch_size_raises_error_when_cpu_device_provided(
-        self, mock_cfg_batch_size, mock_dataset, monkeypatch
+        self,
+        mock_cfg_batch_size,
+        mock_dataset,
+        monkeypatch,
     ):
         monkeypatch.setattr("torch.cuda.is_available", lambda: True)
 
@@ -1684,6 +1930,7 @@ class TestMain:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         }
         base_cfg.update(cfg_updates)
         cfg = OmegaConf.create(base_cfg)
@@ -1715,6 +1962,7 @@ class TestMain:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1747,6 +1995,7 @@ class TestMain:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1781,6 +2030,7 @@ class TestMain:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1881,6 +2131,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1918,6 +2169,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1926,7 +2178,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
         main(cfg)
 
         setup.mock_get_default_device.assert_called_once()
-        assert setup.mock_run_training.call_args[0][7] == torch.device("cuda:0")
+        assert setup.mock_run_training.call_args[0][-1] == torch.device("cuda:0")
 
     def test_main_uses_explicit_device_when_device_is_provided(
         self, monkeypatch, temp_output_dir
@@ -1950,6 +2202,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -1960,7 +2213,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
         # get_default_device should NOT be called when device is explicitly provided
         setup.mock_get_default_device.assert_not_called()
         # Verify the explicit device is passed to run_training
-        assert setup.mock_run_training.call_args[0][7] == torch.device("cuda:1")
+        assert setup.mock_run_training.call_args[0][-1] == torch.device("cuda:1")
 
     def test_main_uses_provided_batch_size_when_not_auto(
         self, monkeypatch, temp_output_dir
@@ -1984,6 +2237,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2019,6 +2273,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2054,6 +2309,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2092,6 +2348,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2123,6 +2380,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2162,6 +2420,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch, cuda_device_count=world_size)
@@ -2207,6 +2466,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2239,6 +2499,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2281,6 +2542,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2321,6 +2583,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2368,6 +2631,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "allow_duplicates": True,
             "trim_start_end": True,
             "recording_cache_dir": None,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2399,6 +2663,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "allow_duplicates": True,
             "trim_start_end": True,
             "recording_cache_dir": str(custom_cache_dir),
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2432,6 +2697,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
         setup = MainTestSetup(monkeypatch)
@@ -2482,6 +2748,7 @@ class TestMainErrorReporting:
             "max_delay_s": 0.5,
             "allow_duplicates": True,
             "trim_start_end": True,
+            "preprocessing": MINIMAL_PREPROCESSING_CFG,
         })
 
     def test_calls_try_report_error_to_cloud_when_training_id_set_and_run_training_raises(  # noqa: E501

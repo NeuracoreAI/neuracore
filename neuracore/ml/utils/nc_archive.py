@@ -20,6 +20,11 @@ from neuracore_types import CrossEmbodimentDescription, ModelInitDescription
 from neuracore.ml.core.neuracore_model import NeuracoreModel
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.device_utils import get_default_device
+from neuracore.ml.utils.preprocessing_utils import (
+    PreprocessingConfiguration,
+    resolve_preprocessing_config,
+    serialize_preprocessing_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +57,8 @@ def create_nc_archive(
     algorithm_config: dict = {},
     input_cross_embodiment_description: dict[str, Any] = {},
     output_cross_embodiment_description: dict[str, Any] = {},
+    input_preprocessing_config: PreprocessingConfiguration = {},
+    output_preprocessing_config: PreprocessingConfiguration = {},
 ) -> Path:
     """Create a Neuracore model archive (NC.ZIP) file from a Neuracore model.
 
@@ -65,6 +72,8 @@ def create_nc_archive(
         algorithm_config: Custom configuration for the algorithm.
         input_cross_embodiment_description: Input embodiment mapping.
         output_cross_embodiment_description: Output embodiment mapping.
+        input_preprocessing_config: preprocessing configuration for the input data.
+        output_preprocessing_config: preprocessing configuration for the output data.
 
     Returns:
         Path to the created NC.ZIP file.
@@ -101,6 +110,16 @@ def create_nc_archive(
             json.dump(input_cross_embodiment_description, f, indent=2)
         with open(temp_path / "output_cross_embodiment_description.json", "w") as f:
             json.dump(output_cross_embodiment_description, f, indent=2)
+        with open(temp_path / "input_preprocessing_config.json", "w") as f:
+            input_preprocessing_config_serialized = serialize_preprocessing_config(
+                input_preprocessing_config
+            )
+            json.dump(input_preprocessing_config_serialized, f, indent=2)
+        with open(temp_path / "output_preprocessing_config.json", "w") as f:
+            output_preprocessing_config_serialized = serialize_preprocessing_config(
+                output_preprocessing_config
+            )
+            json.dump(output_preprocessing_config_serialized, f, indent=2)
 
         # Save archive metadata
         with open(temp_path / "metadata", "w") as f:
@@ -128,6 +147,14 @@ def create_nc_archive(
             zip_file.write(
                 temp_path / "output_cross_embodiment_description.json",
                 "output_cross_embodiment_description.json",
+            )
+            zip_file.write(
+                temp_path / "input_preprocessing_config.json",
+                "input_preprocessing_config.json",
+            )
+            zip_file.write(
+                temp_path / "output_preprocessing_config.json",
+                "output_preprocessing_config.json",
             )
 
             # Add archive metadata
@@ -192,6 +219,10 @@ def extract_nc_archive(archive_file: Path, output_dir: Path) -> dict[str, Path]:
                 extracted_files["input_cross_embodiment_description"] = file_path
             elif file_info.filename == "output_cross_embodiment_description.json":
                 extracted_files["output_cross_embodiment_description"] = file_path
+            elif file_info.filename == "input_preprocessing_config.json":
+                extracted_files["input_preprocessing_config"] = file_path
+            elif file_info.filename == "output_preprocessing_config.json":
+                extracted_files["output_preprocessing_config"] = file_path
             elif file_info.filename == "metadata":
                 extracted_files["metadata"] = file_path
             elif file_info.filename == "algorithm/requirements.txt":
@@ -251,7 +282,13 @@ def load_cross_embodiment_descriptions_from_nc_archive(
 
 def load_model_from_nc_archive(
     archive_file: Path, extract_to: Path | None = None, device: str | None = None
-) -> tuple[NeuracoreModel, CrossEmbodimentDescription, CrossEmbodimentDescription]:
+) -> tuple[
+    NeuracoreModel,
+    CrossEmbodimentDescription,
+    CrossEmbodimentDescription,
+    PreprocessingConfiguration,
+    PreprocessingConfiguration,
+]:
     """Load a Neuracore model from a NC.ZIP archive file.
 
     Extracts the archive file and reconstructs the original Neuracore model instance
@@ -268,6 +305,8 @@ def load_model_from_nc_archive(
           - The reconstructed model instance ready for inference.
           - Input cross-embodiment description loaded from the archive (if present).
           - Output cross-embodiment description loaded from the archive (if present).
+          - Input preprocessing config loaded from the archive (if present).
+          - Output preprocessing config loaded from the archive (if present).
     """
     use_temp_dir = extract_to is None
 
@@ -308,6 +347,30 @@ def load_model_from_nc_archive(
         if "output_cross_embodiment_description" in extracted_files:
             with open(extracted_files["output_cross_embodiment_description"]) as f:
                 output_cross_embodiment_description = json.load(f)
+        input_preprocessing_config: PreprocessingConfiguration = {}
+        if "input_preprocessing_config" in extracted_files:
+            with open(extracted_files["input_preprocessing_config"]) as f:
+                input_preprocessing_config_serialized = json.load(f)
+                if input_preprocessing_config_serialized:
+                    input_preprocessing_config = resolve_preprocessing_config(
+                        input_preprocessing_config_serialized
+                    )
+                else:
+                    logger.warning(
+                        "Input preprocessing config in model archive is empty"
+                    )
+        output_preprocessing_config: PreprocessingConfiguration = {}
+        if "output_preprocessing_config" in extracted_files:
+            with open(extracted_files["output_preprocessing_config"]) as f:
+                output_preprocessing_config_serialized = json.load(f)
+                if output_preprocessing_config_serialized:
+                    output_preprocessing_config = resolve_preprocessing_config(
+                        output_preprocessing_config_serialized
+                    )
+                else:
+                    logger.warning(
+                        "Output preprocessing config in model archive is empty"
+                    )
 
         # Find the algorithm directory
         algorithm_dir = extract_to / "algorithm"
@@ -339,6 +402,8 @@ def load_model_from_nc_archive(
             model,
             input_cross_embodiment_description,
             output_cross_embodiment_description,
+            input_preprocessing_config,
+            output_preprocessing_config,
         )
 
     finally:

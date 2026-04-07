@@ -13,6 +13,7 @@ from neuracore_types import (
     CrossEmbodimentDescription,
     DataType,
     EmbodimentDescription,
+    EmbodimentUnion,
     NCDataStats,
     SynchronizedDatasetStatistics,
     SynchronizedPoint,
@@ -29,6 +30,10 @@ from neuracore.core.utils.training_input_args_validation import (
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
 from neuracore.ml.utils.memory_monitor import MemoryMonitor
+from neuracore.ml.utils.preprocessing_utils import (
+    PreprocessingConfiguration,
+    apply_preprocessing_configs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +62,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         synchronized_dataset: SynchronizedDataset,
         input_cross_embodiment_description: CrossEmbodimentDescription,
         output_cross_embodiment_description: CrossEmbodimentDescription,
+        input_preprocessing_config: PreprocessingConfiguration,
+        output_preprocessing_config: PreprocessingConfiguration,
         output_prediction_horizon: int,
     ):
         """Initialize the dataset.
@@ -67,8 +74,11 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 include in the dataset.
             output_cross_embodiment_description: List of output data types to
                 include in the dataset.
+            input_preprocessing_config: Preprocessing configuration applied
+                to input slots.
+            output_preprocessing_config: Preprocessing configuration applied
+                to output slots.
             output_prediction_horizon: Number of future timesteps to predict.
-            order_configuration: Configuration for ordering data types.
         """
         self._validate_cross_embodiment_specs(
             synchronized_dataset,
@@ -162,6 +172,9 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         self.episode_indices = self._get_episode_indices()
         self._logged_in = False
 
+        self._input_preprocessing_config = input_preprocessing_config
+        self._output_preprocessing_config = output_preprocessing_config
+
     def _get_num_training_observations(self) -> int:
         # The count attribute of the stats should give total number of training
         # observations and should be same across all data types
@@ -230,8 +243,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
         return episode_indices
 
-    def convert_to_embodiment_description(
-        self, value: dict[DataType, list[str]]
+    def _convert_to_embodiment_description(
+        self, value: EmbodimentUnion
     ) -> EmbodimentDescription:
         """Normalize list-based sensor specs into indexed embodiment mappings.
 
@@ -275,7 +288,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         return embodiment_description
 
     @staticmethod
-    def _project_sync_point_to_spec(
+    def _project_sync_point_to_embodiment_description(
         sync_point: SynchronizedPoint,
         embodiment_description: EmbodimentDescription,
     ) -> SynchronizedPoint:
@@ -341,22 +354,22 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             ],
         )
 
-        # Order the SynchronizedPoints
+        # Order the SynchronizedPoints to the merged embodiment description.
         robot_id = synced_recording.robot_id
 
-        spec_for_ordering: dict[DataType, list[str]] = (
+        robot_embodiment_union: EmbodimentUnion = (
             self.merged_cross_embodiment_description[robot_id]
         )
-        converted_embodiment_description: EmbodimentDescription = (
-            self.convert_to_embodiment_description(spec_for_ordering)
+        robot_merged_embodiment_description: EmbodimentDescription = (
+            self._convert_to_embodiment_description(robot_embodiment_union)
         )
-        sync_point = self._project_sync_point_to_spec(
-            sync_point, converted_embodiment_description
+        sync_point = self._project_sync_point_to_embodiment_description(
+            sync_point, robot_merged_embodiment_description
         )
 
         for i in range(len(future_sync_points)):
-            future_sync_points[i] = self._project_sync_point_to_spec(
-                future_sync_points[i], converted_embodiment_description
+            future_sync_points[i] = self._project_sync_point_to_embodiment_description(
+                future_sync_points[i], robot_merged_embodiment_description
             )
 
         # Padding for future sync points
@@ -392,15 +405,25 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     # get the data. Otherwise, pad with zeros.
                     nc_data = sync_point.data[data_type][name]
                     batched_nc_data = batched_nc_data_class.from_nc_data(nc_data)
-                    batched_nc_data.transform_nc_data()
+                    batched_nc_data = apply_preprocessing_configs(
+                        data_type=data_type,
+                        batched_data=batched_nc_data,
+                        preprocessing_configs=self._input_preprocessing_config,
+                    )
                     inputs[data_type].append(batched_nc_data)
                     mask.append(1.0)
 
                 else:
                     # Pad missing data with zeros
-                    inputs[data_type].append(
-                        batched_nc_data_class.sample(batch_size=1, time_steps=1)
+                    batched_nc_data = batched_nc_data_class.sample(
+                        batch_size=1, time_steps=1
                     )
+                    batched_nc_data = apply_preprocessing_configs(
+                        data_type=data_type,
+                        batched_data=batched_nc_data,
+                        preprocessing_configs=self._input_preprocessing_config,
+                    )
+                    inputs[data_type].append(batched_nc_data)
                     mask.append(0.0)
 
             # Create mask for inputs
@@ -439,17 +462,25 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     batched_nc_data = batched_nc_data_class.from_nc_data_list(
                         nc_data_list
                     )
-                    batched_nc_data.transform_nc_data()
+                    batched_nc_data = apply_preprocessing_configs(
+                        data_type=data_type,
+                        batched_data=batched_nc_data,
+                        preprocessing_configs=self._output_preprocessing_config,
+                    )
                     outputs[data_type].append(batched_nc_data)
                     mask.append(1.0)
                 else:
                     # Pad missing data with zeros.
-                    outputs[data_type].append(
-                        batched_nc_data_class.sample(
-                            batch_size=1,
-                            time_steps=self.output_prediction_horizon,
-                        )
+                    batched_nc_data = batched_nc_data_class.sample(
+                        batch_size=1,
+                        time_steps=self.output_prediction_horizon,
                     )
+                    batched_nc_data = apply_preprocessing_configs(
+                        data_type=data_type,
+                        batched_data=batched_nc_data,
+                        preprocessing_configs=self._output_preprocessing_config,
+                    )
+                    outputs[data_type].append(batched_nc_data)
                     mask.append(0.0)
 
             # Create mask for outputs.
