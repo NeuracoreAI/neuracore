@@ -48,6 +48,24 @@ output_cross_embodiment_description: {
 
 }
 
+# Dict[str, Dict[DataType, List[MethodConfig]]], e.g.:
+# for images, we must have a resize step to reshape all images from different sources to the same size.
+preprocessing:
+  input:
+    RGB_IMAGES:
+      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
+        size: [224, 224]
+    DEPTH_IMAGES:
+      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
+        size: [224, 224]
+  output:
+    RGB_IMAGES:
+      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
+        size: [224, 224]
+    DEPTH_IMAGES:
+      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
+        size: [224, 224]
+
 # Paths and IDs (for cloud vs local training)
 algorithm_id: null    # For cloud training
 training_id: null     # For cloud training

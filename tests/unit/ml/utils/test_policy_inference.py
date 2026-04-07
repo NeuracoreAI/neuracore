@@ -7,12 +7,14 @@ import pytest
 import torch
 from neuracore_types import (
     BatchedJointData,
+    BatchedNCData,
     CrossEmbodimentDescription,
     DataType,
     JointData,
     SynchronizedPoint,
 )
 
+from neuracore.ml.preprocessing.base import PreprocessingMethod
 from neuracore.ml.utils.policy_inference import PolicyInference
 
 
@@ -22,6 +24,7 @@ def _make_policy_inference(
     policy_inference = PolicyInference.__new__(PolicyInference)
     policy_inference.output_embodiment_description = output_embodiment_description or {}
     policy_inference.input_embodiment_description = {}
+    policy_inference.input_preprocessing_config = {}
     policy_inference.org_id = "test_org"
     policy_inference.job_id = None
     policy_inference.device = torch.device("cpu")
@@ -29,7 +32,9 @@ def _make_policy_inference(
     policy_inference.input_dataset_statistics = {}
     policy_inference.prediction_horizon = 1
     policy_inference.model = SimpleNamespace(
-        model_init_description=SimpleNamespace(input_data_types=[])
+        model_init_description=SimpleNamespace(
+            input_data_types=[],
+        )
     )
     return policy_inference
 
@@ -259,12 +264,15 @@ def test_init_loads_embodiments_from_archive_when_robot_id_provided(
             fake_model,
             {"robot-1": {"JOINT_POSITIONS": {"0": "joint1"}}},
             {"robot-1": {"JOINT_TARGET_POSITIONS": {"0": "joint1"}}},
+            {"JOINT_POSITIONS": []},
+            {"JOINT_TARGET_POSITIONS": []},
         ),
     )
 
     inference = PolicyInference(
         input_embodiment_description=None,
         output_embodiment_description=None,
+        input_preprocessing_config=None,
         model_file=Path("dummy.nc.zip"),
         org_id="org",
         robot_id="robot-1",
@@ -286,7 +294,7 @@ def test_init_raises_when_no_descriptions_and_no_robot_id(
     )
     monkeypatch.setattr(
         "neuracore.ml.utils.policy_inference.load_model_from_nc_archive",
-        lambda model_file, device=None: (fake_model, {}, {}),
+        lambda model_file, device=None: (fake_model, {}, {}, {}, {}),
     )
 
     with pytest.raises(
@@ -299,6 +307,53 @@ def test_init_raises_when_no_descriptions_and_no_robot_id(
         PolicyInference(
             input_embodiment_description=None,
             output_embodiment_description=None,
+            input_preprocessing_config=None,
             model_file=Path("dummy.nc.zip"),
             org_id="org",
+        )
+
+
+class _RgbOnlyMethod(PreprocessingMethod):
+    @staticmethod
+    def allowed_data_types() -> frozenset[DataType]:
+        return frozenset({DataType.RGB_IMAGES})
+
+    def __call__(
+        self, data: BatchedNCData
+    ) -> BatchedNCData:  # pragma: no cover - behavior irrelevant for validation
+        return data
+
+
+def test_init_raises_when_input_preprocessing_method_is_not_allowed_for_data_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_model = SimpleNamespace(
+        eval=lambda: None,
+        model_init_description=SimpleNamespace(
+            input_dataset_statistics={},
+            output_prediction_horizon=1,
+        ),
+    )
+    monkeypatch.setattr(
+        "neuracore.ml.utils.policy_inference.load_model_from_nc_archive",
+        lambda model_file, device=None: (
+            fake_model,
+            {"robot-1": {"JOINT_POSITIONS": {"0": "joint1"}}},
+            {"robot-1": {"JOINT_TARGET_POSITIONS": {"0": "joint1"}}},
+            {DataType.JOINT_POSITIONS: []},
+            {"JOINT_TARGET_POSITIONS": []},
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="is not allowed for data type JOINT_POSITIONS",
+    ):
+        PolicyInference(
+            input_embodiment_description=None,
+            output_embodiment_description=None,
+            input_preprocessing_config={DataType.JOINT_POSITIONS: [_RgbOnlyMethod()]},
+            model_file=Path("dummy.nc.zip"),
+            org_id="org",
+            robot_id="robot-1",
         )

@@ -34,6 +34,10 @@ from neuracore.core.get_latest_sync_point import get_latest_sync_point
 from neuracore.core.utils.download import download_with_progress
 from neuracore.ml.logging.endpoint_log_streamer import EndpointLogStreamer
 from neuracore.ml.utils.endpoint_storage_handler import EndpointStorageHandler
+from neuracore.ml.utils.preprocessing_utils import (
+    PreprocessingConfiguration,
+    serialize_preprocessing_config,
+)
 
 from .auth import get_auth
 from .const import API_URL, PING_ENDPOINT, PREDICT_ENDPOINT, SET_CHECKPOINT_ENDPOINT
@@ -147,6 +151,7 @@ class DirectPolicy(Policy):
         org_id: str,
         input_embodiment_description: EmbodimentDescription | None = None,
         output_embodiment_description: EmbodimentDescription | None = None,
+        input_preprocessing_config: PreprocessingConfiguration | None = None,
         job_id: str | None = None,
         device: str | None = None,
         robot_id: str | None = None,
@@ -159,6 +164,7 @@ class DirectPolicy(Policy):
         self._policy = PolicyInference(
             input_embodiment_description=input_embodiment_description,
             output_embodiment_description=output_embodiment_description,
+            input_preprocessing_config=input_preprocessing_config,
             org_id=org_id,
             job_id=job_id,
             model_file=model_path,
@@ -363,6 +369,7 @@ class LocalServerPolicy(ServerPolicy):
         model_path: Path,
         input_embodiment_description: EmbodimentDescription | None = None,
         output_embodiment_description: EmbodimentDescription | None = None,
+        input_preprocessing_config: PreprocessingConfiguration | None = None,
         device: str | None = None,
         job_id: str | None = None,
         port: int = 8080,
@@ -386,6 +393,8 @@ class LocalServerPolicy(ServerPolicy):
             endpoint_id: Optional deployed endpoint ID used for cloud log uploads.
             robot_id: Optional robot ID used to resolve embodiments from model
                 metadata when explicit embodiments are omitted.
+            input_preprocessing_config: Preprocessing configuration for the input
+                data.
         """
         super().__init__(
             f"http://{host}:{port}",
@@ -393,6 +402,7 @@ class LocalServerPolicy(ServerPolicy):
         )
         self.input_embodiment_description = input_embodiment_description
         self.output_embodiment_description = output_embodiment_description
+        self.input_preprocessing_config = input_preprocessing_config
         self.robot_id = robot_id
         self.org_id = org_id
         self.job_id = job_id
@@ -460,6 +470,14 @@ class LocalServerPolicy(ServerPolicy):
             cmd.extend([
                 "--output-embodiment-description",
                 f"{output_embodiment_description_str}",
+            ])
+        if self.input_preprocessing_config is not None:
+            input_preprocessing_config_serialized = serialize_preprocessing_config(
+                self.input_preprocessing_config
+            )
+            cmd.extend([
+                "--input-preprocessing-config",
+                json.dumps(input_preprocessing_config_serialized),
             ])
         if self.robot_id is not None:
             cmd.extend(["--robot-id", self.robot_id])
@@ -613,6 +631,7 @@ class RemoteServerPolicy(ServerPolicy):
 def policy(
     input_embodiment_description: EmbodimentDescription | None = None,
     output_embodiment_description: EmbodimentDescription | None = None,
+    input_preprocessing_config: PreprocessingConfiguration | None = None,
     train_run_name: str | None = None,
     model_file: str | None = None,
     device: str | None = None,
@@ -625,6 +644,7 @@ def policy(
             be fed into the model
         output_embodiment_description: Specification of the order that will
             be output from the model
+        input_preprocessing_config: Preprocessing configuration for the input data.
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load.
         device: Torch device to run the model on (CPU or GPU, or MPS).
@@ -647,6 +667,7 @@ def policy(
     return DirectPolicy(
         input_embodiment_description=input_embodiment_description,
         output_embodiment_description=output_embodiment_description,
+        input_preprocessing_config=input_preprocessing_config,
         org_id=org_id,
         job_id=job_id,
         model_path=model_path,
@@ -658,6 +679,7 @@ def policy(
 def policy_local_server(
     input_embodiment_description: EmbodimentDescription | None = None,
     output_embodiment_description: EmbodimentDescription | None = None,
+    input_preprocessing_config: PreprocessingConfiguration | None = None,
     train_run_name: str | None = None,
     model_file: str | None = None,
     device: str | None = None,
@@ -674,6 +696,7 @@ def policy_local_server(
             will be fed into the model
         output_embodiment_description: Specification of the order that
             will be output from the model
+        input_preprocessing_config: Preprocessing configuration for the input data.
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load.
         device: Device model to be loaded on.
@@ -709,6 +732,7 @@ def policy_local_server(
         model_path=model_path,
         input_embodiment_description=input_embodiment_description,
         output_embodiment_description=output_embodiment_description,
+        input_preprocessing_config=input_preprocessing_config,
         device=device,
         job_id=job_id,
         port=port,
