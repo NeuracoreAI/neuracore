@@ -216,10 +216,11 @@ class DummyRecordingDiskManager:
         pass
 
 
-def test_cleanup_removes_channel_without_heartbeat() -> None:
+def test_cleanup_removes_channel_without_heartbeat(emitter) -> None:
     daemon = Daemon(
         comm_manager=DummyComm(),
         recording_disk_manager=DummyRecordingDiskManager(),
+        emitter=emitter,
     )
     channel = ChannelState(
         producer_id="stale",
@@ -233,10 +234,11 @@ def test_cleanup_removes_channel_without_heartbeat() -> None:
     assert "stale" not in daemon.channels
 
 
-def test_cleanup_keeps_recent_channel() -> None:
+def test_cleanup_keeps_recent_channel(emitter) -> None:
     daemon = Daemon(
         comm_manager=DummyComm(),
         recording_disk_manager=DummyRecordingDiskManager(),
+        emitter=emitter,
     )
     channel = ChannelState(
         producer_id="active",

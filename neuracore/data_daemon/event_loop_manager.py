@@ -13,7 +13,7 @@ from collections.abc import Coroutine
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
-from neuracore.data_daemon.event_emitter import init_emitter
+from neuracore.data_daemon.event_emitter import Emitter, init_emitter
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +41,11 @@ class EventLoopManager:
 
         self._started = False
 
-    def start(self) -> None:
+    def start(self) -> Emitter:
         """Start both event loops in separate threads.
+
+        Returns:
+            The Emitter bound to the general event loop.
 
         Raises:
             RuntimeError: If already started or if loops fail to start.
@@ -62,12 +65,13 @@ class EventLoopManager:
         if not self._general_ready.wait(timeout=5.0):
             raise RuntimeError("General event loop failed to start within timeout")
 
-        # Initialize the global emitter with the general loop
-        if self.general_loop:
-            init_emitter(loop=self.general_loop)
+        if not self.general_loop:
+            raise RuntimeError("General event loop did not set loop reference")
 
+        emitter = init_emitter(loop=self.general_loop)
         self._started = True
         logger.debug("EventLoopManager started successfully")
+        return emitter
 
     def stop(self, timeout: float = 10.0) -> None:
         """Stop both event loops gracefully.

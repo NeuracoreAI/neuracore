@@ -12,7 +12,6 @@ import zmq
 from neuracore_types import DataType
 
 import neuracore.data_daemon.const as const_module
-import neuracore.data_daemon.event_emitter as em_module
 from neuracore.data_daemon.communications_management import (
     communications_manager as comms_module,
 )
@@ -29,7 +28,7 @@ from neuracore.data_daemon.communications_management.producer_channel import (
 from neuracore.data_daemon.communications_management.recording_context import (
     RecordingContext,
 )
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.models import MessageEnvelope
 from neuracore.data_daemon.recording_encoding_disk_manager import (
@@ -103,13 +102,11 @@ def ipc_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def loop_manager():
-    """EventLoopManager instance for tests."""
-    em_module._emitter = None
-
+def loop_manager_with_emitter() -> tuple[EventLoopManager, Emitter]:
+    """EventLoopManager instance for tests, together with its Emitter."""
     manager = EventLoopManager()
-    manager.start()
-    yield manager
+    rdm_emitter = manager.start()
+    yield manager, rdm_emitter
 
     if manager.is_running():
         try:
@@ -117,15 +114,18 @@ def loop_manager():
         except RuntimeError:
             pass
 
-    em_module._emitter = None
-
 
 @pytest.fixture
-def daemon_runtime(tmp_path: Path, loop_manager: EventLoopManager):
+def daemon_runtime(
+    tmp_path: Path,
+    loop_manager_with_emitter: tuple[EventLoopManager, Emitter],
+):
+    loop_manager, rdm_emitter = loop_manager_with_emitter
     recordings_root = tmp_path / "recordings"
 
     rdm = rdm_module.RecordingDiskManager(
         loop_manager=loop_manager,
+        emitter=rdm_emitter,
         flush_bytes=1,
         recordings_root=str(recordings_root),
     )
@@ -134,6 +134,7 @@ def daemon_runtime(tmp_path: Path, loop_manager: EventLoopManager):
     daemon = Daemon(
         comm_manager=comm,
         recording_disk_manager=rdm,
+        emitter=rdm_emitter,
     )
 
     stop_event = threading.Event()
@@ -157,7 +158,7 @@ def daemon_runtime(tmp_path: Path, loop_manager: EventLoopManager):
         thread.join(timeout=0.5)
         try:
             future = asyncio.run_coroutine_threadsafe(
-                rdm.shutdown(), loop_manager.general_loop
+                rdm.shutdown(), loop_manager_with_emitter[0].general_loop
             )
             future.result(timeout=1.0)
         except Exception:
@@ -190,7 +191,10 @@ def test_zmq_socket_establishment_and_teardown() -> None:
     context.term()
 
 
-def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
+def test_zmq_commands_and_message_flow(
+    daemon_runtime,
+    loop_manager_with_emitter: tuple[EventLoopManager, Emitter],
+) -> None:
     """Test ZMQ command flow between producers and the daemon.
 
     Verifies that creating a trace, opening a ring buffer, sending data chunks,
@@ -198,6 +202,7 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
     CommunicationsManager's cleanup function properly closes the sockets and
     terminates the ZMQ context.
     """
+    _loop_manager, rdm_emitter = loop_manager_with_emitter
     daemon, _, context = daemon_runtime
 
     producer_comm = CommunicationsManager(context=context)
@@ -222,7 +227,7 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
         if trace_id == active_trace_id:
             trace_written.append(bytes_written)
 
-    get_emitter().on(Emitter.TRACE_WRITTEN, on_trace_written)
+    rdm_emitter.on(Emitter.TRACE_WRITTEN, on_trace_written)
     try:
         producer.send_data(
             payload,
@@ -238,7 +243,7 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
         producer.end_trace()
         assert _wait_for(lambda: trace_written, timeout=1)
     finally:
-        get_emitter().remove_listener(Emitter.TRACE_WRITTEN, on_trace_written)
+        rdm_emitter.remove_listener(Emitter.TRACE_WRITTEN, on_trace_written)
 
     recording_comm = CommunicationsManager(context=context)
     recording_context = RecordingContext(
@@ -254,7 +259,9 @@ def test_zmq_commands_and_message_flow(daemon_runtime) -> None:
 
 
 def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_detection(
-    daemon_runtime, tmp_path: Path
+    daemon_runtime,
+    loop_manager_with_emitter: tuple[EventLoopManager, Emitter],
+    tmp_path: Path,
 ) -> None:
     """Tests channel timeout cleanup and trace finalization.
 
@@ -295,6 +302,7 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
         timeout=1,
     )
 
+    _loop_manager, rdm_emitter = loop_manager_with_emitter
     trace_written: list[int] = []
     active_trace_id = producer.trace_id
 
@@ -302,7 +310,7 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
         if trace_id == active_trace_id:
             trace_written.append(bytes_written)
 
-    get_emitter().on(Emitter.TRACE_WRITTEN, on_trace_written)
+    rdm_emitter.on(Emitter.TRACE_WRITTEN, on_trace_written)
     try:
         producer._stop_event.set()
 
@@ -316,7 +324,7 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
         # RDM finalizes trace asynchronously (worker); allow time for TRACE_WRITTEN
         assert _wait_for(lambda: trace_written, timeout=3)
     finally:
-        get_emitter().remove_listener(Emitter.TRACE_WRITTEN, on_trace_written)
+        rdm_emitter.remove_listener(Emitter.TRACE_WRITTEN, on_trace_written)
 
     trace_dir = (
         tmp_path
@@ -350,7 +358,7 @@ def test_socket_cleanup_on_disconnect(daemon_runtime) -> None:
     )
 
 
-def test_deferred_close_honors_zmq_buffer_data(loop_manager: EventLoopManager) -> None:
+def test_deferred_close_honors_zmq_buffer_data(emitter: Emitter) -> None:
     """Deferred close mechanism ensures ZMQ buffer data is processed before blocking.
 
     The Story:
@@ -402,7 +410,9 @@ def test_deferred_close_honors_zmq_buffer_data(loop_manager: EventLoopManager) -
 
     mock_comm = MagicMock()
     mock_rdm = MagicMock()
-    daemon = Daemon(comm_manager=mock_comm, recording_disk_manager=mock_rdm)
+    daemon = Daemon(
+        comm_manager=mock_comm, recording_disk_manager=mock_rdm, emitter=emitter
+    )
 
     recording_id = "rec-123"
 
@@ -415,7 +425,6 @@ def test_deferred_close_honors_zmq_buffer_data(loop_manager: EventLoopManager) -
     def on_stop_recording(rec_id: str) -> None:
         stop_committed_events.append(rec_id)
 
-    emitter = get_emitter()
     emitter.on(Emitter.STOP_RECORDING_REQUESTED, on_stop_recording_requested)
     emitter.on(Emitter.STOP_RECORDING, on_stop_recording)
 
@@ -459,7 +468,7 @@ def test_deferred_close_honors_zmq_buffer_data(loop_manager: EventLoopManager) -
 
 
 def test_data_blocked_after_recording_closed(
-    loop_manager: EventLoopManager, caplog: pytest.LogCaptureFixture
+    emitter: Emitter, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Data chunks for closed recordings are dropped with warning.
 
@@ -511,7 +520,9 @@ def test_data_blocked_after_recording_closed(
 
     mock_comm = MagicMock()
     mock_rdm = MagicMock()
-    daemon = Daemon(comm_manager=mock_comm, recording_disk_manager=mock_rdm)
+    daemon = Daemon(
+        comm_manager=mock_comm, recording_disk_manager=mock_rdm, emitter=emitter
+    )
 
     recording_id = "rec-closed"
     trace_id = "trace-late-arrival"
@@ -529,7 +540,6 @@ def test_data_blocked_after_recording_closed(
     def on_trace_written(tid: str, rid: str, bytes_written: int) -> None:
         events_received.append(f"TRACE_WRITTEN:{tid}")
 
-    emitter = get_emitter()
     emitter.on(Emitter.TRACE_WRITTEN, on_trace_written)
 
     try:
@@ -579,7 +589,7 @@ def test_data_blocked_after_recording_closed(
 
 
 def test_close_waits_for_sequence_cutoff_before_committing_stop(
-    loop_manager: EventLoopManager,
+    emitter: Emitter,
 ) -> None:
     """Recording close waits until producer sequence cutoff has been observed."""
     from unittest.mock import MagicMock
@@ -591,7 +601,9 @@ def test_close_waits_for_sequence_cutoff_before_committing_stop(
 
     mock_comm = MagicMock()
     mock_rdm = MagicMock()
-    daemon = Daemon(comm_manager=mock_comm, recording_disk_manager=mock_rdm)
+    daemon = Daemon(
+        comm_manager=mock_comm, recording_disk_manager=mock_rdm, emitter=emitter
+    )
 
     recording_id = "rec-cutoff"
     producer_id = "producer-cutoff"
@@ -600,7 +612,6 @@ def test_close_waits_for_sequence_cutoff_before_committing_stop(
     def on_stop_recording(rec_id: str) -> None:
         stop_events_received.append(rec_id)
 
-    emitter = get_emitter()
     emitter.on(Emitter.STOP_RECORDING, on_stop_recording)
     try:
         daemon._handle_recording_stopped(
@@ -653,7 +664,7 @@ def test_close_waits_for_sequence_cutoff_before_committing_stop(
 
 
 def test_channel_expires_after_timeout_without_recording_stopped(
-    loop_manager: EventLoopManager,
+    emitter: Emitter,
 ) -> None:
     """Channels are cleaned up after inactivity timeout even without RECORDING_STOPPED.
 
@@ -701,7 +712,9 @@ def test_channel_expires_after_timeout_without_recording_stopped(
 
     mock_comm = MagicMock()
     mock_rdm = MagicMock()
-    daemon = Daemon(comm_manager=mock_comm, recording_disk_manager=mock_rdm)
+    daemon = Daemon(
+        comm_manager=mock_comm, recording_disk_manager=mock_rdm, emitter=emitter
+    )
 
     producer_id = "prod-123"
     trace_id = "trace-orphaned"
@@ -739,7 +752,7 @@ def test_channel_expires_after_timeout_without_recording_stopped(
     assert producer_id not in daemon.channels
 
 
-def test_channel_stays_alive_within_timeout(loop_manager: EventLoopManager) -> None:
+def test_channel_stays_alive_within_timeout(emitter: Emitter) -> None:
     """Active channels within timeout window are NOT cleaned up.
 
     The Story:
@@ -787,7 +800,9 @@ def test_channel_stays_alive_within_timeout(loop_manager: EventLoopManager) -> N
 
     mock_comm = MagicMock()
     mock_rdm = MagicMock()
-    daemon = Daemon(comm_manager=mock_comm, recording_disk_manager=mock_rdm)
+    daemon = Daemon(
+        comm_manager=mock_comm, recording_disk_manager=mock_rdm, emitter=emitter
+    )
 
     producer_id = "prod-active"
     trace_id = "trace-active"

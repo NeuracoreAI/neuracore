@@ -99,7 +99,7 @@ class TestBatchRegistration:
 
     @pytest.mark.asyncio
     async def test_registration_payload_includes_cloud_files(
-        self, mock_auth, state_api
+        self, mock_auth, state_api, emitter
     ) -> None:
         session = _mock_http_session({
             "registered_traces": [{"trace_id": "t1", "upload_session_uris": {}}],
@@ -108,7 +108,10 @@ class TestBatchRegistration:
         candidate = _make_candidate(data_type=DataType.RGB_IMAGES, data_type_name="cam")
 
         mgr = RegistrationManager(
-            client_session=session, state_api=state_api, batch_size=10
+            client_session=session,
+            state_api=state_api,
+            emitter=emitter,
+            batch_size=10,
         )
         await mgr._register_data_trace_batch([candidate])
 
@@ -120,7 +123,7 @@ class TestBatchRegistration:
 
     @pytest.mark.asyncio
     async def test_session_uris_forwarded_to_state_api(
-        self, mock_auth, state_api
+        self, mock_auth, state_api, emitter
     ) -> None:
         uris = {"JOINT_POSITIONS/arm/trace.json": "https://storage/sess/1"}
         session = _mock_http_session({
@@ -130,7 +133,10 @@ class TestBatchRegistration:
         state_api.mark_traces_registered = AsyncMock(return_value=["t1"])
 
         mgr = RegistrationManager(
-            client_session=session, state_api=state_api, batch_size=10
+            client_session=session,
+            state_api=state_api,
+            emitter=emitter,
+            batch_size=10,
         )
         await mgr._register_and_record_outcome([_make_candidate()])
 
@@ -138,7 +144,7 @@ class TestBatchRegistration:
 
     @pytest.mark.asyncio
     async def test_empty_session_uris_normalised_to_none(
-        self, mock_auth, state_api
+        self, mock_auth, state_api, emitter
     ) -> None:
         session = _mock_http_session({
             "registered_traces": [{"trace_id": "t1", "upload_session_uris": {}}],
@@ -147,7 +153,10 @@ class TestBatchRegistration:
         state_api.mark_traces_registered = AsyncMock(return_value=["t1"])
 
         mgr = RegistrationManager(
-            client_session=session, state_api=state_api, batch_size=10
+            client_session=session,
+            state_api=state_api,
+            emitter=emitter,
+            batch_size=10,
         )
         await mgr._register_and_record_outcome([_make_candidate()])
 

@@ -20,7 +20,7 @@ from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.const import API_URL
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.models import TraceErrorCode
 
 from .resumable_file_uploader import ResumableFileUploader
@@ -47,7 +47,12 @@ class UploadManager:
     Uploads are triggered via READY_FOR_UPLOAD events from state manager.
     """
 
-    def __init__(self, config: DaemonConfig, client_session: aiohttp.ClientSession):
+    def __init__(
+        self,
+        config: DaemonConfig,
+        client_session: aiohttp.ClientSession,
+        emitter: Emitter,
+    ):
         """Initialize the upload manager."""
         self._config = config
         self._active_uploads: dict[str, asyncio.Task] = {}
@@ -69,7 +74,7 @@ class UploadManager:
         else:
             self._upload_semaphore = None
 
-        self._emitter = get_emitter()
+        self._emitter = emitter
         self._emitter.on(Emitter.READY_FOR_UPLOAD, self._on_ready_for_upload)
 
         logger.debug("UploadManager initialized")

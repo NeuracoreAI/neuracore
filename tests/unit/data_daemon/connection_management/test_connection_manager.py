@@ -11,7 +11,7 @@ import pytest_asyncio
 from neuracore.data_daemon.connection_management.connection_manager import (
     ConnectionManager,
 )
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 
 
 @pytest_asyncio.fixture
@@ -23,10 +23,13 @@ async def client_session():
 
 
 @pytest_asyncio.fixture
-async def manager(client_session: aiohttp.ClientSession) -> ConnectionManager:
+async def manager(
+    client_session: aiohttp.ClientSession, emitter: Emitter
+) -> ConnectionManager:
     """Create a ConnectionManager instance for testing."""
     return ConnectionManager(
         client_session=client_session,
+        emitter=emitter,
         timeout=2.0,
         check_interval=1.0,
     )
@@ -44,7 +47,6 @@ async def test_connection_manager_initializes_correctly(
 @pytest.mark.asyncio
 async def test_connection_manager_start_stop(manager: ConnectionManager) -> None:
     """Test basic start and stop functionality."""
-    # Start manager
     await manager.start()
     assert manager._stopped is False
     assert manager._connection_task is not None
@@ -52,7 +54,6 @@ async def test_connection_manager_start_stop(manager: ConnectionManager) -> None
 
     await asyncio.sleep(0.5)
 
-    # Stop manager
     await manager.stop()
     assert manager._stopped is True
 
@@ -60,6 +61,7 @@ async def test_connection_manager_start_stop(manager: ConnectionManager) -> None
 @pytest.mark.asyncio
 async def test_connection_manager_emits_events_on_state_change(
     client_session: aiohttp.ClientSession,
+    emitter: Emitter,
 ) -> None:
     """Test that events are emitted when connection state changes."""
     received: list[bool] = []
@@ -67,10 +69,11 @@ async def test_connection_manager_emits_events_on_state_change(
     async def handler(is_connected: bool) -> None:
         received.append(is_connected)
 
-    get_emitter().on(Emitter.IS_CONNECTED, handler)
+    emitter.on(Emitter.IS_CONNECTED, handler)
     try:
         manager = ConnectionManager(
             client_session=client_session,
+            emitter=emitter,
             timeout=2.0,
             check_interval=0.5,
         )
@@ -81,12 +84,13 @@ async def test_connection_manager_emits_events_on_state_change(
 
         assert len(received) > 0
     finally:
-        get_emitter().remove_listener(Emitter.IS_CONNECTED, handler)
+        emitter.remove_listener(Emitter.IS_CONNECTED, handler)
 
 
 @pytest.mark.asyncio
 async def test_connection_manager_tracks_state_changes(
     client_session: aiohttp.ClientSession,
+    emitter: Emitter,
 ) -> None:
     """Test that connection state changes are tracked correctly."""
     received: list[bool] = []
@@ -94,10 +98,11 @@ async def test_connection_manager_tracks_state_changes(
     async def handler(is_connected: bool) -> None:
         received.append(is_connected)
 
-    get_emitter().on(Emitter.IS_CONNECTED, handler)
+    emitter.on(Emitter.IS_CONNECTED, handler)
     try:
         manager = ConnectionManager(
             client_session=client_session,
+            emitter=emitter,
             timeout=2.0,
             check_interval=0.3,
         )
@@ -121,7 +126,7 @@ async def test_connection_manager_tracks_state_changes(
         assert True in received
         assert False in received
     finally:
-        get_emitter().remove_listener(Emitter.IS_CONNECTED, handler)
+        emitter.remove_listener(Emitter.IS_CONNECTED, handler)
 
 
 @pytest.mark.asyncio
@@ -197,6 +202,7 @@ async def test_connection_manager_stops_thread_on_stop(
 @pytest.mark.asyncio
 async def test_connection_manager_handles_check_exceptions(
     client_session: aiohttp.ClientSession,
+    emitter: Emitter,
 ) -> None:
     """Test that exceptions in connectivity check are handled gracefully."""
     received: list[bool] = []
@@ -204,10 +210,11 @@ async def test_connection_manager_handles_check_exceptions(
     async def handler(is_connected: bool) -> None:
         received.append(is_connected)
 
-    get_emitter().on(Emitter.IS_CONNECTED, handler)
+    emitter.on(Emitter.IS_CONNECTED, handler)
     try:
         manager = ConnectionManager(
             client_session=client_session,
+            emitter=emitter,
             timeout=2.0,
             check_interval=0.3,
         )
@@ -228,12 +235,13 @@ async def test_connection_manager_handles_check_exceptions(
 
         assert check_count[0] >= 3
     finally:
-        get_emitter().remove_listener(Emitter.IS_CONNECTED, handler)
+        emitter.remove_listener(Emitter.IS_CONNECTED, handler)
 
 
 @pytest.mark.asyncio
 async def test_connection_manager_only_emits_on_state_change(
     client_session: aiohttp.ClientSession,
+    emitter: Emitter,
 ) -> None:
     """Test that events are only emitted when state actually changes."""
     received: list[bool] = []
@@ -241,10 +249,11 @@ async def test_connection_manager_only_emits_on_state_change(
     async def handler(is_connected: bool) -> None:
         received.append(is_connected)
 
-    get_emitter().on(Emitter.IS_CONNECTED, handler)
+    emitter.on(Emitter.IS_CONNECTED, handler)
     try:
         manager = ConnectionManager(
             client_session=client_session,
+            emitter=emitter,
             timeout=2.0,
             check_interval=0.3,
         )
@@ -262,4 +271,4 @@ async def test_connection_manager_only_emits_on_state_change(
         if len(received) > 1:
             assert all(received[1:])
     finally:
-        get_emitter().remove_listener(Emitter.IS_CONNECTED, handler)
+        emitter.remove_listener(Emitter.IS_CONNECTED, handler)

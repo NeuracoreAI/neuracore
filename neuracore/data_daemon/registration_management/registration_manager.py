@@ -19,7 +19,7 @@ from neuracore_types import DataType
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.data_daemon.const import API_URL
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.models import TraceRegistrationErrorCode, get_content_type
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,7 @@ class RegistrationManager:
         *,
         client_session: aiohttp.ClientSession,
         state_api: RegistrationStateAPI,
+        emitter: Emitter,
         batch_size: int = 200,
         max_wait_s: float = 1.0,
         poll_interval_s: float = 2.0,
@@ -128,6 +129,7 @@ class RegistrationManager:
         Args:
             client_session: Shared HTTP session used for backend registration calls.
             state_api: State facade that owns DB access and transitions.
+            emitter: Event emitter for cross-component signaling.
             batch_size: Max traces to claim/register per drain iteration.
             max_wait_s: Max age threshold before flushing short batches.
             poll_interval_s: Safety polling interval when no wake signal arrives.
@@ -149,7 +151,7 @@ class RegistrationManager:
         self._shutdown_event = asyncio.Event()
         self._worker_task: asyncio.Task | None = None
 
-        self._emitter = get_emitter()
+        self._emitter = emitter
         self._emitter.on(
             Emitter.TRACE_REGISTRATION_AVAILABLE, self.notify_work_available
         )

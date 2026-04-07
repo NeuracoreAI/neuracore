@@ -30,7 +30,7 @@ from neuracore.core.streaming.base_sse_consumer import (
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
-from neuracore.data_daemon.lifecycle.daemon_lifecycle import ensure_daemon_running
+from neuracore.data_daemon.lifecycle.daemon_os_control import ensure_daemon_running
 
 logger = logging.getLogger(__name__)
 

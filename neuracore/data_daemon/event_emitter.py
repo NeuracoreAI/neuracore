@@ -104,25 +104,13 @@ class Emitter(AsyncIOEventEmitter):
         super().__init__(loop=loop)
 
 
-_emitter: Emitter | None = None
-
-
 def init_emitter(*, loop: asyncio.AbstractEventLoop) -> Emitter:
-    """Initialize the global emitter once the General loop is running.
+    """Create and return a new Emitter bound to the given event loop.
 
     Args:
         loop: The event loop to use for async event handlers.
 
+    Returns:
+        A new Emitter instance bound to the provided loop.
     """
-    global _emitter
-    if _emitter is not None:
-        return _emitter
-    _emitter = Emitter(loop=loop)
-    return _emitter
-
-
-def get_emitter() -> Emitter:
-    """Return the initialized emitter."""
-    if _emitter is None:
-        raise RuntimeError("Emitter not initialized.")
-    return _emitter
+    return Emitter(loop=loop)

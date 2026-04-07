@@ -379,7 +379,7 @@ def test_reader_assemble_failure_clears_pending() -> None:
 # =============================================================================
 
 
-def test_daemon_continues_after_ring_buffer_write_error() -> None:
+def test_daemon_continues_after_ring_buffer_write_error(emitter) -> None:
     """Write error doesn't stop daemon.
 
     One bad message shouldn't kill daemon. Log error, skip message, keep
@@ -391,6 +391,7 @@ def test_daemon_continues_after_ring_buffer_write_error() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -447,7 +448,7 @@ def test_daemon_continues_after_ring_buffer_write_error() -> None:
     assert len(mock_rdm.enqueued) >= 1
 
 
-def test_daemon_continues_after_ring_buffer_read_error() -> None:
+def test_daemon_continues_after_ring_buffer_read_error(emitter) -> None:
     """Read error doesn't stop daemon.
 
     Read failures must be contained. Daemon keeps running for other channels.
@@ -458,6 +459,7 @@ def test_daemon_continues_after_ring_buffer_read_error() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     # Create channel with corrupted buffer state
@@ -482,7 +484,7 @@ def test_daemon_continues_after_ring_buffer_read_error() -> None:
     assert "test-producer" in daemon.channels
 
 
-def test_daemon_continues_after_reader_poll_error() -> None:
+def test_daemon_continues_after_reader_poll_error(emitter) -> None:
     """Reader error doesn't stop daemon.
 
     Per-channel errors isolated. Bad channel doesn't break good channels.
@@ -493,6 +495,7 @@ def test_daemon_continues_after_reader_poll_error() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     # Create channel
@@ -518,7 +521,7 @@ def test_daemon_continues_after_reader_poll_error() -> None:
     assert daemon.channels is not None
 
 
-def test_daemon_continues_after_channel_error() -> None:
+def test_daemon_continues_after_channel_error(emitter) -> None:
     """One bad channel doesn't affect others.
 
     Critical isolation: channels are independent. One failure can't cascade.
@@ -529,6 +532,7 @@ def test_daemon_continues_after_channel_error() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     # Create two channels
@@ -656,7 +660,7 @@ def test_many_partial_messages_memory_bounded() -> None:
     assert total_chunks == 1000
 
 
-def test_rapid_channel_create_destroy() -> None:
+def test_rapid_channel_create_destroy(emitter) -> None:
     """Fast churn handled.
 
     Lifecycle stress: rapid channel turnover shouldn't leak resources or
@@ -668,6 +672,7 @@ def test_rapid_channel_create_destroy() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     for i in range(100):
@@ -768,7 +773,7 @@ def test_reader_state_consistent_after_poll_error() -> None:
     assert "valid-trace" in reader._pending
 
 
-def test_channel_state_consistent_after_error() -> None:
+def test_channel_state_consistent_after_error(emitter) -> None:
     """Channel state valid after error.
 
     Channel object must stay in valid state. Partial state is worse than no
@@ -780,6 +785,7 @@ def test_channel_state_consistent_after_error() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -805,7 +811,7 @@ def test_channel_state_consistent_after_error() -> None:
 # =============================================================================
 
 
-def test_daemon_handles_none_ring_buffer() -> None:
+def test_daemon_handles_none_ring_buffer(emitter) -> None:
     """None buffer handled safely.
 
     Defensive: missing buffer shouldn't crash. Skip and continue.
@@ -816,6 +822,7 @@ def test_daemon_handles_none_ring_buffer() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     # Channel without buffer
@@ -827,7 +834,7 @@ def test_daemon_handles_none_ring_buffer() -> None:
     daemon._drain_channel_messages()
 
 
-def test_daemon_handles_none_reader() -> None:
+def test_daemon_handles_none_reader(emitter) -> None:
     """None reader handled safely.
 
     Same for missing reader. Graceful skip, not crash.
@@ -838,6 +845,7 @@ def test_daemon_handles_none_reader() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     # Channel with buffer but no reader
@@ -850,7 +858,7 @@ def test_daemon_handles_none_reader() -> None:
     daemon._drain_channel_messages()
 
 
-def test_data_chunk_before_open_buffer() -> None:
+def test_data_chunk_before_open_buffer(emitter) -> None:
     """DATA_CHUNK before OPEN_RING_BUFFER.
 
     Out-of-order commands happen. Must handle gracefully, not crash.
@@ -861,6 +869,7 @@ def test_data_chunk_before_open_buffer() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -889,7 +898,7 @@ def test_data_chunk_before_open_buffer() -> None:
         pass
 
 
-def test_trace_end_for_unknown_trace() -> None:
+def test_trace_end_for_unknown_trace(emitter) -> None:
     """TRACE_END for nonexistent trace.
 
     Spurious or duplicate trace_end. Must not crash or corrupt state.
@@ -900,6 +909,7 @@ def test_trace_end_for_unknown_trace() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")

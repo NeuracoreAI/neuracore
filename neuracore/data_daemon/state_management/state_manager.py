@@ -21,7 +21,7 @@ from neuracore.data_daemon.const import (
     UPLOAD_RETRY_BASE_SECONDS,
     UPLOAD_RETRY_MAX_SECONDS,
 )
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.models import (
     DataType,
     TraceErrorCode,
@@ -45,14 +45,16 @@ class StateManager:
     _FAILED_TRACE_MAX_AGE_S = 60 * 60 * 4  # 4 hours
     _EMPTY_RECORDING_MAX_AGE_HOURS = 24
 
-    def __init__(self, store: StateStore, config: DaemonConfig | None = None) -> None:
+    def __init__(
+        self, store: StateStore, config: DaemonConfig | None = None, *, emitter: Emitter
+    ) -> None:
         """Initialize with a persistence backend."""
         self._store = store
         self._config = config
 
         self.expected_trace_count_reporting: dict[str, bool] = {}
 
-        self._emitter = get_emitter()
+        self._emitter = emitter
 
         self._emitter.on(Emitter.START_TRACE, self._handle_start_trace)
         self._emitter.on(Emitter.TRACE_WRITTEN, self._handle_trace_written)

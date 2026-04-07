@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import pytest
 import pytest_asyncio
 
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.models import (
     DataType,
     ProgressReportStatus,
@@ -468,41 +468,10 @@ class FakeStateStore:
         return 1
 
 
-def _register_state_manager(manager: StateManager) -> None:
-    emitter = get_emitter()
-    emitter.on(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
-    emitter.on(Emitter.START_TRACE, manager._handle_start_trace)
-    emitter.on(Emitter.UPLOAD_STARTED, manager.handle_upload_started)
-    emitter.on(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
-    emitter.on(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
-    emitter.on(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
-    emitter.on(
-        Emitter.STOP_RECORDING_REQUESTED, manager.handle_stop_recording_requested
-    )
-    emitter.on(Emitter.STOP_RECORDING, manager.handle_stop_recording)
-    emitter.on(Emitter.IS_CONNECTED, manager.handle_is_connected)
-
-
-def _cleanup_state_manager(manager: StateManager) -> None:
-    get_emitter().remove_listener(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
-    get_emitter().remove_listener(Emitter.START_TRACE, manager._handle_start_trace)
-    get_emitter().remove_listener(Emitter.UPLOAD_STARTED, manager.handle_upload_started)
-    get_emitter().remove_listener(
-        Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete
-    )
-    get_emitter().remove_listener(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
-    get_emitter().remove_listener(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
-    get_emitter().remove_listener(
-        Emitter.STOP_RECORDING_REQUESTED, manager.handle_stop_recording_requested
-    )
-    get_emitter().remove_listener(Emitter.STOP_RECORDING, manager.handle_stop_recording)
-    get_emitter().remove_listener(Emitter.IS_CONNECTED, manager.handle_is_connected)
-
-
 @pytest_asyncio.fixture
-async def state_manager() -> tuple[StateManager, FakeStateStore]:
+async def state_manager(emitter: Emitter) -> tuple[StateManager, FakeStateStore]:
     store = FakeStateStore()
-    manager = StateManager(store)
+    manager = StateManager(store, emitter=emitter)
 
     async def _fake_set_expected(recording_id: str, expected_trace_count: int) -> bool:
         await store.set_expected_trace_count(recording_id, expected_trace_count)
@@ -510,11 +479,7 @@ async def state_manager() -> tuple[StateManager, FakeStateStore]:
         return True
 
     setattr(manager, "_set_expected_trace_count", _fake_set_expected)
-    _register_state_manager(manager)
-    try:
-        yield manager, store
-    finally:
-        _cleanup_state_manager(manager)
+    yield manager, store
 
 
 def _make_trace(
@@ -563,29 +528,33 @@ def _make_trace(
 
 
 @pytest.mark.asyncio
-async def test_stop_recording_emits_stop_all_and_sets_stopped(state_manager) -> None:
+async def test_stop_recording_emits_stop_all_and_sets_stopped(
+    state_manager, emitter: Emitter
+) -> None:
     manager, store = state_manager
     received: list[str] = []
 
     def handler(recording_id: str) -> None:
         received.append(recording_id)
 
-    get_emitter().on(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)
+    emitter.on(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)
     try:
-        get_emitter().emit(Emitter.STOP_RECORDING_REQUESTED, "rec-1")
+        emitter.emit(Emitter.STOP_RECORDING_REQUESTED, "rec-1")
         await asyncio.sleep(0.2)
         assert store.stopped == ["rec-1"]
         assert received == []
 
-        get_emitter().emit(Emitter.STOP_RECORDING, "rec-1")
+        emitter.emit(Emitter.STOP_RECORDING, "rec-1")
         await asyncio.sleep(0.2)
         assert received == ["rec-1"]
     finally:
-        get_emitter().remove_listener(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)
+        emitter.remove_listener(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)
 
 
 @pytest.mark.asyncio
-async def test_stop_recording_sets_expected_trace_count_once(state_manager) -> None:
+async def test_stop_recording_sets_expected_trace_count_once(
+    state_manager, emitter: Emitter
+) -> None:
     manager, store = state_manager
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     trace_a = _make_trace(
@@ -614,7 +583,7 @@ async def test_stop_recording_sets_expected_trace_count_once(state_manager) -> N
 
     manager._set_expected_trace_count = fake_set_expected  # type: ignore[method-assign]
 
-    get_emitter().emit(Emitter.STOP_RECORDING, "rec-exp")
+    emitter.emit(Emitter.STOP_RECORDING, "rec-exp")
     await asyncio.sleep(0.2)
 
     assert store._expected_trace_count["rec-exp"] == 2
@@ -622,7 +591,7 @@ async def test_stop_recording_sets_expected_trace_count_once(state_manager) -> N
 
     # A repeated stop should not schedule an expected-count post.
     store._expected_trace_count_reported["rec-exp"] = True
-    get_emitter().emit(Emitter.STOP_RECORDING, "rec-exp")
+    emitter.emit(Emitter.STOP_RECORDING, "rec-exp")
     await asyncio.sleep(0.2)
 
     assert posted == []
@@ -630,7 +599,7 @@ async def test_stop_recording_sets_expected_trace_count_once(state_manager) -> N
 
 @pytest.mark.asyncio
 async def test_is_connected_backfills_expected_trace_count_for_stopped_recordings(
-    state_manager,
+    state_manager, emitter: Emitter
 ) -> None:
     manager, store = state_manager
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -690,7 +659,7 @@ async def test_is_connected_backfills_expected_trace_count_for_stopped_recording
 
     manager._set_expected_trace_count = fake_set_expected  # type: ignore[method-assign]
 
-    get_emitter().emit(Emitter.IS_CONNECTED, True)
+    emitter.emit(Emitter.IS_CONNECTED, True)
     await asyncio.sleep(0.2)
 
     assert store._expected_trace_count["rec-missing"] == 2
@@ -700,7 +669,7 @@ async def test_is_connected_backfills_expected_trace_count_for_stopped_recording
 
 @pytest.mark.asyncio
 async def test_stop_recording_does_not_post_expected_when_local_missing(
-    state_manager,
+    state_manager, emitter: Emitter
 ) -> None:
     manager, store = state_manager
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -720,7 +689,7 @@ async def test_stop_recording_does_not_post_expected_when_local_missing(
 
     manager._set_expected_trace_count = fake_set_expected  # type: ignore[method-assign]
 
-    get_emitter().emit(Emitter.STOP_RECORDING, "rec-missing-local")
+    emitter.emit(Emitter.STOP_RECORDING, "rec-missing-local")
     await asyncio.sleep(0.2)
 
     assert posted == []
@@ -728,7 +697,7 @@ async def test_stop_recording_does_not_post_expected_when_local_missing(
 
 @pytest.mark.asyncio
 async def test_stop_recording_uses_existing_local_expected_trace_count(
-    state_manager,
+    state_manager, emitter: Emitter
 ) -> None:
     manager, store = state_manager
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -757,7 +726,7 @@ async def test_stop_recording_uses_existing_local_expected_trace_count(
 
     manager._set_expected_trace_count = fake_set_expected  # type: ignore[method-assign]
 
-    get_emitter().emit(Emitter.STOP_RECORDING, "rec-local")
+    emitter.emit(Emitter.STOP_RECORDING, "rec-local")
     await asyncio.sleep(0.2)
 
     assert store._expected_trace_count["rec-local"] == 7
@@ -765,10 +734,10 @@ async def test_stop_recording_uses_existing_local_expected_trace_count(
 
 
 @pytest.mark.asyncio
-async def test_start_trace_creates_trace(state_manager) -> None:
+async def test_start_trace_creates_trace(state_manager, emitter: Emitter) -> None:
     """START_TRACE creates trace in INITIALIZING with metadata (waiting for bytes)."""
     _, store = state_manager
-    get_emitter().emit(
+    emitter.emit(
         Emitter.START_TRACE,
         "trace-1",
         "rec-1",
@@ -797,16 +766,18 @@ async def test_start_trace_creates_trace(state_manager) -> None:
 
 
 @pytest.mark.asyncio
-async def test_uploaded_bytes_updates_store(state_manager) -> None:
+async def test_uploaded_bytes_updates_store(state_manager, emitter: Emitter) -> None:
     _, store = state_manager
-    get_emitter().emit(Emitter.UPLOADED_BYTES, "trace-2", 42)
+    emitter.emit(Emitter.UPLOADED_BYTES, "trace-2", 42)
     await asyncio.sleep(0.2)
 
     assert store.updated_bytes == [("trace-2", 42)]
 
 
 @pytest.mark.asyncio
-async def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
+async def test_upload_complete_emits_delete_and_deletes(
+    state_manager, emitter: Emitter
+) -> None:
     _, store = state_manager
     received: list[tuple[str, str, DataType]] = []
 
@@ -826,25 +797,24 @@ async def test_upload_complete_emits_delete_and_deletes(state_manager) -> None:
     def handler(recording_id: str, trace_id: str, data_type: DataType) -> None:
         received.append((recording_id, trace_id, data_type))
 
-    get_emitter().on(Emitter.DELETE_TRACE, handler)
+    emitter.on(Emitter.DELETE_TRACE, handler)
     try:
-        get_emitter().emit(Emitter.UPLOAD_COMPLETE, "trace-3")
+        emitter.emit(Emitter.UPLOAD_COMPLETE, "trace-3")
         await asyncio.sleep(0.2)
 
         assert store.deleted == ["trace-3"]
         assert store.uploaded_count_increments == ["rec-3"]
         assert received == [("rec-3", "trace-3", DataType.CUSTOM_1D)]
     finally:
-        get_emitter().remove_listener(Emitter.DELETE_TRACE, handler)
+        emitter.remove_listener(Emitter.DELETE_TRACE, handler)
 
 
 @pytest.mark.asyncio
 async def test_upload_failed_does_not_record_error_in_event_suite(
-    state_manager,
+    state_manager, emitter: Emitter
 ) -> None:
     """UPLOAD_FAILED should not call record_error."""
     _, store = state_manager
-    emitter = get_emitter()
 
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     trace = _make_trace(
@@ -880,7 +850,7 @@ async def test_upload_failed_does_not_record_error_in_event_suite(
 
 @pytest.mark.asyncio
 async def test_trace_written_emits_ready_for_upload_when_connected(
-    state_manager,
+    state_manager, emitter: Emitter
 ) -> None:
     """When both START_TRACE and TRACE_WRITTEN arrive, emit READY_FOR_UPLOAD."""
     manager, store = state_manager
@@ -889,10 +859,10 @@ async def test_trace_written_emits_ready_for_upload_when_connected(
     def handler(*args) -> None:
         received.append(args)
 
-    get_emitter().on(Emitter.READY_FOR_UPLOAD, handler)
+    emitter.on(Emitter.READY_FOR_UPLOAD, handler)
     try:
         # First: START_TRACE with metadata (creates PENDING trace)
-        get_emitter().emit(
+        emitter.emit(
             Emitter.START_TRACE,
             "trace-5",
             "rec-5",
@@ -910,22 +880,24 @@ async def test_trace_written_emits_ready_for_upload_when_connected(
         # No READY_FOR_UPLOAD yet (missing bytes_written)
         assert received == []
 
-        get_emitter().emit(Emitter.IS_CONNECTED, True)
+        emitter.emit(Emitter.IS_CONNECTED, True)
         await asyncio.sleep(0)
         store._expected_trace_count_reported["rec-5"] = True
 
         # Second: TRACE_WRITTEN with bytes (completes the trace)
-        get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-5", "rec-5", 64)
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-5", "rec-5", 64)
         await asyncio.sleep(0.2)
 
         # Registration is now signaled; upload-ready happens after registration stage.
         assert received == []
     finally:
-        get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, handler)
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, handler)
 
 
 @pytest.mark.asyncio
-async def test_trace_written_emits_progress_report_with_bounds(state_manager) -> None:
+async def test_trace_written_emits_progress_report_with_bounds(
+    state_manager, emitter: Emitter
+) -> None:
     """Test that progress report is emitted when all traces in recording complete."""
     manager, store = state_manager
 
@@ -938,11 +910,11 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
     def progress_handler(*args) -> None:
         progress_events.append(args)
 
-    get_emitter().on(Emitter.READY_FOR_UPLOAD, ready_handler)
-    get_emitter().on(Emitter.PROGRESS_REPORT, progress_handler)
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
     try:
         # Create two traces in the same recording via START_TRACE
-        get_emitter().emit(
+        emitter.emit(
             Emitter.START_TRACE,
             "trace-1",
             "rec-1",
@@ -955,7 +927,7 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
             None,
             "/tmp/trace-1.bin",
         )
-        get_emitter().emit(
+        emitter.emit(
             Emitter.START_TRACE,
             "trace-2",
             "rec-1",
@@ -972,18 +944,18 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
 
         store._expected_trace_count_reported["rec-1"] = True
         store._expected_trace_count["rec-1"] = 2
-        get_emitter().emit(Emitter.IS_CONNECTED, True)
+        emitter.emit(Emitter.IS_CONNECTED, True)
         await asyncio.sleep(0)
 
         # Stop the recording so stopped_at gets set on traces
-        get_emitter().emit(Emitter.STOP_RECORDING_REQUESTED, "rec-1")
+        emitter.emit(Emitter.STOP_RECORDING_REQUESTED, "rec-1")
         await asyncio.sleep(0.1)
 
         # No progress report yet - neither trace has bytes_written
         assert len(progress_events) == 0
 
         # Complete first trace
-        get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-1", "rec-1", 10)
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-1", "rec-1", 10)
         await asyncio.sleep(0.2)
 
         # Still no progress report - trace-2 not complete
@@ -991,7 +963,7 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
         assert len(ready_events) == 0
 
         # Complete second trace
-        get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-2", "rec-1", 10)
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-2", "rec-1", 10)
         await asyncio.sleep(0.3)
 
         # Now progress report should be emitted
@@ -1004,13 +976,13 @@ async def test_trace_written_emits_progress_report_with_bounds(state_manager) ->
         # Verify time bounds are reasonable (both created close to now)
         assert start_time <= end_time
     finally:
-        get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
-        get_emitter().remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+        emitter.remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
 
 
 @pytest.mark.asyncio
 async def test_trace_written_waits_for_all_traces_before_progress_report(
-    state_manager,
+    state_manager, emitter: Emitter
 ) -> None:
     """Test that progress report waits for all traces before emitting."""
     _, store = state_manager
@@ -1045,18 +1017,20 @@ async def test_trace_written_waits_for_all_traces_before_progress_report(
     def progress_handler(*args) -> None:
         progress_events.append(args)
 
-    get_emitter().on(Emitter.PROGRESS_REPORT, progress_handler)
+    emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
     try:
-        get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-written", "rec-1", 8)
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-written", "rec-1", 8)
         await asyncio.sleep(0.3)
 
         assert progress_events == []
     finally:
-        get_emitter().remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
+        emitter.remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
 
 
 @pytest.mark.asyncio
-async def test_recording_completion_isolated_across_recordings(state_manager) -> None:
+async def test_recording_completion_isolated_across_recordings(
+    state_manager, emitter: Emitter
+) -> None:
     """Test that recordings complete independently of each other."""
     _, store = state_manager
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -1100,16 +1074,16 @@ async def test_recording_completion_isolated_across_recordings(state_manager) ->
     def progress_handler(*args) -> None:
         progress_events.append(args)
 
-    get_emitter().on(Emitter.PROGRESS_REPORT, progress_handler)
+    emitter.on(Emitter.PROGRESS_REPORT, progress_handler)
     try:
-        get_emitter().emit(Emitter.IS_CONNECTED, True)
+        emitter.emit(Emitter.IS_CONNECTED, True)
         await asyncio.sleep(0.1)
 
         # Stop rec-b so stopped_at gets set on its traces
-        get_emitter().emit(Emitter.STOP_RECORDING_REQUESTED, "rec-b")
+        emitter.emit(Emitter.STOP_RECORDING_REQUESTED, "rec-b")
         await asyncio.sleep(0.1)
 
-        get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-b2", "rec-b", 10)
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-b2", "rec-b", 10)
         await asyncio.sleep(0.3)
 
         assert len(progress_events) == 1
@@ -1117,11 +1091,13 @@ async def test_recording_completion_isolated_across_recordings(state_manager) ->
         assert recording_id == "rec-b"
         assert set(trace_map.keys()) == {"trace-b1", "trace-b2"}
     finally:
-        get_emitter().remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
+        emitter.remove_listener(Emitter.PROGRESS_REPORT, progress_handler)
 
 
 @pytest.mark.asyncio
-async def test_upload_failed_does_not_block_other_recordings(state_manager) -> None:
+async def test_upload_failed_does_not_block_other_recordings(
+    state_manager, emitter: Emitter
+) -> None:
     """Test that upload failure in one recording doesn't block others."""
     _, store = state_manager
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -1153,12 +1129,12 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
     def ready_handler(*args) -> None:
         ready_events.append(args)
 
-    get_emitter().on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
     try:
-        get_emitter().emit(Emitter.IS_CONNECTED, True)
+        emitter.emit(Emitter.IS_CONNECTED, True)
         await asyncio.sleep(0.1)
 
-        get_emitter().emit(
+        emitter.emit(
             Emitter.UPLOAD_FAILED,
             "trace-a",
             0,
@@ -1167,21 +1143,20 @@ async def test_upload_failed_does_not_block_other_recordings(state_manager) -> N
         )
         await asyncio.sleep(0.1)
 
-        get_emitter().emit(Emitter.TRACE_WRITTEN, "trace-b", "rec-b", 10)
+        emitter.emit(Emitter.TRACE_WRITTEN, "trace-b", "rec-b", 10)
         await asyncio.sleep(0.3)
 
         assert ready_events == []
     finally:
-        get_emitter().remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
 
 
 @pytest.mark.asyncio
 async def test_is_connected_emits_ready_for_due_retries_event_suite(
-    state_manager,
+    state_manager, emitter: Emitter
 ) -> None:
     """When we come online, traces that are eligible should be re-queued."""
     _, store = state_manager
-    emitter = get_emitter()
 
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
@@ -1226,11 +1201,10 @@ async def test_is_connected_emits_ready_for_due_retries_event_suite(
 
 @pytest.mark.asyncio
 async def test_is_connected_emits_ready_even_when_next_retry_at_in_future_event_suite(
-    state_manager,
+    state_manager, emitter: Emitter
 ) -> None:
     """IS_CONNECTED emits READY for traces returned by find_ready_traces()."""
     _, store = state_manager
-    emitter = get_emitter()
 
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
@@ -1273,11 +1247,10 @@ async def test_is_connected_emits_ready_even_when_next_retry_at_in_future_event_
 
 @pytest.mark.asyncio
 async def test_upload_failed_does_not_record_error_and_does_not_emit_ready_event_suite(
-    state_manager,
+    state_manager, emitter: Emitter
 ) -> None:
     """UPLOAD_FAILED should not call record_error and not emit READY_FOR_UPLOAD."""
     _, store = state_manager
-    emitter = get_emitter()
 
     created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     trace = _make_trace(

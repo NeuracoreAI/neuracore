@@ -63,7 +63,7 @@ class MockComm:
 # =============================================================================
 
 
-def test_daemon_creates_ring_buffer_on_open() -> None:
+def test_daemon_creates_ring_buffer_on_open(emitter) -> None:
     """OPEN_RING_BUFFER creates buffer.
 
     Buffer created on-demand when producer requests it. Lazy initialization
@@ -75,6 +75,7 @@ def test_daemon_creates_ring_buffer_on_open() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -97,7 +98,7 @@ def test_daemon_creates_ring_buffer_on_open() -> None:
     assert channel.reader is not None
 
 
-def test_daemon_writes_chunk_to_ring_buffer() -> None:
+def test_daemon_writes_chunk_to_ring_buffer(emitter) -> None:
     """DATA_CHUNK writes to buffer.
 
     Data path works: producer sends chunk, daemon writes to buffer. Core
@@ -109,6 +110,7 @@ def test_daemon_writes_chunk_to_ring_buffer() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -146,7 +148,7 @@ def test_daemon_writes_chunk_to_ring_buffer() -> None:
     assert channel.ring_buffer.available() > 0
 
 
-def test_daemon_writes_correct_header_format() -> None:
+def test_daemon_writes_correct_header_format(emitter) -> None:
     """Header format matches spec.
 
     Daemon must write headers that reader can parse. Format mismatch breaks
@@ -158,6 +160,7 @@ def test_daemon_writes_correct_header_format() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -205,7 +208,7 @@ def test_daemon_writes_correct_header_format() -> None:
     assert chunk_len == len(data)
 
 
-def test_daemon_handles_multiple_channels() -> None:
+def test_daemon_handles_multiple_channels(emitter) -> None:
     """Separate buffers per producer.
 
     Channel isolation: producer A's data never appears in producer B's buffer.
@@ -216,6 +219,7 @@ def test_daemon_handles_multiple_channels() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     # Create two channels
@@ -261,7 +265,7 @@ def test_daemon_handles_multiple_channels() -> None:
 # =============================================================================
 
 
-def test_daemon_header_trace_id_padding() -> None:
+def test_daemon_header_trace_id_padding(emitter) -> None:
     """trace_id padded to 36 bytes.
 
     Short trace_ids must be null-padded to fill fixed field size.
@@ -272,6 +276,7 @@ def test_daemon_header_trace_id_padding() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -308,7 +313,7 @@ def test_daemon_header_trace_id_padding() -> None:
     assert raw_trace_id.rstrip(b"\x00") == b"short"
 
 
-def test_daemon_header_data_type_padding() -> None:
+def test_daemon_header_data_type_padding(emitter) -> None:
     """data_type padded to 32 bytes.
 
     Same padding requirement for data_type field. Fixed format requires
@@ -320,6 +325,7 @@ def test_daemon_header_data_type_padding() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -356,7 +362,7 @@ def test_daemon_header_data_type_padding() -> None:
     assert len(raw_data_type) == DATA_TYPE_FIELD_SIZE
 
 
-def test_daemon_header_with_long_trace_id() -> None:
+def test_daemon_header_with_long_trace_id(emitter) -> None:
     """Long trace_id truncated.
 
     Truncation must happen silently. Long IDs shouldn't corrupt header or
@@ -368,6 +374,7 @@ def test_daemon_header_with_long_trace_id() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -406,7 +413,7 @@ def test_daemon_header_with_long_trace_id() -> None:
     assert len(raw_trace_id) == TRACE_ID_FIELD_SIZE
 
 
-def test_new_channel_fresh_buffer() -> None:
+def test_new_channel_fresh_buffer(emitter) -> None:
     """New channel gets clean buffer.
 
     Each channel starts fresh. No cross-contamination from previous channels.
@@ -417,6 +424,7 @@ def test_new_channel_fresh_buffer() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     # Create and setup first channel

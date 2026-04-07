@@ -21,7 +21,7 @@ import pytest_asyncio
 from neuracore_types import DataType, RecordingDataTraceStatus
 
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.models import TraceErrorCode
 from neuracore.data_daemon.upload_management.upload_manager import UploadManager
 
@@ -220,10 +220,14 @@ def _attach_legacy_upload_manager_compat(manager: UploadManager) -> None:
 
 
 @pytest_asyncio.fixture
-async def upload_manager(client_session: aiohttp.ClientSession, mock_auth):
+async def upload_manager(
+    client_session: aiohttp.ClientSession, mock_auth, emitter: Emitter
+):
     """Create and cleanup UploadManager instance."""
     config = DaemonConfig(num_threads=2)
-    manager = UploadManager(config=config, client_session=client_session)
+    manager = UploadManager(
+        config=config, client_session=client_session, emitter=emitter
+    )
     _attach_legacy_upload_manager_compat(manager)
 
     yield manager
@@ -265,6 +269,7 @@ class TestDirectoryUploadHandling:
         self,
         upload_manager: UploadManager,
         trace_directory: Path,
+        emitter: Emitter,
     ) -> None:
         """T1.1: Directory with multiple files uploads successfully.
 
@@ -301,7 +306,6 @@ class TestDirectoryUploadHandling:
         uploader_calls: list[dict] = []
         upload_done = asyncio.Event()
 
-        emitter = get_emitter()
         emitter.on(
             Emitter.UPLOAD_COMPLETE,
             make_upload_complete_handler(upload_complete_events, upload_done),
@@ -368,6 +372,7 @@ class TestDirectoryUploadHandling:
         self,
         upload_manager: UploadManager,
         trace_directory: Path,
+        emitter: Emitter,
     ) -> None:
         """T1.2: All files uploaded before UPLOAD_COMPLETE.
 
@@ -397,8 +402,6 @@ class TestDirectoryUploadHandling:
         """
         event_sequence: list[str] = []
         upload_done = asyncio.Event()
-
-        emitter = get_emitter()
 
         def on_upload_complete(trace_id: str) -> None:
             event_sequence.append(f"UPLOAD_COMPLETE:{trace_id}")
@@ -474,6 +477,7 @@ class TestDirectoryUploadHandling:
         self,
         upload_manager: UploadManager,
         empty_directory: Path,
+        emitter: Emitter,
     ) -> None:
         """T1.3: Empty directory fails gracefully.
 
@@ -508,7 +512,6 @@ class TestDirectoryUploadHandling:
         uploader_instantiated = [False]
         upload_done = asyncio.Event()
 
-        emitter = get_emitter()
         emitter.on(
             Emitter.UPLOAD_COMPLETE,
             lambda trace_id: upload_complete_events.append(trace_id),
@@ -583,6 +586,7 @@ class TestCloudPathConstruction:
         self,
         upload_manager: UploadManager,
         trace_directory: Path,
+        emitter: Emitter,
     ) -> None:
         """T2.1: Cloud path format is {data_type.value}/{data_type_name}/{filename}.
 
@@ -615,7 +619,6 @@ class TestCloudPathConstruction:
         upload_complete_events: list[str] = []
         upload_done = asyncio.Event()
 
-        emitter = get_emitter()
         emitter.on(
             Emitter.UPLOAD_COMPLETE,
             make_upload_complete_handler(upload_complete_events, upload_done),
@@ -685,6 +688,7 @@ class TestCloudPathConstruction:
         self,
         upload_manager: UploadManager,
         trace_directory: Path,
+        emitter: Emitter,
     ) -> None:
         """T2.2: Each file gets unique path with correct filename.
 
@@ -716,7 +720,6 @@ class TestCloudPathConstruction:
         upload_done = asyncio.Event()
         trace_id = TEST_TRACE_ID_2
 
-        emitter = get_emitter()
         emitter.on(
             Emitter.UPLOAD_COMPLETE,
             make_upload_complete_handler(upload_complete_events, upload_done),
@@ -794,6 +797,7 @@ class TestRegistrationAndUploadFailures:
         self,
         upload_manager: UploadManager,
         trace_directory: Path,
+        emitter: Emitter,
     ) -> None:
         """T3.1: Registration failure emits UPLOAD_FAILED.
 
@@ -825,8 +829,6 @@ class TestRegistrationAndUploadFailures:
         uploader_instantiated = [False]
         upload_done = asyncio.Event()
         trace_id = TEST_TRACE_ID_INTERNAL
-
-        emitter = get_emitter()
 
         def on_upload_failed(*args):
             upload_failed_events.append(args)
@@ -902,6 +904,7 @@ class TestBackendApiConsistency:
         self,
         upload_manager: UploadManager,
         trace_directory: Path,
+        emitter: Emitter,
     ) -> None:
         """T4.1: Backend updates use external_trace_id not internal trace_id.
 
@@ -933,7 +936,6 @@ class TestBackendApiConsistency:
         upload_complete_events: list[str] = []
         upload_done = asyncio.Event()
 
-        emitter = get_emitter()
         emitter.on(
             Emitter.UPLOAD_COMPLETE,
             make_upload_complete_handler(upload_complete_events, upload_done),
@@ -1000,6 +1002,7 @@ class TestBackendApiConsistency:
         self,
         upload_manager: UploadManager,
         trace_directory: Path,
+        emitter: Emitter,
     ) -> None:
         """T4.2: UPLOAD_STARTED sends external_trace_id to correct endpoint.
 
@@ -1033,7 +1036,6 @@ class TestBackendApiConsistency:
         upload_complete_events: list[str] = []
         upload_done = asyncio.Event()
 
-        emitter = get_emitter()
         emitter.on(
             Emitter.UPLOAD_COMPLETE,
             make_upload_complete_handler(upload_complete_events, upload_done),
@@ -1105,6 +1107,7 @@ class TestBackendApiConsistency:
         self,
         upload_manager: UploadManager,
         trace_directory: Path,
+        emitter: Emitter,
     ) -> None:
         """T4.3: UPLOAD_COMPLETE sends external_trace_id with final bytes.
 
@@ -1138,7 +1141,6 @@ class TestBackendApiConsistency:
         upload_complete_events: list[str] = []
         upload_done = asyncio.Event()
 
-        emitter = get_emitter()
         emitter.on(
             Emitter.UPLOAD_COMPLETE,
             make_upload_complete_handler(upload_complete_events, upload_done),
@@ -1220,6 +1222,7 @@ class TestBackendApiConsistency:
         self,
         upload_manager: UploadManager,
         trace_directory: Path,
+        emitter: Emitter,
     ) -> None:
         """T4.4: Resume uses same trace_id for all backend calls.
 
@@ -1252,7 +1255,6 @@ class TestBackendApiConsistency:
         upload_complete_events: list[str] = []
         upload_done = asyncio.Event()
 
-        emitter = get_emitter()
         emitter.on(
             Emitter.UPLOAD_COMPLETE,
             make_upload_complete_handler(upload_complete_events, upload_done),
@@ -1330,6 +1332,7 @@ class TestResumeLogic:
         self,
         upload_manager: UploadManager,
         tmp_path: Path,
+        emitter: Emitter,
     ) -> None:
         """T5.1: Resume from middle of multi-file upload.
 
@@ -1371,7 +1374,6 @@ class TestResumeLogic:
         upload_complete_events: list[str] = []
         upload_done = asyncio.Event()
 
-        emitter = get_emitter()
         emitter.on(
             Emitter.UPLOAD_COMPLETE,
             make_upload_complete_handler(upload_complete_events, upload_done),
@@ -1451,6 +1453,7 @@ class TestResumeLogic:
         self,
         upload_manager: UploadManager,
         tmp_path: Path,
+        emitter: Emitter,
     ) -> None:
         """T5.2: Partial failure preserves progress.
 
@@ -1487,8 +1490,6 @@ class TestResumeLogic:
         upload_complete_events: list[str] = []
         upload_call_count = [0]
         upload_done = asyncio.Event()
-
-        emitter = get_emitter()
 
         def on_upload_failed(*args):
             upload_failed_events.append(args)
@@ -1566,6 +1567,7 @@ class TestConcurrentUploads:
         upload_manager: UploadManager,
         client_session: aiohttp.ClientSession,
         tmp_path: Path,
+        emitter: Emitter,
     ) -> None:
         """T6.1: Multiple concurrent uploads complete successfully.
 
@@ -1615,8 +1617,6 @@ class TestConcurrentUploads:
         upload_complete_events: list[str] = []
         upload_failed_events: list[tuple] = []
         all_complete = asyncio.Event()
-
-        emitter = get_emitter()
 
         def on_complete(trace_id: str) -> None:
             upload_complete_events.append(trace_id)
@@ -1692,6 +1692,7 @@ class TestBandwidthThrottling:
         tmp_path: Path,
         mock_auth,
         client_session: aiohttp.ClientSession,
+        emitter: Emitter,
     ) -> None:
         """Test that config creates an AsyncLimiter."""
         from aiolimiter import AsyncLimiter
@@ -1702,13 +1703,13 @@ class TestBandwidthThrottling:
 
         bandwidth_limit = 2 * 1024 * 1024  # 2MB/s
         config = DaemonConfig(num_threads=2, bandwidth_limit=bandwidth_limit)
-        manager = UploadManager(config=config, client_session=client_session)
+        manager = UploadManager(
+            config=config, client_session=client_session, emitter=emitter
+        )
         _attach_legacy_upload_manager_compat(manager)
 
         uploader_kwargs: list[dict] = []
         upload_done = asyncio.Event()
-
-        emitter = get_emitter()
 
         def on_complete(trace_id: str) -> None:
             upload_done.set()
@@ -1767,6 +1768,7 @@ class TestBandwidthThrottling:
         tmp_path: Path,
         mock_auth,
         client_session: aiohttp.ClientSession,
+        emitter: Emitter,
     ) -> None:
         """Test that bandwidth_limiter=None is passed when not configured."""
         trace_dir = tmp_path / "trace-no-limit"
@@ -1774,13 +1776,13 @@ class TestBandwidthThrottling:
         (trace_dir / "file.mp4").write_bytes(b"X" * 1000)
 
         config = DaemonConfig(num_threads=2, bandwidth_limit=None)
-        manager = UploadManager(config=config, client_session=client_session)
+        manager = UploadManager(
+            config=config, client_session=client_session, emitter=emitter
+        )
         _attach_legacy_upload_manager_compat(manager)
 
         uploader_kwargs: list[dict] = []
         upload_done = asyncio.Event()
-
-        emitter = get_emitter()
 
         def on_complete(trace_id: str) -> None:
             upload_done.set()
@@ -1837,6 +1839,7 @@ class TestBandwidthThrottling:
         tmp_path: Path,
         mock_auth,
         client_session: aiohttp.ClientSession,
+        emitter: Emitter,
     ) -> None:
         """Test uploads work with bandwidth limiter configured."""
         import base64
@@ -1852,7 +1855,6 @@ class TestBandwidthThrottling:
         md5_b64 = base64.b64encode(hashlib.md5(file_data).digest()).decode()
 
         upload_done = asyncio.Event()
-        emitter = get_emitter()
 
         def on_complete(trace_id: str) -> None:
             upload_done.set()
@@ -1896,7 +1898,9 @@ class TestBandwidthThrottling:
                 ),
             ):
                 config = DaemonConfig(num_threads=2, bandwidth_limit=bandwidth_limit)
-                manager = UploadManager(config=config, client_session=client_session)
+                manager = UploadManager(
+                    config=config, client_session=client_session, emitter=emitter
+                )
                 _attach_legacy_upload_manager_compat(manager)
 
                 rfu_auth = MagicMock()

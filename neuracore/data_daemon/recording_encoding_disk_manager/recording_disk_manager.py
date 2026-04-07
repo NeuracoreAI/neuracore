@@ -15,7 +15,7 @@ from neuracore.data_daemon.const import (
     SENTINEL,
     STORAGE_REFRESH_SECONDS,
 )
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
 from neuracore.data_daemon.models import CompleteMessage, parse_data_type
@@ -42,6 +42,7 @@ class RecordingDiskManager:
         self,
         *,
         loop_manager: EventLoopManager,
+        emitter: Emitter,
         flush_bytes: int | None = None,
         storage_limit_bytes: int | None = None,
         recordings_root: str | None = None,
@@ -50,10 +51,12 @@ class RecordingDiskManager:
 
         Args:
             loop_manager: EventLoopManager instance for scheduling workers.
+            emitter: Event emitter for cross-component signaling.
             flush_bytes: Flush threshold for buffered raw writes.
             storage_limit_bytes: Max bytes allowed for on-disk trace storage.
             recordings_root: Root directory for per-recording trace folders.
         """
+        self._emitter = emitter
         self.flush_bytes = flush_bytes or DEFAULT_FLUSH_BYTES
         self.storage_limit_bytes = storage_limit_bytes
         self._recordings_root = (
@@ -112,11 +115,13 @@ class RecordingDiskManager:
             filesystem=self._filesystem,
             storage_budget=self._storage_budget,
             recording_traces=self.recording_traces,
+            emitter=self._emitter,
         )
 
         self._encoder_manager = _EncoderManager(
             filesystem=self._filesystem,
             abort_trace=self._controller.abort_trace_due_to_storage,
+            emitter=self._emitter,
         )
 
         self._writer = _RawBatchWriter(
@@ -127,6 +132,7 @@ class RecordingDiskManager:
             recording_traces=self.recording_traces,
             abort_trace=self._controller.abort_trace_due_to_storage,
             sentinel=SENTINEL,
+            emitter=self._emitter,
         )
 
         self._encoder_worker = _BatchEncoderWorker(
@@ -134,6 +140,7 @@ class RecordingDiskManager:
             encoder_manager=self._encoder_manager,
             storage_budget=self._storage_budget,
             abort_trace=self._controller.abort_trace_due_to_storage,
+            emitter=self._emitter,
         )
 
     def start(self) -> None:
@@ -149,7 +156,6 @@ class RecordingDiskManager:
             self._writer.worker()
         )
 
-        self._emitter = get_emitter()
         self._emitter.on(
             Emitter.STOP_ALL_TRACES_FOR_RECORDING,
             self._on_stop_all_traces_for_recording,

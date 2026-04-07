@@ -25,7 +25,7 @@ from neuracore.data_daemon.const import (
     NEVER_OPENED_TIMEOUT_SECS,
     TRACE_ID_FIELD_SIZE,
 )
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.helpers import utc_now
 from neuracore.data_daemon.models import (
     CommandType,
@@ -157,6 +157,7 @@ class Daemon:
     def __init__(
         self,
         recording_disk_manager: RecordingDiskManager,
+        emitter: Emitter,
         comm_manager: CommunicationsManager | None = None,
     ) -> None:
         """Initializes the daemon.
@@ -164,6 +165,7 @@ class Daemon:
         Args:
             recording_disk_manager: The recording disk manager for persisting
                 trace data to disk.
+            emitter: Event emitter for cross-component signaling.
             comm_manager: The communications manager for ZMQ operations.
                 If not provided, a new instance will be created.
         """
@@ -185,7 +187,7 @@ class Daemon:
             CommandType.TRACE_END: self._handle_end_trace,
         }
 
-        self._emitter = get_emitter()
+        self._emitter = emitter
         self._running = False
         self._emitter.on(Emitter.TRACE_WRITTEN, self.cleanup_channel_on_trace_written)
 

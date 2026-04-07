@@ -9,7 +9,7 @@ import pytest_asyncio
 from sqlalchemy import select, text, update
 
 from neuracore.data_daemon.const import UPLOAD_MAX_RETRIES
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.models import (
     DataType,
     TraceErrorCode,
@@ -22,41 +22,13 @@ from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStat
 from neuracore.data_daemon.state_management.tables import traces
 
 
-def _register_state_manager(manager: StateManager) -> None:
-    emitter = get_emitter()
-    emitter.on(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
-    emitter.on(Emitter.START_TRACE, manager._handle_start_trace)
-    emitter.on(Emitter.UPLOAD_STARTED, manager.handle_upload_started)
-    emitter.on(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
-    emitter.on(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
-    emitter.on(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
-    emitter.on(
-        Emitter.STOP_RECORDING_REQUESTED, manager.handle_stop_recording_requested
-    )
-    emitter.on(Emitter.STOP_RECORDING, manager.handle_stop_recording)
-    emitter.on(Emitter.IS_CONNECTED, manager.handle_is_connected)
-
-
-def _cleanup_state_manager(manager: StateManager) -> None:
-    emitter = get_emitter()
-    emitter.remove_listener(Emitter.TRACE_WRITTEN, manager._handle_trace_written)
-    emitter.remove_listener(Emitter.START_TRACE, manager._handle_start_trace)
-    emitter.remove_listener(Emitter.UPLOAD_STARTED, manager.handle_upload_started)
-    emitter.remove_listener(Emitter.UPLOAD_COMPLETE, manager.handle_upload_complete)
-    emitter.remove_listener(Emitter.UPLOADED_BYTES, manager.update_bytes_uploaded)
-    emitter.remove_listener(Emitter.UPLOAD_FAILED, manager.handle_upload_failed)
-    emitter.remove_listener(
-        Emitter.STOP_RECORDING_REQUESTED, manager.handle_stop_recording_requested
-    )
-    emitter.remove_listener(Emitter.STOP_RECORDING, manager.handle_stop_recording)
-    emitter.remove_listener(Emitter.IS_CONNECTED, manager.handle_is_connected)
-
-
 @pytest_asyncio.fixture
-async def manager_store(tmp_path, monkeypatch) -> tuple[StateManager, SqliteStateStore]:
+async def manager_store(
+    tmp_path, monkeypatch, emitter: Emitter
+) -> tuple[StateManager, SqliteStateStore]:
     store = SqliteStateStore(tmp_path / "state.db")
     await store.init_async_store()
-    manager = StateManager(store)
+    manager = StateManager(store, emitter=emitter)
 
     async def _noop_resume_reporting_work_on_reconnect() -> None:
         return
@@ -66,11 +38,9 @@ async def manager_store(tmp_path, monkeypatch) -> tuple[StateManager, SqliteStat
         "_resume_reporting_work_on_reconnect",
         _noop_resume_reporting_work_on_reconnect,
     )
-    _register_state_manager(manager)
     try:
         yield manager, store
     finally:
-        _cleanup_state_manager(manager)
         await store.close()
 
 
@@ -118,7 +88,9 @@ async def _get_trace_row(store, trace_id: str):
 
 
 @pytest.mark.asyncio
-async def test_trace_written_emits_ready_and_progress_report(manager_store) -> None:
+async def test_trace_written_emits_ready_and_progress_report(
+    manager_store, emitter: Emitter
+) -> None:
     manager, store = manager_store
     created_early = datetime.now(timezone.utc) - timedelta(seconds=100)
     created_late = datetime.now(timezone.utc) - timedelta(seconds=50)
@@ -151,8 +123,6 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
     await _set_created_at(store, "trace-2", created_late)
     await store.set_expected_trace_count("rec-1", 2)
     await store.mark_expected_trace_count_reported("rec-1")
-    emitter = get_emitter()
-
     ready_events: list[tuple] = []
     progress_events: list[tuple] = []
     progress_event = asyncio.Event()
@@ -199,7 +169,7 @@ async def test_trace_written_emits_ready_and_progress_report(manager_store) -> N
 
 
 @pytest.mark.asyncio
-async def test_uploaded_bytes_updates_store(manager_store) -> None:
+async def test_uploaded_bytes_updates_store(manager_store, emitter: Emitter) -> None:
     manager, store = manager_store
     await manager._handle_start_trace(
         "trace-uploaded",
@@ -213,7 +183,6 @@ async def test_uploaded_bytes_updates_store(manager_store) -> None:
         None,
         path="/tmp/trace-uploaded.bin",
     )
-    emitter = get_emitter()
     emitter.emit(Emitter.UPLOADED_BYTES, "trace-uploaded", 5)
     await asyncio.sleep(0.1)
     trace = await store.get_trace("trace-uploaded")
@@ -246,14 +215,16 @@ async def test_invalid_transition_raises_via_manager(manager_store) -> None:
 
 
 @pytest.mark.asyncio
-async def test_multiple_state_managers_share_sqlite_db(tmp_path) -> None:
+async def test_multiple_state_managers_share_sqlite_db(
+    tmp_path, emitter: Emitter
+) -> None:
     db_path = tmp_path / "state.db"
     store_one = SqliteStateStore(db_path)
     store_two = SqliteStateStore(db_path)
     await store_one.init_async_store()
     await store_two.init_async_store()
-    manager_one = StateManager(store_one)
-    manager_two = StateManager(store_two)
+    manager_one = StateManager(store_one, emitter=emitter)
+    manager_two = StateManager(store_two, emitter=emitter)
 
     try:
         await manager_one._handle_start_trace(
@@ -284,8 +255,6 @@ async def test_multiple_state_managers_share_sqlite_db(tmp_path) -> None:
         assert await store_one.get_trace("trace-multi-1") is not None
         assert await store_one.get_trace("trace-multi-2") is not None
     finally:
-        _cleanup_state_manager(manager_one)
-        _cleanup_state_manager(manager_two)
         await store_one.close()
         await store_two.close()
 
@@ -337,7 +306,7 @@ async def test_concurrent_writes_with_wal(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_race_conditions_on_rapid_state_changes(
-    tmp_path, caplog, mock_auth_requests
+    tmp_path, caplog, mock_auth_requests, emitter: Emitter
 ) -> None:
     """Test race conditions on rapid state changes.
 
@@ -350,8 +319,8 @@ async def test_race_conditions_on_rapid_state_changes(
     store_two = SqliteStateStore(db_path)
     await store_one.init_async_store()
     await store_two.init_async_store()
-    manager_one = StateManager(store_one)
-    manager_two = StateManager(store_two)
+    manager_one = StateManager(store_one, emitter=emitter)
+    manager_two = StateManager(store_two, emitter=emitter)
     try:
         await manager_one._handle_start_trace(
             "trace-race",
@@ -391,20 +360,16 @@ async def test_race_conditions_on_rapid_state_changes(
             == TraceUploadStatus.UPLOADED
         )
     finally:
-        _cleanup_state_manager(manager_one)
-        _cleanup_state_manager(manager_two)
         await store_one.close()
         await store_two.close()
 
 
 @pytest.mark.asyncio
-async def test_state_recovery_after_restart(tmp_path) -> None:
-    emitter = get_emitter()
+async def test_state_recovery_after_restart(tmp_path, emitter: Emitter) -> None:
     db_path = tmp_path / "state.db"
     store = SqliteStateStore(db_path)
     await store.init_async_store()
-    manager = StateManager(store)
-    _register_state_manager(manager)
+    manager = StateManager(store, emitter=emitter)
     try:
         await manager._handle_start_trace(
             "trace-recover",
@@ -426,7 +391,6 @@ async def test_state_recovery_after_restart(tmp_path) -> None:
         await store.set_expected_trace_count("rec-recover", 1)
         await store.mark_expected_trace_count_reported("rec-recover")
     finally:
-        _cleanup_state_manager(manager)
         await store.close()
 
     recovered_store = SqliteStateStore(db_path)
@@ -453,9 +417,10 @@ async def test_state_recovery_after_restart(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_simultaneous_recordings_emit_progress_reports(manager_store) -> None:
+async def test_simultaneous_recordings_emit_progress_reports(
+    manager_store, emitter: Emitter
+) -> None:
     manager, store = manager_store
-    emitter = get_emitter()
     for trace_id, recording_id in [
         ("trace-a1", "rec-a"),
         ("trace-a2", "rec-a"),
@@ -516,10 +481,9 @@ async def test_simultaneous_recordings_emit_progress_reports(manager_store) -> N
 
 @pytest.mark.asyncio
 async def test_encoder_crash_does_not_block_other_recordings(
-    manager_store, mock_auth_requests
+    manager_store, mock_auth_requests, emitter: Emitter
 ) -> None:
     manager, store = manager_store
-    emitter = get_emitter()
     await manager._handle_start_trace(
         "trace-a",
         "rec-a",
@@ -580,7 +544,7 @@ async def test_encoder_crash_does_not_block_other_recordings(
 
 @pytest.mark.asyncio
 async def test_status_is_uploading_during_active_upload(
-    manager_store, mock_auth_requests
+    manager_store, mock_auth_requests, emitter: Emitter
 ) -> None:
     """Verify trace status is UPLOADING after UPLOAD_STARTED.
 
@@ -606,7 +570,6 @@ async def test_status_is_uploading_during_active_upload(
     - READY_FOR_UPLOAD event is emitted with correct trace data
     """
     manager, store = manager_store
-    emitter = get_emitter()
 
     await manager._handle_start_trace(
         "trace-upload-status",
@@ -662,7 +625,9 @@ async def test_status_is_uploading_during_active_upload(
 
 
 @pytest.mark.asyncio
-async def test_two_traces_same_recording_sequential_completion(manager_store) -> None:
+async def test_two_traces_same_recording_sequential_completion(
+    manager_store, emitter: Emitter
+) -> None:
     """Verify two traces in the same recording transition independently.
 
     The Story:
@@ -687,7 +652,6 @@ async def test_two_traces_same_recording_sequential_completion(manager_store) ->
     - Neither trace blocks the other's state transition
     """
     manager, store = manager_store
-    get_emitter()
 
     await manager._handle_start_trace(
         "trace-seq-1",
@@ -733,7 +697,7 @@ async def test_two_traces_same_recording_sequential_completion(manager_store) ->
 
 
 @pytest.mark.asyncio
-async def test_two_traces_staggered_completion(manager_store) -> None:
+async def test_two_traces_staggered_completion(manager_store, emitter: Emitter) -> None:
     """Verify trace-A can upload while trace-B is still writing.
 
     The Story:
@@ -762,7 +726,6 @@ async def test_two_traces_staggered_completion(manager_store) -> None:
     - No cross-contamination between trace states
     """
     manager, store = manager_store
-    get_emitter()
 
     await manager._handle_start_trace(
         "trace-stag-a",
@@ -816,11 +779,10 @@ async def test_two_traces_staggered_completion(manager_store) -> None:
 
 @pytest.mark.asyncio
 async def test_upload_failed_schedules_retry_increments_attempts_sets_next_retry_at(
-    manager_store, monkeypatch
+    manager_store, monkeypatch, emitter: Emitter
 ) -> None:
 
     manager, store = manager_store
-    emitter = get_emitter()
 
     import neuracore.data_daemon.const as const_mod
     import neuracore.data_daemon.state_management.state_manager as sm_mod
@@ -909,9 +871,10 @@ async def test_upload_failed_schedules_retry_increments_attempts_sets_next_retry
 
 
 @pytest.mark.asyncio
-async def test_upload_failed_backoff_caps_at_max(manager_store, monkeypatch) -> None:
+async def test_upload_failed_backoff_caps_at_max(
+    manager_store, monkeypatch, emitter: Emitter
+) -> None:
     manager, store = manager_store
-    emitter = get_emitter()
 
     import neuracore.data_daemon.const as const_mod
     import neuracore.data_daemon.state_management.state_manager as sm_mod
@@ -1007,10 +970,9 @@ async def test_upload_failed_backoff_caps_at_max(manager_store, monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_upload_failed_after_max_retries_marks_failed_and_no_ready_emitted(
-    manager_store,
+    manager_store, emitter: Emitter
 ) -> None:
     manager, store = manager_store
-    emitter = get_emitter()
 
     await manager._handle_start_trace(
         "trace-exhaust",
@@ -1071,10 +1033,9 @@ async def test_upload_failed_after_max_retries_marks_failed_and_no_ready_emitted
 
 @pytest.mark.asyncio
 async def test_is_connected_emits_due_retry_only_once(
-    manager_store, mock_auth_requests
+    manager_store, mock_auth_requests, emitter: Emitter
 ) -> None:
     manager, store = manager_store
-    emitter = get_emitter()
 
     await manager._handle_start_trace(
         "trace-due",
@@ -1117,13 +1078,12 @@ async def test_is_connected_emits_due_retry_only_once(
 
 @pytest.mark.asyncio
 async def test_retry_emit_does_not_emit_before_next_retry_at(
-    manager_store, monkeypatch
+    manager_store, monkeypatch, emitter: Emitter
 ) -> None:
     from datetime import datetime as dt
     from datetime import timedelta, timezone
 
     manager, store = manager_store
-    emitter = get_emitter()
 
     await manager._handle_start_trace(
         "trace-not-due",
