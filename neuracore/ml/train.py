@@ -23,6 +23,11 @@ from neuracore_types import (
     ModelInitDescription,
 )
 from neuracore_types.nc_data import DataType
+from neuracore_types.preprocessing import (
+    PreProcessingConfiguration,
+    PreProcessingMethod,
+    PreprocessingPhase,
+)
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler, random_split
 
@@ -69,6 +74,31 @@ os.environ["PJRT_DEVICE"] = "GPU"
 logger = logging.getLogger(__name__)
 
 MAX_AUTOTUNE_SAMPLE_CANDIDATES = 1000
+
+
+# NOTE: This is a placeholder only for v1 the actual preprocessing config.
+def _build_fixed_preprocessing_config(
+    robot_data_spec: dict[str, dict[DataType, list[str]]],
+) -> PreProcessingConfiguration:
+    """Build fixed v1 preprocessing config: resize RGB/depth slots to 224x224."""
+    steps: dict[DataType, dict[int, list[PreProcessingMethod]]] = {}
+    image_types = {DataType.RGB_IMAGES, DataType.DEPTH_IMAGES}
+
+    for _, per_robot_spec in robot_data_spec.items():
+        for data_type, names in per_robot_spec.items():
+            if data_type not in image_types:
+                continue
+            type_steps = steps.setdefault(data_type, {})
+            for slot_idx, _name in enumerate(names):
+                type_steps[slot_idx] = [
+                    PreProcessingMethod(
+                        name="resize_pad",
+                        phase=PreprocessingPhase.TRAIN_INFERENCE,
+                        args={"size": [224, 224]},
+                    )
+                ]
+
+    return PreProcessingConfiguration(steps=steps)
 
 
 def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
@@ -484,6 +514,12 @@ def determine_optimal_batch_size(
         device = get_default_device()
 
     logger.info(f"Starting batch size autotuning on {device}...")
+    input_preprocessing_config = _build_fixed_preprocessing_config(
+        input_robot_data_spec
+    )
+    output_preprocessing_config = _build_fixed_preprocessing_config(
+        output_robot_data_spec
+    )
 
     # Avoid altering the original dataset
     autotuning_dataset = copy.deepcopy(dataset)
@@ -495,6 +531,8 @@ def determine_optimal_batch_size(
         input_data_types=extract_data_types(input_cross_embodiment_description),
         output_data_types=extract_data_types(output_cross_embodiment_description),
         output_prediction_horizon=cfg.output_prediction_horizon,
+        input_preprocessing_config=input_preprocessing_config,
+        output_preprocessing_config=output_preprocessing_config,
     )
     model, algorithm_config = get_model_and_algorithm_config(
         cfg, model_init_description
@@ -550,6 +588,12 @@ def run_training(
 
     try:
         logger.info(f"Using batch size: {batch_size}")
+        input_preprocessing_config = _build_fixed_preprocessing_config(
+            input_robot_data_spec
+        )
+        output_preprocessing_config = _build_fixed_preprocessing_config(
+            output_robot_data_spec
+        )
 
         # Merge data_types for synchronization
         merge_cross_embodiment_description(
@@ -644,6 +688,8 @@ def run_training(
             input_data_types=input_data_types,
             output_data_types=output_data_types,
             output_prediction_horizon=cfg.output_prediction_horizon,
+            input_preprocessing_config=input_preprocessing_config,
+            output_preprocessing_config=output_preprocessing_config,
         )
 
         model, algorithm_config = get_model_and_algorithm_config(
@@ -840,6 +886,25 @@ def _main(cfg: DictConfig) -> None:
                 "Neither 'algorithm' nor 'algorithm_id' is provided. "
                 "Please specify one."
             )
+    
+        input_preprocessing_config = _build_fixed_preprocessing_config(
+            input_robot_data_spec_with_id
+        )
+        output_preprocessing_config = _build_fixed_preprocessing_config(
+            output_robot_data_spec_with_id
+        )
+
+        # Create a pytorch synchronized dataset
+        # NOTE: we are creating it here, and not in training to access the first sample
+        # for batch size autotuning, if used.
+        pytorch_dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=synchronized_dataset,
+            input_robot_data_spec=input_robot_data_spec_with_id,
+            output_robot_data_spec=output_robot_data_spec_with_id,
+            output_prediction_horizon=cfg.output_prediction_horizon,
+            input_preprocessing_config=input_preprocessing_config,
+            output_preprocessing_config=output_preprocessing_config,
+        )
 
         # Validate dataset specification
         if cfg.dataset_id is None and cfg.dataset_name is None:

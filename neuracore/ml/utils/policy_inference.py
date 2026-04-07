@@ -15,11 +15,13 @@ from neuracore_types import (
     EmbodimentDescription,
     SynchronizedPoint,
 )
+from neuracore_types.preprocessing import PreProcessingConfiguration
 
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.utils.download import download_with_progress
 from neuracore.ml import BatchedInferenceInputs
+from neuracore.ml.preprocessing import apply_methods_for_slot
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.nc_archive import load_model_from_nc_archive
 
@@ -95,6 +97,9 @@ class PolicyInference:
         inputs: dict[DataType, list[BatchedNCData]] = {}
         inputs_mask: dict[DataType, torch.Tensor] = {}  # Dict[DataType, (B, MAX_LEN)]
         # We need to go from sync_point (single time step) to BatchedNCData
+        input_preprocessing_config: PreProcessingConfiguration | None = (
+            self.model.model_init_description.input_preprocessing_config
+        )
         for data_type in sync_point.data.keys():
             inputs[data_type] = []
             max_items_for_this_data_type = len(sync_point.data[data_type])
@@ -116,10 +121,22 @@ class PolicyInference:
                 dtype=torch.float32,
             )
             inputs_mask[data_type].unsqueeze_(0)  # Add batch dimension
-            for name, nc_data in sync_point.data[data_type].items():
+            for slot_idx, (name, nc_data) in enumerate(
+                sync_point.data[data_type].items()
+            ):
                 tensor = DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type].from_nc_data(
                     nc_data
                 )
+                if input_preprocessing_config is not None:
+                    methods = input_preprocessing_config.steps.get(data_type, {}).get(
+                        slot_idx, []
+                    )
+                    if methods:
+                        tensor = apply_methods_for_slot(
+                            data_type=data_type,
+                            batched_data=tensor,
+                            methods=methods,
+                        )
                 inputs[data_type].append(tensor)
         return BatchedInferenceInputs(
             inputs=inputs,

@@ -14,6 +14,8 @@ from neuracore_types import (
     DataType,
     EmbodimentDescription,
     NCDataStats,
+    PreProcessingConfiguration,
+    RobotDataSpec,
     SynchronizedDatasetStatistics,
     SynchronizedPoint,
 )
@@ -28,6 +30,7 @@ from neuracore.core.utils.training_input_args_validation import (
 )
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
+from neuracore.ml.preprocessing import apply_methods_for_slot
 from neuracore.ml.utils.memory_monitor import MemoryMonitor
 
 logger = logging.getLogger(__name__)
@@ -58,6 +61,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         input_cross_embodiment_description: CrossEmbodimentDescription,
         output_cross_embodiment_description: CrossEmbodimentDescription,
         output_prediction_horizon: int,
+        input_preprocessing_config: PreProcessingConfiguration | None = None,
+        output_preprocessing_config: PreProcessingConfiguration | None = None,
     ):
         """Initialize the dataset.
 
@@ -68,7 +73,10 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             output_cross_embodiment_description: List of output data types to
                 include in the dataset.
             output_prediction_horizon: Number of future timesteps to predict.
-            order_configuration: Configuration for ordering data types.
+            input_preprocessing_config: Optional preprocessing configuration
+                applied to input slots.
+            output_preprocessing_config: Optional preprocessing configuration
+                applied to output slots.
         """
         self._validate_cross_embodiment_specs(
             synchronized_dataset,
@@ -161,6 +169,37 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
         self.episode_indices = self._get_episode_indices()
         self._logged_in = False
+
+        # If user does not provide a robot data spec, use the first sample we see
+        # to determine ordering
+        self._requires_fallback = False
+        for robot_id, data_spec in self.robot_data_spec.items():
+            for data_type, names in data_spec.items():
+                if len(names) == 0:
+                    self._requires_fallback = True
+                    break
+
+        self._fallback_robot_data_spec: RobotDataSpec = {}
+        self._input_preprocessing_config = input_preprocessing_config
+        self._output_preprocessing_config = output_preprocessing_config
+
+    @staticmethod
+    def _apply_slot_preprocessing(
+        data_type: DataType,
+        slot_idx: int,
+        batched_nc_data: BatchedNCData,
+        preprocessing_config: PreProcessingConfiguration | None,
+    ) -> BatchedNCData:
+        if preprocessing_config is None:
+            return batched_nc_data
+        methods = preprocessing_config.steps.get(data_type, {}).get(slot_idx, [])
+        if not methods:
+            return batched_nc_data
+        return apply_methods_for_slot(
+            data_type=data_type,
+            batched_data=batched_nc_data,
+            methods=methods,
+        )
 
     def _get_num_training_observations(self) -> int:
         # The count attribute of the stats should give total number of training
@@ -371,6 +410,17 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             batched_nc_data_class = DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type]
             inputs[data_type] = []
             mask = []
+            for slot_idx, (name, nc_data) in enumerate(
+                sync_point.data[data_type].items()
+            ):
+                batched_nc_data = batched_nc_data_class.from_nc_data(nc_data)
+                batched_nc_data = self._apply_slot_preprocessing(
+                    data_type=data_type,
+                    slot_idx=slot_idx,
+                    batched_nc_data=batched_nc_data,
+                    preprocessing_config=self._input_preprocessing_config,
+                )
+                inputs[data_type].append(batched_nc_data)
 
             max_items_for_this_data_type = 0
             # Iterate through all robots and find the max index for this data
@@ -412,6 +462,19 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             batched_nc_data_class = DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type]
             outputs[data_type] = []
             mask = []
+            # Need to add action prediction horizon for outputs
+            for slot_idx, name in enumerate(sync_point.data[data_type].keys()):
+                nc_data_list = [
+                    future_sp.data[data_type][name] for future_sp in future_sync_points
+                ]
+                batched_nc_data = batched_nc_data_class.from_nc_data_list(nc_data_list)
+                batched_nc_data = self._apply_slot_preprocessing(
+                    data_type=data_type,
+                    slot_idx=slot_idx,
+                    batched_nc_data=batched_nc_data,
+                    preprocessing_config=self._output_preprocessing_config,
+                )
+                outputs[data_type].append(batched_nc_data)
 
             max_items_for_this_data_type = 0
             # Iterate through all robots and find the max index for this data
