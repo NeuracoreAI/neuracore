@@ -42,19 +42,12 @@ from neuracore.ml import (
 from neuracore.ml.algorithm_utils.normalizer import QuantileNormalizer
 
 from .modules import PI05Policy
-from .utils import (
-    PI05Config,
-    _load_tokenizer,
-    build_lr_lambda,
-    pad_vector,
-    resize_with_pad_torch,
-)
+from .utils import PI05Config, _load_tokenizer, build_lr_lambda, pad_vector
 
 logger = logging.getLogger(__name__)
 
 PROPRIO_NORMALIZER = QuantileNormalizer
 ACTION_NORMALIZER = QuantileNormalizer
-IMAGE_RESIZE_SHAPE = (224, 224)
 
 
 class Pi05(NeuracoreModel):
@@ -443,8 +436,8 @@ class Pi05(NeuracoreModel):
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Prepare RGB images for the vision encoder.
 
-        Resizes images to 224x224 and normalizes pixel values to [-1, 1]
-        as expected by the SigLIP vision encoder.
+        Normalizes pixel values to [-1, 1] as expected by the SigLIP vision
+        encoder. Spatial resizing is handled upstream by preprocessing config.
 
         Args:
             batch: Batch of inference samples
@@ -463,9 +456,8 @@ class Pi05(NeuracoreModel):
         image_masks = []
         for cam_id, input_rgb in enumerate(batched_rgb_data):
             last_frame = input_rgb.frame[:, -1, :, :, :]  # (B, 3, H, W)
-            image = resize_with_pad_torch(last_frame, *IMAGE_RESIZE_SHAPE)
             # Normalize from range [0,1] to [-1,1] as expected by siglip
-            image = image * 2.0 - 1.0
+            image = last_frame * 2.0 - 1.0
             images.append(image)
             image_masks.append(camera_mask[:, cam_id])
 
