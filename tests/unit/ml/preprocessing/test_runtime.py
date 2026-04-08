@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+import yaml
 from neuracore_types import BatchedRGBData, DataType
 from neuracore_types.preprocessing import (
     MethodSpec,
@@ -50,7 +51,7 @@ def test_apply_methods_for_slot_rejects_unknown_method_name():
         )
 
 
-def test_apply_methods_for_slot_executes_handlers_in_order():
+def test_apply_methods_for_slot_executes_handlers_in_order_from_python_config():
     call_order: list[str] = []
 
     def step_one(batched_data, **kwargs):
@@ -67,7 +68,53 @@ def test_apply_methods_for_slot_executes_handlers_in_order():
             handler=step_two, allowed_data_types={DataType.RGB_IMAGES}
         ),
     }
-    methods = [PreProcessingMethod(name="first"), PreProcessingMethod(name="second")]
+    config = PreProcessingConfiguration(
+        steps={
+            DataType.RGB_IMAGES: {
+                0: [
+                    PreProcessingMethod(name="first"),
+                    PreProcessingMethod(name="second"),
+                ]
+            }
+        }
+    )
+    methods = config.steps[DataType.RGB_IMAGES][0]
+
+    with patch("neuracore.ml.preprocessing.runtime._METHOD_REGISTRY", custom_registry):
+        result = apply_methods_for_slot(
+            data_type=DataType.RGB_IMAGES, batched_data=_sample_rgb(), methods=methods
+        )
+
+    assert isinstance(result, BatchedRGBData)
+    assert call_order == ["first", "second"]
+
+
+def test_apply_methods_for_slot_executes_handlers_in_order_from_yaml_config():
+    call_order: list[str] = []
+
+    def step_one(batched_data, **kwargs):
+        call_order.append("first")
+        return batched_data
+
+    def step_two(batched_data, **kwargs):
+        call_order.append("second")
+        return batched_data
+
+    custom_registry = {
+        "first": MethodSpec(handler=step_one, allowed_data_types={DataType.RGB_IMAGES}),
+        "second": MethodSpec(
+            handler=step_two, allowed_data_types={DataType.RGB_IMAGES}
+        ),
+    }
+    yaml_config = """
+steps:
+  RGB_IMAGES:
+    "0":
+      - name: first
+      - name: second
+"""
+    config = PreProcessingConfiguration(**yaml.safe_load(yaml_config))
+    methods = config.steps[DataType.RGB_IMAGES][0]
 
     with patch("neuracore.ml.preprocessing.runtime._METHOD_REGISTRY", custom_registry):
         result = apply_methods_for_slot(
