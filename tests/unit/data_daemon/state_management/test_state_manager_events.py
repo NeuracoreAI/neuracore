@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -373,8 +373,29 @@ class FakeStateStore:
         self._update_trace_in_recording(trace, recording_id)
         return trace
 
-    async def claim_traces_for_registration(self, limit: int, max_wait_s: float):
-        return []
+    async def claim_traces_for_registration(
+        self,
+        limit: int,
+        max_wait_s: float,
+    ):
+        candidates = [
+            trace
+            for trace in self._traces_by_id.values()
+            if trace.write_status == TraceWriteStatus.WRITTEN
+            and trace.registration_status == TraceRegistrationStatus.PENDING
+        ][:limit]
+
+        claimed: list[TraceRecord] = []
+        for trace in candidates:
+            updated = replace(
+                trace,
+                registration_status=TraceRegistrationStatus.REGISTERING,
+            )
+            self._traces_by_id[trace.trace_id] = updated
+            self._update_trace_in_recording(updated, updated.recording_id)
+            claimed.append(updated)
+
+        return claimed
 
     async def mark_traces_as_registering(self, trace_ids: list[str]) -> list[str]:
         return list(trace_ids)
@@ -1246,6 +1267,102 @@ async def test_is_connected_emits_ready_even_when_next_retry_at_in_future_event_
 
 
 @pytest.mark.asyncio
+async def test_is_connected_reconciles_failed_trace_with_payload_and_emits_ready(
+    state_manager,
+    emitter: Emitter,
+) -> None:
+    _, store = state_manager
+
+    created_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=5)
+    failed_trace = _make_trace(
+        "trace-failed-recoverable",
+        "rec-failed-recoverable",
+        write_status=TraceWriteStatus.WRITTEN,
+        registration_status=TraceRegistrationStatus.REGISTERED,
+        upload_status=TraceUploadStatus.FAILED,
+        bytes_written=10,
+        total_bytes=10,
+        bytes_uploaded=4,
+        num_upload_attempts=1,
+        created_at=created_at,
+        last_updated=created_at,
+    )
+
+    store._traces_by_id[failed_trace.trace_id] = failed_trace
+    store._traces_by_recording[failed_trace.recording_id] = [failed_trace]
+
+    ready_events: list[tuple] = []
+    ready_event = asyncio.Event()
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+        if args[0] == "trace-failed-recoverable":
+            ready_event.set()
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        await asyncio.wait_for(ready_event.wait(), timeout=2.0)
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+    recovered = store._traces_by_id["trace-failed-recoverable"]
+    assert recovered.upload_status == TraceUploadStatus.PENDING
+    assert recovered.bytes_uploaded == 0
+    assert recovered.num_upload_attempts == 0
+    assert recovered.error_code is None
+    assert recovered.error_message is None
+
+    assert len(ready_events) == 1
+    assert ready_events[0][:2] == (
+        "trace-failed-recoverable",
+        "rec-failed-recoverable",
+    )
+
+
+@pytest.mark.asyncio
+async def test_is_connected_deletes_failed_trace_when_payload_missing(
+    state_manager,
+    emitter: Emitter,
+) -> None:
+    _, store = state_manager
+
+    created_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=5)
+    unrecoverable = _make_trace(
+        "trace-failed-missing-payload",
+        "rec-failed-missing-payload",
+        write_status=TraceWriteStatus.WRITTEN,
+        registration_status=TraceRegistrationStatus.REGISTERED,
+        upload_status=TraceUploadStatus.FAILED,
+        bytes_written=0,
+        total_bytes=0,
+        bytes_uploaded=0,
+        num_upload_attempts=1,
+        created_at=created_at,
+        last_updated=created_at,
+    )
+    unrecoverable = replace(unrecoverable, path=None)
+
+    store._traces_by_id[unrecoverable.trace_id] = unrecoverable
+    store._traces_by_recording[unrecoverable.recording_id] = [unrecoverable]
+
+    ready_events: list[tuple] = []
+
+    def ready_handler(*args) -> None:
+        ready_events.append(args)
+
+    emitter.on(Emitter.READY_FOR_UPLOAD, ready_handler)
+    try:
+        emitter.emit(Emitter.IS_CONNECTED, True)
+        await asyncio.sleep(0.2)
+    finally:
+        emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+    assert "trace-failed-missing-payload" in store.deleted
+    assert ready_events == []
+
+
+@pytest.mark.asyncio
 async def test_upload_failed_does_not_record_error_and_does_not_emit_ready_event_suite(
     state_manager, emitter: Emitter
 ) -> None:
@@ -1282,3 +1399,38 @@ async def test_upload_failed_does_not_record_error_and_does_not_emit_ready_event
 
     assert store.errors == []
     assert ready_events == []
+
+
+@pytest.mark.asyncio
+async def test_mark_traces_registration_failed_requeues_traces_for_registration(
+    state_manager,
+) -> None:
+    manager, store = state_manager
+
+    created_at = datetime.now(timezone.utc)
+
+    trace = _make_trace(
+        "trace-reg-fail",
+        "rec-reg-fail",
+        write_status=TraceWriteStatus.WRITTEN,
+        registration_status=TraceRegistrationStatus.REGISTERING,
+        upload_status=TraceUploadStatus.PENDING,
+        bytes_written=10,
+        total_bytes=10,
+        created_at=created_at,
+        last_updated=created_at,
+    )
+
+    store._traces_by_id[trace.trace_id] = trace
+    store._traces_by_recording[trace.recording_id] = [trace]
+
+    await manager.mark_traces_registration_failed(
+        ["trace-reg-fail"],
+        "backend registration failed",
+    )
+
+    updated = store._traces_by_id["trace-reg-fail"]
+    assert updated.registration_status == TraceRegistrationStatus.PENDING
+
+    claimed = await manager.claim_traces_for_registration(limit=10, max_wait_s=0)
+    assert [candidate.trace_id for candidate in claimed] == ["trace-reg-fail"]

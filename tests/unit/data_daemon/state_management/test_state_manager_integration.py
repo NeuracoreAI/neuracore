@@ -1032,6 +1032,53 @@ async def test_upload_failed_after_max_retries_marks_failed_and_no_ready_emitted
 
 
 @pytest.mark.asyncio
+async def test_is_connected_resets_uploading_and_retrying_traces_to_pending(
+    manager_store,
+) -> None:
+    manager, store = manager_store
+
+    await manager._handle_start_trace(
+        "trace-uploading",
+        "rec-reset",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-uploading.bin",
+    )
+    await manager._handle_trace_written("trace-uploading", "rec-reset", 10)
+    await store.mark_traces_as_registered(["trace-uploading"])
+    await store.update_upload_status("trace-uploading", TraceUploadStatus.UPLOADING)
+
+    await manager._handle_start_trace(
+        "trace-retrying",
+        "rec-reset",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-retrying.bin",
+    )
+    await manager._handle_trace_written("trace-retrying", "rec-reset", 10)
+    await store.mark_traces_as_registered(["trace-retrying"])
+    await store.update_upload_status("trace-retrying", TraceUploadStatus.RETRYING)
+
+    await manager.handle_is_connected(True)
+
+    row_uploading = await _get_trace_row(store, "trace-uploading")
+    row_retrying = await _get_trace_row(store, "trace-retrying")
+
+    assert row_uploading["upload_status"] == TraceUploadStatus.PENDING.value
+    assert row_retrying["upload_status"] == TraceUploadStatus.PENDING.value
+
+
+@pytest.mark.asyncio
 async def test_is_connected_emits_due_retry_only_once(
     manager_store, mock_auth_requests, emitter: Emitter
 ) -> None:
