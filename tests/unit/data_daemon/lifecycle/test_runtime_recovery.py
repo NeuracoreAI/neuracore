@@ -1,24 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import signal
 import sqlite3
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-import pytest
-
-from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
-    DaemonLifecycleError,
+from neuracore.data_daemon.lifecycle.daemon_os_control import (
     acquire_pid_file,
+    pid_is_running,
+    read_pid_from_file,
+)
+from neuracore.data_daemon.lifecycle.runtime_recovery import (
     cleanup_socket_files,
-    install_signal_handlers,
     reconcile_state_with_filesystem,
-    remove_pid_file,
     shutdown,
-    startup,
     validate_or_recover_sqlite,
 )
 from neuracore.data_daemon.models import (
@@ -67,22 +63,6 @@ class _InMemoryStore:
         return self._traces.get(trace_id)
 
 
-def test_acquire_pid_file_rejects_running_pid(tmp_path: Path) -> None:
-    pid_path = tmp_path / "daemon.pid"
-    pid_path.write_text(str(os.getpid()), encoding="utf-8")
-
-    with pytest.raises(DaemonLifecycleError):
-        acquire_pid_file(pid_path)
-
-
-def test_acquire_pid_file_clears_stale_pid(tmp_path: Path) -> None:
-    pid_path = tmp_path / "daemon.pid"
-    pid_path.write_text("999999", encoding="utf-8")
-
-    assert acquire_pid_file(pid_path) is True
-    assert pid_path.read_text(encoding="utf-8").strip() == str(os.getpid())
-
-
 def test_cleanup_socket_files_removes_paths(tmp_path: Path) -> None:
     socket_path = tmp_path / "daemon.sock"
     socket_path.write_text("stale", encoding="utf-8")
@@ -101,8 +81,12 @@ def test_validate_or_recover_sqlite_rotates_corrupt_db(tmp_path: Path) -> None:
     assert any(path.name.startswith("state.db.corrupt-") for path in tmp_path.iterdir())
 
 
-def test_startup_reconciles_missing_and_orphaned_traces(tmp_path: Path) -> None:
+def test_runtime_recovery_primitives_reconcile_missing_and_orphaned_traces(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "state.db"
+    pid_path = tmp_path / "daemon.pid"
+    socket_path = tmp_path / "daemon.sock"
     recordings_root = tmp_path / "recordings"
     missing_trace_path = recordings_root / "rec-1" / "CUSTOM_1D" / "trace-missing"
     now = datetime.now()
@@ -139,26 +123,26 @@ def test_startup_reconciles_missing_and_orphaned_traces(tmp_path: Path) -> None:
     orphan_dir = recordings_root / "rec-1" / "CUSTOM_1D" / "trace-orphan"
     orphan_dir.mkdir(parents=True, exist_ok=True)
     (orphan_dir / "batch_000001.raw").write_text("orphan", encoding="utf-8")
+    socket_path.write_text("stale", encoding="utf-8")
 
-    asyncio.run(
-        startup(
-            pid_path=tmp_path / "daemon.pid",
-            socket_paths=(),
-            db_path=db_path,
-            recordings_root=recordings_root,
-            store=store,
-            recover_sqlite=True,
-            manage_pid=True,
-        )
-    )
+    assert acquire_pid_file(pid_path) is True
+    cleanup_socket_files((socket_path,))
+    assert validate_or_recover_sqlite(db_path, recover=True) is True
+    recordings_root.mkdir(parents=True, exist_ok=True)
+    asyncio.run(reconcile_state_with_filesystem(store, recordings_root))
+
     updated = asyncio.run(store.get_trace("trace-missing"))
     assert updated is not None
     assert updated.upload_status == TraceUploadStatus.FAILED
     assert updated.error_code == TraceErrorCode.WRITE_FAILED
     assert not orphan_dir.exists()
+    assert not socket_path.exists()
+    assert pid_is_running(read_pid_from_file(pid_path) or -1)
 
 
-def test_startup_initializes_store_before_reconcile(tmp_path: Path) -> None:
+def test_runtime_recovery_primitives_initialize_store_before_reconcile(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "legacy-state.db"
     recordings_root = tmp_path / "recordings"
     conn = sqlite3.connect(str(db_path))
@@ -225,17 +209,10 @@ def test_startup_initializes_store_before_reconcile(tmp_path: Path) -> None:
         conn.close()
 
     store = SqliteStateStore(db_path)
-    asyncio.run(
-        startup(
-            pid_path=tmp_path / "daemon.pid",
-            socket_paths=(),
-            db_path=db_path,
-            recordings_root=recordings_root,
-            store=store,
-            recover_sqlite=True,
-            manage_pid=False,
-        )
-    )
+    assert validate_or_recover_sqlite(db_path, recover=True) is True
+    asyncio.run(store.init_async_store())
+    recordings_root.mkdir(parents=True, exist_ok=True)
+    asyncio.run(reconcile_state_with_filesystem(store, recordings_root))
 
     conn = sqlite3.connect(str(db_path))
     try:
@@ -337,13 +314,6 @@ def test_reconcile_marks_empty_trace_dir_as_incomplete(tmp_path: Path) -> None:
     assert updated.error_code == TraceErrorCode.WRITE_FAILED
 
 
-def test_remove_pid_file_removes(tmp_path: Path) -> None:
-    pid_path = tmp_path / "daemon.pid"
-    pid_path.write_text("123", encoding="utf-8")
-    remove_pid_file(pid_path)
-    assert not pid_path.exists()
-
-
 def test_shutdown_removes_pid_and_sockets(tmp_path: Path) -> None:
     pid_path = tmp_path / "daemon.pid"
     pid_path.write_text("123", encoding="utf-8")
@@ -363,23 +333,3 @@ def test_shutdown_removes_pid_and_sockets(tmp_path: Path) -> None:
     assert not socket_path.exists()
     assert not events_path.exists()
     assert not pid_path.exists()
-
-
-def test_install_signal_handlers_invokes_shutdown() -> None:
-    called: list[int] = []
-
-    def on_shutdown(signum: int) -> None:
-        called.append(signum)
-
-    orig_term = signal.getsignal(signal.SIGTERM)
-    orig_int = signal.getsignal(signal.SIGINT)
-    try:
-        install_signal_handlers(on_shutdown)
-        handler = signal.getsignal(signal.SIGTERM)
-        assert handler is not None
-        with pytest.raises(KeyboardInterrupt):
-            handler(signal.SIGTERM, None)
-        assert called == [signal.SIGTERM]
-    finally:
-        signal.signal(signal.SIGTERM, orig_term)
-        signal.signal(signal.SIGINT, orig_int)

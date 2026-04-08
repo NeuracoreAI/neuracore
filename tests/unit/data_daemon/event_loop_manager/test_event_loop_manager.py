@@ -6,15 +6,12 @@ import time
 
 import pytest
 
-import neuracore.data_daemon.event_emitter as em_module
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 
 
 @pytest.fixture
 def loop_manager() -> EventLoopManager:
     """EventLoopManager instance."""
-    em_module._emitter = None
-
     manager = EventLoopManager()
     yield manager
     if manager.is_running():
@@ -23,21 +20,13 @@ def loop_manager() -> EventLoopManager:
         except RuntimeError:
             pass
 
-    em_module._emitter = None
-
 
 @pytest.fixture
 def running_loop_manager(loop_manager: EventLoopManager) -> EventLoopManager:
-    em_module._emitter = None
-
     loop_manager.start()
     yield loop_manager
-    # Only stop if still running
     if loop_manager.is_running():
         loop_manager.stop(timeout=2.0)
-
-    # Clean up emitter after test
-    em_module._emitter = None
 
 
 def test_initial_state(loop_manager: EventLoopManager):
@@ -102,13 +91,18 @@ def test_start_stop_start_cycle(loop_manager: EventLoopManager):
     loop_manager._general_ready.clear()
     loop_manager._general_shutdown.clear()
 
-    # Reset emitter for the second start
-    em_module._emitter = None
-
     loop_manager.start()
     assert loop_manager.is_running()
     loop_manager.stop(timeout=2.0)
     assert not loop_manager.is_running()
+
+
+def test_start_returns_emitter(loop_manager: EventLoopManager):
+    from neuracore.data_daemon.event_emitter import Emitter
+
+    result = loop_manager.start()
+    assert isinstance(result, Emitter)
+    loop_manager.stop(timeout=2.0)
 
 
 def test_schedule_on_general_loop(running_loop_manager: EventLoopManager):

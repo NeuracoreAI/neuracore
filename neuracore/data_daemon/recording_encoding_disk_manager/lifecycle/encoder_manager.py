@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.models import get_content_type
 from neuracore.data_daemon.recording_encoding_disk_manager.encoding.json_trace import (
     JsonTrace,
@@ -36,19 +36,21 @@ class _EncoderManager:
         *,
         filesystem: _TraceFilesystem,
         abort_trace: Callable[[_TraceKey], None],
+        emitter: Emitter,
     ) -> None:
         """Initialise _EncoderManager.
 
         Args:
             filesystem: Filesystem helper for path resolution.
             abort_trace: Callback used to abort traces on failure.
+            emitter: Event emitter for cross-component signaling.
         """
         self._filesystem = filesystem
         self._abort_trace = abort_trace
 
         self._encoders: dict[_TraceKey, JsonTrace | VideoTrace] = {}
 
-        self._emitter = get_emitter()
+        self._emitter = emitter
         self._emitter.on(Emitter.TRACE_ABORTED, self._on_trace_aborted)
 
     def _on_trace_aborted(self, trace_key: _TraceKey) -> None:

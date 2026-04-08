@@ -155,19 +155,6 @@ def patched_modules(
     )
 
     monkeypatch.setattr(
-        worker_module,
-        "get_emitter",
-        lambda: fake_emitter,
-        raising=True,
-    )
-    monkeypatch.setattr(
-        manager_module,
-        "get_emitter",
-        lambda: fake_emitter,
-        raising=True,
-    )
-
-    monkeypatch.setattr(
         manager_module,
         "get_content_type",
         lambda dt: (
@@ -209,7 +196,7 @@ def patched_modules(
 
 
 @pytest.fixture
-def make_worker(tmp_path: Path, patched_modules):
+def make_worker(tmp_path: Path, patched_modules, fake_emitter: _FakeEmitter):
     worker_module, manager_module = patched_modules
 
     filesystem = _FakeFilesystem(tmp_path / "out")
@@ -221,13 +208,16 @@ def make_worker(tmp_path: Path, patched_modules):
         aborted.append(key)
 
     manager = manager_module._EncoderManager(
-        filesystem=filesystem, abort_trace=abort_trace
+        filesystem=filesystem,
+        abort_trace=abort_trace,
+        emitter=fake_emitter,
     )
     worker = worker_module._BatchEncoderWorker(
         filesystem=filesystem,
         encoder_manager=manager,
         storage_budget=budget,
         abort_trace=abort_trace,
+        emitter=fake_emitter,
     )
 
     return worker, manager, filesystem, budget, aborted, worker_module, manager_module

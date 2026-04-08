@@ -1,29 +1,17 @@
-"""Tests for daemon bootstrap and lifecycle management.
-
-This module tests the bootstrap sequence that initializes all daemon
-subsystems in the correct order across three execution contexts.
-"""
+"""Tests for daemon runtime orchestration."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import aiohttp
 import pytest
 
-from neuracore.data_daemon.bootstrap import (
-    AsyncServices,
-    DaemonBootstrap,
-    DaemonContext,
-    bootstrap_async_services,
-    shutdown_async_services,
-)
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
-from neuracore.data_daemon.const import COMPLETED_RECORDING_RETENTION_HOURS
-from neuracore.data_daemon.state_management.state_manager import StateManager
-from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
+from neuracore.data_daemon.runtime import DaemonContext, DaemonRuntime
+from neuracore.data_daemon.services import DaemonServices
 
 
 @pytest.fixture
@@ -38,269 +26,8 @@ def mock_config() -> DaemonConfig:
     return DaemonConfig(path_to_store_record="/tmp/test_recordings")
 
 
-@pytest.fixture
-def mock_async_services() -> AsyncServices:
-    """Create a mock AsyncServices instance for shutdown tests."""
-    mock_session = MagicMock(spec=aiohttp.ClientSession)
-    mock_session.close = AsyncMock()
-
-    mock_state_store = MagicMock(spec=SqliteStateStore)
-    mock_state_store.close = AsyncMock()
-    mock_state_manager = MagicMock(spec=StateManager)
-    mock_registration_manager = MagicMock()
-    mock_registration_manager.shutdown = AsyncMock()
-
-    mock_upload_manager = MagicMock()
-    mock_upload_manager.shutdown = AsyncMock()
-
-    mock_connection_manager = MagicMock()
-    mock_connection_manager.stop = AsyncMock()
-
-    mock_progress_reporter = MagicMock()
-
-    return AsyncServices(
-        client_session=mock_session,
-        state_store=mock_state_store,
-        state_manager=mock_state_manager,
-        registration_manager=mock_registration_manager,
-        upload_manager=mock_upload_manager,
-        connection_manager=mock_connection_manager,
-        progress_reporter=mock_progress_reporter,
-    )
-
-
-@pytest.fixture(autouse=True)
-def _mock_registration_manager_ctor():
-    with patch("neuracore.data_daemon.bootstrap.RegistrationManager") as mock_ctor:
-        instance = MagicMock()
-        instance.start = MagicMock()
-        instance.shutdown = AsyncMock()
-        mock_ctor.return_value = instance
-        yield mock_ctor
-
-
-class TestBootstrapAsyncServices:
-    """Tests for bootstrap_async_services() function."""
-
-    @pytest.mark.asyncio
-    async def test_b2_bootstrap_deletes_expired_completed_recordings_on_startup(
-        self,
-        mock_config: DaemonConfig,
-        temp_db_path: Path,
-    ) -> None:
-        with (
-            patch("neuracore.data_daemon.bootstrap.ConnectionManager") as MockConnMgr,
-            patch("neuracore.data_daemon.bootstrap.UploadManager") as MockUploadMgr,
-            patch(
-                "neuracore.data_daemon.bootstrap.ProgressReporter"
-            ) as MockProgressReporter,
-            patch("neuracore.data_daemon.bootstrap.SqliteStateStore") as MockStateStore,
-            patch("neuracore.data_daemon.bootstrap.StateManager") as MockStateMgr,
-        ):
-            mock_conn_instance = AsyncMock()
-            mock_conn_instance.start = AsyncMock()
-            MockConnMgr.return_value = mock_conn_instance
-
-            mock_upload_instance = MagicMock()
-            MockUploadMgr.return_value = mock_upload_instance
-
-            mock_progress_instance = MagicMock()
-            MockProgressReporter.return_value = mock_progress_instance
-
-            mock_state_store_instance = AsyncMock()
-            mock_state_store_instance.init_async_store = AsyncMock()
-            mock_state_store_instance.reset_retrying_to_written = AsyncMock()
-            mock_state_store_instance.delete_expired_completed_recordings = AsyncMock(
-                return_value=0
-            )
-            MockStateStore.return_value = mock_state_store_instance
-
-            mock_state_manager_instance = MagicMock()
-            mock_state_manager_instance.recover_startup_state = AsyncMock()
-            MockStateMgr.return_value = mock_state_manager_instance
-
-            services = await bootstrap_async_services(mock_config, temp_db_path)
-
-            assert services is not None
-            mock_state_store_instance.delete_expired_completed_recordings.assert_awaited_once_with(
-                COMPLETED_RECORDING_RETENTION_HOURS
-            )
-
-            await services.client_session.close()
-
-    @pytest.mark.asyncio
-    async def test_b1_happy_path_all_services_initialize(
-        self,
-        mock_config: DaemonConfig,
-        temp_db_path: Path,
-    ) -> None:
-        """
-        B1: Happy Path - All Services Initialize Successfully
-
-        The Story:
-        The daemon is starting up. After the event loops are running, we need to
-        initialize all async services on the General Loop. This includes auth,
-        HTTP client, database, state management, uploads, connectivity monitoring,
-        and progress reporting. Everything must initialize in the correct order.
-
-        The Flow:
-        1. Create a mock DaemonConfig with basic settings
-        2. Call `bootstrap_async_services(config, temp_db_path)`
-        3. All 6 services initialize in dependency order
-        4. Returns AsyncServices with all components populated
-
-        Why This Matters:
-        This is the primary happy path for daemon startup. Every service must
-        be properly initialized before the daemon can process recordings. If
-        any service is missing or misconfigured, recordings will fail silently.
-
-        Key Assertions:
-        - Returns AsyncServices (not None)
-        - client_session is an aiohttp.ClientSession
-        - state_store is initialized (init_async_store called)
-        - state_manager, upload_manager, connection_manager, progress_reporter all exist
-        - connection_manager.start() was called
-        """
-        with (
-            patch("neuracore.data_daemon.bootstrap.ConnectionManager") as MockConnMgr,
-            patch("neuracore.data_daemon.bootstrap.UploadManager") as MockUploadMgr,
-            patch(
-                "neuracore.data_daemon.bootstrap.ProgressReporter"
-            ) as MockProgressReporter,
-            patch("neuracore.data_daemon.bootstrap.SqliteStateStore") as MockStateStore,
-            patch("neuracore.data_daemon.bootstrap.StateManager") as MockStateMgr,
-        ):
-            mock_conn_instance = AsyncMock()
-            mock_conn_instance.start = AsyncMock()
-            MockConnMgr.return_value = mock_conn_instance
-
-            mock_upload_instance = MagicMock()
-            MockUploadMgr.return_value = mock_upload_instance
-
-            mock_progress_instance = MagicMock()
-            MockProgressReporter.return_value = mock_progress_instance
-
-            mock_state_store_instance = AsyncMock()
-            mock_state_store_instance.init_async_store = AsyncMock()
-            MockStateStore.return_value = mock_state_store_instance
-
-            mock_state_manager_instance = MagicMock()
-            mock_state_manager_instance.recover_startup_state = AsyncMock()
-            MockStateMgr.return_value = mock_state_manager_instance
-
-            services = await bootstrap_async_services(mock_config, temp_db_path)
-
-            assert services is not None
-            assert isinstance(services, AsyncServices)
-
-            assert isinstance(services.client_session, aiohttp.ClientSession)
-
-            assert services.state_store is mock_state_store_instance
-            mock_state_store_instance.init_async_store.assert_called_once()
-
-            assert services.state_manager is mock_state_manager_instance
-
-            assert services.upload_manager is mock_upload_instance
-            assert services.connection_manager is mock_conn_instance
-            assert services.progress_reporter is mock_progress_instance
-
-            mock_conn_instance.start.assert_called_once()
-
-            await services.client_session.close()
-
-
-class TestShutdownAsyncServices:
-    """Tests for shutdown_async_services() function."""
-
-    @pytest.mark.asyncio
-    async def test_s1_clean_shutdown_closes_all_resources(
-        self,
-        mock_async_services: AsyncServices,
-    ) -> None:
-        """
-        S1: Clean Shutdown Closes All Resources
-
-        The Story:
-        The daemon is shutting down gracefully. We need to close HTTP connections,
-        stop background monitors, and wait for in-flight uploads to complete.
-        Resources must be released in reverse order of initialization.
-
-        The Flow:
-        1. Have a running AsyncServices instance
-        2. Call `shutdown_async_services(services)`
-        3. ConnectionManager.stop() is called
-        4. UploadManager.shutdown() is called (waits for uploads)
-        5. aiohttp.ClientSession.close() is called last
-
-        Why This Matters:
-        Improper shutdown can cause resource leaks (unclosed sockets), lost data
-        (interrupted uploads), or hanging processes. The reverse order ensures
-        dependencies are respected.
-
-        Key Assertions:
-        - connection_manager.stop() called
-        - upload_manager.shutdown() called
-        - state_store.close() called
-        - client_session.close() called
-        - No exceptions raised
-        """
-        await shutdown_async_services(mock_async_services)
-
-        mock_async_services.connection_manager.stop.assert_called_once()
-
-        mock_async_services.upload_manager.shutdown.assert_called_once()
-
-        mock_async_services.state_store.close.assert_called_once()
-
-        mock_async_services.client_session.close.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_s2_shutdown_continues_despite_errors(
-        self,
-        mock_async_services: AsyncServices,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """
-        S2: Shutdown Continues Despite Individual Errors
-
-        The Story:
-        During shutdown, ConnectionManager.stop() throws an exception (maybe the
-        socket was already closed). We must NOT abort shutdown - we need to
-        continue closing other resources to avoid leaks.
-
-        The Flow:
-        1. Mock connection_manager.stop() to raise RuntimeError
-        2. Call `shutdown_async_services(services)`
-        3. Error is logged but not raised
-        4. upload_manager.shutdown() still called
-        5. client_session.close() still called
-
-        Why This Matters:
-        Partial shutdowns are worse than crashes. If we abort on first error,
-        we leak the HTTP session and any other resources. The daemon process
-        may hang or leave orphaned connections.
-
-        Key Assertions:
-        - No exception propagates to caller
-        - All shutdown methods still called despite earlier error
-        - Error is logged (check log capture)
-        """
-        mock_async_services.connection_manager.stop = AsyncMock(
-            side_effect=RuntimeError("Connection already closed")
-        )
-
-        with caplog.at_level(logging.ERROR):
-            await shutdown_async_services(mock_async_services)
-
-        mock_async_services.upload_manager.shutdown.assert_called_once()
-
-        mock_async_services.client_session.close.assert_called_once()
-
-        assert "Error stopping ConnectionManager" in caplog.text
-
-
-class TestDaemonBootstrapStart:
-    """Tests for DaemonBootstrap.start() method."""
+class TestDaemonRuntimeInitialize:
+    """Tests for DaemonRuntime.initialize() method."""
 
     def test_d1_full_startup_returns_daemon_context(
         self,
@@ -311,13 +38,13 @@ class TestDaemonBootstrapStart:
         D1: Full Startup Returns Complete DaemonContext
 
         The Story:
-        The daemon process starts. DaemonBootstrap.start() orchestrates the
+        The daemon process starts. DaemonRuntime.initialize() orchestrates the
         entire initialization sequence across 5 layers. On success, it returns
         a DaemonContext containing everything the Daemon needs to run.
 
         The Flow:
-        1. Create DaemonBootstrap instance
-        2. Call bootstrap.start()
+        1. Create DaemonRuntime instance
+        2. Call runtime.initialize()
         3. Layer 1: Config resolved from ProfileManager -> ConfigManager
         4. Layer 2: EventLoopManager.start() creates General + Encoder loops
         5. Layer 3: bootstrap_async_services() runs on General Loop
@@ -334,30 +61,27 @@ class TestDaemonBootstrapStart:
         - Returns DaemonContext (not None)
         - context.config is the resolved DaemonConfig
         - context.loop_manager is running
-        - context.services contains all AsyncServices
+        - context.services contains all DaemonServices dependencies
         - context.recording_disk_manager is initialized
         - context.comm_manager is ready
         """
         mock_rdm = MagicMock()
         mock_comm = MagicMock()
-        mock_services = MagicMock(spec=AsyncServices)
+        mock_services = MagicMock(spec=DaemonServices)
+        mock_services.state_store = MagicMock()
         mock_loop_mgr = MagicMock()
 
         with (
-            patch("neuracore.data_daemon.bootstrap.ProfileManager"),
-            patch("neuracore.data_daemon.bootstrap.ConfigManager") as MockConfigMgr,
-            patch("neuracore.data_daemon.bootstrap.login"),
-            patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
+            patch("neuracore.data_daemon.runtime.ProfileManager"),
+            patch("neuracore.data_daemon.runtime.ConfigManager") as MockConfigMgr,
+            patch("neuracore.data_daemon.runtime.login"),
+            patch("neuracore.data_daemon.runtime.EventLoopManager") as MockLoopMgr,
             patch(
-                "neuracore.data_daemon.bootstrap.bootstrap_async_services",
-                new=MagicMock(),
-            ),
-            patch(
-                "neuracore.data_daemon.bootstrap.rdm.RecordingDiskManager",
+                "neuracore.data_daemon.runtime.rdm.RecordingDiskManager",
                 return_value=mock_rdm,
             ),
             patch(
-                "neuracore.data_daemon.bootstrap.CommunicationsManager",
+                "neuracore.data_daemon.runtime.CommunicationsManager",
                 return_value=mock_comm,
             ),
         ):
@@ -368,11 +92,26 @@ class TestDaemonBootstrapStart:
             mock_loop_mgr.is_running.return_value = True
             services_future = MagicMock()
             services_future.result.return_value = mock_services
-            mock_loop_mgr.schedule_on_general_loop.return_value = services_future
+            reconcile_future = MagicMock()
+            reconcile_future.result.return_value = None
+            scheduled_calls = [0]
+
+            def schedule_side_effect(coroutine):
+                coroutine.close()
+                scheduled_calls[0] += 1
+                if scheduled_calls[0] == 1:
+                    return services_future
+                return reconcile_future
+
+            mock_loop_mgr.schedule_on_general_loop.side_effect = schedule_side_effect
             MockLoopMgr.return_value = mock_loop_mgr
 
-            bootstrap = DaemonBootstrap(db_path=temp_db_path)
-            context = bootstrap.start()
+            runtime = DaemonRuntime(
+                db_path=temp_db_path,
+                pid_path=temp_db_path.with_suffix(".pid"),
+                socket_paths=(),
+            )
+            context = runtime.initialize()
 
             assert context is not None
             assert isinstance(context, DaemonContext)
@@ -403,7 +142,7 @@ class TestDaemonBootstrapStart:
 
         The Flow:
         1. Mock ConfigManager.resolve_effective_config() to raise ValueError
-        2. Call bootstrap.start()
+        2. Call runtime.initialize()
         3. Exception is caught and logged
         4. Returns None immediately
         5. No cleanup needed (nothing was started yet)
@@ -419,9 +158,9 @@ class TestDaemonBootstrapStart:
         - No EventLoopManager started (would leak threads)
         """
         with (
-            patch("neuracore.data_daemon.bootstrap.ProfileManager"),
-            patch("neuracore.data_daemon.bootstrap.ConfigManager") as MockConfigMgr,
-            patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
+            patch("neuracore.data_daemon.runtime.ProfileManager"),
+            patch("neuracore.data_daemon.runtime.ConfigManager") as MockConfigMgr,
+            patch("neuracore.data_daemon.runtime.EventLoopManager") as MockLoopMgr,
         ):
             mock_config_mgr_instance = MagicMock()
             mock_config_mgr_instance.resolve_effective_config.side_effect = ValueError(
@@ -429,10 +168,14 @@ class TestDaemonBootstrapStart:
             )
             MockConfigMgr.return_value = mock_config_mgr_instance
 
-            bootstrap = DaemonBootstrap(db_path=temp_db_path)
+            runtime = DaemonRuntime(
+                db_path=temp_db_path,
+                pid_path=temp_db_path.with_suffix(".pid"),
+                socket_paths=(),
+            )
 
             with caplog.at_level(logging.ERROR):
-                context = bootstrap.start()
+                context = runtime.initialize()
 
             assert context is None
 
@@ -456,7 +199,7 @@ class TestDaemonBootstrapStart:
 
         The Flow:
         1. Mock EventLoopManager.start() to raise RuntimeError
-        2. Call bootstrap.start()
+        2. Call runtime.initialize()
         3. Config layer succeeds
         4. Loop layer fails, exception caught
         5. Returns None
@@ -474,10 +217,10 @@ class TestDaemonBootstrapStart:
         - Error logged
         """
         with (
-            patch("neuracore.data_daemon.bootstrap.ProfileManager"),
-            patch("neuracore.data_daemon.bootstrap.ConfigManager") as MockConfigMgr,
-            patch("neuracore.data_daemon.bootstrap.login"),
-            patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
+            patch("neuracore.data_daemon.runtime.ProfileManager"),
+            patch("neuracore.data_daemon.runtime.ConfigManager") as MockConfigMgr,
+            patch("neuracore.data_daemon.runtime.login"),
+            patch("neuracore.data_daemon.runtime.EventLoopManager") as MockLoopMgr,
         ):
             mock_config_mgr_instance = MagicMock()
             mock_config_mgr_instance.resolve_effective_config.return_value = mock_config
@@ -490,10 +233,14 @@ class TestDaemonBootstrapStart:
             mock_loop_mgr_instance.is_running.return_value = False
             MockLoopMgr.return_value = mock_loop_mgr_instance
 
-            bootstrap = DaemonBootstrap(db_path=temp_db_path)
+            runtime = DaemonRuntime(
+                db_path=temp_db_path,
+                pid_path=temp_db_path.with_suffix(".pid"),
+                socket_paths=(),
+            )
 
             with caplog.at_level(logging.ERROR):
-                context = bootstrap.start()
+                context = runtime.initialize()
 
             assert context is None
 
@@ -518,8 +265,8 @@ class TestDaemonBootstrapStart:
         before returning None, or we'll leak two threads.
 
         The Flow:
-        1. Mock bootstrap_async_services to raise Exception
-        2. Call bootstrap.start()
+        1. Mock general-loop bootstrap work to raise Exception
+        2. Call runtime.initialize()
         3. Config succeeds
         4. EventLoopManager.start() succeeds
         5. Async services fail
@@ -538,14 +285,10 @@ class TestDaemonBootstrapStart:
         - Error logged
         """
         with (
-            patch("neuracore.data_daemon.bootstrap.ProfileManager"),
-            patch("neuracore.data_daemon.bootstrap.ConfigManager") as MockConfigMgr,
-            patch("neuracore.data_daemon.bootstrap.login"),
-            patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
-            patch(
-                "neuracore.data_daemon.bootstrap.bootstrap_async_services",
-                new=MagicMock(),
-            ),
+            patch("neuracore.data_daemon.runtime.ProfileManager"),
+            patch("neuracore.data_daemon.runtime.ConfigManager") as MockConfigMgr,
+            patch("neuracore.data_daemon.runtime.login"),
+            patch("neuracore.data_daemon.runtime.EventLoopManager") as MockLoopMgr,
         ):
             mock_config_mgr_instance = MagicMock()
             mock_config_mgr_instance.resolve_effective_config.return_value = mock_config
@@ -554,14 +297,25 @@ class TestDaemonBootstrapStart:
             mock_loop_mgr_instance = MagicMock()
             mock_future = MagicMock()
             mock_future.result.side_effect = RuntimeError("Database init failed")
-            mock_loop_mgr_instance.schedule_on_general_loop.return_value = mock_future
+
+            def schedule_side_effect(coroutine):
+                coroutine.close()
+                return mock_future
+
+            mock_loop_mgr_instance.schedule_on_general_loop.side_effect = (
+                schedule_side_effect
+            )
             mock_loop_mgr_instance.is_running.return_value = False
             MockLoopMgr.return_value = mock_loop_mgr_instance
 
-            bootstrap = DaemonBootstrap(db_path=temp_db_path)
+            runtime = DaemonRuntime(
+                db_path=temp_db_path,
+                pid_path=temp_db_path.with_suffix(".pid"),
+                socket_paths=(),
+            )
 
             with caplog.at_level(logging.ERROR):
-                context = bootstrap.start()
+                context = runtime.initialize()
 
             assert context is None
 
@@ -587,10 +341,10 @@ class TestDaemonBootstrapStart:
 
         The Flow:
         1. Mock RecordingDiskManager.__init__ to raise Exception
-        2. Call bootstrap.start()
+        2. Call runtime.initialize()
         3. Config, loops, async services all succeed
         4. RDM fails
-        5. shutdown_async_services() called on General Loop
+        5. services.shutdown() scheduled on General Loop
         6. EventLoopManager.stop() called
         7. Returns None
 
@@ -601,61 +355,74 @@ class TestDaemonBootstrapStart:
 
         Key Assertions:
         - Returns None
-        - shutdown_async_services() was called
+        - services.shutdown() was called
         - EventLoopManager.stop() was called
         - aiohttp session closed
         - No resource leaks
         """
-        mock_services = MagicMock(spec=AsyncServices)
-
-        mock_shutdown = MagicMock()
+        mock_services = SimpleNamespace(
+            state_store=MagicMock(),
+            shutdown=AsyncMock(),
+        )
 
         with (
-            patch("neuracore.data_daemon.bootstrap.ProfileManager"),
-            patch("neuracore.data_daemon.bootstrap.ConfigManager") as MockConfigMgr,
-            patch("neuracore.data_daemon.bootstrap.login"),
-            patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
+            patch("neuracore.data_daemon.runtime.ProfileManager"),
+            patch("neuracore.data_daemon.runtime.ConfigManager") as MockConfigMgr,
+            patch("neuracore.data_daemon.runtime.login"),
+            patch("neuracore.data_daemon.runtime.EventLoopManager") as MockLoopMgr,
             patch(
-                "neuracore.data_daemon.bootstrap.bootstrap_async_services",
-                new=MagicMock(),
-            ),
-            patch(
-                "neuracore.data_daemon.bootstrap.shutdown_async_services",
-                new=mock_shutdown,
-            ),
-            patch(
-                "neuracore.data_daemon.bootstrap.rdm.RecordingDiskManager"
-            ) as MockRDM,
+                "neuracore.data_daemon.runtime.DaemonServices.create",
+                new_callable=AsyncMock,
+            ) as mock_create_services,
+            patch("neuracore.data_daemon.runtime.rdm.RecordingDiskManager") as MockRDM,
         ):
             mock_config_mgr_instance = MagicMock()
             mock_config_mgr_instance.resolve_effective_config.return_value = mock_config
             MockConfigMgr.return_value = mock_config_mgr_instance
 
             mock_loop_mgr_instance = MagicMock()
+            mock_create_services.return_value = mock_services
 
             services_future = MagicMock()
             services_future.result.return_value = mock_services
+            reconcile_future = MagicMock()
+            reconcile_future.result.return_value = None
             shutdown_future = MagicMock()
             shutdown_future.result.return_value = None
 
-            mock_loop_mgr_instance.schedule_on_general_loop.side_effect = [
+            scheduled_futures = [
                 services_future,
+                reconcile_future,
                 shutdown_future,
             ]
+
+            def schedule_side_effect(coroutine):
+                coroutine.close()
+                return scheduled_futures.pop(0)
+
+            mock_loop_mgr_instance.schedule_on_general_loop.side_effect = (
+                schedule_side_effect
+            )
             MockLoopMgr.return_value = mock_loop_mgr_instance
 
             MockRDM.side_effect = RuntimeError("Invalid recordings path")
 
-            bootstrap = DaemonBootstrap(db_path=temp_db_path)
+            runtime = DaemonRuntime(
+                db_path=temp_db_path,
+                pid_path=temp_db_path.with_suffix(".pid"),
+                socket_paths=(),
+            )
 
             with caplog.at_level(logging.ERROR):
-                context = bootstrap.start()
+                context = runtime.initialize()
 
             assert context is None
 
-            assert mock_loop_mgr_instance.schedule_on_general_loop.call_count == 2
+            assert mock_loop_mgr_instance.schedule_on_general_loop.call_count == 3
 
-            mock_shutdown.assert_called_once_with(mock_services)
+            mock_create_services.assert_called_once()
+
+            mock_services.shutdown.assert_called_once_with()
 
             mock_loop_mgr_instance.stop.assert_called_once()
 
@@ -665,8 +432,8 @@ class TestDaemonBootstrapStart:
             assert "Failed to initialize RecordingDiskManager" in caplog.text
 
 
-class TestDaemonBootstrapStop:
-    """Tests for DaemonBootstrap.stop() method."""
+class TestDaemonRuntimeShutdown:
+    """Tests for DaemonRuntime.shutdown() method."""
 
     def test_t1_stop_shuts_down_all_layers(
         self,
@@ -677,13 +444,13 @@ class TestDaemonBootstrapStop:
         T1: Stop Shuts Down All Layers in Reverse Order
 
         The Story:
-        The daemon received SIGTERM. DaemonBootstrap.stop() must gracefully shut
+        The daemon received SIGTERM. DaemonRuntime.shutdown() must gracefully shut
         down all subsystems. Order matters: stop accepting new work (RDM), finish
         in-flight work (services), then stop the loops.
 
         The Flow:
-        1. Have a running daemon (bootstrap.start() succeeded)
-        2. Call bootstrap.stop()
+        1. Have a running daemon (runtime.initialize() succeeded)
+        2. Call runtime.shutdown()
         3. Layer 1: RecordingDiskManager.shutdown() flushes pending writes
         4. Layer 2: shutdown_async_services() closes connections
         5. Layer 3: EventLoopManager.stop() terminates threads
@@ -698,11 +465,12 @@ class TestDaemonBootstrapStop:
         - RDM shutdown called first
         - Services shutdown called second
         - Loops stopped last
-        - bootstrap.context is None after
+        - runtime.context is None after
         """
         mock_rdm = MagicMock()
         mock_rdm.shutdown = AsyncMock()
-        mock_services = MagicMock(spec=AsyncServices)
+        mock_services = MagicMock(spec=DaemonServices)
+        mock_services.state_store = MagicMock()
         mock_loop_mgr = MagicMock()
 
         shutdown_order: list[str] = []
@@ -743,14 +511,18 @@ class TestDaemonBootstrapStop:
         mock_loop_mgr.schedule_on_general_loop.side_effect = schedule_side_effect
         mock_loop_mgr.stop.side_effect = track_loop_stop
 
-        bootstrap = DaemonBootstrap(db_path=temp_db_path)
-        bootstrap._context = context
+        runtime = DaemonRuntime(
+            db_path=temp_db_path,
+            pid_path=temp_db_path.with_suffix(".pid"),
+            socket_paths=(),
+        )
+        runtime._context = context
 
-        bootstrap.stop()
+        runtime.shutdown()
 
         assert shutdown_order == ["rdm", "services", "loops"]
 
-        assert bootstrap.context is None
+        assert runtime.context is None
 
     def test_t2_stop_without_start_logs_warning(
         self,
@@ -761,13 +533,13 @@ class TestDaemonBootstrapStop:
         T2: Stop Without Start Logs Warning
 
         The Story:
-        Due to a bug or race condition, stop() is called on a bootstrap that
+        Due to a bug or race condition, stop() is called on a runtime that
         never successfully started. This shouldn't crash - just log a warning
         and return.
 
         The Flow:
-        1. Create DaemonBootstrap (don't call start)
-        2. Call bootstrap.stop()
+        1. Create DaemonRuntime (don't call initialize)
+        2. Call runtime.shutdown()
         3. Warning logged: "Cannot stop: daemon not started"
         4. Returns without error
 
@@ -780,12 +552,16 @@ class TestDaemonBootstrapStop:
         - Warning logged
         - Returns cleanly
         """
-        bootstrap = DaemonBootstrap(db_path=temp_db_path)
+        runtime = DaemonRuntime(
+            db_path=temp_db_path,
+            pid_path=temp_db_path.with_suffix(".pid"),
+            socket_paths=(),
+        )
 
         with caplog.at_level(logging.WARNING):
-            bootstrap.stop()
+            runtime.shutdown()
 
-        assert "Cannot stop: daemon not started" in caplog.text
+        assert "Cannot shut down: daemon not started" in caplog.text
 
     def test_t3_stop_continues_despite_errors(
         self,
@@ -804,7 +580,7 @@ class TestDaemonBootstrapStop:
         The Flow:
         1. Have running daemon
         2. Mock RDM.shutdown() to raise TimeoutError
-        3. Call bootstrap.stop()
+        3. Call runtime.shutdown()
         4. RDM error logged but not raised
         5. shutdown_async_services() still called
         6. EventLoopManager.stop() still called
@@ -820,7 +596,7 @@ class TestDaemonBootstrapStop:
         - context is None after
         """
         mock_rdm = MagicMock()
-        mock_services = MagicMock(spec=AsyncServices)
+        mock_services = MagicMock(spec=DaemonServices)
         mock_loop_mgr = MagicMock()
 
         context = DaemonContext(
@@ -849,11 +625,15 @@ class TestDaemonBootstrapStop:
 
         mock_loop_mgr.schedule_on_general_loop.side_effect = schedule_side_effect
 
-        bootstrap = DaemonBootstrap(db_path=temp_db_path)
-        bootstrap._context = context
+        runtime = DaemonRuntime(
+            db_path=temp_db_path,
+            pid_path=temp_db_path.with_suffix(".pid"),
+            socket_paths=(),
+        )
+        runtime._context = context
 
         with caplog.at_level(logging.ERROR):
-            bootstrap.stop()
+            runtime.shutdown()
 
         assert mock_loop_mgr.schedule_on_general_loop.call_count == 2
 
@@ -861,11 +641,11 @@ class TestDaemonBootstrapStop:
 
         assert "Error shutting down RecordingDiskManager" in caplog.text
 
-        assert bootstrap.context is None
+        assert runtime.context is None
 
 
-class TestDaemonBootstrapContext:
-    """Tests for DaemonBootstrap.context property."""
+class TestDaemonRuntimeContext:
+    """Tests for DaemonRuntime.context property."""
 
     def test_c1_context_property_before_start(
         self,
@@ -875,21 +655,25 @@ class TestDaemonBootstrapContext:
         C1: Context Property Before Start
 
         The Story:
-        Code checks bootstrap.context before calling start(). This is valid -
+        Code checks runtime.context before calling initialize(). This is valid -
         maybe checking if already running. Should return None, not raise.
 
         The Flow:
-        1. Create DaemonBootstrap
-        2. Access bootstrap.context
+        1. Create DaemonRuntime
+        2. Access runtime.context
         3. Returns None
 
         Key Assertions:
         - Returns None
         - No exception
         """
-        bootstrap = DaemonBootstrap(db_path=temp_db_path)
+        runtime = DaemonRuntime(
+            db_path=temp_db_path,
+            pid_path=temp_db_path.with_suffix(".pid"),
+            socket_paths=(),
+        )
 
-        result = bootstrap.context
+        result = runtime.context
 
         assert result is None
 
@@ -902,38 +686,35 @@ class TestDaemonBootstrapContext:
         C2: Context Property After Successful Start
 
         The Story:
-        After start() succeeds, context should return the DaemonContext. This
+        After initialize() succeeds, context should return the DaemonContext. This
         lets callers access components without storing the return value.
 
         The Flow:
-        1. Create and start DaemonBootstrap
-        2. Access bootstrap.context
-        3. Returns the DaemonContext from start()
+        1. Create and initialize DaemonRuntime
+        2. Access runtime.context
+        3. Returns the DaemonContext from initialize()
 
         Key Assertions:
-        - Returns same DaemonContext as start() returned
+        - Returns same DaemonContext as initialize() returned
         - All components accessible
         """
         mock_rdm = MagicMock()
         mock_comm = MagicMock()
-        mock_services = MagicMock(spec=AsyncServices)
+        mock_services = MagicMock(spec=DaemonServices)
+        mock_services.state_store = MagicMock()
         mock_loop_mgr = MagicMock()
 
         with (
-            patch("neuracore.data_daemon.bootstrap.ProfileManager"),
-            patch("neuracore.data_daemon.bootstrap.ConfigManager") as MockConfigMgr,
-            patch("neuracore.data_daemon.bootstrap.login"),
-            patch("neuracore.data_daemon.bootstrap.EventLoopManager") as MockLoopMgr,
+            patch("neuracore.data_daemon.runtime.ProfileManager"),
+            patch("neuracore.data_daemon.runtime.ConfigManager") as MockConfigMgr,
+            patch("neuracore.data_daemon.runtime.login"),
+            patch("neuracore.data_daemon.runtime.EventLoopManager") as MockLoopMgr,
             patch(
-                "neuracore.data_daemon.bootstrap.bootstrap_async_services",
-                new=MagicMock(),
-            ),
-            patch(
-                "neuracore.data_daemon.bootstrap.rdm.RecordingDiskManager",
+                "neuracore.data_daemon.runtime.rdm.RecordingDiskManager",
                 return_value=mock_rdm,
             ),
             patch(
-                "neuracore.data_daemon.bootstrap.CommunicationsManager",
+                "neuracore.data_daemon.runtime.CommunicationsManager",
                 return_value=mock_comm,
             ),
         ):
@@ -944,13 +725,28 @@ class TestDaemonBootstrapContext:
             mock_loop_mgr.is_running.return_value = True
             services_future = MagicMock()
             services_future.result.return_value = mock_services
-            mock_loop_mgr.schedule_on_general_loop.return_value = services_future
+            reconcile_future = MagicMock()
+            reconcile_future.result.return_value = None
+            scheduled_calls = [0]
+
+            def schedule_side_effect(coroutine):
+                coroutine.close()
+                scheduled_calls[0] += 1
+                if scheduled_calls[0] == 1:
+                    return services_future
+                return reconcile_future
+
+            mock_loop_mgr.schedule_on_general_loop.side_effect = schedule_side_effect
             MockLoopMgr.return_value = mock_loop_mgr
 
-            bootstrap = DaemonBootstrap(db_path=temp_db_path)
-            start_result = bootstrap.start()
+            runtime = DaemonRuntime(
+                db_path=temp_db_path,
+                pid_path=temp_db_path.with_suffix(".pid"),
+                socket_paths=(),
+            )
+            start_result = runtime.initialize()
 
-            context_result = bootstrap.context
+            context_result = runtime.context
 
             assert context_result is start_result
             assert context_result is not None

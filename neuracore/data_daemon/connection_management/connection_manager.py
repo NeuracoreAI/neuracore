@@ -10,7 +10,7 @@ import logging
 import aiohttp
 
 from neuracore.data_daemon.const import API_URL
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ class ConnectionManager:
     def __init__(
         self,
         client_session: aiohttp.ClientSession,
+        emitter: Emitter,
         timeout: float = 5.0,
         check_interval: float = 10.0,
     ) -> None:
@@ -43,7 +44,7 @@ class ConnectionManager:
         self._stopped = False
         self._connection_task: asyncio.Task | None = None
 
-        self._emitter = get_emitter()
+        self._emitter = emitter
         self._emitter.emit(Emitter.IS_CONNECTED, self._is_connected)
 
     async def start(self) -> None:

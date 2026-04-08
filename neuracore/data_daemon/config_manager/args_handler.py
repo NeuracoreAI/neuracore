@@ -3,15 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import os
 import signal
-import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any
-
-import filelock
 
 from neuracore.data_daemon.config_manager.config import ConfigManager
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
@@ -23,15 +18,17 @@ from neuracore.data_daemon.config_manager.profiles import (
 )
 from neuracore.data_daemon.const import SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
-from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
+from neuracore.data_daemon.lifecycle.daemon_os_control import (
+    DaemonLifecycleError,
     cleanup_stale_client_state,
     force_kill,
+    launch_new_daemon_subprocess,
     pid_is_running,
     read_pid_from_file,
-    shutdown,
     terminate_pid,
     wait_for_exit,
 )
+from neuracore.data_daemon.lifecycle.runtime_recovery import shutdown
 
 profile_manager = ProfileManager()
 config_manager = ConfigManager(profile_manager)
@@ -205,70 +202,34 @@ def handle_launch(args: argparse.Namespace) -> None:
     """
     pid_path = get_daemon_pid_path()
     db_path = get_daemon_db_path()
-    pid_path.parent.mkdir(parents=True, exist_ok=True)
-    pid_file_lock = str(pid_path) + ".lock"
 
-    with filelock.FileLock(pid_file_lock):
-        existing_pid = read_pid_from_file(pid_path)
-        if existing_pid is not None:
-            if pid_is_running(existing_pid):
-                print(f"Daemon already running (pid={existing_pid}).")
-                sys.exit(1)
-            try:
-                pid_path.unlink()
-            except FileNotFoundError:
-                pass
-
-        runner_command = [
-            sys.executable,
-            "-m",
-            "neuracore.data_daemon.runner_entry",
-        ]
-
-        env = os.environ.copy()
-        env["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
-        env["NEURACORE_DAEMON_DB_PATH"] = str(db_path)
-        env["NEURACORE_DAEMON_MANAGE_PID"] = "0"
-
-        profile_name = getattr(args, "profile", None)
-        if profile_name is not None:
-            try:
-                profile_manager.get_profile(profile_name)
-            except ProfileNotFound as exc:
-                print(exc)
-                sys.exit(1)
-            env["NEURACORE_DAEMON_PROFILE"] = profile_name
-
-        background = getattr(args, "background", False)
-        if background:
-            daemon_process = subprocess.Popen(
-                runner_command,
-                start_new_session=True,
-                close_fds=True,
-                cwd=str(Path.cwd()),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env=env,
-            )
-        else:
-            daemon_process = subprocess.Popen(
-                runner_command,
-                start_new_session=False,
-                close_fds=True,
-                cwd=str(Path.cwd()),
-                env=env,
-            )
-
-        spawned_pid = daemon_process.pid
-
-        time.sleep(0.1)
-        if daemon_process.poll() is not None:
-            print("Daemon failed to start.")
+    env_overrides: dict[str, str] = {}
+    profile_name = getattr(args, "profile", None)
+    if profile_name is not None:
+        try:
+            profile_manager.get_profile(profile_name)
+        except ProfileNotFound as exc:
+            print(exc)
             sys.exit(1)
+        env_overrides["NEURACORE_DAEMON_PROFILE"] = profile_name
 
-        pid_path.write_text(str(spawned_pid), encoding="utf-8")
-        print(f"Daemon launched (pid={spawned_pid}).")
+    background = getattr(args, "background", False)
+    try:
+        daemon_process = launch_new_daemon_subprocess(
+            pid_path=pid_path,
+            db_path=db_path,
+            background=background,
+            env_overrides=env_overrides or None,
+        )
+    except DaemonLifecycleError as exc:
+        print(str(exc))
+        sys.exit(1)
+    except RuntimeError as exc:
+        print(str(exc))
+        sys.exit(1)
+
+    spawned_pid = daemon_process.pid
+    print(f"Daemon launched (pid={spawned_pid}).")
 
     if background:
         return

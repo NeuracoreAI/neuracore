@@ -14,7 +14,7 @@ from neuracore.data_daemon.const import (
     BACKEND_API_MAX_RETRIES,
     BACKEND_API_RETRYABLE_STATUS_CODES,
 )
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +22,10 @@ logger = logging.getLogger(__name__)
 class ProgressReporter:
     """Send progress reports to the Neuracore backend."""
 
-    def __init__(self, client_session: aiohttp.ClientSession) -> None:
+    def __init__(self, client_session: aiohttp.ClientSession, emitter: Emitter) -> None:
         """Subscribe to progress report events."""
         self.client_session = client_session
-        self._emitter = get_emitter()
+        self._emitter = emitter
         self._emitter.on(Emitter.PROGRESS_REPORT, self.report_progress)
 
     async def report_progress(

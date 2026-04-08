@@ -2,6 +2,7 @@ import base64
 import logging
 import math
 import time
+from collections.abc import Generator
 from enum import Enum
 from uuid import uuid4
 
@@ -32,7 +33,7 @@ class CaptureRDM:
 
 
 @pytest.fixture(autouse=True)
-def ipc_paths(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def ipc_paths(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     base_dir = tmp_path / "ndd"
     socket_path = f"inproc://daemon-{uuid4().hex}"
     events_path = f"inproc://events-{uuid4().hex}"
@@ -59,7 +60,7 @@ def ipc_paths(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def zmq_context() -> zmq.Context:
+def zmq_context() -> Generator[zmq.Context, None, None]:
     context = zmq.Context.instance()
     yield context
 
@@ -164,11 +165,17 @@ def test_pub_sub_recording_stopped_event(zmq_context: zmq.Context) -> None:
     daemon_comm.cleanup_daemon()
 
 
-def test_large_payload_chunked_round_trip_over_ipc(zmq_context: zmq.Context) -> None:
+def test_large_payload_chunked_round_trip_over_ipc(
+    zmq_context: zmq.Context, emitter
+) -> None:
     daemon_comm = CommunicationsManager(context=zmq_context)
     daemon_comm.start_consumer()
     rdm = CaptureRDM()
-    daemon = Daemon(comm_manager=daemon_comm, recording_disk_manager=rdm)
+    daemon = Daemon(
+        comm_manager=daemon_comm,
+        recording_disk_manager=rdm,
+        emitter=emitter,
+    )
 
     producer_comm = CommunicationsManager(context=zmq_context)
     producer = ProducerChannel(
@@ -205,11 +212,15 @@ def test_large_payload_chunked_round_trip_over_ipc(zmq_context: zmq.Context) -> 
     daemon_comm.cleanup_daemon()
 
 
-def test_two_producers_route_to_own_channels(zmq_context: zmq.Context) -> None:
+def test_two_producers_route_to_own_channels(zmq_context: zmq.Context, emitter) -> None:
     daemon_comm = CommunicationsManager(context=zmq_context)
     daemon_comm.start_consumer()
     rdm = CaptureRDM()
-    daemon = Daemon(comm_manager=daemon_comm, recording_disk_manager=rdm)
+    daemon = Daemon(
+        comm_manager=daemon_comm,
+        recording_disk_manager=rdm,
+        emitter=emitter,
+    )
 
     producer_a_comm = CommunicationsManager(context=zmq_context)
     producer_b_comm = CommunicationsManager(context=zmq_context)
@@ -267,11 +278,17 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context) -> None:
     daemon_comm.cleanup_daemon()
 
 
-def test_interleaved_chunks_reassemble_per_producer(zmq_context: zmq.Context) -> None:
+def test_interleaved_chunks_reassemble_per_producer(
+    zmq_context: zmq.Context, emitter
+) -> None:
     daemon_comm = CommunicationsManager(context=zmq_context)
     daemon_comm.start_consumer()
     rdm = CaptureRDM()
-    daemon = Daemon(comm_manager=daemon_comm, recording_disk_manager=rdm)
+    daemon = Daemon(
+        comm_manager=daemon_comm,
+        recording_disk_manager=rdm,
+        emitter=emitter,
+    )
 
     producer_a_comm = CommunicationsManager(context=zmq_context)
     producer_b_comm = CommunicationsManager(context=zmq_context)
@@ -382,12 +399,15 @@ def test_recording_id_required_on_start_new_trace() -> None:
 
 def test_unknown_command_logs_warning_and_continues(
     caplog: pytest.LogCaptureFixture,
+    emitter,
 ) -> None:
     class FakeCommand(Enum):
         UNKNOWN = "unknown_command"
 
     daemon = Daemon(
-        comm_manager=CommunicationsManager(), recording_disk_manager=CaptureRDM()
+        comm_manager=CommunicationsManager(),
+        recording_disk_manager=CaptureRDM(),
+        emitter=emitter,
     )
 
     with caplog.at_level(logging.WARNING):
@@ -414,10 +434,15 @@ def test_garbage_messages_are_logged_and_daemon_survives(
     caplog: pytest.LogCaptureFixture,
     zmq_context: zmq.Context,
     monkeypatch: pytest.MonkeyPatch,
+    emitter,
 ) -> None:
     daemon_comm = CommunicationsManager(context=zmq_context)
     daemon_comm.start_consumer()
-    daemon = Daemon(comm_manager=daemon_comm, recording_disk_manager=CaptureRDM())
+    daemon = Daemon(
+        comm_manager=daemon_comm,
+        recording_disk_manager=CaptureRDM(),
+        emitter=emitter,
+    )
     handled_messages: list[MessageEnvelope] = []
 
     original_handle_message = daemon.handle_message

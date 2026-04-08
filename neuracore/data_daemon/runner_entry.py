@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-import atexit
 import logging
 
-from neuracore.data_daemon.bootstrap import DaemonBootstrap, DaemonContext
-from neuracore.data_daemon.communications_management.data_bridge import Daemon
 from neuracore.data_daemon.const import SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
-from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
-    install_signal_handlers,
-    shutdown,
-)
+from neuracore.data_daemon.lifecycle.daemon_os_control import install_signal_handlers
+from neuracore.data_daemon.lifecycle.runtime_recovery import shutdown
+from neuracore.data_daemon.runtime import DaemonContext, DaemonRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +16,7 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     """Runner entrypoint for the Neuracore data daemon.
 
-    This function bootstraps the daemon, starts it, and then waits for
+    This function initializes the daemon runtime, starts it, and then waits for
     a signal to stop. The daemon is stopped when the function returns.
 
     Environment variables affecting this function:
@@ -38,35 +34,27 @@ def main() -> None:
     """
     pid_path = get_daemon_pid_path()
     db_path = get_daemon_db_path()
+    runtime = DaemonRuntime(
+        db_path=db_path,
+        pid_path=pid_path,
+        socket_paths=(SOCKET_PATH,),
+    )
 
     try:
-        bootstrap = DaemonBootstrap(db_path=db_path)
-        context = bootstrap.start()
+        install_signal_handlers(lambda _signum: None)
+        context = runtime.initialize()
 
         if not isinstance(context, DaemonContext):
             logger.error("Failed to start daemon")
             return
-        install_signal_handlers(lambda _signum: None)
-        daemon = Daemon(
-            recording_disk_manager=context.recording_disk_manager,
-            comm_manager=context.comm_manager,
-        )
-
-        def on_exit() -> None:
-            """Inform user of daemon exit event."""
-            daemon.stop()
-            print("Daemon exited.")
-
-        atexit.register(on_exit)
-        logger.info("Daemon starting main loop...")
-        daemon.run()
+        runtime.run_forever()
 
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt")
     except SystemExit:
         pass
     finally:
-        bootstrap.stop()
+        runtime.shutdown()
         shutdown(
             pid_path=pid_path,
             socket_paths=(SOCKET_PATH,),

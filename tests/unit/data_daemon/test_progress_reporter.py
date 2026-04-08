@@ -75,10 +75,6 @@ class TestProgressReporterSuccess:
 
         with (
             patch(
-                "neuracore.data_daemon.progress_reporter.get_emitter",
-                return_value=mock_emitter,
-            ),
-            patch(
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
             ),
@@ -87,7 +83,7 @@ class TestProgressReporterSuccess:
                 return_value="org-123",
             ),
         ):
-            reporter = ProgressReporter(mock_session)
+            reporter = ProgressReporter(mock_session, mock_emitter)
             await _report(reporter)
 
             mock_emitter.emit.assert_called_once_with(
@@ -123,10 +119,6 @@ class TestProgressReporterRetry:
 
         with (
             patch(
-                "neuracore.data_daemon.progress_reporter.get_emitter",
-                return_value=mock_emitter,
-            ),
-            patch(
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
             ),
@@ -136,7 +128,7 @@ class TestProgressReporterRetry:
             ),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
-            reporter = ProgressReporter(mock_session)
+            reporter = ProgressReporter(mock_session, mock_emitter)
             await _report(reporter)
 
             assert call_count == 3
@@ -160,10 +152,6 @@ class TestProgressReporterRetry:
 
         with (
             patch(
-                "neuracore.data_daemon.progress_reporter.get_emitter",
-                return_value=mock_emitter,
-            ),
-            patch(
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
             ),
@@ -172,7 +160,7 @@ class TestProgressReporterRetry:
                 return_value="org-123",
             ),
         ):
-            reporter = ProgressReporter(mock_session)
+            reporter = ProgressReporter(mock_session, mock_emitter)
             await _report(reporter)
 
             mock_session.post.assert_called_once()
@@ -203,10 +191,6 @@ class TestProgressReporterRetry:
 
         with (
             patch(
-                "neuracore.data_daemon.progress_reporter.get_emitter",
-                return_value=mock_emitter,
-            ),
-            patch(
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
             ),
@@ -216,7 +200,7 @@ class TestProgressReporterRetry:
             ),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
-            reporter = ProgressReporter(mock_session)
+            reporter = ProgressReporter(mock_session, mock_emitter)
             await _report(reporter)
 
             assert call_count == 3
@@ -240,10 +224,6 @@ class TestProgressReporterRetry:
 
         with (
             patch(
-                "neuracore.data_daemon.progress_reporter.get_emitter",
-                return_value=mock_emitter,
-            ),
-            patch(
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
             ),
@@ -253,7 +233,7 @@ class TestProgressReporterRetry:
             ),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
-            reporter = ProgressReporter(mock_session)
+            reporter = ProgressReporter(mock_session, mock_emitter)
             await _report(reporter)
 
             assert mock_session.post.call_count == BACKEND_API_MAX_RETRIES
@@ -272,30 +252,22 @@ class TestProgressReporterEdgeCases:
         """Test that empty traces list returns without action."""
         mock_session = MagicMock()
 
-        with patch(
-            "neuracore.data_daemon.progress_reporter.get_emitter",
-            return_value=mock_emitter,
-        ):
-            reporter = ProgressReporter(mock_session)
-            await _report(reporter, trace_map={})
+        reporter = ProgressReporter(mock_session, mock_emitter)
+        await _report(reporter, trace_map={})
 
-            mock_session.post.assert_not_called()
-            mock_emitter.emit.assert_not_called()
+        mock_session.post.assert_not_called()
+        mock_emitter.emit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_missing_recording_id_returns_early(self, mock_emitter, mock_trace):
         """Test that missing recording_id returns without action."""
         mock_session = MagicMock()
 
-        with patch(
-            "neuracore.data_daemon.progress_reporter.get_emitter",
-            return_value=mock_emitter,
-        ):
-            reporter = ProgressReporter(mock_session)
-            await _report(reporter, recording_id="")
+        reporter = ProgressReporter(mock_session, mock_emitter)
+        await _report(reporter, recording_id="")
 
-            mock_session.post.assert_not_called()
-            mock_emitter.emit.assert_not_called()
+        mock_session.post.assert_not_called()
+        mock_emitter.emit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_timeout_triggers_retry(self, mock_emitter, mock_trace, mock_auth):
@@ -318,10 +290,6 @@ class TestProgressReporterEdgeCases:
 
         with (
             patch(
-                "neuracore.data_daemon.progress_reporter.get_emitter",
-                return_value=mock_emitter,
-            ),
-            patch(
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
             ),
@@ -331,7 +299,7 @@ class TestProgressReporterEdgeCases:
             ),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
-            reporter = ProgressReporter(mock_session)
+            reporter = ProgressReporter(mock_session, mock_emitter)
             await _report(reporter)
 
             assert call_count == 2
@@ -348,10 +316,6 @@ class TestProgressReporterEdgeCases:
 
         with (
             patch(
-                "neuracore.data_daemon.progress_reporter.get_emitter",
-                return_value=mock_emitter,
-            ),
-            patch(
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
             ),
@@ -360,7 +324,7 @@ class TestProgressReporterEdgeCases:
                 side_effect=RuntimeError("org lookup failed"),
             ),
         ):
-            reporter = ProgressReporter(mock_session)
+            reporter = ProgressReporter(mock_session, mock_emitter)
             await _report(reporter)
 
             mock_emitter.emit.assert_called_once_with(
@@ -378,10 +342,6 @@ class TestProgressReporterEdgeCases:
 
         with (
             patch(
-                "neuracore.data_daemon.progress_reporter.get_emitter",
-                return_value=mock_emitter,
-            ),
-            patch(
                 "neuracore.data_daemon.progress_reporter.get_auth",
                 return_value=mock_auth,
             ),
@@ -394,7 +354,7 @@ class TestProgressReporterEdgeCases:
                 side_effect=RuntimeError("invalid traces payload"),
             ),
         ):
-            reporter = ProgressReporter(mock_session)
+            reporter = ProgressReporter(mock_session, mock_emitter)
             await _report(reporter)
 
             mock_emitter.emit.assert_called_once_with(

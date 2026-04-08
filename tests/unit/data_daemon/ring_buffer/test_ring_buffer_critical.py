@@ -82,7 +82,7 @@ def _write_chunk_to_ring_buffer(
     ring.write(header + data)
 
 
-def test_end_to_end_data_integrity() -> None:
+def test_end_to_end_data_integrity(emitter) -> None:
     """Bytes preserved producer→RDM.
 
     The ultimate test: data in equals data out. Any corruption anywhere in
@@ -94,6 +94,7 @@ def test_end_to_end_data_integrity() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -129,7 +130,7 @@ def test_end_to_end_data_integrity() -> None:
     assert received_data == original_data
 
 
-def test_multi_chunk_reassembly_integrity() -> None:
+def test_multi_chunk_reassembly_integrity(emitter) -> None:
     """Large data split and reassembled correctly.
 
     Chunking is lossless. Large messages must survive split/reassemble without
@@ -141,6 +142,7 @@ def test_multi_chunk_reassembly_integrity() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -186,7 +188,7 @@ def test_multi_chunk_reassembly_integrity() -> None:
     assert reassembled == original_data
 
 
-def test_binary_payload_through_pipeline() -> None:
+def test_binary_payload_through_pipeline(emitter) -> None:
     """Binary with null bytes preserved.
 
     Full byte range must work. No special character handling that corrupts
@@ -198,6 +200,7 @@ def test_binary_payload_through_pipeline() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -233,7 +236,7 @@ def test_binary_payload_through_pipeline() -> None:
     assert received == binary_data
 
 
-def test_daemon_handles_corrupted_chunk_gracefully() -> None:
+def test_daemon_handles_corrupted_chunk_gracefully(emitter) -> None:
     """Malformed chunk doesn't crash.
 
     Corruption happens. Daemon must log and continue, not crash the whole
@@ -250,6 +253,7 @@ def test_daemon_handles_corrupted_chunk_gracefully() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -269,7 +273,7 @@ def test_daemon_handles_corrupted_chunk_gracefully() -> None:
     assert daemon.channels["test-producer"] is not None
 
 
-def test_daemon_survives_full_buffer() -> None:
+def test_daemon_survives_full_buffer(emitter) -> None:
     """Daemon handles buffer pressure.
 
     Back-pressure scenario: system must survive temporary overload without
@@ -281,6 +285,7 @@ def test_daemon_survives_full_buffer() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -330,7 +335,7 @@ def test_daemon_survives_full_buffer() -> None:
     assert len(mock_rdm.enqueued) == 2
 
 
-def test_rdm_failure_does_not_lose_ring_buffer() -> None:
+def test_rdm_failure_does_not_lose_ring_buffer(emitter) -> None:
     """RDM error doesn't corrupt buffer.
 
     Downstream failure shouldn't corrupt upstream state. Isolation between
@@ -354,6 +359,7 @@ def test_rdm_failure_does_not_lose_ring_buffer() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=failing_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -404,7 +410,7 @@ def test_rdm_failure_does_not_lose_ring_buffer() -> None:
     assert failing_rdm.enqueued[0].trace_id == "trace-2"
 
 
-def test_new_trace_independent_of_previous() -> None:
+def test_new_trace_independent_of_previous(emitter) -> None:
     """New trace unaffected by prior.
 
     Trace isolation: completing one trace must not leave state that affects
@@ -416,6 +422,7 @@ def test_new_trace_independent_of_previous() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")
@@ -467,7 +474,7 @@ def test_new_trace_independent_of_previous() -> None:
     assert mock_rdm.enqueued[1].data_type == DataType.JOINT_VELOCITIES
 
 
-def test_concurrent_traces_isolation() -> None:
+def test_concurrent_traces_isolation(emitter) -> None:
     """Multiple traces don't interfere.
 
     Concurrent traces are common. Must not mix up chunks between different
@@ -479,6 +486,7 @@ def test_concurrent_traces_isolation() -> None:
     daemon = Daemon(
         comm_manager=mock_comm,
         recording_disk_manager=mock_rdm,
+        emitter=emitter,
     )
 
     channel = ChannelState(producer_id="test-producer")

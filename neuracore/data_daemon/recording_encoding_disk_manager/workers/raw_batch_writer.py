@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import aiofiles
 
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.models import CompleteMessage
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
     StorageBudget,
@@ -44,6 +44,7 @@ class _RawBatchWriter:
         recording_traces: dict[str, dict[str, Any]],
         abort_trace: Callable[[_TraceKey], None],
         sentinel: object,
+        emitter: Emitter,
     ) -> None:
         """Initialise _RawBatchWriter.
 
@@ -55,6 +56,7 @@ class _RawBatchWriter:
             recording_traces: Recording-to-traces bookkeeping map.
             abort_trace: Callback used to abort traces on failure.
             sentinel: Sentinel object used to stop the worker.
+            emitter: Event emitter for cross-component signaling.
         """
         self.flush_bytes = flush_bytes
         self.trace_message_queue = trace_message_queue
@@ -67,7 +69,7 @@ class _RawBatchWriter:
 
         self.SENTINEL = sentinel
 
-        self._emitter = get_emitter()
+        self._emitter = emitter
 
         self._writer_states: dict[_TraceKey, _WriteState] = {}
         self._aborted_traces: set[_TraceKey] = set()

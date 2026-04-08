@@ -17,15 +17,15 @@ from neuracore_types import DataType
 import neuracore as nc
 from neuracore.data_daemon.const import SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
-from neuracore.data_daemon.lifecycle.daemon_lifecycle import (
+from neuracore.data_daemon.lifecycle.daemon_os_control import (
     ensure_daemon_running,
     force_kill,
     pid_is_running,
     read_pid_from_file,
-    shutdown,
     terminate_pid,
     wait_for_exit,
 )
+from neuracore.data_daemon.lifecycle.runtime_recovery import shutdown
 
 # Add examples dir to path.
 THIS_DIR = Path(__file__).resolve().parent

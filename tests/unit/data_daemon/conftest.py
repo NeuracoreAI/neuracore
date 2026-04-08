@@ -1,24 +1,20 @@
 """Shared fixtures for data_daemon tests."""
 
-import asyncio
+# cspell:ignore getfixturevalue
+from collections.abc import Generator
 
-import pytest_asyncio
+import pytest
+from pytest import FixtureRequest
+from pytest_asyncio.plugin import Runner
 
-import neuracore.data_daemon.event_emitter as em_module
-from neuracore.data_daemon.event_emitter import init_emitter
+from neuracore.data_daemon.event_emitter import Emitter, init_emitter
 
 
-@pytest_asyncio.fixture(scope="function", autouse=True)
-async def initialize_emitter():
-    """Initialize the emitter for each test with the current event loop."""
-    loop = asyncio.get_event_loop()
-
-    em_module._emitter = None
-
-    emitter = init_emitter(loop=loop)
-
-    yield emitter
-
-    emitter.remove_all_listeners()
-
-    em_module._emitter = None
+@pytest.fixture(scope="function", autouse=True)
+def emitter(request: FixtureRequest) -> Generator[Emitter, None, None]:
+    """Create a fresh Emitter bound to pytest-asyncio's function runner loop."""
+    runner = request.getfixturevalue("_function_scoped_runner")
+    assert isinstance(runner, Runner)
+    test_emitter = init_emitter(loop=runner.get_loop())
+    yield test_emitter
+    test_emitter.remove_all_listeners()

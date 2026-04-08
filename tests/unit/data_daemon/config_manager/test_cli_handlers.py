@@ -228,22 +228,19 @@ def test_handle_launch_writes_pid_file_and_prints_success(
     tmp_path: Path,
 ) -> None:
     pid_path = tmp_path / "daemon.pid"
+    db_path = tmp_path / "state.db"
 
     monkeypatch.setattr(args_handler, "get_daemon_pid_path", lambda: pid_path)
-    monkeypatch.setattr(args_handler, "read_pid_from_file", lambda _: None)
-    monkeypatch.setattr(args_handler, "pid_is_running", lambda _: False)
-    monkeypatch.setattr(args_handler.time, "sleep", lambda _: None)
-
+    monkeypatch.setattr(args_handler, "get_daemon_db_path", lambda: db_path)
     monkeypatch.setattr(
-        args_handler.subprocess,
-        "Popen",
-        lambda *a, **k: _FakePopen(pid=12345, poll_value=None),
+        args_handler,
+        "launch_new_daemon_subprocess",
+        lambda **_: _FakePopen(pid=12345, poll_value=None),
     )
 
     args_handler.handle_launch(_ns(background=True))
     out = capsys.readouterr().out.strip()
 
-    assert pid_path.read_text(encoding="utf-8").strip() == "12345"
     assert out == "Daemon launched (pid=12345)."
 
 
@@ -252,14 +249,13 @@ def test_handle_launch_rejects_running_pid(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    pid_path = tmp_path / "daemon.pid"
-    db_path = tmp_path / "state.db"
-
-    monkeypatch.setattr(args_handler, "get_daemon_pid_path", lambda: pid_path)
-    monkeypatch.setattr(args_handler, "get_daemon_db_path", lambda: db_path)
-
-    monkeypatch.setattr(args_handler, "read_pid_from_file", lambda _: 999)
-    monkeypatch.setattr(args_handler, "pid_is_running", lambda _: True)
+    monkeypatch.setattr(
+        args_handler,
+        "launch_new_daemon_subprocess",
+        lambda **_: (_ for _ in ()).throw(
+            args_handler.DaemonLifecycleError("Daemon already running (pid=999).")
+        ),
+    )
 
     with pytest.raises(SystemExit) as excinfo:
         args_handler.handle_launch(_ns(background=False))
@@ -275,24 +271,19 @@ def test_handle_launch_clears_stale_pid_and_starts(
     tmp_path: Path,
 ) -> None:
     pid_path = tmp_path / "daemon.pid"
-    pid_path.parent.mkdir(parents=True, exist_ok=True)
-    pid_path.write_text("999", encoding="utf-8")
+    db_path = tmp_path / "state.db"
 
     monkeypatch.setattr(args_handler, "get_daemon_pid_path", lambda: pid_path)
-    monkeypatch.setattr(args_handler, "read_pid_from_file", lambda _: 999)
-    monkeypatch.setattr(args_handler, "pid_is_running", lambda _: False)
-    monkeypatch.setattr(args_handler.time, "sleep", lambda _: None)
-
+    monkeypatch.setattr(args_handler, "get_daemon_db_path", lambda: db_path)
     monkeypatch.setattr(
-        args_handler.subprocess,
-        "Popen",
-        lambda *a, **k: _FakePopen(pid=12345, poll_value=None),
+        args_handler,
+        "launch_new_daemon_subprocess",
+        lambda **_: _FakePopen(pid=12345, poll_value=None),
     )
 
     args_handler.handle_launch(_ns(background=True))
     out = capsys.readouterr().out.strip()
 
-    assert pid_path.read_text(encoding="utf-8").strip() == "12345"
     assert out == "Daemon launched (pid=12345)."
 
 
@@ -302,16 +293,14 @@ def test_handle_launch_exits_and_does_not_write_pid_file_when_runner_exits_immed
     tmp_path: Path,
 ) -> None:
     pid_path = tmp_path / "daemon.pid"
+    db_path = tmp_path / "state.db"
 
     monkeypatch.setattr(args_handler, "get_daemon_pid_path", lambda: pid_path)
-    monkeypatch.setattr(args_handler, "read_pid_from_file", lambda _: None)
-    monkeypatch.setattr(args_handler, "pid_is_running", lambda _: False)
-    monkeypatch.setattr(args_handler.time, "sleep", lambda _: None)
-
+    monkeypatch.setattr(args_handler, "get_daemon_db_path", lambda: db_path)
     monkeypatch.setattr(
-        args_handler.subprocess,
-        "Popen",
-        lambda *a, **k: _FakePopen(pid=99999, poll_value=1),
+        args_handler,
+        "launch_new_daemon_subprocess",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("Daemon failed to start.")),
     )
 
     with pytest.raises(SystemExit) as excinfo:

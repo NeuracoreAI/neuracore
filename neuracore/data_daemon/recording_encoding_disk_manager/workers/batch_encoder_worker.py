@@ -12,7 +12,7 @@ from pathlib import Path
 import aiofiles
 import aiofiles.os
 
-from neuracore.data_daemon.event_emitter import Emitter, get_emitter
+from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
     StorageBudget,
 )
@@ -53,6 +53,7 @@ class _BatchEncoderWorker:
         encoder_manager: _EncoderManager,
         storage_budget: StorageBudget,
         abort_trace: Callable[[_TraceKey], None],
+        emitter: Emitter,
     ) -> None:
         """Initialise _BatchEncoderWorker.
 
@@ -61,13 +62,14 @@ class _BatchEncoderWorker:
             encoder_manager: Encoder manager used to get/create per-trace encoders.
             storage_budget: Storage budget tracker used to enforce storage limits.
             abort_trace: Callback used to abort traces on failure.
+            emitter: Event emitter for cross-component signaling.
         """
         self._filesystem = filesystem
         self._encoder_manager = encoder_manager
         self._storage_budget = storage_budget
         self._abort_trace = abort_trace
 
-        self._emitter = get_emitter()
+        self._emitter = emitter
 
         self._aborted_traces: set[_TraceKey] = set()
         self._finalised_traces: set[_TraceKey] = set()
