@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -161,3 +162,204 @@ class TestBatchRegistration:
         await mgr._register_and_record_outcome([_make_candidate()])
 
         state_api.emit_ready_for_upload.assert_awaited_once_with(["t1"], None)
+
+    @pytest.mark.asyncio
+    async def test_registration_retries_on_500_then_succeeds(
+        self,
+        mock_auth,
+        state_api,
+    ) -> None:
+        contexts: list[MagicMock] = []
+
+        for status, body in [
+            (500, "server exploded"),
+            (500, "still broken"),
+            (
+                200,
+                {
+                    "registered_traces": [{
+                        "trace_id": "t1",
+                        "upload_session_uris": {
+                            "JOINT_POSITIONS/joints/trace.json": (
+                                "https://storage/sess/1"
+                            ),
+                        },
+                    }],
+                    "failed_traces": [],
+                },
+            ),
+        ]:
+            response = AsyncMock(spec=aiohttp.ClientResponse)
+            response.status = status
+            response.text = AsyncMock(
+                return_value=body if isinstance(body, str) else ""
+            )
+            response.json = AsyncMock(
+                return_value=body if isinstance(body, dict) else {}
+            )
+
+            context = MagicMock()
+            context.__aenter__ = AsyncMock(return_value=response)
+            context.__aexit__ = AsyncMock(return_value=False)
+            contexts.append(context)
+
+        session = MagicMock(spec=aiohttp.ClientSession)
+        session.post = MagicMock(side_effect=contexts)
+
+        state_api.mark_traces_registered = AsyncMock(return_value=["t1"])
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            manager = RegistrationManager(
+                client_session=session,
+                state_api=state_api,
+                emitter=MagicMock(),
+                batch_size=10,
+            )
+            await manager._register_and_record_outcome([_make_candidate()])
+
+        assert session.post.call_count == 3
+        state_api.mark_traces_registered.assert_awaited_once_with(["t1"])
+        state_api.emit_ready_for_upload.assert_awaited_once_with(
+            ["t1"],
+            {
+                "t1": {
+                    "JOINT_POSITIONS/joints/trace.json": "https://storage/sess/1",
+                },
+            },
+        )
+        state_api.mark_traces_registration_failed.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_registration_repeated_500_marks_traces_failed(
+        self,
+        mock_auth,
+        state_api,
+    ) -> None:
+        contexts: list[MagicMock] = []
+
+        for _ in range(registration_manager.REGISTRATION_MAX_RETRIES):
+            response = AsyncMock(spec=aiohttp.ClientResponse)
+            response.status = 500
+            response.text = AsyncMock(return_value="backend down")
+            response.json = AsyncMock(return_value={})
+
+            context = MagicMock()
+            context.__aenter__ = AsyncMock(return_value=response)
+            context.__aexit__ = AsyncMock(return_value=False)
+            contexts.append(context)
+
+        session = MagicMock(spec=aiohttp.ClientSession)
+        session.post = MagicMock(side_effect=contexts)
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            manager = RegistrationManager(
+                client_session=session,
+                state_api=state_api,
+                emitter=MagicMock(),
+                batch_size=10,
+            )
+            await manager._register_and_record_outcome([_make_candidate()])
+
+        assert session.post.call_count == registration_manager.REGISTRATION_MAX_RETRIES
+        state_api.mark_traces_registered.assert_not_awaited()
+        state_api.emit_ready_for_upload.assert_not_awaited()
+        state_api.mark_traces_registration_failed.assert_awaited_once()
+
+        call = state_api.mark_traces_registration_failed.await_args
+        assert call.kwargs["trace_ids"] == ["t1"]
+        assert "backend down" in call.kwargs["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_registration_retries_on_timeout_then_succeeds(
+        self,
+        mock_auth,
+        state_api,
+    ) -> None:
+        success_response = AsyncMock(spec=aiohttp.ClientResponse)
+        success_response.status = 200
+        success_response.json = AsyncMock(
+            return_value={
+                "registered_traces": [{
+                    "trace_id": "t1",
+                    "upload_session_uris": {},
+                }],
+                "failed_traces": [],
+            }
+        )
+
+        success_context = MagicMock()
+        success_context.__aenter__ = AsyncMock(return_value=success_response)
+        success_context.__aexit__ = AsyncMock(return_value=False)
+
+        session = MagicMock(spec=aiohttp.ClientSession)
+        session.post = MagicMock(
+            side_effect=[
+                asyncio.TimeoutError("timed out"),
+                asyncio.TimeoutError("timed out again"),
+                success_context,
+            ]
+        )
+
+        state_api.mark_traces_registered = AsyncMock(return_value=["t1"])
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            manager = RegistrationManager(
+                client_session=session,
+                state_api=state_api,
+                emitter=MagicMock(),
+                batch_size=10,
+            )
+            await manager._register_and_record_outcome([_make_candidate()])
+
+        assert session.post.call_count == 3
+        state_api.mark_traces_registered.assert_awaited_once_with(["t1"])
+        state_api.emit_ready_for_upload.assert_awaited_once_with(["t1"], None)
+        state_api.mark_traces_registration_failed.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_registration_partial_batch_success_and_failure(
+        self,
+        mock_auth,
+        state_api,
+    ) -> None:
+        session = _mock_http_session({
+            "registered_traces": [{
+                "trace_id": "t1",
+                "upload_session_uris": {
+                    "JOINT_POSITIONS/joints/trace.json": ("https://storage/sess/1"),
+                },
+            }],
+            "failed_traces": [{
+                "trace_id": "t2",
+                "error": "bad trace payload",
+            }],
+        })
+
+        candidates = [
+            _make_candidate(trace_id="t1", recording_id="r1"),
+            _make_candidate(trace_id="t2", recording_id="r2"),
+        ]
+        state_api.mark_traces_registered = AsyncMock(return_value=["t1"])
+
+        manager = RegistrationManager(
+            client_session=session,
+            state_api=state_api,
+            emitter=MagicMock(),
+            batch_size=10,
+        )
+        await manager._register_and_record_outcome(candidates)
+
+        state_api.mark_traces_registered.assert_awaited_once_with(["t1"])
+        state_api.emit_ready_for_upload.assert_awaited_once_with(
+            ["t1"],
+            {
+                "t1": {
+                    "JOINT_POSITIONS/joints/trace.json": "https://storage/sess/1",
+                },
+            },
+        )
+        state_api.mark_traces_registration_failed.assert_awaited_once()
+
+        call = state_api.mark_traces_registration_failed.await_args
+        assert call.kwargs["trace_ids"] == ["t2"]
+        assert "bad trace payload" in call.kwargs["error_message"]
