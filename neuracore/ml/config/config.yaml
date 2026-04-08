@@ -10,7 +10,7 @@ epochs: 100
 output_prediction_horizon: 100
 validation_split: 0.2
 logging_frequency: 50
-keep_last_n_checkpoints: 5 
+keep_last_n_checkpoints: 2 
 device: null  # e.g., "cuda:0", "mps", "cpu"
 
 # Batch size (can be "auto" for automatic tuning or an integer)
