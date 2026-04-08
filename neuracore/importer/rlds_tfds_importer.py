@@ -253,7 +253,9 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                 episode_label=episode_label,
             )
         if not self.dry_run:
-            nc.stop_recording(robot_name=self.robot_name, instance=self._worker_id)
+            nc.stop_recording(
+                robot_name=self.robot_name, instance=self._worker_id, wait=True
+            )
         self.logger.info("[%s] Completed %s", worker_label, episode_label)
 
     def _handle_step_error(

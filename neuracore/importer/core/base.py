@@ -779,7 +779,7 @@ class NeuracoreDatasetImporter(ABC):
             )
 
         # Pre-check: dry run to check for errors
-        precheck_items = items[:1]
+        precheck_items = [random.choice(items)]
         original_dry_run = self.dry_run
         self.dry_run = True
         self.pre_check = True
@@ -1032,6 +1032,8 @@ class NeuracoreDatasetImporter(ABC):
         try:
             self.import_item(item)
         except Exception as exc:  # noqa: BLE001 - keep traceback for summary
+            if not self.dry_run:
+                nc.cancel_recording(robot_name=self.robot_name, instance=worker_id)
             tb = traceback.format_exc()
             if self.skip_on_error == "episode":
                 error_queue.put(
