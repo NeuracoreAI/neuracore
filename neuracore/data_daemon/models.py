@@ -27,6 +27,8 @@ class CommandType(Enum):
     DATA_CHUNK = "data_chunk"
     TRACE_END = "trace_end"
     RECORDING_STOPPED = "recording_stopped"
+    BRIDGE_CUTOFF_QUERY = "bridge_cutoff_query"
+    BRIDGE_CUTOFF_QUERY_RESPONSE = "bridge_cutoff_query_response"
 
 
 class TraceStatus(str, Enum):

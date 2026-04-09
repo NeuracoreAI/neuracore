@@ -70,7 +70,7 @@ class DaemonServices:
         state_store = SqliteStateStore(db_path)
         await state_store.init_async_store()
         logger.debug("SqliteStateStore initialized at %s", db_path)
-        await state_store.reset_retrying_to_written()
+        await state_store.reset_writing_status_to_written()
 
         state_manager = StateManager(state_store, config, emitter=emitter)
         await state_manager.recover_startup_state()
@@ -130,7 +130,7 @@ class DaemonServices:
             logger.exception("Error shutting down UploadManager")
 
         try:
-            await self.state_store.reset_retrying_to_written()
+            await self.state_store.reset_writing_status_to_written()
             await self.state_store.close()
             logger.debug("SqliteStateStore closed")
         except Exception:

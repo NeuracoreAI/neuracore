@@ -248,6 +248,7 @@ class Daemon:
         try:
             while self._running:
                 self._finalize_closing_recordings()
+                self._drain_bridge_cutoff_queries()
                 raw = self.comm.receive_raw()
                 if raw:
                     self.process_raw_message(raw)
@@ -355,6 +356,83 @@ class Daemon:
             return
         self.handle_message(message)
 
+    def _emit_bridge_cutoff_observed(self) -> None:
+        """Emit events for producer cutoffs already observed by the bridge."""
+        with self._state_lock:
+            for recording_id, closing_state in self._closing_recordings.items():
+                if not closing_state.producer_stop_sequence_numbers:
+                    continue
+                for producer_id, cutoff_sequence_number in (
+                    closing_state.producer_stop_sequence_numbers.items()
+                ):
+                    if producer_id in closing_state.cutoff_observed_producers:
+                        continue
+                    last_sequence_number = self._producer_last_sequence_numbers.get(
+                        producer_id
+                    )
+                    if (
+                        last_sequence_number is None
+                        or last_sequence_number < cutoff_sequence_number
+                    ):
+                        continue
+                    closing_state.cutoff_observed_producers.add(producer_id)
+
+    def _drain_bridge_cutoff_queries(self) -> None:
+        """Reply to any pending producer bridge cutoff queries."""
+        while True:
+            message = self.comm.receive_query_message(timeout_ms=0)
+            if message is None:
+                return
+            self.comm.send_query_response(self._handle_bridge_cutoff_query(message))
+
+    def _handle_bridge_cutoff_query(self, message: MessageEnvelope) -> MessageEnvelope:
+        """Return whether the bridge has observed the queried cutoff."""
+        payload = message.payload.get("bridge_cutoff_query", {})
+        recording_id = payload.get("recording_id")
+        requested_cutoffs_raw = payload.get("producer_stop_sequence_numbers", {})
+        observed_producer_sequence_numbers: dict[str, int] = {}
+
+        if isinstance(requested_cutoffs_raw, dict) and recording_id is not None:
+            with self._state_lock:
+                closing_state = self._closing_recordings.get(str(recording_id))
+                observed_producers = (
+                    closing_state.cutoff_observed_producers
+                    if closing_state is not None
+                    else set()
+                )
+                for producer_id, cutoff_sequence_number_raw in (
+                    requested_cutoffs_raw.items()
+                ):
+                    try:
+                        cutoff_sequence_number = int(cutoff_sequence_number_raw)
+                    except (TypeError, ValueError):
+                        continue
+                    if cutoff_sequence_number <= 0:
+                        continue
+                    observed_sequence_number = int(
+                        self._producer_last_sequence_numbers.get(str(producer_id), 0)
+                    )
+                    if (
+                        str(producer_id) in observed_producers
+                        and observed_sequence_number >= cutoff_sequence_number
+                    ):
+                        observed_producer_sequence_numbers[str(producer_id)] = (
+                            observed_sequence_number
+                        )
+
+        return MessageEnvelope(
+            producer_id=None,
+            command=CommandType.BRIDGE_CUTOFF_QUERY_RESPONSE,
+            payload={
+                "bridge_cutoff_query_response": {
+                    "recording_id": recording_id,
+                    "observed_producer_sequence_numbers": (
+                        observed_producer_sequence_numbers
+                    ),
+                }
+            },
+        )
+
     # Producer
     def handle_message(self, message: MessageEnvelope) -> None:
         """Handles a ManagementMessage from a producer.
@@ -427,6 +505,7 @@ class Daemon:
                 cmd,
                 producer_id,
             )
+        self._emit_bridge_cutoff_observed()
 
     def _handle_open_ring_buffer(
         self, channel: ChannelState, message: MessageEnvelope
@@ -454,34 +533,6 @@ class Daemon:
         """
         payload = message.payload.get(message.command.value, {})
         size = payload.get("size", DEFAULT_RING_BUFFER_SIZE)
-        if channel.producer_id.startswith(f"{DataType.RGB_IMAGES.value}:"):
-            current_trace_id = channel.trace_id
-            pending_close_trace_id = (
-                channel.pending_close.trace_id
-                if channel.pending_close is not None
-                else None
-            )
-            ring_buffer = channel.ring_buffer
-            available_bytes = ring_buffer.available() if ring_buffer is not None else 0
-            has_pending_current_trace = False
-            reader = channel.reader
-            if reader is not None and current_trace_id is not None:
-                has_pending_current_trace = reader.has_pending_trace(current_trace_id)
-            if (
-                ring_buffer is not None
-                or current_trace_id is not None
-                or pending_close_trace_id is not None
-                or available_bytes > 0
-                or has_pending_current_trace
-            ):
-                logger.info(
-                    "RGB open_ring_buffer replacing existing state producer_id=%s current_trace_id=%s pending_close_trace_id=%s available_bytes=%s has_pending_current_trace=%s",
-                    channel.producer_id,
-                    current_trace_id,
-                    pending_close_trace_id,
-                    available_bytes,
-                    has_pending_current_trace,
-                )
         with channel.drain_lock:
             channel.set_ring_buffer(RingBuffer(size))
 
@@ -903,16 +954,6 @@ class Daemon:
         else:
             raise ValueError(f"Missing data_type in metadata for trace_id={trace_id}.")
 
-        if data_type == DataType.RGB_IMAGES:
-            logger.info(
-                "RGB final cutoff received producer_id=%s recording_id=%s trace_id=%s cutoff_sequence_number=%s last_sequence_number=%s",
-                channel.producer_id,
-                recording_id,
-                trace_id,
-                message.sequence_number,
-                channel.last_sequence_number,
-            )
-
         with channel.drain_lock:
             reader = channel.reader
 
@@ -950,12 +991,6 @@ class Daemon:
                 recording_id=str(recording_id),
                 data_type=data_type,
             )
-            logger.info(
-                "TRACE_END queued trace_id=%s recording_id=%s producer_id=%s",
-                trace_id,
-                recording_id,
-                channel.producer_id,
-            )
             self._finalize_pending_close(channel)
 
     def _trace_has_buffered_data(self, channel: ChannelState, trace_id: str) -> bool:
@@ -974,13 +1009,6 @@ class Daemon:
             return False
         if self._trace_has_buffered_data(channel, pending_close.trace_id):
             return False
-
-        logger.info(
-            "TRACE_END finalized trace_id=%s recording_id=%s producer_id=%s",
-            pending_close.trace_id,
-            pending_close.recording_id,
-            channel.producer_id,
-        )
 
         self._on_complete_message(
             channel=channel,
@@ -1047,6 +1075,8 @@ class Daemon:
                 producer_stop_sequence_numbers=producer_stop_sequence_numbers,
                 stop_requested_at=utc_now(),
             )
+
+        self._emit_bridge_cutoff_observed()
 
         self._emitter.emit(Emitter.STOP_RECORDING_REQUESTED, recording_id)
 

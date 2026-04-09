@@ -21,6 +21,7 @@ class RecordingContext:
         self.recording_id = recording_id
         self._comm = comm_manager or CommunicationsManager()
         self._comm.create_producer_socket()
+        self._comm.create_query_request_socket()
 
     def set_recording_id(self, recording_id: str | None) -> None:
         """Set or clear the recording identifier for this context."""
@@ -52,6 +53,17 @@ class RecordingContext:
     def close(self) -> None:
         """Close sockets and cleanup context resources owned by this instance."""
         self._comm.cleanup_producer()
+
+    def query_bridge_cutoff_observations(
+        self,
+        recording_id: str,
+        producer_stop_sequence_numbers: dict[str, int],
+    ) -> dict[str, int]:
+        """Return producer cutoffs already observed by the daemon bridge."""
+        return self._comm.query_bridge_cutoff_observations(
+            recording_id=recording_id,
+            producer_stop_sequence_numbers=producer_stop_sequence_numbers,
+        )
 
     def _send(self, command: CommandType, payload: dict | None = None) -> None:
         """Send a management message to the daemon.

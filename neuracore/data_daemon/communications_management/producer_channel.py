@@ -33,9 +33,9 @@ class ProducerChannel:
         recording_id: str | None = None,
     ) -> None:
         """Initialize the producer channel."""
+        self.channel_id = id or str(uuid.uuid4())
         self._comm = comm_manager or CommunicationsManager()
         self._comm.create_producer_socket()
-        self.channel_id = id or str(uuid.uuid4())
         self.chunk_size = chunk_size
         self.send_queue_maxsize = max(0, int(send_queue_maxsize))
         self.trace_id: str | None = None
@@ -52,7 +52,6 @@ class ProducerChannel:
         self._last_socket_sent_sequence_number = 0
         self._sequence_cv = threading.Condition()
         self._enqueue_lock = threading.Lock()
-
         self._sender_thread = threading.Thread(
             target=self._sender_loop, name="producer-channel-sender", daemon=True
         )
@@ -147,9 +146,6 @@ class ProducerChannel:
         """
         self.recording_id = recording_id
 
-    def _stop_recording(self) -> None:
-        self.recording_id = None
-
     def start_new_trace(self) -> None:
         """Start a new trace for the given recording."""
         if not self.recording_id:
@@ -172,17 +168,6 @@ class ProducerChannel:
                 }
             },
         )
-        if self.channel_id.startswith(f"{DataType.RGB_IMAGES.value}:"):
-            wait_until_sent_ok = self.wait_until_sequence_sent(sequence_number)
-            logger.info(
-                "RGB final cutoff sent_before_shutdown=%s channel_id=%s trace_id=%s recording_id=%s cutoff_sequence_number=%s last_sent=%s",
-                wait_until_sent_ok,
-                self.channel_id,
-                trace_id,
-                recording_id,
-                sequence_number,
-                self.get_last_sent_sequence_number(),
-            )
         self.trace_id = None
         self.recording_id = None
 
@@ -444,4 +429,3 @@ class ProducerChannel:
         associated resources.
         """
         self.end_trace()
-        self._stop_recording()

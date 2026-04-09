@@ -214,7 +214,7 @@ class FakeStateStore:
         self._traces_by_id[trace_id] = updated
         self._update_trace_in_recording(updated, updated.recording_id)
 
-    async def reset_retrying_to_written(self) -> int:
+    async def reset_writing_status_to_written(self) -> int:
         return 0
 
     async def record_error(

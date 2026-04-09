@@ -11,6 +11,9 @@ from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
 import neuracore as nc
 import cv2
 
+import logging
+logging.basicConfig(level=logging.INFO, force=True)
+
 
 def main(args):
     """Main function for running the robot demo and logging with neuracore."""

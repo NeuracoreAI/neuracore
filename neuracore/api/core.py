@@ -297,12 +297,17 @@ def stop_recording(
     Ends the current recording session for the specified robot. Optionally
     waits for all data streams to finish uploading before returning.
 
+    When ``wait=False``, this still waits until the local daemon has observed
+    the final producer cutoff sequences for the recording. It does not wait for
+    full backend registration/upload completion.
+
     Args:
         robot_name: Robot identifier. If not provided, uses the currently
             active robot from the global state.
         instance: Instance number of the robot for multi-instance scenarios.
-        wait: Whether to block until all data streams have finished uploading
-            to the backend storage.
+        wait: Whether to additionally block until all data streams have finished
+            uploading to the backend storage after the daemon has observed the
+            final producer cutoffs.
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided.
@@ -317,7 +322,10 @@ def stop_recording(
     recording_id = robot.get_current_recording_id()
     if not recording_id:
         raise ValueError("Recording_id is None, no current recording")
-    robot.stop_recording(recording_id)
+    producer_stop_sequence_numbers = robot.stop_recording(recording_id)
+    robot.wait_for_bridge_cutoff_observation(
+        recording_id, producer_stop_sequence_numbers
+    )
 
     if not wait:
         return

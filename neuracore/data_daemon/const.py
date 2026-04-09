@@ -25,6 +25,7 @@ DEFAULT_RING_BUFFER_SIZE = 4184304  # (4mb)
 
 BASE_DIR = Path("/tmp/ndd")
 SOCKET_PATH = BASE_DIR / "management.sock"
+BRIDGE_QUERY_SOCKET_PATH = BASE_DIR / "bridge_query.sock"
 
 # Uploads Configuration paths and files
 CONFIG_DIR = Path.home() / ".neuracore"

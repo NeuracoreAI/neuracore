@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
@@ -35,6 +36,8 @@ from .exceptions import RobotError, ValidationError
 from .utils.http_errors import extract_error_detail
 
 logger = logging.getLogger(__name__)
+_BRIDGE_CUTOFF_WAIT_TIMEOUT_S = 30.0
+_BRIDGE_CUTOFF_POLL_INTERVAL_S = 0.05
 
 
 @dataclass
@@ -298,7 +301,7 @@ class Robot:
                 detail = extract_error_detail(e.response)
             raise RobotError(f"Failed to start recording: {detail or str(e)}")
 
-    def stop_recording(self, recording_id: str) -> None:
+    def stop_recording(self, recording_id: str) -> dict[str, int]:
         """Stop an active recording session.
 
         Ends the specified recording session and stops data collection from
@@ -347,6 +350,61 @@ class Robot:
             )
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to stop recording: {str(e)}")
+
+        return producer_stop_sequence_numbers
+
+    def wait_for_bridge_cutoff_observation(
+        self,
+        recording_id: str,
+        producer_stop_sequence_numbers: dict[str, int],
+        *,
+        timeout_s: float = _BRIDGE_CUTOFF_WAIT_TIMEOUT_S,
+    ) -> None:
+        """Block until the daemon has observed every producer cutoff sequence."""
+        pending_cutoffs = {
+            str(producer_id): int(cutoff_sequence_number)
+            for producer_id, cutoff_sequence_number in producer_stop_sequence_numbers.items()
+        }
+        if not pending_cutoffs:
+            return
+        logged_rgb_producers: set[str] = set()
+        recording_context = self._get_daemon_recording_context()
+        deadline = time.monotonic() + timeout_s
+        while pending_cutoffs:
+            observed_sequences = recording_context.query_bridge_cutoff_observations(
+                recording_id,
+                pending_cutoffs,
+            )
+            observed_this_round = [
+                producer_id
+                for producer_id, cutoff_sequence_number in pending_cutoffs.items()
+                if observed_sequences.get(producer_id, 0) >= cutoff_sequence_number
+            ]
+
+            for producer_id in observed_this_round:
+                if (
+                    producer_id.startswith("RGB_IMAGES:")
+                    and producer_id not in logged_rgb_producers
+                ):
+                    logged_rgb_producers.add(producer_id)
+                    logger.info(
+                        "RGB bridge cutoff ack received producer_id=%s recording_id=%s observed_sequence_number=%s",
+                        producer_id,
+                        recording_id,
+                        observed_sequences.get(producer_id, 0),
+                    )
+
+            for producer_id in observed_this_round:
+                pending_cutoffs.pop(producer_id, None)
+
+            if not pending_cutoffs:
+                return
+            if time.monotonic() >= deadline:
+                raise RobotError(
+                    "Timed out waiting for daemon to observe final producer cutoffs "
+                    f"for recording {recording_id}: {pending_cutoffs}"
+                )
+            time.sleep(_BRIDGE_CUTOFF_POLL_INTERVAL_S)
 
     def _stop_all_streams(self) -> dict[str, int]:
         """Stop recording on all data streams for this robot instance."""
