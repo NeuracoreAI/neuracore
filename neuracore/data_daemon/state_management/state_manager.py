@@ -187,10 +187,12 @@ class StateManager:
 
     async def handle_is_connected(self, is_connected: bool) -> None:
         """Handle a connection status event from the data bridge."""
-        self._is_connected = is_connected
-        await self._reset_in_flight_resumable_states()
+        if is_connected and is_connected != self._is_connected:
+            await self._reset_in_flight_resumable_states()
 
-        if not is_connected and not self._config.offline:
+        self._is_connected = is_connected
+
+        if not is_connected or not self._config.offline:
             return
 
         await self._reconcile_failed_traces()
@@ -385,7 +387,7 @@ class StateManager:
         self, trace_id: str, recording_id: str, bytes_written: int
     ) -> None:
         """Handle TRACE_WRITTEN by marking a trace as written."""
-        trace = await self._store.upsert_trace_bytes(
+        await self._store.upsert_trace_bytes(
             trace_id=trace_id,
             recording_id=recording_id,
             bytes_written=bytes_written,
@@ -393,25 +395,19 @@ class StateManager:
         expected_trace_count_reported = await self._store.is_expected_trace_count_reported(recording_id)
         if not expected_trace_count_reported:
             return 
-        if not self._store.are_all_traces_written_for_recording(recording_id):
+        if not await self._store.are_all_traces_written_for_recording(recording_id):
             return
         await self._emit_progress_report_if_last_trace_written(recording_id)
-        await self._finalize_trace(trace)
 
     async def _handle_trace_write_progress(
         self, trace_id: str, recording_id: str, bytes_written: int
     ) -> None:
         """Handle TRACE_WRITE_PROGRESS by marking a trace as actively writing."""
-        try:
-            await self._store.upsert_trace_write_progress(
-                trace_id=trace_id,
-                recording_id=recording_id,
-                bytes_written=bytes_written,
-            )
-        except Exception:
-            logger.exception("Failed to process TRACE_WRITE_PROGRESS event")
-            raise
-        
+        await self._store.upsert_trace_write_progress(
+            trace_id=trace_id,
+            recording_id=recording_id,
+            bytes_written=bytes_written,
+        )
 
     async def handle_upload_started(self, trace_id: str) -> None:
         """Mark a trace as uploading once the uploader starts."""
@@ -497,7 +493,6 @@ class StateManager:
         self.expected_trace_count_reporting[recording_id] = True
         loop = asyncio.get_running_loop()
         auth = get_auth()
-
         try:
             try:
                 org_id = await loop.run_in_executor(None, get_current_org)

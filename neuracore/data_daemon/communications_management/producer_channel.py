@@ -163,9 +163,7 @@ class ProducerChannel:
         if trace_id is None or recording_id is None:
             logger.warning("Cannot end trace; missing trace_id or recording_id.")
             return
-        self.trace_id = None
-        self.recording_id = None
-        self._send(
+        sequence_number = self._send(
             CommandType.TRACE_END,
             {
                 "trace_end": {
@@ -174,6 +172,19 @@ class ProducerChannel:
                 }
             },
         )
+        if self.channel_id.startswith(f"{DataType.RGB_IMAGES.value}:"):
+            wait_until_sent_ok = self.wait_until_sequence_sent(sequence_number)
+            logger.info(
+                "RGB final cutoff sent_before_shutdown=%s channel_id=%s trace_id=%s recording_id=%s cutoff_sequence_number=%s last_sent=%s",
+                wait_until_sent_ok,
+                self.channel_id,
+                trace_id,
+                recording_id,
+                sequence_number,
+                self.get_last_sent_sequence_number(),
+            )
+        self.trace_id = None
+        self.recording_id = None
 
     def stop_producer_channel(self) -> None:
         """Stops the producer channel and cleans up any associated resources."""
@@ -395,7 +406,6 @@ class ProducerChannel:
             )
 
         for idx, chunk in enumerate(chunks):
-
             payload = DataChunkPayload(
                 channel_id=self.channel_id,
                 recording_id=recording_id,

@@ -706,6 +706,65 @@ def test_close_waits_for_sequence_cutoff_before_committing_stop(
         emitter.remove_listener(Emitter.STOP_RECORDING, on_stop_recording)
 
 
+def test_logs_when_producer_cutoff_is_observed(
+    loop_manager: EventLoopManager,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Daemon logs once when it observes a producer stop cutoff."""
+    import logging
+    from unittest.mock import MagicMock
+
+    from neuracore.data_daemon.communications_management.communications_manager import (
+        MessageEnvelope,
+    )
+    from neuracore.data_daemon.models import CommandType
+
+    mock_comm = MagicMock()
+    mock_rdm = MagicMock()
+    daemon = Daemon(comm_manager=mock_comm, recording_disk_manager=mock_rdm)
+
+    recording_id = "rec-cutoff-log"
+    producer_id = "RGB_IMAGES:angle:test-producer"
+
+    daemon._handle_recording_stopped(
+        MessageEnvelope(
+            producer_id=None,
+            command=CommandType.RECORDING_STOPPED,
+            payload={
+                "recording_stopped": {
+                    "recording_id": recording_id,
+                    "producer_stop_sequence_numbers": {producer_id: 5},
+                }
+            },
+        )
+    )
+
+    daemon.handle_message(
+        MessageEnvelope(
+            producer_id=producer_id,
+            command=CommandType.HEARTBEAT,
+            payload={},
+            sequence_number=5,
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        daemon._finalize_closing_recordings()
+
+    observed_logs = [
+        record.message
+        for record in caplog.records
+        if "Observed producer cutoff:" in record.message
+    ]
+    assert observed_logs == [
+        (
+            "Observed producer cutoff: recording_id=rec-cutoff-log "
+            "producer_id=RGB_IMAGES:angle:test-producer "
+            "cutoff_sequence_number=5 last_sequence_number=5"
+        )
+    ]
+
+
 def test_channel_expires_after_timeout_without_recording_stopped(
     emitter: Emitter,
 ) -> None:

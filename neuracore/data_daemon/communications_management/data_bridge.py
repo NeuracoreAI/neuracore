@@ -48,6 +48,7 @@ RecordingDiskManager = rdm_module.RecordingDiskManager
 logger = logging.getLogger(__name__)
 _BRIDGE_DRAIN_IDLE_SLEEP_S = 0.001
 _BRIDGE_FORWARD_WAIT_TIMEOUT_S = 0.05
+_CLOSING_DEBUG_LOG_INTERVAL_S = 5.0
 
 
 def _str_or_none(value: str | int | None) -> str | None:
@@ -68,6 +69,7 @@ class ChannelState:
     last_heartbeat: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     reader: ChannelMessageReader | None = None
     trace_id: str | None = None
+    pending_close: "PendingTraceClose | None" = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_sequence_number: int = 0
     opened_at: datetime | None = None
@@ -148,11 +150,25 @@ CommandHandler = Callable[[ChannelState, MessageEnvelope], None]
 
 
 @dataclass
+class PendingTraceEnd:
+    """Deferred trace-end state until the channel fully drains."""
+
+    trace_id: str
+    recording_id: str
+    data_type: DataType
+
+
+PendingTraceClose = PendingTraceEnd
+
+
+@dataclass
 class RecordingClosingState:
     """Recording-level stop/drain state."""
 
     producer_stop_sequence_numbers: dict[str, int]
     stop_requested_at: datetime
+    cutoff_observed_producers: set[str] = field(default_factory=set)
+    last_blocked_log_at: datetime | None = None
 
 
 class Daemon:
@@ -438,8 +454,36 @@ class Daemon:
         """
         payload = message.payload.get(message.command.value, {})
         size = payload.get("size", DEFAULT_RING_BUFFER_SIZE)
-
-        channel.set_ring_buffer(RingBuffer(size))
+        if channel.producer_id.startswith(f"{DataType.RGB_IMAGES.value}:"):
+            current_trace_id = channel.trace_id
+            pending_close_trace_id = (
+                channel.pending_close.trace_id
+                if channel.pending_close is not None
+                else None
+            )
+            ring_buffer = channel.ring_buffer
+            available_bytes = ring_buffer.available() if ring_buffer is not None else 0
+            has_pending_current_trace = False
+            reader = channel.reader
+            if reader is not None and current_trace_id is not None:
+                has_pending_current_trace = reader.has_pending_trace(current_trace_id)
+            if (
+                ring_buffer is not None
+                or current_trace_id is not None
+                or pending_close_trace_id is not None
+                or available_bytes > 0
+                or has_pending_current_trace
+            ):
+                logger.info(
+                    "RGB open_ring_buffer replacing existing state producer_id=%s current_trace_id=%s pending_close_trace_id=%s available_bytes=%s has_pending_current_trace=%s",
+                    channel.producer_id,
+                    current_trace_id,
+                    pending_close_trace_id,
+                    available_bytes,
+                    has_pending_current_trace,
+                )
+        with channel.drain_lock:
+            channel.set_ring_buffer(RingBuffer(size))
 
     # Consumer
     def _drain_channel_messages(self) -> bool:
@@ -455,13 +499,13 @@ class Daemon:
 
     def _drain_single_channel_messages(self, channel: ChannelState) -> bool:
         """Drain all currently-complete messages for a single channel."""
-        if channel.reader is None or channel.ring_buffer is None:
-            return False
-
         drained_any = False
         with channel.drain_lock:
+            reader = channel.reader
+            if reader is None or channel.ring_buffer is None:
+                return False
             while True:
-                result = channel.reader.poll_one()
+                result = reader.poll_one()
                 if result is None:
                     break
 
@@ -477,6 +521,9 @@ class Daemon:
                 self._on_complete_message(
                     channel, trace_id, data_type, payload, recording_id
                 )
+                drained_any = True
+
+            if self._finalize_pending_close(channel):
                 drained_any = True
 
         return drained_any
@@ -856,23 +903,101 @@ class Daemon:
         else:
             raise ValueError(f"Missing data_type in metadata for trace_id={trace_id}.")
 
-        # Flush any fully assembled payloads already in the channel ring buffer
-        # before sending the trace-end marker into the RDM queue.
-        # Otherwise the RDM can close the trace and drop trailing
-        # frames that were buffered but not yet drained.
-        self._drain_single_channel_messages(channel)
+        if data_type == DataType.RGB_IMAGES:
+            logger.info(
+                "RGB final cutoff received producer_id=%s recording_id=%s trace_id=%s cutoff_sequence_number=%s last_sequence_number=%s",
+                channel.producer_id,
+                recording_id,
+                trace_id,
+                message.sequence_number,
+                channel.last_sequence_number,
+            )
 
-        # Send final_chunk=True message to RDM to signal trace end
-        self._on_complete_message(
-            channel=channel,
-            trace_id=str(trace_id),
-            data_type=data_type,
-            data=b"",
-            recording_id=str(recording_id),
-            final_chunk=True,
+        with channel.drain_lock:
+            reader = channel.reader
+
+            # Flush any fully assembled payloads already in the channel ring buffer
+            # before sending the trace-end marker into the RDM queue.
+            # Otherwise the RDM can close the trace and drop trailing
+            # frames that were buffered but not yet drained.
+            if reader is not None and channel.ring_buffer is not None:
+                while True:
+                    result = reader.poll_one()
+                    if result is None:
+                        break
+
+                    drained_trace_id, drained_data_type, drained_payload = result
+                    with self._state_lock:
+                        drained_recording_id = self._trace_recordings.get(
+                            drained_trace_id
+                        )
+                    if not drained_recording_id:
+                        logger.warning(
+                            "No recording_id found for trace_id=%s, dropping message",
+                            drained_trace_id,
+                        )
+                        continue
+                    self._on_complete_message(
+                        channel,
+                        drained_trace_id,
+                        drained_data_type,
+                        drained_payload,
+                        drained_recording_id,
+                    )
+
+            channel.pending_close = PendingTraceClose(
+                trace_id=str(trace_id),
+                recording_id=str(recording_id),
+                data_type=data_type,
+            )
+            logger.info(
+                "TRACE_END queued trace_id=%s recording_id=%s producer_id=%s",
+                trace_id,
+                recording_id,
+                channel.producer_id,
+            )
+            self._finalize_pending_close(channel)
+
+    def _trace_has_buffered_data(self, channel: ChannelState, trace_id: str) -> bool:
+        """Return True when a trace still has unread or partially assembled data."""
+        reader = channel.reader
+        if reader is not None and reader.has_pending_trace(trace_id):
+            return True
+        if channel.ring_buffer is not None and channel.ring_buffer.available() > 0:
+            return channel.trace_id == trace_id
+        return False
+
+    def _finalize_pending_close(self, channel: ChannelState) -> bool:
+        """Finalize a pending channel close once buffered data has drained."""
+        pending_close = channel.pending_close
+        if pending_close is None:
+            return False
+        if self._trace_has_buffered_data(channel, pending_close.trace_id):
+            return False
+
+        logger.info(
+            "TRACE_END finalized trace_id=%s recording_id=%s producer_id=%s",
+            pending_close.trace_id,
+            pending_close.recording_id,
+            channel.producer_id,
         )
 
-        self._remove_trace(str(recording_id), str(trace_id))
+        self._on_complete_message(
+            channel=channel,
+            trace_id=pending_close.trace_id,
+            data_type=pending_close.data_type,
+            data=b"",
+            recording_id=pending_close.recording_id,
+            final_chunk=True,
+        )
+        self._remove_trace(
+            pending_close.recording_id,
+            pending_close.trace_id,
+        )
+        if channel.trace_id == pending_close.trace_id:
+            channel.trace_id = None
+        channel.pending_close = None
+        return True
 
     def _handle_recording_stopped(self, message: MessageEnvelope) -> None:
         """Handle a RECORDING_STOPPED message from a producer.
@@ -944,7 +1069,9 @@ class Daemon:
             spool_pending_count = self._bridge_spool.pending_count_for_recording(
                 recording_id
             )
-            cutoffs_reached = self._has_reached_sequence_cutoffs(closing_state)
+            cutoffs_reached = self._has_reached_sequence_cutoffs(
+                recording_id, closing_state
+            )
 
             # Not processed all chunks up to stop yet
             if not cutoffs_reached:
@@ -952,6 +1079,7 @@ class Daemon:
 
             if not traces and spool_pending_count == 0:
                 to_close.append(recording_id)
+                continue
 
         # Only stop recording (signal flush RDM) when all traces have been processed
         for recording_id in to_close:
@@ -961,7 +1089,7 @@ class Daemon:
             self._emitter.emit(Emitter.STOP_RECORDING, recording_id)
 
     def _has_reached_sequence_cutoffs(
-        self, closing_state: RecordingClosingState
+        self, recording_id: str, closing_state: RecordingClosingState
     ) -> bool:
         """Return True when all producer sequence cutoffs have been observed.
 
@@ -1020,6 +1148,11 @@ class Daemon:
 
             if not state.has_missed_heartbeat(now):
                 state.heartbeat_expired_at = None
+                continue
+
+            if state.pending_close is not None:
+                if state.heartbeat_expired_at is None:
+                    state.heartbeat_expired_at = now
                 continue
 
             if state.trace_id is None:

@@ -72,6 +72,10 @@ class ChannelMessageReader:
         self._ring_buffer = ring_buffer
         self._pending: dict[str, PartialMessage] = {}
 
+    def has_pending_trace(self, trace_id: str) -> bool:
+        """Return True when the trace still has partially assembled chunks."""
+        return trace_id in self._pending
+
     def poll_one(self) -> tuple[str, DataType, bytes] | None:
         """Try to read and assemble one complete message.
 

@@ -21,6 +21,7 @@ from neuracore.data_daemon.const import (
     TRACE_ID_FIELD_SIZE,
 )
 from neuracore.data_daemon.models import CommandType, CompleteMessage, MessageEnvelope
+from tests.unit.data_daemon.conftest import emitter
 
 
 @dataclass
@@ -329,7 +330,119 @@ class TestHandleEndTrace:
         assert "trace-456" not in daemon._trace_recordings
         assert "trace-456" not in daemon._trace_metadata
 
-    def test_handle_end_trace_skips_if_missing_trace_id(self, emitter) -> None:
+    def test_handle_end_trace_clears_active_channel_trace_id(self) -> None:
+        """TRACE_END should release channel trace ownership for the next trace."""
+        mock_comm = MockComm()
+        mock_rdm = MockRDM()
+
+        daemon = Daemon(
+            comm_manager=mock_comm,
+            recording_disk_manager=mock_rdm,
+        )
+
+        channel = ChannelState(producer_id="test-producer", trace_id="trace-456")
+        channel.set_ring_buffer(RingBuffer(4096))
+        daemon.channels["test-producer"] = channel
+
+        daemon._trace_metadata["trace-456"] = {"data_type": DataType.CUSTOM_1D.value}
+        daemon._trace_recordings["trace-456"] = "rec-123"
+        daemon._recording_traces["rec-123"] = {"trace-456"}
+
+        _write_chunk_to_ring_buffer(
+            ring=channel.ring_buffer,
+            trace_id="trace-456",
+            data_type=DataType.CUSTOM_1D,
+            chunk_index=0,
+            total_chunks=1,
+            data=b"payload",
+        )
+
+        message = MessageEnvelope(
+            producer_id="test-producer",
+            command=CommandType.TRACE_END,
+            payload={
+                "trace_end": {
+                    "trace_id": "trace-456",
+                    "recording_id": "rec-123",
+                }
+            },
+        )
+
+        daemon._handle_end_trace(channel, message)
+
+        _forward_all_spooled_messages(daemon)
+
+        assert channel.trace_id is None
+        assert [msg.trace_id for msg in mock_rdm.enqueued] == ["trace-456", "trace-456"]
+        assert mock_rdm.enqueued[0].final_chunk is False
+        assert mock_rdm.enqueued[1].final_chunk is True
+
+    def test_handle_end_trace_waits_for_partial_message_before_final_chunk(self) -> None:
+        """TRACE_END should wait for partial buffered data before removing trace."""
+        mock_comm = MockComm()
+        mock_rdm = MockRDM()
+
+        daemon = Daemon(
+            comm_manager=mock_comm,
+            recording_disk_manager=mock_rdm,
+        )
+
+        channel = ChannelState(producer_id="test-producer", trace_id="trace-456")
+        channel.set_ring_buffer(RingBuffer(4096))
+        daemon.channels["test-producer"] = channel
+
+        daemon._trace_metadata["trace-456"] = {"data_type": DataType.CUSTOM_1D.value}
+        daemon._trace_recordings["trace-456"] = "rec-123"
+        daemon._recording_traces["rec-123"] = {"trace-456"}
+
+        _write_chunk_to_ring_buffer(
+            ring=channel.ring_buffer,
+            trace_id="trace-456",
+            data_type=DataType.CUSTOM_1D,
+            chunk_index=0,
+            total_chunks=2,
+            data=b"hello ",
+        )
+
+        end_message = MessageEnvelope(
+            producer_id="test-producer",
+            command=CommandType.TRACE_END,
+            payload={
+                "trace_end": {
+                    "trace_id": "trace-456",
+                    "recording_id": "rec-123",
+                }
+            },
+        )
+
+        daemon._handle_end_trace(channel, end_message)
+        _forward_all_spooled_messages(daemon)
+
+        assert "trace-456" in daemon._trace_recordings
+        assert channel.pending_close is not None
+        assert channel.pending_close.trace_id == "trace-456"
+        assert channel.trace_id == "trace-456"
+        assert mock_rdm.enqueued == []
+
+        _write_chunk_to_ring_buffer(
+            ring=channel.ring_buffer,
+            trace_id="trace-456",
+            data_type=DataType.CUSTOM_1D,
+            chunk_index=1,
+            total_chunks=2,
+            data=b"world",
+        )
+
+        assert daemon._drain_single_channel_messages(channel) is True
+        _forward_all_spooled_messages(daemon)
+
+        assert "trace-456" not in daemon._trace_recordings
+        assert channel.pending_close is None
+        assert channel.trace_id is None
+        assert [msg.data for msg in mock_rdm.enqueued] == [b"hello world", b""]
+        assert [msg.final_chunk for msg in mock_rdm.enqueued] == [False, True]
+
+    def test_handle_end_trace_skips_if_missing_trace_id(self) -> None:
         """_handle_end_trace should skip if trace_id is missing."""
         daemon, _, mock_rdm = _create_daemon(emitter)
 
@@ -727,3 +840,31 @@ class TestRDMEnqueueErrorHandling:
             "trace-1",
             "trace-2",
         ]
+
+    def test_forward_spool_skips_missing_segment_file(self) -> None:
+        """Forward loop should tolerate startup/shutdown spool cleanup races."""
+        mock_comm = MockComm()
+        mock_rdm = MockRDM()
+
+        daemon = Daemon(
+            comm_manager=mock_comm,
+            recording_disk_manager=mock_rdm,
+        )
+
+        channel = ChannelState(producer_id="test-producer")
+
+        daemon._on_complete_message(
+            channel=channel,
+            trace_id="trace-missing",
+            data_type=DataType.CUSTOM_1D,
+            data=b"test-data",
+            recording_id="rec-123",
+            final_chunk=False,
+        )
+
+        segment_path = daemon._bridge_spool._segment_path(0)
+        segment_path.unlink()
+
+        assert daemon._forward_spool_once() is False
+        assert daemon._bridge_spool.snapshot()["queued_messages"] == 0
+        assert mock_rdm.enqueued == []

@@ -1407,7 +1407,6 @@ class SqliteStateStore(StateStore):
             return
         if current_total_bytes is None or int(current_total_bytes) <= 0:
             return
-
         await conn.execute(self._recording_row_insert_stmt(recording_id, now))
         await conn.execute(
             update(recordings)
@@ -1809,7 +1808,7 @@ class SqliteStateStore(StateStore):
                     select(traces)
                     .where(
                         traces.c.upload_status == TraceWriteStatus.WRITING,
-                        traces.c.trace_path.is_not(None),
+                        traces.c.path.is_not(None),
                     )
                 )
             ).mappings().all()

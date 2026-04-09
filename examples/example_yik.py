@@ -29,7 +29,7 @@ def main(args):
 
     if record:
         nc.create_dataset(
-            name="test_recording_23032026",
+            name="test_yik",
             description="This is an example dataset",
         )
         print("Created Dataset...")

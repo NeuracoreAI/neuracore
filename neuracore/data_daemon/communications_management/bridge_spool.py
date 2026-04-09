@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import struct
 import threading
 from collections import deque
@@ -17,6 +18,8 @@ from neuracore.data_daemon.models import CompleteMessage
 _HEADER_FORMAT = "<II"
 _HEADER_SIZE = struct.calcsize(_HEADER_FORMAT)
 _DEFAULT_SEGMENT_MAX_BYTES = 64 * 1024 * 1024
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -100,12 +103,18 @@ class BridgeSpool:
 
     def peek(self) -> CompleteMessage | None:
         """Return the oldest queued message without acknowledging it."""
-        with self._lock:
-            if not self._entries:
-                return None
-            entry = self._entries[0]
-
-        return self._read_entry(entry)
+        with self._not_empty:
+            while self._entries:
+                entry = self._entries[0]
+                try:
+                    return self._read_entry(entry)
+                except FileNotFoundError:
+                    logger.warning(
+                        "Bridge spool segment missing for segment_id=%s; dropping stale head entry",
+                        entry.segment_id,
+                    )
+                    self._drop_entry_locked(self._entries.popleft())
+            return None
 
     def ack(self) -> None:
         """Acknowledge the oldest queued message and advance the head."""
@@ -113,23 +122,7 @@ class BridgeSpool:
             if not self._entries:
                 return
 
-            entry = self._entries.popleft()
-            self._queued_messages = max(0, self._queued_messages - 1)
-            self._queued_bytes = max(0, self._queued_bytes - entry.length)
-
-            recording_count = self._pending_by_recording.get(entry.recording_id, 0) - 1
-            if recording_count > 0:
-                self._pending_by_recording[entry.recording_id] = recording_count
-            else:
-                self._pending_by_recording.pop(entry.recording_id, None)
-
-            segment_count = self._pending_by_segment.get(entry.segment_id, 0) - 1
-            if segment_count > 0:
-                self._pending_by_segment[entry.segment_id] = segment_count
-            else:
-                self._pending_by_segment.pop(entry.segment_id, None)
-                if entry.segment_id != self._current_segment_id:
-                    self._segment_path(entry.segment_id).unlink(missing_ok=True)
+            self._drop_entry_locked(self._entries.popleft())
 
     def pending_count_for_recording(self, recording_id: str) -> int:
         """Return the number of queued records for a recording."""
@@ -156,6 +149,26 @@ class BridgeSpool:
             self._pending_by_segment.clear()
         if self._root.exists():
             rmtree(self._root, ignore_errors=True)
+
+    def _drop_entry_locked(self, entry: _SpoolEntry) -> None:
+        """Remove one queued entry while holding the spool lock."""
+        self._queued_messages = max(0, self._queued_messages - 1)
+        self._queued_bytes = max(0, self._queued_bytes - entry.length)
+
+        recording_count = self._pending_by_recording.get(entry.recording_id, 0) - 1
+        if recording_count > 0:
+            self._pending_by_recording[entry.recording_id] = recording_count
+        else:
+            self._pending_by_recording.pop(entry.recording_id, None)
+
+        segment_count = self._pending_by_segment.get(entry.segment_id, 0) - 1
+        if segment_count > 0:
+            self._pending_by_segment[entry.segment_id] = segment_count
+            return
+
+        self._pending_by_segment.pop(entry.segment_id, None)
+        if entry.segment_id != self._current_segment_id:
+            self._segment_path(entry.segment_id).unlink(missing_ok=True)
 
     def _segment_path(self, segment_id: int) -> Path:
         return self._root / f"segment-{segment_id:06d}.spool"

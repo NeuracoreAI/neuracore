@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,8 @@ from neuracore.data_daemon.recording_encoding_disk_manager.encoding.video_trace 
 
 from ..core.trace_filesystem import _TraceFilesystem
 from ..core.types import _BatchJob, _TraceKey, _WriteState
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
