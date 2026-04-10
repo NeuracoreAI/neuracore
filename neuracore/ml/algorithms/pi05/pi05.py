@@ -272,12 +272,15 @@ class Pi05(NeuracoreModel):
             name="actions", statistics=output_stats
         )
 
-        # Setup RGB cameras
-        if DataType.RGB_IMAGES in self.input_data_types:
-            stats = cast(
+        # Track RGB camera statistics for optional image conditioning.
+        self.rgb_input_statistics: list[CameraDataStats] = (
+            cast(
                 list[CameraDataStats],
                 self.input_dataset_statistics[DataType.RGB_IMAGES],
             )
+            if DataType.RGB_IMAGES in self.input_data_types
+            else []
+        )
 
         # Build Pi05 config
         self.config = PI05Config(
@@ -388,36 +391,51 @@ class Pi05(NeuracoreModel):
             DataType.JOINT_TORQUES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         ]:
-            if data_type not in batch.inputs:
+            if data_type not in self.input_data_types:
                 continue
 
-            batched_nc_data = batch.inputs[data_type]
-            mask = batch.inputs_mask[data_type]
+            if data_type in batch.inputs:
+                batched_nc_data = batch.inputs[data_type]
+                mask = batch.inputs_mask[data_type]
 
-            if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
-                batched_gripper_data = cast(
-                    list[BatchedParallelGripperOpenAmountData], batched_nc_data
-                )
-                proprio_data = torch.cat(
-                    [bgd.open_amount for bgd in batched_gripper_data], dim=-1
-                )
-            elif data_type in [
-                DataType.JOINT_POSITIONS,
-                DataType.JOINT_VELOCITIES,
-                DataType.JOINT_TORQUES,
-            ]:
-                batched_joint_data = cast(list[BatchedJointData], batched_nc_data)
-                proprio_data = torch.cat(
-                    [bjd.value for bjd in batched_joint_data], dim=-1
-                )
+                if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                    batched_gripper_data = cast(
+                        list[BatchedParallelGripperOpenAmountData], batched_nc_data
+                    )
+                    proprio_data = torch.cat(
+                        [bgd.open_amount for bgd in batched_gripper_data], dim=-1
+                    )
+                elif data_type in [
+                    DataType.JOINT_POSITIONS,
+                    DataType.JOINT_VELOCITIES,
+                    DataType.JOINT_TORQUES,
+                ]:
+                    batched_joint_data = cast(list[BatchedJointData], batched_nc_data)
+                    proprio_data = torch.cat(
+                        [bjd.value for bjd in batched_joint_data], dim=-1
+                    )
 
-            last_proprio = proprio_data[:, -1, :]  # (B, horizon, num_features)
-            masked_proprio = last_proprio * mask
+                last_proprio = proprio_data[:, -1, :]  # (B, horizon, num_features)
+                masked_proprio = last_proprio * mask
+            else:
+                start_idx, end_idx = self.proprio_dims[data_type]
+                dim = end_idx - start_idx
+                masked_proprio = torch.zeros(
+                    (len(batch), dim),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
             proprio_list.append(masked_proprio)
 
-        # If no proprioception data is available, return None
-        # This allows the algorithm to work with visual-only inputs
+        # If no proprioception data is available, return a masked zero vector
+        # when state-dependent tokenization is enabled, otherwise None.
         if not proprio_list:
+            if self.discrete_state_input:
+                return torch.zeros(
+                    (len(batch), self.max_state_dim),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
             return None
 
         # Concatenate all proprio together: (B, total_proprio_dim)
@@ -453,6 +471,8 @@ class Pi05(NeuracoreModel):
             Tuple of (images, masks) where images is a list of tensors
             [B, C, H, W] per camera and masks is a list of [B] tensors.
         """
+        if DataType.RGB_IMAGES not in self.input_data_types:
+            return [], []
         if DataType.RGB_IMAGES not in batch.inputs:
             raise ValueError("RGB images are required but not provided")
 
@@ -499,12 +519,15 @@ class Pi05(NeuracoreModel):
             )
 
         task_texts: list[str]
-        if DataType.LANGUAGE not in batch.inputs:
+        if DataType.LANGUAGE not in self.input_data_types:
             task_texts = [""] * batch_size
         else:
-            batched_language_data = cast(
-                list[BatchedLanguageData], batch.inputs[DataType.LANGUAGE]
-            )
+            if DataType.LANGUAGE not in batch.inputs:
+                task_texts = [""] * batch_size
+            else:
+                batched_language_data = cast(
+                    list[BatchedLanguageData], batch.inputs[DataType.LANGUAGE]
+                )
             # Grab the last language group and last timestep.
             language_data = batched_language_data[-1]
             language_tokens = language_data.input_ids[:, -1, :]  # (B, L)
@@ -689,9 +712,9 @@ class Pi05(NeuracoreModel):
             inference_sample
         )
 
-        if set(batch.outputs.keys()) != set(self.output_data_types):
+        if not set(self.output_data_types).issubset(set(batch.outputs.keys())):
             raise ValueError(
-                "Batch outputs do not match model output configuration."
+                "Batch outputs do not include the model output configuration."
                 f" Expected {self.output_data_types}, got {list(batch.outputs.keys())}"
             )
 
