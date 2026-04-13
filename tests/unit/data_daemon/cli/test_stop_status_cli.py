@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+import typer
 
 import neuracore.data_daemon.config_manager.args_handler as ah
 
@@ -18,7 +18,7 @@ def test_stop_prints_not_running_if_no_pid(
     monkeypatch.setattr(ah, "get_daemon_db_path", lambda: db_path)
     monkeypatch.setattr(ah, "read_pid_from_file", lambda p: None)
 
-    ah.handle_stop(SimpleNamespace())
+    ah.run_stop()
     assert capsys.readouterr().out.strip() == "Daemon is not running."
 
 
@@ -35,12 +35,12 @@ def test_stop_cleans_up_if_pid_file_stale(
 
     called = {"shutdown": 0}
 
-    def fake_shutdown(pid_path, socket_paths, db_path):
+    def fake_shutdown(*, pid_path, socket_paths, db_path):
         called["shutdown"] += 1
 
     monkeypatch.setattr(ah, "shutdown", fake_shutdown)
 
-    ah.handle_stop(SimpleNamespace())
+    ah.run_stop()
     assert called["shutdown"] == 1
     assert capsys.readouterr().out.strip() == "Daemon stopped."
 
@@ -65,7 +65,7 @@ def test_stop_terminate_then_shutdown_happy_path(
 
     monkeypatch.setattr(ah, "shutdown", fake_shutdown)
 
-    ah.handle_stop(SimpleNamespace())
+    ah.run_stop()
     assert called["shutdown"] == 1
     assert capsys.readouterr().out.strip() == "Daemon stopped."
 
@@ -83,14 +83,13 @@ def test_stop_force_kill_path(
     monkeypatch.setattr(ah, "get_daemon_db_path", lambda: db_path)
     monkeypatch.setattr(ah, "read_pid_from_file", lambda p: 1234)
     monkeypatch.setattr(ah, "pid_is_running", lambda pid: True)
-
     monkeypatch.setattr(ah, "terminate_pid", lambda pid: True)
 
     calls = {"n": 0}
 
     def fake_wait_for_exit(pid: int, timeout_s: float) -> bool:
         calls["n"] += 1
-        return calls["n"] == 2  # first wait fails, second succeeds
+        return calls["n"] == 2
 
     monkeypatch.setattr(ah, "wait_for_exit", fake_wait_for_exit)
     monkeypatch.setattr(ah, "force_kill", lambda pid: True)
@@ -102,7 +101,7 @@ def test_stop_force_kill_path(
 
     monkeypatch.setattr(ah, "shutdown", fake_shutdown)
 
-    ah.handle_stop(SimpleNamespace())  # type: ignore[arg-type]
+    ah.run_stop()
 
     out = capsys.readouterr().out
     assert "Daemon stopped (forced)." in out
@@ -121,10 +120,10 @@ def test_stop_permission_denied_on_sigterm_exits_1(
     monkeypatch.setattr(ah, "pid_is_running", lambda pid: True)
     monkeypatch.setattr(ah, "terminate_pid", lambda pid: False)
 
-    with pytest.raises(SystemExit) as e:
-        ah.handle_stop(SimpleNamespace())
-    assert e.value.code == 1
-    assert "Permission denied sending SIGTERM to pid=123." in capsys.readouterr().out
+    with pytest.raises(typer.Exit) as e:
+        ah.run_stop()
+    assert e.value.exit_code == 1
+    assert "Permission denied sending SIGTERM to pid=123." in capsys.readouterr().err
 
 
 def test_status_prints_not_running_if_no_pid(
@@ -137,7 +136,7 @@ def test_status_prints_not_running_if_no_pid(
     monkeypatch.setattr(ah, "get_daemon_db_path", lambda: db_path)
     monkeypatch.setattr(ah, "read_pid_from_file", lambda p: None)
 
-    ah.handle_status(SimpleNamespace())
+    ah.run_status()
     assert capsys.readouterr().out.strip() == "Daemon not running."
 
 
@@ -161,7 +160,7 @@ def test_status_cleans_up_stale_client_state_when_pid_not_running(
         ah, "cleanup_stale_client_state", fake_cleanup_stale_client_state
     )
 
-    ah.handle_status(SimpleNamespace())
+    ah.run_status()
     assert called["cleanup"] == 1
     assert capsys.readouterr().out.strip() == "Daemon not running."
 
@@ -177,5 +176,5 @@ def test_status_prints_running_when_pid_is_running(
     monkeypatch.setattr(ah, "read_pid_from_file", lambda p: 456)
     monkeypatch.setattr(ah, "pid_is_running", lambda pid: True)
 
-    ah.handle_status(SimpleNamespace())
+    ah.run_status()
     assert capsys.readouterr().out.strip() == "Daemon running (pid=456)."

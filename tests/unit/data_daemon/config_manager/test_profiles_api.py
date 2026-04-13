@@ -37,9 +37,25 @@ def profiles_directory(temporary_home: Path) -> Path:
 def test_create_profile_creates_yaml_with_default_config(
     profile_manager: ProfileManager,
     profiles_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """create_profile should create a YAML file with default DaemonConfig values."""
+    """create_profile should create a YAML file with default config values."""
     profile_name = "recording"
+    expected_config = DaemonConfig(
+        storage_limit=123_456,
+        bandwidth_limit=7_890,
+        path_to_store_record="/tmp/test-recordings",
+        num_threads=2,
+        keep_wakelock_while_upload=False,
+        offline=False,
+        api_key=None,
+        current_org_id=None,
+    )
+
+    monkeypatch.setattr(
+        "neuracore.data_daemon.config_manager.profiles.build_default_daemon_config",
+        lambda: expected_config,
+    )
 
     profile_manager.create_profile(profile_name)
 
@@ -49,7 +65,6 @@ def test_create_profile_creates_yaml_with_default_config(
     with profile_path.open("r") as profile_file:
         stored_data = yaml.safe_load(profile_file)
 
-    expected_config = DaemonConfig()
     assert stored_data == expected_config.model_dump()
 
 

@@ -127,7 +127,7 @@ class ProfileManager:
                 If a profile with the same name already exists.
         """
         profile_path = self._get_profile_path(profile)
-        daemon_config = DaemonConfig()
+        daemon_config = build_default_daemon_config()
 
         try:
             with profile_path.open("x") as profile_file:
@@ -162,3 +162,20 @@ class ProfileManager:
             yaml.safe_dump(new_config.model_dump(), profile_file)
 
         return new_config
+
+    def delete_profile(self, profile_name: str) -> None:
+        """Delete an existing profile.
+
+        Args:
+            profile_name: Name of the profile to delete.
+
+        Raises:
+            ProfileNotFound:
+                If the profile YAML file does not exist.
+        """
+        profile_path = self._get_profile_path(profile_name)
+
+        try:
+            profile_path.unlink()
+        except FileNotFoundError as exc:
+            raise ProfileNotFound(f"Profile {profile_name!r} not found.") from exc

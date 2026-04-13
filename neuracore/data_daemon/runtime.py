@@ -14,7 +14,11 @@ from neuracore.data_daemon.communications_management.communications_manager impo
 from neuracore.data_daemon.communications_management.data_bridge import Daemon
 from neuracore.data_daemon.config_manager.config import ConfigManager
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
-from neuracore.data_daemon.config_manager.profiles import ProfileManager
+from neuracore.data_daemon.config_manager.profiles import (
+    ProfileAlreadyExist,
+    ProfileManager,
+)
+from neuracore.data_daemon.const import DEFAULT_PROFILE_NAME
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.lifecycle.daemon_os_control import acquire_pid_file
@@ -101,11 +105,27 @@ class DaemonRuntime:
             return False
 
     def _resolve_configuration(self) -> DaemonConfig | None:
+        """Resolve daemon configuration from profiles, env, and CLI."""
         try:
-            profile_name = os.environ.get("NEURACORE_DAEMON_PROFILE") or None
+            profile_name = (
+                os.environ.get("NEURACORE_DAEMON_PROFILE") or DEFAULT_PROFILE_NAME
+            )
+
             profile_manager = ProfileManager()
+
+            try:
+                profile_manager.create_profile(DEFAULT_PROFILE_NAME)
+            except ProfileAlreadyExist:
+                pass
+            except Exception:
+                logger.exception(
+                    "Failed to create default profile %r", DEFAULT_PROFILE_NAME
+                )
+
             config_manager = ConfigManager(profile_manager, profile=profile_name)
+
             config = config_manager.resolve_effective_config()
+
             logger.debug("Configuration resolved")
             return config
         except Exception:

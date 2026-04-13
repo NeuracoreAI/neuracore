@@ -2,6 +2,7 @@
 
 import shutil
 from pathlib import Path
+from typing import Any
 
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.const import (
@@ -63,6 +64,44 @@ def parse_bytes(value: int | str) -> int:
         raise ValueError(f"Unknown byte unit in value: {value!r}")
 
     return base_value * multiplier
+
+
+def extract_config_updates(raw_config_values: dict[str, Any]) -> dict[str, Any]:
+    """Extract and validate daemon config updates from raw config values."""
+    daemon_config_field_names = set(DaemonConfig.model_fields.keys())
+    config_updates = {
+        key: value
+        for key, value in raw_config_values.items()
+        if key in daemon_config_field_names and value is not None
+    }
+    return DaemonConfig.model_validate(config_updates).model_dump(exclude_none=True)
+
+
+def collect_config_updates(
+    *,
+    storage_limit: int | None,
+    bandwidth_limit: int | None,
+    path_to_store_record: str | None,
+    num_threads: int | None,
+    max_concurrent_uploads: int | None,
+    keep_wakelock_while_upload: bool | None,
+    offline: bool | None,
+    api_key: str | None,
+    current_org_id: str | None,
+) -> dict[str, Any]:
+    """Normalize CLI inputs into validated daemon config updates."""
+    raw_config_values = {
+        "storage_limit": storage_limit,
+        "bandwidth_limit": bandwidth_limit,
+        "path_to_store_record": path_to_store_record,
+        "num_threads": num_threads,
+        "max_concurrent_uploads": max_concurrent_uploads,
+        "keep_wakelock_while_upload": keep_wakelock_while_upload,
+        "offline": offline,
+        "api_key": api_key,
+        "current_org_id": current_org_id,
+    }
+    return extract_config_updates(raw_config_values)
 
 
 def calculate_storage_limit(record_dir: Path, storage_free_fraction: float) -> int:
