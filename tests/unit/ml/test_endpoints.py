@@ -4,6 +4,8 @@ import numpy as np
 import pytest
 import torch
 from neuracore_types import BatchedJointData, BatchedNCData, DataType
+from neuracore_types.endpoints.endpoint_requests import DeploymentRequest
+from neuracore_types.training.training import GPUType
 
 import neuracore as nc
 from neuracore.core.const import API_URL
@@ -22,15 +24,20 @@ FAKE_PREDICTED_DATA_JSON = {
     for k, v in FAKE_PREDICTED_DATA.items()
 }
 
-MODEL_INPUT_ORDER: dict[DataType, list[str]] = {
-    DataType.JOINT_POSITIONS: ["joint1", "joint2", "joint3"],
-    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
-    DataType.RGB_IMAGES: ["top_camera"],
+
+def _indexed_names(names: list[str] | tuple[str, ...]) -> dict[int, str]:
+    return {index: name for index, name in enumerate(names)}
+
+
+INPUT_EMBODIMENT_DESCRIPTION = {
+    DataType.JOINT_POSITIONS: _indexed_names(["joint1", "joint2", "joint3"]),
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: _indexed_names(["left_arm", "right_arm"]),
+    DataType.RGB_IMAGES: _indexed_names(["top_camera"]),
 }
 
-MODEL_OUTPUT_ORDER: dict[DataType, list[str]] = {
-    DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
-    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
+OUTPUT_EMBODIMENT_DESCRIPTION = {
+    DataType.JOINT_TARGET_POSITIONS: _indexed_names(["joint1", "joint2", "joint3"]),
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: _indexed_names(["left_arm", "right_arm"]),
 }
 
 
@@ -242,8 +249,8 @@ def test_connect_local_endpoint(
     nc.connect_robot("test_robot")
 
     local_endpoint = nc.policy_local_server(
-        model_input_order=MODEL_INPUT_ORDER,
-        model_output_order=MODEL_OUTPUT_ORDER,
+        input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+        output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
         model_file=mock_model_mar,
         port=port,
     )
@@ -289,12 +296,14 @@ def test_deploy_model(
     result = nc.deploy_model(
         job_id="job_123",
         name="test_endpoint",
-        model_input_order={
-            DataType.RGB_IMAGES: ["top_camera"],
-            DataType.JOINT_POSITIONS: ["joint1", "joint2", "joint3"],
+        input_embodiment_description={
+            DataType.RGB_IMAGES: _indexed_names(["top_camera"]),
+            DataType.JOINT_POSITIONS: _indexed_names(["joint1", "joint2", "joint3"]),
         },
-        model_output_order={
-            DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
+        output_embodiment_description={
+            DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                ["joint1", "joint2", "joint3"]
+            ),
         },
     )
 
@@ -303,6 +312,76 @@ def test_deploy_model(
     assert result["id"] == "endpoint_123"
     assert result["name"] == "test_endpoint"
     assert result["status"] == "deploying"
+    request_body = mock_auth_requests.request_history[-1].json()
+    assert request_body["input_embodiment_description"]["RGB_IMAGES"] == {
+        "0": "top_camera"
+    }
+    assert request_body["input_embodiment_description"]["JOINT_POSITIONS"] == {
+        "0": "joint1",
+        "1": "joint2",
+        "2": "joint3",
+    }
+    assert request_body["output_embodiment_description"]["JOINT_TARGET_POSITIONS"] == {
+        "0": "joint1",
+        "1": "joint2",
+        "2": "joint3",
+    }
+    assert request_body == DeploymentRequest(
+        training_id="job_123",
+        name="test_endpoint",
+        input_embodiment_description={
+            DataType.RGB_IMAGES: _indexed_names(["top_camera"]),
+            DataType.JOINT_POSITIONS: _indexed_names(["joint1", "joint2", "joint3"]),
+        },
+        output_embodiment_description={
+            DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                ["joint1", "joint2", "joint3"]
+            ),
+        },
+        config={"gpu_type": GPUType.NVIDIA_TESLA_V100},
+    ).model_dump(mode="json")
+
+
+def test_deploy_model_includes_ttl_and_default_config(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """Test model deployment serializes ttl and the default config."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/models/deploy",
+        json={"id": "endpoint_123", "name": "test_endpoint", "status": "deploying"},
+        status_code=200,
+    )
+
+    nc.deploy_model(
+        job_id="job_123",
+        name="test_endpoint",
+        input_embodiment_description={
+            DataType.RGB_IMAGES: _indexed_names(["top_camera"]),
+        },
+        output_embodiment_description={
+            DataType.JOINT_TARGET_POSITIONS: _indexed_names(["joint1"]),
+        },
+        ttl=1800,
+    )
+
+    request_body = mock_auth_requests.request_history[-1].json()
+    assert request_body["ttl"] == 1800
+    assert (
+        request_body["config"]
+        == DeploymentRequest(
+            training_id="job_123",
+            name="test_endpoint",
+            ttl=1800,
+            input_embodiment_description={
+                DataType.RGB_IMAGES: _indexed_names(["top_camera"]),
+            },
+            output_embodiment_description={
+                DataType.JOINT_TARGET_POSITIONS: _indexed_names(["joint1"]),
+            },
+            config={"gpu_type": GPUType.NVIDIA_TESLA_V100},
+        ).model_dump(mode="json")["config"]
+    )
 
 
 def test_get_endpoint_status(
@@ -370,12 +449,16 @@ def test_deploy_model_failure(
         nc.deploy_model(
             job_id="job_123",
             name="test_endpoint",
-            model_input_order={
-                DataType.RGB_IMAGES: ["top_camera"],
-                DataType.JOINT_POSITIONS: ["joint1", "joint2", "joint3"],
+            input_embodiment_description={
+                DataType.RGB_IMAGES: _indexed_names(["top_camera"]),
+                DataType.JOINT_POSITIONS: _indexed_names(
+                    ["joint1", "joint2", "joint3"]
+                ),
             },
-            model_output_order={
-                DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
+            output_embodiment_description={
+                DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                    ["joint1", "joint2", "joint3"]
+                ),
             },
         )
 
@@ -438,8 +521,8 @@ def test_connect_local_endpoint_with_train_run(
 
     # Connect using train run name
     local_endpoint = nc.policy_local_server(
-        model_input_order=MODEL_INPUT_ORDER,
-        model_output_order=MODEL_OUTPUT_ORDER,
+        input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+        output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
         train_run_name="test_run",
         port=port,
     )
@@ -478,8 +561,8 @@ def test_connect_local_endpoint_invalid_args(
         ValueError, match="Cannot specify both train_run_name and model_file"
     ):
         nc.policy_local_server(
-            model_input_order=MODEL_INPUT_ORDER,
-            model_output_order=MODEL_OUTPUT_ORDER,
+            input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+            output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
             model_file="model.nc.zip",
             train_run_name="test_run",
         )
@@ -489,5 +572,6 @@ def test_connect_local_endpoint_invalid_args(
         ValueError, match="Must specify either train_run_name or model_file"
     ):
         nc.policy_local_server(
-            model_input_order=MODEL_INPUT_ORDER, model_output_order=MODEL_OUTPUT_ORDER
+            input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+            output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
         )

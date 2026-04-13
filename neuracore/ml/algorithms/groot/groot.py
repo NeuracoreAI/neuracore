@@ -279,27 +279,28 @@ class Groot(NeuracoreModel):
             DataType.JOINT_TORQUES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         ]:
-            if data_type not in self.data_types:
+            if data_type not in self.input_data_types:
                 continue
             if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
                 stats = cast(
                     list[ParallelGripperOpenAmountDataStats],
-                    self.dataset_statistics[data_type],
+                    self.input_dataset_statistics[data_type],
                 )
                 combined_stats = DataItemStats()
                 for stat in stats:
                     combined_stats = combined_stats.concatenate(stat.open_amount)
             else:
-                stats = cast(list[JointDataStats], self.dataset_statistics[data_type])
+                stats = cast(
+                    list[JointDataStats], self.input_dataset_statistics[data_type]
+                )
                 combined_stats = DataItemStats()
                 for stat in stats:
                     combined_stats = combined_stats.concatenate(stat.value)
 
-            if data_type in self.input_data_types:
-                proprio_stats.append(combined_stats)
-                dim = len(combined_stats.mean)
-                self.proprio_dims[data_type] = (current_dim, current_dim + dim)
-                current_dim += dim
+            proprio_stats.append(combined_stats)
+            dim = len(combined_stats.mean)
+            self.proprio_dims[data_type] = (current_dim, current_dim + dim)
+            current_dim += dim
 
         self.actual_state_dim = current_dim
         assert self.actual_state_dim > 0, (
@@ -318,9 +319,11 @@ class Groot(NeuracoreModel):
         self.output_dims: dict[DataType, tuple[int, int]] = {}
         current_output_dim = 0
 
-        for data_type in self.output_data_types:
+        for data_type in self.ordered_output_data_types:
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
-                stats = cast(list[JointDataStats], self.dataset_statistics[data_type])
+                stats = cast(
+                    list[JointDataStats], self.output_dataset_statistics[data_type]
+                )
                 combined_stats = DataItemStats()
                 for stat in stats:
                     combined_stats = combined_stats.concatenate(stat.value)
@@ -330,7 +333,7 @@ class Groot(NeuracoreModel):
             ]:
                 stats = cast(
                     list[ParallelGripperOpenAmountDataStats],
-                    self.dataset_statistics[data_type],
+                    self.output_dataset_statistics[data_type],
                 )
                 combined_stats = DataItemStats()
                 for stat in stats:
@@ -697,7 +700,7 @@ class Groot(NeuracoreModel):
         }
 
         current_list = []
-        for data_type in self.output_data_types:
+        for data_type in self.ordered_output_data_types:
             input_type = output_to_input[data_type]
             # The input may carry more joints than the output targets (e.g.
             # input JOINT_POSITIONS has 16 dims but output JOINT_TARGET_POSITIONS
@@ -819,13 +822,13 @@ class Groot(NeuracoreModel):
 
         # -- 6. Pack into Neuracore output format --
         output: dict[DataType, list[BatchedNCData]] = {}
-        for data_type in self.output_data_types:
+        for data_type in self.ordered_output_data_types:
             start_idx, end_idx = self.output_dims[data_type]
             dt_preds = absolute_actions[:, :, start_idx:end_idx]
 
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 batched_outputs: list[BatchedNCData] = []
-                for i, _ in enumerate(self.dataset_statistics[data_type]):
+                for i, _ in enumerate(self.output_dataset_statistics[data_type]):
                     batched_outputs.append(
                         BatchedJointData(value=dt_preds[:, :, i : i + 1])
                     )
@@ -835,7 +838,7 @@ class Groot(NeuracoreModel):
                 DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             ]:
                 batched_outputs = []
-                for i, _ in enumerate(self.dataset_statistics[data_type]):
+                for i, _ in enumerate(self.output_dataset_statistics[data_type]):
                     batched_outputs.append(
                         BatchedParallelGripperOpenAmountData(
                             open_amount=dt_preds[:, :, i : i + 1]
@@ -899,7 +902,7 @@ class Groot(NeuracoreModel):
 
         # -- 3. Build targets (deltas or absolute) -> normalize -> pad --
         action_targets = []
-        for data_type in self.output_data_types:
+        for data_type in self.ordered_output_data_types:
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 batched = cast(list[BatchedJointData], batch.outputs[data_type])
                 action_targets.extend([b.value for b in batched])

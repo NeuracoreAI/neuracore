@@ -4,6 +4,7 @@ import logging
 import tempfile
 from collections import defaultdict
 from pathlib import Path
+from typing import cast
 
 import requests
 import torch
@@ -11,6 +12,7 @@ from neuracore_types import (
     DATA_TYPE_TO_BATCHED_NC_DATA_CLASS,
     BatchedNCData,
     DataType,
+    EmbodimentDescription,
     SynchronizedPoint,
 )
 
@@ -24,6 +26,16 @@ from neuracore.ml.utils.nc_archive import load_model_from_nc_archive
 logger = logging.getLogger(__name__)
 
 
+def _indexed_names_from_description(
+    output_names: list[str] | dict[int, str] | dict[str, str],
+) -> list[tuple[int, str]]:
+    """Normalize output names to explicit tensor index/name pairs."""
+    if isinstance(output_names, list):
+        return list(enumerate(output_names))
+    indexed_output_names = cast(dict[int | str, str], output_names)
+    return sorted((int(index), name) for index, name in indexed_output_names.items())
+
+
 class PolicyInference:
     """PolicyInference class for handling model inference.
 
@@ -34,8 +46,8 @@ class PolicyInference:
 
     def __init__(
         self,
-        model_input_order: dict[DataType, list[str]],
-        model_output_order: dict[DataType, list[str]],
+        input_embodiment_description: EmbodimentDescription,
+        output_embodiment_description: EmbodimentDescription,
         model_file: Path,
         org_id: str,
         job_id: str | None = None,
@@ -44,8 +56,8 @@ class PolicyInference:
         """Initialize the policy inference.
 
         Args:
-            model_input_order: Input mapping per supported robot type.
-            model_output_order: Output mapping per supported robot type.
+            input_embodiment_description: Input mapping per supported robot type.
+            output_embodiment_description: Output mapping per supported robot type.
             model_file: Path to the model file to load.
             org_id: ID of the organization for loading checkpoints.
             job_id: ID of the training job for loading checkpoints.
@@ -56,10 +68,12 @@ class PolicyInference:
         self.job_id = job_id
         self.model = load_model_from_nc_archive(model_file, device=device)
         self.model.eval()
-        self.dataset_statistics = self.model.model_init_description.dataset_statistics
+        self.input_dataset_statistics = (
+            self.model.model_init_description.input_dataset_statistics
+        )
         self.device = torch.device(device) if device else get_default_device()
-        self.model_input_order = model_input_order
-        self.model_output_order = model_output_order
+        self.input_embodiment_description = input_embodiment_description
+        self.output_embodiment_description = output_embodiment_description
         self.prediction_horizon = (
             self.model.model_init_description.output_prediction_horizon
         )
@@ -84,7 +98,12 @@ class PolicyInference:
         for data_type in sync_point.data.keys():
             inputs[data_type] = []
             max_items_for_this_data_type = len(sync_point.data[data_type])
-            max_items_trained_on = len(self.dataset_statistics[data_type])
+            trained_statistics = self.input_dataset_statistics.get(data_type)
+            if trained_statistics is None:
+                raise ValueError(
+                    f"Model was not trained with input statistics for {data_type}."
+                )
+            max_items_trained_on = len(trained_statistics)
             if max_items_for_this_data_type > max_items_trained_on:
                 raise ValueError(
                     f"Received {max_items_for_this_data_type} items for data type "
@@ -170,21 +189,29 @@ class PolicyInference:
 
         # Map outputs to SynchronizedPoint fields based on output_mapping
         for data_type, list_of_batched_ncdata in batch_output.items():
+            output_names = self.output_embodiment_description.get(data_type)
 
             # Check that there are enough output names for the data type
-            if data_type not in self.model_output_order:
+            if output_names is None:
                 raise ValueError(f"DataType {data_type} not in output configuration.")
-            # There can be more tensors than names due to
-            # output padding (multi robot training)
-            if len(list_of_batched_ncdata) < len(self.model_output_order[data_type]):
+            indexed_output_names = _indexed_names_from_description(output_names)
+            required_tensor_count = (
+                max(index for index, _ in indexed_output_names) + 1
+                if indexed_output_names
+                else 0
+            )
+            # Dict-backed specs may be sparse, so preserve their absolute tensor
+            # indices instead of collapsing them into dense positions.
+            if len(list_of_batched_ncdata) < required_tensor_count:
                 raise ValueError(
                     f"Not enough output names for DataType {data_type}. "
-                    f"Expected at least {len(self.model_output_order[data_type])}, "
+                    "Expected at least "
+                    f"{required_tensor_count}, "
                     f"but got {len(list_of_batched_ncdata)}."
                 )
 
-            for tensor_idx, batched_nc_data in enumerate(list_of_batched_ncdata):
-                name_of_tensor = self.model_output_order[data_type][tensor_idx]
+            for tensor_idx, name_of_tensor in indexed_output_names:
+                batched_nc_data = list_of_batched_ncdata[tensor_idx]
                 outputs[data_type][name_of_tensor] = batched_nc_data
 
         return outputs
@@ -201,9 +228,11 @@ class PolicyInference:
         Raises:
             ValueError: If the sync point does not contain required data types.
         """
-        input_robot_data_spec = self.model.model_init_description.input_data_types
+        input_cross_embodiment_description = (
+            self.model.model_init_description.input_data_types
+        )
         missing_data_types = []
-        for data_type in input_robot_data_spec:
+        for data_type in input_cross_embodiment_description:
             # Convert string to DataType enum if needed
             # (can happen after JSON deserialization)
             if isinstance(data_type, str):
@@ -228,7 +257,7 @@ class PolicyInference:
         Returns:
             SynchronizedPoint with model predictions filled in for each robot.
         """
-        sync_point = sync_point.order(self.model_input_order)
+        sync_point = sync_point.order(self.input_embodiment_description)
         self._validate_input_sync_point(sync_point)
         batch = self._preprocess(sync_point)
         with torch.no_grad():

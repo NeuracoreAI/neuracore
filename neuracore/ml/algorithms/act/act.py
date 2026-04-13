@@ -122,11 +122,11 @@ class ACT(NeuracoreModel):
             DataType.JOINT_TORQUES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         ]:
-            if data_type in self.data_types:
+            if data_type in self.input_data_types:
                 if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
                     stats = cast(
                         list[ParallelGripperOpenAmountDataStats],
-                        self.dataset_statistics[data_type],
+                        self.input_dataset_statistics[data_type],
                     )
                     combined_stats = DataItemStats()
                     for stat in stats:
@@ -134,18 +134,17 @@ class ACT(NeuracoreModel):
                     data_stats[data_type] = combined_stats
                 else:
                     stats = cast(
-                        list[JointDataStats], self.dataset_statistics[data_type]
+                        list[JointDataStats], self.input_dataset_statistics[data_type]
                     )
                     combined_stats = DataItemStats()
                     for stat in stats:
                         combined_stats = combined_stats.concatenate(stat.value)
                     data_stats[data_type] = combined_stats
 
-                if data_type in self.input_data_types:
-                    proprio_stats.append(combined_stats)
-                    dim = len(combined_stats.mean)
-                    self.proprio_dims[data_type] = (current_dim, current_dim + dim)
-                    current_dim += dim
+                proprio_stats.append(combined_stats)
+                dim = len(combined_stats.mean)
+                self.proprio_dims[data_type] = (current_dim, current_dim + dim)
+                current_dim += dim
 
         # State embedding
         state_input_dim = current_dim
@@ -156,11 +155,13 @@ class ACT(NeuracoreModel):
         # Setup output data
         self.max_output_size = 0
         output_stats = []
-        for data_type in self.output_data_types:
+        self.output_dims: dict[DataType, tuple[int, int]] = {}
+        current_output_dim = 0
+        for data_type in self.ordered_output_data_types:
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 stats = cast(
                     list[JointDataStats],
-                    self.dataset_statistics[data_type],
+                    self.output_dataset_statistics[data_type],
                 )
                 combined_stats = DataItemStats()
                 for stat in stats:
@@ -171,7 +172,7 @@ class ACT(NeuracoreModel):
             ]:
                 stats = cast(
                     list[ParallelGripperOpenAmountDataStats],
-                    self.dataset_statistics[data_type],
+                    self.output_dataset_statistics[data_type],
                 )
                 combined_stats = DataItemStats()
                 for stat in stats:
@@ -181,7 +182,13 @@ class ACT(NeuracoreModel):
 
             data_stats[data_type] = combined_stats
             output_stats.append(combined_stats)
-            self.max_output_size += len(combined_stats.mean)
+            dim = len(combined_stats.mean)
+            self.output_dims[data_type] = (
+                current_output_dim,
+                current_output_dim + dim,
+            )
+            current_output_dim += dim
+            self.max_output_size += dim
 
         # Action embedding
         self.action_embed = nn.Linear(self.max_output_size, hidden_dim)
@@ -201,7 +208,8 @@ class ACT(NeuracoreModel):
         # Vision components
         if DataType.RGB_IMAGES in self.input_data_types:
             stats = cast(
-                list[CameraDataStats], self.dataset_statistics[DataType.RGB_IMAGES]
+                list[CameraDataStats],
+                self.input_dataset_statistics[DataType.RGB_IMAGES],
             )
             max_cameras = len(stats)
             self.image_encoders = nn.ModuleList()
@@ -616,15 +624,18 @@ class ACT(NeuracoreModel):
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
 
         start_slice_idx = 0
-        for data_type in self.output_data_types:
-            end_slice_idx = start_slice_idx + len(self.dataset_statistics[data_type])
+        for data_type in self.ordered_output_data_types:
+            output_width = (
+                self.output_dims[data_type][1] - self.output_dims[data_type][0]
+            )
+            end_slice_idx = start_slice_idx + output_width
             dt_preds = predictions[
                 :, :, start_slice_idx:end_slice_idx
             ]  # (B, T, dt_size)
 
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 batched_outputs = []
-                for i in range(len(self.dataset_statistics[data_type])):
+                for i in range(output_width):
                     joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
                     batched_outputs.append(BatchedJointData(value=joint_preds))
                 output_tensors[data_type] = batched_outputs
@@ -633,7 +644,7 @@ class ACT(NeuracoreModel):
                 DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             ]:
                 batched_outputs = []
-                for i in range(len(self.dataset_statistics[data_type])):
+                for i in range(output_width):
                     gripper_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
                     batched_outputs.append(
                         BatchedParallelGripperOpenAmountData(open_amount=gripper_preds)
@@ -666,7 +677,7 @@ class ACT(NeuracoreModel):
 
         # Extract target actions
         action_targets = []
-        for data_type in self.output_data_types:
+        for data_type in self.ordered_output_data_types:
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 batched_joints = cast(list[BatchedJointData], batch.outputs[data_type])
                 action_targets.extend([bjd.value for bjd in batched_joints])

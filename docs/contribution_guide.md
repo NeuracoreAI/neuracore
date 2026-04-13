@@ -65,14 +65,15 @@ class MyCustomAlgorithm(NeuracoreModel):
         self.lr = lr
 
         # Access data types and statistics from base class
-        # self.input_data_types, self.output_data_types, self.dataset_statistics
+        # self.input_data_types, self.output_data_types,
+        # self.input_dataset_statistics, and self.output_dataset_statistics
         # are available after calling super().__init__()
 
         # Stats for inputs
         joint_stats = DataItemStats()
         for stat in cast(
             list[JointDataStats],
-            self.dataset_statistics.get(DataType.JOINT_POSITIONS, []),
+            self.input_dataset_statistics.get(DataType.JOINT_POSITIONS, []),
         ):
             joint_stats = joint_stats.concatenate(stat.value)
         if len(joint_stats.mean) == 0:
@@ -83,7 +84,9 @@ class MyCustomAlgorithm(NeuracoreModel):
         target_stats = DataItemStats()
         for stat in cast(
             list[JointDataStats],
-            self.dataset_statistics.get(DataType.JOINT_TARGET_POSITIONS, []),
+            self.output_dataset_statistics.get(
+                DataType.JOINT_TARGET_POSITIONS, []
+            ),
         ):
             target_stats = target_stats.concatenate(stat.value)
         if len(target_stats.mean) == 0:
@@ -141,7 +144,9 @@ class MyCustomAlgorithm(NeuracoreModel):
         # Format output as dict[DataType, list[BatchedNCData]]
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
         batched_outputs = []
-        for i in range(len(self.dataset_statistics[DataType.JOINT_TARGET_POSITIONS])):
+        for i in range(
+            len(self.output_dataset_statistics[DataType.JOINT_TARGET_POSITIONS])
+        ):
             joint_preds = predictions[:, :, i : i + 1]  # (B, T, 1)
             batched_outputs.append(BatchedJointData(value=joint_preds))
         output_tensors[DataType.JOINT_TARGET_POSITIONS] = batched_outputs
@@ -361,4 +366,3 @@ This human-written summary is included at the top of the GitHub release notes. I
    - Publish to PyPI
    - Create a GitHub release with changelog
    - Tag the release
-

@@ -4,15 +4,18 @@ from the Neuracore platform."""
 import argparse
 
 from common.base_env import BimanualViperXTask
-from neuracore_types import DataSpec, DataType, RobotDataSpec
+from neuracore_types import CrossEmbodimentDescription, DataType, EmbodimentDescription
 
 import neuracore as nc
 
-MODEL_OUTPUT_ORDER: DataSpec = {
-    DataType.JOINT_TARGET_POSITIONS: (
-        BimanualViperXTask.LEFT_ARM_JOINT_NAMES
-        + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
-    ),
+OUTPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
+    DataType.JOINT_TARGET_POSITIONS: {
+        i: name
+        for i, name in enumerate(
+            BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+            + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+        )
+    },
 }
 
 
@@ -100,14 +103,16 @@ if __name__ == "__main__":
         "output_prediction_horizon": args.output_prediction_horizon,
     }
 
-    input_robot_data_spec: RobotDataSpec = {
+    input_cross_embodiment_description: CrossEmbodimentDescription = {
         robot_id: {
-            nc.DataType.RGB_IMAGES: ["angle"],
+            nc.DataType.RGB_IMAGES: {
+                0: "angle",
+            },
         }
     }
 
-    output_robot_data_spec: RobotDataSpec = {
-        robot_id: MODEL_OUTPUT_ORDER,
+    output_cross_embodiment_description: CrossEmbodimentDescription = {
+        robot_id: OUTPUT_EMBODIMENT_DESCRIPTION,
     }
 
     job_data = nc.start_training_run(
@@ -118,8 +123,8 @@ if __name__ == "__main__":
         algorithm_name=algorithm_name,
         dataset_name=dataset_name,
         algorithm_config=algorithm_config,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
     )
 
     print("Training job started")

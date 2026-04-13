@@ -13,6 +13,7 @@ from neuracore.core.const import API_URL
 from neuracore.core.data.synced_recording import SynchronizedRecording
 
 
+@pytest.mark.usefixtures("mock_login")
 class TestSynchronizedRecording:
     """Tests for the SynchronizedRecording class."""
 
@@ -51,7 +52,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_union=None,
         )
 
     def test_init(self, synced_recording: SynchronizedRecording, dataset_mock):
@@ -61,14 +62,14 @@ class TestSynchronizedRecording:
         assert synced_recording.frequency == 30
         assert synced_recording.robot_id == "robot1"
         assert synced_recording.instance == 1
-        assert synced_recording.robot_data_spec is None
+        assert synced_recording.cross_embodiment_union is None
         assert synced_recording._iter_idx == 0
 
     def test_init_with_data_types(self, dataset_mock, mock_data_requests):
         """Test initialization with specific data types."""
         from neuracore_types import DataType
 
-        robot_data_spec = {
+        cross_embodiment_union = {
             "robot1": {
                 DataType.RGB_IMAGES: [],
                 DataType.DEPTH_IMAGES: [],
@@ -81,10 +82,10 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=robot_data_spec,
+            cross_embodiment_union=cross_embodiment_union,
         )
 
-        assert synced.robot_data_spec == robot_data_spec
+        assert synced.cross_embodiment_union == cross_embodiment_union
 
     def test_get_synced_data(
         self, synced_recording: SynchronizedRecording, synced_data
@@ -176,7 +177,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_union=None,
         )
 
         frames = synced[0:5:2]
@@ -234,11 +235,7 @@ class TestSynchronizedRecording:
         """Test that cached videos are reused on subsequent access."""
         # Create cache directory and add a fake cached frame
         cache_path = (
-            dataset_mock.cache_dir
-            / "rec1"
-            / "30Hz"
-            / DataType.RGB_IMAGES.value
-            / "cam1"
+            dataset_mock.cache_dir / "rec1" / DataType.RGB_IMAGES.value / "cam1"
         )
         cache_path.mkdir(parents=True, exist_ok=True)
 
@@ -253,7 +250,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_union=None,
         )
 
         sync_point = cast(SynchronizedPoint, synced[0])
@@ -273,7 +270,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_union=None,
             prefetch_videos=True,
         )
 
@@ -290,7 +287,7 @@ class TestSynchronizedRecording:
                 robot_id="robot1",
                 instance=1,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_union=None,
                 prefetch_videos=True,
             )
 
@@ -311,7 +308,6 @@ class TestSynchronizedRecording:
     def test_rgb_to_depth_storage_called_when_retrieving_frame(
         self,
         dataset_mock,
-        mock_login,
         mock_data_requests,
         mock_wget_download,
         tmp_path,
@@ -335,7 +331,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_union=None,
         )
 
         with patch(
@@ -378,10 +374,10 @@ class TestSynchronizedRecording:
         """Test that wget progress is suppressed by default."""
         assert synced_recording._suppress_wget_progress is True
 
-    def test_different_frequencies_different_cache(
+    def test_different_frequencies_are_stored_on_instances(
         self, dataset_mock, mock_data_requests, mock_wget_download
     ):
-        """Test that different frequencies use different cache directories."""
+        """Test that different instances can retain different frequencies."""
         synced_30 = SynchronizedRecording(
             dataset=dataset_mock,
             recording_id="rec1",
@@ -389,7 +385,7 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=30,
-            robot_data_spec=None,
+            cross_embodiment_union=None,
         )
 
         synced_60 = SynchronizedRecording(
@@ -399,18 +395,12 @@ class TestSynchronizedRecording:
             robot_id="robot1",
             instance=1,
             frequency=60,
-            robot_data_spec=None,
+            cross_embodiment_union=None,
         )
 
-        # Trigger cache creation
-        _ = synced_30[0]
-        _ = synced_60[0]
-
-        cache_30 = dataset_mock.cache_dir / "rec1"
-        cache_60 = dataset_mock.cache_dir / "rec1"
-
-        assert cache_30.exists()
-        assert cache_60.exists()
+        assert synced_30.frequency == 30
+        assert synced_60.frequency == 60
+        assert synced_30.frequency != synced_60.frequency
 
     def test_create_decoding_lock_creates_file(self, synced_recording, tmp_path):
         """_create_decoding_lock should create lock file when none exists."""

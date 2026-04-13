@@ -34,7 +34,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_union=None,
                 prefetch_videos=False,
             )
             mock_prefetch.assert_called_once()
@@ -49,14 +49,14 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec={
+                cross_embodiment_union={
                     "robot_id": {DataType.RGB_IMAGES: [], DataType.DEPTH_IMAGES: []}
                 },
                 prefetch_videos=False,
             )
             mock_prefetch.assert_called_once()
 
-        assert synced.robot_data_spec == {
+        assert synced.cross_embodiment_union == {
             "robot_id": {DataType.RGB_IMAGES: [], DataType.DEPTH_IMAGES: []}
         }
 
@@ -74,6 +74,7 @@ class TestSynchronizedDataset:
 
     def test_getitem_single_index(self, synced_dataset, mock_data_requests):
         """Test accessing a single recording by index."""
+        nc.login()
         recording = synced_dataset[0]
 
         assert isinstance(recording, SynchronizedRecording)
@@ -83,6 +84,7 @@ class TestSynchronizedDataset:
 
     def test_getitem_second_recording(self, synced_dataset, mock_data_requests):
         """Test accessing the second recording."""
+        nc.login()
         recording = synced_dataset[1]
 
         assert isinstance(recording, SynchronizedRecording)
@@ -91,6 +93,7 @@ class TestSynchronizedDataset:
 
     def test_getitem_negative_index(self, synced_dataset, mock_data_requests):
         """Test accessing recordings with negative indices."""
+        nc.login()
         recording = synced_dataset[-1]
 
         assert isinstance(recording, SynchronizedRecording)
@@ -98,6 +101,7 @@ class TestSynchronizedDataset:
 
     def test_getitem_negative_first(self, synced_dataset, mock_data_requests):
         """Test accessing first recording with negative index."""
+        nc.login()
         recording = synced_dataset[-2]
 
         assert isinstance(recording, SynchronizedRecording)
@@ -151,7 +155,7 @@ class TestSynchronizedDataset:
         sliced = synced_dataset[0:1]
 
         assert sliced.frequency == synced_dataset.frequency
-        assert sliced.robot_data_spec == synced_dataset.robot_data_spec
+        assert sliced.cross_embodiment_union == synced_dataset.cross_embodiment_union
 
     def test_iteration(self, synced_dataset, mock_data_requests):
         """Test iterating through synchronized dataset."""
@@ -216,7 +220,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_union=None,
                 prefetch_videos=False,
             )
 
@@ -232,7 +236,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_union=None,
                 prefetch_videos=True,
             )
 
@@ -258,7 +262,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_union=None,
                 prefetch_videos=True,
             )
 
@@ -270,7 +274,7 @@ class TestSynchronizedDataset:
     ):
         """Test that prefetch runs if only some recordings are cached."""
         # Create cache for only first recording with at least one file
-        cache_path = dataset_mock.cache_dir / f"{dataset_mock[0]['id']}" / "30Hz"
+        cache_path = dataset_mock.cache_dir / f"{dataset_mock[0].id}" / "30Hz"
         cache_path.mkdir(parents=True, exist_ok=True)
         # Create a dummy file to indicate cache exists and has content
         (cache_path / "0.png").touch()
@@ -282,7 +286,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_union=None,
                 prefetch_videos=True,
             )
 
@@ -298,7 +302,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_union=None,
                 prefetch_videos=True,
                 max_prefetch_workers=8,
             )
@@ -357,16 +361,16 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_union=None,
                 prefetch_videos=False,
             )
             mock_prefetch.assert_called_once()
 
-        assert synced.robot_data_spec is None
+        assert synced.cross_embodiment_union is None
 
     def test_multiple_data_types(self, dataset_mock):
         """Test initialization with multiple data types."""
-        robot_data_spec = {
+        cross_embodiment_union = {
             "robot_id": {
                 DataType.RGB_IMAGES: [],
                 DataType.DEPTH_IMAGES: [],
@@ -380,12 +384,12 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=robot_data_spec,
+                cross_embodiment_union=cross_embodiment_union,
                 prefetch_videos=False,
             )
             mock_prefetch.assert_called_once()
 
-        assert synced.robot_data_spec == robot_data_spec
+        assert synced.cross_embodiment_union == cross_embodiment_union
 
     def test_cache_independence_between_instances(
         self, dataset_mock, mock_data_requests
@@ -398,7 +402,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_union=None,
                 prefetch_videos=False,
             )
             mock_prefetch.assert_called_once()
@@ -410,7 +414,7 @@ class TestSynchronizedDataset:
                 id="synced_dataset_id_2",
                 dataset=dataset_mock,
                 frequency=30,
-                robot_data_spec=None,
+                cross_embodiment_union=None,
                 prefetch_videos=False,
             )
             mock_prefetch.assert_called_once()

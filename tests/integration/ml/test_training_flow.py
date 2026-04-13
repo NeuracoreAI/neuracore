@@ -50,12 +50,17 @@ JOINT_NAMES = (
     BimanualViperXTask.LEFT_ARM_JOINT_NAMES + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
 )
 
+
+def _indexed_names(names: list[str] | tuple[str, ...]) -> dict[int, str]:
+    return {index: name for index, name in enumerate(names)}
+
+
 INPUT_DATA_SPEC = {
-    DataType.RGB_IMAGES: [NC_CAM_NAME],
-    DataType.JOINT_POSITIONS: list(JOINT_NAMES),
+    DataType.RGB_IMAGES: {0: NC_CAM_NAME},
+    DataType.JOINT_POSITIONS: _indexed_names(JOINT_NAMES),
 }
 OUTPUT_DATA_SPEC = {
-    DataType.JOINT_POSITIONS: JOINT_NAMES,
+    DataType.JOINT_POSITIONS: _indexed_names(JOINT_NAMES),
 }
 
 INPUT_DATA_TYPES = [
@@ -211,10 +216,9 @@ def test_training_flow():
     collected_dataset_name = _unique_name("collected")
     merged_dataset_name = _unique_name("merged")
     training_name = _unique_name("cnnmlp_flow")
+    merged_dataset = None
     job_id = None
     endpoint_id = None
-    merged_dataset = None
-    collected_dataset = None
 
     try:
         # ------------------------------------------------------------------
@@ -222,7 +226,7 @@ def test_training_flow():
         # ------------------------------------------------------------------
         try:
             collected_dataset = _collect_demo_data(
-                ROBOT_NAME, collected_dataset_name, num_episodes=3, instance_id=0
+                ROBOT_NAME, collected_dataset_name, num_episodes=3
             )
         except Exception as e:
             pytest.fail(f"Step 1 (collect demo data) failed: {e}")
@@ -249,23 +253,32 @@ def test_training_flow():
             time.sleep(30)  # wait for merge to complete and be queryable
             dataset = nc.get_dataset(merged_dataset_name)
             robot_ids = dataset.robot_ids
+
             assert (
                 len(robot_ids) == 2
             ), f"Expected 2 robots in merged dataset, got {robot_ids}"
-            input_robot_data_spec = {}
-            output_robot_data_spec = {}
+            input_cross_embodiment_description = {}
+            output_cross_embodiment_description = {}
             for robot_id in robot_ids:
-                data_spec = dataset.get_full_data_spec(robot_id)
-                data_spec = {
-                    dt: item for dt, item in data_spec.items() if dt in INPUT_DATA_TYPES
-                }
+                embodiment_description = dataset.get_full_embodiment_description(
+                    robot_id
+                )
                 assert (
-                    DataType.JOINT_POSITIONS in data_spec
+                    DataType.JOINT_POSITIONS in embodiment_description
                 ), f"JOINT_POSITIONS missing from robot {robot_id} data spec"
-                input_robot_data_spec[robot_id] = data_spec
-                output_robot_data_spec[robot_id] = {
-                    DataType.JOINT_POSITIONS: data_spec[DataType.JOINT_POSITIONS],
+
+                input_cross_embodiment_description[robot_id] = {
+                    DataType.JOINT_POSITIONS: embodiment_description[
+                        DataType.JOINT_POSITIONS
+                    ],
+                    DataType.RGB_IMAGES: embodiment_description[DataType.RGB_IMAGES],
                 }
+                output_cross_embodiment_description[robot_id] = {
+                    DataType.JOINT_POSITIONS: embodiment_description[
+                        DataType.JOINT_POSITIONS
+                    ],
+                }
+
             job_data = nc.start_training_run(
                 name=training_name,
                 dataset_name=merged_dataset_name,
@@ -274,8 +287,10 @@ def test_training_flow():
                 gpu_type=GPU_TYPE,
                 num_gpus=NUM_GPUS,
                 frequency=FREQUENCY,
-                input_robot_data_spec=input_robot_data_spec,
-                output_robot_data_spec=output_robot_data_spec,
+                input_cross_embodiment_description=input_cross_embodiment_description,
+                output_cross_embodiment_description=(
+                    output_cross_embodiment_description
+                ),
             )
             job_id = job_data["id"]
             logger.info(f"Training job started: {job_id}")
@@ -363,7 +378,10 @@ def test_training_flow():
             assert resumed_job["status"] in {
                 "PENDING",
                 "RUNNING",
-            }, f"Expected PENDING/RUNNING after resume, got: {resumed_job['status']!r}"
+            }, (
+                "Expected PENDING/RUNNING after resume, got: "
+                f"{resumed_job['status']!r}"
+            )
             assert resumed_job.get(
                 "resume_points"
             ), "Expected non-empty resume_points after resume"
@@ -397,8 +415,8 @@ def test_training_flow():
         try:
             nc.connect_robot(MUJOCO_ROBOT_NAME)
             policy = nc.policy(
-                model_input_order=INPUT_DATA_SPEC,
-                model_output_order=OUTPUT_DATA_SPEC,
+                input_embodiment_description=INPUT_DATA_SPEC,
+                output_embodiment_description=OUTPUT_DATA_SPEC,
                 train_run_name=training_name,
             )
             _run_policy_inference(policy)
@@ -410,8 +428,8 @@ def test_training_flow():
         # ------------------------------------------------------------------
         try:
             policy = nc.policy_local_server(
-                model_input_order=INPUT_DATA_SPEC,
-                model_output_order=OUTPUT_DATA_SPEC,
+                input_embodiment_description=INPUT_DATA_SPEC,
+                output_embodiment_description=OUTPUT_DATA_SPEC,
                 train_run_name=training_name,
                 port=8181,
             )
@@ -427,8 +445,8 @@ def test_training_flow():
             endpoint_data = nc.deploy_model(
                 job_id=job_id,
                 name=endpoint_name,
-                model_input_order=INPUT_DATA_SPEC,
-                model_output_order=OUTPUT_DATA_SPEC,
+                input_embodiment_description=INPUT_DATA_SPEC,
+                output_embodiment_description=OUTPUT_DATA_SPEC,
                 ttl=60 * 30,
             )
             endpoint_id = endpoint_data["id"]
@@ -486,30 +504,28 @@ def test_training_failure_error_reporting():
     dataset_name = _unique_name("failure_report_test")
 
     try:
-        # ------------------------------------------------------------------
-        # Collect minimal demo data (1 episode is enough)
-        # ------------------------------------------------------------------
-        try:
-            dataset = _collect_demo_data(
-                ROBOT_NAME, dataset_name, num_episodes=1, instance_id=1
-            )
-        except Exception as e:
-            pytest.fail(f"Data collection failed: {e}")
+        dataset = _collect_demo_data(
+            ROBOT_NAME, dataset_name, num_episodes=1, instance_id=1
+        )
+    except Exception as e:
+        pytest.fail(f"Data collection failed: {e}")
 
         # ------------------------------------------------------------------
         # Build a per-robot data spec from the collected dataset
         # ------------------------------------------------------------------
         try:
             robot_ids = dataset.robot_ids
-            input_robot_data_spec: dict = {}
-            output_robot_data_spec: dict = {}
+            input_cross_embodiment_description: dict = {}
+            output_cross_embodiment_description: dict = {}
             for robot_id in robot_ids:
-                data_spec = dataset.get_full_data_spec(robot_id)
+                data_spec = dataset.get_full_embodiment_description(robot_id)
                 filtered = {
-                    dt: item for dt, item in data_spec.items() if dt in INPUT_DATA_TYPES
+                    data_type: item
+                    for data_type, item in data_spec.items()
+                    if data_type in INPUT_DATA_TYPES
                 }
-                input_robot_data_spec[robot_id] = filtered
-                output_robot_data_spec[robot_id] = {
+                input_cross_embodiment_description[robot_id] = filtered
+                output_cross_embodiment_description[robot_id] = {
                     DataType.JOINT_POSITIONS: filtered[DataType.JOINT_POSITIONS],
                 }
         except Exception as e:
@@ -527,8 +543,10 @@ def test_training_failure_error_reporting():
                 gpu_type=GPU_TYPE,
                 num_gpus=NUM_GPUS,
                 frequency=FREQUENCY,
-                input_robot_data_spec=input_robot_data_spec,
-                output_robot_data_spec=output_robot_data_spec,
+                input_cross_embodiment_description=(input_cross_embodiment_description),
+                output_cross_embodiment_description=(
+                    output_cross_embodiment_description
+                ),
             )
             job_id = job_data["id"]
             logger.info(f"Failure-reporting test job started: {job_id}")
@@ -580,3 +598,4 @@ def test_training_failure_error_reporting():
                 dataset.delete()
             except Exception:
                 logger.warning(f"Failed to delete dataset {dataset_name}")
+        pass

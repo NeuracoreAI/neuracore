@@ -20,6 +20,34 @@ from neuracore_types import (
 from neuracore.core.endpoint import DirectPolicy
 
 
+def _ordered_names(names_or_mapping):
+    """Return sensor names in configured order for test fixtures."""
+    if isinstance(names_or_mapping, dict):
+        return [
+            name
+            for _, name in sorted(
+                names_or_mapping.items(), key=lambda item: int(item[0])
+            )
+        ]
+    return list(names_or_mapping)
+
+
+def _indexed_names(*names: str) -> dict[int, str]:
+    """Return explicitly indexed names for embodiment descriptions."""
+    return {index: name for index, name in enumerate(names)}
+
+
+def _mock_policy_output(output_embodiment_description):
+    """Build a named policy output from an embodiment description."""
+    output = {}
+    for data_type, names_or_mapping in output_embodiment_description.items():
+        output[data_type] = {
+            name: BatchedJointData(value=torch.zeros((1, 3, 1)))
+            for name in _ordered_names(names_or_mapping)
+        }
+    return output
+
+
 @pytest.fixture
 def mock_model_path(tmp_path):
     """Create a mock model file path."""
@@ -32,13 +60,11 @@ def mock_model_path(tmp_path):
 def mock_policy_inference():
     """Create a mock PolicyInference object."""
     mock_policy = MagicMock()
-    mock_policy.model_input_order = {}
-    mock_policy.model_output_order = {}
-    mock_policy.return_value = {
-        DataType.JOINT_TARGET_POSITIONS: {
-            "joint1": BatchedJointData(value=torch.zeros((1, 3, 1))),
-        }
-    }
+    mock_policy.input_embodiment_description = {}
+    mock_policy.output_embodiment_description = {}
+    mock_policy.return_value = _mock_policy_output(
+        {DataType.JOINT_TARGET_POSITIONS: {0: "joint1"}}
+    )
     return mock_policy
 
 
@@ -77,35 +103,32 @@ def sample_sync_point_with_multiple_data_types():
 
 
 @patch("neuracore.ml.utils.policy_inference.PolicyInference")
-def test_predict_filters_to_model_input_order_only(
+def test_predict_filters_to_input_embodiment_description_only(
     mock_policy_inference_class,
     mock_model_path,
     sample_sync_point_with_multiple_data_types,
 ):
-    """Test _predict only includes data types from model_input_order."""
+    """Test _predict only includes data types from input_embodiment_description."""
     # Setup: Model only expects JOINT_POSITIONS and RGB_IMAGES
-    model_input_order = {
-        DataType.JOINT_POSITIONS: ["joint1", "joint2"],
-        DataType.RGB_IMAGES: ["camera1"],
+    input_embodiment_description = {
+        DataType.JOINT_POSITIONS: _indexed_names("joint1", "joint2"),
+        DataType.RGB_IMAGES: _indexed_names("camera1"),
     }
-    model_output_order = {
-        DataType.JOINT_TARGET_POSITIONS: ["joint1"],
+    output_embodiment_description = {
+        DataType.JOINT_TARGET_POSITIONS: _indexed_names("joint1"),
     }
 
     # Create mock PolicyInference instance
     mock_policy = MagicMock()
-    mock_policy.model_input_order = model_input_order
-    mock_policy.return_value = {
-        DataType.JOINT_TARGET_POSITIONS: {
-            "joint1": BatchedJointData(value=torch.zeros((1, 3, 1))),
-        }
-    }
+    mock_policy.input_embodiment_description = input_embodiment_description
+    mock_policy.output_embodiment_description = output_embodiment_description
+    mock_policy.return_value = _mock_policy_output(output_embodiment_description)
     mock_policy_inference_class.return_value = mock_policy
 
     # Create DirectPolicy
     policy = DirectPolicy(
-        model_input_order=model_input_order,
-        model_output_order=model_output_order,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         model_path=mock_model_path,
         org_id="test_org",
     )
@@ -160,11 +183,11 @@ def test_predict_filters_when_sync_point_is_none(
 ):
     """Test _predict filters as expected when sync_point is None."""
     # Setup: Model only expects JOINT_POSITIONS
-    model_input_order = {
-        DataType.JOINT_POSITIONS: ["joint1", "joint2"],
+    input_embodiment_description = {
+        DataType.JOINT_POSITIONS: _indexed_names("joint1", "joint2"),
     }
-    model_output_order = {
-        DataType.JOINT_TARGET_POSITIONS: ["joint1"],
+    output_embodiment_description = {
+        DataType.JOINT_TARGET_POSITIONS: _indexed_names("joint1"),
     }
 
     # Mock get_latest_sync_point to return sync point with multiple data types
@@ -172,18 +195,15 @@ def test_predict_filters_when_sync_point_is_none(
 
     # Create mock PolicyInference instance
     mock_policy = MagicMock()
-    mock_policy.model_input_order = model_input_order
-    mock_policy.return_value = {
-        DataType.JOINT_TARGET_POSITIONS: {
-            "joint1": BatchedJointData(value=torch.zeros((1, 3, 1))),
-        }
-    }
+    mock_policy.input_embodiment_description = input_embodiment_description
+    mock_policy.output_embodiment_description = output_embodiment_description
+    mock_policy.return_value = _mock_policy_output(output_embodiment_description)
     mock_policy_inference_class.return_value = mock_policy
 
     # Create DirectPolicy
     policy = DirectPolicy(
-        model_input_order=model_input_order,
-        model_output_order=model_output_order,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         model_path=mock_model_path,
         org_id="test_org",
     )
@@ -216,12 +236,12 @@ def test_predict_filters_when_sync_point_missing_expected_data_types(
 ):
     """Test _predict skips missing model-required data types gracefully."""
     # Setup: Model expects JOINT_POSITIONS and RGB_IMAGES
-    model_input_order = {
-        DataType.JOINT_POSITIONS: ["joint1"],
-        DataType.RGB_IMAGES: ["camera1"],
+    input_embodiment_description = {
+        DataType.JOINT_POSITIONS: _indexed_names("joint1"),
+        DataType.RGB_IMAGES: _indexed_names("camera1"),
     }
-    model_output_order = {
-        DataType.JOINT_TARGET_POSITIONS: ["joint1"],
+    output_embodiment_description = {
+        DataType.JOINT_TARGET_POSITIONS: _indexed_names("joint1"),
     }
 
     # Create sync point with only JOINT_POSITIONS (missing RGB_IMAGES)
@@ -236,18 +256,15 @@ def test_predict_filters_when_sync_point_missing_expected_data_types(
 
     # Create mock PolicyInference instance
     mock_policy = MagicMock()
-    mock_policy.model_input_order = model_input_order
-    mock_policy.return_value = {
-        DataType.JOINT_TARGET_POSITIONS: {
-            "joint1": BatchedJointData(value=torch.zeros((1, 3, 1))),
-        }
-    }
+    mock_policy.input_embodiment_description = input_embodiment_description
+    mock_policy.output_embodiment_description = output_embodiment_description
+    mock_policy.return_value = _mock_policy_output(output_embodiment_description)
     mock_policy_inference_class.return_value = mock_policy
 
     # Create DirectPolicy
     policy = DirectPolicy(
-        model_input_order=model_input_order,
-        model_output_order=model_output_order,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         model_path=mock_model_path,
         org_id="test_org",
     )
@@ -264,32 +281,29 @@ def test_predict_filters_when_sync_point_missing_expected_data_types(
 
 
 @patch("neuracore.ml.utils.policy_inference.PolicyInference")
-def test_predict_filters_with_empty_model_input_order(
+def test_predict_filters_with_empty_input_embodiment_description(
     mock_policy_inference_class,
     mock_model_path,
     sample_sync_point_with_multiple_data_types,
 ):
-    """Test that _predict handles empty model_input_order correctly."""
+    """Test that _predict handles empty input_embodiment_description correctly."""
     # Setup: Model expects no inputs (edge case)
-    model_input_order = {}
-    model_output_order = {
-        DataType.JOINT_TARGET_POSITIONS: ["joint1"],
+    input_embodiment_description = {}
+    output_embodiment_description = {
+        DataType.JOINT_TARGET_POSITIONS: {"0": "joint1"},
     }
 
     # Create mock PolicyInference instance
     mock_policy = MagicMock()
-    mock_policy.model_input_order = model_input_order
-    mock_policy.return_value = {
-        DataType.JOINT_TARGET_POSITIONS: {
-            "joint1": BatchedJointData(value=torch.zeros((1, 3, 1))),
-        }
-    }
+    mock_policy.input_embodiment_description = input_embodiment_description
+    mock_policy.output_embodiment_description = output_embodiment_description
+    mock_policy.return_value = _mock_policy_output(output_embodiment_description)
     mock_policy_inference_class.return_value = mock_policy
 
     # Create DirectPolicy
     policy = DirectPolicy(
-        model_input_order=model_input_order,
-        model_output_order=model_output_order,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         model_path=mock_model_path,
         org_id="test_org",
     )
@@ -311,12 +325,12 @@ def test_predict_filters_preserves_all_sensors_for_selected_data_types(
 ):
     """Test that filtering preserves all sensors/labels for selected data types."""
     # Setup: Model expects JOINT_POSITIONS with multiple joints
-    model_input_order = {
-        DataType.JOINT_POSITIONS: ["joint1", "joint2", "joint3"],
-        DataType.RGB_IMAGES: ["camera1", "camera2"],
+    input_embodiment_description = {
+        DataType.JOINT_POSITIONS: {0: "joint1", 1: "joint2", 2: "joint3"},
+        DataType.RGB_IMAGES: {0: "camera1", 1: "camera2"},
     }
-    model_output_order = {
-        DataType.JOINT_TARGET_POSITIONS: ["joint1"],
+    output_embodiment_description = {
+        DataType.JOINT_TARGET_POSITIONS: {0: "joint1"},
     }
 
     # Create sync point with multiple sensors per data type
@@ -350,18 +364,15 @@ def test_predict_filters_preserves_all_sensors_for_selected_data_types(
 
     # Create mock PolicyInference instance
     mock_policy = MagicMock()
-    mock_policy.model_input_order = model_input_order
-    mock_policy.return_value = {
-        DataType.JOINT_TARGET_POSITIONS: {
-            "joint1": BatchedJointData(value=torch.zeros((1, 3, 1))),
-        }
-    }
+    mock_policy.input_embodiment_description = input_embodiment_description
+    mock_policy.output_embodiment_description = output_embodiment_description
+    mock_policy.return_value = _mock_policy_output(output_embodiment_description)
     mock_policy_inference_class.return_value = mock_policy
 
     # Create DirectPolicy
     policy = DirectPolicy(
-        model_input_order=model_input_order,
-        model_output_order=model_output_order,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         model_path=mock_model_path,
         org_id="test_org",
     )
@@ -401,12 +412,12 @@ def test_predict_filters_multiple_streams_logged_scenario(
     3. Only the expected subset should be passed to the model
     """
     # Setup: Model only expects JOINT_POSITIONS and one RGB camera
-    model_input_order = {
-        DataType.JOINT_POSITIONS: ["arm_joint1", "arm_joint2"],
-        DataType.RGB_IMAGES: ["top_camera"],
+    input_embodiment_description = {
+        DataType.JOINT_POSITIONS: {0: "arm_joint1", 1: "arm_joint2"},
+        DataType.RGB_IMAGES: {0: "top_camera"},
     }
-    model_output_order = {
-        DataType.JOINT_TARGET_POSITIONS: ["arm_joint1", "arm_joint2"],
+    output_embodiment_description = {
+        DataType.JOINT_TARGET_POSITIONS: {0: "arm_joint1", 1: "arm_joint2"},
     }
 
     # Create sync point simulating multiple logged streams
@@ -450,19 +461,15 @@ def test_predict_filters_multiple_streams_logged_scenario(
 
     # Create mock PolicyInference instance
     mock_policy = MagicMock()
-    mock_policy.model_input_order = model_input_order
-    mock_policy.return_value = {
-        DataType.JOINT_TARGET_POSITIONS: {
-            "arm_joint1": BatchedJointData(value=torch.zeros((1, 3, 1))),
-            "arm_joint2": BatchedJointData(value=torch.zeros((1, 3, 1))),
-        }
-    }
+    mock_policy.input_embodiment_description = input_embodiment_description
+    mock_policy.output_embodiment_description = output_embodiment_description
+    mock_policy.return_value = _mock_policy_output(output_embodiment_description)
     mock_policy_inference_class.return_value = mock_policy
 
     # Create DirectPolicy
     policy = DirectPolicy(
-        model_input_order=model_input_order,
-        model_output_order=model_output_order,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         model_path=mock_model_path,
         org_id="test_org",
     )
@@ -515,27 +522,24 @@ def test_predict_filters_with_single_data_type(
 ):
     """Test filtering when model only expects a single data type."""
     # Setup: Model only expects RGB_IMAGES
-    model_input_order = {
-        DataType.RGB_IMAGES: ["camera1", "camera2"],
+    input_embodiment_description = {
+        DataType.RGB_IMAGES: {0: "camera1", 1: "camera2"},
     }
-    model_output_order = {
-        DataType.JOINT_TARGET_POSITIONS: ["joint1"],
+    output_embodiment_description = {
+        DataType.JOINT_TARGET_POSITIONS: {0: "joint1"},
     }
 
     # Create mock PolicyInference instance
     mock_policy = MagicMock()
-    mock_policy.model_input_order = model_input_order
-    mock_policy.return_value = {
-        DataType.JOINT_TARGET_POSITIONS: {
-            "joint1": BatchedJointData(value=torch.zeros((1, 3, 1))),
-        }
-    }
+    mock_policy.input_embodiment_description = input_embodiment_description
+    mock_policy.output_embodiment_description = output_embodiment_description
+    mock_policy.return_value = _mock_policy_output(output_embodiment_description)
     mock_policy_inference_class.return_value = mock_policy
 
     # Create DirectPolicy
     policy = DirectPolicy(
-        model_input_order=model_input_order,
-        model_output_order=model_output_order,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         model_path=mock_model_path,
         org_id="test_org",
     )

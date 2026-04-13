@@ -10,7 +10,7 @@ from typing import Any
 
 import requests
 import typer
-from neuracore_types import RobotDataSpec, TrainingJob, TrainingJobStatus
+from neuracore_types import CrossEmbodimentDescription, TrainingJob, TrainingJobStatus
 from pydantic import TypeAdapter, ValidationError
 from rich.console import Console
 
@@ -60,20 +60,23 @@ def _format_duration(start_time: float | None, end_time: float | None) -> str:
     return f"{seconds}s"
 
 
-def _format_robot_data_spec(robot_data_spec: RobotDataSpec | None) -> str:
+def _format_cross_embodiment_description(
+    cross_embodiment_description: CrossEmbodimentDescription | None,
+) -> str:
     """Format robot data spec for display.
 
     Args:
-        robot_data_spec: Dictionary mapping robot IDs to data types and names.
+        cross_embodiment_description: Dictionary mapping robot IDs to data
+            types and names.
 
     Returns:
         Formatted string representation of the robot data spec.
     """
-    if not robot_data_spec:
+    if not cross_embodiment_description:
         return "  (none)"
 
     lines: list[str] = []
-    for robot_id, data_types in robot_data_spec.items():
+    for robot_id, data_types in cross_embodiment_description.items():
         lines.append(f"  Robot: {robot_id}")
         for data_type, names in data_types.items():
             data_type_name = getattr(data_type, "value", str(data_type))
@@ -398,12 +401,12 @@ def run_inspect(
 
         # Model Input/Output Ordering
         typer.echo("\n--- Model Input Data Spec ---")
-        input_spec = job.input_robot_data_spec
-        typer.echo(_format_robot_data_spec(input_spec))
+        input_spec = job.input_cross_embodiment_description
+        typer.echo(_format_cross_embodiment_description(input_spec))
 
         typer.echo("\n--- Model Output Data Spec ---")
-        output_spec = job.output_robot_data_spec
-        typer.echo(_format_robot_data_spec(output_spec))
+        output_spec = job.output_cross_embodiment_description
+        typer.echo(_format_cross_embodiment_description(output_spec))
 
         # Synchronization Details
         sync_details = job.synchronization_details

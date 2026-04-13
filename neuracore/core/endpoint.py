@@ -7,6 +7,7 @@ manages FastAPI instance for local model deployment.
 """
 
 import atexit
+import json
 import logging
 import os
 import signal
@@ -20,7 +21,7 @@ from subprocess import Popen
 from typing import TYPE_CHECKING
 
 import requests
-from neuracore_types import DataType, SynchronizedPoint
+from neuracore_types import DataType, EmbodimentDescription, SynchronizedPoint
 
 if TYPE_CHECKING:
     from neuracore_types import BatchedNCData
@@ -130,8 +131,8 @@ class DirectPolicy(Policy):
 
     def __init__(
         self,
-        model_input_order: dict[DataType, list[str]],
-        model_output_order: dict[DataType, list[str]],
+        input_embodiment_description: EmbodimentDescription,
+        output_embodiment_description: EmbodimentDescription,
         model_path: Path,
         org_id: str,
         job_id: str | None = None,
@@ -143,8 +144,8 @@ class DirectPolicy(Policy):
         from neuracore.ml.utils.policy_inference import PolicyInference
 
         self._policy = PolicyInference(
-            model_input_order=model_input_order,
-            model_output_order=model_output_order,
+            input_embodiment_description=input_embodiment_description,
+            output_embodiment_description=output_embodiment_description,
             org_id=org_id,
             job_id=job_id,
             model_file=model_path,
@@ -186,7 +187,7 @@ class DirectPolicy(Policy):
         # Filter sync point to only include data types the model expects as input
         filtered_data = {
             data_type: sync_point.data[data_type]
-            for data_type in self._policy.model_input_order.keys()
+            for data_type in self._policy.input_embodiment_description.keys()
             if data_type in sync_point.data
         }
         sync_point.data = filtered_data
@@ -333,8 +334,8 @@ class LocalServerPolicy(ServerPolicy):
 
     def __init__(
         self,
-        model_input_order: dict[DataType, list[str]],
-        model_output_order: dict[DataType, list[str]],
+        input_embodiment_description: EmbodimentDescription,
+        output_embodiment_description: EmbodimentDescription,
         org_id: str,
         model_path: Path,
         device: str | None = None,
@@ -345,9 +346,9 @@ class LocalServerPolicy(ServerPolicy):
         """Initialize the local server policy.
 
         Args:
-            model_input_order: Specification of the order that will
+            input_embodiment_description: Specification of the order that will
                 be fed into the model
-            model_output_order: Specification of the order that will
+            output_embodiment_description: Specification of the order that will
                 be fed into the model outputs
             org_id: Organization ID
             model_path: Path to the .nc.zip model file
@@ -357,8 +358,8 @@ class LocalServerPolicy(ServerPolicy):
             host: Host to bind to
         """
         super().__init__(f"http://{host}:{port}")
-        self.model_input_order = model_input_order
-        self.model_output_order = model_output_order
+        self.input_embodiment_description = input_embodiment_description
+        self.output_embodiment_description = output_embodiment_description
         self.org_id = org_id
         self.job_id = job_id
         self.model_path = model_path
@@ -372,20 +373,20 @@ class LocalServerPolicy(ServerPolicy):
     def _start_server(self) -> None:
         """Start the FastAPI server in a subprocess using module execution."""
         # Start the server process using module execution
-        model_input_order_str = str(
-            {k.value: v for k, v in self.model_input_order.items()}
-        ).replace("'", '"')
-        model_output_order_str = str(
-            {k.value: v for k, v in self.model_output_order.items()}
-        ).replace("'", '"')
+        input_embodiment_description_str = json.dumps(
+            {k.value: v for k, v in self.input_embodiment_description.items()}
+        )
+        output_embodiment_description_str = json.dumps(
+            {k.value: v for k, v in self.output_embodiment_description.items()}
+        )
         cmd = [
             sys.executable,
             "-m",
             "neuracore.core.utils.server",
-            "--model-input-order",
-            f"{model_input_order_str}",
-            "--model-output-order",
-            f"{model_output_order_str}",
+            "--input-embodiment-description",
+            f"{input_embodiment_description_str}",
+            "--output-embodiment-description",
+            f"{output_embodiment_description_str}",
             "--model-file",
             str(self.model_path),
             "--org-id",
@@ -409,7 +410,6 @@ class LocalServerPolicy(ServerPolicy):
             )
 
         logger.info(f"Starting FastAPI server with command: {' '.join(cmd)}")
-
         self.server_process = subprocess.Popen(
             cmd,
             # Ensure clean process termination
@@ -508,8 +508,8 @@ class RemoteServerPolicy(ServerPolicy):
 
 
 def policy(
-    model_input_order: dict[DataType, list[str]],
-    model_output_order: dict[DataType, list[str]],
+    input_embodiment_description: EmbodimentDescription,
+    output_embodiment_description: EmbodimentDescription,
     train_run_name: str | None = None,
     model_file: str | None = None,
     device: str | None = None,
@@ -517,9 +517,9 @@ def policy(
     """Launch a direct policy that runs the model in-process.
 
     Args:
-        model_input_order: Specification of the order that will
+        input_embodiment_description: Specification of the order that will
             be fed into the model
-        model_output_order: Specification of the order that will
+        output_embodiment_description: Specification of the order that will
             be output from the model
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load.
@@ -539,8 +539,8 @@ def policy(
         raise ValueError("Must specify either train_run_name or model_file")
 
     return DirectPolicy(
-        model_input_order=model_input_order,
-        model_output_order=model_output_order,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         org_id=org_id,
         job_id=job_id,
         model_path=model_path,
@@ -549,8 +549,8 @@ def policy(
 
 
 def policy_local_server(
-    model_input_order: dict[DataType, list[str]],
-    model_output_order: dict[DataType, list[str]],
+    input_embodiment_description: EmbodimentDescription,
+    output_embodiment_description: EmbodimentDescription,
     train_run_name: str | None = None,
     model_file: str | None = None,
     device: str | None = None,
@@ -561,9 +561,9 @@ def policy_local_server(
     """Launch a local server policy with a FastAPI server.
 
     Args:
-        model_input_order: Specification of the order that
+        input_embodiment_description: Specification of the order that
             will be fed into the model
-        model_output_order: Specification of the order that
+        output_embodiment_description: Specification of the order that
             will be output from the model
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load.
@@ -593,8 +593,8 @@ def policy_local_server(
         raise ValueError("Must specify either train_run_name or model_file")
 
     return LocalServerPolicy(
-        model_input_order=model_input_order,
-        model_output_order=model_output_order,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         org_id=org_id,
         model_path=model_path,
         device=device,

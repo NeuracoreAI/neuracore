@@ -162,10 +162,14 @@ def test_start_training_run(
         status_code=200,
     )
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-data-spec/{robot_id}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-embodiment-description/{robot_id}",
         json={
-            DataType.RGB_IMAGES: ["angle"],
-            DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
+            DataType.RGB_IMAGES: {0: "angle"},
+            DataType.JOINT_TARGET_POSITIONS: {
+                0: "joint1",
+                1: "joint2",
+                2: "joint3",
+            },
         },
         status_code=200,
     )
@@ -176,15 +180,15 @@ def test_start_training_run(
         "num_layers": 3,
         "cnn_output_dim": 64,
     }
-    input_robot_data_spec = {
-        robot_name: {
-            DataType.RGB_IMAGES: ["angle"],
+    input_cross_embodiment_description = {
+        TEST_ROBOT_ID: {
+            DataType.RGB_IMAGES: {0: "angle"},
         }
     }
 
-    output_robot_data_spec = {
-        robot_name: {
-            DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
+    output_cross_embodiment_description = {
+        TEST_ROBOT_ID: {
+            DataType.JOINT_TARGET_POSITIONS: {0: "joint1", 1: "joint2", 2: "joint3"},
         }
     }
 
@@ -196,8 +200,8 @@ def test_start_training_run(
         gpu_type=GPUType.NVIDIA_TESLA_T4,
         num_gpus=1,
         frequency=10,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
     )
 
     # Verify job was created with expected values
@@ -316,17 +320,28 @@ def test_start_training_run_raises_on_duplicate_name(
         status_code=200,
     )
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-data-spec/{robot_id}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-embodiment-description/{robot_id}",
         json={
-            DataType.RGB_IMAGES: ["angle"],
-            DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
+            DataType.RGB_IMAGES: {0: "angle"},
+            DataType.JOINT_TARGET_POSITIONS: {
+                0: "joint1",
+                1: "joint2",
+                2: "joint3",
+            },
         },
         status_code=200,
     )
 
-    input_robot_data_spec = {robot_name: {DataType.RGB_IMAGES: ["angle"]}}
-    output_robot_data_spec = {
-        robot_name: {DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"]}
+    input_cross_embodiment_description = {
+        TEST_ROBOT_ID: {
+            DataType.RGB_IMAGES: {0: "angle"},
+        }
+    }
+
+    output_cross_embodiment_description = {
+        TEST_ROBOT_ID: {
+            DataType.JOINT_TARGET_POSITIONS: {0: "joint1", 1: "joint2", 2: "joint3"},
+        }
     }
 
     with pytest.raises(requests.exceptions.HTTPError):
@@ -338,8 +353,8 @@ def test_start_training_run_raises_on_duplicate_name(
             gpu_type=GPUType.NVIDIA_TESLA_T4,
             num_gpus=1,
             frequency=10,
-            input_robot_data_spec=input_robot_data_spec,
-            output_robot_data_spec=output_robot_data_spec,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
         )
 
 
@@ -434,17 +449,28 @@ def test_start_training_run_name_auto_increment(
         status_code=200,
     )
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-data-spec/{robot_id}",
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-embodiment-description/{robot_id}",
         json={
-            DataType.RGB_IMAGES: ["angle"],
-            DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"],
+            DataType.RGB_IMAGES: {0: "angle"},
+            DataType.JOINT_TARGET_POSITIONS: {
+                0: "joint1",
+                1: "joint2",
+                2: "joint3",
+            },
         },
         status_code=200,
     )
 
-    input_robot_data_spec = {robot_name: {DataType.RGB_IMAGES: ["angle"]}}
-    output_robot_data_spec = {
-        robot_name: {DataType.JOINT_TARGET_POSITIONS: ["joint1", "joint2", "joint3"]}
+    input_cross_embodiment_description = {
+        TEST_ROBOT_ID: {
+            DataType.RGB_IMAGES: {0: "angle"},
+        }
+    }
+
+    output_cross_embodiment_description = {
+        TEST_ROBOT_ID: {
+            DataType.JOINT_TARGET_POSITIONS: {0: "joint1", 1: "joint2", 2: "joint3"},
+        }
     }
 
     job = nc.start_training_run(
@@ -455,8 +481,8 @@ def test_start_training_run_name_auto_increment(
         gpu_type=GPUType.NVIDIA_TESLA_T4,
         num_gpus=1,
         frequency=10,
-        input_robot_data_spec=input_robot_data_spec,
-        output_robot_data_spec=output_robot_data_spec,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
         name_auto_increment=True,
     )
 

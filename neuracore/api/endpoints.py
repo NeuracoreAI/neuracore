@@ -6,9 +6,13 @@ including deployment, status monitoring, and deletion operations.
 """
 
 import requests
-from neuracore_types import DataSpec, DataType, DeploymentRequest, SynchronizedPoint
-from neuracore_types.endpoints.endpoint_requests import DeploymentConfig
-from neuracore_types.training.training import GPUType
+from neuracore_types import (
+    DeploymentConfig,
+    DeploymentRequest,
+    EmbodimentDescription,
+    GPUType,
+    SynchronizedPoint,
+)
 
 from neuracore.api.core import _get_robot
 from neuracore.core.auth import get_auth
@@ -27,8 +31,8 @@ from neuracore.core.get_latest_sync_point import (
 
 
 def policy(
-    model_input_order: dict[DataType, list[str]],
-    model_output_order: dict[DataType, list[str]],
+    input_embodiment_description: EmbodimentDescription,
+    output_embodiment_description: EmbodimentDescription,
     train_run_name: str | None = None,
     model_file: str | None = None,
     device: str | None = None,
@@ -39,11 +43,11 @@ def policy(
     The model runs directly in your Python process.
 
     Args:
+        input_embodiment_description: Specification of the model input data order.
+        output_embodiment_description: Specification of the model output data order.
         train_run_name: Name of the training run to load the model from.
-        model_file: Path to the model file to load. If provided, overrides
-        output_configuration: Model output configuration mapping
-            data types to sensor names.
-        device: Torch device to run the model on (CPU or GPU, or MPS)
+        model_file: Path to the model file to load.
+        device: Torch device to run the model on (CPU or GPU, or MPS).
 
     Returns:
         DirectPolicy object that provides direct in-process model inference.
@@ -53,8 +57,8 @@ def policy(
         ConfigError: If there is an error trying to get the current org.
     """
     return _policy(
-        model_input_order=model_input_order,
-        model_output_order=model_output_order,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         train_run_name=train_run_name,
         model_file=model_file,
         device=device,
@@ -62,8 +66,8 @@ def policy(
 
 
 def policy_local_server(
-    model_input_order: dict[DataType, list[str]],
-    model_output_order: dict[DataType, list[str]],
+    input_embodiment_description: EmbodimentDescription,
+    output_embodiment_description: EmbodimentDescription,
     train_run_name: str | None = None,
     model_file: str | None = None,
     device: str | None = None,
@@ -75,9 +79,11 @@ def policy_local_server(
     This option provides server-like architecture while maintaining local control.
 
     Args:
+        input_embodiment_description: Specification of the model input data order.
+        output_embodiment_description: Specification of the model output data order.
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load.
-        device: Torch device to run the model on (CPU or GPU, or MPS)
+        device: Torch device to run the model on (CPU or GPU, or MPS).
         port: TCP port number where the local server will run.
         host: Host address to bind the server to. Defaults to localhost.
 
@@ -89,8 +95,8 @@ def policy_local_server(
         ConfigError: If there is an error trying to get the current org.
     """
     return _policy_local_server(
-        model_input_order=model_input_order,
-        model_output_order=model_output_order,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         train_run_name=train_run_name,
         model_file=model_file,
         device=device,
@@ -123,8 +129,8 @@ def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:
 def deploy_model(
     job_id: str,
     name: str,
-    model_input_order: DataSpec,
-    model_output_order: DataSpec,
+    input_embodiment_description: EmbodimentDescription,
+    output_embodiment_description: EmbodimentDescription,
     ttl: int | None = None,
     gpu_type: GPUType = GPUType.NVIDIA_TESLA_V100,
 ) -> dict:
@@ -138,8 +144,10 @@ def deploy_model(
         job_id: Unique identifier of the completed training job containing
             the model to deploy.
         name: Human-readable name for the endpoint that will be created.
-        model_input_order: Specification of the model input data order.
-        model_output_order: Specification of the model output data order.
+        input_embodiment_description: Indexed specification of the model input
+            embodiment description as `dict[DataType, dict[int, str]]`.
+        output_embodiment_description: Indexed specification of the model output
+            embodiment description as `dict[DataType, dict[int, str]]`.
         ttl: Optional time-to-live in seconds for the endpoint. If provided,
             the endpoint will be automatically deleted after this duration.
         gpu_type: Type of GPU to use for deployment.
@@ -158,18 +166,19 @@ def deploy_model(
     """
     auth = get_auth()
     org_id = get_current_org()
+    payload = DeploymentRequest(
+        training_id=job_id,
+        name=name,
+        ttl=ttl,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
+        config=DeploymentConfig(gpu_type=gpu_type),
+    ).model_dump(mode="json")
     try:
         response = requests.post(
             f"{API_URL}/org/{org_id}/models/deploy",
             headers=auth.get_headers(),
-            json=DeploymentRequest(
-                training_id=job_id,
-                name=name,
-                ttl=ttl,
-                model_input_order=model_input_order,
-                model_output_order=model_output_order,
-                config=DeploymentConfig(gpu_type=gpu_type),
-            ).model_dump(mode="json"),
+            json=payload,
         )
         response.raise_for_status()
         return response.json()

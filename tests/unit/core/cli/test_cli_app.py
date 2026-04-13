@@ -83,8 +83,8 @@ def test_neuracore_launch_server_help_includes_options() -> None:
     )
 
     assert result.exit_code == 0
-    assert "--model_input_order" in result.output
-    assert "--model_output_order" in result.output
+    assert "Input embodiment description" in result.output
+    assert "Output embodiment description" in result.output
 
 
 @pytest.mark.parametrize(

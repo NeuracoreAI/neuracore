@@ -3,7 +3,7 @@ import sys
 
 import rclpy
 from cv_bridge import CvBridge
-from neuracore_types import DataSpec, DataType
+from neuracore_types import DataType, EmbodimentDescription
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
@@ -21,19 +21,31 @@ from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
 CAMERA_NAMES = ["top", "angle", "vis"]
 
 # Specification of the order that will be fed into the model
-MODEL_INPUT_ORDER: DataSpec = {
-    DataType.JOINT_POSITIONS: BimanualViperXTask.LEFT_ARM_JOINT_NAMES
-    + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES,
-    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
-    DataType.RGB_IMAGES: CAMERA_NAMES,
+INPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
+    DataType.JOINT_POSITIONS: {
+        i: name
+        for i, name in enumerate(
+            BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+            + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+        )
+    },
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: {
+        i: name for i, name in enumerate(["left_arm", "right_arm"])
+    },
+    DataType.RGB_IMAGES: {i: name for i, name in enumerate(CAMERA_NAMES)},
 }
 
-MODEL_OUTPUT_ORDER: DataSpec = {
-    DataType.JOINT_TARGET_POSITIONS: (
-        BimanualViperXTask.LEFT_ARM_JOINT_NAMES
-        + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
-    ),
-    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: ["left_arm", "right_arm"],
+OUTPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
+    DataType.JOINT_TARGET_POSITIONS: {
+        i: name
+        for i, name in enumerate(
+            BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+            + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+        )
+    },
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: {
+        i: name for i, name in enumerate(["left_arm", "right_arm"])
+    },
 }
 
 
@@ -53,8 +65,8 @@ class SimulationNodePrediction(Node):
             overwrite=False,
         )
         self.policy = nc.policy(
-            model_input_order=MODEL_INPUT_ORDER,
-            model_output_order=MODEL_OUTPUT_ORDER,
+            input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+            output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
             train_run_name=self.training_run_name,
         )
 

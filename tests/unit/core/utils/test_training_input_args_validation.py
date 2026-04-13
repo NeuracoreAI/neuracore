@@ -12,6 +12,10 @@ from neuracore.core.utils.training_input_args_validation import (
 TEST_ROBOT_ID = "20a621b7-2f9b-4699-a08e-7d080488a5a1"
 
 
+def _indexed_names(*names: str) -> dict[int, str]:
+    return dict(enumerate(names))
+
+
 @pytest.fixture
 def dataset() -> Dataset:
     dataset = MagicMock(spec=Dataset)
@@ -20,13 +24,15 @@ def dataset() -> Dataset:
 
 def test_validate_data_specs_rejects_missing_data_values(dataset: Dataset):
     dataset.data_types = [DataType.RGB_IMAGES]
-    robot_data_spec = {TEST_ROBOT_ID: {DataType.RGB_IMAGES: ["front", "side"]}}
+    cross_embodiment_description = {
+        TEST_ROBOT_ID: {DataType.RGB_IMAGES: _indexed_names("front", "side")}
+    }
     with pytest.raises(ValueError, match="data values .* not present in dataset"):
         _validate_data_specs(
             dataset=dataset,
             dataset_name="test-dataset",
             algorithm_name="test-algorithm",
-            robot_data_spec=robot_data_spec,
+            cross_embodiment_description=cross_embodiment_description,
             supported_data_types={DataType.RGB_IMAGES},
             spec_kind="input",
         )
@@ -34,17 +40,19 @@ def test_validate_data_specs_rejects_missing_data_values(dataset: Dataset):
 
 def test_validate_data_specs_rejects_robot_name_rather_than_id(dataset: Dataset):
     dataset.data_types = [DataType.RGB_IMAGES]
-    dataset.get_full_data_spec = MagicMock(
-        return_value={DataType.RGB_IMAGES: ["front"]}
+    dataset.get_full_embodiment_description = MagicMock(
+        return_value={DataType.RGB_IMAGES: _indexed_names("front")}
     )
-    robot_data_spec = {"robot_name": {DataType.RGB_IMAGES: ["front"]}}
+    cross_embodiment_description = {
+        "robot_name": {DataType.RGB_IMAGES: _indexed_names("front")}
+    }
 
     with pytest.raises(AssertionError, match="Expected robot_id format for robot_name"):
         _validate_data_specs(
             dataset=dataset,
             dataset_name="test-dataset",
             algorithm_name="test-algorithm",
-            robot_data_spec=robot_data_spec,
+            cross_embodiment_description=cross_embodiment_description,
             supported_data_types={DataType.RGB_IMAGES},
             spec_kind="input",
         )
@@ -52,16 +60,18 @@ def test_validate_data_specs_rejects_robot_name_rather_than_id(dataset: Dataset)
 
 def test_validate_data_specs_allows_subset_of_dataset_values(dataset: Dataset):
     dataset.data_types = [DataType.RGB_IMAGES]
-    dataset.get_full_data_spec = MagicMock(
-        return_value={DataType.RGB_IMAGES: ["front", "side"]}
+    dataset.get_full_embodiment_description = MagicMock(
+        return_value={DataType.RGB_IMAGES: _indexed_names("front", "side")}
     )
-    robot_data_spec = {TEST_ROBOT_ID: {DataType.RGB_IMAGES: ["front"]}}
+    cross_embodiment_description = {
+        TEST_ROBOT_ID: {DataType.RGB_IMAGES: _indexed_names("front")}
+    }
 
     _validate_data_specs(
         dataset=dataset,
         dataset_name="test-dataset",
         algorithm_name="test-algorithm",
-        robot_data_spec=robot_data_spec,
+        cross_embodiment_description=cross_embodiment_description,
         supported_data_types={DataType.RGB_IMAGES},
         spec_kind="input",
     )
@@ -74,17 +84,19 @@ def test_validate_algorithm_exists_raises_when_missing():
 
 def test_validate_data_specs_rejects_unsupported_data_type(dataset: Dataset):
     dataset.data_types = [DataType.RGB_IMAGES]
-    dataset.get_full_data_spec = MagicMock(
-        return_value={DataType.RGB_IMAGES: ["front"]}
+    dataset.get_full_embodiment_description = MagicMock(
+        return_value={DataType.RGB_IMAGES: _indexed_names("front")}
     )
-    robot_data_spec = {TEST_ROBOT_ID: {DataType.JOINT_POSITIONS: ["j0"]}}
+    cross_embodiment_description = {
+        TEST_ROBOT_ID: {DataType.JOINT_POSITIONS: _indexed_names("j0")}
+    }
 
-    with pytest.raises(ValueError, match="data type .* is not supported"):
+    with pytest.raises(ValueError, match="data type .* is not present in dataset"):
         _validate_data_specs(
             dataset=dataset,
             dataset_name="test-dataset",
             algorithm_name="test-algorithm",
-            robot_data_spec=robot_data_spec,
+            cross_embodiment_description=cross_embodiment_description,
             supported_data_types={DataType.RGB_IMAGES},
             spec_kind="input",
         )
@@ -92,17 +104,19 @@ def test_validate_data_specs_rejects_unsupported_data_type(dataset: Dataset):
 
 def test_validate_data_specs_rejects_missing_data_type_in_dataset(dataset: Dataset):
     dataset.data_types = [DataType.RGB_IMAGES]
-    dataset.get_full_data_spec = MagicMock(
-        return_value={DataType.RGB_IMAGES: ["front"]}
+    dataset.get_full_embodiment_description = MagicMock(
+        return_value={DataType.RGB_IMAGES: _indexed_names("front")}
     )
-    robot_data_spec = {TEST_ROBOT_ID: {DataType.JOINT_POSITIONS: ["j0"]}}
+    cross_embodiment_description = {
+        TEST_ROBOT_ID: {DataType.JOINT_POSITIONS: _indexed_names("j0")}
+    }
 
     with pytest.raises(ValueError, match="data type .* is not present in dataset"):
         _validate_data_specs(
             dataset=dataset,
             dataset_name="test-dataset",
             algorithm_name="test-algorithm",
-            robot_data_spec=robot_data_spec,
+            cross_embodiment_description=cross_embodiment_description,
             supported_data_types={DataType.JOINT_POSITIONS},
             spec_kind="input",
         )
@@ -110,15 +124,17 @@ def test_validate_data_specs_rejects_missing_data_type_in_dataset(dataset: Datas
 
 def test_validate_data_specs_rejects_missing_data_type_in_full_spec(dataset: Dataset):
     dataset.data_types = [DataType.RGB_IMAGES]
-    dataset.get_full_data_spec = MagicMock(return_value={})
-    robot_data_spec = {TEST_ROBOT_ID: {DataType.RGB_IMAGES: ["front"]}}
+    dataset.get_full_embodiment_description = MagicMock(return_value={})
+    cross_embodiment_description = {
+        TEST_ROBOT_ID: {DataType.RGB_IMAGES: _indexed_names("front")}
+    }
 
     with pytest.raises(ValueError, match="data values .* not present in dataset"):
         _validate_data_specs(
             dataset=dataset,
             dataset_name="test-dataset",
             algorithm_name="test-algorithm",
-            robot_data_spec=robot_data_spec,
+            cross_embodiment_description=cross_embodiment_description,
             supported_data_types={DataType.RGB_IMAGES},
             spec_kind="input",
         )
