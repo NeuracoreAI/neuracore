@@ -37,6 +37,8 @@ def get_active_data_traces(recording_id: str) -> list[RecordingDataTrace]:
         f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/active",
         headers=get_auth().get_headers(),
     )
+    if response.status_code == 404:
+        return []
     response.raise_for_status()
     data = response.json() or []
     return [RecordingDataTrace.model_validate(item) for item in data]
