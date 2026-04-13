@@ -158,6 +158,7 @@ class NeuracoreDatasetImporter(ABC):
         self.robot_utils: RobotUtils | None = None
         self.prev_ik_solution: list[float] | None = None
         self.curr_joint_positions: dict[str, float] = {}
+        self.curr_joint_target_positions: dict[str, float] = {}
         self.curr_end_effector_poses: dict[str, list[float]] = {}
         self.shared = shared
         if skip_on_error not in {"episode", "step", "all"}:
@@ -384,6 +385,12 @@ class NeuracoreDatasetImporter(ABC):
             extrinsics: Optional 4x4 camera extrinsics matrix for camera streams.
             intrinsics: Optional 3x3 camera intrinsics matrix for camera streams.
         """
+        # if data_type == DataType.JOINT_TARGET_POSITIONS:
+        #     print("Input data: ", source_data)
+        # source_data[3:] = [0, 0, 0, 1]
+        # print("Output data: ", source_data)
+        if data_type == DataType.LANGUAGE:
+            print("Input data: ", source_data)
         ik_requested = (
             data_type == DataType.JOINT_POSITIONS
             and format.joint_position_input_type
@@ -466,6 +473,7 @@ class NeuracoreDatasetImporter(ABC):
                         self._validate_joint_data(data_type, position, name)
                 elif format.action_space == ActionSpaceConfig.JOINT:
                     self._validate_joint_data(data_type, transformed_data, item.name)
+                    self.curr_joint_target_positions[item.name] = transformed_data
             elif relative_action_requested:
                 if format.action_space == ActionSpaceConfig.END_EFFECTOR:
                     if item.name not in self.curr_end_effector_poses:
@@ -486,7 +494,7 @@ class NeuracoreDatasetImporter(ABC):
                     next_position = next_pose[:3, 3]
                     next_orientation = R.from_matrix(next_pose[:3, :3]).as_quat()
                     transformed_data = np.concatenate([next_position, next_orientation])
-                    transformed_data.copy()
+                    target_pose = transformed_data.copy()
                     # Get joint positions using IK from the end effector pose
                     if self.robot_utils is None:
                         raise ImporterError(
@@ -510,6 +518,7 @@ class NeuracoreDatasetImporter(ABC):
                         )
                     transformed_data += self.curr_joint_positions[item.name]
                     self._validate_joint_data(data_type, transformed_data, item.name)
+                    self.curr_joint_target_positions[item.name] = transformed_data
             else:
                 if data_type in JOINT_DATA_TYPES and self.joint_info:
                     self._validate_joint_data(data_type, transformed_data, item.name)
@@ -547,6 +556,13 @@ class NeuracoreDatasetImporter(ABC):
                             name,
                             timestamp,
                         )
+                # log target position as pose
+                self._log_transformed_data(
+                    DataType.END_EFFECTOR_POSES,
+                    target_pose,
+                    "target_pose",
+                    timestamp,
+                )
             else:
                 self._log_transformed_data(
                     data_type,
@@ -556,6 +572,18 @@ class NeuracoreDatasetImporter(ABC):
                     extrinsics=extrinsics,
                     intrinsics=intrinsics,
                 )
+                # if data_type == DataType.LANGUAGE:
+                #     target_pose = (
+                #         self.robot_utils.joint_positions_to_end_effector_pose(
+                #         self.curr_joint_target_positions, "panda_hand_tcp"
+                #         )
+                #     )
+                #     self._log_transformed_data(
+                #         DataType.END_EFFECTOR_POSES,
+                #         target_pose,
+                #         "target_pose",
+                #         timestamp,
+                #     )
         except Exception as e:
             self.logger.error(
                 "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e

@@ -350,6 +350,7 @@ pyav
 rawvideo
 elementwise
 finetune
+roboset
 geglu
 pretraining
 Qwen
