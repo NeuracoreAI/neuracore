@@ -118,3 +118,5 @@ examples/logs/
 *.log
 *.log.gz
 examples/test_streaming/
+
+.data_daemon_test_state/
