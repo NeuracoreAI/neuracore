@@ -203,6 +203,7 @@ class Daemon:
         self._trace_metadata: dict[str, dict[str, str | int | None]] = {}
         self._closed_recordings: set[str] = set()
         self._closing_recordings: dict[str, RecordingClosingState] = {}
+        self._closed_recording_cutoff_states: dict[str, RecordingClosingState] = {}
         self._producer_last_sequence_numbers: dict[str, int] = {}
         self._state_lock = threading.RLock()
         self._worker_stop_event = threading.Event()
@@ -376,6 +377,13 @@ class Daemon:
                     ):
                         continue
                     closing_state.cutoff_observed_producers.add(producer_id)
+                    logger.info(
+                        "Bridge observed cutoff recording_id=%s producer_id=%s observed_sequence_number=%s cutoff_sequence_number=%s",
+                        recording_id,
+                        producer_id,
+                        last_sequence_number,
+                        cutoff_sequence_number,
+                    )
 
     def _drain_bridge_cutoff_queries(self) -> None:
         """Reply to any pending producer bridge cutoff queries."""
@@ -395,6 +403,12 @@ class Daemon:
         if isinstance(requested_cutoffs_raw, dict) and recording_id is not None:
             with self._state_lock:
                 closing_state = self._closing_recordings.get(str(recording_id))
+                state_source = "closing"
+                if closing_state is None:
+                    closing_state = self._closed_recording_cutoff_states.get(
+                        str(recording_id)
+                    )
+                    state_source = "closed"
                 observed_producers = (
                     closing_state.cutoff_observed_producers
                     if closing_state is not None
@@ -419,6 +433,57 @@ class Daemon:
                         observed_producer_sequence_numbers[str(producer_id)] = (
                             observed_sequence_number
                         )
+
+                if closing_state is not None:
+                    missing_cutoffs = {
+                        str(producer_id): int(cutoff_sequence_number_raw)
+                        for producer_id, cutoff_sequence_number_raw in requested_cutoffs_raw.items()
+                        if str(producer_id)
+                        not in observed_producer_sequence_numbers
+                    }
+                    now = utc_now()
+                    should_log_blocked = (
+                        missing_cutoffs
+                        and (
+                            closing_state.last_blocked_log_at is None
+                            or (
+                                now - closing_state.last_blocked_log_at
+                            ).total_seconds()
+                            >= _CLOSING_DEBUG_LOG_INTERVAL_S
+                        )
+                    )
+                    if should_log_blocked:
+                        closing_state.last_blocked_log_at = now
+                        current_sequences = {
+                            producer_id: int(
+                                self._producer_last_sequence_numbers.get(
+                                    producer_id, 0
+                                )
+                            )
+                            for producer_id in missing_cutoffs
+                        }
+                        logger.info(
+                            "Bridge cutoff query blocked recording_id=%s state_source=%s missing_cutoffs=%s current_sequences=%s observed_producers=%s",
+                            recording_id,
+                            state_source,
+                            missing_cutoffs,
+                            current_sequences,
+                            sorted(observed_producers),
+                        )
+
+                if (
+                    state_source == "closed"
+                    and closing_state is not None
+                    and requested_cutoffs_raw
+                    and len(observed_producer_sequence_numbers)
+                    == len(requested_cutoffs_raw)
+                ):
+                    self._closed_recording_cutoff_states.pop(str(recording_id), None)
+                    logger.info(
+                        "Bridge cutoff closed-state ack delivered recording_id=%s observed_producer_sequence_numbers=%s",
+                        recording_id,
+                        observed_producer_sequence_numbers,
+                    )
 
         return MessageEnvelope(
             producer_id=None,
@@ -1075,6 +1140,17 @@ class Daemon:
                 producer_stop_sequence_numbers=producer_stop_sequence_numbers,
                 stop_requested_at=utc_now(),
             )
+            current_sequences = {
+                producer_id: int(self._producer_last_sequence_numbers.get(producer_id, 0))
+                for producer_id in producer_stop_sequence_numbers
+            }
+
+        logger.info(
+            "Recording stopped received recording_id=%s producer_stop_sequence_numbers=%s current_sequences=%s",
+            recording_id,
+            producer_stop_sequence_numbers,
+            current_sequences,
+        )
 
         self._emit_bridge_cutoff_observed()
 
@@ -1114,8 +1190,14 @@ class Daemon:
         # Only stop recording (signal flush RDM) when all traces have been processed
         for recording_id in to_close:
             with self._state_lock:
-                self._closing_recordings.pop(recording_id, None)
+                closing_state = self._closing_recordings.pop(recording_id, None)
                 self._closed_recordings.add(recording_id)
+                if closing_state is not None:
+                    self._closed_recording_cutoff_states[recording_id] = closing_state
+            logger.info(
+                "Closing recording finalized recording_id=%s",
+                recording_id,
+            )
             self._emitter.emit(Emitter.STOP_RECORDING, recording_id)
 
     def _has_reached_sequence_cutoffs(

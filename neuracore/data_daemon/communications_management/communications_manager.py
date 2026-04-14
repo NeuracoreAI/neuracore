@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 
 import zmq
@@ -42,6 +43,7 @@ class CommunicationsManager:
 
         self._producer_socket: zmq.Socket | None = None
         self._query_request_socket: zmq.Socket | None = None
+        self._last_bridge_cutoff_query_empty_log_at = 0.0
 
     def _endpoint(self, socket_path: Path | str) -> str:
         """Build a ZMQ endpoint from a socket path or address."""
@@ -191,7 +193,13 @@ class CommunicationsManager:
         try:
             self._query_request_socket.send(request.to_bytes())
             response = MessageEnvelope.from_bytes(self._query_request_socket.recv())
-        except zmq.error.ZMQError:
+        except zmq.error.ZMQError as exc:
+            logger.warning(
+                "Bridge cutoff query failed recording_id=%s producer_stop_sequence_numbers=%s error=%r",
+                recording_id,
+                producer_stop_sequence_numbers,
+                exc,
+            )
             self._query_request_socket.close(0)
             self._query_request_socket = None
             self.create_query_request_socket()
@@ -211,6 +219,16 @@ class CommunicationsManager:
                 observed[str(producer_id)] = int(observed_sequence_number)
             except (TypeError, ValueError):
                 continue
+        if not observed:
+            now = time.monotonic()
+            if now - self._last_bridge_cutoff_query_empty_log_at >= 5.0:
+                self._last_bridge_cutoff_query_empty_log_at = now
+                logger.info(
+                    "Bridge cutoff query returned empty recording_id=%s producer_stop_sequence_numbers=%s raw_response=%s",
+                    recording_id,
+                    producer_stop_sequence_numbers,
+                    observed_producer_sequence_numbers,
+                )
         return observed
 
     def send_message(self, message: MessageEnvelope) -> None:

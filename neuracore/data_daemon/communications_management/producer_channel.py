@@ -225,6 +225,38 @@ class ProducerChannel:
         with self._sequence_cv:
             return self._last_enqueued_sequence_number
 
+    def get_transport_stats(self) -> dict[str, object]:
+        """Return a lightweight snapshot of producer transport state."""
+        with self._sequence_cv:
+            last_enqueued_sequence_number = self._last_enqueued_sequence_number
+            last_socket_sent_sequence_number = self._last_socket_sent_sequence_number
+
+        pending_sequence_count = max(
+            0,
+            last_enqueued_sequence_number - last_socket_sent_sequence_number,
+        )
+
+        sender_thread = self._sender_thread
+        heartbeat_thread = self._heartbeat_thread
+
+        return {
+            "channel_id": self.channel_id,
+            "recording_id": self.recording_id,
+            "trace_id": self.trace_id,
+            "chunk_size": self.chunk_size,
+            "send_queue_qsize": self._send_queue.qsize(),
+            "send_queue_maxsize": self.send_queue_maxsize,
+            "last_enqueued_sequence_number": last_enqueued_sequence_number,
+            "last_socket_sent_sequence_number": last_socket_sent_sequence_number,
+            "pending_sequence_count": pending_sequence_count,
+            "sender_thread_alive": (
+                sender_thread.is_alive() if sender_thread is not None else False
+            ),
+            "heartbeat_thread_alive": (
+                heartbeat_thread.is_alive() if heartbeat_thread is not None else False
+            ),
+        }
+
     def wait_until_sequence_sent(self, sequence_number: int) -> bool:
         """Block until the sender thread has sent up to `sequence_number`.
 

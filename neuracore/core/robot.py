@@ -368,13 +368,39 @@ class Robot:
         if not pending_cutoffs:
             return
         logged_rgb_producers: set[str] = set()
+        last_logged_observed_sequences = {
+            producer_id: 0 for producer_id in pending_cutoffs
+        }
         recording_context = self._get_daemon_recording_context()
+        wait_started_at = time.monotonic()
         deadline = time.monotonic() + timeout_s
+        logger.info(
+            "Bridge cutoff wait started recording_id=%s pending_cutoffs=%s",
+            recording_id,
+            pending_cutoffs,
+        )
         while pending_cutoffs:
             observed_sequences = recording_context.query_bridge_cutoff_observations(
                 recording_id,
                 pending_cutoffs,
             )
+            for producer_id in pending_cutoffs:
+                observed_sequence_number = int(observed_sequences.get(producer_id, 0))
+                if observed_sequence_number <= 0:
+                    continue
+                if observed_sequence_number == last_logged_observed_sequences.get(
+                    producer_id, 0
+                ):
+                    continue
+                last_logged_observed_sequences[producer_id] = observed_sequence_number
+                logger.info(
+                    "Bridge cutoff progress recording_id=%s producer_id=%s observed_sequence_number=%s cutoff_sequence_number=%s elapsed_s=%.3f",
+                    recording_id,
+                    producer_id,
+                    observed_sequence_number,
+                    pending_cutoffs[producer_id],
+                    time.monotonic() - wait_started_at,
+                )
             observed_this_round = [
                 producer_id
                 for producer_id, cutoff_sequence_number in pending_cutoffs.items()
@@ -398,6 +424,11 @@ class Robot:
                 pending_cutoffs.pop(producer_id, None)
 
             if not pending_cutoffs:
+                logger.info(
+                    "Bridge cutoff wait completed recording_id=%s elapsed_s=%.3f",
+                    recording_id,
+                    time.monotonic() - wait_started_at,
+                )
                 return
             if time.monotonic() >= deadline:
                 raise RobotError(
@@ -414,11 +445,37 @@ class Robot:
                 stream.stop_recording()
                 producer_channel = getattr(stream, "_producer_channel", None)
                 if isinstance(producer_channel, ProducerChannel):
+                    transport_stats_before_drain = (
+                        producer_channel.get_transport_stats()
+                    )
                     cutoff_sequence_number = (
                         producer_channel.get_last_enqueued_sequence_number()
                     )
+                    drain_started_at = time.monotonic()
                     drained = producer_channel.wait_until_sequence_sent(
                         cutoff_sequence_number
+                    )
+                    drain_elapsed_s = time.monotonic() - drain_started_at
+                    transport_stats_after_drain = producer_channel.get_transport_stats()
+                    logger.info(
+                        "Producer drain stream_id=%s producer_id=%s drained=%s elapsed_s=%.3f cutoff_sequence_number=%s pre_queue=%s/%s pre_pending_seq=%s pre_last_sent=%s post_queue=%s/%s post_pending_seq=%s post_last_sent=%s",
+                        stream_id,
+                        producer_channel.channel_id,
+                        drained,
+                        drain_elapsed_s,
+                        cutoff_sequence_number,
+                        transport_stats_before_drain["send_queue_qsize"],
+                        transport_stats_before_drain["send_queue_maxsize"],
+                        transport_stats_before_drain["pending_sequence_count"],
+                        transport_stats_before_drain[
+                            "last_socket_sent_sequence_number"
+                        ],
+                        transport_stats_after_drain["send_queue_qsize"],
+                        transport_stats_after_drain["send_queue_maxsize"],
+                        transport_stats_after_drain["pending_sequence_count"],
+                        transport_stats_after_drain[
+                            "last_socket_sent_sequence_number"
+                        ],
                     )
                     if not drained:
                         sent_sequence_number = (
