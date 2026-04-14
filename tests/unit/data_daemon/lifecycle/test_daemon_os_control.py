@@ -55,6 +55,8 @@ def test_launch_daemon_subprocess_redirects_stdio_in_background(
 ) -> None:
     pid_path = tmp_path / "daemon.pid"
     db_path = tmp_path / "state.db"
+    fake_socket_path = tmp_path / "management.sock"
+    fake_socket_path.touch()
     captured: dict[str, object] = {}
 
     def fake_popen(command: list[str], **kwargs: object) -> _FakePopen:
@@ -64,6 +66,7 @@ def test_launch_daemon_subprocess_redirects_stdio_in_background(
 
     monkeypatch.setattr(daemon_os_control.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(daemon_os_control.time, "sleep", lambda _: None)
+    monkeypatch.setattr(daemon_os_control, "SOCKET_PATH", fake_socket_path)
 
     proc = launch_daemon_subprocess(
         pid_path=pid_path,
@@ -92,6 +95,8 @@ def test_launch_daemon_subprocess_keeps_foreground_stdio_attached(
 ) -> None:
     pid_path = tmp_path / "daemon.pid"
     db_path = tmp_path / "state.db"
+    fake_socket_path = tmp_path / "management.sock"
+    fake_socket_path.touch()
     captured: dict[str, object] = {}
 
     def fake_popen(command: list[str], **kwargs: object) -> _FakePopen:
@@ -101,6 +106,7 @@ def test_launch_daemon_subprocess_keeps_foreground_stdio_attached(
 
     monkeypatch.setattr(daemon_os_control.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(daemon_os_control.time, "sleep", lambda _: None)
+    monkeypatch.setattr(daemon_os_control, "SOCKET_PATH", fake_socket_path)
 
     proc = launch_daemon_subprocess(
         pid_path=pid_path,

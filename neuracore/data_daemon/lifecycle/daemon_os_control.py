@@ -149,7 +149,7 @@ def launch_daemon_subprocess(
     timeout_s: float = 5.0,
     env_overrides: dict[str, str] | None = None,
 ) -> subprocess.Popen:
-    """Launch the daemon runner subprocess and wait briefly for startup success."""
+    """Launch the daemon runner subprocess and poll until it is ready."""
     pid_path.parent.mkdir(parents=True, exist_ok=True)
 
     process = _start_daemon_subprocess(
@@ -159,9 +159,24 @@ def launch_daemon_subprocess(
         env_overrides=env_overrides,
     )
 
-    time.sleep(min(timeout_s, 0.1))
-    if process.poll() is not None:
-        raise RuntimeError("Daemon failed to start.")
+    socket_poll_interval_s = 0.05
+    daemon_startup_timeout_s = time.monotonic() + timeout_s
+
+    while time.monotonic() < daemon_startup_timeout_s:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"Daemon process exited unexpectedly during startup "
+                f"(exit code {process.returncode})."
+            )
+        if SOCKET_PATH.exists():
+            break
+        time.sleep(socket_poll_interval_s)
+    else:
+        process.terminate()
+        raise RuntimeError(
+            f"Daemon did not become ready within {timeout_s}s: "
+            f"socket {SOCKET_PATH} never appeared."
+        )
 
     pid_path.write_text(str(process.pid), encoding="utf-8")
     return process
