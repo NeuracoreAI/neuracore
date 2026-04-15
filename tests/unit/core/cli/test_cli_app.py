@@ -85,6 +85,53 @@ def test_neuracore_launch_server_help_includes_options() -> None:
     assert result.exit_code == 0
     assert "Input embodiment description" in result.output
     assert "Output embodiment description" in result.output
+    assert "indexed name mapping" in result.output
+
+
+def test_neuracore_launch_server_accepts_documented_json(monkeypatch) -> None:
+    launched = {}
+
+    class DummyPolicy:
+        class ServerProcess:
+            def wait(self) -> None:
+                launched["waited"] = True
+
+        server_process = ServerProcess()
+
+    def fake_policy_local_server(**kwargs):
+        launched.update(kwargs)
+        return DummyPolicy()
+
+    monkeypatch.setattr("neuracore.core.cli.launch_server.nc.login", lambda: None)
+    monkeypatch.setattr(
+        "neuracore.core.cli.launch_server.nc.set_organization", lambda org_id: None
+    )
+    monkeypatch.setattr(
+        "neuracore.core.cli.launch_server.policy_local_server",
+        fake_policy_local_server,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "launch-server",
+            "--input_embodiment_description",
+            '{"RGB_IMAGES": {"0": "front_cam"}}',
+            "--output_embodiment_description",
+            '{"JOINT_TARGET_POSITIONS": {"0": "arm"}}',
+            "--job_id",
+            "run-1",
+            "--org_id",
+            "org-1",
+        ],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert launched["input_embodiment_description"]
+    assert launched["output_embodiment_description"]
+    assert launched["waited"] is True
 
 
 @pytest.mark.parametrize(
