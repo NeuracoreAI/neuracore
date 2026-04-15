@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SHARED_DATASET_NAME = "ASU Table Top"
+COLLECTED_DEMO_EPISODES = 3
 GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
 FREQUENCY = 20
@@ -45,6 +46,8 @@ ROBOT_NAME = "integration_test_robot"
 MUJOCO_ROBOT_NAME = "Mujoco VX300s"
 TRAINING_TIMEOUT_MINUTES = 180
 ENDPOINT_TIMEOUT_MINUTES = 30
+MERGED_DATASET_RECORDING_TIMEOUT_SECONDS = 120
+MERGED_DATASET_RECORDING_POLL_SECONDS = 5
 
 JOINT_NAMES = (
     BimanualViperXTask.LEFT_ARM_JOINT_NAMES + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
@@ -184,6 +187,38 @@ def _wait_for_endpoint(
         time.sleep(20)
 
 
+def _wait_for_dataset_recording_count(
+    dataset_name: str,
+    expected_recordings: int,
+    timeout_seconds: int = MERGED_DATASET_RECORDING_TIMEOUT_SECONDS,
+) -> Dataset:
+    deadline = time.time() + timeout_seconds
+    last_count = None
+    last_error = None
+
+    while time.time() < deadline:
+        try:
+            dataset = nc.get_dataset(dataset_name)
+            last_count = len(dataset)
+            if last_count == expected_recordings:
+                return dataset
+            last_error = None
+        except Exception as e:
+            last_error = e
+
+        time.sleep(MERGED_DATASET_RECORDING_POLL_SECONDS)
+
+    if last_error is not None:
+        raise AssertionError(
+            f"Dataset {dataset_name!r} did not become queryable within "
+            f"{timeout_seconds} seconds; last error: {last_error}"
+        )
+    raise AssertionError(
+        f"Dataset {dataset_name!r} had {last_count} recordings after "
+        f"{timeout_seconds} seconds; expected {expected_recordings}"
+    )
+
+
 def _run_policy_inference(policy: Policy) -> None:
     try:
         env = make_sim_env(seed=42)
@@ -216,6 +251,7 @@ def test_training_flow():
     collected_dataset_name = _unique_name("collected")
     merged_dataset_name = _unique_name("merged")
     training_name = _unique_name("cnnmlp_flow")
+    collected_dataset = None
     merged_dataset = None
     job_id = None
     endpoint_id = None
@@ -226,7 +262,14 @@ def test_training_flow():
         # ------------------------------------------------------------------
         try:
             collected_dataset = _collect_demo_data(
-                ROBOT_NAME, collected_dataset_name, num_episodes=3
+                ROBOT_NAME,
+                collected_dataset_name,
+                num_episodes=COLLECTED_DEMO_EPISODES,
+            )
+            collected_recordings = len(collected_dataset)
+            assert collected_recordings == COLLECTED_DEMO_EPISODES, (
+                f"Expected {COLLECTED_DEMO_EPISODES} recordings in collected "
+                f"dataset {collected_dataset_name!r}, got {collected_recordings}"
             )
         except Exception as e:
             pytest.fail(f"Step 1 (collect demo data) failed: {e}")
@@ -235,6 +278,10 @@ def test_training_flow():
         # Step 2: Merge collected dataset with shared dataset
         # ------------------------------------------------------------------
         try:
+            shared_dataset = nc.get_dataset(SHARED_DATASET_NAME)
+            shared_recordings = len(shared_dataset)
+            expected_merged_recordings = collected_recordings + shared_recordings
+
             merged_dataset = nc.merge_datasets(
                 merged_dataset_name,
                 [collected_dataset_name, SHARED_DATASET_NAME],
@@ -242,6 +289,10 @@ def test_training_flow():
             assert (
                 merged_dataset.name == merged_dataset_name
             ), f"Merged dataset name mismatch: {merged_dataset.name!r}"
+            merged_dataset = _wait_for_dataset_recording_count(
+                merged_dataset_name,
+                expected_recordings=expected_merged_recordings,
+            )
             logger.info(f"Merged dataset: {merged_dataset.id}")
         except Exception as e:
             pytest.fail(f"Step 2 (merge datasets) failed: {e}")
@@ -250,7 +301,6 @@ def test_training_flow():
         # Step 3: Train CNNMLP with auto batch sizing
         # ------------------------------------------------------------------
         try:
-            time.sleep(30)  # wait for merge to complete and be queryable
             dataset = nc.get_dataset(merged_dataset_name)
             robot_ids = dataset.robot_ids
 
