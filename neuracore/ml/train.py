@@ -242,7 +242,9 @@ def _resolve_cross_embodiment_description(
         ValueError: If ``cross_embodiment_description_cfg`` is invalid.
     """
     # if cross_embodiment_description is provided
-    if cross_embodiment_description_cfg is not None:
+    if cross_embodiment_description_cfg is not None and len(
+        cross_embodiment_description_cfg
+    ):
         if not isinstance(cross_embodiment_description_cfg, DictConfig):
             raise ValueError(
                 f"'{field_name}' must either be None or a dictionary mapping robot "
@@ -259,7 +261,7 @@ def _resolve_cross_embodiment_description(
         for robot_id in dataset.robot_ids:
             robot_full_spec = dataset.get_full_embodiment_description(robot_id)
             cross_embodiment_description[robot_id] = {
-                data_type: list(robot_full_spec.get(data_type.value, []))
+                data_type: dict(robot_full_spec.get(data_type, {}))
                 for data_type in data_types
             }
         return cross_embodiment_description

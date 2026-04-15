@@ -36,6 +36,7 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
 )
 from neuracore.ml.train import (
     _resolve_algorithm_name_and_supported_data_types,
+    _resolve_cross_embodiment_description,
     _resolve_output_dir,
     _resolve_recording_cache_dir,
     determine_optimal_batch_size,
@@ -517,6 +518,84 @@ class TestResolveRecordingCacheDir:
         custom_dir = tmp_path / "recordings"
         cfg = OmegaConf.create({"recording_cache_dir": str(custom_dir)})
         assert _resolve_recording_cache_dir(cfg) == custom_dir
+
+
+class TestResolveCrossEmbodimentDescription:
+    def test_uses_explicit_cross_embodiment_description_when_provided(self):
+        cfg = OmegaConf.create({
+            "robot-1": {
+                "JOINT_POSITIONS": {
+                    0: "joint_1",
+                },
+            },
+        })
+        dataset = Mock()
+
+        result = _resolve_cross_embodiment_description(
+            cross_embodiment_description_cfg=cfg,
+            data_types_cfg=["RGB_IMAGES"],
+            dataset=dataset,
+            field_name="input_cross_embodiment_description",
+        )
+
+        assert result == {
+            "robot-1": {
+                DataType.JOINT_POSITIONS: {
+                    0: "joint_1",
+                },
+            },
+        }
+        dataset.get_full_embodiment_description.assert_not_called()
+
+    def test_empty_cross_embodiment_description_falls_back_to_data_types(self):
+        dataset = Mock()
+        dataset.robot_ids = ["robot-1", "robot-2"]
+        dataset.get_full_embodiment_description.side_effect = [
+            {
+                DataType.JOINT_POSITIONS: {
+                    0: "joint_1",
+                    1: "joint_2",
+                },
+                DataType.RGB_IMAGES: {
+                    0: "front",
+                },
+            },
+            {
+                DataType.JOINT_POSITIONS: {
+                    0: "joint_a",
+                },
+                DataType.RGB_IMAGES: {
+                    0: "wrist",
+                },
+            },
+        ]
+
+        result = _resolve_cross_embodiment_description(
+            cross_embodiment_description_cfg=OmegaConf.create({}),
+            data_types_cfg=["JOINT_POSITIONS", "RGB_IMAGES"],
+            dataset=dataset,
+            field_name="input_cross_embodiment_description",
+        )
+
+        assert result == {
+            "robot-1": {
+                DataType.JOINT_POSITIONS: {
+                    0: "joint_1",
+                    1: "joint_2",
+                },
+                DataType.RGB_IMAGES: {
+                    0: "front",
+                },
+            },
+            "robot-2": {
+                DataType.JOINT_POSITIONS: {
+                    0: "joint_a",
+                },
+                DataType.RGB_IMAGES: {
+                    0: "wrist",
+                },
+            },
+        }
 
 
 class TestGetModelAndAlgorithmConfig:
