@@ -620,6 +620,41 @@ def test_write_unblocks_after_read() -> None:
     assert ring.available() == 3
 
 
+def test_shared_write_unblocks_after_shared_read() -> None:
+    """Shared writer wakes when the shared reader frees space."""
+    consumer_ring = RingBuffer.create_shared(size=80)
+    producer_ring = RingBuffer.open_shared(consumer_ring.shared_name, size=80)
+
+    try:
+        producer_ring.write(b"x" * 60)
+
+        write_completed = threading.Event()
+        write_started = threading.Event()
+
+        def blocked_write() -> None:
+            write_started.set()
+            producer_ring.write(b"y" * 60)
+            write_completed.set()
+
+        thread = threading.Thread(target=blocked_write)
+        thread.start()
+
+        write_started.wait(timeout=1)
+        time.sleep(0.05)
+        assert not write_completed.is_set()
+
+        assert consumer_ring.read(60) == b"x" * 60
+
+        write_completed.wait(timeout=1)
+        assert write_completed.is_set()
+        assert consumer_ring.read(60) == b"y" * 60
+
+        thread.join(timeout=1)
+    finally:
+        consumer_ring.close()
+        producer_ring.close()
+
+
 def test_free_space_calculation() -> None:
     """size - used is correct free space.
 

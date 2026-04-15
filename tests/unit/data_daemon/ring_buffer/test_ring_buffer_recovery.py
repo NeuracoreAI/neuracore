@@ -166,10 +166,8 @@ def test_negative_read_length_handled() -> None:
     ring = RingBuffer(size=100)
     ring.write(b"data")
 
-    # Negative length - should return None or handle gracefully
-    result = ring.read(-1)
-    # Current implementation returns None for insufficient data
-    assert result is None or isinstance(result, bytes)
+    with pytest.raises(ValueError, match="size must be >= 0"):
+        ring.read(-1)
 
 
 def test_negative_peek_length_handled() -> None:
@@ -181,8 +179,8 @@ def test_negative_peek_length_handled() -> None:
     ring = RingBuffer(size=100)
     ring.write(b"data")
 
-    result = ring.peek(-1)
-    assert result is None or isinstance(result, bytes)
+    with pytest.raises(ValueError, match="size must be >= 0"):
+        ring.peek(-1)
 
 
 def test_zero_read_length() -> None:

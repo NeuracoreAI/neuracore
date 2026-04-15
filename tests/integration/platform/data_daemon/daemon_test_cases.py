@@ -66,6 +66,17 @@ BASE_CASES = (
         mode=MODE_STAGGERED,
         timestamp_mode=TIMESTAMP_MODE_REAL,
     ),
+    DataDaemonTestCase(
+        duration_sec=10,
+        recording_count=1,
+        video_count=1,
+        image_height=120,
+        image_width=120,
+        video_fps=500,
+        producer_channels=PRODUCER_PER_THREAD,
+        timestamp_mode=TIMESTAMP_MODE_REAL,
+        wait=False,
+    ),
 )
 
 PRE_NETWORK_INTEGRITY_CASES = BASE_CASES

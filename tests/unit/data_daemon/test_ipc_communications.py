@@ -1,5 +1,4 @@
 import logging
-import math
 import time
 from collections.abc import Generator
 from enum import Enum
@@ -69,23 +68,29 @@ def _drain_messages(
     comm: CommunicationsManager,
     expected: int,
     timeout: float = 2.0,
+    until=None,
 ) -> None:
     poller = zmq.Poller()
     poller.register(comm._consumer_socket, zmq.POLLIN)
     received = 0
     deadline = time.monotonic() + timeout
-    while received < expected and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
         remaining = max(0.0, deadline - time.monotonic())
-        events = dict(poller.poll(remaining * 1000))
+        if received >= expected and (until is None or until()):
+            return
+        poll_timeout_ms = max(1, int(min(remaining, 0.05) * 1000))
+        events = dict(poller.poll(poll_timeout_ms))
         if comm._consumer_socket in events:
             raw = comm.receive_raw()
             if raw is None:
                 continue
             message = MessageEnvelope.from_bytes(raw)
             daemon.handle_message(message)
-            daemon._drain_channel_messages()
             received += 1
+        daemon._drain_channel_messages()
     assert received == expected
+    if until is not None:
+        assert until()
 
 
 def test_daemon_singleton_socket_enforced(zmq_context: zmq.Context) -> None:
@@ -176,10 +181,9 @@ def test_large_payload_chunked_round_trip_over_ipc(
         emitter=emitter,
     )
 
-    producer_comm = CommunicationsManager(context=zmq_context)
     producer = ProducerChannel(
         id="producer-large",
-        comm_manager=producer_comm,
+        context=zmq_context,
         chunk_size=16 * 1024,
         recording_id="rec-large",
         data_type=DataType.CUSTOM_1D,
@@ -200,9 +204,12 @@ def test_large_payload_chunked_round_trip_over_ipc(
         dataset_id="dataset-1",
         dataset_name="dataset",
     )
-
-    expected_chunks = math.ceil(len(payload) / producer.chunk_size)
-    _drain_messages(daemon, daemon_comm, expected=expected_chunks)
+    _drain_messages(
+        daemon,
+        daemon_comm,
+        expected=0,
+        until=lambda: len(rdm.enqueued) == 1,
+    )
 
     assert len(rdm.enqueued) == 1
     assert rdm.enqueued[0].data == payload
@@ -221,19 +228,16 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context, emitter) 
         emitter=emitter,
     )
 
-    producer_a_comm = CommunicationsManager(context=zmq_context)
-    producer_b_comm = CommunicationsManager(context=zmq_context)
-
     producer_a = ProducerChannel(
         id="producer-a",
-        comm_manager=producer_a_comm,
+        context=zmq_context,
         chunk_size=8,
         recording_id="rec-a",
         data_type=DataType.CUSTOM_1D,
     )
     producer_b = ProducerChannel(
         id="producer-b",
-        comm_manager=producer_b_comm,
+        context=zmq_context,
         chunk_size=8,
         recording_id="rec-b",
         data_type=DataType.CUSTOM_1D,
@@ -264,11 +268,12 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context, emitter) 
         robot_id="robot-b",
         dataset_id="dataset-b",
     )
-
-    expected = math.ceil(len(payload_a) / producer_a.chunk_size) + math.ceil(
-        len(payload_b) / producer_b.chunk_size
+    _drain_messages(
+        daemon,
+        daemon_comm,
+        expected=0,
+        until=lambda: len(rdm.enqueued) == 2,
     )
-    _drain_messages(daemon, daemon_comm, expected=expected)
 
     by_producer = {msg.producer_id: msg.data for msg in rdm.enqueued}
     assert by_producer["producer-a"] == payload_a
@@ -364,16 +369,12 @@ def test_interleaved_chunks_reassemble_per_producer(
     assert by_producer["producer-a"] == payload_a
     assert by_producer["producer-b"] == payload_b
 
-    producer_a_comm.cleanup_producer()
-    producer_b_comm.cleanup_producer()
     daemon_comm.cleanup_daemon()
 
 
 def test_trace_id_required_on_send_data() -> None:
     """send_data() requires start_new_trace() to be called first."""
-    producer_comm = CommunicationsManager()
     producer = ProducerChannel(
-        comm_manager=producer_comm,
         recording_id="rec-1",
         data_type=DataType.CUSTOM_1D,
     )
@@ -393,9 +394,7 @@ def test_trace_id_required_on_send_data() -> None:
 
 def test_recording_id_required_on_start_new_trace() -> None:
     """start_new_trace() requires recording_id to be set on init."""
-    producer_comm = CommunicationsManager()
     producer = ProducerChannel(
-        comm_manager=producer_comm,
         data_type=DataType.CUSTOM_1D,
     )
 

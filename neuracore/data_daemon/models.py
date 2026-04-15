@@ -261,6 +261,135 @@ class ManagementModel(BaseModel):
     open_ring_buffer: OpenRingBufferModel | None = None
 
 
+@dataclass(frozen=True)
+class TraceTransportMetadata:
+    """Trace-level metadata carried by transport messages."""
+
+    recording_id: str
+    data_type: DataType
+    data_type_name: str
+    dataset_id: str | None = None
+    dataset_name: str | None = None
+    robot_name: str | None = None
+    robot_id: str | None = None
+    robot_instance: int | None = None
+
+    def __getitem__(self, key: str) -> str | int | None:
+        """Provide dict-like access for legacy callers and tests."""
+        return self.to_dict()[key]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Provide dict-like access with a default for legacy callers."""
+        return self.to_dict().get(key, default)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TraceTransportMetadata | None":
+        """Parse trace-level transport metadata from a dict when present."""
+        if "recording_id" not in data and "data_type" not in data:
+            return None
+
+        recording_id_raw = data.get("recording_id")
+        if recording_id_raw is None:
+            raise ValueError("recording_id is required when trace metadata is present")
+
+        data_type_raw = data.get("data_type")
+        if data_type_raw is None:
+            raise ValueError("data_type is required when trace metadata is present")
+
+        robot_instance_raw = data.get("robot_instance")
+        return cls(
+            recording_id=str(recording_id_raw),
+            data_type=(
+                data_type_raw
+                if isinstance(data_type_raw, DataType)
+                else DataType(str(data_type_raw))
+            ),
+            data_type_name=str(data.get("data_type_name", "")),
+            dataset_id=(
+                None if data.get("dataset_id") is None else str(data.get("dataset_id"))
+            ),
+            dataset_name=(
+                None
+                if data.get("dataset_name") is None
+                else str(data.get("dataset_name"))
+            ),
+            robot_name=(
+                None if data.get("robot_name") is None else str(data.get("robot_name"))
+            ),
+            robot_id=(
+                None if data.get("robot_id") is None else str(data.get("robot_id"))
+            ),
+            robot_instance=(
+                None if robot_instance_raw is None else int(robot_instance_raw)
+            ),
+        )
+
+    def to_dict(self) -> dict[str, str | int | None]:
+        """Serialize the metadata to a JSON-friendly dict."""
+        return {
+            "recording_id": self.recording_id,
+            "data_type": self.data_type.value,
+            "data_type_name": self.data_type_name,
+            "dataset_id": self.dataset_id,
+            "dataset_name": self.dataset_name,
+            "robot_name": self.robot_name,
+            "robot_id": self.robot_id,
+            "robot_instance": self.robot_instance,
+        }
+
+    def merged_with(
+        self, other: "TraceTransportMetadata"
+    ) -> tuple[
+        "TraceTransportMetadata", dict[str, tuple[str | int | None, str | int | None]]
+    ]:
+        """Merge non-empty fields from another metadata instance."""
+        merged = self.to_dict()
+        mismatches: dict[str, tuple[str | int | None, str | int | None]] = {}
+        for key, value in other.to_dict().items():
+            if value in (None, ""):
+                continue
+            existing = merged.get(key)
+            if existing in (None, ""):
+                merged[key] = value
+            elif existing != value:
+                mismatches[key] = (existing, value)
+        merged_metadata = type(self).from_dict(merged)
+        if merged_metadata is None:
+            raise ValueError("Merged trace metadata unexpectedly missing")
+        return merged_metadata, mismatches
+
+
+@dataclass(frozen=True)
+class SharedRingChunkMetadata:
+    """Per-chunk metadata written into the shared ring buffer."""
+
+    trace_id: str
+    chunk_index: int
+    total_chunks: int
+    trace_metadata: TraceTransportMetadata | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SharedRingChunkMetadata":
+        """Parse a shared-ring chunk metadata record from JSON."""
+        return cls(
+            trace_id=str(data["trace_id"]),
+            chunk_index=int(data["chunk_index"]),
+            total_chunks=int(data["total_chunks"]),
+            trace_metadata=TraceTransportMetadata.from_dict(data),
+        )
+
+    def to_dict(self) -> dict[str, str | int | None]:
+        """Serialize the shared-ring chunk metadata to a JSON-friendly dict."""
+        payload: dict[str, str | int | None] = {
+            "trace_id": self.trace_id,
+            "chunk_index": self.chunk_index,
+            "total_chunks": self.total_chunks,
+        }
+        if self.trace_metadata is not None:
+            payload.update(self.trace_metadata.to_dict())
+        return payload
+
+
 @dataclass
 class DataChunkPayload:
     """Payload for the DATA_CHUNK command."""
@@ -278,6 +407,20 @@ class DataChunkPayload:
     robot_instance: int
     data: bytes
     data_type: DataType
+
+    @property
+    def trace_metadata(self) -> TraceTransportMetadata:
+        """Return the trace-level metadata for this payload."""
+        return TraceTransportMetadata(
+            recording_id=self.recording_id,
+            data_type=self.data_type,
+            data_type_name=self.data_type_name,
+            dataset_id=self.dataset_id,
+            dataset_name=self.dataset_name,
+            robot_name=self.robot_name,
+            robot_id=self.robot_id,
+            robot_instance=self.robot_instance,
+        )
 
     @classmethod
     def from_dict(cls, data: dict) -> "DataChunkPayload":

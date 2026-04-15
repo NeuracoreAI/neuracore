@@ -396,3 +396,8 @@ huggingface
 Emika
 packb
 unpackb
+memfd
+CLOEXEC
+ftruncate
+RDWR
+

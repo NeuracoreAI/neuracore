@@ -31,7 +31,11 @@ class CommunicationsManager:
     def __init__(self, context: zmq.Context | None = None) -> None:
         """Initialize the CommunicationsManager."""
         self._owns_context = context is None
-        self._context = context or zmq.Context.instance()
+        # ProducerChannel instances may coexist within one process. Using the
+        # global singleton context here lets one channel's cleanup terminate the
+        # sockets for every other channel. Give each owned manager its own
+        # context unless a shared one was explicitly passed in.
+        self._context = context or zmq.Context()
 
         self._consumer_socket: zmq.Socket | None = None
 

@@ -9,6 +9,8 @@ import threading
 import uuid
 from collections.abc import Iterator, Sequence
 
+import zmq
+
 from neuracore.data_daemon.communications_management.communications_manager import (
     CommunicationsManager,
     MessageEnvelope,
@@ -20,29 +22,28 @@ from neuracore.data_daemon.const import (
     DEFAULT_VIDEO_RING_BUFFER_SIZE,
     DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
 )
-from neuracore.data_daemon.models import CommandType, DataChunkPayload, DataType
+from neuracore.data_daemon.models import CommandType, DataType
+
+from .producer_channel_message_sender import (
+    ProducerChannelMessageSender,
+    QueuedSharedRingWrite,
+)
+from .producer_heartbeat_service import ProducerHeartbeatService
+from .producer_shared_ring_buffer_transport import ProducerSharedRingBufferTransport
+from .producer_transport_debug_models import ProducerTransportDebugStats
+from .ring_buffer import RingBuffer
 
 logger = logging.getLogger(__name__)
 
 BytePart = bytes | bytearray | memoryview
 
+__all__ = ["ProducerChannel", "RingBuffer", "producer_transport_args_for_data_type"]
+
 
 def producer_transport_args_for_data_type(
     data_type: DataType,
 ) -> tuple[int, int, int]:
-    """Returns the transport arguments for the given data type.
-
-    These arguments are used to initialize a ProducerChannel
-    and determine the chunk size,
-    ring buffer size, and send queue max size for the channel.
-
-    Args:
-        data_type: The data type for which to return the transport arguments.
-
-    Returns:
-        A tuple of (chunk_size, ring_buffer_size, send_queue_maxsize)
-          for the given data type.
-    """
+    """Return producer transport arguments for the given data type."""
     if data_type in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
         return (
             DEFAULT_VIDEO_CHUNK_SIZE,
@@ -65,7 +66,7 @@ class ProducerChannel:
         *,
         data_type: DataType,
         id: str | None = None,
-        comm_manager: CommunicationsManager | None = None,
+        context: zmq.Context | None = None,
         chunk_size: int | None = None,
         send_queue_maxsize: int | None = None,
         recording_id: str | None = None,
@@ -82,7 +83,7 @@ class ProducerChannel:
         ) = producer_transport_args_for_data_type(data_type)
 
         self.channel_id = id or str(uuid.uuid4())
-        self._comm = comm_manager or CommunicationsManager()
+        self._comm = CommunicationsManager(context=context)
         self._comm.create_producer_socket()
         self.chunk_size = int(default_chunk_size if chunk_size is None else chunk_size)
         self.send_queue_maxsize = max(
@@ -93,116 +94,49 @@ class ProducerChannel:
                 else send_queue_maxsize
             ),
         )
-        self._ring_buffer_size = int(
-            default_ring_buffer_size if ring_buffer_size is None else ring_buffer_size
-        )
         self.trace_id: str | None = None
-        self._stop_event = threading.Event()
         self.recording_id: str | None = recording_id
         self._heartbeat_interval = 1.0
-        self._heartbeat_thread: threading.Thread | None = None
-        self._send_queue: queue.Queue[MessageEnvelope | None] = queue.Queue(
-            maxsize=self.send_queue_maxsize
+        self._shared_ring_transport = ProducerSharedRingBufferTransport(
+            int(
+                default_ring_buffer_size
+                if ring_buffer_size is None
+                else ring_buffer_size
+            )
         )
-        self._sender_thread: threading.Thread | None = None
-        self._next_sequence_number = 1
-        self._last_enqueued_sequence_number = 0
-        self._last_socket_sent_sequence_number = 0
-        self._sequence_cv = threading.Condition()
-        self._enqueue_lock = threading.Lock()
-
-        self._sender_thread = threading.Thread(
-            target=self._sender_loop, name="producer-channel-sender", daemon=True
+        self._message_sender = ProducerChannelMessageSender(
+            producer_id=self.channel_id,
+            comm=self._comm,
+            send_queue_maxsize=self.send_queue_maxsize,
+            write_shared_ring_record=self._shared_ring_transport.write_record,
         )
-        self._sender_thread.start()
+        self._heartbeat_service = ProducerHeartbeatService(
+            interval_s=self._heartbeat_interval,
+            send_heartbeat=self.heartbeat,
+        )
 
-    def _sender_loop(self) -> None:
-        """Single thread that owns the ZMQ socket; drains queue and sends.
+    @property
+    def _send_queue(
+        self,
+    ) -> queue.Queue[MessageEnvelope | QueuedSharedRingWrite | None]:
+        """Expose the sender queue for compatibility with existing tests."""
+        return self._message_sender.queue
 
-        Only this thread may call send_message/close on the socket (ZMQ is not
-        thread-safe). Other threads enqueue MessageEnvelopes.
-        """
-        while True:
-            envelope = self._send_queue.get()
-            try:
-                if envelope is None:
-                    break
-
-                try:
-                    self._comm.send_message(envelope)
-                    if envelope.sequence_number is not None:
-                        with self._sequence_cv:
-                            if (
-                                envelope.sequence_number
-                                > self._last_socket_sent_sequence_number
-                            ):
-                                self._last_socket_sent_sequence_number = (
-                                    envelope.sequence_number
-                                )
-                            self._sequence_cv.notify_all()
-                except Exception as exc:
-                    logger.warning("Send failed: %s", exc)
-            finally:
-                self._send_queue.task_done()
-
-        with self._sequence_cv:
-            self._sequence_cv.notify_all()
+    @property
+    def _stop_event(self) -> threading.Event:
+        """Expose the heartbeat stop event for compatibility with existing tests."""
+        return self._heartbeat_service.stop_event
 
     def start_producer_channel(self) -> None:
-        """Starts the producer channel's heartbeat loop.
-
-        This function starts a separate thread which is responsible for sending
-        periodic heartbeats to the daemon. If a heartbeat fails, it will log
-        a warning message but continue running.
-
-        """
-        if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
-            return
-
-        self._stop_event.clear()
-        self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop, name="producer-channel-heartbeat", daemon=True
-        )
-        self._heartbeat_thread.start()
-
-    def _heartbeat_loop(self) -> None:
-        """Heartbeat loop for producer.
-
-        This function runs in a separate thread and is responsible for sending
-        periodic heartbeats to the daemon. If a heartbeat fails, it will log
-        a warning message but continue running.
-
-        """
-        self.heartbeat()
-
-        while not self._stop_event.wait(self._heartbeat_interval):
-            try:
-                self.heartbeat()
-            except Exception as exc:
-                logger.warning("Heartbeat failed: %s", exc)
+        """Starts the producer channel's heartbeat loop."""
+        self._heartbeat_service.start()
 
     def heartbeat(self) -> None:
-        """Send a heartbeat message to the daemon.
-
-        This message is used by the daemon to detect whether
-        a producer is still alive.
-        If the daemon does not receive a heartbeat message
-        from a producer within a certain
-        timeout period, it will assume that the producer has stopped and will clean up
-        any associated resources (e.g. the ring buffer).
-
-        """
+        """Send a heartbeat message to the daemon."""
         self._send(CommandType.HEARTBEAT, {})
 
     def set_recording_id(self, recording_id: str | None) -> None:
-        """Set the recording ID for the producer.
-
-        Args:
-            recording_id (str): The unique identifier for the recording session.
-
-        Returns:
-            None
-        """
+        """Set the recording ID for the producer."""
         self.recording_id = recording_id
 
     def start_new_trace(self) -> None:
@@ -216,7 +150,7 @@ class ProducerChannel:
         trace_id = self.trace_id
         recording_id = self.recording_id
         if trace_id is None or recording_id is None:
-            logger.warning("Cannot end trace; missing trace_id or recording_id.")
+            logger.warning("Cannot end trace without trace_id and recording_id")
             return
         self._send(
             CommandType.TRACE_END,
@@ -232,88 +166,56 @@ class ProducerChannel:
 
     def stop_producer_channel(self) -> None:
         """Stops the producer channel and cleans up any associated resources."""
-        self._stop_event.set()
-        self._send_queue.put(None)  # poison pill: sender thread closes socket and exits
-        if self._sender_thread is not None:
-            self._sender_thread.join(timeout=2)
-            self._sender_thread = None
-        if self._heartbeat_thread is not None:
-            self._heartbeat_thread.join(timeout=1)
-            self._heartbeat_thread = None
+        self._stop_heartbeat_service()
+        self._stop_message_sender()
+        self._close_shared_ring_transport()
         self._comm.cleanup_producer()
 
     def _send(self, command: CommandType, payload: dict | None = None) -> int:
-        """Send a message to the daemon.
-
-        This method serializes the message into a JSON bytes
-        object and then sends it over
-        the ZeroMQ socket to the daemon.
-
-        Args:
-            command: The command to send to the daemon. This is used by the daemon to
-                determine how to handle the message.
-            payload: A dictionary containing any additional data required by the daemon
-                to process the message.
-
-        Returns:
-            The sequence number assigned to the enqueued message.
-        """
-        with self._enqueue_lock:
-            with self._sequence_cv:
-                sequence_number = self._next_sequence_number
-                self._next_sequence_number += 1
-                self._last_enqueued_sequence_number = sequence_number
-            envelope = MessageEnvelope(
-                producer_id=self.channel_id,
-                command=command,
-                payload=payload or {},
-                sequence_number=sequence_number,
-            )
-            self._send_queue.put(envelope)
-            return sequence_number
+        """Send a message to the daemon."""
+        return self._message_sender.send(command, payload)
 
     def get_last_sent_sequence_number(self) -> int:
         """Return the most recent sequence number successfully sent on the socket."""
-        with self._sequence_cv:
-            return self._last_socket_sent_sequence_number
+        return self._message_sender.get_last_sent_sequence_number()
 
     def get_last_enqueued_sequence_number(self) -> int:
         """Return the most recent sequence number enqueued for the sender thread."""
-        with self._sequence_cv:
-            return self._last_enqueued_sequence_number
+        return self._message_sender.get_last_enqueued_sequence_number()
 
     def wait_until_sequence_sent(self, sequence_number: int) -> bool:
-        """Block until the sender thread has sent up to `sequence_number`.
+        """Block until the sender thread has sent up to `sequence_number`."""
+        return self._message_sender.wait_until_sequence_sent(sequence_number)
 
-        Returns False if the sender thread exits before reaching the target.
-        """
-        if sequence_number <= 0:
-            return True
-        with self._sequence_cv:
-            while self._last_socket_sent_sequence_number < sequence_number:
-                sender_thread = self._sender_thread
-                if sender_thread is None or not sender_thread.is_alive():
-                    return False
-                self._sequence_cv.wait()
-            return True
+    def get_transport_stats(self) -> ProducerTransportDebugStats:
+        """Return a typed snapshot of producer transport debug state."""
+        return ProducerTransportDebugStats(
+            channel_id=self.channel_id,
+            recording_id=self.recording_id,
+            trace_id=self.trace_id,
+            chunk_size=self.chunk_size,
+            heartbeat_thread_alive=self._heartbeat_service.get_stats()[
+                "heartbeat_thread_alive"
+            ],
+            shared_ring=self._shared_ring_transport.get_stats(),
+            message_sender=self._message_sender.get_stats(),
+        )
 
     def open_ring_buffer(self, size: int | None = None) -> None:
-        """Open a ring buffer for sending data chunks to the daemon.
-
-        This method sends an OPEN_RING_BUFFER command to the daemon, which
-        creates a new RingBuffer instance of the specified size and associates it
-        with the producer's channel.
-
-        :param  size (int): The size of the ring buffer in bytes.
-        """
+        """Open the daemon-side ring buffer transport for this producer."""
+        payload = self._shared_ring_transport.open(size)
         self._send(
             CommandType.OPEN_RING_BUFFER,
-            {
-                "open_ring_buffer": {
-                    "size": self._ring_buffer_size if size is None else size
-                }
-            },
+            {"open_ring_buffer": payload},
         )
+
+    def _ensure_shared_ring_buffer(self) -> None:
+        """Create and announce the shared ring buffer on first data send."""
+        if self._shared_ring_transport.is_open():
+            return
+
+        self.open_ring_buffer()
+        self._shared_ring_transport.ensure_open()
 
     def send_data(
         self,
@@ -326,17 +228,7 @@ class ProducerChannel:
         dataset_id: str | None = None,
         dataset_name: str | None = None,
     ) -> None:
-        """Send data to the daemon.
-
-        This method sends the data to the daemon in chunks, using the
-        DATA_CHUNK command. Requires start_new_trace() to be called first.
-
-        :param data (bytes): The data to send.
-        :param robot_instance (int): The robot instance identifier.
-
-        Returns:
-            None
-        """
+        """Send data to the daemon."""
         if not data:
             return
 
@@ -364,7 +256,8 @@ class ProducerChannel:
         return views
 
     def _iter_chunk_views(
-        self, parts: Sequence[memoryview]
+        self,
+        parts: Sequence[memoryview],
     ) -> Iterator[bytes | memoryview]:
         if not parts:
             return
@@ -391,7 +284,7 @@ class ProducerChannel:
                     remaining = self.chunk_size
 
         if chunk_parts:
-            yield (chunk_parts[0] if len(chunk_parts) == 1 else b"".join(chunk_parts))
+            yield chunk_parts[0] if len(chunk_parts) == 1 else b"".join(chunk_parts)
 
     def send_data_parts(
         self,
@@ -426,27 +319,30 @@ class ProducerChannel:
         if not dataset_id and not dataset_name:
             raise ValueError("Dataset ID or name required")
 
+        self._ensure_shared_ring_buffer()
+
         total_chunks = math.ceil(total_bytes / self.chunk_size)
         produced_chunks = 0
 
         for idx, chunk in enumerate(self._iter_chunk_views(normalised_parts)):
             produced_chunks += 1
-            payload = DataChunkPayload(
-                channel_id=self.channel_id,
-                recording_id=recording_id,
-                trace_id=trace_id,
-                chunk_index=idx,
-                total_chunks=total_chunks,
-                data_type=data_type,
-                data_type_name=data_type_name,
-                dataset_name=dataset_name,
-                dataset_id=dataset_id,
-                robot_name=robot_name,
-                robot_id=robot_id,
-                robot_instance=robot_instance,
-                data=chunk,
+            self._message_sender.enqueue_shared_ring_write(
+                metadata={
+                    "channel_id": self.channel_id,
+                    "recording_id": recording_id,
+                    "trace_id": trace_id,
+                    "chunk_index": idx,
+                    "total_chunks": total_chunks,
+                    "data_type": data_type.value,
+                    "data_type_name": data_type_name,
+                    "dataset_name": dataset_name,
+                    "dataset_id": dataset_id,
+                    "robot_name": robot_name,
+                    "robot_id": robot_id,
+                    "robot_instance": robot_instance,
+                },
+                chunk=chunk,
             )
-            self._send(CommandType.DATA_CHUNK, {"data_chunk": payload.to_dict()})
 
         if produced_chunks != total_chunks:
             raise RuntimeError(
@@ -457,10 +353,7 @@ class ProducerChannel:
         self,
         ring_buffer_size: int | None = None,
     ) -> None:
-        """Initialize a new producer channel.
-
-        This method starts a new trace and opens a ring buffer.
-        """
+        """Initialize a new producer channel."""
         if not self.trace_id:
             self.start_new_trace()
 
@@ -468,9 +361,14 @@ class ProducerChannel:
         self.open_ring_buffer(size=ring_buffer_size)
 
     def cleanup_producer_channel(self) -> None:
-        """Clean up the producer channel.
-
-        This method stops the trace and closes the ring buffer, releasing any
-        associated resources.
-        """
+        """Clean up the producer channel."""
         self.end_trace()
+
+    def _stop_heartbeat_service(self) -> None:
+        self._heartbeat_service.stop(join_timeout_s=1.0)
+
+    def _stop_message_sender(self) -> None:
+        self._message_sender.close(join_timeout_s=2.0)
+
+    def _close_shared_ring_transport(self) -> None:
+        self._shared_ring_transport.close()

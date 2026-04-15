@@ -1016,13 +1016,25 @@ async def test_upload_failed_after_max_retries_marks_failed_and_no_ready_emitted
             TraceErrorCode.NETWORK_ERROR,
             "final fail",
         )
-        await asyncio.sleep(0.15)
+
+        async def wait_row(timeout: float = 2.0) -> dict:
+            end = asyncio.get_running_loop().time() + timeout
+            while True:
+                row = await _get_trace_row(store, "trace-exhaust")
+                if (
+                    row["upload_status"] == TraceUploadStatus.FAILED.value
+                    and int(row["num_upload_attempts"]) == UPLOAD_MAX_RETRIES
+                ):
+                    return row
+                if asyncio.get_running_loop().time() >= end:
+                    return row
+                await asyncio.sleep(0.01)
+
+        row = await wait_row()
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
 
     assert ready_events == []
-
-    row = await _get_trace_row(store, "trace-exhaust")
     assert row["upload_status"] == TraceUploadStatus.FAILED.value
     assert row["error_code"] == TraceErrorCode.NETWORK_ERROR.value
     assert row["error_message"] == "final fail"
