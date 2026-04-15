@@ -35,9 +35,18 @@ jobs:
 
     steps:
     - name: Checkout code
+      if: ${{ matrix.environment != 'production' }}
       uses: actions/checkout@v4
       with:
         ref: main
+    - name: Checkout production test harness
+      if: ${{ matrix.environment == 'production' }}
+      uses: actions/checkout@v4
+      with:
+        ref: main
+        sparse-checkout: |
+          tests/integration/ml
+          examples/common
     - name: Pull LFS objects
       run: git lfs pull
 
@@ -74,27 +83,10 @@ jobs:
           pip install --no-cache-dir ".[dev,ml,examples]"
         fi
 
-    - name: Run Evaluation
-      env:
-        NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
-        NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
-        NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
-        NEURACORE_ENDPOINT_TIMEOUT: 30
-        ALGORITHM_NAME: ${{ matrix.algorithm }}
-        DISPLAY: :0
+    - name: Verify production uses PyPI neuracore
+      if: ${{ matrix.environment == 'production' }}
       run: |
-        sudo apt-get update
-        sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1-mesa-glx libosmesa6-dev
-        Xvfb $DISPLAY -screen 0 1280x1024x24 &
-        if [ "${{ matrix.environment }}" = "production" ]; then
-          TEST_DIR="$RUNNER_TEMP/neuracore-performance-tests-${{ matrix.algorithm }}-${{ matrix.environment }}"
-          mkdir -p "$TEST_DIR/tests/integration/ml" "$TEST_DIR/examples"
-          cp "$GITHUB_WORKSPACE/tests/integration/ml/test_algorithm_performance.py" "$TEST_DIR/tests/integration/ml/"
-          cp "$GITHUB_WORKSPACE/tests/integration/ml/conftest.py" "$TEST_DIR/tests/integration/ml/"
-          cp "$GITHUB_WORKSPACE/tests/integration/ml/algorithm_configs.yaml" "$TEST_DIR/tests/integration/ml/"
-          cp -R "$GITHUB_WORKSPACE/examples/common" "$TEST_DIR/examples/"
-          cd "$TEST_DIR"
-          python - <<'EOF'
+        python - <<'EOF'
         import os
         from pathlib import Path
 
@@ -108,7 +100,17 @@ jobs:
             )
         print(f"Using neuracore from {package_path}")
         EOF
-          pytest -o log_cli=true --log-cli-level=INFO -v -k test_evaluate tests/integration/ml/test_algorithm_performance.py
-        else
-          pytest -o log_cli=true --log-cli-level=INFO -v -k test_evaluate tests/integration/ml/test_algorithm_performance.py
-        fi
+
+    - name: Run Evaluation
+      env:
+        NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
+        NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
+        NEURACORE_ENDPOINT_TIMEOUT: 30
+        ALGORITHM_NAME: ${{ matrix.algorithm }}
+        DISPLAY: :0
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1-mesa-glx libosmesa6-dev
+        Xvfb $DISPLAY -screen 0 1280x1024x24 &
+        pytest -o log_cli=true --log-cli-level=INFO -v -k test_evaluate tests/integration/ml/test_algorithm_performance.py
