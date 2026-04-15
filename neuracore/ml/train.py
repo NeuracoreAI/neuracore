@@ -413,7 +413,7 @@ def determine_optimal_batch_size(
         device = get_default_device()
 
     logger.info(f"Starting batch size autotuning on {device}...")
-    
+
     # Avoid altering the original dataset
     autotuning_dataset = copy.deepcopy(dataset)
 

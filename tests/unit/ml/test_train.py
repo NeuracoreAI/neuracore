@@ -674,7 +674,7 @@ class TestDetermineOptimalBatchSize:
             mock_cfg_batch_size,
             mock_dataset,
             mock_cfg_batch_size.input_cross_embodiment_description,
-            mock_cfg_batch_size.output_cross_embodiment_description
+            mock_cfg_batch_size.output_cross_embodiment_description,
         )
 
         assert result == 16
@@ -694,7 +694,7 @@ class TestDetermineOptimalBatchSize:
                 mock_cfg_batch_size,
                 mock_dataset,
                 mock_cfg_batch_size.input_cross_embodiment_description,
-                mock_cfg_batch_size.output_cross_embodiment_description
+                mock_cfg_batch_size.output_cross_embodiment_description,
             )
 
     @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
@@ -775,7 +775,7 @@ class TestDetermineOptimalBatchSize:
             mock_cfg_batch_size,
             mock_dataset,
             mock_cfg_batch_size.input_cross_embodiment_description,
-            mock_cfg_batch_size.output_cross_embodiment_description
+            mock_cfg_batch_size.output_cross_embodiment_description,
         )
 
         assert result == 16
