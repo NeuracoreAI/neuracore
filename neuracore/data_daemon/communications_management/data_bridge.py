@@ -51,6 +51,11 @@ _BRIDGE_FORWARD_WAIT_TIMEOUT_S = 0.05
 _CLOSING_DEBUG_LOG_INTERVAL_S = 5.0
 
 
+def _elapsed_since_stop_requested_s(closing_state: RecordingClosingState) -> float:
+    """Return seconds elapsed since RECORDING_STOPPED was received."""
+    return (utc_now() - closing_state.stop_requested_at).total_seconds()
+
+
 def _str_or_none(value: str | int | None) -> str | None:
     """Convert value to string or None.
 
@@ -378,11 +383,12 @@ class Daemon:
                         continue
                     closing_state.cutoff_observed_producers.add(producer_id)
                     logger.info(
-                        "Bridge observed cutoff recording_id=%s producer_id=%s observed_sequence_number=%s cutoff_sequence_number=%s",
+                        "Bridge observed cutoff recording_id=%s producer_id=%s observed_sequence_number=%s cutoff_sequence_number=%s elapsed_since_stop_s=%.3f",
                         recording_id,
                         producer_id,
                         last_sequence_number,
                         cutoff_sequence_number,
+                        _elapsed_since_stop_requested_s(closing_state),
                     )
 
     def _drain_bridge_cutoff_queries(self) -> None:
@@ -426,10 +432,11 @@ class Daemon:
                     observed_sequence_number = int(
                         self._producer_last_sequence_numbers.get(str(producer_id), 0)
                     )
-                    if (
-                        str(producer_id) in observed_producers
-                        and observed_sequence_number >= cutoff_sequence_number
-                    ):
+                    if observed_sequence_number >= cutoff_sequence_number:
+                        if closing_state is not None:
+                            closing_state.cutoff_observed_producers.add(
+                                str(producer_id)
+                            )
                         observed_producer_sequence_numbers[str(producer_id)] = (
                             observed_sequence_number
                         )
@@ -463,12 +470,13 @@ class Daemon:
                             for producer_id in missing_cutoffs
                         }
                         logger.info(
-                            "Bridge cutoff query blocked recording_id=%s state_source=%s missing_cutoffs=%s current_sequences=%s observed_producers=%s",
+                            "Bridge cutoff query blocked recording_id=%s state_source=%s missing_cutoffs=%s current_sequences=%s observed_producers=%s elapsed_since_stop_s=%.3f",
                             recording_id,
                             state_source,
                             missing_cutoffs,
                             current_sequences,
                             sorted(observed_producers),
+                            _elapsed_since_stop_requested_s(closing_state),
                         )
 
                 if (
@@ -480,9 +488,10 @@ class Daemon:
                 ):
                     self._closed_recording_cutoff_states.pop(str(recording_id), None)
                     logger.info(
-                        "Bridge cutoff closed-state ack delivered recording_id=%s observed_producer_sequence_numbers=%s",
+                        "Bridge cutoff closed-state ack delivered recording_id=%s observed_producer_sequence_numbers=%s elapsed_since_stop_s=%.3f",
                         recording_id,
                         observed_producer_sequence_numbers,
+                        _elapsed_since_stop_requested_s(closing_state),
                     )
 
         return MessageEnvelope(
@@ -1146,7 +1155,7 @@ class Daemon:
             }
 
         logger.info(
-            "Recording stopped received recording_id=%s producer_stop_sequence_numbers=%s current_sequences=%s",
+            "Recording stopped received recording_id=%s producer_stop_sequence_numbers=%s current_sequences=%s elapsed_since_stop_s=0.000",
             recording_id,
             producer_stop_sequence_numbers,
             current_sequences,
@@ -1195,8 +1204,9 @@ class Daemon:
                 if closing_state is not None:
                     self._closed_recording_cutoff_states[recording_id] = closing_state
             logger.info(
-                "Closing recording finalized recording_id=%s",
+                "Closing recording finalized recording_id=%s elapsed_since_stop_s=%.3f",
                 recording_id,
+                _elapsed_since_stop_requested_s(closing_state),
             )
             self._emitter.emit(Emitter.STOP_RECORDING, recording_id)
 

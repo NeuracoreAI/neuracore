@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 from collections.abc import Callable, Generator
 from pathlib import Path
@@ -21,6 +22,9 @@ sys.path.append(str(Path(__file__).resolve().parent))
 
 @pytest.fixture(autouse=True)
 def daemon_setup_teardown():
+    if os.getenv("NCD_SKIP_DAEMON_CLEANUP_FOR_DEBUG") == "1":
+        yield
+        return
     daemon_cleanup()
     yield
     daemon_cleanup()

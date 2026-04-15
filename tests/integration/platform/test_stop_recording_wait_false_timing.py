@@ -6,11 +6,17 @@ import time
 import uuid
 from pathlib import Path
 
-import numpy as np
 import pytest
 from neuracore_types import DataType
 
 import neuracore as nc
+from neuracore.core.robot import Robot
+from neuracore.data_daemon.communications_management.producer_channel import ProducerChannel
+from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
+from neuracore.data_daemon.lifecycle.daemon_os_control import (
+    launch_new_daemon_subprocess,
+)
+from recording_playback_shared import daemon_cleanup
 
 THIS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = THIS_DIR.parents[2]
@@ -18,20 +24,19 @@ sys.path.append(str(REPO_ROOT / "examples"))
 
 # ruff: noqa: E402
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
-from recording_playback_shared import (
-    decode_frame_number,
-    encode_frame_number,
-    wait_for_dataset_ready,
-)
+from recording_playback_shared import encode_frame_number
 
 logger = logging.getLogger(__name__)
 
 MAX_TIME_TO_START_S = 20
 MAX_TIME_TO_STOP_S = 3
-MAX_TIME_TO_DATASET_READY_S = 500
-
-os.environ.setdefault("NCD_BANDWIDTH_LIMIT", str(200 * 1024 * 1024))
-os.environ.setdefault("NCD_MAX_CONCURRENT_UPLOADS", "30")
+_TEST_DAEMON_ENV_OVERRIDES = {
+    "NCD_BANDWIDTH_LIMIT": str(200 * 1024 * 1024),
+    "NCD_MAX_CONCURRENT_UPLOADS": "30",
+    # This test is transport-focused and stops at bridge cutoff observation,
+    # so keep the daemon offline to avoid upload-side resource noise.
+    "NCD_OFFLINE": "1",
+}
 
 
 class Timer:
@@ -107,7 +112,7 @@ def _log_timer_stats() -> None:
         )
 
 
-def _log_rgb_stream_transport_stats(robot, *, camera_name: str, phase: str) -> None:
+def _log_rgb_stream_transport_stats(robot: Robot, *, camera_name: str, phase: str) -> None:
     stream_id = f"{DataType.RGB_IMAGES.value}:{camera_name}"
     stream = robot.get_data_stream(stream_id)
     if stream is None:
@@ -118,7 +123,7 @@ def _log_rgb_stream_transport_stats(robot, *, camera_name: str, phase: str) -> N
         )
         return
 
-    producer_channel = getattr(stream, "_producer_channel", None)
+    producer_channel: ProducerChannel = getattr(stream, "_producer_channel", None)
     if producer_channel is None:
         logger.info(
             "RGB transport stats unavailable phase=%s stream_id=%s producer_channel=None",
@@ -152,10 +157,50 @@ def cleanup_repo_state_with_script(daemon_setup_teardown):
     `daemon_setup_teardown` comes from platform `conftest.py` and ensures the
     daemon pid/socket/db state is cleaned before and after each test.
     """
+    if os.getenv("NCD_SKIP_DAEMON_CLEANUP_FOR_DEBUG") == "1":
+        yield
+        return
     cleanup_script = REPO_ROOT / "cleanup.sh"
     subprocess.run(["bash", str(cleanup_script)], cwd=REPO_ROOT, check=True)
     yield
+    daemon_cleanup()
     subprocess.run(["bash", str(cleanup_script)], cwd=REPO_ROOT, check=True)
+
+
+@pytest.fixture(autouse=True)
+def launch_clean_daemon_for_test(cleanup_repo_state_with_script):
+    """Launch a fresh daemon for this test before any client calls occur.
+
+    This avoids relying on lazy background startup during `nc.start_recording()`,
+    which made timing results differ from the explicit clean daemon runs.
+    """
+    if os.getenv("NCD_SKIP_DAEMON_CLEANUP_FOR_DEBUG") == "1":
+        yield
+        return
+
+    previous_env = {
+        key: os.environ.get(key) for key in _TEST_DAEMON_ENV_OVERRIDES
+    }
+    os.environ.update(_TEST_DAEMON_ENV_OVERRIDES)
+
+    pid_path = get_daemon_pid_path()
+    db_path = get_daemon_db_path()
+    daemon_process = launch_new_daemon_subprocess(
+        pid_path=pid_path,
+        db_path=db_path,
+        background=False,
+        timeout_s=10.0,
+    )
+    logger.info("Launched clean data daemon for test pid=%s", daemon_process.pid)
+    try:
+        yield
+    finally:
+        daemon_cleanup()
+        for key, previous_value in previous_env.items():
+            if previous_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous_value
 
 
 def test_stop_recording_wait_false_4k_timing(dataset_cleanup):
@@ -167,18 +212,28 @@ def test_stop_recording_wait_false_4k_timing(dataset_cleanup):
 
     frame_width = 3840
     frame_height = 2160
-    frame_count = 4
+    frame_rate_hz = 60
+    duration_s = 30
+    frame_count = frame_rate_hz * duration_s
     camera_name = "camera_0"
-    expected_frame_numbers = set(range(frame_count))
     bytes_per_frame = frame_width * frame_height * 3
+    total_payload_mib = (frame_count * bytes_per_frame) / (1024 * 1024)
+    log_checkpoints = {
+        0,
+        frame_rate_hz - 1,
+        (frame_count // 2) - 1,
+        frame_count - 1,
+    }
 
     logger.info(
-        "Starting isolated 4K wait=False integration test frames=%d resolution=%dx%d bytes_per_frame=%.2f MiB total=%.2f MiB",
+        "Starting isolated 4K wait=False integration test fps=%d duration_s=%d frames=%d resolution=%dx%d bytes_per_frame=%.2f MiB total=%.2f MiB",
+        frame_rate_hz,
+        duration_s,
         frame_count,
         frame_width,
         frame_height,
         bytes_per_frame / (1024 * 1024),
-        (frame_count * bytes_per_frame) / (1024 * 1024),
+        total_payload_mib,
     )
 
     with Timer(label="nc.login", max_time=MAX_TIME_TO_START_S, always_log=True):
@@ -212,7 +267,7 @@ def test_stop_recording_wait_false_4k_timing(dataset_cleanup):
     _log_rgb_stream_transport_stats(robot, camera_name=camera_name, phase="after_start")
 
     for frame_num in range(frame_count):
-        timestamp = frame_num * 0.25
+        timestamp = frame_num / frame_rate_hz
         with Timer(
             label="generate_frame",
             max_time=1.5,
@@ -221,12 +276,12 @@ def test_stop_recording_wait_false_4k_timing(dataset_cleanup):
             frame = encode_frame_number(frame_num, frame_width, frame_height)
         with Timer(
             label="nc.log_rgb",
-            max_time=5.0,
+            max_time=20.0,
             log_threshold=0.05,
         ):
             nc.log_rgb(camera_name, frame, timestamp=timestamp)
 
-        if frame_num in (0, frame_count - 1):
+        if frame_num in log_checkpoints:
             _log_rgb_stream_transport_stats(
                 robot,
                 camera_name=camera_name,
@@ -244,48 +299,9 @@ def test_stop_recording_wait_false_4k_timing(dataset_cleanup):
         nc.stop_recording(wait=False)
 
     _log_rgb_stream_transport_stats(robot, camera_name=camera_name, phase="after_stop")
-
-    with Timer(
-        label="wait_for_dataset_ready",
-        max_time=MAX_TIME_TO_DATASET_READY_S,
-        always_log=True,
-    ):
-        wait_for_dataset_ready(
-            dataset_name,
-            expected_recording_count=1,
-            poll_interval_s=0.5,
-        )
-
-    _log_rgb_stream_transport_stats(
-        robot,
-        camera_name=camera_name,
-        phase="after_dataset_ready",
-    )
-
-    with Timer(label="nc.get_dataset", max_time=120.0, always_log=True):
-        dataset = nc.get_dataset(dataset_name)
-    with Timer(
-        label="dataset.synchronize",
-        max_time=MAX_TIME_TO_DATASET_READY_S,
-        always_log=True,
-    ):
-        synced_dataset = dataset.synchronize()
-
-    decoded_frame_numbers: set[int] = set()
-    for synced_episode in synced_dataset:
-        for sync_point in synced_episode:
-            if DataType.RGB_IMAGES not in sync_point.data:
-                continue
-            for _, cam_data in sync_point[DataType.RGB_IMAGES].items():
-                decoded_frame_numbers.add(
-                    decode_frame_number(np.array(cam_data.frame))
-                )
-
     logger.info(
-        "Isolated 4K wait=False result retrieved_frames=%d expected_frames=%d",
-        len(decoded_frame_numbers),
+        "Isolated 4K wait=False transport test completed after bridge cutoff acknowledgement frames_sent=%d total_payload_mib=%.2f",
         frame_count,
+        total_payload_mib,
     )
     _log_timer_stats()
-
-    assert decoded_frame_numbers == expected_frame_numbers

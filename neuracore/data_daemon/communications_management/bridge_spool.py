@@ -63,6 +63,9 @@ class BridgeSpool:
         record_len = len(record)
 
         with self._not_empty:
+            self._root.mkdir(parents=True, exist_ok=True)
+            self._current_segment_path.parent.mkdir(parents=True, exist_ok=True)
+            self._current_segment_path.touch(exist_ok=True)
             if (
                 self._current_segment_size > 0
                 and self._current_segment_size + record_len > self._segment_max_bytes
@@ -178,7 +181,8 @@ class BridgeSpool:
         self._current_segment_id += 1
         self._current_segment_size = 0
         self._current_segment_path = self._segment_path(self._current_segment_id)
-        self._current_segment_path.touch()
+        self._current_segment_path.parent.mkdir(parents=True, exist_ok=True)
+        self._current_segment_path.touch(exist_ok=True)
         if previous_segment_id not in self._pending_by_segment:
             self._segment_path(previous_segment_id).unlink(missing_ok=True)
 

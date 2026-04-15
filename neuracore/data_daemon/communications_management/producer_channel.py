@@ -7,7 +7,7 @@ import math
 import queue
 import threading
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 from neuracore.data_daemon.communications_management.communications_manager import (
     CommunicationsManager,
@@ -345,17 +345,17 @@ class ProducerChannel:
     def _iter_chunk_views(
         self,
         parts: Sequence[memoryview],
-    ) -> list[bytes | memoryview]:
+    ) -> Iterator[bytes | memoryview]:
         if not parts:
-            return []
+            return
 
-        chunks: list[bytes | memoryview] = []
         chunk_parts: list[memoryview] = []
         remaining = self.chunk_size
 
         for part in parts:
             start = 0
             part_len = len(part)
+
             while start < part_len:
                 take = min(remaining, part_len - start)
                 chunk_parts.append(part[start : start + take])
@@ -363,7 +363,7 @@ class ProducerChannel:
                 remaining -= take
 
                 if remaining == 0:
-                    chunks.append(
+                    yield (
                         chunk_parts[0]
                         if len(chunk_parts) == 1
                         else b"".join(chunk_parts)
@@ -372,11 +372,7 @@ class ProducerChannel:
                     remaining = self.chunk_size
 
         if chunk_parts:
-            chunks.append(
-                chunk_parts[0] if len(chunk_parts) == 1 else b"".join(chunk_parts)
-            )
-
-        return chunks
+            yield chunk_parts[0] if len(chunk_parts) == 1 else b"".join(chunk_parts)
 
     def send_data_parts(
         self,
@@ -416,13 +412,10 @@ class ProducerChannel:
             raise ValueError("Dataset ID or name required")
 
         total_chunks = math.ceil(total_bytes / self.chunk_size)
-        chunks = self._iter_chunk_views(normalised_parts)
-        if len(chunks) != total_chunks:
-            raise RuntimeError(
-                "Chunk count mismatch while serializing payload for transport"
-            )
+        produced_chunks = 0
 
-        for idx, chunk in enumerate(chunks):
+        for idx, chunk in enumerate(self._iter_chunk_views(normalised_parts)):
+            produced_chunks += 1
             payload = DataChunkPayload(
                 channel_id=self.channel_id,
                 recording_id=recording_id,
@@ -439,6 +432,11 @@ class ProducerChannel:
                 data=chunk,
             )
             self._send(CommandType.DATA_CHUNK, {"data_chunk": payload.to_dict()})
+
+        if produced_chunks != total_chunks:
+            raise RuntimeError(
+                "Chunk count mismatch while serializing payload for transport"
+            )
 
     def initialize_new_producer_channel(
         self,

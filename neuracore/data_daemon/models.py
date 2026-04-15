@@ -2,6 +2,7 @@
 
 import base64
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -340,6 +341,17 @@ class DataChunkPayload:
         data_type = (
             DataType(data_type_raw) if data_type_raw is not None else DataType.CUSTOM_1D
         )
+        data_raw = data["data"]
+        if isinstance(data_raw, str):
+            chunk_data = base64.b64decode(data_raw)
+        elif isinstance(data_raw, memoryview):
+            chunk_data = data_raw.tobytes()
+        elif isinstance(data_raw, (bytes, bytearray)):
+            chunk_data = bytes(data_raw)
+        else:
+            raise TypeError(
+                "data_chunk.data must be base64 text or raw bytes-like data"
+            )
         return cls(
             channel_id=str(data.get("channel_id", "")),
             trace_id=str(data["trace_id"]),
@@ -352,7 +364,7 @@ class DataChunkPayload:
             robot_name=data.get("robot_name"),
             robot_id=data.get("robot_id"),
             robot_instance=int(robot_instance_raw),
-            data=base64.b64decode(data["data"]),
+            data=chunk_data,
             data_type=data_type,
         )
 
@@ -437,6 +449,29 @@ class MessageEnvelope:
         """
         parsed = json.loads(raw.decode("utf-8"))
         return cls.from_dict(parsed)
+
+    @classmethod
+    def from_raw_message_parts(cls, raw_parts: Sequence[bytes]) -> "MessageEnvelope":
+        """Construct a message envelope from one or more raw socket frames."""
+        if len(raw_parts) == 1:
+            return cls.from_bytes(raw_parts[0])
+        if len(raw_parts) != 2:
+            raise ValueError(
+                f"Unexpected multipart message with {len(raw_parts)} parts"
+            )
+
+        envelope = cls.from_bytes(raw_parts[0])
+        if envelope.command != CommandType.DATA_CHUNK:
+            raise ValueError(
+                "Multipart messages are only supported for DATA_CHUNK commands"
+            )
+
+        payload = dict(envelope.payload or {})
+        data_chunk_payload = dict(payload.get("data_chunk") or payload)
+        data_chunk_payload["data"] = raw_parts[1]
+        payload["data_chunk"] = data_chunk_payload
+        envelope.payload = payload
+        return envelope
 
     def to_bytes(self) -> bytes:
         """Serialize the message envelope to a JSON-serialized bytes object.
