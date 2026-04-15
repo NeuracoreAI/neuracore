@@ -46,7 +46,111 @@ def test_neuracore_cli_help_includes_subcommands() -> None:
     assert "login" in result.output
     assert "select-org" in result.output
     assert "launch-server" in result.output
+    assert "cache" in result.output
     assert "training" in result.output
+
+
+def test_neuracore_cache_clear_requires_confirmation(monkeypatch, tmp_path) -> None:
+    recording_cache = tmp_path / "recording_cache"
+    dataset_cache = tmp_path / "dataset_cache"
+    recording_cache.mkdir()
+    dataset_cache.mkdir()
+    (recording_cache / "frame.png").write_bytes(b"abc")
+    (dataset_cache / "stats.json").write_text("{}")
+
+    monkeypatch.setattr(
+        "neuracore.core.cli.cache_commands.DEFAULT_RECORDING_CACHE_DIR",
+        recording_cache,
+    )
+    monkeypatch.setattr(
+        "neuracore.core.cli.cache_commands.DEFAULT_DATASET_CACHE_DIR",
+        dataset_cache,
+    )
+
+    result = runner.invoke(
+        app,
+        ["cache", "clear"],
+        input="n\n",
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert "Clear these cache files?" in result.output
+    assert "Aborted." in result.output
+    assert (recording_cache / "frame.png").exists()
+    assert (dataset_cache / "stats.json").exists()
+
+
+def test_neuracore_cache_clear_yes_deletes_only_cache_contents(
+    monkeypatch, tmp_path
+) -> None:
+    recording_cache = tmp_path / "recording_cache"
+    dataset_cache = tmp_path / "dataset_cache"
+    training_runs = tmp_path / "runs"
+    recording_cache.mkdir()
+    dataset_cache.mkdir()
+    training_runs.mkdir()
+    (recording_cache / "frame.png").write_bytes(b"abc")
+    (dataset_cache / "stats.json").write_text("{}")
+    (training_runs / "training_run.json").write_text("{}")
+
+    monkeypatch.setattr(
+        "neuracore.core.cli.cache_commands.DEFAULT_RECORDING_CACHE_DIR",
+        recording_cache,
+    )
+    monkeypatch.setattr(
+        "neuracore.core.cli.cache_commands.DEFAULT_DATASET_CACHE_DIR",
+        dataset_cache,
+    )
+
+    result = runner.invoke(
+        app,
+        ["cache", "clear", "--yes"],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert "Training runs, auth config, and daemon state will not be deleted." in (
+        result.output
+    )
+    assert "Cleared" in result.output
+    assert recording_cache.exists()
+    assert dataset_cache.exists()
+    assert not (recording_cache / "frame.png").exists()
+    assert not (dataset_cache / "stats.json").exists()
+    assert (training_runs / "training_run.json").exists()
+
+
+def test_neuracore_cache_clear_dry_run_preserves_files(monkeypatch, tmp_path) -> None:
+    recording_cache = tmp_path / "recording_cache"
+    dataset_cache = tmp_path / "dataset_cache"
+    recording_cache.mkdir()
+    dataset_cache.mkdir()
+    (recording_cache / "frame.png").write_bytes(b"abc")
+    (dataset_cache / "stats.json").write_text("{}")
+
+    monkeypatch.setattr(
+        "neuracore.core.cli.cache_commands.DEFAULT_RECORDING_CACHE_DIR",
+        recording_cache,
+    )
+    monkeypatch.setattr(
+        "neuracore.core.cli.cache_commands.DEFAULT_DATASET_CACHE_DIR",
+        dataset_cache,
+    )
+
+    result = runner.invoke(
+        app,
+        ["cache", "clear", "--dry-run"],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert "Dry run: no files were deleted." in result.output
+    assert (recording_cache / "frame.png").exists()
+    assert (dataset_cache / "stats.json").exists()
 
 
 def test_neuracore_login_help_includes_options() -> None:
