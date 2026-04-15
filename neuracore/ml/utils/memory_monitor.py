@@ -59,7 +59,8 @@ class MemoryMonitor:
         if ram_used_ratio > self.max_ram_utilization:
             raise OutOfMemoryError(
                 f"RAM usage {ram_used_ratio*100:.1f}% exceeded limit! "
-                "Consider using a smaller batch size or a more powerful machine."
+                "Consider using a smaller batch size or a more powerful machine.",
+                device="RAM",
             )
 
         if self.gpu_id is not None and torch.cuda.is_available():

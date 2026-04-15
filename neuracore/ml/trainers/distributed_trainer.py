@@ -153,6 +153,9 @@ class DistributedTrainer:
             disable=self.rank != 0 or self.storage_handler.log_to_cloud,
         )
 
+        for optimizer in self.optimizers:
+            optimizer.zero_grad()
+
         for batch_idx, batch in enumerate(pbar):
             memory_monitor.check_memory()
 
@@ -169,8 +172,6 @@ class DistributedTrainer:
             )
 
             # Backward pass
-            for optimizer in self.optimizers:
-                optimizer.zero_grad()
             loss.backward()
 
             # Clip gradients if configured
@@ -211,6 +212,12 @@ class DistributedTrainer:
                 self.storage_handler.update_training_progress(
                     epoch=epoch, step=self.global_train_step
                 )
+
+            # Free-up GPU during validation or before next forward pass
+            for optimizer in self.optimizers:
+                optimizer.zero_grad()
+
+            del batch, batch_output, loss
 
         avg_epoch_losses, avg_epoch_metrics = self._average_epoch_metrics(
             epoch_losses, epoch_metrics, epoch
