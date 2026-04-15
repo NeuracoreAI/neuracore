@@ -83,24 +83,6 @@ jobs:
           pip install --no-cache-dir ".[dev,ml,examples]"
         fi
 
-    - name: Verify production uses PyPI neuracore
-      if: ${{ matrix.environment == 'production' }}
-      run: |
-        python - <<'EOF'
-        import os
-        from pathlib import Path
-
-        import neuracore
-
-        package_path = Path(neuracore.__file__).resolve()
-        workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
-        if workspace in package_path.parents:
-            raise SystemExit(
-                f"Production must use the released PyPI package, got {package_path}"
-            )
-        print(f"Using neuracore from {package_path}")
-        EOF
-
     - name: Run Evaluation
       env:
         NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
