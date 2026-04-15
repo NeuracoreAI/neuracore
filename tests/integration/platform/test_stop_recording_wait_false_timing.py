@@ -6,6 +6,7 @@ import time
 import uuid
 from pathlib import Path
 
+import numpy as np
 import pytest
 from neuracore_types import DataType
 
@@ -24,7 +25,11 @@ sys.path.append(str(REPO_ROOT / "examples"))
 
 # ruff: noqa: E402
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
-from recording_playback_shared import encode_frame_number
+from recording_playback_shared import (
+    decode_frame_number,
+    encode_frame_number,
+    wait_for_dataset_ready,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +38,12 @@ MAX_TIME_TO_STOP_S = 3
 _TEST_DAEMON_ENV_OVERRIDES = {
     "NCD_BANDWIDTH_LIMIT": str(200 * 1024 * 1024),
     "NCD_MAX_CONCURRENT_UPLOADS": "30",
-    # This test is transport-focused and stops at bridge cutoff observation,
-    # so keep the daemon offline to avoid upload-side resource noise.
-    "NCD_OFFLINE": "1",
 }
+
+if os.getenv("NCD_VERIFY_TIMING_TEST_END_TO_END") != "1":
+    # The default mode is transport-focused and stops at bridge cutoff observation,
+    # so keep the daemon offline to avoid upload-side resource noise.
+    _TEST_DAEMON_ENV_OVERRIDES["NCD_OFFLINE"] = "1"
 
 
 class Timer:
@@ -150,6 +157,80 @@ def _log_rgb_stream_transport_stats(robot: Robot, *, camera_name: str, phase: st
     )
 
 
+def _verify_rgb_dataset_frames(
+    *,
+    dataset_name: str,
+    camera_name: str,
+    expected_frame_count: int,
+    dataset_wait_timeout_s: float,
+) -> dict[str, object]:
+    """Wait for the dataset and verify decoded RGB frame identities."""
+    with Timer(
+        label="wait_for_dataset_ready",
+        max_time=dataset_wait_timeout_s,
+        always_log=True,
+    ):
+        wait_for_dataset_ready(
+            dataset_name,
+            expected_recording_count=1,
+            timeout_s=dataset_wait_timeout_s,
+        )
+
+    with Timer(
+        label="nc.get_dataset",
+        max_time=dataset_wait_timeout_s,
+        always_log=True,
+    ):
+        dataset = nc.get_dataset(dataset_name)
+
+    with Timer(
+        label="dataset.synchronize",
+        max_time=dataset_wait_timeout_s,
+        always_log=True,
+    ):
+        synced_dataset = dataset.synchronize()
+
+    retrieved_frames = 0
+    unique_frames: set[int] = set()
+    duplicate_frames: list[int] = []
+
+    with Timer(
+        label="verify_dataset.iterate_frames",
+        max_time=dataset_wait_timeout_s,
+        always_log=True,
+    ):
+        for synced_episode in synced_dataset:
+            for sync_point in synced_episode:
+                rgb_streams = sync_point.data.get(DataType.RGB_IMAGES)
+                if not rgb_streams or camera_name not in rgb_streams:
+                    continue
+
+                frame = rgb_streams[camera_name].frame
+                decoded_frame_num = decode_frame_number(np.array(frame))
+                retrieved_frames += 1
+                if decoded_frame_num in unique_frames:
+                    duplicate_frames.append(decoded_frame_num)
+                unique_frames.add(decoded_frame_num)
+
+    missing_frames = sorted(set(range(expected_frame_count)) - unique_frames)
+    results = {
+        "retrieved_frames": retrieved_frames,
+        "unique_frames": unique_frames,
+        "duplicate_frames": duplicate_frames,
+        "missing_frames": missing_frames,
+    }
+    logger.info(
+        "RGB dataset verification dataset=%s camera=%s retrieved_frames=%d unique_frames=%d missing=%d duplicates=%d",
+        dataset_name,
+        camera_name,
+        retrieved_frames,
+        len(unique_frames),
+        len(missing_frames),
+        len(duplicate_frames),
+    )
+    return results
+
+
 @pytest.fixture(autouse=True)
 def cleanup_repo_state_with_script(daemon_setup_teardown):
     """Run repo-local cleanup around each isolated timing test.
@@ -206,16 +287,21 @@ def launch_clean_daemon_for_test(cleanup_repo_state_with_script):
 def test_stop_recording_wait_false_4k_timing(dataset_cleanup):
     _reset_timer_stats()
 
+    verify_end_to_end = os.getenv("NCD_VERIFY_TIMING_TEST_END_TO_END") == "1"
+
     robot_name = f"test_robot_4k_{uuid.uuid4().hex[:8]}"
     dataset_name = f"test_dataset_4k_{uuid.uuid4().hex[:8]}"
     dataset_cleanup(dataset_name)
 
     frame_width = 3840
     frame_height = 2160
-    frame_rate_hz = 60
-    duration_s = 30
+    frame_rate_hz = int(os.getenv("NCD_TIMING_TEST_FPS", "60"))
+    duration_s = int(os.getenv("NCD_TIMING_TEST_DURATION_S", "5"))
     frame_count = frame_rate_hz * duration_s
     camera_name = "camera_0"
+    dataset_wait_timeout_s = float(
+        os.getenv("NCD_TIMING_TEST_DATASET_TIMEOUT_S", "900")
+    )
     bytes_per_frame = frame_width * frame_height * 3
     total_payload_mib = (frame_count * bytes_per_frame) / (1024 * 1024)
     log_checkpoints = {
@@ -226,10 +312,11 @@ def test_stop_recording_wait_false_4k_timing(dataset_cleanup):
     }
 
     logger.info(
-        "Starting isolated 4K wait=False integration test fps=%d duration_s=%d frames=%d resolution=%dx%d bytes_per_frame=%.2f MiB total=%.2f MiB",
+        "Starting isolated 4K wait=False integration test fps=%d duration_s=%d frames=%d verify_end_to_end=%s resolution=%dx%d bytes_per_frame=%.2f MiB total=%.2f MiB",
         frame_rate_hz,
         duration_s,
         frame_count,
+        verify_end_to_end,
         frame_width,
         frame_height,
         bytes_per_frame / (1024 * 1024),
@@ -304,4 +391,16 @@ def test_stop_recording_wait_false_4k_timing(dataset_cleanup):
         frame_count,
         total_payload_mib,
     )
+
+    if verify_end_to_end:
+        results = _verify_rgb_dataset_frames(
+            dataset_name=dataset_name,
+            camera_name=camera_name,
+            expected_frame_count=frame_count,
+            dataset_wait_timeout_s=dataset_wait_timeout_s,
+        )
+        assert results["retrieved_frames"] == frame_count
+        assert not results["missing_frames"]
+        assert not results["duplicate_frames"]
+
     _log_timer_stats()

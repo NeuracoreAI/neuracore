@@ -17,6 +17,10 @@ CHUNK_HEADER_FORMAT = f"!{TRACE_ID_FIELD_SIZE}s{DATA_TYPE_FIELD_SIZE}sIII"
 # uint32 total_chunks, uint32 chunk_len
 CHUNK_HEADER_SIZE = struct.calcsize(CHUNK_HEADER_FORMAT)
 
+SHARED_RING_RECORD_MAGIC = b"NCR1"
+SHARED_RING_RECORD_HEADER_FORMAT = "!4sII"
+SHARED_RING_RECORD_HEADER_SIZE = struct.calcsize(SHARED_RING_RECORD_HEADER_FORMAT)
+
 # This mismatches the front nd need to agree on a size
 # ...(PFE's - 67,108,864 seems very large and created to suite GCS constraints)
 DEFAULT_CHUNK_SIZE = 16384  # (16kb)

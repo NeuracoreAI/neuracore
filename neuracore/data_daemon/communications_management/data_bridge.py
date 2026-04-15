@@ -106,6 +106,11 @@ class ChannelState:
         """
         if not isinstance(ring_buffer, RingBuffer):
             raise TypeError("Invalid ring buffer instance provided for new channel.")
+        if self.ring_buffer is not None and self.ring_buffer is not ring_buffer:
+            try:
+                self.ring_buffer.close()
+            finally:
+                self.ring_buffer.unlink()
         self.ring_buffer = ring_buffer
         self.reader = ChannelMessageReader(ring_buffer)
         self.opened_at = datetime.now(timezone.utc)
@@ -160,7 +165,7 @@ class PendingTraceEnd:
 
     trace_id: str
     recording_id: str
-    data_type: DataType
+    data_type: DataType | None
 
 
 PendingTraceClose = PendingTraceEnd
@@ -607,8 +612,48 @@ class Daemon:
         """
         payload = message.payload.get(message.command.value, {})
         size = payload.get("size", DEFAULT_RING_BUFFER_SIZE)
+        shared_memory_name = payload.get("shared_memory_name")
         with channel.drain_lock:
-            channel.set_ring_buffer(RingBuffer(size))
+            if shared_memory_name:
+                channel.set_ring_buffer(
+                    RingBuffer.open_shared(str(shared_memory_name), int(size))
+                )
+            else:
+                channel.set_ring_buffer(RingBuffer(int(size)))
+
+    def _ensure_result_trace_registered(
+        self,
+        *,
+        channel: ChannelState,
+        result,
+    ) -> str | None:
+        """Ensure trace/recording metadata is registered for a drained ring result."""
+        trace_id = result.trace_id
+        with self._state_lock:
+            recording_id = self._trace_recordings.get(trace_id)
+        if recording_id is not None:
+            return recording_id
+
+        metadata = dict(getattr(result, "metadata", {}))
+        recording_id = _str_or_none(metadata.get("recording_id"))
+        if recording_id is None:
+            return None
+
+        channel.set_trace_id(trace_id)
+        self._register_trace(recording_id, trace_id)
+        self._register_trace_metadata(
+            trace_id,
+            {
+                "dataset_id": _str_or_none(metadata.get("dataset_id")),
+                "dataset_name": _str_or_none(metadata.get("dataset_name")),
+                "robot_name": _str_or_none(metadata.get("robot_name")),
+                "robot_id": _str_or_none(metadata.get("robot_id")),
+                "robot_instance": metadata.get("robot_instance"),
+                "data_type": _str_or_none(metadata.get("data_type")),
+                "data_type_name": _str_or_none(metadata.get("data_type_name")),
+            },
+        )
+        return recording_id
 
     # Consumer
     def _drain_channel_messages(self) -> bool:
@@ -630,13 +675,20 @@ class Daemon:
             if reader is None or channel.ring_buffer is None:
                 return False
             while True:
+                available_before = channel.ring_buffer.available()
                 result = reader.poll_one()
+                available_after = channel.ring_buffer.available()
                 if result is None:
+                    if available_after < available_before:
+                        drained_any = True
+                        continue
                     break
 
                 trace_id, data_type, payload = result
-                with self._state_lock:
-                    recording_id = self._trace_recordings.get(trace_id)
+                recording_id = self._ensure_result_trace_registered(
+                    channel=channel,
+                    result=result,
+                )
                 if not recording_id:
                     logger.warning(
                         "No recording_id found for trace_id=%s, dropping message",
@@ -939,6 +991,7 @@ class Daemon:
                     "data_type_name": data_chunk.data_type_name,
                 },
             )
+
         chunk_index = data_chunk.chunk_index
         total_chunks = data_chunk.total_chunks
         data = data_chunk.data
@@ -1005,6 +1058,8 @@ class Daemon:
         with self._state_lock:
             recording_id = self._trace_recordings.get(str(trace_id))
         if not recording_id:
+            recording_id = _str_or_none(payload.get("recording_id"))
+        if not recording_id:
             logger.warning(
                 "TRACE_END received without recording for producer_id=%s trace_id=%s "
                 "sequence_number=%s",
@@ -1018,6 +1073,7 @@ class Daemon:
         with self._state_lock:
             metadata = dict(self._trace_metadata.get(str(trace_id), {}))
         data_type_str = metadata.get("data_type")
+        data_type: DataType | None = None
         if data_type_str:
             try:
                 data_type = DataType(data_type_str)
@@ -1025,8 +1081,6 @@ class Daemon:
                 raise ValueError(
                     f"Unknown data_type '{data_type_str}' for trace_id={trace_id}."
                 )
-        else:
-            raise ValueError(f"Missing data_type in metadata for trace_id={trace_id}.")
 
         with channel.drain_lock:
             reader = channel.reader
@@ -1042,10 +1096,10 @@ class Daemon:
                         break
 
                     drained_trace_id, drained_data_type, drained_payload = result
-                    with self._state_lock:
-                        drained_recording_id = self._trace_recordings.get(
-                            drained_trace_id
-                        )
+                    drained_recording_id = self._ensure_result_trace_registered(
+                        channel=channel,
+                        result=result,
+                    )
                     if not drained_recording_id:
                         logger.warning(
                             "No recording_id found for trace_id=%s, dropping message",
@@ -1084,10 +1138,24 @@ class Daemon:
         if self._trace_has_buffered_data(channel, pending_close.trace_id):
             return False
 
+        data_type = pending_close.data_type
+        if data_type is None:
+            with self._state_lock:
+                metadata = dict(self._trace_metadata.get(pending_close.trace_id, {}))
+            data_type_str = metadata.get("data_type")
+            if data_type_str:
+                data_type = DataType(data_type_str)
+            else:
+                logger.warning(
+                    "Cannot finalize trace_id=%s without data_type metadata",
+                    pending_close.trace_id,
+                )
+                return False
+
         self._on_complete_message(
             channel=channel,
             trace_id=pending_close.trace_id,
-            data_type=pending_close.data_type,
+            data_type=data_type,
             data=b"",
             recording_id=pending_close.recording_id,
             final_chunk=True,
@@ -1329,5 +1397,10 @@ class Daemon:
                         channel.last_sequence_number,
                     )
             with self._state_lock:
-                self.channels.pop(producer_id, None)
+                existing_channel = self.channels.pop(producer_id, None)
+                if existing_channel is not None and existing_channel.ring_buffer is not None:
+                    try:
+                        existing_channel.ring_buffer.close()
+                    finally:
+                        existing_channel.ring_buffer.unlink()
                 self._closed_producers.add(producer_id)
