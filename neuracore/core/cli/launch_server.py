@@ -24,7 +24,7 @@ def run(
         "--input_embodiment_description",
         help=(
             "Input embodiment description consisting of json dump of "
-            "dict mapping DataType to list of strings"
+            "dict mapping DataType to indexed name mapping"
         ),
     ),
     output_embodiment_description: str = typer.Option(
@@ -32,7 +32,7 @@ def run(
         "--output_embodiment_description",
         help=(
             "Output embodiment description consisting of json dump of "
-            "dict mapping DataType to list of strings"
+            "dict mapping DataType to indexed name mapping"
         ),
     ),
     job_id: str | None = typer.Option(None, "--job_id", help="Job ID to run"),
