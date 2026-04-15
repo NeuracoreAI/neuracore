@@ -60,7 +60,6 @@ logger = logging.getLogger(__name__)
 # Keep integration timing deterministic across machines by avoiding
 # low default daemon upload bandwidth derived from local disk size.
 os.environ.setdefault("NCD_BANDWIDTH_LIMIT", str(200 * 1024 * 1024))  # 200 MiB/s
-os.environ.setdefault("NCD_MAX_CONCURRENT_UPLOADS", "30")
 
 
 class Timer:

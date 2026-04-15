@@ -14,6 +14,9 @@ from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.services import DaemonServices
 from neuracore.data_daemon.state_management.state_manager import StateManager
 from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
+from neuracore.data_daemon.upload_management.trace_status_updater import (
+    TraceStatusUpdater,
+)
 
 
 @pytest.fixture
@@ -34,8 +37,11 @@ def mock_daemon_services() -> DaemonServices:
     mock_state_store = MagicMock(spec=SqliteStateStore)
     mock_state_store.close = AsyncMock()
     mock_state_manager = MagicMock(spec=StateManager)
+
     mock_registration_manager = MagicMock()
     mock_registration_manager.shutdown = AsyncMock()
+
+    mock_trace_status_updater = MagicMock(spec=TraceStatusUpdater)
 
     mock_upload_manager = MagicMock()
     mock_upload_manager.shutdown = AsyncMock()
@@ -48,6 +54,7 @@ def mock_daemon_services() -> DaemonServices:
         state_store=mock_state_store,
         state_manager=mock_state_manager,
         registration_manager=mock_registration_manager,
+        trace_status_updater=mock_trace_status_updater,
         upload_manager=mock_upload_manager,
         connection_manager=mock_connection_manager,
         progress_reporter=MagicMock(),

@@ -227,20 +227,19 @@ class RegistrationManager:
 
     async def _drain_claimable_traces(self) -> None:
         """Claim/register batches until state has no more eligible traces."""
-        while not self._shutdown_event.is_set():
-            traces = await self._state_api.claim_traces_for_registration(
-                limit=self._batch_size,
-                max_wait_s=self._max_wait_s,
-            )
-            if not traces:
-                logger.debug("RegistrationManager claim returned no traces")
-                return
-            logger.debug(
-                "RegistrationManager claimed %d traces for batch registration",
-                len(traces),
-            )
+        traces = await self._state_api.claim_traces_for_registration(
+            limit=self._batch_size,
+            max_wait_s=self._max_wait_s,
+        )
+        if not traces:
+            logger.debug("RegistrationManager claim returned no traces")
+            return
+        logger.debug(
+            "RegistrationManager claimed %d traces for batch registration",
+            len(traces),
+        )
 
-            await self._register_and_record_outcome(traces)
+        await self._register_and_record_outcome(traces)
 
     async def _register_data_trace_batch(
         self, traces: list[RegistrationCandidate]

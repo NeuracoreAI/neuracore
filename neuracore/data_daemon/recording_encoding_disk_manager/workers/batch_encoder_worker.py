@@ -54,6 +54,7 @@ class _BatchEncoderWorker:
         storage_budget: StorageBudget,
         abort_trace: Callable[[_TraceKey], None],
         emitter: Emitter,
+        loop: asyncio.AbstractEventLoop,
     ) -> None:
         """Initialise _BatchEncoderWorker.
 
@@ -63,11 +64,13 @@ class _BatchEncoderWorker:
             storage_budget: Storage budget tracker used to enforce storage limits.
             abort_trace: Callback used to abort traces on failure.
             emitter: Event emitter for cross-component signaling.
+            loop: The current event loop.
         """
         self._filesystem = filesystem
         self._encoder_manager = encoder_manager
         self._storage_budget = storage_budget
         self._abort_trace = abort_trace
+        self._loop = loop
 
         self._emitter = emitter
 
@@ -326,30 +329,32 @@ class _BatchEncoderWorker:
         try:
             async with aiofiles.open(batch_job.batch_path, "rb") as f:
                 raw_bytes = await f.read()
-            for raw_line in raw_bytes.splitlines():
-                if not raw_line:
-                    continue
 
-                envelope = json.loads(raw_line.decode("utf-8"))
-                data_base64 = envelope.get("data")
-                if not isinstance(data_base64, str):
-                    continue
+            def encoding_work(raw_bytes: bytes) -> None:
+                for raw_line in raw_bytes.splitlines():
+                    if not raw_line:
+                        continue
 
-                payload = base64.b64decode(data_base64)
-                if not payload:
-                    continue
+                    envelope = json.loads(raw_line.decode("utf-8"))
+                    data_base64 = envelope.get("data")
+                    if not isinstance(data_base64, str):
+                        continue
+                    payload = base64.b64decode(data_base64)
+                    if not payload:
+                        continue
 
-                if isinstance(encoder, VideoTrace):
-                    encoder.add_payload(payload)
-                else:
-                    decoded = json.loads(payload.decode("utf-8"))
-                    if isinstance(decoded, list):
-                        for item in decoded:
-                            if isinstance(item, dict):
-                                encoder.add_frame(item)
-                    elif isinstance(decoded, dict):
-                        encoder.add_frame(decoded)
+                    if isinstance(encoder, VideoTrace):
+                        encoder.add_payload(payload)
+                    else:
+                        decoded = json.loads(payload.decode("utf-8"))
+                        if isinstance(decoded, list):
+                            for item in decoded:
+                                if isinstance(item, dict):
+                                    encoder.add_frame(item)
+                        elif isinstance(decoded, dict):
+                            encoder.add_frame(decoded)
 
+            await self._loop.run_in_executor(None, encoding_work, raw_bytes)
             return True
 
         except Exception as exc:

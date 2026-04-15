@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import pytest_asyncio
 from neuracore_types import DataType
 
 
@@ -195,8 +196,8 @@ def patched_modules(
     return worker_module, manager_module
 
 
-@pytest.fixture
-def make_worker(tmp_path: Path, patched_modules, fake_emitter: _FakeEmitter):
+@pytest_asyncio.fixture
+async def make_worker(tmp_path: Path, patched_modules, fake_emitter: _FakeEmitter):
     worker_module, manager_module = patched_modules
 
     filesystem = _FakeFilesystem(tmp_path / "out")
@@ -218,6 +219,7 @@ def make_worker(tmp_path: Path, patched_modules, fake_emitter: _FakeEmitter):
         storage_budget=budget,
         abort_trace=abort_trace,
         emitter=fake_emitter,
+        loop=asyncio.get_running_loop(),
     )
 
     return worker, manager, filesystem, budget, aborted, worker_module, manager_module

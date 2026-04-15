@@ -41,7 +41,6 @@ def test_run_profile_update_validates_and_updates(
         bandwidth_limit=4096,
         path_to_store_record=None,
         num_threads=None,
-        max_concurrent_uploads=None,
         keep_wakelock_while_upload=None,
         offline=None,
         api_key=None,

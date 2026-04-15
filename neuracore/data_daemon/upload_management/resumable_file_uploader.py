@@ -8,7 +8,6 @@ import asyncio
 import base64
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,6 +19,10 @@ from aiolimiter import AsyncLimiter
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.data_daemon.const import API_URL
+from neuracore.data_daemon.event_emitter import Emitter
+from neuracore.data_daemon.upload_management.trace_status_updater import (
+    TraceStatusUpdater,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +60,14 @@ class ResumableFileUploader:
     def __init__(
         self,
         recording_id: str,
+        trace_id: str,
         filepath: str,
         cloud_filepath: str,
         content_type: str,
         client_session: aiohttp.ClientSession,
+        trace_status_updater: TraceStatusUpdater,
+        emitter: Emitter,
         bytes_uploaded: int = 0,
-        progress_callback: Callable[[int], Awaitable[None]] | None = None,
         bandwidth_limiter: AsyncLimiter | None = None,
         session_uri: str | None = None,
     ) -> None:
@@ -70,26 +75,30 @@ class ResumableFileUploader:
 
         Args:
             recording_id: Recording identifier
+            trace_id: Trace identifier
             filepath: Local filesystem path to file
             cloud_filepath: Cloud storage path
             content_type: MIME type
             client_session: aiohttp ClientSession for HTTP requests
+            trace_status_updater: Trace status updater for progress updates.
+            emitter: the global event emitter
             bytes_uploaded: Starting offset for resume
-            progress_callback: Called after each chunk to report progress
             bandwidth_limiter: Shared token-bucket limiter; None means unlimited.
             session_uri: Pre-fetched resumable upload session URI
         """
         self._recording_id = recording_id
+        self._trace_id = trace_id
         self._filepath = filepath
         self._cloud_filepath = cloud_filepath
         self._content_type = content_type
         self._session = client_session
         self._bytes_uploaded = bytes_uploaded
-        self._progress_callback = progress_callback
+        self._trace_status_updater = trace_status_updater
         self._bandwidth_limiter = bandwidth_limiter
 
         self._session_uri: str | None = session_uri
         self._total_bytes = 0
+        self._emitter = emitter
 
     async def _get_upload_session_uri(self) -> str:
         """Get a resumable upload session URI from the backend.
@@ -142,8 +151,8 @@ class ResumableFileUploader:
         """Upload the file with resumable chunks.
 
         Reads the file from disk starting at the bytes_uploaded offset and
-        uploads it in chunks to cloud storage. Calls progress_callback after
-        each successful chunk if provided.
+        uploads it in chunks to cloud storage. Updates trace status with progress after
+        each chunk.
 
         Returns:
             Tuple of (success, total_bytes_uploaded, error_message)
@@ -197,7 +206,7 @@ class ResumableFileUploader:
         """Read file from disk and upload in chunks.
 
         Opens the file, seeks to the resume point, and uploads remaining
-        data in chunks. Calls progress_callback after each successful chunk.
+        data in chunks. Updates trace status after each chunk.
         Uses aiofiles for non-blocking file I/O.
 
         Returns:
@@ -240,8 +249,14 @@ class ResumableFileUploader:
                     chunk_size = len(chunk)
                     self._bytes_uploaded += chunk_size
 
-                    if self._progress_callback:
-                        await self._progress_callback(chunk_size)
+                    self._emitter.emit(
+                        Emitter.UPLOADED_BYTES, self._trace_id, self._bytes_uploaded
+                    )
+                    await self._trace_status_updater.update_trace_progress(
+                        recording_id=self._recording_id,
+                        trace_id=self._trace_id,
+                        uploaded_bytes=self._bytes_uploaded,
+                    )
 
                     logger.debug(
                         f"Uploaded chunk: {self._bytes_uploaded}/"

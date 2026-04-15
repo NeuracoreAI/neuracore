@@ -48,7 +48,7 @@ setup(
         "fastapi==0.135.2",
         "psutil",
         "typer>=0.20.0",
-        "neuracore_types>=7.0.0",
+        "neuracore_types>=7.1.0",
         "ordered_set",
         "pyzmq==27.1.0",
         "sqlalchemy>=2.0.0",

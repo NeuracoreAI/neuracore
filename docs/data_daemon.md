@@ -196,7 +196,6 @@ These are the supported settings:
 | `bandwidth_limit` | Maximum upload speed the daemon should use (bytes per second). |
 | `path_to_store_record` | Folder where recordings are stored. |
 | `num_threads` | Number of worker threads used by the daemon. |
-| `max_concurrent_uploads` | Max traces uploaded at once. Recommended: `5-10`. |
 | `keep_wakelock_while_upload` | Whether to keep the machine awake during uploads (where supported). |
 | `offline` | If enabled, uploading is disabled and data is only stored locally. |
 | `api_key` | API key used for authenticating the daemon. |
@@ -247,7 +246,6 @@ Supported environment variables:
 | `bandwidth_limit` | `NCD_BANDWIDTH_LIMIT` |
 | `path_to_store_record` | `NCD_PATH_TO_STORE_RECORD` |
 | `num_threads` | `NCD_NUM_THREADS` |
-| `max_concurrent_uploads` | `NCD_MAX_CONCURRENT_UPLOADS` |
 | `keep_wakelock_while_upload` | `NCD_KEEP_WAKELOCK_WHILE_UPLOAD` |
 | `offline` | `NCD_OFFLINE` |
 | `api_key` | `NCD_API_KEY` |
@@ -290,7 +288,6 @@ Recommended for containers/dev environments:
 ```bash
 export NEURACORE_DAEMON_DB_PATH=/workspaces/neuracore/data_daemon_state.db
 export NEURACORE_DAEMON_RECORDINGS_ROOT=/workspaces/neuracore/recordings
-export NCD_MAX_CONCURRENT_UPLOADS=10
 ```
 
 Recommended upload concurrency:
