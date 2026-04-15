@@ -12,6 +12,7 @@ from neuracore.data_daemon.config_manager.cli_options import (
     BackgroundOption,
     BandwidthLimitOption,
     CurrentOrgIdOption,
+    DebugOption,
     KeepWakelockOption,
     LaunchProfileOption,
     MaxConcurrentUploadsOption,
@@ -194,6 +195,7 @@ def run_list_profiles() -> None:
 def run_launch(
     profile: LaunchProfileOption = None,
     background: BackgroundOption = False,
+    debug: DebugOption = False,
 ) -> None:
     """Launch the data daemon."""
     pid_path = get_daemon_pid_path()
@@ -207,6 +209,9 @@ def run_launch(
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=1)
         env_overrides["NEURACORE_DAEMON_PROFILE"] = profile
+
+    if debug:
+        env_overrides["NDD_DEBUG"] = "true"
 
     try:
         daemon_process = launch_new_daemon_subprocess(
