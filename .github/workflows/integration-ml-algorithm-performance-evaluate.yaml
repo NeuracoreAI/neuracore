@@ -35,9 +35,18 @@ jobs:
 
     steps:
     - name: Checkout code
+      if: ${{ matrix.environment != 'production' }}
       uses: actions/checkout@v4
       with:
         ref: main
+    - name: Checkout production test harness
+      if: ${{ matrix.environment == 'production' }}
+      uses: actions/checkout@v4
+      with:
+        ref: main
+        sparse-checkout: |
+          tests/integration/ml
+          examples/common
     - name: Pull LFS objects
       run: git lfs pull
 
