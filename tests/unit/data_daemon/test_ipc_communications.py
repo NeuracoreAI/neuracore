@@ -183,6 +183,7 @@ def test_large_payload_chunked_round_trip_over_ipc(
         comm_manager=producer_comm,
         chunk_size=16 * 1024,
         recording_id="rec-large",
+        data_type=DataType.CUSTOM_1D,
     )
 
     producer.open_ring_buffer(size=128 * 1024)
@@ -230,12 +231,14 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context, emitter) 
         comm_manager=producer_a_comm,
         chunk_size=8,
         recording_id="rec-a",
+        data_type=DataType.CUSTOM_1D,
     )
     producer_b = ProducerChannel(
         id="producer-b",
         comm_manager=producer_b_comm,
         chunk_size=8,
         recording_id="rec-b",
+        data_type=DataType.CUSTOM_1D,
     )
 
     producer_a.open_ring_buffer(size=4096)
@@ -371,7 +374,11 @@ def test_interleaved_chunks_reassemble_per_producer(
 def test_trace_id_required_on_send_data() -> None:
     """send_data() requires start_new_trace() to be called first."""
     producer_comm = CommunicationsManager()
-    producer = ProducerChannel(comm_manager=producer_comm, recording_id="rec-1")
+    producer = ProducerChannel(
+        comm_manager=producer_comm,
+        recording_id="rec-1",
+        data_type=DataType.CUSTOM_1D,
+    )
 
     with pytest.raises(ValueError, match="Trace ID required"):
         producer.send_data(
@@ -389,7 +396,10 @@ def test_trace_id_required_on_send_data() -> None:
 def test_recording_id_required_on_start_new_trace() -> None:
     """start_new_trace() requires recording_id to be set on init."""
     producer_comm = CommunicationsManager()
-    producer = ProducerChannel(comm_manager=producer_comm)
+    producer = ProducerChannel(
+        comm_manager=producer_comm,
+        data_type=DataType.CUSTOM_1D,
+    )
 
     with pytest.raises(ValueError, match="recording_id is required"):
         producer.start_new_trace()

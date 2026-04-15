@@ -208,7 +208,10 @@ def test_zmq_commands_and_message_flow(
     producer_comm = CommunicationsManager(context=context)
     recording_id = "rec-zmq-commands"
     producer = ProducerChannel(
-        comm_manager=producer_comm, chunk_size=16, recording_id=recording_id
+        comm_manager=producer_comm,
+        chunk_size=16,
+        recording_id=recording_id,
+        data_type=DataType.CUSTOM_1D,
     )
 
     producer.start_new_trace()
@@ -275,7 +278,10 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
     producer_comm = CommunicationsManager(context=context)
     recording_id = "rec-zmq-timeout"
     producer = ProducerChannel(
-        comm_manager=producer_comm, chunk_size=16, recording_id=recording_id
+        comm_manager=producer_comm,
+        chunk_size=16,
+        recording_id=recording_id,
+        data_type=DataType.CUSTOM_1D,
     )
 
     producer.start_new_trace()
@@ -343,7 +349,10 @@ def test_socket_cleanup_on_disconnect(daemon_runtime) -> None:
 
     producer_comm = CommunicationsManager(context=context)
     producer = ProducerChannel(
-        comm_manager=producer_comm, chunk_size=16, recording_id="rec-disconnect"
+        comm_manager=producer_comm,
+        chunk_size=16,
+        recording_id="rec-disconnect",
+        data_type=DataType.CUSTOM_1D,
     )
     producer.start_new_trace()
     producer.open_ring_buffer(size=512)

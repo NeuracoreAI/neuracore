@@ -7,6 +7,7 @@ aiortc
 allclose
 altclip
 asarray
+ascontiguousarray
 attns
 autocast
 Autoencoders
@@ -43,6 +44,7 @@ Colab
 colcon
 Colormaps
 colwise
+cdef
 conaffinity
 condim
 conq

@@ -1,5 +1,6 @@
 import base64
 import struct
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -162,7 +163,7 @@ def _wait_for_messages(comm: DummyComm, expected: int, timeout: float = 1.0) -> 
 
 def test_producer_open_ring_buffer_sends_payload() -> None:
     comm = DummyComm()
-    producer = ProducerChannel(comm_manager=comm)
+    producer = ProducerChannel(comm_manager=comm, data_type=DataType.CUSTOM_1D)
 
     assert comm.socket_requested is True
     producer.open_ring_buffer(size=2048)
@@ -176,7 +177,12 @@ def test_producer_open_ring_buffer_sends_payload() -> None:
 
 def test_producer_send_data_chunks_and_base64() -> None:
     comm = DummyComm()
-    producer = ProducerChannel(comm_manager=comm, chunk_size=2, recording_id="rec-1")
+    producer = ProducerChannel(
+        comm_manager=comm,
+        chunk_size=2,
+        recording_id="rec-1",
+        data_type=DataType.CUSTOM_1D,
+    )
 
     assert comm.socket_requested is True
     producer.start_new_trace()
@@ -207,6 +213,103 @@ def test_producer_send_data_chunks_and_base64() -> None:
         assert payload["data_type"] == DataType.CUSTOM_1D.value
         decoded = base64.b64decode(payload["data"])
         assert decoded == (b"ab" if idx == 0 else b"cd")
+
+
+def test_producer_send_data_parts_chunks_across_multiple_buffers() -> None:
+    comm = DummyComm()
+    producer = ProducerChannel(
+        comm_manager=comm,
+        chunk_size=3,
+        recording_id="rec-1",
+        data_type=DataType.CUSTOM_1D,
+    )
+
+    assert comm.socket_requested is True
+    producer.start_new_trace()
+    # cspell:ignore cdef
+    producer.send_data_parts(
+        (b"ab", memoryview(b"cdef"), b"gh"),
+        total_bytes=8,
+        data_type=DataType.CUSTOM_1D,
+        data_type_name="custom",
+        robot_instance=2,
+        robot_id="robot-1",
+        robot_name="robot",
+        dataset_id="dataset-1",
+        dataset_name="dataset",
+    )
+    _wait_for_messages(comm, 3)
+
+    assert len(comm.messages) == 3
+    decoded_chunks = [
+        base64.b64decode(envelope.payload["data_chunk"]["data"])
+        for envelope in comm.messages
+    ]
+    assert decoded_chunks == [b"abc", b"def", b"gh"]
+
+
+def test_producer_sequences_follow_enqueue_order_under_concurrent_senders(
+    monkeypatch,
+) -> None:
+    comm = DummyComm()
+    producer = ProducerChannel(
+        comm_manager=comm,
+        recording_id="rec-1",
+        data_type=DataType.CUSTOM_1D,
+    )
+
+    first_put_entered = threading.Event()
+    allow_first_put = threading.Event()
+    second_send_finished = threading.Event()
+    thread_errors: list[BaseException] = []
+
+    real_put = producer._send_queue.put
+
+    def blocked_put(item):
+        if item is not None and not first_put_entered.is_set():
+            first_put_entered.set()
+            allow_first_put.wait(timeout=5.0)
+        return real_put(item)
+
+    monkeypatch.setattr(producer._send_queue, "put", blocked_put)
+
+    def send_heartbeat(mark_done: threading.Event | None = None) -> None:
+        try:
+            producer.heartbeat()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            thread_errors.append(exc)
+        finally:
+            if mark_done is not None:
+                mark_done.set()
+
+    first_sender = threading.Thread(target=send_heartbeat, daemon=True)
+    second_sender = threading.Thread(
+        target=send_heartbeat,
+        kwargs={"mark_done": second_send_finished},
+        daemon=True,
+    )
+
+    try:
+        first_sender.start()
+        assert first_put_entered.wait(timeout=5.0) is True
+
+        second_sender.start()
+        time.sleep(0.1)
+
+        assert producer.get_last_enqueued_sequence_number() == 1
+        assert second_send_finished.is_set() is False
+
+        allow_first_put.set()
+
+        first_sender.join(timeout=5.0)
+        second_sender.join(timeout=5.0)
+        _wait_for_messages(comm, 2)
+    finally:
+        allow_first_put.set()
+        producer.stop_producer_channel()
+
+    assert thread_errors == []
+    assert [message.sequence_number for message in comm.messages] == [1, 2]
 
 
 class DummyRecordingDiskManager:
