@@ -86,4 +86,29 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1-mesa-glx libosmesa6-dev
         Xvfb $DISPLAY -screen 0 1280x1024x24 &
-        pytest -o log_cli=true --log-cli-level=INFO -v -k test_evaluate tests/integration/ml/test_algorithm_performance.py
+        if [ "${{ matrix.environment }}" = "production" ]; then
+          TEST_DIR="$RUNNER_TEMP/neuracore-performance-tests-${{ matrix.algorithm }}-${{ matrix.environment }}"
+          mkdir -p "$TEST_DIR/tests/integration/ml" "$TEST_DIR/examples"
+          cp "$GITHUB_WORKSPACE/tests/integration/ml/test_algorithm_performance.py" "$TEST_DIR/tests/integration/ml/"
+          cp "$GITHUB_WORKSPACE/tests/integration/ml/conftest.py" "$TEST_DIR/tests/integration/ml/"
+          cp "$GITHUB_WORKSPACE/tests/integration/ml/algorithm_configs.yaml" "$TEST_DIR/tests/integration/ml/"
+          cp -R "$GITHUB_WORKSPACE/examples/common" "$TEST_DIR/examples/"
+          cd "$TEST_DIR"
+          python - <<'EOF'
+        import os
+        from pathlib import Path
+
+        import neuracore
+
+        package_path = Path(neuracore.__file__).resolve()
+        workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+        if workspace in package_path.parents:
+            raise SystemExit(
+                f"Production must use the released PyPI package, got {package_path}"
+            )
+        print(f"Using neuracore from {package_path}")
+        EOF
+          pytest -o log_cli=true --log-cli-level=INFO -v -k test_evaluate tests/integration/ml/test_algorithm_performance.py
+        else
+          pytest -o log_cli=true --log-cli-level=INFO -v -k test_evaluate tests/integration/ml/test_algorithm_performance.py
+        fi
