@@ -777,16 +777,14 @@ def _main(cfg: DictConfig) -> None:
                 "Please specify only one."
             )
 
-        # TODO: make sure only the data_types or cross_embodiment_description
-        # is provided for both input and output,
-        # and that they are consistent with each other
-
         # Login before constructing cloud storage so org/auth state is available.
         nc.login()
         if cfg.org_id is not None:
             nc.set_organization(cfg.org_id)
 
         training_id = getattr(cfg, "training_id", None)
+        # If a training ID is provided,
+        # We assume it is a Cloud Training Run
         if training_id is not None:
             setup_storage_handler = TrainingStorageHandler(
                 local_dir=cfg.local_output_dir,
