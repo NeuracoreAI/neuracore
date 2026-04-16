@@ -463,8 +463,6 @@ def run_training(
     device: torch.device | None = None,
 ) -> None:
     """Run the training process for a single GPU."""
-    log_streamer: CloudLogStreamer | None = None
-
     # Setup for distributed training
     if world_size > 1:
         nc.login()  # Ensure Neuracore is logged in on this process
@@ -585,16 +583,6 @@ def run_training(
             algorithm_config=algorithm_config,
         )
 
-        # Only start log streamer on rank 0 to avoid multiple processes
-        # uploading the same logs
-        # and only if this is a cloud run (training_id is not None)
-        if rank == 0 and cfg.training_id is not None:
-            log_streamer = CloudLogStreamer(
-                storage_handler=training_storage_handler,
-                output_dir=Path(cfg.local_output_dir),
-            )
-            log_streamer.start()
-
         logger.info(
             f"Created model with "
             f"{sum(p.numel() for p in model.parameters()):,} parameters"
@@ -646,8 +634,6 @@ def run_training(
             raise
 
     finally:
-        if log_streamer is not None:
-            log_streamer.close()
         # Clean up distributed process group
         if world_size > 1:
             cleanup_distributed()
@@ -759,200 +745,217 @@ def _main(cfg: DictConfig) -> None:
     """
     # Resolve the configuration
     OmegaConf.resolve(cfg)
-
-    logger.info(f"Training run directory: {cfg.local_output_dir}")
-
-    # Print configuration
-    logger.info("Training configuration:")
-    logger.info(OmegaConf.to_yaml(cfg, resolve=True))
-
-    # Validate algorithm
-    if "algorithm" in cfg and cfg.algorithm_id is not None:
-        raise ValueError(
-            "Both 'algorithm' and 'algorithm_id' are provided. "
-            "Please specify only one."
-        )
-    if "algorithm" not in cfg and cfg.algorithm_id is None:
-        raise ValueError(
-            "Neither 'algorithm' nor 'algorithm_id' is provided. " "Please specify one."
-        )
-
-    # Validate dataset specification
-    if cfg.dataset_id is None and cfg.dataset_name is None:
-        raise ValueError("Either 'dataset_id' or 'dataset_name' must be provided.")
-    if cfg.dataset_id is not None and cfg.dataset_name is not None:
-        raise ValueError(
-            "Both 'dataset_id' and 'dataset_name' are provided. "
-            "Please specify only one."
-        )
-
-    # TODO: make sure only the data_types or cross_embodiment_description
-    # is provided for both input and output,
-    # and that they are consistent with each other
-
-    # Login and get dataset
-    nc.login()
-    if cfg.org_id is not None:
-        nc.set_organization(cfg.org_id)
-
-    # Dataset retrieval and preparation
-    if cfg.dataset_id is not None:
-        dataset = nc.get_dataset(id=cfg.dataset_id)
-    elif cfg.dataset_name is not None:
-        dataset = nc.get_dataset(name=cfg.dataset_name)
-    else:
-        raise ValueError("Either 'dataset_id' or 'dataset_name' must be provided.")
-    dataset.cache_dir = _resolve_recording_cache_dir(cfg)
-    dataset.cache_dir.mkdir(parents=True, exist_ok=True)
-
-    # Convert data_types to the final cross_embodiment_description
-    input_cross_embodiment_description = _resolve_cross_embodiment_description(
-        cross_embodiment_description_cfg=cfg.input_cross_embodiment_description,
-        data_types_cfg=cfg.input_data_types,
-        dataset=dataset,
-        field_name="input_cross_embodiment_description",
-    )
-    output_cross_embodiment_description = _resolve_cross_embodiment_description(
-        cross_embodiment_description_cfg=cfg.output_cross_embodiment_description,
-        data_types_cfg=cfg.output_data_types,
-        dataset=dataset,
-        field_name="output_cross_embodiment_description",
-    )
-
-    input_cross_embodiment_description = (
-        convert_cross_embodiment_description_names_to_ids(
-            input_cross_embodiment_description
-        )
-    )
-    output_cross_embodiment_description = (
-        convert_cross_embodiment_description_names_to_ids(
-            output_cross_embodiment_description
-        )
-    )
-
-    # =========================================================
-    # From here onwards we only deal with robot IDs, not names
-    # =========================================================
-
-    batch_size = cfg.batch_size
-
-    # Get algorithm JSONs parameters
-    algorithms_jsons = _get_algorithms()
-    algorithm_name, supported_input_data_types, supported_output_data_types = (
-        _resolve_algorithm_name_and_supported_data_types(cfg, algorithms_jsons)
-    )
-
-    # Validate that the provided parameters are consistent and sufficient
-    validate_training_params(
-        dataset,
-        dataset_name=cfg.dataset_name if cfg.dataset_name is not None else "",
-        algorithm_name=algorithm_name,
-        input_cross_embodiment_description=input_cross_embodiment_description,
-        output_cross_embodiment_description=output_cross_embodiment_description,
-        supported_input_data_types=supported_input_data_types,
-        supported_output_data_types=supported_output_data_types,
-    )
-
-    # Prepare data types for synchronization
-    cross_embodiment_union: CrossEmbodimentUnion = merge_cross_embodiment_description(
-        input_cross_embodiment_description, output_cross_embodiment_description
-    )
-
-    # Save local metadata so CLI can inspect local runs without cloud access
-    _save_local_training_metadata(
-        cfg=cfg,
-        algorithm_name=algorithm_name,
-        input_cross_embodiment_description=input_cross_embodiment_description,
-        output_cross_embodiment_description=output_cross_embodiment_description,
-        cross_embodiment_union=cross_embodiment_union,
-    )
-
-    synchronized_dataset = dataset.synchronize(
-        frequency=cfg.frequency,
-        cross_embodiment_union=cross_embodiment_union,
-        prefetch_videos=True,
-        max_prefetch_workers=cfg.max_prefetch_workers,
-        max_delay_s=(
-            sys.float_info.max
-            if getattr(cfg, "max_delay_s", None) is None
-            else cfg.max_delay_s
-        ),
-        allow_duplicates=cfg.allow_duplicates,
-        trim_start_end=cfg.trim_start_end,
-    )
-
-    # Setup logging for main process
     setup_logging(cfg.local_output_dir)
 
-    # Check if distributed training is enabled and multiple GPUs are available
-    world_size = torch.cuda.device_count()
+    log_streamer: CloudLogStreamer | None = None
 
-    if cfg.algorithm_id is not None:
-        # Download the algorithm so that it can be processed later
-        logger.info(f"Downloading algorithm from cloud with ID: {cfg.algorithm_id}")
-        storage_handler = AlgorithmStorageHandler(algorithm_id=cfg.algorithm_id)
-        extract_dir = Path(cfg.local_output_dir) / "algorithm"
-        storage_handler.download_algorithm(extract_dir=extract_dir)
-        logger.info(f"Algorithm extracted to {extract_dir}")
+    try:
+        logger.info(f"Training run directory: {cfg.local_output_dir}")
 
-    device = None
-    if cfg.device is not None:
-        device = torch.device(cfg.device)
-    else:
-        device = get_default_device()
+        # Print configuration
+        logger.info("Training configuration:")
+        logger.info(OmegaConf.to_yaml(cfg, resolve=True))
 
-    # Create a pytorch synchronized dataset
-    # NOTE: we are creating it here, and not in training to access the first sample
-    # for batch size autotuning, if used.
-    pytorch_dataset = PytorchSynchronizedDataset(
-        synchronized_dataset=synchronized_dataset,
-        input_cross_embodiment_description=input_cross_embodiment_description,
-        output_cross_embodiment_description=output_cross_embodiment_description,
-        output_prediction_horizon=cfg.output_prediction_horizon,
-    )
+        # Validate algorithm
+        if "algorithm" in cfg and cfg.algorithm_id is not None:
+            raise ValueError(
+                "Both 'algorithm' and 'algorithm_id' are provided. "
+                "Please specify only one."
+            )
+        if "algorithm" not in cfg and cfg.algorithm_id is None:
+            raise ValueError(
+                "Neither 'algorithm' nor 'algorithm_id' is provided. "
+                "Please specify one."
+            )
 
-    # Handle batch size configuration
-    if isinstance(batch_size, str) and batch_size.lower() == "auto":
-        optimal_batch_size = determine_optimal_batch_size(
-            cfg=cfg,
-            dataset=pytorch_dataset,
-            input_cross_embodiment_description=input_cross_embodiment_description,
-            output_cross_embodiment_description=output_cross_embodiment_description,
-            device=device,
+        # Validate dataset specification
+        if cfg.dataset_id is None and cfg.dataset_name is None:
+            raise ValueError("Either 'dataset_id' or 'dataset_name' must be provided.")
+        if cfg.dataset_id is not None and cfg.dataset_name is not None:
+            raise ValueError(
+                "Both 'dataset_id' and 'dataset_name' are provided. "
+                "Please specify only one."
+            )
+
+        # Login before constructing cloud storage so org/auth state is available.
+        nc.login()
+        if cfg.org_id is not None:
+            nc.set_organization(cfg.org_id)
+
+        training_id = getattr(cfg, "training_id", None)
+        # If a training ID is provided,
+        # We assume it is a Cloud Training Run
+        if training_id is not None:
+            setup_storage_handler = TrainingStorageHandler(
+                local_dir=cfg.local_output_dir,
+                training_job_id=training_id,
+            )
+            log_streamer = CloudLogStreamer(
+                storage_handler=setup_storage_handler,
+                output_dir=Path(cfg.local_output_dir),
+            )
+            log_streamer.start()
+
+        # Dataset retrieval and preparation
+        if cfg.dataset_id is not None:
+            dataset = nc.get_dataset(id=cfg.dataset_id)
+        elif cfg.dataset_name is not None:
+            dataset = nc.get_dataset(name=cfg.dataset_name)
+        else:
+            raise ValueError("Either 'dataset_id' or 'dataset_name' must be provided.")
+        dataset.cache_dir = _resolve_recording_cache_dir(cfg)
+        dataset.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Convert data_types to the final cross_embodiment_description
+        input_cross_embodiment_description = _resolve_cross_embodiment_description(
+            cross_embodiment_description_cfg=cfg.input_cross_embodiment_description,
+            data_types_cfg=cfg.input_data_types,
+            dataset=dataset,
+            field_name="input_cross_embodiment_description",
+        )
+        output_cross_embodiment_description = _resolve_cross_embodiment_description(
+            cross_embodiment_description_cfg=cfg.output_cross_embodiment_description,
+            data_types_cfg=cfg.output_data_types,
+            dataset=dataset,
+            field_name="output_cross_embodiment_description",
         )
 
-        batch_size = optimal_batch_size
-    else:
-        batch_size = int(batch_size)
+        input_cross_embodiment_description = (
+            convert_cross_embodiment_description_names_to_ids(
+                input_cross_embodiment_description
+            )
+        )
+        output_cross_embodiment_description = (
+            convert_cross_embodiment_description_names_to_ids(
+                output_cross_embodiment_description
+            )
+        )
 
-    if world_size > 1:
-        # Use multiprocessing to launch multiple processes
-        mp.spawn(
-            run_training,
-            args=(
-                world_size,
+        # =========================================================
+        # From here onwards we only deal with robot IDs, not names
+        # =========================================================
+
+        batch_size = cfg.batch_size
+
+        # Get algorithm JSONs parameters
+        algorithms_jsons = _get_algorithms()
+        algorithm_name, supported_input_data_types, supported_output_data_types = (
+            _resolve_algorithm_name_and_supported_data_types(cfg, algorithms_jsons)
+        )
+
+        # Validate that the provided parameters are consistent and sufficient
+        validate_training_params(
+            dataset,
+            dataset_name=cfg.dataset_name if cfg.dataset_name is not None else "",
+            algorithm_name=algorithm_name,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
+            supported_input_data_types=supported_input_data_types,
+            supported_output_data_types=supported_output_data_types,
+        )
+
+        # Prepare data types for synchronization
+        cross_embodiment_union: CrossEmbodimentUnion = (
+            merge_cross_embodiment_description(
+                input_cross_embodiment_description, output_cross_embodiment_description
+            )
+        )
+
+        # Save local metadata so CLI can inspect local runs without cloud access
+        _save_local_training_metadata(
+            cfg,
+            algorithm_name=algorithm_name,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
+            cross_embodiment_union=cross_embodiment_union,
+        )
+
+        synchronized_dataset = dataset.synchronize(
+            frequency=cfg.frequency,
+            cross_embodiment_union=cross_embodiment_union,
+            prefetch_videos=True,
+            max_prefetch_workers=cfg.max_prefetch_workers,
+            max_delay_s=(
+                sys.float_info.max
+                if getattr(cfg, "max_delay_s", None) is None
+                else cfg.max_delay_s
+            ),
+            allow_duplicates=cfg.allow_duplicates,
+            trim_start_end=cfg.trim_start_end,
+        )
+
+        # Check if distributed training is enabled and multiple GPUs are available
+        world_size = torch.cuda.device_count()
+
+        if cfg.algorithm_id is not None:
+            # Download the algorithm so that it can be processed later
+            logger.info(f"Downloading algorithm from cloud with ID: {cfg.algorithm_id}")
+            storage_handler = AlgorithmStorageHandler(algorithm_id=cfg.algorithm_id)
+            extract_dir = Path(cfg.local_output_dir) / "algorithm"
+            storage_handler.download_algorithm(extract_dir=extract_dir)
+            logger.info(f"Algorithm extracted to {extract_dir}")
+
+        device = None
+        if cfg.device is not None:
+            device = torch.device(cfg.device)
+        else:
+            device = get_default_device()
+
+        # Create a pytorch synchronized dataset
+        # NOTE: we are creating it here, and not in training to access the first sample
+        # for batch size autotuning, if used.
+        pytorch_dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=synchronized_dataset,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
+            output_prediction_horizon=cfg.output_prediction_horizon,
+        )
+
+        # Handle batch size configuration
+        if isinstance(batch_size, str) and batch_size.lower() == "auto":
+            optimal_batch_size = determine_optimal_batch_size(
+                cfg=cfg,
+                dataset=pytorch_dataset,
+                input_cross_embodiment_description=input_cross_embodiment_description,
+                output_cross_embodiment_description=output_cross_embodiment_description,
+                device=device,
+            )
+
+            batch_size = optimal_batch_size
+        else:
+            batch_size = int(batch_size)
+
+        if world_size > 1:
+            # Use multiprocessing to launch multiple processes
+            mp.spawn(
+                run_training,
+                args=(
+                    world_size,
+                    cfg,
+                    batch_size,
+                    input_cross_embodiment_description,
+                    output_cross_embodiment_description,
+                    pytorch_dataset,
+                    device,
+                ),
+                nprocs=world_size,
+                join=True,
+            )
+        else:
+            # Single GPU or CPU training
+            run_training(
+                0,
+                1,
                 cfg,
                 batch_size,
                 input_cross_embodiment_description,
                 output_cross_embodiment_description,
                 pytorch_dataset,
                 device,
-            ),
-            nprocs=world_size,
-            join=True,
-        )
-    else:
-        # Single GPU or CPU training
-        run_training(
-            0,
-            1,
-            cfg,
-            batch_size,
-            input_cross_embodiment_description,
-            output_cross_embodiment_description,
-            pytorch_dataset,
-            device,
-        )
+            )
+    finally:
+        if log_streamer is not None:
+            log_streamer.close()
 
 
 @hydra.main(version_base=None, config_path="config", config_name="config")

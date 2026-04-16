@@ -120,6 +120,14 @@ class MainTestSetup:
         self.mock_storage_handler = Mock()
         self.mock_storage_handler.download_algorithm = Mock()
         self.mock_storage_handler_class = Mock(return_value=self.mock_storage_handler)
+        self.mock_training_storage_handler = Mock()
+        self.mock_training_storage_handler_class = Mock(
+            return_value=self.mock_training_storage_handler
+        )
+        self.mock_cloud_log_streamer = Mock()
+        self.mock_cloud_log_streamer_class = Mock(
+            return_value=self.mock_cloud_log_streamer
+        )
         self.mock_get_algorithms = Mock(
             return_value=[{"id": "test-algorithm-id", "name": "test-algorithm"}]
         )
@@ -158,6 +166,14 @@ class MainTestSetup:
         self.monkeypatch.setattr(
             "neuracore.ml.train.AlgorithmStorageHandler",
             self.mock_storage_handler_class,
+        )
+        self.monkeypatch.setattr(
+            "neuracore.ml.train.TrainingStorageHandler",
+            self.mock_training_storage_handler_class,
+        )
+        self.monkeypatch.setattr(
+            "neuracore.ml.train.CloudLogStreamer",
+            self.mock_cloud_log_streamer_class,
         )
         self.monkeypatch.setattr(
             "neuracore.ml.train.convert_cross_embodiment_description_names_to_ids",
@@ -1957,6 +1973,46 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
 
         mock_setup_logging.assert_called_once_with(cfg.local_output_dir)
 
+    def test_main_sets_up_logging_before_login(self, monkeypatch, temp_output_dir):
+        cfg = OmegaConf.create({
+            "algorithm_id": "test-algorithm-id",
+            "dataset_id": "test-dataset-id",
+            "dataset_name": None,
+            "org_id": None,
+            "device": None,
+            "local_output_dir": str(temp_output_dir),
+            "batch_size": 8,
+            "input_data_types": {},
+            "output_data_types": {},
+            "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
+            "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
+            "output_prediction_horizon": 5,
+            "frequency": 30,
+            "algorithm_params": None,
+            "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
+        })
+
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+
+        call_order: list[str] = []
+
+        def record_setup_logging(*args, **kwargs):
+            call_order.append("setup_logging")
+
+        def record_login(*args, **kwargs):
+            call_order.append("login")
+
+        monkeypatch.setattr("neuracore.ml.train.setup_logging", record_setup_logging)
+        setup.mock_login.side_effect = record_login
+
+        main(cfg)
+
+        assert call_order.index("setup_logging") < call_order.index("login")
+
     def test_main_saves_local_metadata_for_local_runs(
         self, monkeypatch, temp_output_dir
     ):
@@ -2254,6 +2310,40 @@ class TestMainErrorReporting:
         mock_report.assert_called_once()
         _, reported_error_msg = mock_report.call_args[0]
         assert "dataset not found" in reported_error_msg
+        setup.mock_cloud_log_streamer.start.assert_called_once()
+        setup.mock_cloud_log_streamer.close.assert_called_once()
+
+    def test_cloud_log_streamer_starts_before_dataset_loading(
+        self, monkeypatch, temp_output_dir
+    ):
+        cfg = self._cloud_cfg(temp_output_dir, training_id="cloud-job-id")
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+
+        call_order: list[str] = []
+
+        def record_streamer_start():
+            call_order.append("streamer_start")
+
+        def record_get_dataset(*args, **kwargs):
+            call_order.append("get_dataset")
+            return setup.mock_dataset
+
+        setup.mock_cloud_log_streamer.start.side_effect = record_streamer_start
+        setup.mock_get_dataset.side_effect = record_get_dataset
+
+        main(cfg)
+
+        setup.mock_training_storage_handler_class.assert_called_once_with(
+            local_dir=cfg.local_output_dir,
+            training_job_id="cloud-job-id",
+        )
+        setup.mock_cloud_log_streamer_class.assert_called_once_with(
+            storage_handler=setup.mock_training_storage_handler,
+            output_dir=Path(cfg.local_output_dir),
+        )
+        assert call_order.index("streamer_start") < call_order.index("get_dataset")
+        setup.mock_cloud_log_streamer.close.assert_called_once()
 
     def test_reported_error_message_contains_full_traceback(
         self, monkeypatch, temp_output_dir
