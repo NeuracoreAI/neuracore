@@ -18,6 +18,9 @@ from neuracore.data_daemon.registration_management.registration_manager import (
 )
 from neuracore.data_daemon.state_management.state_manager import StateManager
 from neuracore.data_daemon.state_management.state_store_sqlite import SqliteStateStore
+from neuracore.data_daemon.upload_management.trace_status_updater import (
+    TraceStatusUpdater,
+)
 from neuracore.data_daemon.upload_management.upload_manager import UploadManager
 
 logger = logging.getLogger(__name__)
@@ -41,6 +44,7 @@ class DaemonServices:
         state_store: SqliteStateStore,
         state_manager: StateManager,
         registration_manager: RegistrationManager,
+        trace_status_updater: TraceStatusUpdater,
         upload_manager: UploadManager,
         connection_manager: ConnectionManager,
         progress_reporter: ProgressReporter,
@@ -50,6 +54,7 @@ class DaemonServices:
         self.state_store = state_store
         self.state_manager = state_manager
         self.registration_manager = registration_manager
+        self.trace_status_updater = trace_status_updater
         self.upload_manager = upload_manager
         self.connection_manager = connection_manager
         self.progress_reporter = progress_reporter
@@ -85,7 +90,15 @@ class DaemonServices:
             registration_manager.start()
             logger.debug("RegistrationManager started")
 
-        upload_manager = UploadManager(config, client_session, emitter)
+        trace_status_updater = TraceStatusUpdater(client_session)
+        logger.debug("TraceStatusUpdater initialized")
+
+        upload_manager = UploadManager(
+            config=config,
+            client_session=client_session,
+            emitter=emitter,
+            trace_status_updater=trace_status_updater,
+        )
         logger.debug("UploadManager initialized")
 
         connection_manager = ConnectionManager(client_session, emitter)
@@ -102,6 +115,7 @@ class DaemonServices:
             state_store=state_store,
             state_manager=state_manager,
             registration_manager=registration_manager,
+            trace_status_updater=trace_status_updater,
             upload_manager=upload_manager,
             connection_manager=connection_manager,
             progress_reporter=progress_reporter,

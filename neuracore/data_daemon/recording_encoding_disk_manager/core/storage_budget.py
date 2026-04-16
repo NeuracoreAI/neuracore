@@ -126,6 +126,8 @@ class StorageBudget:
         Returns:
             True if filesystem has enough free bytes after the write plus safety margin.
         """
+        # TODO: replace with check sum of usage stored in the database instead of
+        # scanning the filesystem
         free_bytes = get_free_bytes(self._recordings_root)
         return free_bytes >= (bytes_to_write + self._policy.min_free_disk_bytes)
 

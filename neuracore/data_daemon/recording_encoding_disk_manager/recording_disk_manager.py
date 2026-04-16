@@ -134,13 +134,16 @@ class RecordingDiskManager:
             sentinel=SENTINEL,
             emitter=self._emitter,
         )
-
+        assert (
+            self._loop_manager.is_running() and self._loop_manager.general_loop
+        ), "Event loop not running"
         self._encoder_worker = _BatchEncoderWorker(
             filesystem=self._filesystem,
             encoder_manager=self._encoder_manager,
             storage_budget=self._storage_budget,
             abort_trace=self._controller.abort_trace_due_to_storage,
             emitter=self._emitter,
+            loop=self._loop_manager.general_loop,
         )
 
     def start(self) -> None:

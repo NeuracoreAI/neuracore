@@ -10,12 +10,13 @@ import base64
 import hashlib
 import ssl
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
 import pytest_asyncio
 
+from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.upload_management.resumable_file_uploader import (
     ResumableFileUploader,
 )
@@ -59,6 +60,19 @@ def very_large_test_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def mock_emitter():
+    mock_emitter = MagicMock(spec=Emitter)
+    return mock_emitter
+
+
+@pytest.fixture
+def mock_trace_status_updater():
+    mock_trace_status_updater = MagicMock()
+    mock_trace_status_updater.update_trace_progress = AsyncMock()
+    return mock_trace_status_updater
+
+
+@pytest.fixture
 def mock_auth():
     with (
         patch(
@@ -79,14 +93,21 @@ def mock_auth():
 
 @pytest.fixture
 def uploader(
-    test_file: Path, mock_auth, client_session: aiohttp.ClientSession
+    test_file: Path,
+    mock_auth,
+    mock_emitter,
+    mock_trace_status_updater,
+    client_session: aiohttp.ClientSession,
 ) -> ResumableFileUploader:
     return ResumableFileUploader(
         recording_id="rec-123",
+        trace_id="trace-123",
         filepath=str(test_file),
         cloud_filepath="RGB_IMAGES/camera/trace.mp4",
         content_type="video/mp4",
         client_session=client_session,
+        emitter=mock_emitter,
+        trace_status_updater=mock_trace_status_updater,
         bytes_uploaded=0,
     )
 
@@ -194,21 +215,23 @@ async def test_uploader_handles_successful_upload(
 
 @pytest.mark.asyncio
 async def test_uploader_tracks_progress_with_callback(
-    test_file: Path, mock_auth, client_session: aiohttp.ClientSession
+    test_file: Path,
+    mock_auth,
+    mock_emitter,
+    mock_trace_status_updater,
+    client_session: aiohttp.ClientSession,
 ) -> None:
-    progress_updates: list[int] = []
     md5_b64 = _compute_file_md5_b64(test_file)
-
-    async def progress_callback(bytes_delta: int) -> None:
-        progress_updates.append(bytes_delta)
 
     uploader = ResumableFileUploader(
         recording_id="rec-123",
+        trace_id="trace-123",
         filepath=str(test_file),
         cloud_filepath="RGB_IMAGES/camera/trace.mp4",
         content_type="video/mp4",
         client_session=client_session,
-        progress_callback=progress_callback,
+        emitter=mock_emitter,
+        trace_status_updater=mock_trace_status_updater,
     )
 
     put_responses = [
@@ -230,22 +253,34 @@ async def test_uploader_tracks_progress_with_callback(
         ):
             await uploader.upload()
 
-    assert len(progress_updates) > 0
-    assert sum(progress_updates) == 5 * 1024 * 1024
+    assert mock_trace_status_updater.update_trace_progress.call_count > 0
+    assert (
+        mock_trace_status_updater.update_trace_progress.call_args_list[-1].kwargs[
+            "uploaded_bytes"
+        ]
+        == 5 * 1024 * 1024
+    )
 
 
 @pytest.mark.asyncio
 async def test_uploader_resumes_from_offset(
-    large_test_file: Path, mock_auth, client_session: aiohttp.ClientSession
+    large_test_file: Path,
+    mock_auth,
+    mock_emitter,
+    mock_trace_status_updater,
+    client_session: aiohttp.ClientSession,
 ) -> None:
     md5_b64 = _compute_file_md5_b64(large_test_file)
 
     uploader = ResumableFileUploader(
         recording_id="rec-123",
+        trace_id="trace-123",
         filepath=str(large_test_file),
         cloud_filepath="RGB_IMAGES/camera/trace.mp4",
         content_type="video/mp4",
         client_session=client_session,
+        emitter=mock_emitter,
+        trace_status_updater=mock_trace_status_updater,
         bytes_uploaded=5 * 1024 * 1024,
     )
 
@@ -341,14 +376,20 @@ async def test_uploader_handles_network_error(uploader: ResumableFileUploader) -
 
 @pytest.mark.asyncio
 async def test_uploader_handles_file_not_found(
-    mock_auth, client_session: aiohttp.ClientSession
+    mock_auth,
+    mock_emitter,
+    mock_trace_status_updater,
+    client_session: aiohttp.ClientSession,
 ) -> None:
     uploader = ResumableFileUploader(
         recording_id="rec-123",
+        trace_id="trace-123",
         filepath="/nonexistent/file.mp4",
         cloud_filepath="RGB_IMAGES/camera/trace.mp4",
         content_type="video/mp4",
         client_session=client_session,
+        emitter=mock_emitter,
+        trace_status_updater=mock_trace_status_updater,
     )
 
     with pytest.raises(FileNotFoundError):
@@ -510,21 +551,23 @@ async def test_uploader_handles_session_uri_fetch_failure(
 
 @pytest.mark.asyncio
 async def test_uploader_handles_large_file(
-    very_large_test_file: Path, mock_auth, client_session: aiohttp.ClientSession
+    very_large_test_file: Path,
+    mock_auth,
+    mock_emitter,
+    mock_trace_status_updater,
+    client_session: aiohttp.ClientSession,
 ) -> None:
-    progress_updates: list[int] = []
     md5_b64 = _compute_file_md5_b64(very_large_test_file)
-
-    async def progress_callback(bytes_delta: int) -> None:
-        progress_updates.append(bytes_delta)
 
     uploader = ResumableFileUploader(
         recording_id="rec-123",
+        trace_id="trace-123",
         filepath=str(very_large_test_file),
         cloud_filepath="RGB_IMAGES/camera/trace.mp4",
         content_type="video/mp4",
         client_session=client_session,
-        progress_callback=progress_callback,
+        emitter=mock_emitter,
+        trace_status_updater=mock_trace_status_updater,
     )
 
     with patch.object(
@@ -553,8 +596,14 @@ async def test_uploader_handles_large_file(
 
     assert success is True
     assert bytes_uploaded == 200 * 1024 * 1024
-    assert len(progress_updates) == 4
-    assert sum(progress_updates) == 200 * 1024 * 1024
+
+    assert mock_trace_status_updater.update_trace_progress.call_count == 4
+    assert (
+        mock_trace_status_updater.update_trace_progress.call_args_list[-1].kwargs[
+            "uploaded_bytes"
+        ]
+        == bytes_uploaded
+    )
 
 
 @pytest.mark.asyncio
@@ -827,15 +876,21 @@ async def test_uploader_ssl_error_handling(
 
 @pytest.mark.asyncio
 async def test_uploader_backoff_caps_at_five_minutes(
-    mock_auth, client_session: aiohttp.ClientSession
+    mock_auth,
+    mock_emitter,
+    mock_trace_status_updater,
+    client_session: aiohttp.ClientSession,
 ) -> None:
     """Test that exponential backoff caps at MAX_BACKOFF_SECONDS (300)."""
     uploader = ResumableFileUploader(
         recording_id="rec-123",
+        trace_id="trace-123",
         filepath="/tmp/does-not-matter",
         cloud_filepath="trace.mp4",
         content_type="video/mp4",
         client_session=client_session,
+        emitter=mock_emitter,
+        trace_status_updater=mock_trace_status_updater,
     )
 
     sleep_calls: list[float] = []
@@ -851,7 +906,11 @@ async def test_uploader_backoff_caps_at_five_minutes(
 
 @pytest.mark.asyncio
 async def test_uploader_resume_no_duplicate_data(
-    large_test_file: Path, mock_auth, client_session: aiohttp.ClientSession
+    large_test_file: Path,
+    mock_auth,
+    mock_emitter,
+    mock_trace_status_updater,
+    client_session: aiohttp.ClientSession,
 ) -> None:
     """Test that resuming from server offset doesn't send duplicate bytes."""
     md5_b64 = _compute_file_md5_b64(large_test_file)
@@ -860,10 +919,13 @@ async def test_uploader_resume_no_duplicate_data(
 
     uploader = ResumableFileUploader(
         recording_id="rec-123",
+        trace_id="trace-123",
         filepath=str(large_test_file),
         cloud_filepath="RGB_IMAGES/camera/trace.mp4",
         content_type="video/mp4",
         client_session=client_session,
+        emitter=mock_emitter,
+        trace_status_updater=mock_trace_status_updater,
         bytes_uploaded=0,
     )
 
@@ -939,7 +1001,12 @@ class TestBandwidthThrottling:
 
     @pytest.mark.asyncio
     async def test_acquire_called_per_chunk(
-        self, test_file: Path, mock_auth, client_session: aiohttp.ClientSession
+        self,
+        test_file: Path,
+        mock_auth,
+        mock_emitter,
+        mock_trace_status_updater,
+        client_session: aiohttp.ClientSession,
     ) -> None:
         """Test that should call bandwidth_limiter.acquire for each chunk."""
         file_size = 5 * 1024 * 1024
@@ -957,10 +1024,13 @@ class TestBandwidthThrottling:
 
         uploader = ResumableFileUploader(
             recording_id="rec-123",
+            trace_id="trace-123",
             filepath=str(test_file),
             cloud_filepath="RGB_IMAGES/camera/trace.mp4",
             content_type="video/mp4",
             client_session=client_session,
+            emitter=mock_emitter,
+            trace_status_updater=mock_trace_status_updater,
             bandwidth_limiter=limiter,
         )
 
@@ -989,17 +1059,25 @@ class TestBandwidthThrottling:
 
     @pytest.mark.asyncio
     async def test_no_throttle_when_limiter_none(
-        self, test_file: Path, mock_auth, client_session: aiohttp.ClientSession
+        self,
+        test_file: Path,
+        mock_auth,
+        mock_emitter,
+        mock_trace_status_updater,
+        client_session: aiohttp.ClientSession,
     ) -> None:
         """Test that no throttling occurs when bandwidth_limiter is None."""
         md5_b64 = _compute_file_md5_b64(test_file)
 
         uploader = ResumableFileUploader(
             recording_id="rec-123",
+            trace_id="trace-123",
             filepath=str(test_file),
             cloud_filepath="RGB_IMAGES/camera/trace.mp4",
             content_type="video/mp4",
             client_session=client_session,
+            emitter=mock_emitter,
+            trace_status_updater=mock_trace_status_updater,
             bandwidth_limiter=None,
         )
 

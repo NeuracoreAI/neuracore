@@ -68,15 +68,6 @@ NumThreadsOption = Annotated[
     ),
 ]
 
-MaxConcurrentUploadsOption = Annotated[
-    int | None,
-    typer.Option(
-        "--max-concurrent-uploads",
-        "--max_concurrent_uploads",
-        help="Maximum number of traces uploaded concurrently.",
-    ),
-]
-
 KeepWakelockOption = Annotated[
     bool | None,
     typer.Option(

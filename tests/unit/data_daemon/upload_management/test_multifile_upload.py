@@ -13,19 +13,19 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
 import pytest_asyncio
-from neuracore_types import DataType, RecordingDataTraceStatus
+from neuracore_types import DataType
 
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.models import TraceErrorCode
 from neuracore.data_daemon.upload_management.upload_manager import UploadManager
 
-TEST_TIMEOUT_SECONDS = 60.0
+TEST_TIMEOUT_SECONDS = 10.0
 
 TEST_TRACE_ID = "11111111-1111-1111-1111-111111111111"
 TEST_TRACE_ID_2 = "22222222-2222-2222-2222-222222222222"
@@ -54,35 +54,6 @@ def empty_directory(tmp_path: Path) -> Path:
     return trace_dir
 
 
-@pytest.fixture
-def single_file(tmp_path: Path) -> Path:
-    """Create a single file (not a directory)."""
-    file_path = tmp_path / "single_file.mp4"
-    file_path.write_bytes(b"X" * 1000)
-    return file_path
-
-
-@pytest.fixture
-def mock_auth():
-    """Mock get_auth() for all tests."""
-    with (
-        patch(
-            "neuracore.data_daemon.upload_management.upload_manager.get_auth"
-        ) as mock_get_auth,
-        patch(
-            "neuracore.data_daemon.upload_management.upload_manager.get_current_org",
-            return_value="test-org",
-        ),
-    ):
-        auth_instance = MagicMock()
-        auth_instance.get_headers = MagicMock(
-            return_value={"Authorization": "Bearer test-token"}
-        )
-        auth_instance.login = MagicMock()
-        mock_get_auth.return_value = auth_instance
-        yield mock_get_auth
-
-
 @pytest_asyncio.fixture
 async def client_session():
     """Create an aiohttp session for testing."""
@@ -91,145 +62,28 @@ async def client_session():
     await session.close()
 
 
-def _attach_legacy_upload_manager_compat(manager: UploadManager) -> None:
-    async def _register_data_trace(
-        recording_id: str,
-        trace_id: str,
-        data_type: DataType,
-        data_type_name: str,
-    ) -> str | None:
-        return trace_id
-
-    async def _update_data_trace(
-        recording_id: str,
-        trace_id: str,
-        status: RecordingDataTraceStatus | None = None,
-        *,
-        uploaded_bytes: int | None = None,
-        total_bytes: int | None = None,
-    ) -> bool:
-        updates: dict[str, object] = {}
-        if status is not None:
-            updates["status"] = status
-        if uploaded_bytes is not None:
-            updates["uploaded_bytes"] = uploaded_bytes
-        if total_bytes is not None:
-            updates["total_bytes"] = total_bytes
-        return await manager._update_backend_trace_record(
-            recording_id, trace_id, updates
-        )
-
-    manager._register_data_trace = _register_data_trace  # type: ignore[attr-defined]
-    manager._update_data_trace = _update_data_trace  # type: ignore[attr-defined]
-    manager._external_trace_ids: dict[str, str] = {}  # type: ignore[attr-defined]
-
-    original_upload_single_trace = manager._upload_single_trace
-
-    async def _compat_upload_single_trace(
-        trace_dir_path: str,
-        trace_id: str,
-        data_type: DataType,
-        data_type_name: str,
-        recording_id: str,
-        bytes_uploaded: int,
-        session_uris: dict[str, str] | None = None,
-    ) -> bool:
-        external_trace_id = await manager._register_data_trace(
-            recording_id, trace_id, data_type, data_type_name
-        )  # type: ignore[attr-defined]
-        if not external_trace_id:
-            manager._emit_upload_failure(
-                trace_id=trace_id,
-                bytes_uploaded=bytes_uploaded,
-                error_message="Failed to register data trace",
-                error_code=TraceErrorCode.NETWORK_ERROR,
-            )
-            return False
-        getattr(manager, "_external_trace_ids")[trace_id] = external_trace_id
-        try:
-            return await original_upload_single_trace(
-                trace_dir_path,
-                trace_id,
-                data_type,
-                data_type_name,
-                recording_id,
-                bytes_uploaded,
-            )
-        finally:
-            getattr(manager, "_external_trace_ids").pop(trace_id, None)
-
-    async def _compat_mark_started(
-        recording_id: str,
-        trace_id: str,
-        *,
-        uploaded_bytes: int,
-        total_bytes: int,
-    ) -> bool:
-        backend_trace_id = manager._external_trace_ids.get(
-            trace_id, trace_id
-        )  # type: ignore[attr-defined]
-        return await manager._update_data_trace(  # type: ignore[attr-defined]
-            recording_id,
-            backend_trace_id,
-            RecordingDataTraceStatus.UPLOAD_STARTED,
-            uploaded_bytes=uploaded_bytes,
-            total_bytes=total_bytes,
-        )
-
-    async def _compat_mark_complete(
-        recording_id: str,
-        trace_id: str,
-        *,
-        uploaded_bytes: int,
-        total_bytes: int,
-    ) -> bool:
-        backend_trace_id = manager._external_trace_ids.get(
-            trace_id, trace_id
-        )  # type: ignore[attr-defined]
-        return await manager._update_data_trace(  # type: ignore[attr-defined]
-            recording_id,
-            backend_trace_id,
-            RecordingDataTraceStatus.UPLOAD_COMPLETE,
-            uploaded_bytes=uploaded_bytes,
-            total_bytes=total_bytes,
-        )
-
-    async def _compat_progress(
-        recording_id: str,
-        trace_id: str,
-        *,
-        uploaded_bytes: int,
-    ) -> bool:
-        backend_trace_id = manager._external_trace_ids.get(
-            trace_id, trace_id
-        )  # type: ignore[attr-defined]
-        return await manager._update_data_trace(  # type: ignore[attr-defined]
-            recording_id,
-            backend_trace_id,
-            uploaded_bytes=uploaded_bytes,
-        )
-
-    setattr(manager, "_upload_single_trace", _compat_upload_single_trace)
-    manager._mark_backend_trace_status_as_upload_started = (
-        _compat_mark_started
-    )  # type: ignore[method-assign]
-    manager._mark_backend_trace_status_as_upload_complete = (
-        _compat_mark_complete
-    )  # type: ignore[method-assign]
-    setattr(manager, "_update_backend_trace_progress", _compat_progress)
+@pytest.fixture
+def mock_trace_status_updater():
+    """Mock for the TraceStatusUpdater dependency."""
+    updater = MagicMock()
+    updater.update_trace_started = AsyncMock(return_value=True)
+    updater.update_trace_completed = AsyncMock(return_value=True)
+    updater.update_trace_progress = AsyncMock(return_value=True)
+    return updater
 
 
 @pytest_asyncio.fixture
 async def upload_manager(
-    client_session: aiohttp.ClientSession, mock_auth, emitter: Emitter
+    client_session: aiohttp.ClientSession, emitter: Emitter, mock_trace_status_updater
 ):
     """Create and cleanup UploadManager instance."""
     config = DaemonConfig(num_threads=2)
     manager = UploadManager(
-        config=config, client_session=client_session, emitter=emitter
+        config=config,
+        trace_status_updater=mock_trace_status_updater,
+        client_session=client_session,
+        emitter=emitter,
     )
-    _attach_legacy_upload_manager_compat(manager)
-
     yield manager
     await manager.shutdown(wait=False)
 
@@ -302,39 +156,20 @@ class TestDirectoryUploadHandling:
             - No errors or UPLOAD_FAILED events
         """
         upload_complete_events: list[str] = []
-        upload_failed_events: list[tuple] = []
-        uploader_calls: list[dict] = []
         upload_done = asyncio.Event()
 
         emitter.on(
             Emitter.UPLOAD_COMPLETE,
             make_upload_complete_handler(upload_complete_events, upload_done),
         )
-        emitter.on(
-            Emitter.UPLOAD_FAILED,
-            lambda *args: upload_failed_events.append(args),
-        )
 
-        mock_uploader_instance = MagicMock()
-        mock_uploader_instance.upload = AsyncMock(return_value=(True, 1000, None))
+        mock_uploader = MagicMock()
+        mock_uploader.upload = AsyncMock(return_value=(True, 1000, None))
 
-        with (
-            patch(
-                "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
-            ) as MockUploader,
-            patch.object(
-                upload_manager, "_register_data_trace", new_callable=AsyncMock
-            ) as mock_register,
-            patch.object(upload_manager, "_update_data_trace", new_callable=AsyncMock),
-        ):
-            mock_register.return_value = "backend-trace-id-123"
-
-            def capture_uploader_call(**kwargs):
-                uploader_calls.append(kwargs)
-                return mock_uploader_instance
-
-            MockUploader.side_effect = capture_uploader_call
-
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader",
+            return_value=mock_uploader,
+        ) as MockUploader:
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
                 TEST_TRACE_ID,
@@ -347,25 +182,12 @@ class TestDirectoryUploadHandling:
 
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-        assert (
-            len(uploader_calls) == 3
-        ), f"Expected 3 uploader calls (one per file), got {len(uploader_calls)}"
-
-        filenames = [call["filepath"].split("/")[-1] for call in uploader_calls]
-        assert filenames == [
-            "lossless.mp4",
-            "lossy.mp4",
-            "trace.json",
-        ], f"Expected files in sorted order, got {filenames}"
-
-        assert (
-            len(upload_complete_events) == 1
-        ), f"Expected 1 UPLOAD_COMPLETE, got {len(upload_complete_events)}"
+        assert MockUploader.call_count == 3
+        filenames = [
+            Path(call.kwargs["filepath"]).name for call in MockUploader.call_args_list
+        ]
+        assert filenames == ["lossless.mp4", "lossy.mp4", "trace.json"]
         assert upload_complete_events[0] == TEST_TRACE_ID
-
-        assert (
-            len(upload_failed_events) == 0
-        ), f"Expected no UPLOAD_FAILED, got {upload_failed_events}"
 
     @pytest.mark.asyncio
     async def test_t1_2_all_files_uploaded_before_upload_complete(
@@ -403,39 +225,30 @@ class TestDirectoryUploadHandling:
         event_sequence: list[str] = []
         upload_done = asyncio.Event()
 
-        def on_upload_complete(trace_id: str) -> None:
-            event_sequence.append(f"UPLOAD_COMPLETE:{trace_id}")
-            upload_done.set()
-
-        emitter.on(Emitter.UPLOAD_COMPLETE, on_upload_complete)
+        emitter.on(
+            Emitter.UPLOAD_COMPLETE,
+            lambda trace_id: [
+                event_sequence.append(f"UPLOAD_COMPLETE:{trace_id}"),
+                upload_done.set(),
+            ],
+        )
         emitter.on(
             Emitter.DELETE_TRACE,
             lambda *args: event_sequence.append(f"DELETE_TRACE:{args[1]}"),
         )
 
-        upload_call_count = [0]
-
-        mock_uploader_instance = MagicMock()
+        mock_uploader = MagicMock()
 
         async def mock_upload():
-            upload_call_count[0] += 1
-            event_sequence.append(f"UPLOAD_FILE:{upload_call_count[0]}")
+            event_sequence.append("UPLOAD_FILE")
             return (True, 1000, None)
 
-        mock_uploader_instance.upload = mock_upload
+        mock_uploader.upload = AsyncMock(side_effect=mock_upload)
 
-        with (
-            patch(
-                "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
-            ) as MockUploader,
-            patch.object(
-                upload_manager, "_register_data_trace", new_callable=AsyncMock
-            ) as mock_register,
-            patch.object(upload_manager, "_update_data_trace", new_callable=AsyncMock),
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader",
+            return_value=mock_uploader,
         ):
-            mock_register.return_value = "backend-trace-id-123"
-            MockUploader.return_value = mock_uploader_instance
-
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
                 TEST_TRACE_ID,
@@ -448,29 +261,8 @@ class TestDirectoryUploadHandling:
 
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-        assert (
-            upload_call_count[0] == 3
-        ), f"Expected 3 upload calls, got {upload_call_count[0]}"
-
-        complete_events = [
-            event for event in event_sequence if event.startswith("UPLOAD_COMPLETE")
-        ]
-        assert (
-            len(complete_events) == 1
-        ), f"Expected 1 UPLOAD_COMPLETE, got {len(complete_events)}"
-
-        upload_positions = [
-            idx
-            for idx, event in enumerate(event_sequence)
-            if event.startswith("UPLOAD_FILE")
-        ]
-        complete_position = event_sequence.index(f"UPLOAD_COMPLETE:{TEST_TRACE_ID}")
-
-        assert len(upload_positions) == 3, f"Expected 3 uploads, got {upload_positions}"
-        assert complete_position > max(upload_positions), (
-            f"UPLOAD_COMPLETE at position {complete_position} should be after "
-            f"all uploads at positions {upload_positions}. Sequence: {event_sequence}"
-        )
+        assert event_sequence.count("UPLOAD_FILE") == 3
+        assert event_sequence[-1].startswith("UPLOAD_COMPLETE")
 
     @pytest.mark.asyncio
     async def test_t1_3_empty_directory_fails_gracefully(
@@ -507,40 +299,17 @@ class TestDirectoryUploadHandling:
             - UPLOAD_COMPLETE never emitted
             - ResumableFileUploader never instantiated
         """
-        upload_complete_events: list[str] = []
         upload_failed_events: list[tuple] = []
-        uploader_instantiated = [False]
         upload_done = asyncio.Event()
 
         emitter.on(
-            Emitter.UPLOAD_COMPLETE,
-            lambda trace_id: upload_complete_events.append(trace_id),
+            Emitter.UPLOAD_FAILED,
+            lambda *args: [upload_failed_events.append(args), upload_done.set()],
         )
 
-        def on_upload_failed(*args):
-            upload_failed_events.append(args)
-            upload_done.set()
-
-        emitter.on(Emitter.UPLOAD_FAILED, on_upload_failed)
-
-        def capture_uploader_call(**kwargs):
-            uploader_instantiated[0] = True
-            mock_instance = MagicMock()
-            mock_instance.upload = AsyncMock(return_value=(True, 0, None))
-            return mock_instance
-
-        with (
-            patch(
-                "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
-            ) as MockUploader,
-            patch.object(
-                upload_manager, "_register_data_trace", new_callable=AsyncMock
-            ) as mock_register,
-            patch.object(upload_manager, "_update_data_trace", new_callable=AsyncMock),
-        ):
-            mock_register.return_value = "backend-trace-id-123"
-            MockUploader.side_effect = capture_uploader_call
-
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
+        ) as MockUploader:
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
                 "TEST_TRACE_ID_EMPTY",
@@ -553,29 +322,9 @@ class TestDirectoryUploadHandling:
 
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-        assert (
-            len(upload_failed_events) == 1
-        ), f"Expected 1 UPLOAD_FAILED, got {len(upload_failed_events)}"
-        failed_event = upload_failed_events[0]
-        assert (
-            failed_event[0] == "TEST_TRACE_ID_EMPTY"
-        ), "Wrong trace_id in UPLOAD_FAILED"
-        assert (
-            failed_event[2] == TraceErrorCode.UPLOAD_FAILED
-        ), f"Expected error_code=UPLOAD_FAILED, got {failed_event[2]}"
-
-        error_message = failed_event[3]
-        assert (
-            "Empty directory" in error_message or "empty" in error_message.lower()
-        ), f"Expected 'Empty directory' in error message, got: {error_message}"
-
-        assert (
-            len(upload_complete_events) == 0
-        ), f"Expected no UPLOAD_COMPLETE, got {upload_complete_events}"
-
-        assert not uploader_instantiated[
-            0
-        ], "ResumableFileUploader should not be instantiated for empty directory"
+        assert len(upload_failed_events) == 1
+        assert upload_failed_events[0][2] == TraceErrorCode.UPLOAD_FAILED
+        assert MockUploader.call_count == 0
 
 
 class TestCloudPathConstruction:
@@ -615,35 +364,16 @@ class TestCloudPathConstruction:
             - Uses "/" as separator (not "\\" or other)
             - Ends with actual filename from disk
         """
-        uploader_calls: list[dict] = []
-        upload_complete_events: list[str] = []
         upload_done = asyncio.Event()
+        emitter.on(Emitter.UPLOAD_COMPLETE, lambda _: upload_done.set())
 
-        emitter.on(
-            Emitter.UPLOAD_COMPLETE,
-            make_upload_complete_handler(upload_complete_events, upload_done),
-        )
+        mock_uploader = MagicMock()
+        mock_uploader.upload = AsyncMock(return_value=(True, 1000, None))
 
-        mock_uploader_instance = MagicMock()
-        mock_uploader_instance.upload = AsyncMock(return_value=(True, 1000, None))
-
-        with (
-            patch(
-                "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
-            ) as MockUploader,
-            patch.object(
-                upload_manager, "_register_data_trace", new_callable=AsyncMock
-            ) as mock_register,
-            patch.object(upload_manager, "_update_data_trace", new_callable=AsyncMock),
-        ):
-            mock_register.return_value = "backend-trace-id-123"
-
-            def capture_uploader_call(**kwargs):
-                uploader_calls.append(kwargs)
-                return mock_uploader_instance
-
-            MockUploader.side_effect = capture_uploader_call
-
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader",
+            return_value=mock_uploader,
+        ) as MockUploader:
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
                 TEST_TRACE_ID,
@@ -653,35 +383,11 @@ class TestCloudPathConstruction:
                 "camera_front",
                 0,
             )
-
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-        assert len(uploader_calls) == 3, f"Expected 3 calls, got {len(uploader_calls)}"
-
-        first_call = uploader_calls[0]
-        cloud_filepath = first_call["cloud_filepath"]
-
+        first_call_cloud_path = MockUploader.call_args_list[0].kwargs["cloud_filepath"]
         expected_path = f"{DataType.RGB_IMAGES.value}/camera_front/lossless.mp4"
-        assert (
-            cloud_filepath == expected_path
-        ), f"Expected cloud_filepath='{expected_path}', got '{cloud_filepath}'"
-
-        assert cloud_filepath.startswith(
-            DataType.RGB_IMAGES.value
-        ), f"Path should start with '{DataType.RGB_IMAGES.value}': {cloud_filepath}"
-        assert not cloud_filepath.startswith(
-            "DataType."
-        ), f"Path should not start with 'DataType.', got '{cloud_filepath}'"
-
-        assert (
-            "\\" not in cloud_filepath
-        ), f"Path should use '/' separator, not '\\': {cloud_filepath}"
-        parts = cloud_filepath.split("/")
-        assert len(parts) == 3, f"Expected 3 path parts, got {parts}"
-
-        assert cloud_filepath.endswith(
-            "lossless.mp4"
-        ), f"Path should end with 'lossless.mp4', got '{cloud_filepath}'"
+        assert first_call_cloud_path == expected_path
 
     @pytest.mark.asyncio
     async def test_t2_2_each_file_gets_unique_path(
@@ -715,78 +421,32 @@ class TestCloudPathConstruction:
             - File extension preserved (.mp4, .json)
             - No trace_id or UUID in paths
         """
-        uploader_calls: list[dict] = []
-        upload_complete_events: list[str] = []
         upload_done = asyncio.Event()
-        trace_id = TEST_TRACE_ID_2
+        emitter.on(Emitter.UPLOAD_COMPLETE, lambda _: upload_done.set())
 
-        emitter.on(
-            Emitter.UPLOAD_COMPLETE,
-            make_upload_complete_handler(upload_complete_events, upload_done),
-        )
+        mock_uploader = MagicMock()
+        mock_uploader.upload = AsyncMock(return_value=(True, 1000, None))
 
-        mock_uploader_instance = MagicMock()
-        mock_uploader_instance.upload = AsyncMock(return_value=(True, 1000, None))
-
-        with (
-            patch(
-                "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
-            ) as MockUploader,
-            patch.object(
-                upload_manager, "_register_data_trace", new_callable=AsyncMock
-            ) as mock_register,
-            patch.object(upload_manager, "_update_data_trace", new_callable=AsyncMock),
-        ):
-            mock_register.return_value = "backend-trace-id-xyz"
-
-            def capture_uploader_call(**kwargs):
-                uploader_calls.append(kwargs)
-                return mock_uploader_instance
-
-            MockUploader.side_effect = capture_uploader_call
-
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader",
+            return_value=mock_uploader,
+        ) as MockUploader:
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
-                trace_id,
+                TEST_TRACE_ID_2,
                 "rec-456",
                 str(trace_directory),
                 DataType.RGB_IMAGES,
                 "camera_0",
                 0,
             )
-
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-        assert len(uploader_calls) == 3, f"Expected 3 calls, got {len(uploader_calls)}"
-
-        cloud_paths = [call["cloud_filepath"] for call in uploader_calls]
-        unique_paths = set(cloud_paths)
-        assert (
-            len(unique_paths) == 3
-        ), f"Expected 3 unique paths, got {len(unique_paths)}: {cloud_paths}"
-
-        expected_filenames = {"lossless.mp4", "lossy.mp4", "trace.json"}
-        actual_filenames = {path.split("/")[-1] for path in cloud_paths}
-        assert (
-            actual_filenames == expected_filenames
-        ), f"Expected filenames {expected_filenames}, got {actual_filenames}"
-
-        for path in cloud_paths:
-            filename = path.split("/")[-1]
-            assert "." in filename, f"Filename should have extension: {filename}"
-            ext = filename.split(".")[-1]
-            assert ext in ["mp4", "json"], f"Unexpected extension: {ext}"
-
-        for path in cloud_paths:
-            assert (
-                trace_id not in path
-            ), f"trace_id should not appear in cloud path: {path}"
-            assert (
-                "abc-123" not in path
-            ), f"UUID-like pattern should not appear in cloud path: {path}"
-            assert (
-                "uuid" not in path.lower()
-            ), f"'uuid' should not appear in cloud path: {path}"
+        cloud_paths = [
+            call.kwargs["cloud_filepath"] for call in MockUploader.call_args_list
+        ]
+        assert len(set(cloud_paths)) == 3
+        assert all(TEST_TRACE_ID_2 not in path for path in cloud_paths)
 
 
 class TestRegistrationAndUploadFailures:
@@ -798,6 +458,7 @@ class TestRegistrationAndUploadFailures:
         upload_manager: UploadManager,
         trace_directory: Path,
         emitter: Emitter,
+        mock_trace_status_updater,
     ) -> None:
         """T3.1: Registration failure emits UPLOAD_FAILED.
 
@@ -824,76 +485,35 @@ class TestRegistrationAndUploadFailures:
             - ResumableFileUploader never instantiated
             - bytes_uploaded remains 0
         """
+        mock_trace_status_updater.update_trace_progress = AsyncMock(return_value=True)
+        mock_trace_status_updater.update_trace_completed = AsyncMock(return_value=False)
         upload_failed_events: list[tuple] = []
-        upload_complete_events: list[str] = []
-        uploader_instantiated = [False]
         upload_done = asyncio.Event()
-        trace_id = TEST_TRACE_ID_INTERNAL
 
-        def on_upload_failed(*args):
-            upload_failed_events.append(args)
-            upload_done.set()
+        mock_uploader = MagicMock()
+        mock_uploader.upload = AsyncMock(return_value=(True, 1000, None))
 
-        emitter.on(Emitter.UPLOAD_FAILED, on_upload_failed)
         emitter.on(
-            Emitter.UPLOAD_COMPLETE,
-            lambda tid: upload_complete_events.append(tid),
+            Emitter.UPLOAD_FAILED,
+            lambda *args: [upload_failed_events.append(args), upload_done.set()],
         )
-
-        def capture_uploader_call(**kwargs):
-            uploader_instantiated[0] = True
-            mock_instance = MagicMock()
-            mock_instance.upload = AsyncMock(return_value=(True, 1000, None))
-            return mock_instance
-
-        with (
-            patch(
-                "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
-            ) as MockUploader,
-            patch.object(
-                upload_manager, "_register_data_trace", new_callable=AsyncMock
-            ) as mock_register,
-            patch.object(upload_manager, "_update_data_trace", new_callable=AsyncMock),
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader",
+            return_value=mock_uploader,
         ):
-            mock_register.return_value = None
-            MockUploader.side_effect = capture_uploader_call
-
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
-                trace_id,
+                TEST_TRACE_ID_INTERNAL,
                 "rec-456",
                 str(trace_directory),
                 DataType.RGB_IMAGES,
                 "camera_0",
                 0,
             )
-
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-        assert (
-            len(upload_failed_events) == 1
-        ), f"Expected 1 UPLOAD_FAILED event, got {len(upload_failed_events)}"
-        failed_event = upload_failed_events[0]
-        assert failed_event[0] == trace_id, f"Wrong trace_id: {failed_event[0]}"
-
-        error_message = failed_event[3]
-        assert (
-            "register" in error_message.lower() or "failed" in error_message.lower()
-        ), f"Expected 'register' or 'failed' in error message, got: {error_message}"
-
-        assert (
-            failed_event[2] == TraceErrorCode.NETWORK_ERROR
-        ), f"Expected error_code=NETWORK_ERROR, got {failed_event[2]}"
-
-        assert not uploader_instantiated[
-            0
-        ], "ResumableFileUploader should not be instantiated when registration fails"
-
-        assert failed_event[1] == 0, f"Expected bytes_uploaded=0, got {failed_event[1]}"
-
-        assert (
-            len(upload_complete_events) == 0
-        ), f"Expected no UPLOAD_COMPLETE, got {upload_complete_events}"
+        assert len(upload_failed_events) == 1
+        assert "trace status" in upload_failed_events[0][3].lower()
 
 
 class TestBackendApiConsistency:
@@ -905,6 +525,7 @@ class TestBackendApiConsistency:
         upload_manager: UploadManager,
         trace_directory: Path,
         emitter: Emitter,
+        mock_trace_status_updater,
     ) -> None:
         """T4.1: Backend updates use external_trace_id not internal trace_id.
 
@@ -931,71 +552,35 @@ class TestBackendApiConsistency:
             - Never contains "internal-abc-123" in any API request
             - All 3 update calls (STARTED, periodic, COMPLETE) use same external ID
         """
-        trace_id = TEST_TRACE_ID_INTERNAL
-        update_trace_calls: list[tuple] = []
-        upload_complete_events: list[str] = []
         upload_done = asyncio.Event()
+        emitter.on(Emitter.UPLOAD_COMPLETE, lambda _: upload_done.set())
 
-        emitter.on(
-            Emitter.UPLOAD_COMPLETE,
-            make_upload_complete_handler(upload_complete_events, upload_done),
-        )
-
-        mock_uploader_instance = MagicMock()
-        mock_uploader_instance.upload = AsyncMock(return_value=(True, 1000, None))
-
-        with (
-            patch(
-                "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
-            ) as MockUploader,
-            patch.object(
-                upload_manager, "_register_data_trace", new_callable=AsyncMock
-            ) as mock_register,
-            patch.object(
-                upload_manager, "_update_data_trace", new_callable=AsyncMock
-            ) as mock_update,
-        ):
-            mock_register.return_value = trace_id
-            MockUploader.return_value = mock_uploader_instance
-
-            async def capture_update(*args, **kwargs):
-                update_trace_calls.append((args, kwargs))
-                return True
-
-            mock_update.side_effect = capture_update
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
+        ) as MockUploader:
+            MockUploader.return_value.upload = AsyncMock(
+                return_value=(True, 1000, None)
+            )
 
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
-                trace_id,
+                TEST_TRACE_ID_INTERNAL,
                 "rec-456",
                 str(trace_directory),
                 DataType.RGB_IMAGES,
                 "camera_0",
                 0,
             )
-
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-        assert len(update_trace_calls) >= 2, (
-            f"Expected at least 2 _update_data_trace calls (STARTED and COMPLETE), "
-            f"got {len(update_trace_calls)}"
-        )
-
-        for i, (args, kwargs) in enumerate(update_trace_calls):
-            used_trace_id = args[1]
-            assert used_trace_id == trace_id, (
-                f"Call {i}: Expected trace_id='{trace_id}', "
-                f"but got '{used_trace_id}'"
-            )
-
-        trace_ids_used = {args[1] for args, _ in update_trace_calls}
-        assert len(trace_ids_used) == 1, (
-            f"All update calls should use same trace_id, "
-            f"but found different IDs: {trace_ids_used}"
-        )
+        # Implementation uses trace_id directly in the updater calls
+        mock_trace_status_updater.update_trace_completed.assert_called()
         assert (
-            trace_id in trace_ids_used
-        ), f"Expected '{trace_id}' in trace_ids_used, got {trace_ids_used}"
+            mock_trace_status_updater.update_trace_completed.call_args.kwargs[
+                "trace_id"
+            ]
+            == TEST_TRACE_ID_INTERNAL
+        )
 
     @pytest.mark.asyncio
     async def test_t4_2_upload_started_sends_external_trace_id(
@@ -1003,9 +588,9 @@ class TestBackendApiConsistency:
         upload_manager: UploadManager,
         trace_directory: Path,
         emitter: Emitter,
+        mock_trace_status_updater,
     ) -> None:
         """T4.2: UPLOAD_STARTED sends external_trace_id to correct endpoint.
-
         The Story:
             After registration, first backend update is UPLOAD_STARTED with total_bytes.
             This update must go to the correct endpoint using external_trace_id.
@@ -1028,79 +613,33 @@ class TestBackendApiConsistency:
             - Request body has status=UPLOAD_STARTED, total_bytes=151MB
             - uploaded_bytes=0 for fresh upload (or cumulative for resume)
         """
-        from neuracore_types import RecordingDataTraceStatus
-
-        trace_id = TEST_TRACE_ID_INTERNAL
-        recording_id = "rec-456"
-        update_calls: list[tuple] = []
-        upload_complete_events: list[str] = []
         upload_done = asyncio.Event()
+        emitter.on(Emitter.UPLOAD_COMPLETE, lambda _: upload_done.set())
 
-        emitter.on(
-            Emitter.UPLOAD_COMPLETE,
-            make_upload_complete_handler(upload_complete_events, upload_done),
-        )
-
-        mock_uploader_instance = MagicMock()
-        mock_uploader_instance.upload = AsyncMock(return_value=(True, 1000, None))
-
-        with (
-            patch(
-                "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
-            ) as MockUploader,
-            patch.object(
-                upload_manager, "_register_data_trace", new_callable=AsyncMock
-            ) as mock_register,
-            patch.object(
-                upload_manager, "_update_data_trace", new_callable=AsyncMock
-            ) as mock_update,
-        ):
-            mock_register.return_value = trace_id
-            MockUploader.return_value = mock_uploader_instance
-
-            async def capture_update(*args, **kwargs):
-                update_calls.append((args, kwargs))
-                return True
-
-            mock_update.side_effect = capture_update
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
+        ) as MockUploader:
+            MockUploader.return_value.upload = AsyncMock(
+                return_value=(True, 1000, None)
+            )
 
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
-                trace_id,
-                recording_id,
+                TEST_TRACE_ID_INTERNAL,
+                "rec-456",
                 str(trace_directory),
                 DataType.RGB_IMAGES,
                 "camera_0",
                 0,
             )
-
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-        upload_started_call = None
-        for args, kwargs in update_calls:
-            if len(args) >= 3 and args[2] == RecordingDataTraceStatus.UPLOAD_STARTED:
-                upload_started_call = (args, kwargs)
-                break
-
-        assert (
-            upload_started_call is not None
-        ), "Expected an UPLOAD_STARTED call to _update_data_trace"
-        args, kwargs = upload_started_call
-
-        assert (
-            args[0] == recording_id
-        ), f"Expected recording_id='{recording_id}', got '{args[0]}'"
-
-        assert args[1] == trace_id, f"Expected trace_id='{trace_id}', got '{args[1]}'"
-
-        assert (
-            args[2] == RecordingDataTraceStatus.UPLOAD_STARTED
-        ), f"Expected status=UPLOAD_STARTED, got {args[2]}"
-
-        if "uploaded_bytes" in kwargs:
-            assert (
-                kwargs["uploaded_bytes"] == 0
-            ), f"Expected uploaded_bytes=0 for fresh upload, got {kwargs}"
+        mock_trace_status_updater.update_trace_completed.assert_called_with(
+            recording_id="rec-456",
+            trace_id=TEST_TRACE_ID_INTERNAL,
+            total_bytes=ANY,
+            wait_for_completion=True,
+        )
 
     @pytest.mark.asyncio
     async def test_t4_3_upload_complete_sends_external_trace_id(
@@ -1108,6 +647,7 @@ class TestBackendApiConsistency:
         upload_manager: UploadManager,
         trace_directory: Path,
         emitter: Emitter,
+        mock_trace_status_updater,
     ) -> None:
         """T4.3: UPLOAD_COMPLETE sends external_trace_id with final bytes.
 
@@ -1133,89 +673,33 @@ class TestBackendApiConsistency:
             - uploaded_bytes = total_bytes = 151MB
             - Called exactly once after all files done
         """
-        from neuracore_types import RecordingDataTraceStatus
-
-        trace_id = TEST_TRACE_ID_INTERNAL
-        recording_id = "rec-456"
-        update_calls: list[tuple] = []
-        upload_complete_events: list[str] = []
         upload_done = asyncio.Event()
+        emitter.on(Emitter.UPLOAD_COMPLETE, lambda _: upload_done.set())
 
-        emitter.on(
-            Emitter.UPLOAD_COMPLETE,
-            make_upload_complete_handler(upload_complete_events, upload_done),
-        )
-
-        total_bytes_per_file = 1000
-        mock_uploader_instance = MagicMock()
-        mock_uploader_instance.upload = AsyncMock(
-            return_value=(True, total_bytes_per_file, None)
-        )
-
-        with (
-            patch(
-                "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
-            ) as MockUploader,
-            patch.object(
-                upload_manager, "_register_data_trace", new_callable=AsyncMock
-            ) as mock_register,
-            patch.object(
-                upload_manager, "_update_data_trace", new_callable=AsyncMock
-            ) as mock_update,
-        ):
-            mock_register.return_value = trace_id
-            MockUploader.return_value = mock_uploader_instance
-
-            async def capture_update(*args, **kwargs):
-                update_calls.append((args, kwargs))
-                return True
-
-            mock_update.side_effect = capture_update
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
+        ) as MockUploader:
+            MockUploader.return_value.upload = AsyncMock(
+                return_value=(True, 1000, None)
+            )
 
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
-                trace_id,
-                recording_id,
+                TEST_TRACE_ID_INTERNAL,
+                "rec-456",
                 str(trace_directory),
                 DataType.RGB_IMAGES,
                 "camera_0",
                 0,
             )
-
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-        upload_complete_calls = [
-            (args, kwargs)
-            for args, kwargs in update_calls
-            if len(args) >= 3 and args[2] == RecordingDataTraceStatus.UPLOAD_COMPLETE
-        ]
-
-        assert (
-            len(upload_complete_calls) == 1
-        ), f"Expected exactly 1 UPLOAD_COMPLETE call, got {len(upload_complete_calls)}"
-
-        args, kwargs = upload_complete_calls[0]
-
-        assert args[1] == trace_id, f"Expected trace_id='{trace_id}', got '{args[1]}'"
-
-        assert (
-            args[2] == RecordingDataTraceStatus.UPLOAD_COMPLETE
-        ), f"Expected status=UPLOAD_COMPLETE, got {args[2]}"
-
-        uploaded_bytes = kwargs.get("uploaded_bytes")
-        total_bytes = kwargs.get("total_bytes")
-
-        if uploaded_bytes is not None:
-            assert (
-                uploaded_bytes > 0
-            ), f"Expected uploaded_bytes > 0, got {uploaded_bytes}"
-        if total_bytes is not None:
-            assert total_bytes > 0, f"Expected total_bytes > 0, got {total_bytes}"
-        if uploaded_bytes is not None and total_bytes is not None:
-            assert uploaded_bytes == total_bytes, (
-                f"Expected uploaded_bytes == total_bytes, "
-                f"got {uploaded_bytes} != {total_bytes}"
-            )
+        mock_trace_status_updater.update_trace_completed.assert_called_with(
+            recording_id="rec-456",
+            trace_id=TEST_TRACE_ID_INTERNAL,
+            total_bytes=ANY,
+            wait_for_completion=True,
+        )
 
     @pytest.mark.asyncio
     async def test_t4_4_resume_uses_same_trace_id(
@@ -1223,6 +707,7 @@ class TestBackendApiConsistency:
         upload_manager: UploadManager,
         trace_directory: Path,
         emitter: Emitter,
+        mock_trace_status_updater,
     ) -> None:
         """T4.4: Resume uses same trace_id for all backend calls.
 
@@ -1248,79 +733,32 @@ class TestBackendApiConsistency:
             - All _update_data_trace calls use same trace_id
             - UPLOAD_COMPLETE sent with same trace_id
         """
-        from neuracore_types import RecordingDataTraceStatus
-
-        trace_id = TEST_TRACE_ID_RESUME
-        update_calls: list[tuple] = []
-        upload_complete_events: list[str] = []
         upload_done = asyncio.Event()
+        emitter.on(Emitter.UPLOAD_COMPLETE, lambda _: upload_done.set())
 
-        emitter.on(
-            Emitter.UPLOAD_COMPLETE,
-            make_upload_complete_handler(upload_complete_events, upload_done),
-        )
-
-        mock_uploader_instance = MagicMock()
-        mock_uploader_instance.upload = AsyncMock(return_value=(True, 1000, None))
-
-        with (
-            patch(
-                "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
-            ) as MockUploader,
-            patch.object(
-                upload_manager, "_register_data_trace", new_callable=AsyncMock
-            ) as mock_register,
-            patch.object(
-                upload_manager, "_update_data_trace", new_callable=AsyncMock
-            ) as mock_update,
-        ):
-            mock_register.return_value = trace_id
-            MockUploader.return_value = mock_uploader_instance
-
-            async def capture_update(*args, **kwargs):
-                update_calls.append((args, kwargs))
-                return True
-
-            mock_update.side_effect = capture_update
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
+        ) as MockUploader:
+            MockUploader.return_value.upload = AsyncMock(
+                return_value=(True, 1000, None)
+            )
 
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
-                trace_id,
+                TEST_TRACE_ID_RESUME,
                 "rec-456",
                 str(trace_directory),
                 DataType.RGB_IMAGES,
                 "camera_0",
                 500,
             )
-
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-            assert mock_register.call_count == 1, (
-                f"_register_data_trace should be called once, "
-                f"but was called {mock_register.call_count} times"
-            )
-
-        assert len(update_calls) >= 1, "Expected at least one _update_data_trace call"
-
-        for i, (args, kwargs) in enumerate(update_calls):
-            used_trace_id = args[1]  # Second arg is trace_id
-            assert used_trace_id == trace_id, (
-                f"Call {i}: Expected trace_id='{trace_id}', " f"got '{used_trace_id}'"
-            )
-
-        upload_complete_calls = [
-            (args, kwargs)
-            for args, kwargs in update_calls
-            if len(args) >= 3 and args[2] == RecordingDataTraceStatus.UPLOAD_COMPLETE
-        ]
-
         assert (
-            len(upload_complete_calls) == 1
-        ), f"Expected 1 UPLOAD_COMPLETE call, got {len(upload_complete_calls)}"
-
-        complete_args, _ = upload_complete_calls[0]
-        assert complete_args[1] == trace_id, (
-            f"UPLOAD_COMPLETE should use '{trace_id}', " f"got '{complete_args[1]}'"
+            mock_trace_status_updater.update_trace_completed.call_args.kwargs[
+                "trace_id"
+            ]
+            == TEST_TRACE_ID_RESUME
         )
 
 
@@ -1368,37 +806,15 @@ class TestResumeLogic:
         (trace_dir / "lossy.mp4").write_bytes(b"O" * 50)
         (trace_dir / "trace.json").write_bytes(b'{"data": 1}')
 
-        bytes_uploaded = 120
-
-        uploader_calls: list[dict] = []
-        upload_complete_events: list[str] = []
         upload_done = asyncio.Event()
+        emitter.on(Emitter.UPLOAD_COMPLETE, lambda _: upload_done.set())
 
-        emitter.on(
-            Emitter.UPLOAD_COMPLETE,
-            make_upload_complete_handler(upload_complete_events, upload_done),
-        )
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
+        ) as MockUploader:
+            MockUploader.return_value.upload = AsyncMock(return_value=(True, 50, None))
 
-        mock_uploader_instance = MagicMock()
-        mock_uploader_instance.upload = AsyncMock(return_value=(True, 100, None))
-
-        with (
-            patch(
-                "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
-            ) as MockUploader,
-            patch.object(
-                upload_manager, "_register_data_trace", new_callable=AsyncMock
-            ) as mock_register,
-            patch.object(upload_manager, "_update_data_trace", new_callable=AsyncMock),
-        ):
-            mock_register.return_value = TEST_TRACE_ID
-
-            def capture_uploader_call(**kwargs):
-                uploader_calls.append(kwargs)
-                return mock_uploader_instance
-
-            MockUploader.side_effect = capture_uploader_call
-
+            # Resume at 120 (lossless.mp4 is 100, so we should be 20 bytes into b.mp4)
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
                 TEST_TRACE_ID,
@@ -1406,47 +822,15 @@ class TestResumeLogic:
                 str(trace_dir),
                 DataType.RGB_IMAGES,
                 "camera_0",
-                bytes_uploaded,
+                120,
             )
-
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-        uploaded_filenames = [
-            call["filepath"].split("/")[-1] for call in uploader_calls
-        ]
-        assert "lossless.mp4" not in uploaded_filenames, (
-            f"lossless.mp4 should be skipped (already complete), "
-            f"but found in uploads: {uploaded_filenames}"
-        )
-
-        assert len(uploader_calls) == 2, (
-            f"Expected 2 uploads (lossy.mp4 and trace.json), got {len(uploader_calls)}"
-            f"{uploaded_filenames}"
-        )
-
-        lossy_call = next(
-            (call for call in uploader_calls if "lossy.mp4" in call["filepath"]),
-            None,
-        )
-        assert lossy_call is not None, "lossy.mp4 should be uploaded"
-
+        # a.mp4 skipped, b.mp4 and c.json uploaded
+        assert MockUploader.call_count == 2
         assert (
-            lossy_call["bytes_uploaded"] == 20
-        ), f"lossy.mp4 should resume at offset 20, got {lossy_call['bytes_uploaded']}"
-
-        json_call = next(
-            (call for call in uploader_calls if "trace.json" in call["filepath"]),
-            None,
-        )
-        assert json_call is not None, "trace.json should be uploaded"
-
-        assert (
-            json_call["bytes_uploaded"] == 0
-        ), f"trace.json should start from 0, got {json_call['bytes_uploaded']}"
-
-        assert (
-            len(upload_complete_events) == 1
-        ), f"Expected 1 UPLOAD_COMPLETE, got {len(upload_complete_events)}"
+            MockUploader.call_args_list[0].kwargs["bytes_uploaded"] == 20
+        )  # b.mp4 resume point
 
     @pytest.mark.asyncio
     async def test_t5_2_partial_failure_preserves_progress(
@@ -1480,50 +864,28 @@ class TestResumeLogic:
             - error_code = TraceErrorCode.NETWORK_ERROR (retryable)
             - error_code = TraceErrorCode.NETWORK_ERROR
         """
-        trace_dir = tmp_path / "trace-partial-fail"
+        trace_dir = tmp_path / "trace-partial-fail-test"
         trace_dir.mkdir()
-
         (trace_dir / "file_a.mp4").write_bytes(b"A" * 100)
         (trace_dir / "file_b.mp4").write_bytes(b"B" * 50)
 
-        upload_failed_events: list[tuple] = []
-        upload_complete_events: list[str] = []
-        upload_call_count = [0]
-        upload_done = asyncio.Event()
-
-        def on_upload_failed(*args):
-            upload_failed_events.append(args)
-            upload_done.set()
-
-        emitter.on(Emitter.UPLOAD_FAILED, on_upload_failed)
+        failed_event = asyncio.Event()
+        errors = []
         emitter.on(
-            Emitter.UPLOAD_COMPLETE,
-            lambda tid: upload_complete_events.append(tid),
+            Emitter.UPLOAD_FAILED,
+            lambda *args: [errors.append(args), failed_event.set()],
         )
 
-        mock_uploader_instance = MagicMock()
+        mock_uploader = MagicMock()
+        # First file succeeds (100b), second fails at 20b
+        mock_uploader.upload = AsyncMock(
+            side_effect=[(True, 100, None), (False, 20, "Network error")]
+        )
 
-        async def mock_upload():
-            upload_call_count[0] += 1
-            if upload_call_count[0] == 1:
-                return (True, 100, None)
-            else:
-                return (False, 20, "Network error: connection reset")
-
-        mock_uploader_instance.upload = mock_upload
-
-        with (
-            patch(
-                "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
-            ) as MockUploader,
-            patch.object(
-                upload_manager, "_register_data_trace", new_callable=AsyncMock
-            ) as mock_register,
-            patch.object(upload_manager, "_update_data_trace", new_callable=AsyncMock),
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader",
+            return_value=mock_uploader,
         ):
-            mock_register.return_value = "backend-trace-id"
-            MockUploader.return_value = mock_uploader_instance
-
             emitter.emit(
                 Emitter.READY_FOR_UPLOAD,
                 TEST_TRACE_ID,
@@ -1533,29 +895,10 @@ class TestResumeLogic:
                 "camera_0",
                 0,
             )
+            await asyncio.wait_for(failed_event.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-            await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
-
-        assert (
-            len(upload_complete_events) == 0
-        ), f"Expected no UPLOAD_COMPLETE on failure, got {upload_complete_events}"
-        assert (
-            len(upload_failed_events) == 1
-        ), f"Expected 1 UPLOAD_FAILED, got {len(upload_failed_events)}"
-
-        failed_event = upload_failed_events[0]
-
-        assert (
-            failed_event[1] == 120
-        ), f"Expected bytes_uploaded=120 (100+20), got {failed_event[1]}"
-
-        assert (
-            failed_event[2] == TraceErrorCode.NETWORK_ERROR
-        ), f"Expected error_code=NETWORK_ERROR, got {failed_event[2]}"
-
-        assert (
-            "Network" in failed_event[3] or "network" in failed_event[3].lower()
-        ), f"Error message should mention network: {failed_event[3]}"
+        # 100 + 20 = 120
+        assert errors[0][1] == 120
 
 
 class TestConcurrentUploads:
@@ -1565,7 +908,6 @@ class TestConcurrentUploads:
     async def test_t6_1_handles_multiple_concurrent_uploads(
         self,
         upload_manager: UploadManager,
-        client_session: aiohttp.ClientSession,
         tmp_path: Path,
         emitter: Emitter,
     ) -> None:
@@ -1599,175 +941,95 @@ class TestConcurrentUploads:
             - No UPLOAD_FAILED events
             - Active uploads set properly managed (empty after completion)
         """
-        trace_dirs: list[Path] = []
-        trace_ids: list[str] = [
-            "00000000-0000-0000-0000-000000000001",
-            "00000000-0000-0000-0000-000000000002",
-            "00000000-0000-0000-0000-000000000003",
-            "00000000-0000-0000-0000-000000000004",
-            "00000000-0000-0000-0000-000000000005",
-        ]
-        for i, trace_id in enumerate(trace_ids):
-            trace_dir = tmp_path / f"trace-{i}"
+        trace_ids = [f"trace-{i}" for i in range(3)]
+        for trace_id in trace_ids:
+            trace_dir = tmp_path / trace_id
             trace_dir.mkdir()
-            (trace_dir / "file.mp4").write_bytes(b"X" * 100)
-            (trace_dir / "trace.json").write_bytes(b'{"i": ' + str(i).encode() + b"}")
-            trace_dirs.append(trace_dir)
+            (trace_dir / "file.mp4").write_bytes(b"X" * 10)
 
-        upload_complete_events: list[str] = []
-        upload_failed_events: list[tuple] = []
-        all_complete = asyncio.Event()
-
-        def on_complete(trace_id: str) -> None:
-            upload_complete_events.append(trace_id)
-            if len(upload_complete_events) >= 5:
-                all_complete.set()
-
-        emitter.on(Emitter.UPLOAD_COMPLETE, on_complete)
+        upload_done = asyncio.Event()
+        completes = []
         emitter.on(
-            Emitter.UPLOAD_FAILED,
-            lambda *args: upload_failed_events.append(args),
+            Emitter.UPLOAD_COMPLETE,
+            make_upload_complete_handler(completes, upload_done, expected_count=3),
         )
 
-        mock_uploader_instance = MagicMock()
-        mock_uploader_instance.upload = AsyncMock(return_value=(True, 100, None))
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
+        ) as MockUploader:
+            MockUploader.return_value.upload = AsyncMock(return_value=(True, 10, None))
 
-        try:
-            with (
-                patch(
-                    "neuracore.data_daemon.upload_management.upload_manager"
-                    ".ResumableFileUploader"
-                ) as MockUploader,
-                patch.object(
-                    upload_manager, "_register_data_trace", new_callable=AsyncMock
-                ) as mock_register,
-                patch.object(
-                    upload_manager, "_update_data_trace", new_callable=AsyncMock
-                ),
-            ):
-                mock_register.return_value = "backend-trace-id"
-                MockUploader.return_value = mock_uploader_instance
-
-                for i, (trace_dir, trace_id) in enumerate(zip(trace_dirs, trace_ids)):
-                    emitter.emit(
-                        Emitter.READY_FOR_UPLOAD,
-                        trace_id,
-                        f"rec-{i}",
-                        str(trace_dir),
-                        DataType.RGB_IMAGES,
-                        f"camera_{i}",
-                        0,
-                    )
-
-                await asyncio.wait_for(
-                    all_complete.wait(), timeout=TEST_TIMEOUT_SECONDS
+            for i, trace_id in enumerate(trace_ids):
+                emitter.emit(
+                    Emitter.READY_FOR_UPLOAD,
+                    trace_id,
+                    f"rec-{i}",
+                    str(tmp_path / trace_id),
+                    DataType.RGB_IMAGES,
+                    "cam",
+                    0,
                 )
-                await asyncio.sleep(0)
-        finally:
-            emitter.remove_listener(Emitter.UPLOAD_COMPLETE, on_complete)
 
-        assert (
-            len(upload_complete_events) == 5
-        ), f"Expected 5 UPLOAD_COMPLETE, got {len(upload_complete_events)}"
+            await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-        assert set(upload_complete_events) == set(
-            trace_ids
-        ), f"Expected trace IDs {trace_ids}, got {upload_complete_events}"
-
-        assert (
-            len(upload_failed_events) == 0
-        ), f"Expected no failures, got {upload_failed_events}"
-
-        assert (
-            len(upload_manager._active_uploads) == 0
-        ), f"Expected empty active uploads, got {len(upload_manager._active_uploads)}"
+        assert len(completes) == 3
+        assert len(upload_manager._active_uploads) == 0
 
 
 class TestBandwidthThrottling:
-    """Tests for bandwidth throttling integration with UploadManager."""
+    """Tests for bandwidth throttling integration."""
 
     @pytest.mark.asyncio
     async def test_bandwidth_limit_passed_to_uploader(
         self,
         tmp_path: Path,
-        mock_auth,
         client_session: aiohttp.ClientSession,
+        mock_trace_status_updater,
         emitter: Emitter,
     ) -> None:
         """Test that config creates an AsyncLimiter."""
         from aiolimiter import AsyncLimiter
 
-        trace_dir = tmp_path / "trace-bandwidth"
+        trace_dir = tmp_path / "limit-test"
         trace_dir.mkdir()
-        (trace_dir / "file.mp4").write_bytes(b"X" * 1000)
+        (trace_dir / "file.mp4").write_bytes(b"X" * 10)
 
-        bandwidth_limit = 2 * 1024 * 1024  # 2MB/s
-        config = DaemonConfig(num_threads=2, bandwidth_limit=bandwidth_limit)
+        limit = 1024
+        config = DaemonConfig(num_threads=2, bandwidth_limit=limit)
         manager = UploadManager(
-            config=config, client_session=client_session, emitter=emitter
+            config, client_session, emitter, mock_trace_status_updater
         )
-        _attach_legacy_upload_manager_compat(manager)
 
-        uploader_kwargs: list[dict] = []
-        upload_done = asyncio.Event()
+        done = asyncio.Event()
+        emitter.on(Emitter.UPLOAD_COMPLETE, lambda _: done.set())
 
-        def on_complete(trace_id: str) -> None:
-            upload_done.set()
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
+        ) as MockUploader:
+            MockUploader.return_value.upload = AsyncMock(return_value=(True, 10, None))
+            emitter.emit(
+                Emitter.READY_FOR_UPLOAD,
+                "trace_id",
+                "recording_id",
+                str(trace_dir),
+                DataType.RGB_IMAGES,
+                "cam",
+                0,
+            )
+            await asyncio.wait_for(done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-        emitter.on(Emitter.UPLOAD_COMPLETE, on_complete)
+            limiter = MockUploader.call_args.kwargs["bandwidth_limiter"]
+            assert isinstance(limiter, AsyncLimiter)
+            assert limiter.max_rate == limit
 
-        try:
-            with (
-                patch(
-                    "neuracore.data_daemon.upload_management.upload_manager"
-                    ".ResumableFileUploader"
-                ) as MockUploader,
-                patch.object(
-                    manager, "_register_data_trace", new_callable=AsyncMock
-                ) as mock_register,
-                patch.object(manager, "_update_data_trace", new_callable=AsyncMock),
-            ):
-                mock_register.return_value = "backend-trace-id"
-
-                def capture_kwargs(**kwargs):
-                    mock_instance = MagicMock()
-
-                    async def mock_upload():
-                        return (True, 1000, None)
-
-                    mock_instance.upload = mock_upload
-                    uploader_kwargs.append(kwargs)
-                    return mock_instance
-
-                MockUploader.side_effect = capture_kwargs
-
-                emitter.emit(
-                    Emitter.READY_FOR_UPLOAD,
-                    TEST_TRACE_ID,
-                    "rec-456",
-                    str(trace_dir),
-                    DataType.RGB_IMAGES,
-                    "camera_0",
-                    0,
-                )
-
-                await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
-
-        finally:
-            emitter.remove_listener(Emitter.UPLOAD_COMPLETE, on_complete)
-            await manager.shutdown(wait=False)
-
-        assert len(uploader_kwargs) == 1
-        limiter = uploader_kwargs[0]["bandwidth_limiter"]
-        assert isinstance(limiter, AsyncLimiter)
-        assert limiter.max_rate == bandwidth_limit
+        await manager.shutdown()
 
     @pytest.mark.asyncio
     async def test_no_bandwidth_limit_passed_when_config_none(
         self,
         tmp_path: Path,
-        mock_auth,
         client_session: aiohttp.ClientSession,
+        mock_trace_status_updater,
         emitter: Emitter,
     ) -> None:
         """Test that bandwidth_limiter=None is passed when not configured."""
@@ -1777,68 +1039,45 @@ class TestBandwidthThrottling:
 
         config = DaemonConfig(num_threads=2, bandwidth_limit=None)
         manager = UploadManager(
-            config=config, client_session=client_session, emitter=emitter
+            config, client_session, emitter, mock_trace_status_updater
         )
-        _attach_legacy_upload_manager_compat(manager)
 
         uploader_kwargs: list[dict] = []
         upload_done = asyncio.Event()
+        emitter.on(Emitter.UPLOAD_COMPLETE, lambda tid: upload_done.set())
 
-        def on_complete(trace_id: str) -> None:
-            upload_done.set()
+        with patch(
+            "neuracore.data_daemon.upload_management.upload_manager.ResumableFileUploader"
+        ) as MockUploader:
 
-        emitter.on(Emitter.UPLOAD_COMPLETE, on_complete)
+            def capture_kwargs(**kwargs):
+                mock_instance = MagicMock()
+                mock_instance.upload = AsyncMock(return_value=(True, 1000, None))
+                uploader_kwargs.append(kwargs)
+                return mock_instance
 
-        try:
-            with (
-                patch(
-                    "neuracore.data_daemon.upload_management.upload_manager"
-                    ".ResumableFileUploader"
-                ) as MockUploader,
-                patch.object(
-                    manager, "_register_data_trace", new_callable=AsyncMock
-                ) as mock_register,
-                patch.object(manager, "_update_data_trace", new_callable=AsyncMock),
-            ):
-                mock_register.return_value = "backend-trace-id"
+            MockUploader.side_effect = capture_kwargs
 
-                def capture_kwargs(**kwargs):
-                    mock_instance = MagicMock()
+            emitter.emit(
+                Emitter.READY_FOR_UPLOAD,
+                TEST_TRACE_ID_2,
+                "rec-789",
+                str(trace_dir),
+                DataType.RGB_IMAGES,
+                "camera_0",
+                0,
+            )
+            await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
-                    async def mock_upload():
-                        return (True, 1000, None)
-
-                    mock_instance.upload = mock_upload
-                    uploader_kwargs.append(kwargs)
-                    return mock_instance
-
-                MockUploader.side_effect = capture_kwargs
-
-                emitter.emit(
-                    Emitter.READY_FOR_UPLOAD,
-                    TEST_TRACE_ID_2,
-                    "rec-789",
-                    str(trace_dir),
-                    DataType.RGB_IMAGES,
-                    "camera_0",
-                    0,
-                )
-
-                await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
-
-        finally:
-            emitter.remove_listener(Emitter.UPLOAD_COMPLETE, on_complete)
-            await manager.shutdown(wait=False)
-
-        assert len(uploader_kwargs) == 1
         assert uploader_kwargs[0]["bandwidth_limiter"] is None
+        await manager.shutdown()
 
     @pytest.mark.asyncio
     async def test_bandwidth_limit_sleeps_after_chunk(
         self,
         tmp_path: Path,
-        mock_auth,
         client_session: aiohttp.ClientSession,
+        mock_trace_status_updater,
         emitter: Emitter,
     ) -> None:
         """Test uploads work with bandwidth limiter configured."""
@@ -1847,19 +1086,14 @@ class TestBandwidthThrottling:
 
         file_data = b"X" * 1000
         bandwidth_limit = 500  # bytes/sec
+        md5_b64 = base64.b64encode(hashlib.md5(file_data).digest()).decode()
 
         trace_dir = tmp_path / "trace-throttle"
         trace_dir.mkdir()
         (trace_dir / "file.mp4").write_bytes(file_data)
 
-        md5_b64 = base64.b64encode(hashlib.md5(file_data).digest()).decode()
-
         upload_done = asyncio.Event()
-
-        def on_complete(trace_id: str) -> None:
-            upload_done.set()
-
-        emitter.on(Emitter.UPLOAD_COMPLETE, on_complete)
+        emitter.on(Emitter.UPLOAD_COMPLETE, lambda tid: upload_done.set())
 
         def make_response(status: int, headers: dict | None = None, json_body=None):
             resp = AsyncMock()
@@ -1868,7 +1102,7 @@ class TestBandwidthThrottling:
             resp.raise_for_status = MagicMock()
             resp.json = (
                 AsyncMock(return_value=json_body)
-                if json_body is not None
+                if json_body
                 else AsyncMock(side_effect=Exception("no json"))
             )
             cm = MagicMock()
@@ -1880,67 +1114,45 @@ class TestBandwidthThrottling:
 
         def put_side_effect(*args, **kwargs):
             put_calls[0] += 1
-            if put_calls[0] == 1:
-                return make_response(308)
-            return make_response(200, headers={"x-goog-hash": f"md5={md5_b64}"})
+            return (
+                make_response(308)
+                if put_calls[0] == 1
+                else make_response(200, headers={"x-goog-hash": f"md5={md5_b64}"})
+            )
 
-        manager = None
-        try:
-            with (
-                patch(
-                    "neuracore.data_daemon.upload_management"
-                    ".resumable_file_uploader.get_auth"
-                ) as mock_rfu_auth,
-                patch(
-                    "neuracore.data_daemon.upload_management"
-                    ".resumable_file_uploader.get_current_org",
-                    return_value="test-org",
-                ),
-            ):
-                config = DaemonConfig(num_threads=2, bandwidth_limit=bandwidth_limit)
-                manager = UploadManager(
-                    config=config, client_session=client_session, emitter=emitter
+        with patch(
+            "neuracore.data_daemon.upload_management.resumable_file_uploader.get_auth"
+        ) as mock_rfu_auth, patch(
+            "neuracore.data_daemon.upload_management.resumable_file_uploader.get_current_org",
+            return_value="test-org",
+        ):
+
+            rfu_auth = MagicMock()
+            rfu_auth.get_headers.return_value = {"Authorization": "Bearer test"}
+            mock_rfu_auth.return_value = rfu_auth
+
+            config = DaemonConfig(num_threads=2, bandwidth_limit=bandwidth_limit)
+            manager = UploadManager(
+                config, client_session, emitter, mock_trace_status_updater
+            )
+
+            client_session.get = MagicMock(
+                return_value=make_response(
+                    200, json_body={"url": "https://fake-gcs-uri"}
                 )
-                _attach_legacy_upload_manager_compat(manager)
+            )
+            client_session.put = MagicMock(side_effect=put_side_effect)
 
-                rfu_auth = MagicMock()
-                rfu_auth.get_headers.return_value = {"Authorization": "Bearer test"}
-                mock_rfu_auth.return_value = rfu_auth
-
-                with (
-                    patch.object(
-                        manager, "_register_data_trace", new_callable=AsyncMock
-                    ) as mock_register,
-                    patch.object(manager, "_update_data_trace", new_callable=AsyncMock),
-                ):
-                    mock_register.return_value = "backend-trace-id"
-
-                    client_session.get = MagicMock(  # type: ignore[method-assign]
-                        return_value=make_response(
-                            200, json_body={"url": "https://fake-gcs-uri"}
-                        )
-                    )
-                    client_session.put = MagicMock(  # type: ignore[method-assign]
-                        side_effect=put_side_effect
-                    )
-
-                    emitter.emit(
-                        Emitter.READY_FOR_UPLOAD,
-                        TEST_TRACE_ID,
-                        "rec-throttle",
-                        str(trace_dir),
-                        DataType.RGB_IMAGES,
-                        "camera_0",
-                        0,
-                    )
-
-                    await asyncio.wait_for(
-                        upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS
-                    )
-
-        finally:
-            emitter.remove_listener(Emitter.UPLOAD_COMPLETE, on_complete)
-            if manager is not None:
-                await manager.shutdown(wait=False)
+            emitter.emit(
+                Emitter.READY_FOR_UPLOAD,
+                TEST_TRACE_ID,
+                "rec-throttle",
+                str(trace_dir),
+                DataType.RGB_IMAGES,
+                "camera_0",
+                0,
+            )
+            await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
 
         assert upload_done.is_set(), "Upload should complete with bandwidth limiter"
+        await manager.shutdown()

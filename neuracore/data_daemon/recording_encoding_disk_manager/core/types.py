@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from neuracore_types import DataType
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, repr=True)
 class _TraceKey:
     """Unique key for a trace within a recording.
 
@@ -23,7 +23,7 @@ class _TraceKey:
     trace_id: str
 
 
-@dataclass
+@dataclass(slots=True, repr=True)
 class _WriteState:
     """In-memory write state for a trace.
 
@@ -42,7 +42,7 @@ class _WriteState:
     trace_done: bool
 
 
-@dataclass
+@dataclass(slots=True, repr=True)
 class _BatchJob:
     """Work item for the encoder thread.
 
