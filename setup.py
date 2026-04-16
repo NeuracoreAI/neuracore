@@ -122,7 +122,6 @@ setup(
     entry_points={
         "console_scripts": [
             "neuracore = neuracore.core.cli.app:main",
-            "nc-data-daemon = neuracore.data_daemon.main:main",
         ]
     },
     keywords="robotics machine-learning ai client-library",
