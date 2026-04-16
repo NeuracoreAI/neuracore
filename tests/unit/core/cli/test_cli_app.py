@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 
 from neuracore import __version__
 from neuracore.core.cli.app import app
+from neuracore.core.cli.cache_commands import _directory_size
 from neuracore.core.organizations import Organization
 
 runner = CliRunner()
@@ -151,6 +152,23 @@ def test_neuracore_cache_clear_dry_run_preserves_files(monkeypatch, tmp_path) ->
     assert "Dry run: no files were deleted." in result.output
     assert (recording_cache / "frame.png").exists()
     assert (dataset_cache / "stats.json").exists()
+
+
+def test_directory_size_ignores_symlink_targets(tmp_path) -> None:
+    cache_dir = tmp_path / "cache"
+    external_dir = tmp_path / "external"
+    cache_dir.mkdir()
+    external_dir.mkdir()
+    (cache_dir / "local.bin").write_bytes(b"abc")
+    external_file = external_dir / "large.bin"
+    external_file.write_bytes(b"external")
+
+    try:
+        (cache_dir / "external-link.bin").symlink_to(external_file)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    assert _directory_size(cache_dir) == 3
 
 
 def test_neuracore_login_help_includes_options() -> None:

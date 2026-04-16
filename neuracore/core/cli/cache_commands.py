@@ -34,6 +34,8 @@ def _directory_size(path: Path) -> int:
     total = 0
     for entry in path.rglob("*"):
         try:
+            if entry.is_symlink():
+                continue
             if entry.is_file():
                 total += entry.stat().st_size
         except OSError:
