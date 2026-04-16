@@ -216,7 +216,8 @@ def _log_group_of_joint_data(
         RobotError: If no robot is active and no robot_name provided
         ValueError: If joint_data is not a dictionary of floats
     """
-    timestamp = timestamp or time.time()
+    if timestamp is None:
+        timestamp = time.time()
     if not isinstance(joint_data, dict):
         raise ValueError("Joint data must be a dictionary of floats")
     for key, value in joint_data.items():
@@ -349,7 +350,8 @@ def log_custom_1d(
         raise ValueError("Data must be a numpy ndarray")
     if data.ndim != 1:
         raise ValueError("Data must be a 1D numpy ndarray")
-    timestamp = timestamp or time.time()
+    if timestamp is None:
+        timestamp = time.time()
 
     storage_name = validate_safe_name(name)
     if dry_run:
@@ -726,7 +728,8 @@ def log_pose(
         RobotError: If no robot is active and no robot_name provided
         ValueError: If pose is not a 7-element numpy array
     """
-    timestamp = timestamp or time.time()
+    if timestamp is None:
+        timestamp = time.time()
     if not isinstance(pose, np.ndarray):
         raise ValueError(
             f"Pose must be a numpy array, got {type(pose).__name__} for '{name}'."
@@ -776,7 +779,8 @@ def log_end_effector_pose(
         timestamp: Optional timestamp
         dry_run: If True, skip actual logging (validation only)
     """
-    timestamp = timestamp or time.time()
+    if timestamp is None:
+        timestamp = time.time()
 
     if not isinstance(pose, np.ndarray):
         raise ValueError(
@@ -838,7 +842,8 @@ def log_parallel_gripper_open_amount(
         timestamp: Optional timestamp
         dry_run: If True, skip actual logging (validation only)
     """
-    timestamp = timestamp or time.time()
+    if timestamp is None:
+        timestamp = time.time()
     if not isinstance(name, str):
         raise ValueError(
             f"Parallel gripper names must be strings. " f"{name} is not a string."
@@ -896,7 +901,8 @@ def log_parallel_gripper_open_amounts(
         timestamp: Optional timestamp
         dry_run: If True, skip actual logging (validation only)
     """
-    timestamp = timestamp or time.time()
+    if timestamp is None:
+        timestamp = time.time()
     for name, value in values.items():
         log_parallel_gripper_open_amount(
             name=name,
@@ -929,7 +935,8 @@ def log_parallel_gripper_target_open_amount(
         timestamp: Optional timestamp
         dry_run: If True, skip actual logging (validation only)
     """
-    timestamp = timestamp or time.time()
+    if timestamp is None:
+        timestamp = time.time()
     if not isinstance(name, str):
         raise ValueError(
             f"Parallel gripper names must be strings. " f"{name} is not a string."
@@ -993,7 +1000,8 @@ def log_parallel_gripper_target_open_amounts(
         timestamp: Optional timestamp
         dry_run: If True, skip actual logging (validation only)
     """
-    timestamp = timestamp or time.time()
+    if timestamp is None:
+        timestamp = time.time()
     for name, value in values.items():
         log_parallel_gripper_target_open_amount(
             name=name,
@@ -1027,7 +1035,8 @@ def log_language(
         RobotError: If no robot is active and no robot_name provided
         ValueError: If language is not a string
     """
-    timestamp = timestamp or time.time()
+    if timestamp is None:
+        timestamp = time.time()
     if not isinstance(language, str):
         raise ValueError("Language must be a string")
 
@@ -1084,7 +1093,8 @@ def log_rgb(
     if rgb.dtype != np.uint8:
         raise ValueError("Image must be uint8 with range 0-255")
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
-    timestamp = timestamp or time.time()
+    if timestamp is None:
+        timestamp = time.time()
     rgb_camera_data = RGBCameraData(
         timestamp=timestamp,
         extrinsics=extrinsics,
@@ -1141,7 +1151,8 @@ def log_depth(
             "The values you are passing in are likely in millimeters."
         )
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
-    timestamp = timestamp or time.time()
+    if timestamp is None:
+        timestamp = time.time()
     depth_camera_data = DepthCameraData(
         timestamp=timestamp,
         extrinsics=extrinsics,
@@ -1191,7 +1202,8 @@ def log_point_cloud(
         "Point cloud logging is experimental and may change in future releases.",
         ExperimentalPointCloudWarning,
     )
-    timestamp = timestamp or time.time()
+    if timestamp is None:
+        timestamp = time.time()
     if not isinstance(points, np.ndarray):
         raise ValueError("Point cloud must be a numpy array")
     if points.dtype != np.float16:
