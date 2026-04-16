@@ -6,6 +6,7 @@ from neuracore import __version__
 from neuracore.core.cli.generate_api_key import run as login
 from neuracore.core.cli.launch_server import run as launch_server
 from neuracore.core.cli.select_current_org import run as select_org
+from neuracore.data_daemon.main import app as data_daemon_app
 
 app = typer.Typer(add_completion=False, help="Neuracore command line interface.")
 
@@ -50,6 +51,7 @@ def callback(
 app.command("login")(login)
 app.command("select-org")(select_org)
 app.command("launch-server")(launch_server)
+app.add_typer(data_daemon_app, name="data-daemon")
 
 if importer_app is not None:
     app.add_typer(importer_app, name="importer")

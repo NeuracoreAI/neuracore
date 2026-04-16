@@ -6,7 +6,7 @@ You can use it in two ways:
 - **CLI first**: launch the daemon, then run your scripts
 - **Script first**: run your script and let it start the daemon automatically
 
-Profiles are optional. If you do not use a profile, the daemon runs with built in defaults (and any environment variable overrides you set).
+Profiles are optional. If you do not use a named profile, the daemon uses the default profile (and any environment variable overrides you set).
 
 ---
 
@@ -42,38 +42,38 @@ The data daemon prefers the `ffmpeg` CLI encoder for recording. If the binary is
 
 ### 2) Launch the daemon
 
-With defaults (no profile):
+With the default profile:
 
 ```bash
-nc-data-daemon launch
+neuracore data-daemon launch
 ```
 
-With a profile:
+With a named profile:
 
 ```bash
-nc-data-daemon profile create --name recording
-nc-data-daemon profile update --name recording --storage-limit 2gb --bandwidth-limit 50mb --storage-path /data/records --num-threads 4
-nc-data-daemon launch --profile recording
+neuracore data-daemon profile create recording
+neuracore data-daemon profile update recording --storage-limit 2gb --bandwidth-limit 50mb --storage-path /data/records --num-threads 4
+neuracore data-daemon launch --profile recording
 ```
 
 Background (runs quietly):
 
 ```bash
-nc-data-daemon launch --profile recording --background
+neuracore data-daemon launch --profile recording --background
 ```
 
 ### 3) Check status and stop
 
 ```bash
-nc-data-daemon status
-nc-data-daemon stop
+neuracore data-daemon status
+neuracore data-daemon stop
 ```
 
 ---
 
 ## Run your script without launching the daemon first
 
-You do not have to use `nc-data-daemon launch` beforehand. The daemon will automatically start in the background if it is not already running when your script needs it.
+You do not have to use `neuracore data-daemon launch` beforehand. The daemon will automatically start in the background if it is not already running when your script needs it.
 
 It will:
 - check if the daemon is already running
@@ -112,7 +112,7 @@ When to use which approach:
 When you run:
 
 ```bash
-nc-data-daemon launch
+neuracore data-daemon launch
 ```
 
 the CLI starts the daemon as a separate Python process by running:
@@ -151,7 +151,7 @@ Migration runs once per DB file. After a successful migration, startup continues
 
 ## Configuration
 
-### Profiles (optional)
+### Profiles
 
 A profile is a YAML file that stores daemon settings you want to reuse.
 
@@ -164,13 +164,25 @@ Profiles are stored here:
 Manage profiles with:
 
 ```bash
-nc-data-daemon profile create --name <name>
-nc-data-daemon profile update --name <name> [options...]
-nc-data-daemon profile show --name <name>
-nc-data-daemon list-profiles
+neuracore data-daemon profile create <name>
+neuracore data-daemon profile update [profile_name] [options...]
+neuracore data-daemon profile get [profile_name]
+neuracore data-daemon profile list
 ```
 
-If you do not use a profile, the daemon runs with defaults.
+Notes:
+- Profile names are positional arguments, not `--name` flags.
+- `profile update` can be run without a profile name to update the default profile.
+- `profile get` can be run without a profile name to read the default profile.
+- The default profile is protected and cannot be deleted.
+
+Delete a named profile with:
+
+```bash
+neuracore data-daemon profile delete <name>
+```
+
+If you do not use a named profile, the daemon uses the default profile.
 
 ---
 
@@ -242,20 +254,23 @@ Supported environment variables:
 | `current_org_id` | `NCD_CURRENT_ORG_ID` |
 
 Boolean values treat these as true:
-- 1, true, yes, y (case insensitive)
+- `1`
+- `true`
+- `yes`
+- `y`
 
 Examples:
 
 ```bash
 export NCD_STORAGE_LIMIT=3gb
 export NCD_OFFLINE=true
-nc-data-daemon launch
+neuracore data-daemon launch
 ```
 
 ```bash
 export NCD_PATH_TO_STORE_RECORD=/mnt/data/records
 export NCD_NUM_THREADS=4
-nc-data-daemon launch --background
+neuracore data-daemon launch --background
 ```
 
 ### Runtime path environment variables
@@ -286,90 +301,100 @@ Recommended upload concurrency:
 
 ## CLI reference
 
-### nc-data-daemon profile create
+### `neuracore data-daemon profile create`
 
 ```bash
-nc-data-daemon profile create --name <name>
+neuracore data-daemon profile create <name>
 ```
 
 Example:
 
 ```bash
-nc-data-daemon profile create --name laptop
+neuracore data-daemon profile create laptop
 ```
 
-### nc-data-daemon profile update
+### `neuracore data-daemon profile update`
+
+Update a named profile:
 
 ```bash
-nc-data-daemon profile update --name <name>   [--storage-limit <bytes|unit>]   [--bandwidth-limit <bytes|unit>]   [--storage-path <path>]   [--num-threads <n>]   [--max_concurrent_uploads <n>]   [--keep-wakelock-while-upload]   [--offline]   [--api-key <key>]   [--current-org-id <org_id>]
+neuracore data-daemon profile update <name> [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--max-concurrent-uploads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>]
 ```
 
-Example:
+Update the default profile:
 
 ```bash
-nc-data-daemon profile update --name laptop --storage-limit 2gb --offline
-```
-
-### nc-data-daemon profile show
-
-```bash
-nc-data-daemon profile show --name <name>
+neuracore data-daemon profile update [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--max-concurrent-uploads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>]
 ```
 
 Example:
 
 ```bash
-nc-data-daemon profile show --name laptop
+neuracore data-daemon profile update laptop --storage-limit 2gb --offline
 ```
 
-### nc-data-daemon list-profiles
+### `neuracore data-daemon profile get`
+
+Describe a profile:
 
 ```bash
-nc-data-daemon list-profiles
-```
-
-### nc-data-daemon launch
-
-```bash
-nc-data-daemon launch [--profile <name>] [--background]
+neuracore data-daemon profile get [profile_name]
 ```
 
 Examples:
 
 ```bash
-nc-data-daemon launch
+neuracore data-daemon profile get high-bandwidth
+neuracore data-daemon profile get low-bandwidth
+neuracore data-daemon profile get
+```
+
+### `neuracore data-daemon profile list`
+
+```bash
+neuracore data-daemon profile list
+```
+
+### `neuracore data-daemon profile delete`
+
+```bash
+neuracore data-daemon profile delete <name>
+```
+
+Notes:
+- The profile name is required.
+- The default profile cannot be deleted.
+
+### `neuracore data-daemon launch`
+
+```bash
+neuracore data-daemon launch [--profile <name>] [--background]
+```
+
+Examples:
+
+```bash
+neuracore data-daemon launch
 ```
 
 ```bash
-nc-data-daemon launch --profile laptop
+neuracore data-daemon launch --profile laptop
 ```
 
 ```bash
-nc-data-daemon launch --profile laptop --background
+neuracore data-daemon launch --profile laptop --background
 ```
 
-### nc-data-daemon status
+### `neuracore data-daemon status`
 
 ```bash
-nc-data-daemon status
+neuracore data-daemon status
 ```
 
-### nc-data-daemon stop
+### `neuracore data-daemon stop`
 
 ```bash
-nc-data-daemon stop
-```
-
-### nc-data-daemon update
-
-Resolve and print the effective configuration using:
-- built in defaults
-- the selected profile (if any)
-- environment variables
-- any CLI values you pass to this command
-
-```bash
-nc-data-daemon update   [--storage-limit <bytes|unit>]   [--bandwidth-limit <bytes|unit>]   [--storage-path <path>]   [--num-threads <n>]   [--max_concurrent_uploads <n>]   [--keep-wakelock-while-upload]   [--offline]   [--api-key <key>]   [--current-org-id <org_id>]
+neuracore data-daemon stop
 ```
 
 ---
@@ -382,13 +407,14 @@ Set `offline: true` in your profile, then launch the daemon with that profile as
 
 ```bash
 # Set offline mode
-nc-data-daemon profile update --name my_profile --offline
+neuracore data-daemon profile update my_profile --offline
 
 # Record offline
-nc-data-daemon launch --profile my_profile
+neuracore data-daemon launch --profile my_profile
 
-# Back online, relaunch daemon without the offline mode and it will start uploading automatically
-nc-data-daemon launch --profile my_profile  
+# Back online, disable offline mode and relaunch
+neuracore data-daemon profile update my_profile --online
+neuracore data-daemon launch --profile my_profile
 ```
 
 ### Multi node
@@ -405,23 +431,36 @@ You tried to launch it while it is already running.
 Try:
 
 ```bash
-nc-data-daemon status
-nc-data-daemon stop
-nc-data-daemon launch
+neuracore data-daemon status
+neuracore data-daemon stop
+neuracore data-daemon launch
 ```
 
 ### Daemon failed to start
 Run it in the foreground so you can see the output:
 
 ```bash
-nc-data-daemon launch
+neuracore data-daemon launch
 ```
 
 If it still fails, check your profiles:
 
 ```bash
-nc-data-daemon list-profiles
-nc-data-daemon profile show --name <name>
+neuracore data-daemon profile list
+neuracore data-daemon profile get
+neuracore data-daemon profile get <name>
+```
+
+A common cause is trying to launch with `offline: false` and no valid `api_key`.
+
+### Background launch reports success but daemon is not running
+
+`neuracore data-daemon launch --background` currently confirms that the subprocess started, but it may still exit shortly afterward during bootstrap, for example if authentication fails.
+
+If background launch appears successful but `status` later shows the daemon is not running, rerun in the foreground:
+
+```bash
+neuracore data-daemon launch
 ```
 
 ### Which video encoder backend is being used
@@ -453,7 +492,7 @@ echo "$NEURACORE_DAEMON_DB_PATH"
 3. Start in foreground and read migration logs:
 
 ```bash
-nc-data-daemon launch
+neuracore data-daemon launch
 ```
 
 4. If migration fails repeatedly, stop daemon and keep a backup copy of the DB before retrying.
@@ -467,5 +506,5 @@ Recommended:
 - For normal operation, use:
 
 ```bash
-nc-data-daemon stop
+neuracore data-daemon stop
 ```

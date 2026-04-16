@@ -2,21 +2,35 @@
 
 from __future__ import annotations
 
-import argparse
 import signal
-import sys
 from pathlib import Path
-from typing import Any
 
-from neuracore.data_daemon.config_manager.config import ConfigManager
-from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
-from neuracore.data_daemon.config_manager.helpers import parse_bytes
+import typer
+
+from neuracore.data_daemon.config_manager.cli_options import (
+    ApiKeyOption,
+    BackgroundOption,
+    BandwidthLimitOption,
+    CurrentOrgIdOption,
+    KeepWakelockOption,
+    LaunchProfileOption,
+    MaxConcurrentUploadsOption,
+    NumThreadsOption,
+    OfflineOption,
+    ProfileNameCreateArgument,
+    ProfileNameDeleteArgument,
+    ProfileNameGetArgument,
+    ProfileNameUpdateArgument,
+    StorageLimitOption,
+    StoragePathOption,
+)
+from neuracore.data_daemon.config_manager.helpers import collect_config_updates
 from neuracore.data_daemon.config_manager.profiles import (
     ProfileAlreadyExist,
     ProfileManager,
     ProfileNotFound,
 )
-from neuracore.data_daemon.const import SOCKET_PATH
+from neuracore.data_daemon.const import DEFAULT_PROFILE_NAME, SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
 from neuracore.data_daemon.lifecycle.daemon_os_control import (
     DaemonLifecycleError,
@@ -31,189 +45,169 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import (
 from neuracore.data_daemon.lifecycle.runtime_recovery import shutdown
 
 profile_manager = ProfileManager()
-config_manager = ConfigManager(profile_manager)
+profile_app = typer.Typer(help="Manage daemon profiles.")
 
 
-def add_common_config_args(parser: argparse.ArgumentParser) -> None:
-    """Register common daemon configuration flags on an argparse parser.
-
-    Args:
-        parser: The argparse parser (or subparser) to attach configuration
-            arguments to.
-
-    Returns:
-        None
-    """
-    parser.add_argument(
-        "--storage-limit",
-        "--storage_limit",
-        type=parse_bytes,
-        help="Storage limit in bytes.",
-    )
-    parser.add_argument(
-        "--bandwidth-limit",
-        "--bandwidth_limit",
-        type=parse_bytes,
-        help="Bandwidth limit in bytes per second.",
-    )
-    parser.add_argument(
-        "--storage-path",
-        "--storage_path",
-        "--path_to_store_record",
-        dest="path_to_store_record",
-        help="Path where records should be stored.",
-    )
-    parser.add_argument(
-        "--num-threads",
-        "--num_threads",
-        type=int,
-        help="Number of worker threads.",
-    )
-    parser.add_argument(
-        "--max-concurrent-uploads",
-        "--max_concurrent_uploads",
-        type=int,
-        help="Maximum number of traces uploaded concurrently.",
-    )
-    parser.add_argument(
-        "--keep-wakelock-while-upload",
-        "--keep_wakelock_while_upload",
-        dest="keep_wakelock_while_upload",
-        action="store_true",
-        default=None,
-        help="Keep a wakelock while uploading.",
-    )
-    parser.add_argument(
-        "--offline",
-        dest="offline",
-        action="store_true",
-        default=None,
-        help="Run in offline mode.",
-    )
-    parser.add_argument(
-        "--api-key",
-        "--api_key",
-        dest="api_key",
-        help="API key used for authenticating the daemon.",
-    )
-    parser.add_argument(
-        "--current-org-id",
-        "--current_org_id",
-        dest="current_org_id",
-        help="Active organisation ID for scoping daemon operations.",
+def _update_profile(
+    *,
+    profile_name: str,
+    create_if_missing: bool,
+    storage_limit: int | None,
+    bandwidth_limit: int | None,
+    path_to_store_record: str | None,
+    num_threads: int | None,
+    max_concurrent_uploads: int | None,
+    keep_wakelock_while_upload: bool | None,
+    offline: bool | None,
+    api_key: str | None,
+    current_org_id: str | None,
+) -> None:
+    updates = collect_config_updates(
+        storage_limit=storage_limit,
+        bandwidth_limit=bandwidth_limit,
+        path_to_store_record=path_to_store_record,
+        num_threads=num_threads,
+        max_concurrent_uploads=max_concurrent_uploads,
+        keep_wakelock_while_upload=keep_wakelock_while_upload,
+        offline=offline,
+        api_key=api_key,
+        current_org_id=current_org_id,
     )
 
+    if create_if_missing:
+        try:
+            profile_manager.create_profile(profile_name)
+        except ProfileAlreadyExist:
+            pass
+        except Exception:
+            typer.echo(
+                f"Failed to create default profile {profile_name!r}.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
 
-def _extract_config_updates(args: argparse.Namespace) -> dict[str, Any]:
-    """Extract DaemonConfig field values from parsed CLI arguments.
-
-    Args:
-        args: Parsed argparse namespace containing CLI flags for various commands.
-
-    Returns:
-        A dict of DaemonConfig field names to values, excluding keys that are not part
-        of DaemonConfig and excluding values that are None.
-    """
-    allowed = set(DaemonConfig.model_fields.keys())
-    raw = vars(args)
-    return {k: v for k, v in raw.items() if k in allowed and v is not None}
-
-
-def handle_profile_create(args: argparse.Namespace) -> None:
-    """Handle the profile create CLI command.
-
-    Args:
-        args: Parsed CLI arguments containing the profile name.
-
-    Returns:
-        None
-    """
     try:
-        profile_manager.create_profile(args.name)
-        print(f"Created profile {args.name!r}.")
+        profile_manager.update_profile(profile_name, updates)
+        typer.echo(f"Updated profile {profile_name!r}.")
+    except ProfileNotFound as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+
+@profile_app.command("create")
+def run_profile_create(name: ProfileNameCreateArgument) -> None:
+    """Create a profile."""
+    try:
+        profile_manager.create_profile(name)
+        typer.echo(f"Created profile {name!r}.")
     except ProfileAlreadyExist as exc:
-        print(exc)
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
 
 
-def handle_profile_update(args: argparse.Namespace) -> None:
-    """Handle the profile update CLI command.
+@profile_app.command("update")
+def run_profile_update(
+    name: ProfileNameUpdateArgument = None,
+    storage_limit: StorageLimitOption = None,
+    bandwidth_limit: BandwidthLimitOption = None,
+    path_to_store_record: StoragePathOption = None,
+    num_threads: NumThreadsOption = None,
+    max_concurrent_uploads: MaxConcurrentUploadsOption = None,
+    keep_wakelock_while_upload: KeepWakelockOption = None,
+    offline: OfflineOption = None,
+    api_key: ApiKeyOption = None,
+    current_org_id: CurrentOrgIdOption = None,
+) -> None:
+    """Update an existing profile."""
+    if not name:
+        name = DEFAULT_PROFILE_NAME
 
-    Args:
-        args: Parsed CLI arguments containing the profile name and any
-            configuration fields to update.
-
-    Returns:
-        None
-    """
-    updates = _extract_config_updates(args)
-    validated_updates = DaemonConfig.model_validate(updates).model_dump(
-        exclude_none=True
+    _update_profile(
+        profile_name=name,
+        create_if_missing=False,
+        storage_limit=storage_limit,
+        bandwidth_limit=bandwidth_limit,
+        path_to_store_record=path_to_store_record,
+        num_threads=num_threads,
+        max_concurrent_uploads=max_concurrent_uploads,
+        keep_wakelock_while_upload=keep_wakelock_while_upload,
+        offline=offline,
+        api_key=api_key,
+        current_org_id=current_org_id,
     )
 
+
+@profile_app.command("get")
+def run_profile_get(
+    name: ProfileNameGetArgument = None,
+) -> None:
+    """Get a profile's configuration."""
+    if not name:
+        name = DEFAULT_PROFILE_NAME
     try:
-        profile_manager.update_profile(args.name, validated_updates)
-        print(f"Updated profile {args.name!r}.")
+        config = profile_manager.get_profile(name)
     except ProfileNotFound as exc:
-        print(exc)
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(config.model_dump_json(indent=2))
 
 
-def handle_profile_show(args: argparse.Namespace) -> None:
-    """Handle the profile show CLI command.
+@profile_app.command("delete")
+def run_profile_delete(
+    name: ProfileNameDeleteArgument,
+) -> None:
+    """Delete a profile."""
+    if name == DEFAULT_PROFILE_NAME:
+        typer.echo(
+            f"Cannot delete default profile {DEFAULT_PROFILE_NAME!r}.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
-    Args:
-        args: Parsed CLI arguments containing the profile name.
-
-    Returns:
-        None
-    """
     try:
-        config = profile_manager.get_profile(args.name)
+        profile_manager.delete_profile(name)
+        typer.echo(f"Deleted profile {name!r}.")
     except ProfileNotFound as exc:
-        print(exc)
-        return
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
 
-    print(config.model_dump_json(indent=2))
 
-
-def handle_list_profile(args: argparse.Namespace) -> None:
-    """Handle the ``list-profiles`` CLI command.
-
-    Args:
-        args: Parsed CLI arguments for the command.
-
-    Returns:
-        None
-    """
+@profile_app.command("list")
+def run_list_profiles() -> None:
+    """List all configured daemon profiles."""
     profiles = profile_manager.list_profiles()
     if not profiles:
-        print("No profiles found.")
+        typer.echo("No profiles found.")
         return
 
     for name in profiles:
-        print(name)
+        typer.echo(name)
 
 
-def handle_launch(args: argparse.Namespace) -> None:
-    """Handle the ``launch`` CLI command.
-
-    Behaviour:
-        - If --background: ensure daemon is running (spawn if needed) and return.
-        - Otherwise: launch in foreground and wait, streaming logs.
-    """
+def run_launch(
+    profile: LaunchProfileOption = None,
+    background: BackgroundOption = False,
+) -> None:
+    """Launch the data daemon."""
     pid_path = get_daemon_pid_path()
     db_path = get_daemon_db_path()
 
     env_overrides: dict[str, str] = {}
-    profile_name = getattr(args, "profile", None)
-    if profile_name is not None:
+    if profile is not None:
         try:
-            profile_manager.get_profile(profile_name)
+            profile_manager.get_profile(profile)
         except ProfileNotFound as exc:
-            print(exc)
-            sys.exit(1)
-        env_overrides["NEURACORE_DAEMON_PROFILE"] = profile_name
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1)
+        env_overrides["NEURACORE_DAEMON_PROFILE"] = profile
 
-    background = getattr(args, "background", False)
     try:
         daemon_process = launch_new_daemon_subprocess(
             pid_path=pid_path,
@@ -222,14 +216,14 @@ def handle_launch(args: argparse.Namespace) -> None:
             env_overrides=env_overrides or None,
         )
     except DaemonLifecycleError as exc:
-        print(str(exc))
-        sys.exit(1)
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
     except RuntimeError as exc:
-        print(str(exc))
-        sys.exit(1)
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
 
     spawned_pid = daemon_process.pid
-    print(f"Daemon launched (pid={spawned_pid}).")
+    typer.echo(f"Daemon launched (pid={spawned_pid}).")
 
     if background:
         return
@@ -244,20 +238,14 @@ def handle_launch(args: argparse.Namespace) -> None:
         daemon_process.wait()
 
 
-def handle_stop(args: argparse.Namespace) -> None:
-    """Handle the ``stop`` CLI command.
-
-    Stop the daemon if it is running.
-
-    Returns:
-        None
-    """
+def run_stop() -> None:
+    """Stop the data daemon."""
     pid_path = get_daemon_pid_path()
     db_path = get_daemon_db_path()
 
     pid_value = read_pid_from_file(pid_path)
     if pid_value is None:
-        print("Daemon is not running.")
+        typer.echo("Daemon is not running.")
         return
 
     if not pid_is_running(pid_value):
@@ -266,45 +254,47 @@ def handle_stop(args: argparse.Namespace) -> None:
             socket_paths=(Path(str(SOCKET_PATH)),),
             db_path=db_path,
         )
-        print("Daemon stopped.")
+        typer.echo("Daemon stopped.")
         return
 
     if not terminate_pid(pid_value):
-        print(f"Permission denied sending SIGTERM to pid={pid_value}.")
-        sys.exit(1)
+        typer.echo(f"Permission denied sending SIGTERM to pid={pid_value}.", err=True)
+        raise typer.Exit(code=1)
+
     if wait_for_exit(pid_value, timeout_s=10.0):
         shutdown(
             pid_path=pid_path,
             socket_paths=(Path(str(SOCKET_PATH)),),
             db_path=db_path,
         )
-        print("Daemon stopped.")
+        typer.echo("Daemon stopped.")
         return
 
     if not force_kill(pid_value):
-        print(f"Permission denied sending SIGKILL to pid={pid_value}.")
-        sys.exit(1)
+        typer.echo(f"Permission denied sending SIGKILL to pid={pid_value}.", err=True)
+        raise typer.Exit(code=1)
+
     if wait_for_exit(pid_value, timeout_s=5.0):
         shutdown(
             pid_path=pid_path,
             socket_paths=(Path(str(SOCKET_PATH)),),
             db_path=db_path,
         )
-        print("Daemon stopped (forced).")
+        typer.echo("Daemon stopped (forced).")
         return
 
-    print(f"Failed to stop daemon (pid={pid_value}).")
-    sys.exit(1)
+    typer.echo(f"Failed to stop daemon (pid={pid_value}).", err=True)
+    raise typer.Exit(code=1)
 
 
-def handle_status(args: argparse.Namespace) -> None:
-    """Handle the ``status`` CLI command."""
+def run_status() -> None:
+    """Show daemon status."""
     pid_path = get_daemon_pid_path()
     db_path = get_daemon_db_path()
 
     pid_value = read_pid_from_file(pid_path)
     if pid_value is None:
-        print("Daemon not running.")
+        typer.echo("Daemon not running.")
         return
 
     if not pid_is_running(pid_value):
@@ -313,48 +303,17 @@ def handle_status(args: argparse.Namespace) -> None:
             db_path=db_path,
             socket_paths=(str(SOCKET_PATH),),
         )
-        print("Daemon not running.")
+        typer.echo("Daemon not running.")
         return
 
-    print(f"Daemon running (pid={pid_value}).")
+    typer.echo(f"Daemon running (pid={pid_value}).")
 
 
-def handle_install(args: argparse.Namespace) -> None:
-    """Handle the ``install`` CLI command.
-
-    Args:
-        args: Parsed CLI arguments for the command.
-
-    Returns:
-        None
-    """
-    print("Install command is not implemented yet.")
+def run_install() -> None:
+    """Install the data daemon as a system service."""
+    typer.echo("Install command is not implemented yet.")
 
 
-def handle_uninstall(args: argparse.Namespace) -> None:
-    """Handle the ``uninstall`` CLI command.
-
-    Args:
-        args: Parsed CLI arguments for the command.
-
-    Returns:
-        None
-    """
-    print("Uninstall command is not implemented yet.")
-
-
-def handle_update(args: argparse.Namespace) -> None:
-    """Handle the ` update`` CLI command.
-
-    Args:
-        args: Parsed CLI arguments containing configuration fields to update.
-
-    Returns:
-        None
-    """
-    updates = _extract_config_updates(args)
-    validated_updates = DaemonConfig.model_validate(updates).model_dump(
-        exclude_none=True
-    )
-
-    print(config_manager.resolve_effective_config(validated_updates))
+def run_uninstall() -> None:
+    """Uninstall the data daemon system service."""
+    typer.echo("Uninstall command is not implemented yet.")
