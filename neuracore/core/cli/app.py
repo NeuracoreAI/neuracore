@@ -3,6 +3,7 @@
 import typer
 
 from neuracore import __version__
+from neuracore.core.cli.cache_commands import cache_app
 from neuracore.core.cli.generate_api_key import run as login
 from neuracore.core.cli.launch_server import run as launch_server
 from neuracore.core.cli.select_current_org import run as select_org
@@ -52,6 +53,7 @@ app.command("login")(login)
 app.command("select-org")(select_org)
 app.command("launch-server")(launch_server)
 app.add_typer(data_daemon_app, name="data-daemon")
+app.add_typer(cache_app, name="cache")
 
 if importer_app is not None:
     app.add_typer(importer_app, name="importer")

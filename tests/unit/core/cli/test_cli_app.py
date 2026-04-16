@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 
 from neuracore import __version__
 from neuracore.core.cli.app import app
+from neuracore.core.cli.cache_commands import _directory_size
 from neuracore.core.organizations import Organization
 
 runner = CliRunner()
@@ -46,7 +47,128 @@ def test_neuracore_cli_help_includes_subcommands() -> None:
     assert "login" in result.output
     assert "select-org" in result.output
     assert "launch-server" in result.output
+    assert "cache" in result.output
     assert "training" in result.output
+
+
+def test_neuracore_cache_clear_requires_confirmation(monkeypatch, tmp_path) -> None:
+    recording_cache = tmp_path / "recording_cache"
+    dataset_cache = tmp_path / "dataset_cache"
+    recording_cache.mkdir()
+    dataset_cache.mkdir()
+    (recording_cache / "frame.png").write_bytes(b"abc")
+    (dataset_cache / "stats.json").write_text("{}")
+
+    monkeypatch.setattr(
+        "neuracore.core.cli.cache_commands.DEFAULT_RECORDING_CACHE_DIR",
+        recording_cache,
+    )
+    monkeypatch.setattr(
+        "neuracore.core.cli.cache_commands.DEFAULT_DATASET_CACHE_DIR",
+        dataset_cache,
+    )
+
+    result = runner.invoke(
+        app,
+        ["cache", "clear"],
+        input="n\n",
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert "Clear these cache files?" in result.output
+    assert "Aborted." in result.output
+    assert (recording_cache / "frame.png").exists()
+    assert (dataset_cache / "stats.json").exists()
+
+
+def test_neuracore_cache_clear_yes_deletes_only_cache_contents(
+    monkeypatch, tmp_path
+) -> None:
+    recording_cache = tmp_path / "recording_cache"
+    dataset_cache = tmp_path / "dataset_cache"
+    training_runs = tmp_path / "runs"
+    recording_cache.mkdir()
+    dataset_cache.mkdir()
+    training_runs.mkdir()
+    (recording_cache / "frame.png").write_bytes(b"abc")
+    (dataset_cache / "stats.json").write_text("{}")
+    (training_runs / "training_run.json").write_text("{}")
+
+    monkeypatch.setattr(
+        "neuracore.core.cli.cache_commands.DEFAULT_RECORDING_CACHE_DIR",
+        recording_cache,
+    )
+    monkeypatch.setattr(
+        "neuracore.core.cli.cache_commands.DEFAULT_DATASET_CACHE_DIR",
+        dataset_cache,
+    )
+
+    result = runner.invoke(
+        app,
+        ["cache", "clear", "--yes"],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert "Training runs, auth config, and daemon state will not be deleted." in (
+        result.output
+    )
+    assert "Cleared" in result.output
+    assert recording_cache.exists()
+    assert dataset_cache.exists()
+    assert not (recording_cache / "frame.png").exists()
+    assert not (dataset_cache / "stats.json").exists()
+    assert (training_runs / "training_run.json").exists()
+
+
+def test_neuracore_cache_clear_dry_run_preserves_files(monkeypatch, tmp_path) -> None:
+    recording_cache = tmp_path / "recording_cache"
+    dataset_cache = tmp_path / "dataset_cache"
+    recording_cache.mkdir()
+    dataset_cache.mkdir()
+    (recording_cache / "frame.png").write_bytes(b"abc")
+    (dataset_cache / "stats.json").write_text("{}")
+
+    monkeypatch.setattr(
+        "neuracore.core.cli.cache_commands.DEFAULT_RECORDING_CACHE_DIR",
+        recording_cache,
+    )
+    monkeypatch.setattr(
+        "neuracore.core.cli.cache_commands.DEFAULT_DATASET_CACHE_DIR",
+        dataset_cache,
+    )
+
+    result = runner.invoke(
+        app,
+        ["cache", "clear", "--dry-run"],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert "Dry run: no files were deleted." in result.output
+    assert (recording_cache / "frame.png").exists()
+    assert (dataset_cache / "stats.json").exists()
+
+
+def test_directory_size_ignores_symlink_targets(tmp_path) -> None:
+    cache_dir = tmp_path / "cache"
+    external_dir = tmp_path / "external"
+    cache_dir.mkdir()
+    external_dir.mkdir()
+    (cache_dir / "local.bin").write_bytes(b"abc")
+    external_file = external_dir / "large.bin"
+    external_file.write_bytes(b"external")
+
+    try:
+        (cache_dir / "external-link.bin").symlink_to(external_file)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    assert _directory_size(cache_dir) == 3
 
 
 def test_neuracore_login_help_includes_options() -> None:
