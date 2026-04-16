@@ -25,6 +25,10 @@ class Emitter(AsyncIOEventEmitter):
     # (trace_id, recording_id, bytes_written)
 
     # RDM -> State manager
+    TRACE_WRITE_PROGRESS = "TRACE_WRITE_PROGRESS"
+    # (trace_id, recording_id, bytes_written(total_so_far))
+
+    # RDM -> State manager
     START_TRACE = "START_TRACE"
 
     # State manager -> Uploader

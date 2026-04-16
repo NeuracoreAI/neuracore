@@ -314,6 +314,64 @@ class FakeStateStore:
         self._update_trace_in_recording(trace, recording_id)
         return trace
 
+    async def upsert_trace_write_progress(
+        self,
+        trace_id: str,
+        recording_id: str,
+        bytes_written: int,
+    ) -> TraceRecord:
+        now = datetime.now(timezone.utc)
+        existing = self._traces_by_id.get(trace_id)
+        if existing:
+            new_status = (
+                TraceWriteStatus.WRITING
+                if existing.write_status
+                in (
+                    TraceWriteStatus.PENDING,
+                    TraceWriteStatus.INITIALIZING,
+                    TraceWriteStatus.PENDING_METADATA,
+                    TraceWriteStatus.WRITING,
+                )
+                else existing.write_status
+            )
+            trace = replace(
+                existing,
+                write_status=new_status,
+                bytes_written=bytes_written,
+                last_updated=now,
+            )
+        else:
+            trace = TraceRecord(
+                trace_id=trace_id,
+                recording_id=recording_id,
+                write_status=TraceWriteStatus.WRITING,
+                registration_status=TraceRegistrationStatus.PENDING,
+                upload_status=TraceUploadStatus.PENDING,
+                data_type=None,
+                data_type_name=None,
+                dataset_id=None,
+                dataset_name=None,
+                robot_name=None,
+                robot_id=None,
+                robot_instance=None,
+                path=None,
+                total_bytes=None,
+                bytes_written=bytes_written,
+                bytes_uploaded=0,
+                progress_reported=ProgressReportStatus.PENDING,
+                expected_trace_count_reported=0,
+                error_code=None,
+                error_message=None,
+                created_at=now,
+                last_updated=now,
+                num_upload_attempts=0,
+                next_retry_at=None,
+                stopped_at=None,
+            )
+        self._traces_by_id[trace_id] = trace
+        self._update_trace_in_recording(trace, recording_id)
+        return trace
+
     async def upsert_trace_bytes(
         self,
         trace_id: str,
@@ -324,14 +382,15 @@ class FakeStateStore:
 
         State transitions:
         - New trace: PENDING_METADATA
-        - INITIALIZING -> WRITTEN
+        - INITIALIZING/WRITING -> WRITTEN
         """
         now = datetime.now(timezone.utc)
         existing = self._traces_by_id.get(trace_id)
         if existing:
             new_status = (
                 TraceWriteStatus.WRITTEN
-                if existing.write_status == TraceWriteStatus.INITIALIZING
+                if existing.write_status
+                in (TraceWriteStatus.INITIALIZING, TraceWriteStatus.WRITING)
                 else existing.write_status
             )
             trace = replace(
@@ -784,6 +843,24 @@ async def test_start_trace_creates_trace(state_manager, emitter: Emitter) -> Non
     assert trace.total_bytes is None
     assert trace.write_status == TraceWriteStatus.INITIALIZING
     assert trace.bytes_written is None  # Not complete yet
+
+
+@pytest.mark.asyncio
+async def test_trace_write_progress_creates_writing_trace(
+    state_manager, emitter: Emitter
+) -> None:
+    """TRACE_WRITE_PROGRESS creates a WRITING trace without finalizing it."""
+    _, store = state_manager
+
+    emitter.emit(Emitter.TRACE_WRITE_PROGRESS, "trace-progress-1", "rec-1", 32)
+    await asyncio.sleep(0.2)
+
+    trace = store._traces_by_id.get("trace-progress-1")
+    assert trace is not None
+    assert trace.recording_id == "rec-1"
+    assert trace.write_status == TraceWriteStatus.WRITING
+    assert trace.bytes_written == 32
+    assert trace.total_bytes is None
 
 
 @pytest.mark.asyncio

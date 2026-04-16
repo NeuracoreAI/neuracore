@@ -371,6 +371,51 @@ async def test_upsert_trace_bytes_backfills_missing_total_bytes(
 
 
 @pytest.mark.asyncio
+async def test_upsert_trace_write_progress_inserts_writing_row(
+    store: SqliteStateStore,
+) -> None:
+    trace = await store.upsert_trace_write_progress(
+        trace_id="trace-writing-1",
+        recording_id="rec-writing-1",
+        bytes_written=64,
+    )
+
+    assert trace.write_status == TraceWriteStatus.WRITING
+    row = await _get_trace_row(store, "trace-writing-1")
+    assert row is not None
+    assert row["bytes_written"] == 64
+    assert row["total_bytes"] is None
+    assert row["write_status"] == TraceWriteStatus.WRITING
+    recording_row = await _get_recording_row(store, "rec-writing-1")
+    assert recording_row is not None
+    assert int(recording_row["trace_count"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_upsert_trace_write_progress_is_monotonic(
+    store: SqliteStateStore,
+) -> None:
+    await store.upsert_trace_write_progress(
+        trace_id="trace-writing-monotonic",
+        recording_id="rec-writing-monotonic",
+        bytes_written=128,
+    )
+
+    trace = await store.upsert_trace_write_progress(
+        trace_id="trace-writing-monotonic",
+        recording_id="rec-writing-monotonic",
+        bytes_written=64,
+    )
+
+    assert trace.bytes_written == 128
+    row = await _get_trace_row(store, "trace-writing-monotonic")
+    assert row is not None
+    assert row["bytes_written"] == 128
+    assert row["total_bytes"] is None
+    assert row["write_status"] == TraceWriteStatus.WRITING
+
+
+@pytest.mark.asyncio
 async def test_update_bytes_uploaded_sets_value(store: SqliteStateStore) -> None:
     await store.upsert_trace_metadata(
         trace_id="trace-3",
@@ -471,17 +516,35 @@ async def test_join_pattern_metadata_then_bytes_transitions_to_written(
     recording_row = await _get_recording_row(store, "rec-6b")
     assert recording_row is not None
     assert int(recording_row["trace_count"]) == 1
-    assert recording_row["progress_reported"] == ProgressReportStatus.PENDING
 
-    # Duplicate TRACE_WRITTEN for the same trace must not increment expected count.
-    await store.upsert_trace_bytes(
-        trace_id="trace-6b",
-        recording_id="rec-6b",
+
+@pytest.mark.asyncio
+async def test_join_pattern_write_progress_then_bytes_transitions_to_written(
+    store: SqliteStateStore,
+) -> None:
+    trace = await store.upsert_trace_write_progress(
+        trace_id="trace-6bp",
+        recording_id="rec-6bp",
+        bytes_written=32,
+    )
+    assert trace.write_status == TraceWriteStatus.WRITING
+
+    trace = await store.upsert_trace_bytes(
+        trace_id="trace-6bp",
+        recording_id="rec-6bp",
         bytes_written=64,
     )
-    recording_row = await _get_recording_row(store, "rec-6b")
+
+    assert trace.write_status == TraceWriteStatus.WRITTEN
+    row = await _get_trace_row(store, "trace-6bp")
+    assert row is not None
+    assert row["write_status"] == TraceWriteStatus.WRITTEN
+    assert row["bytes_written"] == 64
+    assert row["total_bytes"] == 64
+    recording_row = await _get_recording_row(store, "rec-6bp")
     assert recording_row is not None
     assert int(recording_row["trace_count"]) == 1
+    assert recording_row["progress_reported"] == ProgressReportStatus.PENDING
 
 
 @pytest.mark.asyncio

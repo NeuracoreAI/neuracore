@@ -327,6 +327,59 @@ def test_rdm_storage_limit_aborts_trace_and_emits_trace_written_zero(
     assert trace_dir.exists() is False
 
 
+def test_rdm_emits_trace_write_progress(
+    rdm_module,
+    rdm_factory,
+    loop_manager_with_emitter: tuple[EventLoopManager, Emitter],
+) -> None:
+    Emitter = rdm_module.Emitter
+    _loop_manager, emitter = loop_manager_with_emitter
+
+    rdm, _recordings_root = rdm_factory(storage_limit=None, flush_bytes=1)
+
+    recording_id = str(uuid.uuid4())
+    trace_id = "progress_trace"
+
+    progress_events: list[tuple[str, int]] = []
+    progress_seen = threading.Event()
+    written_seen = threading.Event()
+
+    @emitter.on(Emitter.TRACE_WRITE_PROGRESS)
+    def on_progress(tid: str, rid: str, bytes_written: int) -> None:
+        if tid == trace_id and rid == recording_id:
+            progress_events.append((tid, bytes_written))
+            progress_seen.set()
+
+    @emitter.on(Emitter.TRACE_WRITTEN)
+    def on_written(tid: str, rid: str, _bytes_written: int) -> None:
+        if tid == trace_id and rid == recording_id:
+            written_seen.set()
+
+    try:
+        rdm.enqueue(
+            CompleteMessage.from_bytes(
+                producer_id="p",
+                recording_id=recording_id,
+                trace_id=trace_id,
+                data_type=DataType.JOINT_POSITIONS,
+                data_type_name="joint_position",
+                robot_instance=0,
+                data=_json_bytes({"x": 1}),
+                final_chunk=False,
+            )
+        )
+
+        assert progress_seen.wait(timeout=5.0) is True
+
+        emitter.emit(Emitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
+        assert written_seen.wait(timeout=5.0) is True
+
+        assert progress_events
+    finally:
+        emitter.remove_listener(Emitter.TRACE_WRITE_PROGRESS, on_progress)
+        emitter.remove_listener(Emitter.TRACE_WRITTEN, on_written)
+
+
 def test_rdm_encoder_creation_failure_aborts_one_trace_but_other_completes(
     monkeypatch: pytest.MonkeyPatch,
     rdm_module,

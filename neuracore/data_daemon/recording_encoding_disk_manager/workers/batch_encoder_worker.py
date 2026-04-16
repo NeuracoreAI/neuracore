@@ -83,6 +83,7 @@ class _BatchEncoderWorker:
         self._trace_next_index: dict[_TraceKey, int] = {}
         self._trace_out_of_order_arrivals: dict[_TraceKey, int] = {}
         self._trace_max_buffered_batches: dict[_TraceKey, int] = {}
+        self._trace_last_progress_bytes: dict[_TraceKey, int] = {}
 
         self._trace_pending: dict[_TraceKey, int] = {}
 
@@ -110,6 +111,7 @@ class _BatchEncoderWorker:
         self._trace_out_of_order_arrivals.pop(trace_key, None)
         self._trace_max_buffered_batches.pop(trace_key, None)
         self._finalised_traces.add(trace_key)
+        self._trace_last_progress_bytes.pop(trace_key, None)
 
     async def _on_batch_ready(self, batch_job: _BatchJob) -> None:
         """Handle BATCH_READY event.
@@ -201,9 +203,15 @@ class _BatchEncoderWorker:
                 self._trace_next_index[key] = next_index
                 continue
 
-            ok = await self._process_batch_into_encoder(next_job, encoder)
+            is_processed = await self._process_batch_into_encoder(next_job, encoder)
             await self._remove_file(next_job.batch_path)
-            if not ok:
+            if (
+                is_processed
+                and key not in self._aborted_traces
+                and key not in self._finalised_traces
+            ):
+                self._emit_trace_write_progress(key)
+            if not is_processed:
                 self._aborted_traces.add(key)
 
             self._decrement_trace_pending(key)
@@ -218,6 +226,20 @@ class _BatchEncoderWorker:
             self._trace_pending.pop(key, None)
         else:
             self._trace_pending[key] = pending
+
+    def _emit_trace_write_progress(self, trace_key: _TraceKey) -> None:
+        bytes_written = self._filesystem.trace_bytes_on_disk(trace_key)
+        bytes_written = max(
+            bytes_written,
+            self._trace_last_progress_bytes.get(trace_key, 0),
+        )
+        self._trace_last_progress_bytes[trace_key] = bytes_written
+        self._emitter.emit(
+            Emitter.TRACE_WRITE_PROGRESS,
+            trace_key.trace_id,
+            trace_key.recording_id,
+            bytes_written,
+        )
 
     def _try_finalize_trace_after_ordered_batches(self, key: _TraceKey) -> None:
         """Finalize trace if the terminal batch has been processed and none remain."""
@@ -249,6 +271,7 @@ class _BatchEncoderWorker:
         self._trace_next_index.pop(key, None)
         self._trace_out_of_order_arrivals.pop(key, None)
         self._trace_max_buffered_batches.pop(key, None)
+        self._trace_last_progress_bytes.pop(key, None)
 
     @staticmethod
     async def _remove_file(path: Path) -> None:
