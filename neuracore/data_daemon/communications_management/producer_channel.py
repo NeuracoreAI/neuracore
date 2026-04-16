@@ -7,15 +7,54 @@ import math
 import queue
 import threading
 import uuid
+from collections.abc import Iterator, Sequence
 
 from neuracore.data_daemon.communications_management.communications_manager import (
     CommunicationsManager,
     MessageEnvelope,
 )
-from neuracore.data_daemon.const import DEFAULT_CHUNK_SIZE, DEFAULT_RING_BUFFER_SIZE
+from neuracore.data_daemon.const import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_RING_BUFFER_SIZE,
+    DEFAULT_VIDEO_CHUNK_SIZE,
+    DEFAULT_VIDEO_RING_BUFFER_SIZE,
+    DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
+)
 from neuracore.data_daemon.models import CommandType, DataChunkPayload, DataType
 
 logger = logging.getLogger(__name__)
+
+BytePart = bytes | bytearray | memoryview
+
+
+def producer_transport_args_for_data_type(
+    data_type: DataType,
+) -> tuple[int, int, int]:
+    """Returns the transport arguments for the given data type.
+
+    These arguments are used to initialize a ProducerChannel
+    and determine the chunk size,
+    ring buffer size, and send queue max size for the channel.
+
+    Args:
+        data_type: The data type for which to return the transport arguments.
+
+    Returns:
+        A tuple of (chunk_size, ring_buffer_size, send_queue_maxsize)
+          for the given data type.
+    """
+    if data_type in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
+        return (
+            DEFAULT_VIDEO_CHUNK_SIZE,
+            DEFAULT_VIDEO_RING_BUFFER_SIZE,
+            DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
+        )
+
+    return (
+        DEFAULT_CHUNK_SIZE,
+        DEFAULT_RING_BUFFER_SIZE,
+        0,
+    )
 
 
 class ProducerChannel:
@@ -23,27 +62,54 @@ class ProducerChannel:
 
     def __init__(
         self,
+        *,
+        data_type: DataType,
         id: str | None = None,
         comm_manager: CommunicationsManager | None = None,
-        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        chunk_size: int | None = None,
+        send_queue_maxsize: int | None = None,
         recording_id: str | None = None,
+        ring_buffer_size: int | None = None,
     ) -> None:
         """Initialize the producer channel."""
+        if data_type is None:
+            raise ValueError("data_type is required")
+
+        (
+            default_chunk_size,
+            default_ring_buffer_size,
+            default_send_queue_maxsize,
+        ) = producer_transport_args_for_data_type(data_type)
+
+        self.channel_id = id or str(uuid.uuid4())
         self._comm = comm_manager or CommunicationsManager()
         self._comm.create_producer_socket()
-        self.channel_id = id or str(uuid.uuid4())
-        self.chunk_size = chunk_size
+        self.chunk_size = int(default_chunk_size if chunk_size is None else chunk_size)
+        self.send_queue_maxsize = max(
+            0,
+            int(
+                default_send_queue_maxsize
+                if send_queue_maxsize is None
+                else send_queue_maxsize
+            ),
+        )
+        self._ring_buffer_size = int(
+            default_ring_buffer_size if ring_buffer_size is None else ring_buffer_size
+        )
         self.trace_id: str | None = None
         self._stop_event = threading.Event()
         self.recording_id: str | None = recording_id
         self._heartbeat_interval = 1.0
         self._heartbeat_thread: threading.Thread | None = None
-        self._send_queue: queue.Queue[MessageEnvelope | None] = queue.Queue()
+        self._send_queue: queue.Queue[MessageEnvelope | None] = queue.Queue(
+            maxsize=self.send_queue_maxsize
+        )
         self._sender_thread: threading.Thread | None = None
         self._next_sequence_number = 1
         self._last_enqueued_sequence_number = 0
         self._last_socket_sent_sequence_number = 0
         self._sequence_cv = threading.Condition()
+        self._enqueue_lock = threading.Lock()
 
         self._sender_thread = threading.Thread(
             target=self._sender_loop, name="producer-channel-sender", daemon=True
@@ -139,9 +205,6 @@ class ProducerChannel:
         """
         self.recording_id = recording_id
 
-    def _stop_recording(self) -> None:
-        self.recording_id = None
-
     def start_new_trace(self) -> None:
         """Start a new trace for the given recording."""
         if not self.recording_id:
@@ -155,8 +218,6 @@ class ProducerChannel:
         if trace_id is None or recording_id is None:
             logger.warning("Cannot end trace; missing trace_id or recording_id.")
             return
-        self.trace_id = None
-        self.recording_id = None
         self._send(
             CommandType.TRACE_END,
             {
@@ -166,6 +227,8 @@ class ProducerChannel:
                 }
             },
         )
+        self.trace_id = None
+        self.recording_id = None
 
     def stop_producer_channel(self) -> None:
         """Stops the producer channel and cleans up any associated resources."""
@@ -179,7 +242,7 @@ class ProducerChannel:
             self._heartbeat_thread = None
         self._comm.cleanup_producer()
 
-    def _send(self, command: CommandType, payload: dict | None = None) -> None:
+    def _send(self, command: CommandType, payload: dict | None = None) -> int:
         """Send a message to the daemon.
 
         This method serializes the message into a JSON bytes
@@ -193,19 +256,21 @@ class ProducerChannel:
                 to process the message.
 
         Returns:
-            None
+            The sequence number assigned to the enqueued message.
         """
-        with self._sequence_cv:
-            sequence_number = self._next_sequence_number
-            self._next_sequence_number += 1
-            self._last_enqueued_sequence_number = sequence_number
-        envelope = MessageEnvelope(
-            producer_id=self.channel_id,
-            command=command,
-            payload=payload or {},
-            sequence_number=sequence_number,
-        )
-        self._send_queue.put(envelope)
+        with self._enqueue_lock:
+            with self._sequence_cv:
+                sequence_number = self._next_sequence_number
+                self._next_sequence_number += 1
+                self._last_enqueued_sequence_number = sequence_number
+            envelope = MessageEnvelope(
+                producer_id=self.channel_id,
+                command=command,
+                payload=payload or {},
+                sequence_number=sequence_number,
+            )
+            self._send_queue.put(envelope)
+            return sequence_number
 
     def get_last_sent_sequence_number(self) -> int:
         """Return the most recent sequence number successfully sent on the socket."""
@@ -232,7 +297,7 @@ class ProducerChannel:
                 self._sequence_cv.wait()
             return True
 
-    def open_ring_buffer(self, size: int = DEFAULT_RING_BUFFER_SIZE) -> None:
+    def open_ring_buffer(self, size: int | None = None) -> None:
         """Open a ring buffer for sending data chunks to the daemon.
 
         This method sends an OPEN_RING_BUFFER command to the daemon, which
@@ -243,7 +308,11 @@ class ProducerChannel:
         """
         self._send(
             CommandType.OPEN_RING_BUFFER,
-            {"open_ring_buffer": {"size": size}},
+            {
+                "open_ring_buffer": {
+                    "size": self._ring_buffer_size if size is None else size
+                }
+            },
         )
 
     def send_data(
@@ -271,6 +340,79 @@ class ProducerChannel:
         if not data:
             return
 
+        self.send_data_parts(
+            (memoryview(data),),
+            total_bytes=len(data),
+            data_type=data_type,
+            robot_instance=robot_instance,
+            data_type_name=data_type_name,
+            robot_id=robot_id,
+            robot_name=robot_name,
+            dataset_id=dataset_id,
+            dataset_name=dataset_name,
+        )
+
+    @staticmethod
+    def _normalise_parts(parts: Sequence[BytePart]) -> list[memoryview]:
+        views: list[memoryview] = []
+        for part in parts:
+            view = part if isinstance(part, memoryview) else memoryview(part)
+            if view.ndim != 1 or view.itemsize != 1 or view.format != "B":
+                view = view.cast("B")
+            if len(view) > 0:
+                views.append(view)
+        return views
+
+    def _iter_chunk_views(
+        self, parts: Sequence[memoryview]
+    ) -> Iterator[bytes | memoryview]:
+        if not parts:
+            return
+
+        chunk_parts: list[memoryview] = []
+        remaining = self.chunk_size
+
+        for part in parts:
+            start = 0
+            part_len = len(part)
+            while start < part_len:
+                take = min(remaining, part_len - start)
+                chunk_parts.append(part[start : start + take])
+                start += take
+                remaining -= take
+
+                if remaining == 0:
+                    yield (
+                        chunk_parts[0]
+                        if len(chunk_parts) == 1
+                        else b"".join(chunk_parts)
+                    )
+                    chunk_parts = []
+                    remaining = self.chunk_size
+
+        if chunk_parts:
+            yield (chunk_parts[0] if len(chunk_parts) == 1 else b"".join(chunk_parts))
+
+    def send_data_parts(
+        self,
+        parts: Sequence[BytePart],
+        *,
+        total_bytes: int | None = None,
+        data_type: DataType,
+        robot_instance: int,
+        data_type_name: str,
+        robot_id: str | None = None,
+        robot_name: str | None = None,
+        dataset_id: str | None = None,
+        dataset_name: str | None = None,
+    ) -> None:
+        """Send a logical payload assembled from multiple byte-like parts."""
+        normalised_parts = self._normalise_parts(parts)
+        if total_bytes is None:
+            total_bytes = sum(len(view) for view in normalised_parts)
+        if total_bytes <= 0:
+            return
+
         trace_id = self.trace_id
         recording_id = self.recording_id
         if not trace_id or not recording_id:
@@ -284,12 +426,11 @@ class ProducerChannel:
         if not dataset_id and not dataset_name:
             raise ValueError("Dataset ID or name required")
 
-        total_chunks = math.ceil(len(data) / self.chunk_size)
-        for idx in range(total_chunks):
-            start = idx * self.chunk_size
-            end = min(start + self.chunk_size, len(data))
-            chunk = data[start:end]
+        total_chunks = math.ceil(total_bytes / self.chunk_size)
+        produced_chunks = 0
 
+        for idx, chunk in enumerate(self._iter_chunk_views(normalised_parts)):
+            produced_chunks += 1
             payload = DataChunkPayload(
                 channel_id=self.channel_id,
                 recording_id=recording_id,
@@ -307,7 +448,15 @@ class ProducerChannel:
             )
             self._send(CommandType.DATA_CHUNK, {"data_chunk": payload.to_dict()})
 
-    def initialize_new_producer_channel(self) -> None:
+        if produced_chunks != total_chunks:
+            raise RuntimeError(
+                "Chunk count mismatch while serializing payload for transport"
+            )
+
+    def initialize_new_producer_channel(
+        self,
+        ring_buffer_size: int | None = None,
+    ) -> None:
         """Initialize a new producer channel.
 
         This method starts a new trace and opens a ring buffer.
@@ -316,7 +465,7 @@ class ProducerChannel:
             self.start_new_trace()
 
         self.start_producer_channel()
-        self.open_ring_buffer()
+        self.open_ring_buffer(size=ring_buffer_size)
 
     def cleanup_producer_channel(self) -> None:
         """Clean up the producer channel.
@@ -325,4 +474,3 @@ class ProducerChannel:
         associated resources.
         """
         self.end_trace()
-        self._stop_recording()

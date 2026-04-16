@@ -99,7 +99,9 @@ class DataStream(ABC):
             channel_id = f"{self._data_type.value}:\
             {self._stream_name}:{uuid.uuid4().hex[:8]}"
             self._producer_channel = ProducerChannel(
-                id=channel_id, recording_id=context.recording_id
+                id=channel_id,
+                recording_id=context.recording_id,
+                data_type=self._data_type,
             )
             self._producer_channel.initialize_new_producer_channel()
             return
@@ -150,6 +152,27 @@ class DataStream(ABC):
             return
         self._producer_channel.send_data(
             data=data,
+            data_type=self._data_type,
+            robot_instance=self._context.robot_instance,
+            data_type_name=self._stream_name,
+            robot_id=self._context.robot_id,
+            robot_name=self._context.robot_name,
+            dataset_id=self._context.dataset_id,
+            dataset_name=self._context.dataset_name,
+        )
+
+    def _send_to_daemon_parts(
+        self,
+        parts: tuple[bytes | memoryview, ...],
+        *,
+        total_bytes: int,
+    ) -> None:
+        """Send a logical payload assembled from multiple byte-like parts."""
+        if self._producer_channel is None or self._context is None:
+            return
+        self._producer_channel.send_data_parts(
+            parts=parts,
+            total_bytes=total_bytes,
             data_type=self._data_type,
             robot_instance=self._context.robot_instance,
             data_type_name=self._stream_name,
@@ -236,10 +259,16 @@ class VideoDataStream(DataStream):
         metadata_json = json.dumps(metadata_dict).encode("utf-8")
 
         # Pack: [metadata_len (4 bytes)] [metadata_json] [frame_bytes]
-        frame_bytes = frame.tobytes()
         header = struct.pack("<I", len(metadata_json))
-        data = header + metadata_json + frame_bytes
-        self._send_to_daemon(data)
+        frame_source = (
+            frame if frame.flags.c_contiguous else np.ascontiguousarray(frame)
+        )
+        frame_view = memoryview(frame_source).cast("B")
+        total_bytes = len(header) + len(metadata_json) + len(frame_view)
+        self._send_to_daemon_parts(
+            (header, metadata_json, frame_view),
+            total_bytes=total_bytes,
+        )
 
 
 class DepthDataStream(VideoDataStream):
