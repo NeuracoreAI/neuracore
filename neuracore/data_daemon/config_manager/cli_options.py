@@ -127,3 +127,12 @@ BackgroundOption = Annotated[
         is_flag=True,
     ),
 ]
+
+DebugOption = Annotated[
+    bool,
+    typer.Option(
+        "--debug",
+        help="Enable debug mode.",
+        is_flag=True,
+    ),
+]

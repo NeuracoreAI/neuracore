@@ -51,6 +51,11 @@ def get_daemon_recordings_root_path() -> Path:
     )
 
 
+def is_debug_mode() -> bool:
+    """Return True if the daemon is running in debug mode."""
+    return os.environ.get("NDD_DEBUG", "false").lower() == "true"
+
+
 def utc_now() -> datetime:
     """Return the current time as a Unix timestamp or datetime object."""
     return datetime.now(timezone.utc)

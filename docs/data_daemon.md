@@ -283,6 +283,7 @@ These variables control where the daemon runtime artifacts live:
 | SQLite DB path | `NEURACORE_DAEMON_DB_PATH` | `~/.neuracore/data_daemon/state.db` |
 | Recordings root | `NEURACORE_DAEMON_RECORDINGS_ROOT` | sibling of DB path (`<db_dir>/recordings`) |
 | Profile for launch/auto-start | `NEURACORE_DAEMON_PROFILE` | unset |
+| Enable debug mode | `NDD_DEBUG` | `false` |
 
 Recommended for containers/dev environments:
 

@@ -96,6 +96,8 @@ setup(
             "requests-mock>=1.9.3",
             "pre-commit",
             "types-aiofiles",
+            "pyinstrument",
+            "plotly",
         ],
         "import": [
             # lerobot is used only for dataset importing

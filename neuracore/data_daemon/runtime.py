@@ -21,6 +21,7 @@ from neuracore.data_daemon.config_manager.profiles import (
 from neuracore.data_daemon.const import DEFAULT_PROFILE_NAME
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
+from neuracore.data_daemon.helpers import is_debug_mode
 from neuracore.data_daemon.lifecycle.daemon_os_control import acquire_pid_file
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
     cleanup_socket_files,
@@ -31,6 +32,7 @@ from neuracore.data_daemon.recording_encoding_disk_manager import (
     recording_disk_manager as rdm,
 )
 from neuracore.data_daemon.services import DaemonServices
+from neuracore.data_daemon.tools.event_logger import EventLogger
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,7 @@ class DaemonRuntime:
         self._manage_pid = os.environ.get("NEURACORE_DAEMON_MANAGE_PID", "1") != "0"
         self._context: DaemonContext | None = None
         self._daemon: Daemon | None = None
+        self._event_logger: EventLogger | None = None
 
     def _get_recordings_root(self, config: DaemonConfig) -> Path:
         if config.path_to_store_record:
@@ -253,6 +256,13 @@ class DaemonRuntime:
             return None
         loop_manager, emitter = loop_result
 
+        debug_mode = is_debug_mode()
+        if debug_mode:
+            log_path = self._db_path.parent / "daemon_events_timeline.csv"
+            self._event_logger = EventLogger(log_path)
+            self._event_logger.attach(emitter)
+            logger.info("Debug Mode enabled")
+
         logger.debug("[5/8] Bootstrapping async services on General Loop...")
         services = self._bootstrap_async_services(config, loop_manager, emitter)
         if services is None:
@@ -318,6 +328,10 @@ class DaemonRuntime:
 
         logger.debug("[3/3] Stopping EventLoopManager...")
         self._stop_event_loops(ctx)
+
+        if self._event_logger is not None:
+            self._event_logger.close()
+            self._event_logger = None
 
         self._daemon = None
         self._context = None

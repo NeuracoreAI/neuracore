@@ -13,7 +13,10 @@ from collections.abc import Coroutine
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
+import pyinstrument
+
 from neuracore.data_daemon.event_emitter import Emitter, init_emitter
+from neuracore.data_daemon.helpers import is_debug_mode
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +128,10 @@ class EventLoopManager:
         This is the main loop for I/O-bound operations
         """
         try:
+            debug_mode = is_debug_mode()
+            profiler = pyinstrument.Profiler() if debug_mode else None
+            if profiler:
+                profiler.start()
             loop = asyncio.new_event_loop()
             executor = ThreadPoolExecutor(
                 max_workers=2, thread_name_prefix="ndd-general-async-executor"
@@ -144,7 +151,9 @@ class EventLoopManager:
             loop.create_task(monitor_shutdown())
 
             loop.run_forever()
-
+            if profiler:
+                profiler.stop()
+                profiler.write_html("profile-daemon-event-loop.html")
             logger.debug("General event loop shutting down")
 
         except Exception as e:
