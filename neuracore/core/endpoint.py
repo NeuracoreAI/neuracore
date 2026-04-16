@@ -30,6 +30,8 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.exceptions import InsufficientSynchronizedPointError
 from neuracore.core.get_latest_sync_point import get_latest_sync_point
 from neuracore.core.utils.download import download_with_progress
+from neuracore.ml.logging.endpoint_log_streamer import EndpointLogStreamer
+from neuracore.ml.utils.endpoint_storage_handler import EndpointStorageHandler
 
 from .auth import get_auth
 from .const import API_URL, PING_ENDPOINT, PREDICT_ENDPOINT, SET_CHECKPOINT_ENDPOINT
@@ -342,6 +344,7 @@ class LocalServerPolicy(ServerPolicy):
         job_id: str | None = None,
         port: int = 8080,
         host: str = "127.0.0.1",
+        endpoint_id: str | None = None,
     ):
         """Initialize the local server policy.
 
@@ -356,17 +359,41 @@ class LocalServerPolicy(ServerPolicy):
             job_id: Optional job ID to associate with the server
             port: Port to run the server on
             host: Host to bind to
+            endpoint_id: Optional deployed endpoint ID used for cloud log uploads.
         """
         super().__init__(f"http://{host}:{port}")
         self.input_embodiment_description = input_embodiment_description
         self.output_embodiment_description = output_embodiment_description
         self.org_id = org_id
         self.job_id = job_id
+        self.endpoint_id = endpoint_id
         self.model_path = model_path
         self.device = device
         self.port = port
         self.host = host
         self.server_process: Popen | None = None
+        self._log_streamer: EndpointLogStreamer | None = None
+        self._endpoint_log_path: Path | None = None
+        self._startup_status_path: Path | None = None
+        if endpoint_id is not None:
+            output_dir = (
+                Path(tempfile.gettempdir()) / "neuracore" / "endpoints" / endpoint_id
+            )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            self._endpoint_log_path = output_dir / "endpoint.log"
+            self._startup_status_path = output_dir / "startup-status.json"
+            storage_handler = EndpointStorageHandler(endpoint_id=endpoint_id)
+            self._log_streamer = EndpointLogStreamer(
+                storage_handler=storage_handler,
+                output_dir=output_dir,
+            )
+            self._log_streamer.start()
+        else:
+            status_dir = Path(tempfile.gettempdir()) / "neuracore" / "endpoints"
+            status_dir.mkdir(parents=True, exist_ok=True)
+            self._startup_status_path = (
+                status_dir / f"startup-status-{self.host}-{self.port}.json"
+            )
         atexit.register(self.disconnect)
         self._start_server()
 
@@ -402,6 +429,12 @@ class LocalServerPolicy(ServerPolicy):
             cmd.extend(["--device", self.device])
         if self.job_id:
             cmd.extend(["--job-id", self.job_id])
+        if self._endpoint_log_path is not None:
+            cmd.extend(["--log-file-path", str(self._endpoint_log_path)])
+        if self._startup_status_path is not None:
+            if self._startup_status_path.exists():
+                self._startup_status_path.unlink()
+            cmd.extend(["--startup-status-file-path", str(self._startup_status_path)])
 
         if self._is_port_in_use(self.host, self.port):
             raise EndpointError(
@@ -428,6 +461,21 @@ class LocalServerPolicy(ServerPolicy):
     def _wait_for_server(self, max_attempts: int = 900) -> None:
         """Wait for the server to become available."""
         for attempt in range(max_attempts):
+            if (
+                self._startup_status_path is not None
+                and self._startup_status_path.exists()
+            ):
+                try:
+                    status_payload = json.loads(
+                        self._startup_status_path.read_text(encoding="utf-8")
+                    )
+                except Exception:
+                    status_payload = {}
+                if status_payload.get("status") == "error":
+                    error = status_payload.get(
+                        "error", "Unknown server initialization error."
+                    )
+                    raise EndpointError(f"Local server failed to initialize: {error}")
             # Check if the process has terminated unexpectedly
             if self.server_process and self.server_process.poll() is not None:
                 raise EndpointError("Local server process terminated unexpectedly.")
@@ -465,6 +513,9 @@ class LocalServerPolicy(ServerPolicy):
     def disconnect(self) -> None:
         """Stop the local server and clean up resources."""
         if not self.server_process:
+            if self._log_streamer is not None:
+                self._log_streamer.close()
+                self._log_streamer = None
             return
         try:
             # Try graceful termination first
@@ -491,6 +542,9 @@ class LocalServerPolicy(ServerPolicy):
             pass
         finally:
             self.server_process = None
+            if self._log_streamer is not None:
+                self._log_streamer.close()
+                self._log_streamer = None
             logger.info("Local server stopped")
 
 
@@ -557,6 +611,7 @@ def policy_local_server(
     port: int = 8080,
     host: str = "127.0.0.1",
     job_id: str | None = None,
+    endpoint_id: str | None = None,
 ) -> LocalServerPolicy:
     """Launch a local server policy with a FastAPI server.
 
@@ -571,6 +626,7 @@ def policy_local_server(
         port: Port to run the server on.
         host: Host to bind to.
         job_id: Optional job ID to associate with the server.
+        endpoint_id: Optional endpoint ID used for endpoint log streaming.
 
     Returns:
         LocalServerPolicy instance managing a local FastAPI server.
@@ -601,6 +657,7 @@ def policy_local_server(
         job_id=job_id,
         port=port,
         host=host,
+        endpoint_id=endpoint_id,
     )
 
 

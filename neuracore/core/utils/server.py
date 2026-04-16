@@ -7,6 +7,7 @@ full control over the inference pipeline while maintaining .nc.zip compatibility
 import json
 import logging
 import time
+import traceback
 from pathlib import Path
 
 import uvicorn
@@ -26,6 +27,7 @@ from neuracore.core.const import (
     SET_CHECKPOINT_ENDPOINT,
 )
 from neuracore.core.exceptions import InsufficientSynchronizedPointError
+from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,37 @@ class CheckpointRequest(BaseModel):
     """Request model for setting checkpoints."""
 
     epoch: int
+
+
+def setup_server_logging(log_level: str, log_file_path: str | None = None) -> None:
+    """Configure structured logging for the server process."""
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file_path is not None:
+        path = Path(log_file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(path)
+        handlers.append(file_handler)
+
+    formatter = JsonLineLogFormatter()
+    for handler in handlers:
+        handler.setFormatter(formatter)
+
+    level = getattr(logging, log_level.upper(), logging.INFO)
+    logging.basicConfig(level=level, handlers=handlers, force=True)
+
+
+def write_startup_status(
+    startup_status_file_path: str | None, status: str, error: str | None = None
+) -> None:
+    """Persist startup status so parent process can report errors."""
+    if startup_status_file_path is None:
+        return
+    payload: dict[str, str] = {"status": status}
+    if error is not None:
+        payload["error"] = error
+    path = Path(startup_status_file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 class ModelServer:
@@ -70,6 +103,14 @@ class ModelServer:
             device=device,
         )
         self.app = self._create_app()
+        logger.info(
+            "Initialized model server.",
+            extra={
+                "model_file": str(model_file),
+                "job_id": job_id,
+                "device": device,
+            },
+        )
 
     def _create_app(self) -> FastAPI:
         """Create and configure the FastAPI application."""
@@ -91,6 +132,7 @@ class ModelServer:
         # Health check endpoint
         @app.get(PING_ENDPOINT)
         async def health_check() -> dict:
+            logger.debug("Health check request received.")
             return {"status": "healthy", "timestamp": time.time()}
 
         # Main prediction endpoint
@@ -102,6 +144,7 @@ class ModelServer:
             sync_point: SynchronizedPoint,
         ) -> dict[DataType, dict[str, BatchedNCDataUnion]]:
             try:
+                logger.info("Received prediction request.")
                 return self.policy_inference(sync_point)
             except InsufficientSynchronizedPointError:
                 logger.error("Insufficient sync point data.")
@@ -110,7 +153,7 @@ class ModelServer:
                     detail="Insufficient sync point data for inference.",
                 )
             except Exception as e:
-                logger.error("Prediction error.", exc_info=True)
+                logger.error("Prediction error: %s", str(e), exc_info=True)
                 raise HTTPException(
                     status_code=500, detail=f"Prediction failed: {str(e)}"
                 )
@@ -118,7 +161,9 @@ class ModelServer:
         @app.post(SET_CHECKPOINT_ENDPOINT)
         async def set_checkpoint(request: CheckpointRequest) -> None:
             try:
+                logger.info("Setting checkpoint to epoch=%s.", request.epoch)
                 self.policy_inference.set_checkpoint(request.epoch)
+                logger.info("Checkpoint set successfully.")
             except Exception as e:
                 logger.error("Checkpoint loading error.", exc_info=True)
                 raise HTTPException(
@@ -151,6 +196,8 @@ def start_server(
     host: str = "0.0.0.0",
     port: int = 8080,
     log_level: str = "info",
+    log_file_path: str | None = None,
+    startup_status_file_path: str | None = None,
     device: str | None = None,
 ) -> ModelServer:
     """Start a model server instance.
@@ -162,11 +209,15 @@ def start_server(
         host: Host to bind to
         port: Port to bind to
         log_level: Logging level
+        log_file_path: Optional log file path for structured server logs.
+        startup_status_file_path: Optional file path used to report startup status.
         device: Device model loaded on
 
     Returns:
         ModelServer instance
     """
+    setup_server_logging(log_level=log_level, log_file_path=log_file_path)
+    logger.info("Starting model server on %s:%s.", host, port)
     server = ModelServer(
         input_embodiment_description=input_embodiment_description,
         output_embodiment_description=output_embodiment_description,
@@ -175,6 +226,7 @@ def start_server(
         job_id=job_id,
         device=device,
     )
+    write_startup_status(startup_status_file_path, status="ready")
     server.run(host, port, log_level)
     return server
 
@@ -207,26 +259,46 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8080, help="Port to bind to")
     parser.add_argument("--log-level", default="info", help="Logging level")
+    parser.add_argument(
+        "--log-file-path",
+        required=False,
+        help="Optional path to write structured server logs.",
+    )
+    parser.add_argument(
+        "--startup-status-file-path",
+        required=False,
+        help="Optional path to write startup status for parent process.",
+    )
     parser.add_argument("--device", help="Device to load model on (cpu, cuda, etc.)")
 
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
 
-    input_embodiment_description = {
-        DataType(k): v
-        for k, v in json.loads(str(args.input_embodiment_description)).items()
-    }
-    output_embodiment_description = {
-        DataType(k): v
-        for k, v in json.loads(str(args.output_embodiment_description)).items()
-    }
-    start_server(
-        input_embodiment_description=input_embodiment_description,
-        output_embodiment_description=output_embodiment_description,
-        model_file=Path(args.model_file),
-        org_id=args.org_id,
-        job_id=args.job_id,
-        host=args.host,
-        port=args.port,
-        log_level=args.log_level,
-        device=args.device,
-    )
+        input_embodiment_description = {
+            DataType(k): v
+            for k, v in json.loads(str(args.input_embodiment_description)).items()
+        }
+        output_embodiment_description = {
+            DataType(k): v
+            for k, v in json.loads(str(args.output_embodiment_description)).items()
+        }
+        start_server(
+            input_embodiment_description=input_embodiment_description,
+            output_embodiment_description=output_embodiment_description,
+            model_file=Path(args.model_file),
+            org_id=args.org_id,
+            job_id=args.job_id,
+            host=args.host,
+            port=args.port,
+            log_level=args.log_level,
+            log_file_path=args.log_file_path,
+            startup_status_file_path=args.startup_status_file_path,
+            device=args.device,
+        )
+    except Exception as exc:
+        write_startup_status(
+            args.startup_status_file_path,
+            status="error",
+            error=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+        )
+        raise
