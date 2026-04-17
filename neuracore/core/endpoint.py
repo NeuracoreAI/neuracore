@@ -288,6 +288,7 @@ class ServerPolicy(Policy):
         if sync_point is None:
             sync_point = get_latest_sync_point()
         response = None
+        print("test")
         try:
             response = requests.post(
                 f"{self._base_url}{PREDICT_ENDPOINT}",
