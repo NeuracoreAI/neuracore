@@ -48,7 +48,10 @@ from neuracore.ml.logging.cloud_log_streamer import CloudLogStreamer
 from neuracore.ml.logging.cloud_training_logger import CloudTrainingLogger
 from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 from neuracore.ml.logging.tensorboard_training_logger import TensorboardTrainingLogger
-from neuracore.ml.trainers.batch_autotuner import find_optimal_batch_size
+from neuracore.ml.trainers.batch_autotuner import (
+    find_optimal_batch_size,
+    is_valid_batch_size,
+)
 from neuracore.ml.trainers.distributed_trainer import (
     DistributedTrainer,
     cleanup_distributed,
@@ -396,6 +399,74 @@ def get_model_and_algorithm_config(
             "must be provided in the configuration"
         )
     return model, algorithm_config
+
+
+def assert_valid_batch_size(
+    batch_size: int,
+    cfg: DictConfig,
+    dataset: PytorchSynchronizedDataset,
+    input_cross_embodiment_description: CrossEmbodimentDescription,
+    output_cross_embodiment_description: CrossEmbodimentDescription,
+    device: torch.device | None = None,
+) -> None:
+    """Assert that a user-selected batch size fits in GPU memory.
+
+    The check is skipped on CPU (or when CUDA is unavailable). The user-selected
+    batch size is trusted in that case.
+
+    Raises:
+        ValueError: If ``batch_size`` does not fit in GPU memory.
+    """
+    if not torch.cuda.is_available() or (
+        device is not None and "cuda" not in device.type
+    ):
+        logger.warning("Skipping batch size memory check: GPU not available.")
+        return
+
+    if device is None:
+        device = get_default_device()
+
+    logger.info(f"Validating batch size {batch_size} on {device}...")
+
+    # Avoid altering the original dataset
+    assert_dataset = copy.deepcopy(dataset)
+
+    dataset_statistics_by_role = assert_dataset.dataset_statistics
+    model_init_description = ModelInitDescription(
+        input_dataset_statistics=dataset_statistics_by_role["input"],
+        output_dataset_statistics=dataset_statistics_by_role["output"],
+        input_data_types=extract_data_types(input_cross_embodiment_description),
+        output_data_types=extract_data_types(output_cross_embodiment_description),
+        output_prediction_horizon=cfg.output_prediction_horizon,
+    )
+    model, _algorithm_config = get_model_and_algorithm_config(
+        cfg, model_init_description
+    )
+
+    try:
+        valid = is_valid_batch_size(
+            cfg=cfg,
+            model=model,
+            dataset=assert_dataset,
+            batch_size=batch_size,
+            device=device,
+        )
+    finally:
+        del model
+        del assert_dataset
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+    if not valid:
+        raise ValueError(
+            f"Batch size {batch_size} is not valid: it does not fit in "
+            "memory for the current algorithm, dataset, and GPU type. "
+            "Try a smaller batch size, or use batch_size='auto' to automatically "
+            "find the largest batch size that fits."
+        )
+
+    logger.info(f"Batch size {batch_size} is valid.")
 
 
 def determine_optimal_batch_size(
@@ -913,6 +984,7 @@ def _main(cfg: DictConfig) -> None:
 
         # Handle batch size configuration
         if isinstance(batch_size, str) and batch_size.lower() == "auto":
+            # Find the largest batch size that fits in RAM and GPU memory
             optimal_batch_size = determine_optimal_batch_size(
                 cfg=cfg,
                 dataset=pytorch_dataset,
@@ -923,6 +995,16 @@ def _main(cfg: DictConfig) -> None:
 
             batch_size = optimal_batch_size
         else:
+            # Check if the specified batch size fits in RAM and GPU memory
+            assert_valid_batch_size(
+                batch_size=int(batch_size),
+                cfg=cfg,
+                dataset=pytorch_dataset,
+                input_cross_embodiment_description=input_cross_embodiment_description,
+                output_cross_embodiment_description=output_cross_embodiment_description,
+                device=device,
+            )
+
             batch_size = int(batch_size)
 
         if world_size > 1:

@@ -15,6 +15,7 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
 from neuracore.ml.trainers.batch_autotuner import (
     BatchSizeAutotuner,
     find_optimal_batch_size,
+    is_valid_batch_size,
 )
 
 
@@ -167,3 +168,146 @@ def test_find_optimal_batch_size_passes_default_min_max_to_batch_size_autotuner(
     kwargs = mock_autotuner_cls.call_args.kwargs
     assert kwargs["min_batch_size"] == 2
     assert kwargs["max_batch_size"] == 80  # clamp to train dataset length
+
+
+def test_autotuner_is_valid_batch_size_delegates_to_test_batch_size():
+    """Instance method delegates to _test_batch_size and propagates its result."""
+    train_dataset = DummyDataset(length=16)
+    val_dataset = DummyDataset(length=16)
+    device = torch.device("cuda:0")
+
+    with patch("torch.cuda.is_available", return_value=True):
+        model = cast(NeuracoreModel, DummyModel(device=device))
+        autotuner = BatchSizeAutotuner(
+            model=model,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            min_batch_size=2,
+            max_batch_size=4,
+            num_iterations=2,
+        )
+
+    with (
+        patch.object(
+            BatchSizeAutotuner, "_test_batch_size", return_value=True
+        ) as mock_test,
+        patch.object(BatchSizeAutotuner, "_cleanup") as mock_cleanup,
+    ):
+        result = autotuner.is_valid_batch_size(batch_size=4)
+
+    assert result is True
+    mock_test.assert_called_once_with(4)
+    mock_cleanup.assert_called_once()
+
+
+def test_autotuner_is_valid_batch_size_returns_false_on_oom():
+    """When _test_batch_size reports OOM, is_valid_batch_size propagates False."""
+    train_dataset = DummyDataset(length=16)
+    val_dataset = DummyDataset(length=16)
+    device = torch.device("cuda:0")
+
+    with patch("torch.cuda.is_available", return_value=True):
+        model = cast(NeuracoreModel, DummyModel(device=device))
+        autotuner = BatchSizeAutotuner(
+            model=model,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            min_batch_size=2,
+            max_batch_size=4,
+            num_iterations=2,
+        )
+
+    with (
+        patch.object(BatchSizeAutotuner, "_test_batch_size", return_value=False),
+        patch.object(BatchSizeAutotuner, "_cleanup"),
+    ):
+        result = autotuner.is_valid_batch_size(batch_size=4)
+
+    assert result is False
+
+
+def test_module_is_valid_batch_size_returns_false_when_batch_size_exceeds_train_len():
+    """If batch_size > len(train_dataset) we must return False."""
+    cfg = OmegaConf.create({
+        "validation_split": 0.2,
+        "seed": 42,
+        "num_train_workers": 0,
+        "num_val_workers": 0,
+    })
+
+    mock_dataset = Mock(spec=PytorchSynchronizedDataset)
+    mock_dataset.__len__ = Mock(return_value=100)  # train split -> 80
+    mock_dataset.collate_fn = lambda x: x
+
+    device = torch.device("cuda:0")
+    model = cast(NeuracoreModel, DummyModel(device=device))
+
+    def fake_random_split(dataset, lengths, generator=None):
+        return (DummyDataset(80), DummyDataset(20))
+
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch.object(model, "to", return_value=model),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.random_split",
+            side_effect=fake_random_split,
+        ),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.BatchSizeAutotuner",
+        ) as mock_autotuner_cls,
+    ):
+        result = is_valid_batch_size(
+            cfg=cfg,
+            model=model,
+            dataset=mock_dataset,
+            batch_size=128,  # > 80 train samples
+            device=device,
+        )
+
+    assert result is False
+    mock_autotuner_cls.assert_not_called()
+
+
+def test_module_is_valid_batch_size_returns_false_when_autotuner_reports_oom():
+    """When the autotuner reports OOM the helper returns False."""
+    cfg = OmegaConf.create({
+        "validation_split": 0.2,
+        "seed": 42,
+        "num_train_workers": 0,
+        "num_val_workers": 0,
+    })
+
+    mock_dataset = Mock(spec=PytorchSynchronizedDataset)
+    mock_dataset.__len__ = Mock(return_value=100)
+    mock_dataset.collate_fn = lambda x: x
+
+    device = torch.device("cuda:0")
+    model = cast(NeuracoreModel, DummyModel(device=device))
+
+    def fake_random_split(dataset, lengths, generator=None):
+        return (DummyDataset(80), DummyDataset(20))
+
+    mock_autotuner_instance = MagicMock()
+    mock_autotuner_instance.is_valid_batch_size.return_value = False
+
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch.object(model, "to", return_value=model),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.random_split",
+            side_effect=fake_random_split,
+        ),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.BatchSizeAutotuner",
+            return_value=mock_autotuner_instance,
+        ),
+    ):
+        result = is_valid_batch_size(
+            cfg=cfg,
+            model=model,
+            dataset=mock_dataset,
+            batch_size=32,
+            device=device,
+        )
+
+    assert result is False

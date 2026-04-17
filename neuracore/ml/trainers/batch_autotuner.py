@@ -144,6 +144,19 @@ class BatchSizeAutotuner:
             device=str(self.device),
         )
 
+    def is_valid_batch_size(self, batch_size: int) -> bool:
+        """Check if a specific batch size fits in GPU memory without OOM.
+
+        Args:
+            batch_size: Batch size to validate.
+
+        Returns:
+            True if the batch size fits in GPU memory, False if it causes OOM.
+        """
+        is_valid = self._test_batch_size(batch_size)
+        self._cleanup()
+        return is_valid
+
     def _test_batch_size(self, batch_size: int) -> bool:
         """Test if a specific batch size works.
 
@@ -420,4 +433,71 @@ def find_optimal_batch_size(
 
     except Exception:
         logger.error("Batch size autotuning failed", exc_info=True)
+        raise
+
+
+def is_valid_batch_size(
+    cfg: DictConfig,
+    model: NeuracoreModel,
+    dataset: PytorchSynchronizedDataset,
+    batch_size: int,
+    device: torch.device,
+) -> bool:
+    """Check whether a specific batch size fits in RAM and GPU memory."""
+    # Split dataset into train and validation sets
+    dataset_size = len(dataset)
+    train_split = 1 - cfg.validation_split
+    train_size = int(train_split * dataset_size)
+    val_size = dataset_size - train_size
+    generator = torch.Generator().manual_seed(cfg.seed)
+    train_dataset, val_dataset = random_split(
+        dataset, [train_size, val_size], generator=generator
+    )
+
+    try:
+        if batch_size > len(train_dataset):
+            logger.info(
+                "Batch size %d exceeds train dataset size %d; treating as invalid.",
+                batch_size,
+                len(train_dataset),
+            )
+            return False
+
+        model = model.to(device)
+
+        num_train_workers = min(cfg.num_train_workers, cpu_count())
+        num_val_workers = min(cfg.num_val_workers, cpu_count())
+
+        logger.info(
+            f"Validating batch_size: {batch_size}, "
+            f"num_train_workers: {num_train_workers}, "
+            f"num_val_workers: {num_val_workers}"
+        )
+
+        autotuner = BatchSizeAutotuner(
+            model=model,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            train_dataloader_kwargs={
+                "collate_fn": dataset.collate_fn,
+                "num_workers": num_train_workers,
+                "persistent_workers": num_train_workers > 0,
+                "pin_memory": True,
+            },
+            val_dataloader_kwargs={
+                "collate_fn": dataset.collate_fn,
+                "num_workers": num_val_workers,
+                "persistent_workers": num_val_workers > 0,
+                "pin_memory": True,
+            },
+            min_batch_size=batch_size,
+            max_batch_size=batch_size,
+        )
+
+        valid = autotuner.is_valid_batch_size(batch_size)
+
+        return valid
+
+    except Exception:
+        logger.error("Batch size validation failed", exc_info=True)
         raise
