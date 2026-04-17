@@ -17,7 +17,11 @@ from neuracore_types import (
     SynchronizedPoint,
 )
 
+import neuracore as nc
+from neuracore.core.const import API_URL
 from neuracore.core.endpoint import DirectPolicy
+
+TEST_API_KEY = "test_api_key"
 
 
 def _ordered_names(names_or_mapping):
@@ -558,3 +562,130 @@ def test_predict_filters_with_single_data_type(
     assert DataType.JOINT_POSITIONS not in called_sync_point.data
     assert DataType.JOINT_VELOCITIES not in called_sync_point.data
     assert DataType.JOINT_TORQUES not in called_sync_point.data
+
+
+@patch("neuracore.ml.utils.policy_inference.PolicyInference")
+def test_connect_direct_policy_with_train_run(
+    mock_policy_inference_class,
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+):
+    """Test connecting to a direct in-process policy using a training run name."""
+    nc.login(TEST_API_KEY)
+    port = np.random.randint(8000, 9000)
+    localhost = f"http://127.0.0.1:{port}"
+
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
+        json=[{
+            "id": "job_direct_123",
+            "name": "test_run_direct",
+            "status": "completed",
+        }],
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/job_direct_123/model_url",
+        json={"url": f"{localhost}/model.nc.zip"},
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{localhost}/model.nc.zip",
+        content=b"dummy model content",
+        status_code=200,
+    )
+
+    input_embodiment_description = {
+        DataType.JOINT_POSITIONS: _indexed_names(["joint1"]),
+    }
+    output_embodiment_description = {
+        DataType.JOINT_TARGET_POSITIONS: _indexed_names(["joint1"]),
+    }
+
+    mock_policy = MagicMock()
+    mock_policy.input_embodiment_description = input_embodiment_description
+    mock_policy.return_value = {
+        DataType.JOINT_TARGET_POSITIONS: {
+            "joint1": BatchedJointData(value=torch.full((1, 1, 1), 0.1))
+        }
+    }
+    mock_policy_inference_class.return_value = mock_policy
+
+    direct_policy = nc.policy(
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
+        train_run_name="test_run_direct",
+    )
+
+    preds = direct_policy.predict(
+        sync_point=SynchronizedPoint(
+            timestamp=1234567890.0,
+            data={
+                DataType.JOINT_POSITIONS: {
+                    "joint1": JointData(timestamp=1234567890.0, value=0.1),
+                },
+            },
+        )
+    )
+    assert DataType.JOINT_TARGET_POSITIONS in preds
+    assert "joint1" in preds[DataType.JOINT_TARGET_POSITIONS]
+
+    assert mock_policy_inference_class.call_args.kwargs["job_id"] == "job_direct_123"
+
+
+@patch("neuracore.ml.utils.policy_inference.PolicyInference")
+def test_connect_direct_policy_with_model_file(
+    mock_policy_inference_class,
+    temp_config_dir,
+    mock_model_mar,
+    mock_auth_requests,
+    reset_neuracore,
+):
+    """Test connecting to a direct in-process policy using a local model file."""
+    nc.login(TEST_API_KEY)
+
+    input_embodiment_description = {
+        DataType.JOINT_POSITIONS: _indexed_names(["joint1"]),
+    }
+    output_embodiment_description = {
+        DataType.JOINT_TARGET_POSITIONS: _indexed_names(["joint1"]),
+    }
+
+    mock_policy = MagicMock()
+    mock_policy.input_embodiment_description = input_embodiment_description
+    mock_policy.return_value = {
+        DataType.JOINT_TARGET_POSITIONS: {
+            "joint1": BatchedJointData(value=torch.full((1, 1, 1), 0.1))
+        }
+    }
+    mock_policy_inference_class.return_value = mock_policy
+
+    direct_policy = nc.policy(
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
+        model_file=mock_model_mar,
+    )
+
+    sync_point = SynchronizedPoint(
+        timestamp=1234567890.0,
+        data={
+            DataType.JOINT_POSITIONS: {
+                "joint1": JointData(timestamp=1234567890.0, value=0.1),
+            },
+            DataType.JOINT_TARGET_POSITIONS: {
+                "joint1": JointData(timestamp=1234567890.0, value=0.9),
+            },
+        },
+    )
+
+    preds = direct_policy.predict(sync_point=sync_point)
+    assert preds == {
+        DataType.JOINT_TARGET_POSITIONS: {
+            "joint1": BatchedJointData(value=torch.full((1, 1, 1), 0.1))
+        }
+    }
+
+    called_sync_point = mock_policy.call_args[0][0]
+    assert set(called_sync_point.data.keys()) == {DataType.JOINT_POSITIONS}
