@@ -13,8 +13,6 @@ from collections.abc import Coroutine
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
-import pyinstrument
-
 from neuracore.data_daemon.event_emitter import Emitter, init_emitter
 from neuracore.data_daemon.helpers import is_debug_mode
 
@@ -127,9 +125,13 @@ class EventLoopManager:
 
         This is the main loop for I/O-bound operations
         """
+        profiler = None
         try:
             debug_mode = is_debug_mode()
-            profiler = pyinstrument.Profiler() if debug_mode else None
+            if debug_mode:
+                import pyinstrument
+
+                profiler = pyinstrument.Profiler()
             if profiler:
                 profiler.start()
             loop = asyncio.new_event_loop()
