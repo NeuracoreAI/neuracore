@@ -32,6 +32,14 @@ from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 logger = logging.getLogger(__name__)
 
 
+def _parse_embodiment_description(raw_description: str) -> EmbodimentDescription:
+    """Parse a JSON CLI embodiment description, restoring typed keys."""
+    return {
+        DataType(data_type): {int(index): name for index, name in indexed_names.items()}
+        for data_type, indexed_names in json.loads(raw_description).items()
+    }
+
+
 class CheckpointRequest(BaseModel):
     """Request model for setting checkpoints."""
 
@@ -274,14 +282,12 @@ if __name__ == "__main__":
     try:
         args = parser.parse_args()
 
-        input_embodiment_description = {
-            DataType(k): v
-            for k, v in json.loads(str(args.input_embodiment_description)).items()
-        }
-        output_embodiment_description = {
-            DataType(k): v
-            for k, v in json.loads(str(args.output_embodiment_description)).items()
-        }
+        input_embodiment_description = _parse_embodiment_description(
+            args.input_embodiment_description
+        )
+        output_embodiment_description = _parse_embodiment_description(
+            args.output_embodiment_description
+        )
         start_server(
             input_embodiment_description=input_embodiment_description,
             output_embodiment_description=output_embodiment_description,

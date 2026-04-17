@@ -42,6 +42,14 @@ logger = logging.getLogger(__name__)
 PREDICTION_WAIT_TIME = 0.1
 
 
+def _parse_embodiment_description(raw_description: dict) -> EmbodimentDescription:
+    """Parse an API embodiment description, restoring typed keys."""
+    return {
+        DataType(data_type): {int(index): name for index, name in indexed_names.items()}
+        for data_type, indexed_names in raw_description.items()
+    }
+
+
 class Policy:
     """Base class for all policies."""
 
@@ -208,6 +216,7 @@ class ServerPolicy(Policy):
         self,
         base_url: str,
         headers: dict[str, str] | None = None,
+        input_embodiment_description: EmbodimentDescription | None = None,
     ):
         """Initialize the server policy with connection details.
 
@@ -215,10 +224,13 @@ class ServerPolicy(Policy):
             robot: Robot instance for accessing sensor streams.
             base_url: Base URL of the server.
             headers: Optional HTTP headers for authentication.
+            input_embodiment_description: Optional input spec used to project
+                local sync points before sending them to the server.
         """
         super().__init__()
         self._base_url = base_url
         self._headers = headers or {}
+        self._input_embodiment_description = input_embodiment_description
         self._is_local = "localhost" in base_url or "127.0.0.1" in base_url
 
     def set_checkpoint(
@@ -287,6 +299,13 @@ class ServerPolicy(Policy):
 
         if sync_point is None:
             sync_point = get_latest_sync_point()
+        if self._input_embodiment_description is not None:
+            filtered_data = {
+                data_type: sync_point.data[data_type]
+                for data_type in self._input_embodiment_description.keys()
+                if data_type in sync_point.data
+            }
+            sync_point.data = filtered_data
         response = None
         try:
             response = requests.post(
@@ -361,7 +380,10 @@ class LocalServerPolicy(ServerPolicy):
             host: Host to bind to
             endpoint_id: Optional deployed endpoint ID used for cloud log uploads.
         """
-        super().__init__(f"http://{host}:{port}")
+        super().__init__(
+            f"http://{host}:{port}",
+            input_embodiment_description=input_embodiment_description,
+        )
         self.input_embodiment_description = input_embodiment_description
         self.output_embodiment_description = output_embodiment_description
         self.org_id = org_id
@@ -551,14 +573,25 @@ class LocalServerPolicy(ServerPolicy):
 class RemoteServerPolicy(ServerPolicy):
     """Policy for connecting to remote endpoints on the Neuracore platform."""
 
-    def __init__(self, base_url: str, headers: dict[str, str]):
+    def __init__(
+        self,
+        base_url: str,
+        headers: dict[str, str],
+        input_embodiment_description: EmbodimentDescription | None = None,
+    ):
         """Initialize the remote server policy.
 
         Args:
             base_url: Base URL of the remote server.
             headers: HTTP headers for authentication.
+            input_embodiment_description: Optional input spec used to project
+                local sync points before sending them to the server.
         """
-        super().__init__(base_url, headers)
+        super().__init__(
+            base_url,
+            headers,
+            input_embodiment_description=input_embodiment_description,
+        )
 
 
 def policy(
@@ -695,10 +728,16 @@ def policy_remote_server(
                 f"Multiple active endpoints found with name {endpoint_name} "
             )
         endpoint = active_endpoints[0]
+        input_embodiment_description = None
+        if endpoint.get("input_embodiment_description"):
+            input_embodiment_description = _parse_embodiment_description(
+                endpoint["input_embodiment_description"]
+            )
 
         return RemoteServerPolicy(
             base_url=f"{API_URL}/org/{org_id}/models/endpoints/{endpoint['id']}",
             headers=auth.get_headers(),
+            input_embodiment_description=input_embodiment_description,
         )
     except requests.exceptions.ConnectionError:
         raise EndpointError(

@@ -112,6 +112,56 @@ def test_connect_endpoint(
     assert np.array_equal(pred_values, expected_values)
 
 
+def test_remote_endpoint_filters_sync_point_from_endpoint_input_description(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """Remote endpoints should only receive data types declared in metadata."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot")
+
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints",
+        json=[{
+            "id": "test_endpoint_id",
+            "name": "test_endpoint",
+            "status": "active",
+            "input_embodiment_description": {
+                "JOINT_POSITIONS": {
+                    "0": "joint1",
+                    "1": "joint2",
+                    "2": "joint3",
+                }
+            },
+        }],
+        status_code=200,
+    )
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints/test_endpoint_id/predict",
+        json=FAKE_PREDICTED_DATA_JSON,
+        status_code=200,
+    )
+
+    endpoint = nc.policy_remote_server("test_endpoint")
+
+    nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
+    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
+
+    endpoint.predict()
+
+    request_body = mock_auth_requests.request_history[-1].json()
+    assert set(request_body["data"]) == {"JOINT_POSITIONS"}
+    assert set(request_body["data"]["JOINT_POSITIONS"]) == {
+        "joint1",
+        "joint2",
+        "joint3",
+    }
+
+
 def test_connect_nonexistent_endpoint(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
