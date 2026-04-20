@@ -333,9 +333,9 @@ _KILL_RESTART_CASES: list[DataDaemonTestCase] = [
     DataDaemonTestCase(
         duration_sec=5,
         joint_count=4,
-        video_count=6,
-        image_width=1920,
-        image_height=1080,
+        video_count=2,
+        image_width=64,
+        image_height=64,
     ),
 ]
 

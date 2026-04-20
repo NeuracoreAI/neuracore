@@ -293,7 +293,7 @@ def test_cancel_then_start_new_recording(
                         context_index=0,
                         wall_started_at=None,
                         wall_stopped_at=0.0,
-                        data_type=case.data_type,
+                        timestamp_mode=case.timestamp_mode,
                     )
                 ]
                 verify_cloud_results(results=results, case=case)
