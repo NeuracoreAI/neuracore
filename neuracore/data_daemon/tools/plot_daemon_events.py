@@ -17,7 +17,7 @@ import argparse
 import csv
 from pathlib import Path
 
-import plotly.express as px
+import plotly.graph_objects as go
 
 from neuracore.data_daemon.helpers import get_daemon_db_path
 
@@ -46,22 +46,36 @@ def plot_events(csv_path: Path) -> None:
             event_order.append(row["event_name"])
             seen.add(row["event_name"])
 
-    events = {
-        "timestamp": [float(row["timestamp"]) for row in rows],
-        "event_name": [row["event_name"] for row in rows],
-    }
+    fig = go.Figure()
 
-    fig = px.scatter(
-        events,
-        x="timestamp",
-        y="event_name",
-        color="event_name",
-        category_orders={"event_name": event_order},
+    for event in event_order:
+        xs = []
+        ys = []
+
+        for row in rows:
+            if row["event_name"] == event:
+                xs.append(float(row["timestamp"]))
+                ys.append(event)
+
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                mode="markers",
+                name=event,
+                marker=dict(size=8, opacity=0.85),
+            )
+        )
+
+    fig.update_layout(
         title="Events over Time",
-        labels={
-            "timestamp": "Timestamp (s)",
-            "event_name": "Event",
-        },
+        xaxis_title="Timestamp (s)",
+        yaxis_title="Event",
+        yaxis=dict(
+            categoryorder="array",
+            categoryarray=event_order[::-1],
+        ),
+        height=max(400, len(event_order) * 35 + 150),
     )
 
     fig.update_traces(marker=dict(size=8, opacity=0.85))
