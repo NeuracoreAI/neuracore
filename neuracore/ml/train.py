@@ -339,25 +339,20 @@ def setup_logging(output_dir: str, rank: int = 0) -> None:
     """Setup logging configuration."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    stream_handler = logging.StreamHandler()
 
     if rank == 0:
         file_handler = logging.FileHandler(output_path / "train.log")
-        file_handler.setFormatter(JsonLineLogFormatter())
-        handlers: list[logging.Handler] = [file_handler]
-        logging.basicConfig(
-            level=logging.INFO,
-            handlers=handlers,
-            force=True,
-        )
     else:
         file_handler = logging.FileHandler(output_path / f"train-rank{rank}.log")
-        file_handler.setFormatter(JsonLineLogFormatter())
-        handlers = [file_handler]
-        logging.basicConfig(
-            level=logging.INFO,
-            handlers=handlers,
-            force=True,
-        )
+    file_handler.setFormatter(JsonLineLogFormatter())
+
+    handlers: list[logging.Handler] = [file_handler, stream_handler]
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=handlers,
+        force=True,
+    )
 
 
 def get_model_and_algorithm_config(
@@ -451,6 +446,9 @@ def assert_valid_batch_size(
             batch_size=batch_size,
             device=device,
         )
+    except Exception:
+        logger.error("Batch size validation failed", exc_info=True)
+        raise
     finally:
         del model
         del assert_dataset
@@ -502,19 +500,23 @@ def determine_optimal_batch_size(
         cfg, model_init_description
     )
 
-    optimal_batch_size = find_optimal_batch_size(
-        cfg=cfg,
-        model=model,
-        dataset=autotuning_dataset,
-        device=device,
-    )
-
-    # Clean up
-    del model
-    del autotuning_dataset
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    gc.collect()
+    try:
+        optimal_batch_size = find_optimal_batch_size(
+            cfg=cfg,
+            model=model,
+            dataset=autotuning_dataset,
+            device=device,
+        )
+    except Exception:
+        logger.error("Batch size autotuning failed", exc_info=True)
+        raise
+    finally:
+        # Clean up
+        del model
+        del autotuning_dataset
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
 
     logger.info(
         f"Autotuning complete. Optimal batch size per GPU: {optimal_batch_size}"
