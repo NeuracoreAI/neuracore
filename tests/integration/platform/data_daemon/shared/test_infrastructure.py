@@ -168,8 +168,11 @@ def apply_storage_state_action(storage_state_action: str) -> None:
     if storage_state_action == STORAGE_STATE_EMPTY:
         if db_path.exists():
             with sqlite3.connect(str(db_path)) as connection:
-                connection.execute("DELETE FROM traces")
-                connection.execute("DELETE FROM recordings")
+                for table in ("traces", "recordings"):
+                    try:
+                        connection.execute(f"DELETE FROM {table}")
+                    except sqlite3.OperationalError:
+                        pass
                 connection.commit()
         if recordings_root.exists():
             shutil.rmtree(recordings_root, ignore_errors=True)

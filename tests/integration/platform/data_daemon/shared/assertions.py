@@ -769,7 +769,6 @@ def verify_cloud_results(
         result, recording_index = recording_lookup[recording_id]
         logger.info("data pass: recording %s of dataset %r", recording_id, dataset_name)
         summary = _collect_episode_summary(synced_episode)
-        logger.info(result)
         try:
             _verify_synched_episode_summary(
                 summary=summary,
