@@ -9,7 +9,7 @@ from neuracore.core.cli.launch_server import run as launch_server
 from neuracore.core.cli.select_current_org import run as select_org
 from neuracore.data_daemon.main import app as data_daemon_app
 
-app = typer.Typer(add_completion=False, help="Neuracore command line interface.")
+app = typer.Typer(add_completion=True, help="Neuracore command line interface.")
 
 _training_app = None
 _training_import_error: Exception | None = None
