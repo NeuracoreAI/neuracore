@@ -1,0 +1,73 @@
+"""SQLite constants for data-daemon integration tests."""
+
+from __future__ import annotations
+
+RECORDINGS_TABLE = "recordings"
+TRACES_TABLE = "traces"
+
+COLUMN_RECORDING_ID = "recording_id"
+COLUMN_TRACE_ID = "trace_id"
+COLUMN_EXPECTED_TRACE_COUNT = "expected_trace_count"
+COLUMN_EXPECTED_TRACE_COUNT_REPORTED = "expected_trace_count_reported"
+COLUMN_PROGRESS_REPORTED = "progress_reported"
+COLUMN_STOPPED_AT = "stopped_at"
+COLUMN_TRACE_COUNT = "trace_count"
+COLUMN_WRITE_STATUS = "write_status"
+COLUMN_REGISTRATION_STATUS = "registration_status"
+COLUMN_UPLOAD_STATUS = "upload_status"
+COLUMN_BYTES_UPLOADED = "bytes_uploaded"
+COLUMN_TOTAL_BYTES = "total_bytes"
+COLUMN_NUM_UPLOAD_ATTEMPTS = "num_upload_attempts"
+COLUMN_ERROR_CODE = "error_code"
+COLUMN_ERROR_MESSAGE = "error_message"
+COLUMN_LAST_UPDATED = "last_updated"
+
+STAT_EXPECTED_TRACE_COUNT = "expected_trace_count"
+STAT_EXPECTED_TRACE_COUNT_REPORTED = "expected_trace_count_reported"
+STAT_PROGRESS_REPORTED = "progress_reported"
+STAT_TOTAL_TRACES = "total_traces"
+STAT_NON_PENDING_REGISTRATION_TRACES = "non_pending_registration_traces"
+STAT_REGISTERED_TRACES = "registered_traces"
+STAT_UPLOAD_PROGRESS_TRACES = "upload_progress_traces"
+STAT_UPLOADED_TRACES = "uploaded_traces"
+
+TRACE_UPLOAD_STAT_WRITE_STATUS_COUNTS = "write_status_counts"
+TRACE_UPLOAD_STAT_REGISTRATION_STATUS_COUNTS = "registration_status_counts"
+TRACE_UPLOAD_STAT_UPLOAD_STATUS_COUNTS = "upload_status_counts"
+TRACE_UPLOAD_STAT_TRACE_ROWS = "trace_rows"
+
+TRACE_UPLOAD_DETAIL_COLUMNS = (
+    COLUMN_TRACE_ID,
+    COLUMN_WRITE_STATUS,
+    COLUMN_REGISTRATION_STATUS,
+    COLUMN_UPLOAD_STATUS,
+    COLUMN_BYTES_UPLOADED,
+    COLUMN_TOTAL_BYTES,
+    COLUMN_NUM_UPLOAD_ATTEMPTS,
+    COLUMN_ERROR_CODE,
+    COLUMN_ERROR_MESSAGE,
+    COLUMN_LAST_UPDATED,
+)
+
+TRACE_UPLOAD_INTEGER_COLUMNS = {
+    COLUMN_BYTES_UPLOADED,
+    COLUMN_TOTAL_BYTES,
+    COLUMN_NUM_UPLOAD_ATTEMPTS,
+}
+
+RECORDING_PROGRESS_REPORTED = "reported"
+
+TRACE_WRITE_WRITTEN = "written"
+
+TRACE_REGISTRATION_PENDING = "pending"
+TRACE_REGISTRATION_REGISTERED = "registered"
+
+TRACE_UPLOAD_QUEUED = "queued"
+TRACE_UPLOAD_UPLOADING = "uploading"
+TRACE_UPLOAD_UPLOADED = "uploaded"
+
+TRACE_UPLOAD_PROGRESS_STATUSES = {
+    TRACE_UPLOAD_QUEUED,
+    TRACE_UPLOAD_UPLOADING,
+    TRACE_UPLOAD_UPLOADED,
+}
