@@ -36,8 +36,37 @@ jobs:
         large-packages: true
         swap-storage: true
 
-    - name: Checkout code
+    - name: Checkout repository metadata
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Resolve latest release tag
+      id: release-tag
+      run: |
+        latest_release_tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
+        if [ -z "$latest_release_tag" ]; then
+          echo "::error::No release tag matching v* found"
+          exit 1
+        fi
+        echo "latest_release_tag=$latest_release_tag" >> "$GITHUB_OUTPUT"
+        echo "Latest release tag: $latest_release_tag"
+
+    - name: Checkout test harness
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ matrix.environment == 'production' && steps.release-tag.outputs.latest_release_tag || 'main' }}
+        fetch-depth: 0
+
+    - name: Verify production test harness ref
+      if: ${{ matrix.environment == 'production' }}
+      run: |
+        checked_out_ref="$(git describe --tags --exact-match HEAD)"
+        expected_ref="${{ steps.release-tag.outputs.latest_release_tag }}"
+        if [ "$checked_out_ref" != "$expected_ref" ]; then
+          echo "::error::Expected production test harness ref $expected_ref, got $checked_out_ref"
+          exit 1
+        fi
 
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v4
@@ -55,6 +84,27 @@ jobs:
       run: |
         python -m pip install --no-cache-dir --upgrade pip
         pip install --no-cache-dir ".[dev,ml,examples]"
+
+    - name: Resolve test harness
+      run: |
+        echo "Test harness environment: ${{ matrix.environment }}"
+        echo "Test harness ref: ${{ matrix.environment == 'production' && steps.release-tag.outputs.latest_release_tag || 'main' }}"
+        echo "Test harness commit: $(git rev-parse HEAD)"
+        echo "Test harness paths:"
+        echo "  tests/integration/platform/test_runtime_data_flow.py"
+        echo "  tests/integration/platform/test_consume_stream.py"
+        python - << 'EOF'
+        import neuracore
+
+        print(f"Installed neuracore version: {neuracore.__version__}")
+        EOF
+
+    - name: Run Recording and Playback Integration Test
+      env:
+        NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
+        NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
+      run: pytest -o log_cli=true --log-cli-level=INFO tests/integration/platform/test_runtime_data_flow.py
 
     - name: Run Consume Stream Integration Test
       env:

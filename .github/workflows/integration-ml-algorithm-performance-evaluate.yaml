@@ -85,36 +85,57 @@ jobs:
         include: ${{ fromJson(needs.discover-algorithms.outputs.matrix) }}
 
     steps:
-    - name: Checkout code
-      if: ${{ matrix.environment != 'production' }}
-      uses: actions/checkout@v4
-      with:
-        ref: main
-    - name: Checkout production test harness
-      if: ${{ matrix.environment == 'production' }}
-      uses: actions/checkout@v4
-      with:
-        ref: ${{ needs.discover-algorithms.outputs.latest_release_tag }}
-    - name: Pull LFS objects
-      run: git lfs pull
-
-    - name: Restore training job ID from cache
+    - name: Restore training metadata from cache
       uses: actions/cache/restore@v4
       with:
-        path: training_job_id.txt
+        path: |
+          training_job_id.txt
+          test_harness_ref.txt
         # No exact key match is expected; restore-keys picks the most recent run.
-        key: training-job-${{ matrix.algorithm }}-${{ matrix.environment }}-${{ matrix.test-harness-ref }}-never-exact
+        key: training-job-${{ matrix.algorithm }}-${{ matrix.environment }}-never-exact
         restore-keys: |
-          training-job-${{ matrix.algorithm }}-${{ matrix.environment }}-${{ matrix.test-harness-ref }}-
+          training-job-${{ matrix.algorithm }}-${{ matrix.environment }}-
 
-    - name: Read training job ID
+    - name: Read training metadata
+      id: training-metadata
       run: |
         if [ ! -f training_job_id.txt ]; then
           echo "::error::No cached training job ID found for ${{ matrix.algorithm }}/${{ matrix.environment }}. Did the Start Training workflow succeed?"
           exit 1
         fi
-        echo "TRAINING_JOB_ID=$(cat training_job_id.txt)" >> $GITHUB_ENV
+        echo "TRAINING_JOB_ID=$(cat training_job_id.txt)" >> "$GITHUB_ENV"
+
+        if [ "${{ matrix.environment }}" = "production" ]; then
+          if [ ! -f test_harness_ref.txt ]; then
+            echo "::error::No cached test harness ref found for production ${{ matrix.algorithm }}. Did the Start Training workflow write metadata?"
+            exit 1
+          fi
+          test_harness_ref="$(cat test_harness_ref.txt)"
+        else
+          test_harness_ref="main"
+        fi
+
+        echo "TEST_HARNESS_REF=$test_harness_ref" >> "$GITHUB_ENV"
+        echo "test_harness_ref=$test_harness_ref" >> "$GITHUB_OUTPUT"
         echo "Training job ID: $(cat training_job_id.txt)"
+        echo "Test harness ref: $test_harness_ref"
+
+    - name: Checkout test harness
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ steps.training-metadata.outputs.test_harness_ref }}
+        fetch-depth: 0
+    - name: Pull LFS objects
+      run: git lfs pull
+
+    - name: Verify production test harness ref
+      if: ${{ matrix.environment == 'production' }}
+      run: |
+        checked_out_ref="$(git describe --tags --exact-match HEAD)"
+        if [ "$checked_out_ref" != "$TEST_HARNESS_REF" ]; then
+          echo "::error::Expected production test harness ref $TEST_HARNESS_REF, got $checked_out_ref"
+          exit 1
+        fi
 
     - name: Set up Python ${{ matrix.python-version }}
       if: ${{ matrix.environment != 'production' }}
@@ -137,7 +158,7 @@ jobs:
       run: |
         echo "TEST_HARNESS_PATH=tests/integration/ml/test_algorithm_performance.py" >> "$GITHUB_ENV"
         echo "Test harness environment: ${{ matrix.environment }}"
-        echo "Test harness ref: ${{ matrix.test-harness-ref }}"
+        echo "Test harness ref: $TEST_HARNESS_REF"
         echo "Test harness commit: $(git rev-parse HEAD)"
         echo "Test harness path: tests/integration/ml/test_algorithm_performance.py"
         python - << 'EOF'
