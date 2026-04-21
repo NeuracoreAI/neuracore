@@ -118,7 +118,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         image_width=256,
         image_height=256,
         parallel_contexts=8,
-        recording_count=2,
+        recording_count=16,
         joint_fps=80,
         producer_channels=PRODUCER_PER_THREAD,
         context_duration_mode=DURATION_MODE_VARIABLE,
@@ -143,7 +143,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         image_width=1920,
         image_height=1080,
         parallel_contexts=2,
-        recording_count=2,
+        recording_count=16,
         context_duration_mode=DURATION_MODE_FIXED,
     ),
 )
