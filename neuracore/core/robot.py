@@ -12,12 +12,13 @@ import os
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from warnings import warn
 
 import requests
-from neuracore_types import RobotInstanceIdentifier
+from neuracore_types import DataType, RobotInstanceIdentifier
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
@@ -108,6 +109,7 @@ class Robot:
         self._auth: Auth = get_auth()
         self._temp_dir = None
         self._data_streams: dict[str, DataStream] = dict()
+        self._data_stream_counts: dict[DataType, int] = defaultdict(int)
         self._daemon_recording_context: DaemonRecordingContext | None = None
 
         self.org_id = org_id or get_current_org()
@@ -218,10 +220,12 @@ class Robot:
             RuntimeError: If the maximum number of data streams is exceeded.
             ValueError: If a stream with the same ID already exists.
         """
-        if len(self._data_streams) >= MAX_DATA_STREAMS:
+        if self._data_stream_counts[stream.data_type] > MAX_DATA_STREAMS:
             raise RuntimeError("Excessive number of data streams")
         if stream_id in self._data_streams:
             raise ValueError("Stream already exists")
+
+        self._data_stream_counts[stream.data_type] += 1
         self._data_streams[stream_id] = stream
 
     def get_data_stream(self, stream_id: str) -> DataStream | None:

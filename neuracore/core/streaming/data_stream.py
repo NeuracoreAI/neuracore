@@ -64,6 +64,11 @@ class DataStream(ABC):
         self._stream_name = stream_name
         self._producer_channel: ProducerChannel | None = None
 
+    @property
+    def data_type(self) -> DataType:
+        """Get the data type of this stream."""
+        return self._data_type
+
     def start_recording(self, context: DataRecordingContext) -> None:
         """Start recording data for this stream.
 
