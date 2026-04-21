@@ -15,6 +15,7 @@ from neuracore_types import (
     DataType,
     JointData,
     Recording,
+    RecordingMetadata,
     RGBCameraData,
     SynchronizationProgress,
     SynchronizedDataset,
@@ -153,25 +154,23 @@ def recordings_list():
     return [
         Recording(
             id="rec1",
-            name="recording1",
             robot_id=TEST_ROBOT_ID_1,
             instance=1,
             org_id="test-org-id",
             start_time=0.0,
             end_time=10.0,
             total_bytes=512,
-            created_at="2023-01-01T00:00:00Z",
+            metadata=RecordingMetadata(name="recording1"),
         ).model_dump(mode="json"),
         Recording(
             id="rec2",
-            name="recording2",
             robot_id=TEST_ROBOT_ID_2,
             instance=1,
             org_id="test-org-id",
             start_time=0.0,
             end_time=8.0,
             total_bytes=512,
-            created_at="2023-01-02T00:00:00Z",
+            metadata=RecordingMetadata(name="recording2"),
         ).model_dump(mode="json"),
     ]
 

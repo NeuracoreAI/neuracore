@@ -389,12 +389,44 @@ class Dataset:
         )
         response.raise_for_status()
 
-    @staticmethod
-    def _format_failure_summary(failed_recording_ids: list[str]) -> str:
-        summary = ", ".join(failed_recording_ids[:3])
-        if len(failed_recording_ids) > 3:
-            summary += ", ..."
-        return summary
+    def _format_failure_summary(self, failed_recording_ids: list[str]) -> str:
+        id_to_name = {r.id: r.name for r in self._recordings_cache}
+        auth_headers = get_auth().get_headers()
+        for recording_id in failed_recording_ids:
+            if recording_id not in id_to_name:
+                try:
+                    response = requests.get(
+                        f"{API_URL}/org/{self.org_id}/recording/{recording_id}",
+                        headers=auth_headers,
+                    )
+                    response.raise_for_status()
+                    recording_model = RecordingModel.model_validate(response.json())
+                    id_to_name[recording_id] = recording_model.metadata.name
+                except Exception:
+                    logger.debug("Failed to fetch name for recording %s", recording_id)
+                    id_to_name[recording_id] = recording_id
+        return "".join(
+            f"\n{id_to_name[recording_id]}" for recording_id in failed_recording_ids
+        )
+
+    def _raise_sync_failure(
+        self,
+        failed_recording_ids: list[str],
+        processed: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        recording_names = self._format_failure_summary(failed_recording_ids)
+        progress_line = (
+            f"\n({processed}/{total} recordings synchronized)."
+            if processed is not None and total is not None
+            else ""
+        )
+        raise DatasetError(
+            f"Synchronization failed for dataset '{self.name}'.\n\n"
+            f"Problematic recordings:\n{recording_names}\n\n"
+            "These recordings might have missing or extra sensor data or "
+            f"invalid synchronization parameters were provided.{progress_line}"
+        )
 
     def _synchronize(
         self,
@@ -453,8 +485,16 @@ class Dataset:
             headers=get_auth().get_headers(),
         )
         if response.status_code == 409:
-            detail = extract_error_detail(response)
-            raise DatasetError(detail or "Synchronization failed.")
+            detail = extract_error_detail(response) or "Synchronization failed."
+            prefix = "Synchronization failed for recording(s): "
+            if prefix in detail:
+                failed_ids = [
+                    rid.strip()
+                    for rid in detail.split(prefix, 1)[1].split(",")
+                    if rid.strip()
+                ]
+                self._raise_sync_failure(failed_ids)
+            raise DatasetError(detail)
         response.raise_for_status()
         return SynchronizationProgress.model_validate(response.json())
 
@@ -496,16 +536,12 @@ class Dataset:
             cross_embodiment_union=cross_embodiment_union,
         )
 
-        synchronization_progress = self._get_synchronization_progress(synced_dataset.id)
         total = synced_dataset.num_demonstrations
+        synchronization_progress = self._get_synchronization_progress(synced_dataset.id)
         processed = synchronization_progress.num_synchronized_demonstrations
         if synchronization_progress.has_failures:
-            failure_summary = self._format_failure_summary(
-                synchronization_progress.failed_recording_ids
-            )
-            raise DatasetError(
-                "Synchronization failed for recording(s): "
-                f"{failure_summary} ({processed}/{total} recordings synchronized)."
+            self._raise_sync_failure(
+                synchronization_progress.failed_recording_ids, processed, total
             )
         if total != processed:
             pbar = tqdm(total=total, desc="Synchronizing dataset", unit="recording")
@@ -518,13 +554,8 @@ class Dataset:
                 )
                 if synchronization_progress.has_failures:
                     pbar.close()
-                    failure_summary = self._format_failure_summary(
-                        synchronization_progress.failed_recording_ids
-                    )
-                    raise DatasetError(
-                        "Synchronization failed for recording(s): "
-                        f"{failure_summary} "
-                        f"({processed}/{total} recordings synchronized)."
+                    self._raise_sync_failure(
+                        synchronization_progress.failed_recording_ids, processed, total
                     )
 
                 new_processed = synchronization_progress.num_synchronized_demonstrations
