@@ -2,13 +2,18 @@
 
 import base64
 import json
+import struct
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+import msgpack
 from neuracore_types import DATA_TYPE_CONTENT_MAPPING, DataType
 from pydantic import BaseModel
+
+_BATCH_RECORD_LENGTH_FORMAT = "!I"
+_BATCH_RECORD_LENGTH_SIZE = 4
 
 
 def get_content_type(data_type: DataType) -> str:
@@ -432,7 +437,7 @@ class CompleteMessage:
     data_type_name: str
     robot_instance: int
     received_at: str
-    data: str
+    data: bytes
     final_chunk: bool
 
     @classmethod
@@ -481,50 +486,75 @@ class CompleteMessage:
             robot_instance=robot_instance,
             final_chunk=final_chunk,
             received_at=datetime.now(timezone.utc).isoformat(),
-            data=base64.b64encode(data).decode("ascii"),
+            data=bytes(data),
         )
 
-    def to_dict(self) -> dict:
-        """Convert the TraceRecord to a dict.
+    def to_batch_record(self) -> bytes:
+        """Serialize CompleteMessage into a length-prefixed msgpack record."""
+        packed = msgpack.packb(
+            {
+                "producer_id": self.producer_id,
+                "trace_id": self.trace_id,
+                "recording_id": self.recording_id,
+                "dataset_id": self.dataset_id,
+                "dataset_name": self.dataset_name,
+                "robot_name": self.robot_name,
+                "robot_id": self.robot_id,
+                "data_type": self.data_type.value,
+                "data_type_name": self.data_type_name,
+                "robot_instance": self.robot_instance,
+                "received_at": self.received_at,
+                "data": self.data,
+                "final_chunk": self.final_chunk,
+            },
+            use_bin_type=True,
+        )
+        return struct.pack(_BATCH_RECORD_LENGTH_FORMAT, len(packed)) + packed
 
-        The returned dict will contain the following keys
-        with corresponding types:
-        - "producer_id": str
-        - "trace_id": str
-        - "received_at": str
-        - "data": str (base64 encoded)
+    @classmethod
+    def iter_batch_records(cls, raw: bytes) -> list["CompleteMessage"]:
+        """Parse length-prefixed msgpack CompleteMessage records from raw bytes."""
+        messages: list[CompleteMessage] = []
+        offset = 0
+        total = len(raw)
 
-        :return: dict containing the trace record data
-        """
-        return {
-            "producer_id": self.producer_id,
-            "trace_id": self.trace_id,
-            "recording_id": self.recording_id,
-            "dataset_id": self.dataset_id,
-            "dataset_name": self.dataset_name,
-            "robot_name": self.robot_name,
-            "robot_id": self.robot_id,
-            "data_type": self.data_type.value,
-            "data_type_name": self.data_type_name,
-            "robot_instance": self.robot_instance,
-            "received_at": self.received_at,
-            "data": self.data,
-            "final_chunk": self.final_chunk,
-        }
+        while offset < total:
+            if total - offset < _BATCH_RECORD_LENGTH_SIZE:
+                raise ValueError("Truncated batch record length header")
 
-    def to_json(self) -> str:
-        """Convert the TraceRecord to a JSON string.
+            record_len = struct.unpack(
+                _BATCH_RECORD_LENGTH_FORMAT,
+                raw[offset : offset + _BATCH_RECORD_LENGTH_SIZE],
+            )[0]
+            offset += _BATCH_RECORD_LENGTH_SIZE
 
-        The returned JSON string will contain the following
-        keys with corresponding types:
-        - "producer_id": str
-        - "trace_id": str
-        - "received_at": str
-        - "data": str (base64 encoded)
+            if total - offset < record_len:
+                raise ValueError("Truncated batch record payload")
 
-        :return: JSON string containing the trace record data
-        """
-        return json.dumps(self.to_dict())
+            payload = raw[offset : offset + record_len]
+            offset += record_len
+
+            record = msgpack.unpackb(payload, raw=False)
+
+            messages.append(
+                cls(
+                    producer_id=str(record["producer_id"]),
+                    trace_id=str(record["trace_id"]),
+                    recording_id=str(record["recording_id"]),
+                    dataset_id=record.get("dataset_id"),
+                    dataset_name=record.get("dataset_name"),
+                    robot_name=record.get("robot_name"),
+                    robot_id=record.get("robot_id"),
+                    data_type=DataType(record["data_type"]),
+                    data_type_name=str(record["data_type_name"]),
+                    robot_instance=int(record["robot_instance"]),
+                    received_at=str(record["received_at"]),
+                    data=bytes(record["data"]),
+                    final_chunk=bool(record["final_chunk"]),
+                )
+            )
+
+        return messages
 
 
 def parse_data_type(value: str | DataType) -> DataType:

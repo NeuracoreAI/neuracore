@@ -1,4 +1,3 @@
-import base64
 import logging
 import math
 import time
@@ -206,8 +205,7 @@ def test_large_payload_chunked_round_trip_over_ipc(
     _drain_messages(daemon, daemon_comm, expected=expected_chunks)
 
     assert len(rdm.enqueued) == 1
-    encoded = rdm.enqueued[0].data
-    assert base64.b64decode(encoded) == payload
+    assert rdm.enqueued[0].data == payload
 
     producer.stop_producer_channel()
     daemon_comm.cleanup_daemon()
@@ -272,7 +270,7 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context, emitter) 
     )
     _drain_messages(daemon, daemon_comm, expected=expected)
 
-    by_producer = {msg.producer_id: base64.b64decode(msg.data) for msg in rdm.enqueued}
+    by_producer = {msg.producer_id: msg.data for msg in rdm.enqueued}
     assert by_producer["producer-a"] == payload_a
     assert by_producer["producer-b"] == payload_b
 
@@ -362,7 +360,7 @@ def test_interleaved_chunks_reassemble_per_producer(
 
     _drain_messages(daemon, daemon_comm, expected=len(interleaved))
 
-    by_producer = {msg.producer_id: base64.b64decode(msg.data) for msg in rdm.enqueued}
+    by_producer = {msg.producer_id: msg.data for msg in rdm.enqueued}
     assert by_producer["producer-a"] == payload_a
     assert by_producer["producer-b"] == payload_b
 

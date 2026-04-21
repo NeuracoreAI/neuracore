@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 from collections.abc import Callable
@@ -13,6 +12,7 @@ import aiofiles
 import aiofiles.os
 
 from neuracore.data_daemon.event_emitter import Emitter
+from neuracore.data_daemon.models import CompleteMessage
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
     StorageBudget,
 )
@@ -331,15 +331,9 @@ class _BatchEncoderWorker:
                 raw_bytes = await f.read()
 
             def encoding_work(raw_bytes: bytes) -> None:
-                for raw_line in raw_bytes.splitlines():
-                    if not raw_line:
-                        continue
+                for message in CompleteMessage.iter_batch_records(raw_bytes):
+                    payload = message.data
 
-                    envelope = json.loads(raw_line.decode("utf-8"))
-                    data_base64 = envelope.get("data")
-                    if not isinstance(data_base64, str):
-                        continue
-                    payload = base64.b64decode(data_base64)
                     if not payload:
                         continue
 

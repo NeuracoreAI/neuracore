@@ -231,7 +231,7 @@ class TestHandleEndTrace:
         assert msg.trace_id == "trace-456"
         assert msg.final_chunk is True
         assert msg.data_type == DataType.JOINT_POSITIONS
-        assert msg.data == ""
+        assert msg.data == b""
 
     def test_handle_end_trace_raises_for_unknown_data_type(self, emitter) -> None:
         """_handle_end_trace should raise ValueError for unknown data_type."""

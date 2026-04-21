@@ -948,6 +948,22 @@ class TestConcurrentUploads:
             (trace_dir / "file.mp4").write_bytes(b"X" * 10)
 
         upload_done = asyncio.Event()
+        active_uploads_cleared = asyncio.Event()
+
+        class TrackingDict(dict):
+            def pop(self, key, default=None):
+                result = super().pop(key, default)
+                if not self:
+                    active_uploads_cleared.set()
+                return result
+
+            def __delitem__(self, key):
+                super().__delitem__(key)
+                if not self:
+                    active_uploads_cleared.set()
+
+        upload_manager._active_uploads = TrackingDict()
+
         completes = []
         emitter.on(
             Emitter.UPLOAD_COMPLETE,
@@ -971,6 +987,9 @@ class TestConcurrentUploads:
                 )
 
             await asyncio.wait_for(upload_done.wait(), timeout=TEST_TIMEOUT_SECONDS)
+            await asyncio.wait_for(
+                active_uploads_cleared.wait(), timeout=TEST_TIMEOUT_SECONDS
+            )
 
         assert len(completes) == 3
         assert len(upload_manager._active_uploads) == 0

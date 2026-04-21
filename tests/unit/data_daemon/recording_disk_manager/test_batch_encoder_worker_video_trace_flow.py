@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import importlib
 import json
 from collections.abc import Callable
@@ -12,6 +11,8 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from neuracore_types import DataType
+
+from neuracore.data_daemon.models import CompleteMessage
 
 
 class _FakeEmitter:
@@ -109,17 +110,37 @@ class _FakeStorageBudget:
         return self._over_limit
 
 
-def _envelope_line(payload: bytes) -> bytes:
-    return (
-        json.dumps({"data": base64.b64encode(payload).decode("ascii")}) + "\n"
-    ).encode("utf-8")
-
-
-def _write_batch_file(path: Path, payloads: list[bytes]) -> None:
+def _write_batch_file(
+    path: Path,
+    trace_key: _LocalTraceKey,
+    payloads: list[bytes],
+    *,
+    producer_id: str = "producer-test",
+    data_type_name: str = "test",
+    dataset_id: str | None = "dataset",
+    dataset_name: str | None = None,
+    robot_name: str | None = None,
+    robot_id: str | None = "robot",
+    robot_instance: int = 1,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as f:
-        for p in payloads:
-            f.write(_envelope_line(p))
+        for payload in payloads:
+            message = CompleteMessage.from_bytes(
+                producer_id=producer_id,
+                trace_id=trace_key.trace_id,
+                recording_id=trace_key.recording_id,
+                final_chunk=False,
+                data_type=trace_key.data_type,
+                data_type_name=data_type_name,
+                robot_instance=robot_instance,
+                data=payload,
+                dataset_id=dataset_id,
+                dataset_name=dataset_name,
+                robot_name=robot_name,
+                robot_id=robot_id,
+            )
+            f.write(message.to_batch_record())
 
 
 @dataclass(frozen=True)
@@ -244,7 +265,7 @@ async def test_video_trace_batch_feeds_payloads_in_order_and_finalises_on_trace_
     ).encode("utf-8")
     frame1 = b"\x00" * 36
     frame2 = b"\x01" * 36
-    _write_batch_file(batch_path, [meta, frame1, frame2])
+    _write_batch_file(batch_path, key, [meta, frame1, frame2], data_type_name="rgb")
 
     enc = manager.safe_get_encoder(key)
     assert isinstance(enc, _FakeVideoTrace)
@@ -281,8 +302,8 @@ async def test_finalises_only_after_all_pending_batches_complete(
 
     meta = json.dumps({"width": 2, "height": 2, "timestamp": 1.0}).encode("utf-8")
     frame = b"\x00" * 12
-    _write_batch_file(batch0, [meta, frame])
-    _write_batch_file(batch1, [frame])
+    _write_batch_file(batch0, key, [meta, frame], data_type_name="rgb")
+    _write_batch_file(batch1, key, [frame], data_type_name="rgb")
 
     job0 = _LocalBatchJob(trace_key=key, batch_path=batch0, trace_done=False)
     job1 = _LocalBatchJob(trace_key=key, batch_path=batch1, trace_done=True)
@@ -311,7 +332,7 @@ async def test_corrupt_payload_does_not_crash_logs_and_aborts_trace(
     meta = json.dumps({"width": 2, "height": 2, "timestamp": 1.0}).encode("utf-8")
     good = b"\x00" * 12
     bad = b"\xff" * 12
-    _write_batch_file(batch_path, [meta, good, bad])
+    _write_batch_file(batch_path, key, [meta, good, bad], data_type_name="rgb")
 
     enc = manager.safe_get_encoder(key)
     assert isinstance(enc, _FakeVideoTrace)
@@ -345,10 +366,10 @@ async def test_multiple_traces_concurrently_each_emit_trace_written(
 
     meta = json.dumps({"width": 2, "height": 2, "timestamp": 1.0}).encode("utf-8")
     frame = b"\x00" * 12
-    _write_batch_file(batch_a, [meta, frame])
+    _write_batch_file(batch_a, key_a, [meta, frame], data_type_name="rgb")
 
     payload_json = json.dumps({"i": 1}).encode("utf-8")
-    _write_batch_file(batch_b, [payload_json])
+    _write_batch_file(batch_b, key_b, [payload_json], data_type_name="custom")
 
     job_a = _LocalBatchJob(trace_key=key_a, batch_path=batch_a, trace_done=True)
     job_b = _LocalBatchJob(trace_key=key_b, batch_path=batch_b, trace_done=True)
@@ -403,7 +424,9 @@ async def test_trace_aborted_mid_batch_process_does_not_emit_trace_written_and_c
 
     meta = json.dumps({"width": 2, "height": 2, "timestamp": 1.0}).encode("utf-8")
     frame = b"\x00" * 12
-    _write_batch_file(batch_path, [meta, frame, frame, frame])
+    _write_batch_file(
+        batch_path, key, [meta, frame, frame, frame], data_type_name="rgb"
+    )
 
     enc = manager.safe_get_encoder(key)
     assert isinstance(enc, _FakeVideoTrace)
@@ -446,7 +469,7 @@ async def test_in_flight_count_balances_on_success_and_failure(
     p_ok = tmp_path / "batches" / "batch_0_ok.ndjson"
     meta = json.dumps({"width": 2, "height": 2, "timestamp": 1.0}).encode("utf-8")
     frame = b"\x00" * 12
-    _write_batch_file(p_ok, [meta, frame])
+    _write_batch_file(p_ok, key_ok, [meta, frame], data_type_name="rgb")
 
     job_ok = _LocalBatchJob(trace_key=key_ok, batch_path=p_ok, trace_done=True)
 
@@ -461,7 +484,7 @@ async def test_in_flight_count_balances_on_success_and_failure(
         recording_id="r_bad", data_type=DataType.RGB_IMAGES, trace_id="t_bad"
     )
     p_bad = tmp_path / "batches" / "batch_0_bad.ndjson"
-    _write_batch_file(p_bad, [meta, frame, frame])
+    _write_batch_file(p_bad, key_bad, [meta, frame, frame], data_type_name="rgb")
 
     enc = manager.safe_get_encoder(key_bad)
     assert isinstance(enc, _FakeVideoTrace)
