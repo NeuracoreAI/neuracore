@@ -537,6 +537,59 @@ def run_threaded_logging(
     return [str(role["marker_name"]) for role in roles]
 
 
+def log_frames(
+    spec: ContextSpec,
+    *,
+    recording_index: int,
+    marker_name: str,
+) -> list[str]:
+    """Log all frames for one recording, dispatching based on producer_channels.
+
+    Derives timestamp mode and all frame parameters from *spec*.
+    """
+    use_real_timestamps = spec.case.timestamp_mode == TIMESTAMP_MODE_REAL
+    recording_timestamp_start_s = (
+        spec.timestamp_start_s + recording_index * spec.case.duration_sec
+    )
+    joint_name_list = joint_names_for_count(spec.case.joint_count)
+    camera_name_list = camera_names(spec.case.video_count)
+
+    if spec.case.producer_channels == PRODUCER_PER_THREAD:
+        return run_threaded_logging(
+            robot_name=spec.robot_name,
+            joint_frame_count=spec.expected_joint_frames,
+            video_frame_count=spec.expected_video_frames,
+            recording_index=recording_index,
+            timestamp_start_s=recording_timestamp_start_s,
+            joint_fps=spec.case.joint_fps,
+            video_fps=spec.case.video_fps,
+            context_index=spec.context_index,
+            joint_names=joint_name_list,
+            camera_name_list=camera_name_list,
+            image_width=spec.case.image_width,
+            image_height=spec.case.image_height,
+            use_real_timestamps=use_real_timestamps,
+        )
+
+    log_synchronous_frames(
+        robot_name=spec.robot_name,
+        joint_frame_count=spec.expected_joint_frames,
+        video_frame_count=spec.expected_video_frames,
+        recording_index=recording_index,
+        timestamp_start_s=recording_timestamp_start_s,
+        joint_names=joint_name_list,
+        camera_name_list=camera_name_list,
+        image_width=spec.case.image_width,
+        image_height=spec.case.image_height,
+        joint_fps=spec.case.joint_fps,
+        video_fps=spec.case.video_fps,
+        marker_name=marker_name,
+        context_index=spec.context_index,
+        use_real_timestamps=use_real_timestamps,
+    )
+    return [marker_name]
+
+
 def _bind_worker_dataset(*, dataset_name: str, create_dataset: bool) -> None:
     """Ensure a worker is bound to the shared dataset before recording."""
     if create_dataset:
@@ -650,43 +703,13 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                     by_trace=by_trace
                 )
 
-            if case.producer_channels == PRODUCER_PER_THREAD:
-                current_marker_names = run_threaded_logging(
-                    robot_name=spec.robot_name,
-                    joint_frame_count=spec.expected_joint_frames,
-                    video_frame_count=spec.expected_video_frames,
-                    recording_index=recording_index,
-                    timestamp_start_s=recording_timestamp_start_s,
-                    joint_fps=case.joint_fps,
-                    video_fps=case.video_fps,
-                    context_index=spec.context_index,
-                    joint_names=joint_name_list,
-                    camera_name_list=camera_name_list,
-                    image_width=case.image_width,
-                    image_height=case.image_height,
-                    use_real_timestamps=use_real_timestamps,
-                )
-                if not marker_names:
-                    marker_names = current_marker_names
-            else:
-                if not marker_names:
-                    marker_names = ["marker_synchronous"]
-                log_synchronous_frames(
-                    robot_name=spec.robot_name,
-                    joint_frame_count=spec.expected_joint_frames,
-                    video_frame_count=spec.expected_video_frames,
-                    recording_index=recording_index,
-                    timestamp_start_s=recording_timestamp_start_s,
-                    joint_names=joint_name_list,
-                    camera_name_list=camera_name_list,
-                    image_width=case.image_width,
-                    image_height=case.image_height,
-                    joint_fps=case.joint_fps,
-                    video_fps=case.video_fps,
-                    marker_name=marker_names[0],
-                    context_index=spec.context_index,
-                    use_real_timestamps=use_real_timestamps,
-                )
+            current_marker_names = log_frames(
+                spec,
+                recording_index=recording_index,
+                marker_name="marker_synchronous",
+            )
+            if not marker_names:
+                marker_names = current_marker_names
 
             with Timer(
                 case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
