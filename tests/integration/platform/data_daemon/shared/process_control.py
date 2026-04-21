@@ -219,8 +219,9 @@ def _wait_and_escalate(candidate_pids: set[int], *, graceful_timeout_s: float) -
         if not pid_is_running(pid):
             continue
         if not wait_for_exit(pid, timeout_s=graceful_timeout_s):
-            force_kill(pid)
-            wait_for_exit(pid, timeout_s=5.0)
+            with Timer(5.0, label="stop_daemon_escalated", assert_limit=False):
+                force_kill(pid)
+                wait_for_exit(pid, timeout_s=5.0)
 
 
 def _remove_ipc_artefacts() -> None:
@@ -249,14 +250,15 @@ def stop_daemon(
         graceful_timeout_s: Seconds to wait for graceful exit before escalating
             to SIGKILL.  Ignored when ``method="sigkill"``.
     """
-    candidate_pids = _collect_candidate_pids()
-    _send_initial_stop(method, candidate_pids)
-    if method == STOP_METHOD_SIGKILL:
-        for pid in sorted(candidate_pids):
-            wait_for_exit(pid, timeout_s=5.0)
-    else:
-        _wait_and_escalate(candidate_pids, graceful_timeout_s=graceful_timeout_s)
-    _remove_ipc_artefacts()
+    with Timer(15.0, label=f"stop_daemon[{method}]", assert_limit=False):
+        candidate_pids = _collect_candidate_pids()
+        _send_initial_stop(method, candidate_pids)
+        if method == STOP_METHOD_SIGKILL:
+            for pid in sorted(candidate_pids):
+                wait_for_exit(pid, timeout_s=5.0)
+        else:
+            _wait_and_escalate(candidate_pids, graceful_timeout_s=graceful_timeout_s)
+        _remove_ipc_artefacts()
 
 
 def collect_daemon_pids_from_parallel_startup(worker_count: int) -> list[int]:

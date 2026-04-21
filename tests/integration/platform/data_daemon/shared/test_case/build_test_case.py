@@ -31,6 +31,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_MODE_VARIABLE,
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
+    PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
     STOP_METHOD_CLI,
     STORAGE_STATE_EMPTY,
@@ -264,9 +265,6 @@ class DataDaemonTestBatch:
 def case_id(case: DataDaemonTestCase) -> str:
     """Generate a short human-readable ID for a test case."""
     mode_short = "seq" if case.mode == MODE_SEQUENTIAL else "stag"
-    channels_short = (
-        "sync" if case.producer_channels == PRODUCER_SYNCHRONOUS else "threaded"
-    )
     parts = [
         f"{case.duration_sec}s",
         f"{case.recording_count}recs",
@@ -276,7 +274,6 @@ def case_id(case: DataDaemonTestCase) -> str:
     if case.parallel_contexts > DataDaemonTestCase.parallel_contexts:
         parts.append(mode_short)
     parts.append(f"{case.joint_count}joints")
-
     if case.joint_fps != DataDaemonTestCase.joint_fps:
         parts.append(f"{case.joint_fps}hz")
     if case.has_video:
@@ -284,7 +281,8 @@ def case_id(case: DataDaemonTestCase) -> str:
         parts.append(f"{case.image_width}x{case.image_height}")
         if case.video_fps != DataDaemonTestCase.video_fps:
             parts.append(f"{case.video_fps}hz")
-    parts.append(channels_short)
+    if case.producer_channels == PRODUCER_PER_THREAD:
+        parts.append("threaded")
     if case.wait:
         parts.append("wait")
     if case.timestamp_mode == TIMESTAMP_MODE_REAL:
@@ -485,7 +483,9 @@ def log_run_analysis(
             "case_id": case_id(case),
             "dataset_name": results[0].dataset_name if results else None,
             "timer_stats": {
-                label: dict(Timer._stats[label]) for label in session_labels
+                label: dict(Timer._stats[label])
+                for label in session_labels
+                if not label.startswith("stop_daemon")
             },
             "context_results": [
                 {
