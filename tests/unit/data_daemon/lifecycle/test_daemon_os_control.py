@@ -136,7 +136,7 @@ def test_install_signal_handlers_invokes_shutdown() -> None:
     orig_term = signal.getsignal(signal.SIGTERM)
     orig_int = signal.getsignal(signal.SIGINT)
     try:
-        install_signal_handlers(on_shutdown)
+        install_signal_handlers(on_shutdown=on_shutdown)
         handler = signal.getsignal(signal.SIGTERM)
         assert handler is not None
         with pytest.raises(KeyboardInterrupt):

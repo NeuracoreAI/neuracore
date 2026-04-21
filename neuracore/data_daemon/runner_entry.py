@@ -54,7 +54,9 @@ def main() -> None:
     )
 
     try:
-        install_signal_handlers(lambda _signum: None)
+        # Make SIGTERM raise KeyboardInterrupt
+        install_signal_handlers()
+
         context = runtime.initialize()
 
         if not isinstance(context, DaemonContext):
