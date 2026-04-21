@@ -19,7 +19,7 @@ if API_URL not in STANDARD_API_URLS:
 API_URL = os.getenv("NEURACORE_API_URL", "https://api.neuracore.com/api")
 DEFAULT_CACHE_DIR = Path.home() / ".neuracore" / "training"
 DEFAULT_RECORDING_CACHE_DIR = DEFAULT_CACHE_DIR / "recording_cache"
-MAX_DATA_STREAMS = 300
+MAX_DATA_STREAMS = 1000
 MAX_INPUT_ATTEMPTS = 3
 
 STREAMING_MINIMUM_BACKOFF_TIME_S = 0.05
