@@ -60,6 +60,7 @@ setup(
         "greenlet",
         "filelock>=3.0.0",
         "omegaconf",
+        "msgpack",
     ],
     extras_require={
         "examples": [

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
@@ -255,14 +254,8 @@ class _RawBatchWriter:
             if writer_state is None:
                 raise RuntimeError("Writer state unexpectedly None")
 
-            json_line = json.dumps(
-                raw_message.to_dict(),
-                separators=(",", ":"),
-                ensure_ascii=False,
-            )
-            encoded_line = (json_line + "\n").encode("utf-8")
+            writer_state.buffer.extend(raw_message.to_batch_record())
 
-            writer_state.buffer.extend(encoded_line)
             if raw_message.final_chunk:
                 writer_state.trace_done = True
             should_flush = (

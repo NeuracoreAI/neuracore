@@ -68,7 +68,7 @@ def test_data_chunk_payload_round_trip() -> None:
     assert restored == chunk
 
 
-def test_trace_record_serialization_encodes_data() -> None:
+def test_complete_message_batch_record_round_trip() -> None:
     record = CompleteMessage.from_bytes(
         "prod",
         "rec-1",
@@ -84,19 +84,24 @@ def test_trace_record_serialization_encodes_data() -> None:
         None,
     )
 
-    as_map = record.to_dict()
-    assert as_map["producer_id"] == "prod"
-    assert as_map["trace_id"] == "trace"
-    assert as_map["recording_id"] == "rec-1"
-    assert as_map["dataset_id"] is None
-    assert as_map["dataset_name"] is None
-    assert as_map["robot_name"] is None
-    assert as_map["robot_id"] is None
-    assert as_map["data_type"] == DataType.CUSTOM_1D.value
-    assert as_map["data_type_name"] == "custom_data"
-    assert as_map["robot_instance"] == 0
-    assert datetime.fromisoformat(as_map["received_at"])
-    assert as_map["data"] == base64.b64encode(b"hello").decode("ascii")
+    raw = record.to_batch_record()
+    restored = CompleteMessage.iter_batch_records(raw)
+
+    assert len(restored) == 1
+    parsed = restored[0]
+    assert parsed.producer_id == "prod"
+    assert parsed.trace_id == "trace"
+    assert parsed.recording_id == "rec-1"
+    assert parsed.dataset_id is None
+    assert parsed.dataset_name is None
+    assert parsed.robot_name is None
+    assert parsed.robot_id is None
+    assert parsed.data_type == DataType.CUSTOM_1D
+    assert parsed.data_type_name == "custom_data"
+    assert parsed.robot_instance == 0
+    assert datetime.fromisoformat(parsed.received_at)
+    assert parsed.data == b"hello"
+    assert parsed.final_chunk is True
 
 
 def test_channel_reader_reassembles_chunks() -> None:
