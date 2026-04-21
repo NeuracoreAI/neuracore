@@ -25,8 +25,8 @@ from neuracore.core.streaming.recording_state_manager import get_recording_state
 from neuracore.data_daemon.communications_management.producer_channel import (
     ProducerChannel,
 )
-from neuracore.data_daemon.communications_management.recording_context import (
-    RecordingContext as DaemonRecordingContext,
+from neuracore.data_daemon.communications_management.producer_context import (
+    ProducerContext as DaemonRecordingContext,
 )
 
 from .auth import Auth, get_auth

@@ -25,8 +25,8 @@ from neuracore.data_daemon.communications_management.data_bridge import Daemon
 from neuracore.data_daemon.communications_management.producer_channel import (
     ProducerChannel,
 )
-from neuracore.data_daemon.communications_management.recording_context import (
-    RecordingContext,
+from neuracore.data_daemon.communications_management.producer_context import (
+    ProducerContext,
 )
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
@@ -249,10 +249,10 @@ def test_zmq_commands_and_message_flow(
         rdm_emitter.remove_listener(Emitter.TRACE_WRITTEN, on_trace_written)
 
     recording_comm = CommunicationsManager(context=context)
-    recording_context = RecordingContext(
+    producer_context = ProducerContext(
         recording_id=recording_id, comm_manager=recording_comm
     )
-    recording_context.stop_recording()
+    producer_context.stop_recording()
 
     recording_comm.cleanup_producer()
 

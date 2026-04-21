@@ -348,6 +348,8 @@ class Daemon:
         Returns:
             None
         """
+        if channel.ring_buffer is not None:
+            return
         payload = message.payload.get(message.command.value, {})
         size = payload.get("size", DEFAULT_RING_BUFFER_SIZE)
 

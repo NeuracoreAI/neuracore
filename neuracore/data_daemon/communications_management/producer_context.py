@@ -1,4 +1,4 @@
-"""Recording-scoped context for sending recording control messages to the daemon."""
+"""Producer-scoped context for sending recording control messages to the daemon."""
 
 from __future__ import annotations
 
@@ -9,15 +9,15 @@ from neuracore.data_daemon.communications_management.communications_manager impo
 from neuracore.data_daemon.models import CommandType
 
 
-class RecordingContext:
-    """Recording-scoped context for sending recording control messages."""
+class ProducerContext:
+    """Producer-scoped context for sending recording control messages."""
 
     def __init__(
         self,
         recording_id: str | None = None,
         comm_manager: CommunicationsManager | None = None,
     ) -> None:
-        """Initialize the recording context."""
+        """Initialize the producer context."""
         self.recording_id = recording_id
         self._comm = comm_manager or CommunicationsManager()
         self._comm.create_producer_socket()
