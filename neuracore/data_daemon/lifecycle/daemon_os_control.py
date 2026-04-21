@@ -299,14 +299,15 @@ def remove_pid_file(pid_path: Path) -> None:
 
 
 def install_signal_handlers(
-    on_shutdown: Callable[[int], None],
     *,
+    on_shutdown: Callable[[int], None] | None = None,
     on_reload: Callable[[], None] | None = None,
 ) -> None:
     """Install signal handlers for graceful shutdown and optional reload."""
 
     def _handle_shutdown(signal_number: int, _stack_frame: FrameType | None) -> None:
-        on_shutdown(signal_number)
+        if on_shutdown:
+            on_shutdown(signal_number)
         raise KeyboardInterrupt
 
     def _handle_reload(_signal_number: int, _stack_frame: FrameType | None) -> None:

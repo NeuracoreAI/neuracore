@@ -8,10 +8,7 @@ import pytest
 from tests.integration.platform.data_daemon.shared.assertions import (
     clear_daemon_timer_stats as _clear_daemon_timer_stats,
 )
-from tests.integration.platform.data_daemon.shared.process_control import (
-    stop_daemon,
-    wait_for_daemon_shutdown,
-)
+from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.profiles import cleanup_test_profiles
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     SESSION_RUNS,
@@ -75,36 +72,6 @@ def cleanup_profiles():
     """Remove test-created daemon profiles after each test."""
     yield
     cleanup_test_profiles()
-
-
-@pytest.fixture(autouse=True)
-def await_daemon_shutdown():
-    """Wait for any in-progress daemon shutdown to complete before the test body runs.
-
-    Call this fixture before :func:`~assertions.assert_daemon_cleanup` to
-    avoid assertion races when the previous test left the daemon mid-shutdown.
-    The fixture polls until all daemon PIDs have exited and the PID file and
-    Unix socket are gone, then yields so the test can assert the clean state.
-
-    Raises:
-        TimeoutError: Propagated from :func:`wait_for_daemon_shutdown` when the
-            daemon does not finish shutting down within the default timeout.
-    """
-    stop_daemon(method="sigkill")
-    wait_for_daemon_shutdown()
-    yield
-
-
-@pytest.fixture(autouse=True)
-def kill_daemon_on_teardown():
-    """SIGKILL the daemon after each test to prevent orphaned processes.
-
-    Ensures that if a test is stopped early (e.g. Ctrl-C, --exitfirst, or an
-    unhandled exception that bypasses normal teardown), the daemon does not
-    remain running and pollute subsequent tests or the host environment.
-    """
-    yield
-    stop_daemon(method="sigkill")
 
 
 @pytest.fixture(autouse=True)
@@ -183,6 +150,12 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             if stats is None:
                 continue
             lines.append(_format_timer_stats_line(label, stats))
+
+    infra_labels = sorted(label for label in Timer._stats if label not in all_labels)
+    if infra_labels:
+        lines.append("\n  Infrastructure timings:")
+        for label in infra_labels:
+            lines.append(_format_timer_stats_line(label, Timer._stats[label]))
 
     lines.append(separator)
     terminalreporter.write_line("\n".join(lines))
