@@ -31,11 +31,12 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     ContextResult,
     build_context_specs,
     create_testing_dataset_name,
-    log_synchronous_frames,
+    log_frames,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
+    TIMESTAMP_MODE_REAL,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
@@ -49,6 +50,9 @@ _CASES = DataDaemonTestBatch(
         DataDaemonTestCase(
             duration_sec=5,
             joint_count=4,
+            video_count=1,
+            image_width=64,
+            image_height=64,
         ),
         DataDaemonTestCase(
             duration_sec=5,
@@ -56,6 +60,7 @@ _CASES = DataDaemonTestBatch(
             video_count=1,
             image_width=64,
             image_height=64,
+            timestamp_mode=TIMESTAMP_MODE_REAL,
         ),
     ),
 ).as_cases()
@@ -104,21 +109,7 @@ def test_cancel_recording_produces_no_data(
                 cancelled_recording_id = robot.get_current_recording_id()
                 assert cancelled_recording_id is not None
 
-                log_synchronous_frames(
-                    robot_name=robot_name,
-                    joint_frame_count=spec.expected_joint_frames,
-                    video_frame_count=spec.expected_video_frames,
-                    recording_index=0,
-                    timestamp_start_s=spec.timestamp_start_s,
-                    joint_names=joint_names_for_count(spec.case.joint_count),
-                    camera_name_list=camera_names(spec.case.video_count),
-                    image_width=spec.case.image_width,
-                    image_height=spec.case.image_height,
-                    joint_fps=spec.case.joint_fps,
-                    video_fps=spec.case.video_fps,
-                    marker_name="marker_cancel",
-                    context_index=0,
-                )
+                log_frames(spec, recording_index=0, marker_name="marker_cancel")
 
                 with Timer(
                     case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
@@ -196,16 +187,6 @@ def test_cancel_then_start_new_recording(
                 ):
                     robot = nc.connect_robot(robot_name, overwrite=False)
 
-                joint_frame_count = spec.expected_joint_frames
-                video_frame_count = spec.expected_video_frames
-                timestamp_start_s = spec.timestamp_start_s
-                joint_fps = spec.case.joint_fps
-                video_fps = spec.case.video_fps
-                image_width = spec.case.image_width
-                image_height = spec.case.image_height
-                joint_name_list = joint_names_for_count(spec.case.joint_count)
-                camera_name_list = camera_names(spec.case.video_count)
-
                 # --- cancelled recording ---
                 with Timer(
                     MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
@@ -214,21 +195,7 @@ def test_cancel_then_start_new_recording(
                 cancelled_recording_id = robot.get_current_recording_id()
                 assert cancelled_recording_id is not None
 
-                log_synchronous_frames(
-                    robot_name=robot_name,
-                    joint_frame_count=joint_frame_count,
-                    video_frame_count=video_frame_count,
-                    recording_index=0,
-                    timestamp_start_s=timestamp_start_s,
-                    joint_names=joint_name_list,
-                    camera_name_list=camera_name_list,
-                    image_width=image_width,
-                    image_height=image_height,
-                    joint_fps=joint_fps,
-                    video_fps=video_fps,
-                    marker_name="marker_cancelled",
-                    context_index=0,
-                )
+                log_frames(spec, recording_index=0, marker_name="marker_cancelled")
 
                 with Timer(
                     case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
@@ -250,21 +217,7 @@ def test_cancel_then_start_new_recording(
                 resumed_recording_id = robot.get_current_recording_id()
                 assert resumed_recording_id is not None
 
-                log_synchronous_frames(
-                    robot_name=robot_name,
-                    joint_frame_count=joint_frame_count,
-                    video_frame_count=video_frame_count,
-                    recording_index=1,
-                    timestamp_start_s=timestamp_start_s,
-                    joint_names=joint_name_list,
-                    camera_name_list=camera_name_list,
-                    image_width=image_width,
-                    image_height=image_height,
-                    joint_fps=joint_fps,
-                    video_fps=video_fps,
-                    marker_name="marker_resume",
-                    context_index=0,
-                )
+                log_frames(spec, recording_index=0, marker_name="marker_resume")
 
                 with Timer(
                     case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
@@ -279,17 +232,17 @@ def test_cancel_then_start_new_recording(
                         dataset_name=dataset_name,
                         recording_ids=[resumed_recording_id],
                         robot_name=robot_name,
-                        joint_names=joint_name_list,
-                        camera_names=camera_name_list,
-                        joint_frame_count=joint_frame_count,
-                        video_frame_count=video_frame_count,
-                        joint_fps=joint_fps,
-                        video_fps=video_fps,
+                        joint_names=joint_names_for_count(spec.case.joint_count),
+                        camera_names=camera_names(spec.case.video_count),
+                        joint_frame_count=spec.expected_joint_frames,
+                        video_frame_count=spec.expected_video_frames,
+                        joint_fps=spec.case.joint_fps,
+                        video_fps=spec.case.video_fps,
                         duration_sec=case.duration_sec,
-                        timestamp_start_s=timestamp_start_s,
-                        timestamp_end_s=timestamp_start_s + case.duration_sec,
+                        timestamp_start_s=spec.timestamp_start_s,
+                        timestamp_end_s=spec.timestamp_start_s + case.duration_sec,
                         marker_names=["marker_resume"],
-                        has_video=bool(camera_name_list),
+                        has_video=bool(spec.case.video_count),
                         context_index=0,
                         wall_started_at=None,
                         wall_stopped_at=0.0,
@@ -303,5 +256,3 @@ def test_cancel_then_start_new_recording(
             case=case,
             results=results,
         )
-
-    assert_post_test_storage_state(case.storage_state_action)

@@ -667,6 +667,7 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
+        self._stop_all_streams()
         self._get_daemon_recording_context().stop_recording(recording_id=recording_id)
 
         try:
