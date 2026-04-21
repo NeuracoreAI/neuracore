@@ -13,6 +13,7 @@ from neuracore_types import DataType
 from neuracore.data_daemon.communications_management.channel_reader import (
     CHUNK_HEADER_FORMAT,
     ChannelMessageReader,
+    CompletedChannelMessage,
 )
 from neuracore.data_daemon.communications_management.communications_manager import (
     CommunicationsManager,
@@ -32,6 +33,7 @@ from neuracore.data_daemon.models import (
     CompleteMessage,
     DataChunkPayload,
     MessageEnvelope,
+    TraceTransportMetadata,
 )
 from neuracore.data_daemon.recording_encoding_disk_manager import (
     recording_disk_manager as rdm_module,
@@ -49,6 +51,13 @@ def _str_or_none(value: str | int | None) -> str | None:
     into the str | None type expected by CompleteMessage.from_bytes().
     """
     return None if value is None else str(value)
+
+
+def _trace_metadata_dict(
+    metadata: TraceTransportMetadata | None,
+) -> dict[str, str | int | None]:
+    """Return trace metadata as a plain dict for downstream registration."""
+    return {} if metadata is None else metadata.to_dict()
 
 
 @dataclass
@@ -90,6 +99,11 @@ class ChannelState:
         """
         if not isinstance(ring_buffer, RingBuffer):
             raise TypeError("Invalid ring buffer instance provided for new channel.")
+        if self.ring_buffer is not None and self.ring_buffer is not ring_buffer:
+            try:
+                self.ring_buffer.close()
+            finally:
+                self.ring_buffer.unlink()
         self.ring_buffer = ring_buffer
         self.reader = ChannelMessageReader(ring_buffer)
         self.opened_at = datetime.now(timezone.utc)
@@ -350,8 +364,47 @@ class Daemon:
         """
         payload = message.payload.get(message.command.value, {})
         size = payload.get("size", DEFAULT_RING_BUFFER_SIZE)
+        shared_memory_name = payload.get("shared_memory_name")
+        if shared_memory_name:
+            channel.set_ring_buffer(
+                RingBuffer.open_shared(str(shared_memory_name), int(size))
+            )
+            return
 
-        channel.set_ring_buffer(RingBuffer(size))
+        channel.set_ring_buffer(RingBuffer(int(size)))
+
+    def _ensure_result_trace_registered(
+        self,
+        *,
+        channel: ChannelState,
+        result: CompletedChannelMessage,
+    ) -> str | None:
+        """Ensure trace/recording metadata is registered for a drained ring result."""
+        trace_id = result.trace_id
+        recording_id = self._trace_recordings.get(trace_id)
+        if recording_id is not None:
+            return recording_id
+
+        metadata = _trace_metadata_dict(result.metadata)
+        recording_id = _str_or_none(metadata.get("recording_id"))
+        if recording_id is None:
+            return None
+
+        channel.set_trace_id(trace_id)
+        self._register_trace(recording_id, trace_id)
+        self._register_trace_metadata(
+            trace_id,
+            {
+                "dataset_id": _str_or_none(metadata.get("dataset_id")),
+                "dataset_name": _str_or_none(metadata.get("dataset_name")),
+                "robot_name": _str_or_none(metadata.get("robot_name")),
+                "robot_id": _str_or_none(metadata.get("robot_id")),
+                "robot_instance": metadata.get("robot_instance"),
+                "data_type": _str_or_none(metadata.get("data_type")),
+                "data_type_name": _str_or_none(metadata.get("data_type_name")),
+            },
+        )
+        return recording_id
 
     # Consumer
     def _drain_channel_messages(self) -> None:
@@ -370,8 +423,13 @@ class Daemon:
             if result is None:
                 break
 
-            trace_id, data_type, payload = result
-            recording_id = self._trace_recordings.get(trace_id)
+            trace_id = result.trace_id
+            data_type = result.data_type
+            payload = result.payload
+            recording_id = self._ensure_result_trace_registered(
+                channel=channel,
+                result=result,
+            )
             if not recording_id:
                 logger.warning(
                     "No recording_id found for trace_id=%s, dropping message",
@@ -703,6 +761,7 @@ class Daemon:
         :param channel (ChannelState): the channel state of the producer
         :param message (MessageEnvelope): the message envelope containing
             the command and payload
+        :param reason: source of the trace finalization request
 
         Returns:
             None
@@ -712,8 +771,20 @@ class Daemon:
         if not trace_id:
             return
 
-        recording_id = self._trace_recordings.get(str(trace_id))
+        self._drain_single_channel_messages(channel)
+
+        registered_recording_id = self._trace_recordings.get(str(trace_id))
+        recording_id = registered_recording_id
         if not recording_id:
+            recording_id = _str_or_none(payload.get("recording_id"))
+        if not recording_id:
+            logger.warning(
+                "TRACE_END received without recording for producer_id=%s trace_id=%s "
+                "sequence_number=%s",
+                channel.producer_id,
+                trace_id,
+                message.sequence_number,
+            )
             return
 
         # Get metadata before removing the trace
@@ -727,13 +798,16 @@ class Daemon:
                     f"Unknown data_type '{data_type_str}' for trace_id={trace_id}."
                 )
         else:
-            raise ValueError(f"Missing data_type in metadata for trace_id={trace_id}.")
-
-        # Flush any fully assembled payloads already in the channel ring buffer
-        # before sending the trace-end marker into the RDM queue.
-        # Otherwise the RDM can close the trace and drop trailing
-        # frames that were buffered but not yet drained.
-        self._drain_single_channel_messages(channel)
+            if registered_recording_id is not None:
+                raise ValueError(
+                    f"Missing data_type in metadata for trace_id={trace_id}."
+                )
+            logger.warning(
+                "TRACE_END received for trace_id=%s without registered metadata; "
+                "ignoring finalization",
+                trace_id,
+            )
+            return
 
         # Send final_chunk=True message to RDM to signal trace end
         self._on_complete_message(

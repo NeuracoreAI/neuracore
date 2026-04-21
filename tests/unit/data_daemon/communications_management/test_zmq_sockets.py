@@ -205,10 +205,9 @@ def test_zmq_commands_and_message_flow(
     _loop_manager, rdm_emitter = loop_manager_with_emitter
     daemon, _, context = daemon_runtime
 
-    producer_comm = CommunicationsManager(context=context)
     recording_id = "rec-zmq-commands"
     producer = ProducerChannel(
-        comm_manager=producer_comm,
+        context=context,
         chunk_size=16,
         recording_id=recording_id,
         data_type=DataType.CUSTOM_1D,
@@ -275,10 +274,9 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
     """
     daemon, _, context = daemon_runtime
 
-    producer_comm = CommunicationsManager(context=context)
     recording_id = "rec-zmq-timeout"
     producer = ProducerChannel(
-        comm_manager=producer_comm,
+        context=context,
         chunk_size=16,
         recording_id=recording_id,
         data_type=DataType.CUSTOM_1D,
@@ -298,8 +296,8 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
         robot_id="robot-1",
         dataset_id="dataset-1",
     )
-    # ProducerChannel uses a sender thread; ensure daemon received DATA_CHUNK before we
-    # simulate crash (otherwise _trace_recordings stays empty and no TRACE_WRITTEN).
+    # ProducerChannel uses a sender thread; ensure the daemon observed trace data before
+    # we simulate crash (otherwise _trace_recordings stays empty and no TRACE_WRITTEN).
     assert _wait_for(
         lambda: (
             producer.channel_id in daemon.channels
@@ -347,9 +345,8 @@ def test_socket_cleanup_on_disconnect(daemon_runtime) -> None:
     """Test that channels are cleaned up after producer disconnects."""
     daemon, _, context = daemon_runtime
 
-    producer_comm = CommunicationsManager(context=context)
     producer = ProducerChannel(
-        comm_manager=producer_comm,
+        context=context,
         chunk_size=16,
         recording_id="rec-disconnect",
         data_type=DataType.CUSTOM_1D,

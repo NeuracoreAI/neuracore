@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import struct
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from neuracore_types import DataType
@@ -13,7 +15,11 @@ from neuracore.data_daemon.const import (
     CHUNK_HEADER_FORMAT,
     CHUNK_HEADER_SIZE,
     DATA_TYPE_FIELD_SIZE,
+    SHARED_RING_RECORD_HEADER_FORMAT,
+    SHARED_RING_RECORD_HEADER_SIZE,
+    SHARED_RING_RECORD_MAGIC,
 )
+from neuracore.data_daemon.models import SharedRingChunkMetadata, TraceTransportMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +31,10 @@ class PartialMessage:
     total_chunks: int
     received_chunks: int = 0
     chunks: dict[int, bytes] = field(default_factory=dict)
+    metadata: TraceTransportMetadata | None = None
 
     def add_chunk(self, index: int, data: bytes) -> bool:
-        """Add a chunk to the partial message.
-
-        If the chunk is already present in the partial message, returns
-        True if the partial message is complete, False otherwise.
-
-        If the chunk is not present, adds it to the partial message and
-        returns True if the partial message is complete, False otherwise.
-
-        :param index: index of the chunk
-        :param data: the chunk data
-        :return: whether the partial message is complete
-        """
+        """Add a chunk to the partial message."""
         if index in self.chunks:
             return self.received_chunks == self.total_chunks
 
@@ -47,101 +43,236 @@ class PartialMessage:
         return self.received_chunks == self.total_chunks
 
     def assemble(self) -> bytes:
-        """Assemble a complete logical message from the partial message.
-
-        If the partial message is missing any chunks, raises a ValueError
-        with a list of the missing chunks.
-
-        :return: the complete logical message as bytes
-        """
+        """Assemble a complete logical message from the partial message."""
         missing = [i for i in range(self.total_chunks) if i not in self.chunks]
         if missing:
             raise ValueError(f"Missing chunks: {missing}")
         return b"".join(self.chunks[i] for i in range(self.total_chunks))
 
+    def register_metadata(
+        self, trace_id: str, metadata: TraceTransportMetadata | None
+    ) -> None:
+        """Remember the trace-level metadata associated with this message."""
+        if metadata is None:
+            return
+        if self.metadata is None:
+            self.metadata = metadata
+            return
+
+        merged_metadata, mismatches = self.metadata.merged_with(metadata)
+        self.metadata = merged_metadata
+        for key, (existing, incoming) in mismatches.items():
+            logger.warning(
+                "Metadata mismatch for trace_id=%s field=%s (%s -> %s)",
+                trace_id,
+                key,
+                existing,
+                incoming,
+            )
+
+
+@dataclass
+class CompletedChannelMessage:
+    """A fully assembled logical message plus optional transport metadata."""
+
+    trace_id: str
+    data_type: DataType
+    payload: bytes
+    metadata: TraceTransportMetadata | None = None
+
+    def __iter__(self) -> Iterator[str | DataType | bytes]:
+        """Yield the trace ID, data type, and payload of the completed channel message.
+
+        This iterator is used to unpack the completed channel message into its
+        constituent parts. The yield order is:
+
+        1. trace_id (str)
+        2. data_type (DataType)
+        3. payload (bytes)
+
+        :yields: str, DataType, bytes
+        :rtype: Iterator[str, DataType, bytes]
+        """
+        yield self.trace_id
+        yield self.data_type
+        yield self.payload
+
+    def __getitem__(self, index: int) -> str | DataType | bytes:
+        """Return the component of the completed channel message at the given index.
+
+        The index maps to the following components:
+
+        0: trace_id (str)
+        1: data_type (DataType)
+        2: payload (bytes)
+
+        :param index: The index of the component to return.
+        :type index: int
+        :return: The component at the given index.
+        :rtype: str | DataType | bytes
+        """
+        return (self.trace_id, self.data_type, self.payload)[index]
+
+    def __len__(self) -> int:
+        """Return the length of the completed channel message.
+
+        The length of the completed channel message is 3, corresponding to the
+        three components of the message: trace_id, data_type, and payload.
+
+        :return: The length of the completed channel message.
+        :rtype: int
+        """
+        return 3
+
+    def __eq__(self, other: object) -> bool:
+        """Compare the completed channel message to another object.
+
+        If the other object is a tuple, compare the trace ID, data type, and payload
+        of the completed channel message to the corresponding components of the tuple.
+        Otherwise, compare the objects using the standard equality comparison.
+
+        :param other: The object to compare to.
+        :type other: object
+        :return: True if the objects are equal, False otherwise.
+        :rtype: bool
+        """
+        if isinstance(other, tuple):
+            return (self.trace_id, self.data_type, self.payload) == other
+        return super().__eq__(other)
+
 
 class ChannelMessageReader:
-    """Reads from a RingBuffer and yields complete logical messages.
-
-    - Uses the [header][chunk] format written by the daemon.
-    - Keeps PartialMessage state in memory while assembling.
-    """
+    """Reads from a RingBuffer and yields complete logical messages."""
 
     def __init__(self, ring_buffer: RingBuffer) -> None:
-        """Initialize the ChannelMessageReader."""
+        """Initialize the ChannelMessageReader.
+
+        :param ring_buffer: The RingBuffer instance to read from.
+        :type ring_buffer: RingBuffer
+        """
         self._ring_buffer = ring_buffer
         self._pending: dict[str, PartialMessage] = {}
 
-    def poll_one(self) -> tuple[str, DataType, bytes] | None:
-        """Try to read and assemble one complete message.
+    def has_pending_trace(self, trace_id: str) -> bool:
+        """Return True when the trace still has partially assembled chunks."""
+        return trace_id in self._pending
 
-        Returns:
-            (trace_id, data_type, payload_bytes) if a complete message is ready,
-            or None if not enough data yet.
-        """
-        # Need at least a header to proceed
-        if self._ring_buffer.available() < CHUNK_HEADER_SIZE:
+    def poll_one(self) -> CompletedChannelMessage | None:
+        """Try to read and assemble one complete message."""
+        available = self._ring_buffer.available()
+        if available < 4:
             return None
 
-        header_bytes = self._ring_buffer.peek(CHUNK_HEADER_SIZE)
-        if header_bytes is None:
+        prefix = self._ring_buffer.peek(4)
+        if prefix is None:
             return None
 
-        raw_trace_id, raw_data_type, chunk_index, total_chunks, chunk_len = (
-            struct.unpack(CHUNK_HEADER_FORMAT, header_bytes)
-        )
-        trace_id = raw_trace_id.rstrip(b"\x00").decode("utf-8", errors="ignore")
-        data_type_str = raw_data_type.rstrip(b"\x00").decode("utf-8", errors="ignore")
-        if len(data_type_str) > DATA_TYPE_FIELD_SIZE:
-            data_type_str = data_type_str[:DATA_TYPE_FIELD_SIZE]
-        try:
-            data_type = DataType(data_type_str)
-        except ValueError:
-            raise ValueError(
-                f"Unknown data_type '{data_type_str}' for trace_id={trace_id}. "
+        if prefix == SHARED_RING_RECORD_MAGIC:
+            if available < SHARED_RING_RECORD_HEADER_SIZE:
+                return None
+
+            header_bytes = self._ring_buffer.peek(SHARED_RING_RECORD_HEADER_SIZE)
+            if header_bytes is None:
+                return None
+
+            _magic, metadata_len, chunk_len = struct.unpack(
+                SHARED_RING_RECORD_HEADER_FORMAT,
+                header_bytes,
             )
+            required = SHARED_RING_RECORD_HEADER_SIZE + metadata_len + chunk_len
+            if available < required:
+                return None
 
-        # Now check if we have header + the full chunk
-        required = CHUNK_HEADER_SIZE + chunk_len
-        if self._ring_buffer.available() < required:
-            # Not enough data yet; do not consume anything
-            return None
+            packet = self._ring_buffer.read(required)
+            if packet is None:
+                return None
 
-        # Consume header + chunk in one go
-        packet = self._ring_buffer.read(required)
-        if packet is None:
-            return None
+            metadata_bytes = packet[
+                SHARED_RING_RECORD_HEADER_SIZE : SHARED_RING_RECORD_HEADER_SIZE
+                + metadata_len
+            ]
+            chunk_metadata = SharedRingChunkMetadata.from_dict(
+                json.loads(metadata_bytes.decode("utf-8"))
+            )
+            trace_id = chunk_metadata.trace_id
+            chunk_index = chunk_metadata.chunk_index
+            total_chunks = chunk_metadata.total_chunks
+            chunk_data = packet[SHARED_RING_RECORD_HEADER_SIZE + metadata_len :]
+        else:
+            if available < CHUNK_HEADER_SIZE:
+                return None
 
-        chunk_data = packet[CHUNK_HEADER_SIZE:]
+            header_bytes = self._ring_buffer.peek(CHUNK_HEADER_SIZE)
+            if header_bytes is None:
+                return None
 
-        # Build or update PartialMessage
+            raw_trace_id, raw_data_type, chunk_index, total_chunks, chunk_len = (
+                struct.unpack(CHUNK_HEADER_FORMAT, header_bytes)
+            )
+            trace_id = raw_trace_id.rstrip(b"\x00").decode("utf-8", errors="ignore")
+            data_type_str = raw_data_type.rstrip(b"\x00").decode(
+                "utf-8", errors="ignore"
+            )
+            if len(data_type_str) > DATA_TYPE_FIELD_SIZE:
+                data_type_str = data_type_str[:DATA_TYPE_FIELD_SIZE]
+            try:
+                data_type = DataType(data_type_str)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Unknown data_type '{data_type_str}' for trace_id={trace_id}. "
+                ) from exc
+
+            required = CHUNK_HEADER_SIZE + chunk_len
+            if available < required:
+                return None
+
+            packet = self._ring_buffer.read(required)
+            if packet is None:
+                return None
+
+            chunk_data = packet[CHUNK_HEADER_SIZE:]
+            chunk_metadata = None
+
         partial_message = self._pending.get(trace_id)
         if partial_message is None:
             partial_message = PartialMessage(total_chunks=total_chunks)
             self._pending[trace_id] = partial_message
-        else:
-            if partial_message.total_chunks != total_chunks:
-                logger.warning(
-                    "Inconsistent total_chunks for trace_id=%s (existing=%d, new=%d)",
-                    trace_id,
-                    partial_message.total_chunks,
-                    total_chunks,
-                )
+        elif partial_message.total_chunks != total_chunks:
+            logger.warning(
+                "Inconsistent total_chunks for trace_id=%s (existing=%d, new=%d)",
+                trace_id,
+                partial_message.total_chunks,
+                total_chunks,
+            )
+
+        partial_message.register_metadata(
+            trace_id,
+            None if chunk_metadata is None else chunk_metadata.trace_metadata,
+        )
 
         complete = partial_message.add_chunk(chunk_index, chunk_data)
         if not complete:
             return None
-        # Full message assembled
+
         try:
             payload = partial_message.assemble()
         except ValueError as exc:
-            logger.error(
-                "Failed to assemble trace_id=%s: %s",
-                trace_id,
-                exc,
-            )
+            logger.error("Failed to assemble trace_id=%s: %s", trace_id, exc)
             del self._pending[trace_id]
             return None
 
+        trace_metadata = partial_message.metadata
+        if trace_metadata is not None:
+            data_type = trace_metadata.data_type
+        elif chunk_metadata is not None:
+            raise ValueError(
+                f"Missing trace metadata for shared-ring trace_id={trace_id}."
+            )
+
         del self._pending[trace_id]
-        return trace_id, data_type, payload
+        return CompletedChannelMessage(
+            trace_id=trace_id,
+            data_type=data_type,
+            payload=payload,
+            metadata=trace_metadata,
+        )
