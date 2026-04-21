@@ -17,6 +17,8 @@ import filelock
 from neuracore.data_daemon.const import SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
 
+# cspell:ignore WNOHANG waitpid
+
 
 class DaemonLifecycleError(RuntimeError):
     """Raised when daemon lifecycle checks fail."""
@@ -40,15 +42,37 @@ def read_pid_from_file(pid_path: Path) -> int | None:
     return pid_value if pid_value > 0 else None
 
 
+def _is_zombie(pid_value: int) -> bool:
+    """Return True if pid_value is a zombie process (Linux /proc only)."""
+    try:
+        stat = Path(f"/proc/{pid_value}/stat").read_text(encoding="utf-8")
+        # State is field 3, after the comm field enclosed in parens.
+        state = stat.split(")")[1].split()[0]
+        return state == "Z"
+    except OSError:
+        return False
+
+
+def _try_reap_zombie_child(pid_value: int) -> bool:
+    """Attempt a non-blocking waitpid to reap a zombie child; return True if reaped."""
+    try:
+        reaped_pid, _ = os.waitpid(pid_value, os.WNOHANG)
+        return reaped_pid != 0
+    except ChildProcessError:
+        return False
+    except OSError:
+        return False
+
+
 def pid_is_running(pid_value: int) -> bool:
-    """Return True if `pid_value` exists (or cannot be checked due to permissions)."""
+    """Return True if pid_value exists and is not a zombie."""
     try:
         os.kill(pid_value, 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    return not _is_zombie(pid_value)
 
 
 def cleanup_stale_client_state(
@@ -321,7 +345,7 @@ def wait_for_exit(pid_value: int, *, timeout_s: float) -> bool:
     """Wait for a PID to stop running until a timeout elapses."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        if not pid_is_running(pid_value):
+        if _try_reap_zombie_child(pid_value) or not pid_is_running(pid_value):
             return True
         time.sleep(0.1)
     return False
