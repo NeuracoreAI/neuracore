@@ -57,6 +57,9 @@ class StateManager:
         self._emitter = emitter
 
         self._emitter.on(Emitter.START_TRACE, self._handle_start_trace)
+        self._emitter.on(
+            Emitter.TRACE_WRITE_PROGRESS, self._handle_trace_write_progress
+        )
         self._emitter.on(Emitter.TRACE_WRITTEN, self._handle_trace_written)
         self._emitter.on(Emitter.UPLOAD_STARTED, self.handle_upload_started)
         self._emitter.on(Emitter.UPLOADED_BYTES, self.update_bytes_uploaded)
@@ -365,6 +368,16 @@ class StateManager:
         )
         if trace.write_status == TraceWriteStatus.WRITTEN:
             await self._finalize_trace(trace)
+
+    async def _handle_trace_write_progress(
+        self, trace_id: str, recording_id: str, bytes_written: int
+    ) -> None:
+        """Handle TRACE_WRITE_PROGRESS by marking a trace as actively writing."""
+        await self._store.upsert_trace_write_progress(
+            trace_id=trace_id,
+            recording_id=recording_id,
+            bytes_written=bytes_written,
+        )
 
     async def handle_upload_started(self, trace_id: str) -> None:
         """Mark a trace as uploading once the uploader starts."""

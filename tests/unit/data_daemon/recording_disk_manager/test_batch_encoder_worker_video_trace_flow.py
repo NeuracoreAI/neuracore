@@ -318,6 +318,41 @@ async def test_finalises_only_after_all_pending_batches_complete(
     assert len(emitted) == 1
 
 
+def test_emit_trace_write_progress_keeps_emitted_bytes_monotonic(
+    make_worker,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_emitter: _FakeEmitter,
+) -> None:
+    worker, _, filesystem, _, _, worker_module, _ = make_worker
+
+    key = _LocalTraceKey(
+        recording_id="r-progress", data_type=DataType.RGB_IMAGES, trace_id="t-progress"
+    )
+    observed = iter([120, 80, 140])
+
+    monkeypatch.setattr(
+        filesystem,
+        "trace_bytes_on_disk",
+        lambda _trace_key: next(observed),
+        raising=True,
+    )
+
+    worker._emit_trace_write_progress(key)
+    worker._emit_trace_write_progress(key)
+    worker._emit_trace_write_progress(key)
+
+    emitted = [
+        args
+        for event, args in fake_emitter.emitted
+        if event == worker_module.Emitter.TRACE_WRITE_PROGRESS
+    ]
+    assert emitted == [
+        ("t-progress", "r-progress", 120),
+        ("t-progress", "r-progress", 120),
+        ("t-progress", "r-progress", 140),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_corrupt_payload_does_not_crash_logs_and_aborts_trace(
     make_worker, tmp_path: Path, caplog: pytest.LogCaptureFixture
