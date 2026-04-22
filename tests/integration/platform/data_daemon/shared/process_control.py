@@ -149,7 +149,8 @@ class Timer:
 
 def get_runner_pids() -> set[int]:
     """Return the PIDs of all running neuracore data-daemon runner processes."""
-    output = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True)
+    env = {**os.environ, "COLUMNS": "32768"}
+    output = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True, env=env)
     runner_pids: set[int] = set()
     for line in output.splitlines():
         parts = line.strip().split(None, 1)

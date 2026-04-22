@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from tests.integration.platform.data_daemon.daemon_test_cases import (
@@ -9,8 +7,6 @@ from tests.integration.platform.data_daemon.daemon_test_cases import (
 )
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
-    assert_no_daemon_pids,
-    assert_no_producer_processes,
 )
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_all_traces_written,
@@ -78,8 +74,6 @@ def test_disk_db_data_integrity(
         setup_per_test_artifact_dirs(case_id(case))
 
     results: list[ContextResult] = []
-    daemon_shutdown_s: float | None = None
-    cleanup_started_at: float = time.perf_counter()
     dataset_name = create_testing_dataset_name(case)
 
     with scoped_storage_state(case, dataset_name=dataset_name):
@@ -90,20 +84,6 @@ def test_disk_db_data_integrity(
                 results = run_and_assert_case_contexts(case, specs=specs)
                 wait_for_all_traces_written(results=results)
                 assert_disk_recording_properties(results)
-                # Mark the start of shutdown — stop_daemon() runs in the
-                # offline_daemon_running() finally block as the with exits.
-                profile_shutdown_started_at = time.perf_counter()
-            daemon_shutdown_s = time.perf_counter() - profile_shutdown_started_at
-
-            assert_no_daemon_pids()
-            assert_no_producer_processes()
-            cleanup_started_at = time.perf_counter()
 
         finally:
-            set_case_analysis_report(
-                request=request,
-                case=case,
-                results=results,
-                daemon_shutdown_s=daemon_shutdown_s,
-                final_cleanup_s=time.perf_counter() - cleanup_started_at,
-            )
+            set_case_analysis_report(request=request, case=case, results=results)

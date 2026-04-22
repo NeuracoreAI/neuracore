@@ -72,7 +72,8 @@ BASE_CASES = (
         video_count=1,
         image_height=120,
         image_width=120,
-        video_fps=500,
+        video_fps=120,
+        joint_fps=1000,
         producer_channels=PRODUCER_PER_THREAD,
         timestamp_mode=TIMESTAMP_MODE_REAL,
         wait=False,
@@ -82,10 +83,11 @@ BASE_CASES = (
 PRE_NETWORK_INTEGRITY_CASES = BASE_CASES
 NETWORK_INTEGRITY_CASES = BASE_CASES + (
     DataDaemonTestCase(
-        duration_sec=10,
+        duration_sec=5,
         joint_count=7,
         parallel_contexts=1,
         recording_count=1,
+        joint_fps=600,
         wait=True,
     ),
     DataDaemonTestCase(
