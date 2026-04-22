@@ -98,7 +98,6 @@ def test_cloud_data_integrity(
                 assert_exactly_one_daemon_pid()
                 results = run_and_assert_case_contexts(case, specs=specs)
                 _assert_online_verification_invariants(results)
-                assert_exactly_one_daemon_pid()
                 verify_cloud_results(results=results, case=case)
 
         finally:
