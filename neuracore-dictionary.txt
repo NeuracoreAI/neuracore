@@ -400,4 +400,11 @@ memfd
 CLOEXEC
 ftruncate
 RDWR
-
+bgra
+bigendian
+byteswap
+elems
+itemsize
+mcap
+MCAP
+newbyteorder

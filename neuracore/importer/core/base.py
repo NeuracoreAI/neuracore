@@ -516,6 +516,9 @@ class NeuracoreDatasetImporter(ABC):
         except DataValidationWarning as w:
             if not self.suppress_warnings:
                 self.logger.warning("[WARNING] %s (%s): %s", data_type, item.name, w)
+            if "transformed_data" in locals():
+                return transformed_data
+            raise
         except DataValidationError as e:
             self.logger.error(
                 "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
@@ -1260,7 +1263,7 @@ class NeuracoreDatasetImporter(ABC):
             TimeElapsedColumn(),
             TimeRemainingColumn(),
             refresh_per_second=10,
-            transient=True,
+            transient=False,
             console=get_shared_console(),
         ) as progress:
             overall_task = progress.add_task("Importing episodes", total=total_items)

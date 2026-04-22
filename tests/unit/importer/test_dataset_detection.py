@@ -81,6 +81,26 @@ def test_detect_tfds_case_insensitive_markers(
         assert detector(dataset_dir) == DatasetTypeConfig.TFDS
 
 
+def test_detect_mcap_file(tmp_path: Path, detectors: list[tuple[str, DetectorFn]]):
+    file_path = tmp_path / "example.mcap"
+    file_path.touch()
+
+    for _, detector in detectors:
+        assert detector(file_path) == DatasetTypeConfig.MCAP
+
+
+def test_detect_mcap_in_directory(
+    tmp_path: Path, detectors: list[tuple[str, DetectorFn]]
+):
+    dataset_dir = _create_files(
+        tmp_path / "mcap_dataset",
+        ["session/example.mcap"],
+    )
+
+    for _, detector in detectors:
+        assert detector(dataset_dir) == DatasetTypeConfig.MCAP
+
+
 def test_detect_rlds_by_directory_name(
     tmp_path: Path, detectors: list[tuple[str, DetectorFn]]
 ):

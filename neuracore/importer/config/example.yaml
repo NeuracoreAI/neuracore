@@ -1,5 +1,5 @@
 input_dataset_name: example_input_dataset
-dataset_type: RLDS # RLDS | LEROBOT | TFDS, can be left blank and we will detect based on file structure
+dataset_type: RLDS # MCAP | RLDS | LEROBOT | TFDS, can be left blank and we will detect based on file structure
 
 output_dataset:
   name: example_output_dataset
