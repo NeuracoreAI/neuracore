@@ -70,7 +70,6 @@ _CASES = DataDaemonTestBatch(
 def test_cancel_recording_produces_no_data(
     case: DataDaemonTestCase,
     clear_daemon_timer_stats,
-    await_daemon_shutdown,
     request: pytest.FixtureRequest,
 ) -> None:
     """Verify that cancelling a recording discards all logged data."""
@@ -147,7 +146,6 @@ def test_cancel_then_start_new_recording(
     gap_s: int,
     case: DataDaemonTestCase,
     clear_daemon_timer_stats,
-    await_daemon_shutdown,
     request: pytest.FixtureRequest,
 ) -> None:
     """Verify a valid recording succeeds after cancelling a prior one.

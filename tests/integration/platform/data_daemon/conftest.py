@@ -8,7 +8,10 @@ import pytest
 from tests.integration.platform.data_daemon.shared.assertions import (
     clear_daemon_timer_stats as _clear_daemon_timer_stats,
 )
-from tests.integration.platform.data_daemon.shared.process_control import Timer
+from tests.integration.platform.data_daemon.shared.process_control import (
+    Timer,
+    stop_daemon,
+)
 from tests.integration.platform.data_daemon.shared.profiles import cleanup_test_profiles
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     SESSION_RUNS,
@@ -48,6 +51,7 @@ def daemon_test_state_env():
     previous_db_path = os.environ.get("NEURACORE_DAEMON_DB_PATH")
     os.environ["NEURACORE_DAEMON_RECORDINGS_ROOT"] = str(OFFLINE_RECORDINGS_ROOT)
     os.environ["NEURACORE_DAEMON_DB_PATH"] = str(OFFLINE_DB_PATH)
+    stop_daemon(method="sigkill")
     try:
         yield
     finally:

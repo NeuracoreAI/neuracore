@@ -51,7 +51,6 @@ _CASES = DataDaemonTestBatch(
 def test_offline_pending_data_recovers_when_online(
     case: DataDaemonTestCase,
     clear_daemon_timer_stats,
-    await_daemon_shutdown,
     request: pytest.FixtureRequest,
 ) -> None:
     """Verify offline recordings are correctly uploaded when the daemon goes online.

@@ -275,14 +275,16 @@ def _assert_real_timestamps(
         <= actual_duration_s
         <= expected_duration_s + clock_tolerance_s
     ):
+        recording_path = get_daemon_recordings_root_path() / recording_id
         failures.append(
             TraceFailure(
                 trace_key=trace_key,
                 body=(
-                    f"timestamp span {actual_duration_s:.3f}s outside"
-                    f" expected recording duration "
+                    f"timestamp span {actual_duration_s:.3f}s outside expected "
+                    f"{expected_duration_s:.2f}s ± {clock_tolerance_s:.2f}s "
                     f"[{expected_duration_s - clock_tolerance_s:.2f}s, "
-                    f"{expected_duration_s + clock_tolerance_s:.2f}s]"
+                    f"{expected_duration_s + clock_tolerance_s:.2f}s]; "
+                    f"recording data at {recording_path}"
                 ),
             )
         )
