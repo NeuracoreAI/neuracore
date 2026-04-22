@@ -112,6 +112,19 @@ class ChannelState:
         """Check if the channel is open (i.e. has an initialized ring buffer)."""
         return self.ring_buffer is not None
 
+    def clear_ring_buffer(self) -> None:
+        """Close and forget the current ring buffer for this channel."""
+        ring_buffer = self.ring_buffer
+        self.ring_buffer = None
+        self.reader = None
+        self.opened_at = None
+        if ring_buffer is None:
+            return
+        try:
+            ring_buffer.close()
+        finally:
+            ring_buffer.unlink()
+
     def has_missed_heartbeat(
         self,
         now: datetime,
@@ -367,7 +380,10 @@ class Daemon:
         shared_memory_name = payload.get("shared_memory_name")
         if shared_memory_name:
             channel.set_ring_buffer(
-                RingBuffer.open_shared(str(shared_memory_name), int(size))
+                RingBuffer.create_shared(
+                    int(size),
+                    name=str(shared_memory_name),
+                )
             )
             return
 
@@ -951,6 +967,7 @@ class Daemon:
         )
         if channel is not None:
             channel.trace_id = None
+            channel.clear_ring_buffer()
 
     def _cleanup_expired_channels(self) -> None:
         """Remove channels whose heartbeat has not been seen within the timeout."""
@@ -1012,5 +1029,6 @@ class Daemon:
                     self._producer_last_sequence_numbers.get(channel.producer_id, 0),
                     channel.last_sequence_number,
                 )
+            channel.clear_ring_buffer()
             del self.channels[producer_id]
             self._closed_producers.add(producer_id)
