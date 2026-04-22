@@ -445,11 +445,14 @@ def _assert_synced_camera_codes_are_sane(
     expected_codes = set(range(base_code, base_code + expected_video_frame_count))
     missing_codes = expected_codes - set(actual_codes)
     if missing_codes:
-        sample = sorted(missing_codes)[:8]
+        sample = sorted(missing_codes)[: len(missing_codes) // 2 + 1]
+        duplicate_count = len(actual_codes) - (len(expected_codes) - len(missing_codes))
         assert not missing_codes, (
-            f"Camera {camera_name!r}: {len(missing_codes)} missing frame(s) "
-            f"(expected {len(expected_codes)}, got {len(actual_codes)}); "
-            f"first missing codes: {sample}"
+            f"Camera {camera_name!r}: {len(missing_codes)} missing frame code(s) "
+            f"(received {len(actual_codes)} frames, "
+            f"{duplicate_count} duplicate code(s), "
+            f"{len(missing_codes)} expected codes absent from range "
+            f"[{base_code}, {max_code}]); first missing codes: {sample}"
         )
 
 
@@ -476,71 +479,89 @@ def _verify_synched_episode_summary(
             context, used to reconstruct expected frame codes.
 
     """
-    _assert_synced_episode_timestamps_are_sane(
-        timestamps=summary["timestamps"],
-        result=result,
-    )
-
-    joint_names = result.joint_names
+    # --- Episode shape ---
     sync_points = int(summary.get("sync_points", 0))
     assert sync_points > 0, "Synced episode produced zero sync points"
 
-    for joint_name in joint_names:
-        assert summary["joint_position_counts"].get(joint_name) == sync_points, (
-            f"Joint position missing in synchronized episode for joint {joint_name!r}: "
-            f"got {summary['joint_position_counts'].get(joint_name)} frame(s), "
-            f"expected {sync_points}"
-        )
-        assert summary["joint_velocity_counts"].get(joint_name) == sync_points, (
-            f"Joint velocity missing in synchronized episode for joint {joint_name!r}: "
-            f"got {summary['joint_velocity_counts'].get(joint_name)} frame(s), "
-            f"expected {sync_points}"
-        )
-        assert summary["joint_torque_counts"].get(joint_name) == sync_points, (
-            f"Joint torque missing in synchronized episode for joint {joint_name!r}: "
-            f"got {summary['joint_torque_counts'].get(joint_name)} frame(s), "
-            f"expected {sync_points}"
-        )
+    timestamps = list(summary["timestamps"])
+    assert (
+        len(timestamps) == sync_points
+    ), f"Timestamp count mismatch: got {len(timestamps)}, expected {sync_points}"
+
+    # --- Timestamps ---
+    _assert_synced_episode_timestamps_are_sane(timestamps=timestamps, result=result)
+
+    # --- Joint data: counts then values ---
+    joint_names = result.joint_names
+    for label, count_key in (
+        ("position", "joint_position_counts"),
+        ("velocity", "joint_velocity_counts"),
+        ("torque", "joint_torque_counts"),
+    ):
+        counts = dict(summary[count_key])
+        for joint_name in joint_names:
+            assert counts.get(joint_name) == sync_points, (
+                f"Joint {label} missing for joint {joint_name!r}: "
+                f"got {counts.get(joint_name)} frame(s), expected {sync_points}"
+            )
+        unexpected_joints = set(counts) - set(joint_names)
+        assert (
+            not unexpected_joints
+        ), f"Unexpected joint(s) in {label} counts: {unexpected_joints}"
 
     for frame_index, joint_name, actual_value in summary["joint_position_values"]:
-        assert joint_name in joint_names, (
-            f"Unexpected joint name in synchronized episode at frame {frame_index}: "
-            f"{joint_name!r}"
-        )
+        assert (
+            joint_name in joint_names
+        ), f"Unexpected joint name at synced frame {frame_index}: {joint_name!r}"
         assert math.isfinite(actual_value), (
-            f"Non-finite joint position value for joint {joint_name!r} "
+            f"Non-finite joint position for {joint_name!r} "
             f"at synced frame {frame_index}: {actual_value}"
         )
         assert -1.0 - 1e-5 <= actual_value <= 1.0 + 1e-5, (
-            f"Joint position value outside expected sine-domain bounds for "
-            f"joint {joint_name!r} at synced frame {frame_index}: {actual_value}"
+            f"Joint position outside sine bounds for {joint_name!r} "
+            f"at synced frame {frame_index}: {actual_value}"
         )
 
+    # --- Custom markers ---
+    custom_counts = dict(summary["custom_counts"])
     for marker_name in result.marker_names:
-        expected_marker_count = sync_points
-        assert summary["custom_counts"].get(marker_name) == expected_marker_count, (
-            f"Custom marker missing in synchronized episode for marker"
-            f" {marker_name!r}: "
-            f"got {summary['custom_counts'].get(marker_name)}, "
-            f"expected {expected_marker_count}"
+        assert custom_counts.get(marker_name) == sync_points, (
+            f"Custom marker {marker_name!r}: "
+            f"got {custom_counts.get(marker_name)}, expected {sync_points}"
         )
+    unexpected_markers = set(custom_counts) - set(result.marker_names)
+    assert (
+        not unexpected_markers
+    ), f"Unexpected custom marker(s) in episode: {unexpected_markers}"
 
+    # --- Video presence gate ---
     if not result.has_video:
-        assert summary["rgb_counts"] == {}, (
-            f"Expected no RGB frames for joints-only case but got: "
-            f"{summary['rgb_counts']}"
+        rgb_msg = (
+            f"Expected no RGB frames for joints-only case "
+            f"but got: {summary['rgb_counts']}"
         )
-        assert summary["frame_codes"] == {}, (
-            f"Expected no frame codes for joints-only case but got: "
-            f"{summary['frame_codes']}"
+        assert not summary["rgb_counts"], rgb_msg
+        fc_msg = (
+            f"Expected no frame codes for joints-only case "
+            f"but got: {summary['frame_codes']}"
         )
+        assert not summary["frame_codes"], fc_msg
         return
 
-    for camera_index, camera_name in enumerate(result.camera_names):
-        assert summary["rgb_counts"].get(camera_name) == sync_points, (
-            f"RGB frames missing in synchronized episode for camera {camera_name!r}: "
-            f"got {summary['rgb_counts'].get(camera_name)}, expected {sync_points}"
+    # --- Camera frame counts ---
+    rgb_counts = dict(summary["rgb_counts"])
+    for camera_name in result.camera_names:
+        assert rgb_counts.get(camera_name) == sync_points, (
+            f"RGB frames missing for camera {camera_name!r}: "
+            f"got {rgb_counts.get(camera_name)}, expected {sync_points}"
         )
+    unexpected_cameras = set(rgb_counts) - set(result.camera_names)
+    assert (
+        not unexpected_cameras
+    ), f"Unexpected camera(s) in RGB counts: {unexpected_cameras}"
+
+    # --- Camera frame codes ---
+    for camera_index, camera_name in enumerate(result.camera_names):
         _assert_synced_camera_codes_are_sane(
             actual_codes=summary["frame_codes"].get(camera_name),
             camera_name=camera_name,
@@ -587,7 +608,7 @@ def _verify_recording_structure(
     )
 
     # Duration bounds: variable mode allows 0.75–1.25× base; fixed mode uses exact
-    # base duration. A small upload/clock tolerance is added to both ends.
+    # base duration.
     base_duration_s = float(result.duration_sec)
     clock_tolerance_s = 1.0
     if case.context_duration_mode == DURATION_MODE_VARIABLE:
