@@ -33,6 +33,18 @@ from neuracore.data_daemon.models import (
 )
 
 
+def _decode_shared_ring_write(packet: bytes) -> tuple[dict, bytes]:
+    _magic, metadata_len, chunk_len = struct.unpack(
+        SHARED_RING_RECORD_HEADER_FORMAT,
+        packet[: struct.calcsize(SHARED_RING_RECORD_HEADER_FORMAT)],
+    )
+    metadata_start = struct.calcsize(SHARED_RING_RECORD_HEADER_FORMAT)
+    metadata_end = metadata_start + metadata_len
+    metadata = json.loads(packet[metadata_start:metadata_end].decode("utf-8"))
+    chunk = packet[metadata_end : metadata_end + chunk_len]
+    return metadata, chunk
+
+
 def test_message_envelope_round_trip() -> None:
     payload = {"open_ring_buffer": {"size": 2048}}
     envelope = MessageEnvelope(
@@ -145,15 +157,20 @@ def test_channel_reader_reassembles_shared_ring_records() -> None:
     for idx, chunk in enumerate((b"robot", b"ics")):
         metadata = {
             "trace_id": "trace-shared",
-            "recording_id": "rec-shared",
             "chunk_index": idx,
             "total_chunks": 2,
-            "data_type": DataType.CUSTOM_1D.value,
-            "data_type_name": "custom",
-            "robot_instance": 1,
-            "robot_id": "robot-1",
-            "dataset_id": "dataset-1",
         }
+        if idx == 0:
+            metadata.update(
+                {
+                    "recording_id": "rec-shared",
+                    "data_type": DataType.CUSTOM_1D.value,
+                    "data_type_name": "custom",
+                    "robot_instance": 1,
+                    "robot_id": "robot-1",
+                    "dataset_id": "dataset-1",
+                }
+            )
         metadata_bytes = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
         ring.write(
             struct.pack(
@@ -171,7 +188,8 @@ def test_channel_reader_reassembles_shared_ring_records() -> None:
         assembled = reader.poll_one()
 
     assert assembled == ("trace-shared", DataType.CUSTOM_1D, b"robotics")
-    assert assembled.metadata["recording_id"] == "rec-shared"
+    assert assembled.metadata is not None
+    assert assembled.metadata.recording_id == "rec-shared"
 
 
 class DummyComm:
@@ -240,21 +258,17 @@ def test_producer_open_ring_buffer_sends_payload(monkeypatch) -> None:
     producer = ProducerChannel(data_type=DataType.CUSTOM_1D)
 
     try:
-        with monkeypatch.context() as ring_patch:
-            ring_patch.setattr(
-                "neuracore.data_daemon.communications_management.producer_channel.RingBuffer.create_shared",
-                lambda size: DummySharedRingBuffer(shared_name="rb-open"),
-            )
-            producer.open_ring_buffer(size=2048)
+        producer.open_ring_buffer(size=2048)
+        _wait_for_envelopes(messages, 1)
     finally:
         producer.stop_producer_channel()
 
     assert len(messages) == 1
     envelope = messages[0]
     assert envelope.command == CommandType.OPEN_RING_BUFFER
-    assert envelope.payload == {
-        "open_ring_buffer": {"size": 2048, "shared_memory_name": "rb-open"}
-    }
+    payload = envelope.payload["open_ring_buffer"]
+    assert payload["size"] == 2048
+    assert payload["shared_memory_name"].startswith("neuracore-ring-buffer-")
 
 
 def test_producer_send_data_parts_lazily_opens_shared_ring_buffer(
@@ -264,8 +278,8 @@ def test_producer_send_data_parts_lazily_opens_shared_ring_buffer(
     shared_ring = DummySharedRingBuffer()
 
     monkeypatch.setattr(
-        "neuracore.data_daemon.communications_management.producer_channel.RingBuffer.create_shared",
-        lambda size: shared_ring,
+        "neuracore.data_daemon.communications_management.producer_shared_ring_buffer_transport.RingBuffer.open_shared",
+        lambda name, size: shared_ring,
     )
 
     producer = ProducerChannel(
@@ -289,7 +303,7 @@ def test_producer_send_data_parts_lazily_opens_shared_ring_buffer(
         )
 
         deadline = time.monotonic() + 1.0
-        while len(shared_ring.writes) < 6 and time.monotonic() < deadline:
+        while len(shared_ring.writes) < 2 and time.monotonic() < deadline:
             time.sleep(0.02)
     finally:
         producer.stop_producer_channel()
@@ -297,10 +311,16 @@ def test_producer_send_data_parts_lazily_opens_shared_ring_buffer(
     assert len(messages) == 1
     envelope = messages[0]
     assert envelope.command == CommandType.OPEN_RING_BUFFER
-    assert envelope.payload == {
-        "open_ring_buffer": {"size": 2048, "shared_memory_name": "test-shared"}
-    }
-    assert shared_ring.writes[2::3] == [b"ab", b"cd"]
+    payload = envelope.payload["open_ring_buffer"]
+    assert payload["size"] == 2048
+    assert payload["shared_memory_name"].startswith("neuracore-ring-buffer-")
+    first_metadata, first_chunk = _decode_shared_ring_write(shared_ring.writes[0])
+    second_metadata, second_chunk = _decode_shared_ring_write(shared_ring.writes[1])
+    assert first_chunk == b"ab"
+    assert second_chunk == b"cd"
+    assert first_metadata["recording_id"] == "rec-1"
+    assert second_metadata["trace_id"] == first_metadata["trace_id"]
+    assert "recording_id" not in second_metadata
 
 
 class DummySharedRingBuffer:
@@ -321,8 +341,8 @@ def test_producer_send_data_parts_chunks_across_multiple_buffers(monkeypatch) ->
     shared_ring = DummySharedRingBuffer()
 
     monkeypatch.setattr(
-        "neuracore.data_daemon.communications_management.producer_channel.RingBuffer.create_shared",
-        lambda size: shared_ring,
+        "neuracore.data_daemon.communications_management.producer_shared_ring_buffer_transport.RingBuffer.open_shared",
+        lambda name, size: shared_ring,
     )
 
     producer = ProducerChannel(
@@ -348,7 +368,7 @@ def test_producer_send_data_parts_chunks_across_multiple_buffers(monkeypatch) ->
         )
 
         deadline = time.monotonic() + 1.0
-        while len(shared_ring.writes) < 9 and time.monotonic() < deadline:
+        while len(shared_ring.writes) < 3 and time.monotonic() < deadline:
             time.sleep(0.02)
     finally:
         producer.stop_producer_channel()
@@ -356,10 +376,14 @@ def test_producer_send_data_parts_chunks_across_multiple_buffers(monkeypatch) ->
     assert len(messages) == 1
     envelope = messages[0]
     assert envelope.command == CommandType.OPEN_RING_BUFFER
-    assert envelope.payload == {
-        "open_ring_buffer": {"size": 2048, "shared_memory_name": "test-shared"}
-    }
-    assert shared_ring.writes[2::3] == [b"abc", b"def", b"gh"]
+    payload = envelope.payload["open_ring_buffer"]
+    assert payload["size"] == 2048
+    assert payload["shared_memory_name"].startswith("neuracore-ring-buffer-")
+    packets = [_decode_shared_ring_write(packet) for packet in shared_ring.writes]
+    assert [chunk for _, chunk in packets] == [b"abc", b"def", b"gh"]
+    assert packets[0][0]["recording_id"] == "rec-1"
+    assert "recording_id" not in packets[1][0]
+    assert "recording_id" not in packets[2][0]
 
 
 def test_producer_transport_stats_include_sender_and_shared_ring_metrics(
@@ -370,8 +394,8 @@ def test_producer_transport_stats_include_sender_and_shared_ring_metrics(
     shared_ring = DummySharedRingBuffer()
 
     monkeypatch.setattr(
-        "neuracore.data_daemon.communications_management.producer_channel.RingBuffer.create_shared",
-        lambda size: shared_ring,
+        "neuracore.data_daemon.communications_management.producer_shared_ring_buffer_transport.RingBuffer.open_shared",
+        lambda name, size: shared_ring,
     )
 
     producer = ProducerChannel(
@@ -392,7 +416,7 @@ def test_producer_transport_stats_include_sender_and_shared_ring_metrics(
             dataset_id="dataset-1",
         )
         deadline = time.monotonic() + 1.0
-        while len(shared_ring.writes) < 6 and time.monotonic() < deadline:
+        while len(shared_ring.writes) < 2 and time.monotonic() < deadline:
             time.sleep(0.02)
         stats = producer.get_transport_stats()
     finally:

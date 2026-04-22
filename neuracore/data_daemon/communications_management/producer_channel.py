@@ -23,6 +23,7 @@ from neuracore.data_daemon.const import (
     DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
 )
 from neuracore.data_daemon.models import CommandType, DataType
+from neuracore.data_daemon.models import SharedRingChunkMetadata, TraceTransportMetadata
 
 from .producer_channel_message_sender import (
     ProducerChannelMessageSender,
@@ -84,6 +85,11 @@ class ProducerChannel:
 
         self.channel_id = id or str(uuid.uuid4())
         self._comm = CommunicationsManager(context=context)
+        if not RingBuffer.supports_shared_transport():
+            raise RuntimeError(
+                "Shared ring transport is required for ProducerChannel, "
+                "but the ring buffer transport is unavailable"
+            )
         self._comm.create_producer_socket()
         self.chunk_size = int(default_chunk_size if chunk_size is None else chunk_size)
         self.send_queue_maxsize = max(
@@ -204,10 +210,12 @@ class ProducerChannel:
     def open_ring_buffer(self, size: int | None = None) -> None:
         """Open the daemon-side ring buffer transport for this producer."""
         payload = self._shared_ring_transport.open(size)
-        self._send(
+        sequence_number = self._send(
             CommandType.OPEN_RING_BUFFER,
             {"open_ring_buffer": payload},
         )
+        if not self.wait_until_sequence_sent(sequence_number):
+            raise RuntimeError("Failed to send OPEN_RING_BUFFER before shared connect")
 
     def _ensure_shared_ring_buffer(self) -> None:
         """Create and announce the shared ring buffer on first data send."""
@@ -323,24 +331,26 @@ class ProducerChannel:
 
         total_chunks = math.ceil(total_bytes / self.chunk_size)
         produced_chunks = 0
+        trace_metadata = TraceTransportMetadata(
+            recording_id=recording_id,
+            data_type=data_type,
+            data_type_name=data_type_name,
+            dataset_id=dataset_id,
+            dataset_name=dataset_name,
+            robot_name=robot_name,
+            robot_id=robot_id,
+            robot_instance=robot_instance,
+        )
 
         for idx, chunk in enumerate(self._iter_chunk_views(normalised_parts)):
             produced_chunks += 1
             self._message_sender.enqueue_shared_ring_write(
-                metadata={
-                    "channel_id": self.channel_id,
-                    "recording_id": recording_id,
-                    "trace_id": trace_id,
-                    "chunk_index": idx,
-                    "total_chunks": total_chunks,
-                    "data_type": data_type.value,
-                    "data_type_name": data_type_name,
-                    "dataset_name": dataset_name,
-                    "dataset_id": dataset_id,
-                    "robot_name": robot_name,
-                    "robot_id": robot_id,
-                    "robot_instance": robot_instance,
-                },
+                metadata=SharedRingChunkMetadata(
+                    trace_id=trace_id,
+                    chunk_index=idx,
+                    total_chunks=total_chunks,
+                    trace_metadata=trace_metadata if idx == 0 else None,
+                ).to_dict(),
                 chunk=chunk,
             )
 
