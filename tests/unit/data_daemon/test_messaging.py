@@ -323,6 +323,53 @@ def test_producer_send_data_parts_lazily_opens_shared_ring_buffer(
     assert "recording_id" not in second_metadata
 
 
+def test_producer_ensure_shared_ring_buffer_does_not_reannounce(
+    monkeypatch,
+) -> None:
+    messages = _stub_producer_transport(monkeypatch)
+    shared_ring = DummySharedRingBuffer()
+
+    monkeypatch.setattr(
+        "neuracore.data_daemon.communications_management.producer_shared_ring_buffer_transport.RingBuffer.open_shared",
+        lambda name, size: shared_ring,
+    )
+
+    producer = ProducerChannel(
+        recording_id="rec-1",
+        ring_buffer_size=2048,
+        data_type=DataType.CUSTOM_1D,
+    )
+
+    try:
+        producer.start_new_trace()
+        producer.open_ring_buffer(size=2048)
+        _wait_for_envelopes(messages, 1)
+        announced_name = messages[0].payload["open_ring_buffer"]["shared_memory_name"]
+        trace_id = producer.trace_id
+
+        producer.send_data(
+            b"ab",
+            data_type=DataType.CUSTOM_1D,
+            data_type_name="custom",
+            robot_instance=2,
+            robot_id="robot-1",
+            robot_name="robot",
+            dataset_id="dataset-1",
+            dataset_name="dataset",
+        )
+
+        deadline = time.monotonic() + 1.0
+        while len(shared_ring.writes) < 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+    finally:
+        producer.stop_producer_channel()
+
+    assert len(messages) == 1
+    metadata, _chunk = _decode_shared_ring_write(shared_ring.writes[0])
+    assert messages[0].payload["open_ring_buffer"]["shared_memory_name"] == announced_name
+    assert metadata["trace_id"] == trace_id
+
+
 class DummySharedRingBuffer:
     def __init__(self, shared_name: str = "test-shared") -> None:
         self.shared_name = shared_name

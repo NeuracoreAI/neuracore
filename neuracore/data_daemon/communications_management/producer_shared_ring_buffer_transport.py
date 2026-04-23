@@ -30,7 +30,7 @@ class ProducerSharedRingBufferTransport:
         self._debug_helper = ProducerTransportDebugHelper()
 
     def close(self) -> None:
-        """Close the producer's current shared ring buffer handle."""
+        """Reset the producer's current shared ring buffer state."""
         with self._stats_lock:
             ring_buffer = self._ring_buffer
             self._ring_buffer = None
@@ -39,9 +39,13 @@ class ProducerSharedRingBufferTransport:
             return
         ring_buffer.close()
 
+    def is_announced(self) -> bool:
+        """Return True when a shared ring buffer name has been announced."""
+        return self._shared_ring_name is not None
+
     def is_open(self) -> bool:
-        """Return True when a shared ring buffer has been created."""
-        return self._ring_buffer is not None
+        """Return True when the producer writer handle is attached."""
+        return isinstance(self._ring_buffer, RingBuffer)
 
     def open(self, size: int | None = None) -> dict[str, str | int]:
         """Reserve a new shared ring buffer name and return its open payload."""

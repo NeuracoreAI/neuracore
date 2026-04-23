@@ -145,6 +145,27 @@ class ProducerChannel:
         """Set the recording ID for the producer."""
         self.recording_id = recording_id
 
+    def start_recording_session(
+        self,
+        *,
+        recording_id: str | None = None,
+        ring_buffer_size: int | None = None,
+    ) -> None:
+        """Start a fresh recording session for this producer channel."""
+        if recording_id is not None:
+            self.set_recording_id(recording_id)
+        if not self.recording_id:
+            raise ValueError("recording_id is required; set on ProducerChannel init.")
+        if self.trace_id is not None:
+            raise RuntimeError(
+                "Cannot start a new recording session while a trace is active."
+            )
+
+        self.start_producer_channel()
+        self._close_shared_ring_transport()
+        self.start_new_trace()
+        self.open_ring_buffer(size=ring_buffer_size)
+
     def start_new_trace(self) -> None:
         """Start a new trace for the given recording."""
         if not self.recording_id:
@@ -209,6 +230,8 @@ class ProducerChannel:
 
     def open_ring_buffer(self, size: int | None = None) -> None:
         """Open the daemon-side ring buffer transport for this producer."""
+        if self._shared_ring_transport.is_announced():
+            return
         payload = self._shared_ring_transport.open(size)
         sequence_number = self._send(
             CommandType.OPEN_RING_BUFFER,
@@ -222,7 +245,8 @@ class ProducerChannel:
         if self._shared_ring_transport.is_open():
             return
 
-        self.open_ring_buffer()
+        if not self._shared_ring_transport.is_announced():
+            self.open_ring_buffer()
         self._shared_ring_transport.ensure_open()
 
     def send_data(
@@ -363,12 +387,8 @@ class ProducerChannel:
         self,
         ring_buffer_size: int | None = None,
     ) -> None:
-        """Initialize a new producer channel."""
-        if not self.trace_id:
-            self.start_new_trace()
-
-        self.start_producer_channel()
-        self.open_ring_buffer(size=ring_buffer_size)
+        """Initialize a new producer channel for recording."""
+        self.start_recording_session(ring_buffer_size=ring_buffer_size)
 
     def cleanup_producer_channel(self) -> None:
         """Clean up the producer channel."""
