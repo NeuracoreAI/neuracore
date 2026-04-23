@@ -36,6 +36,18 @@ EXPECTED_VALIDATION_CHECKLIST = {
 }
 
 
+def _raise_for_status_with_detail(response: requests.Response) -> None:
+    """Raise HTTP errors with the backend response body attached."""
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise requests.HTTPError(
+            f"{exc}\nResponse body: {response.text}",
+            response=response,
+            request=response.request,
+        ) from exc
+
+
 def _zip_fixture_directory(fixture_directory: Path) -> bytes:
     """Pack a directory tree into a ZIP archive and return the raw bytes.
 
@@ -78,7 +90,7 @@ def _upload_algorithm(
             "description": "AllTypesModel integration test — tests all data types",
         },
     )
-    response.raise_for_status()
+    _raise_for_status_with_detail(response)
     return response.json()
 
 
@@ -89,7 +101,7 @@ def _get_algorithm(org_id: str, algorithm_id: str) -> dict:
         f"{API_URL}/org/{org_id}/algorithms/{algorithm_id}",
         headers=auth.get_headers(),
     )
-    response.raise_for_status()
+    _raise_for_status_with_detail(response)
     return response.json()
 
 
@@ -100,7 +112,7 @@ def _delete_algorithm(org_id: str, algorithm_id: str) -> None:
         f"{API_URL}/org/{org_id}/algorithms/{algorithm_id}",
         headers=auth.get_headers(),
     )
-    response.raise_for_status()
+    _raise_for_status_with_detail(response)
 
 
 def _poll_until_validation_complete(
