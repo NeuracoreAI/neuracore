@@ -11,6 +11,7 @@ from neuracore.data_daemon.const import (
     SHARED_RING_RECORD_HEADER_FORMAT,
     SHARED_RING_RECORD_MAGIC,
 )
+from neuracore.data_daemon.models import OpenRingBufferModel
 
 from .producer_transport_debug_helper import ProducerTransportDebugHelper
 from .producer_transport_debug_models import ProducerSharedRingBufferDebugStats
@@ -47,7 +48,7 @@ class ProducerSharedRingBufferTransport:
         """Return True when the producer writer handle is attached."""
         return isinstance(self._ring_buffer, RingBuffer)
 
-    def open(self, size: int | None = None) -> dict[str, str | int]:
+    def open(self, size: int | None = None) -> OpenRingBufferModel:
         """Reserve a new shared ring buffer name and return its open payload."""
         effective_size = self._default_size if size is None else int(size)
         self.close()
@@ -55,10 +56,10 @@ class ProducerSharedRingBufferTransport:
         with self._stats_lock:
             self._shared_ring_name = shared_name
             self._configured_size = effective_size
-        return {
-            "size": effective_size,
-            "shared_memory_name": shared_name,
-        }
+        return OpenRingBufferModel(
+            size=effective_size,
+            shared_memory_name=shared_name,
+        )
 
     def ensure_open(self) -> None:
         """Open the producer-side writer handle after the daemon creates the reader."""

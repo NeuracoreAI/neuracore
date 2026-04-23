@@ -189,9 +189,7 @@ def test_large_payload_chunked_round_trip_over_ipc(
         data_type=DataType.CUSTOM_1D,
     )
 
-    producer.open_ring_buffer(size=128 * 1024)
     producer.start_new_trace()
-    _drain_messages(daemon, daemon_comm, expected=1)
 
     payload = b"x" * 50_000
     producer.send_data(
@@ -207,7 +205,7 @@ def test_large_payload_chunked_round_trip_over_ipc(
     _drain_messages(
         daemon,
         daemon_comm,
-        expected=0,
+        expected=1,
         until=lambda: len(rdm.enqueued) == 1,
     )
 
@@ -243,11 +241,8 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context, emitter) 
         data_type=DataType.CUSTOM_1D,
     )
 
-    producer_a.open_ring_buffer(size=4096)
-    producer_b.open_ring_buffer(size=4096)
     producer_a.start_new_trace()
     producer_b.start_new_trace()
-    _drain_messages(daemon, daemon_comm, expected=2)
 
     payload_a = b"payload-a"
     payload_b = b"payload-b"
@@ -271,7 +266,7 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context, emitter) 
     _drain_messages(
         daemon,
         daemon_comm,
-        expected=0,
+        expected=2,
         until=lambda: len(rdm.enqueued) == 2,
     )
 

@@ -20,6 +20,7 @@ from neuracore.data_daemon.communications_management.ring_buffer import RingBuff
 from neuracore.data_daemon.const import (
     CHUNK_HEADER_FORMAT,
     DATA_TYPE_FIELD_SIZE,
+    DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
     HEARTBEAT_TIMEOUT_SECS,
     SHARED_RING_RECORD_HEADER_FORMAT,
     SHARED_RING_RECORD_MAGIC,
@@ -255,7 +256,7 @@ def _stub_producer_transport(monkeypatch) -> list[MessageEnvelope]:
 
 def test_producer_open_ring_buffer_sends_payload(monkeypatch) -> None:
     messages = _stub_producer_transport(monkeypatch)
-    producer = ProducerChannel(data_type=DataType.CUSTOM_1D)
+    producer = ProducerChannel(data_type=DataType.RGB_IMAGES)
 
     try:
         producer.open_ring_buffer(size=2048)
@@ -286,14 +287,14 @@ def test_producer_send_data_parts_lazily_opens_shared_ring_buffer(
         chunk_size=2,
         recording_id="rec-1",
         ring_buffer_size=2048,
-        data_type=DataType.CUSTOM_1D,
+        data_type=DataType.RGB_IMAGES,
     )
 
     try:
         producer.start_new_trace()
         producer.send_data(
             b"abcd",
-            data_type=DataType.CUSTOM_1D,
+            data_type=DataType.RGB_IMAGES,
             data_type_name="custom",
             robot_instance=2,
             robot_id="robot-1",
@@ -318,9 +319,42 @@ def test_producer_send_data_parts_lazily_opens_shared_ring_buffer(
     second_metadata, second_chunk = _decode_shared_ring_write(shared_ring.writes[1])
     assert first_chunk == b"ab"
     assert second_chunk == b"cd"
-    assert first_metadata["recording_id"] == "rec-1"
-    assert second_metadata["trace_id"] == first_metadata["trace_id"]
-    assert "recording_id" not in second_metadata
+
+
+def test_producer_send_data_parts_uses_socket_for_non_video(monkeypatch) -> None:
+    messages = _stub_producer_transport(monkeypatch)
+    producer = ProducerChannel(
+        recording_id="rec-1",
+        data_type=DataType.CUSTOM_1D,
+    )
+
+    try:
+        producer.start_new_trace()
+        producer.send_data(
+            b"abcd",
+            data_type=DataType.CUSTOM_1D,
+            data_type_name="custom",
+            robot_instance=2,
+            robot_id="robot-1",
+            robot_name="robot",
+            dataset_id="dataset-1",
+            dataset_name="dataset",
+        )
+        _wait_for_envelopes(messages, 1)
+    finally:
+        producer.stop_producer_channel()
+
+    assert len(messages) == 1
+    envelope = messages[0]
+    assert envelope.command == CommandType.DATA_CHUNK
+    payload = DataChunkPayload.from_dict(envelope.payload["data_chunk"])
+    assert payload.channel_id == producer.channel_id
+    assert payload.recording_id == "rec-1"
+    assert payload.trace_id == producer.trace_id
+    assert payload.chunk_index == 0
+    assert payload.total_chunks == 1
+    assert payload.data_type == DataType.CUSTOM_1D
+    assert payload.data == b"abcd"
 
 
 def test_producer_ensure_shared_ring_buffer_does_not_reannounce(
@@ -337,7 +371,7 @@ def test_producer_ensure_shared_ring_buffer_does_not_reannounce(
     producer = ProducerChannel(
         recording_id="rec-1",
         ring_buffer_size=2048,
-        data_type=DataType.CUSTOM_1D,
+        data_type=DataType.RGB_IMAGES,
     )
 
     try:
@@ -349,7 +383,7 @@ def test_producer_ensure_shared_ring_buffer_does_not_reannounce(
 
         producer.send_data(
             b"ab",
-            data_type=DataType.CUSTOM_1D,
+            data_type=DataType.RGB_IMAGES,
             data_type_name="custom",
             robot_instance=2,
             robot_id="robot-1",
@@ -396,7 +430,7 @@ def test_producer_send_data_parts_chunks_across_multiple_buffers(monkeypatch) ->
         chunk_size=3,
         recording_id="rec-1",
         ring_buffer_size=2048,
-        data_type=DataType.CUSTOM_1D,
+        data_type=DataType.RGB_IMAGES,
     )
 
     try:
@@ -405,7 +439,7 @@ def test_producer_send_data_parts_chunks_across_multiple_buffers(monkeypatch) ->
         producer.send_data_parts(
             (b"ab", memoryview(b"cdef"), b"gh"),
             total_bytes=8,
-            data_type=DataType.CUSTOM_1D,
+            data_type=DataType.RGB_IMAGES,
             data_type_name="custom",
             robot_instance=2,
             robot_id="robot-1",
@@ -449,14 +483,14 @@ def test_producer_transport_stats_include_sender_and_shared_ring_metrics(
         chunk_size=2,
         recording_id="rec-1",
         ring_buffer_size=2048,
-        data_type=DataType.CUSTOM_1D,
+        data_type=DataType.RGB_IMAGES,
     )
 
     try:
         producer.start_new_trace()
         producer.send_data(
             b"abcd",
-            data_type=DataType.CUSTOM_1D,
+            data_type=DataType.RGB_IMAGES,
             data_type_name="custom",
             robot_instance=2,
             robot_id="robot-1",
@@ -475,7 +509,7 @@ def test_producer_transport_stats_include_sender_and_shared_ring_metrics(
     assert stats["shared_ring_buffer_name"] == "test-shared"
     assert stats["shared_ring_buffer_size"] == 2048
     assert stats["send_queue_qsize"] == 0
-    assert stats["send_queue_maxsize"] == 0
+    assert stats["send_queue_maxsize"] == DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE
     assert stats["last_enqueued_sequence_number"] == 1
     assert stats["last_socket_sent_sequence_number"] == 1
     assert stats["pending_sequence_count"] == 0

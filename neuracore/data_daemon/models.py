@@ -254,6 +254,7 @@ class OpenRingBufferModel(BaseModel):
     """Model for the OPEN_RING_BUFFER command."""
 
     size: int = 1024
+    shared_memory_name: str | None = None
 
 
 class ManagementModel(BaseModel):

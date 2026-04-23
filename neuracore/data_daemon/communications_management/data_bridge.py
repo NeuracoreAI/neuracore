@@ -14,6 +14,7 @@ from neuracore.data_daemon.communications_management.channel_reader import (
     CHUNK_HEADER_FORMAT,
     ChannelMessageReader,
     CompletedChannelMessage,
+    PartialMessage,
 )
 from neuracore.data_daemon.communications_management.communications_manager import (
     CommunicationsManager,
@@ -73,6 +74,8 @@ class ChannelState:
     last_sequence_number: int = 0
     opened_at: datetime | None = None
     heartbeat_expired_at: datetime | None = None
+    socket_transport_opened: bool = False
+    socket_pending_messages: dict[str, PartialMessage] = field(default_factory=dict)
 
     def is_opened(self) -> bool:
         """Check if the channel has been opened with a ring buffer."""
@@ -104,26 +107,80 @@ class ChannelState:
                 self.ring_buffer.close()
             finally:
                 self.ring_buffer.unlink()
+        self.socket_transport_opened = False
         self.ring_buffer = ring_buffer
         self.reader = ChannelMessageReader(ring_buffer)
         self.opened_at = datetime.now(timezone.utc)
 
     def is_open(self) -> bool:
         """Check if the channel is open (i.e. has an initialized ring buffer)."""
-        return self.ring_buffer is not None
+        return self.ring_buffer is not None or self.socket_transport_opened
+
+    def mark_socket_transport_open(self) -> None:
+        """Mark this channel as active on direct socket transport."""
+        self.socket_transport_opened = True
+        if self.opened_at is None:
+            self.opened_at = datetime.now(timezone.utc)
 
     def clear_ring_buffer(self) -> None:
-        """Close and forget the current ring buffer for this channel."""
+        """Close and forget the current transport state for this channel."""
         ring_buffer = self.ring_buffer
         self.ring_buffer = None
         self.reader = None
         self.opened_at = None
+        self.socket_transport_opened = False
+        self.socket_pending_messages.clear()
         if ring_buffer is None:
             return
         try:
             ring_buffer.close()
         finally:
             ring_buffer.unlink()
+
+    def add_socket_data_chunk(
+        self, data_chunk: DataChunkPayload
+    ) -> CompletedChannelMessage | None:
+        """Register one socket DATA_CHUNK and return a completed payload when ready."""
+        self.mark_socket_transport_open()
+
+        trace_id = data_chunk.trace_id
+        partial_message = self.socket_pending_messages.get(trace_id)
+        if partial_message is None:
+            partial_message = PartialMessage(total_chunks=data_chunk.total_chunks)
+            self.socket_pending_messages[trace_id] = partial_message
+        elif partial_message.total_chunks != data_chunk.total_chunks:
+            logger.warning(
+                "Inconsistent total_chunks for socket trace_id=%s (existing=%d, new=%d)",
+                trace_id,
+                partial_message.total_chunks,
+                data_chunk.total_chunks,
+            )
+
+        partial_message.register_metadata(trace_id, data_chunk.trace_metadata)
+        complete = partial_message.add_chunk(data_chunk.chunk_index, data_chunk.data)
+        if not complete:
+            return None
+
+        try:
+            payload = partial_message.assemble()
+        except ValueError as exc:
+            logger.error("Failed to assemble socket trace_id=%s: %s", trace_id, exc)
+            self.socket_pending_messages.pop(trace_id, None)
+            return None
+
+        trace_metadata = partial_message.metadata
+        data_type = (
+            trace_metadata.data_type
+            if trace_metadata is not None
+            else data_chunk.data_type
+        )
+        self.socket_pending_messages.pop(trace_id, None)
+        return CompletedChannelMessage(
+            trace_id=trace_id,
+            data_type=data_type,
+            payload=payload,
+            metadata=trace_metadata,
+        )
 
     def has_missed_heartbeat(
         self,
@@ -532,6 +589,8 @@ class Daemon:
         suitable for use in a high-throughput system.
         """
         channel.touch()
+        if not channel.is_open():
+            channel.mark_socket_transport_open()
 
     def _register_trace(self, recording_id: str, trace_id: str) -> None:
         """Register a trace to a recording.
@@ -633,12 +692,6 @@ class Daemon:
         :param channel: channel state of the producer
         :param message: message envelope containing the data chunk payload
         """
-        if channel.ring_buffer is None:
-            logger.warning(
-                "DATA_CHUNK received but no ring buffer initialized for producer_id=%s",
-                channel.producer_id,
-            )
-            return
         data_chunk_payload = message.payload.get("data_chunk")
         if data_chunk_payload is None:
             data_chunk_payload = message.payload
@@ -727,6 +780,19 @@ class Daemon:
         total_chunks = data_chunk.total_chunks
         data = data_chunk.data
         chunk_len = len(data)
+
+        if channel.ring_buffer is None:
+            completed = channel.add_socket_data_chunk(data_chunk)
+            if completed is None:
+                return
+            self._on_complete_message(
+                channel=channel,
+                trace_id=completed.trace_id,
+                data_type=completed.data_type,
+                data=completed.payload,
+                recording_id=recording_id,
+            )
+            return
 
         trace_id_bytes = trace_id.encode("utf-8")
         if len(trace_id_bytes) > TRACE_ID_FIELD_SIZE:
