@@ -28,7 +28,7 @@ app.add_typer(profile_app, name="profile")
 
 
 def main() -> None:
-    """CLI entrypoint for nc-data-daemon."""
+    """CLI entrypoint for neuracore data-daemon."""
     app()
 
 
