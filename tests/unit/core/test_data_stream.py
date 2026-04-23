@@ -52,6 +52,21 @@ class _FakeProducerChannel:
         self.trace_id = None
         _FakeProducerChannel.instances.append(self)
 
+    def start_recording_session(
+        self,
+        *,
+        recording_id: str | None = None,
+        ring_buffer_size: int | None = None,
+    ) -> None:
+        if recording_id is not None:
+            self.recording_id = recording_id
+        self.trace_id = "trace-1"
+        self.reopened_ring_buffer_sizes.append(
+            self.default_ring_buffer_size
+            if ring_buffer_size is None
+            else ring_buffer_size
+        )
+
     def initialize_new_producer_channel(
         self, ring_buffer_size: int | None = None
     ) -> None:
@@ -123,7 +138,7 @@ def test_rgb_stream_uses_video_specific_producer_settings(monkeypatch) -> None:
     assert producer.data_type == DataType.RGB_IMAGES
     assert producer.chunk_size == DEFAULT_VIDEO_CHUNK_SIZE
     assert producer.send_queue_maxsize == DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE
-    assert producer.init_ring_buffer_size == DEFAULT_VIDEO_RING_BUFFER_SIZE
+    assert producer.reopened_ring_buffer_sizes == [DEFAULT_VIDEO_RING_BUFFER_SIZE]
 
 
 def test_rgb_stream_sends_frame_as_multipart_payload(monkeypatch) -> None:

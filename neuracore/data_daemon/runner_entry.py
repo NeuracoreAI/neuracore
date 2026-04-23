@@ -52,6 +52,20 @@ def main() -> None:
         pid_path=pid_path,
         socket_paths=(SOCKET_PATH,),
     )
+    cleaned_up = False
+
+    def shutdown_runtime() -> None:
+        """Run the standard daemon shutdown path at most once."""
+        nonlocal cleaned_up
+        if cleaned_up:
+            return
+        runtime.shutdown()
+        shutdown(
+            pid_path=pid_path,
+            socket_paths=(SOCKET_PATH,),
+            db_path=db_path,
+        )
+        cleaned_up = True
 
     try:
         install_signal_handlers(lambda _signum: None)
@@ -67,19 +81,19 @@ def main() -> None:
 
         atexit.register(on_exit)
         logger.info("Daemon starting main loop...")
-        runtime.run_forever()
+        try:
+            runtime.run_forever()
+        except Exception:
+            logger.exception("Fatal error while daemon main loop was running")
+            shutdown_runtime()
+            raise
 
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt")
     except SystemExit:
         pass
     finally:
-        runtime.shutdown()
-        shutdown(
-            pid_path=pid_path,
-            socket_paths=(SOCKET_PATH,),
-            db_path=db_path,
-        )
+        shutdown_runtime()
         if profiler:
             profiler.stop()
             profiler.write_html("profile-daemon-main.html")

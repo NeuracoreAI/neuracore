@@ -13,6 +13,11 @@ import time
 import uuid
 from datetime import timedelta
 
+from neuracore.data_daemon.lifecycle.runtime_recovery import (
+    ensure_shared_memory_capacity,
+    shared_memory_required_bytes,
+)
+
 logger = logging.getLogger(__name__)
 
 _SHARED_METADATA_SIZE = 4096
@@ -100,6 +105,12 @@ class RingBuffer:
         ``OPEN_RING_BUFFER``.
         """
         cls._require_shared_support()
+        ensure_shared_memory_capacity(
+            shared_memory_required_bytes(
+                int(size),
+                metadata_size=_SHARED_METADATA_SIZE,
+            )
+        )
         shared_name = name or f"neuracore-ring-buffer-{uuid.uuid4().hex}"
         reader = _SharedReader(
             shared_name,

@@ -88,8 +88,8 @@ class DataStream(ABC):
         """Ensures a producer is available for this data stream.
 
         If the producer does not exist, it is created with the given context.
-        If the producer already exists, its recording ID is updated if necessary.
-        Finally, a new trace is started for this producer.
+        Afterwards, the producer channel starts a fresh recording session for
+        the supplied recording context.
 
         Args:
             context: Recording context containing identifiers for
@@ -103,19 +103,10 @@ class DataStream(ABC):
                 recording_id=context.recording_id,
                 data_type=self._data_type,
             )
-            self._producer_channel.initialize_new_producer_channel()
-            return
-        if (
-            self._producer_channel.recording_id is None
-            or self._producer_channel.recording_id != context.recording_id
-        ):
-            self._producer_channel.set_recording_id(context.recording_id)
 
-        # Reopen producer channel state for each new recording in case
-        # the daemon expired the channel while this producer channel was idle.
-        self._producer_channel.start_producer_channel()
-        self._producer_channel.open_ring_buffer()
-        self._producer_channel.start_new_trace()
+        self._producer_channel.start_recording_session(
+            recording_id=context.recording_id
+        )
 
     def stop_recording(self) -> None:
         """Stop recording data and end trace if producer exists."""
