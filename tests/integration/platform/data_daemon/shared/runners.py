@@ -73,13 +73,29 @@ def online_daemon_running() -> Generator[None, None, None]:
         executes.
     """
     with scoped_online_mode():
+        print("RUNNER: before initial assert_daemon_cleanup", flush=True)
         assert_daemon_cleanup()
+        print("RUNNER: after initial assert_daemon_cleanup", flush=True)
+
+        print("RUNNER: before initial stop_daemon", flush=True)
         stop_daemon()
-        ensure_daemon_running(timeout_s=10.0)
+        print("RUNNER: after initial stop_daemon", flush=True)
+
+        print("RUNNER: before ensure_daemon_running", flush=True)
+        daemon_pid = ensure_daemon_running(timeout_s=10.0)
+        print(f"RUNNER: after ensure_daemon_running pid={daemon_pid}", flush=True)
+
         try:
             with Timer(MAX_TIME_TO_START_S, label="nc.login", always_log=True):
                 nc.login()
+            print("RUNNER: yielding to test body", flush=True)
             yield
+            print("RUNNER: test body returned normally", flush=True)
         finally:
+            print("RUNNER: finally before stop_daemon", flush=True)
             stop_daemon()
+            print("RUNNER: finally after stop_daemon", flush=True)
+
+            print("RUNNER: finally before assert_daemon_cleanup", flush=True)
             assert_daemon_cleanup()
+            print("RUNNER: finally after assert_daemon_cleanup", flush=True)

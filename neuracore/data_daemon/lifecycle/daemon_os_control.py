@@ -121,6 +121,7 @@ def _build_daemon_launch_env(
     environment["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
     environment["NEURACORE_DAEMON_DB_PATH"] = str(db_path)
     environment["NEURACORE_DAEMON_MANAGE_PID"] = "0"
+    environment["PYTHONUNBUFFERED"] = "1"
     if env_overrides:
         environment.update(env_overrides)
     return cast(dict[str, str], environment)
@@ -143,6 +144,10 @@ def _start_daemon_subprocess(
 
     try:
         if background:
+            log_path = Path("/tmp/data_daemon_debug.log")
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = open(log_path, "a", encoding="utf-8")
+
             return subprocess.Popen(
                 _build_daemon_runner_command(),
                 close_fds=True,
@@ -150,8 +155,8 @@ def _start_daemon_subprocess(
                 env=environment,
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=log_handle,
             )
 
         return subprocess.Popen(

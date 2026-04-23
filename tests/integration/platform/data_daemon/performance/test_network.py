@@ -62,17 +62,31 @@ def test_cloud_upload_and_readiness_performance(
             "Online performance tests require NEURACORE_ORG_ID"
             " or a saved current organization."
         )
+
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name)
     results: list[ContextResult] = []
+
+    print(f"TEST: start case={case_ids([case])[0]} dataset={dataset_name}", flush=True)
+
     with scoped_storage_state(case, dataset_name=dataset_name):
+        print("TEST: entered scoped_storage_state", flush=True)
         try:
+            print("TEST: before online_daemon_running", flush=True)
             with online_daemon_running():
+                print("TEST: entered online_daemon_running", flush=True)
+
+                print("TEST: before run_case_contexts", flush=True)
                 results = run_case_contexts(case, specs=specs)
                 wait_for_dataset_ready(
                     results[0].dataset_name,
                     expected_recording_count=case.recording_count,
                     timeout_s=case_timeout_seconds(case),
                 )
+                print("TEST: after wait_for_dataset_ready", flush=True)
         finally:
+            print("TEST: before log_run_analysis_on_teardown", flush=True)
             log_run_analysis_on_teardown(case, results)
+            print("TEST: after log_run_analysis_on_teardown", flush=True)
+
+    print("TEST: after scoped_storage_state", flush=True)
