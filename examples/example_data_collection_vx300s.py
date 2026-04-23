@@ -28,7 +28,7 @@ def main(args):
 
     if record:
         nc.create_dataset(
-            name="My Example Dataset",
+            name="My Example Dataset 1 3",
             description="This is an example dataset",
         )
         print("Created Dataset...")
@@ -52,33 +52,33 @@ def main(args):
             t = time.time()
             CUSTOM_DATA = np.array([1, 2, 3, 4, 5])
             CAM_NAME = "angle"
-            # nc.log_custom_1d("my_custom_data", CUSTOM_DATA, timestamp=t)
-            # nc.log_joint_positions(positions=obs.qpos, timestamp=t)
-            # nc.log_joint_velocities(velocities=obs.qvel, timestamp=t)
+            nc.log_custom_1d("my_custom_data", CUSTOM_DATA, timestamp=t)
+            nc.log_joint_positions(positions=obs.qpos, timestamp=t)
+            nc.log_joint_velocities(velocities=obs.qvel, timestamp=t)
             nc.log_language(
                 name="instruction",
                 language="Pick up the cube and pass it to the other robot",
                 timestamp=t,
             )
-            # nc.log_rgb(CAM_NAME, obs.cameras[CAM_NAME].rgb, timestamp=t)
+            nc.log_rgb(CAM_NAME, obs.cameras[CAM_NAME].rgb, timestamp=t)
 
             # Execute action trajectory while logging
-            # for action in action_traj:
-            #     obs, reward, done = env.step(np.array(list(action.values())))
-            #     t += 0.02
-                # nc.log_custom_1d("my_custom_data", CUSTOM_DATA, timestamp=t)
-                # nc.log_joint_positions(positions=obs.qpos, timestamp=t)
-                # nc.log_joint_velocities(velocities=obs.qvel, timestamp=t)
-                # nc.log_language(
-                #     name="instruction",
-                #     language="Pick up the cube and pass it to the other robot",
-                #     timestamp=t,
-                # )
-                # nc.log_joint_target_positions(
-                #     target_positions=action,
-                #     timestamp=t,
-                # )
-                # nc.log_rgb(name=CAM_NAME, rgb=obs.cameras[CAM_NAME].rgb, timestamp=t)
+            for action in action_traj:
+                obs, reward, done = env.step(np.array(list(action.values())))
+                t += 0.02
+                nc.log_custom_1d("my_custom_data", CUSTOM_DATA, timestamp=t)
+                nc.log_joint_positions(positions=obs.qpos, timestamp=t)
+                nc.log_joint_velocities(velocities=obs.qvel, timestamp=t)
+                nc.log_language(
+                    name="instruction",
+                    language="Pick up the cube and pass it to the other robot",
+                    timestamp=t,
+                )
+                nc.log_joint_target_positions(
+                    target_positions=action,
+                    timestamp=t,
+                )
+                nc.log_rgb(name=CAM_NAME, rgb=obs.cameras[CAM_NAME].rgb, timestamp=t)
 
             # Stop recording if enabled
             if record:
