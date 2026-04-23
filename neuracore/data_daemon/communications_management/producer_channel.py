@@ -23,7 +23,11 @@ from neuracore.data_daemon.const import (
     DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
 )
 from neuracore.data_daemon.models import CommandType, DataType
-from neuracore.data_daemon.models import SharedRingChunkMetadata, TraceTransportMetadata
+from neuracore.data_daemon.models import (
+    DataChunkPayload,
+    SharedRingChunkMetadata,
+    TraceTransportMetadata,
+)
 
 from .producer_channel_message_sender import (
     ProducerChannelMessageSender,
@@ -39,6 +43,11 @@ logger = logging.getLogger(__name__)
 BytePart = bytes | bytearray | memoryview
 
 __all__ = ["ProducerChannel", "RingBuffer", "producer_transport_args_for_data_type"]
+
+
+def data_type_uses_shared_ring_transport(data_type: DataType) -> bool:
+    """Return True when the data type should use shared-ring transport."""
+    return data_type == DataType.RGB_IMAGES
 
 
 def producer_transport_args_for_data_type(
@@ -103,6 +112,8 @@ class ProducerChannel:
         self.trace_id: str | None = None
         self.recording_id: str | None = recording_id
         self._heartbeat_interval = 1.0
+        self._data_type = data_type
+        self._use_shared_transport = data_type_uses_shared_ring_transport(data_type)
         self._shared_ring_transport = ProducerSharedRingBufferTransport(
             int(
                 default_ring_buffer_size
@@ -230,24 +241,35 @@ class ProducerChannel:
 
     def open_ring_buffer(self, size: int | None = None) -> None:
         """Open the daemon-side ring buffer transport for this producer."""
+        if not self._use_shared_transport:
+            return
         if self._shared_ring_transport.is_announced():
             return
         payload = self._shared_ring_transport.open(size)
         sequence_number = self._send(
             CommandType.OPEN_RING_BUFFER,
-            {"open_ring_buffer": payload},
+            {"open_ring_buffer": payload.model_dump(exclude_none=True)},
         )
         if not self.wait_until_sequence_sent(sequence_number):
             raise RuntimeError("Failed to send OPEN_RING_BUFFER before shared connect")
 
     def _ensure_shared_ring_buffer(self) -> None:
         """Create and announce the shared ring buffer on first data send."""
+        if not self._use_shared_transport:
+            return
         if self._shared_ring_transport.is_open():
             return
 
         if not self._shared_ring_transport.is_announced():
             self.open_ring_buffer()
         self._shared_ring_transport.ensure_open()
+
+    def _send_socket_data_chunk(self, payload: DataChunkPayload) -> None:
+        """Send one DATA_CHUNK payload directly over the producer socket."""
+        self._send(
+            CommandType.DATA_CHUNK,
+            {"data_chunk": payload.to_dict()},
+        )
 
     def send_data(
         self,
@@ -365,6 +387,33 @@ class ProducerChannel:
             robot_id=robot_id,
             robot_instance=robot_instance,
         )
+
+        if not self._use_shared_transport:
+            if not normalised_parts:
+                return
+            payload_bytes = (
+                bytes(normalised_parts[0])
+                if len(normalised_parts) == 1
+                else b"".join(bytes(part) for part in normalised_parts)
+            )
+            self._send_socket_data_chunk(
+                DataChunkPayload(
+                    channel_id=self.channel_id,
+                    recording_id=recording_id,
+                    trace_id=trace_id,
+                    chunk_index=0,
+                    total_chunks=1,
+                    data_type_name=data_type_name,
+                    dataset_id=dataset_id,
+                    dataset_name=dataset_name,
+                    robot_name=robot_name,
+                    robot_id=robot_id,
+                    robot_instance=robot_instance,
+                    data=payload_bytes,
+                    data_type=data_type,
+                )
+            )
+            return
 
         for idx, chunk in enumerate(self._iter_chunk_views(normalised_parts)):
             produced_chunks += 1
