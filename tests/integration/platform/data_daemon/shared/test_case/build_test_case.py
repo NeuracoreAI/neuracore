@@ -37,6 +37,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_EMPTY,
     TIMESTAMP_MODE_MANUAL,
     TIMESTAMP_MODE_REAL,
+    TIMESTAMP_MODE_STOCHASTIC,
     StopMethod,
     StorageStateAction,
     TimestampMode,
@@ -283,10 +284,12 @@ def case_id(case: DataDaemonTestCase) -> str:
             parts.append(f"{case.video_fps}hz")
     if case.producer_channels == PRODUCER_PER_THREAD:
         parts.append("threaded")
-    if case.wait:
-        parts.append("wait")
     if case.timestamp_mode == TIMESTAMP_MODE_REAL:
         parts.append("realtime")
+    elif case.timestamp_mode == TIMESTAMP_MODE_STOCHASTIC:
+        parts.append("stochastic")
+    if case.wait:
+        parts.append("wait")
     return "-".join(parts)
 
 

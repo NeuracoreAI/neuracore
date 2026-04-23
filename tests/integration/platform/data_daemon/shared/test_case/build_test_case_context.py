@@ -14,7 +14,7 @@ import random
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -45,13 +45,16 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     MODE_STAGGERED,
     PRODUCER_PER_THREAD,
+    STOCHASTIC_JITTER_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
     TIMESTAMP_MODE_REAL,
+    TIMESTAMP_MODE_STOCHASTIC,
 )
 
 logger = logging.getLogger(__name__)
 
 CONTEXT_DURATION_RANDOM = random.Random(0)
+STOCHASTIC_TIMESTAMP_RANDOM = random.Random(1)
 
 
 def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
@@ -163,6 +166,7 @@ class ContextResult:
     wall_stopped_at: float
     timestamp_mode: str
     expected_timestamps: ContextExpectedTimestamps | None = None
+    timer_stats: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,11 +181,13 @@ class ContextSpec:
     timestamp_start_s: float
     timestamp_end_s: float
     start_delay_s: float
+    assert_deadline: bool = False
 
 
 def build_context_specs(
     case: DataDaemonTestCase,
     dataset_name: str | None = None,
+    assert_deadline: bool = False,
 ) -> list[ContextSpec]:
     """Build per-context worker specs for a matrix case."""
     specs: list[ContextSpec] = []
@@ -242,6 +248,7 @@ def build_context_specs(
                     timestamp_start_s + context_duration_sec * recordings_for_context
                 ),
                 start_delay_s=start_delay_s,
+                assert_deadline=assert_deadline,
             )
         )
     return specs
@@ -270,6 +277,14 @@ def _cleanup_test_worker_robot(robot: object | None) -> None:
         robot._daemon_recording_context = None
 
 
+def get_jitter(use_stochastic_timestamps: bool) -> float:
+    if use_stochastic_timestamps:
+        return STOCHASTIC_TIMESTAMP_RANDOM.uniform(
+            -STOCHASTIC_JITTER_S, STOCHASTIC_JITTER_S
+        )
+    return 0.0
+
+
 def log_synchronous_frames(
     *,
     robot_name: str,
@@ -286,12 +301,15 @@ def log_synchronous_frames(
     marker_name: str,
     context_index: int,
     use_real_timestamps: bool = False,
+    use_stochastic_timestamps: bool = False,
+    assert_deadline: bool = False,  # only set by performance tests
 ) -> None:
     """Log all joint and video frames for one recording synchronously.
 
     Joint and video frames are interleaved in a single loop using a wall-clock
     deadline scheduler, so both streams advance together in time order.
     """
+    timing_tolerance = STOCHASTIC_JITTER_S if use_stochastic_timestamps else None
     recording_wall_start = time.time()
     joint_index = 0
     video_index = 0
@@ -301,14 +319,15 @@ def log_synchronous_frames(
     ):
         joint_due = joint_index < joint_frame_count
         video_due = camera_name_list and video_index < video_frame_count
+        jitter = get_jitter(use_stochastic_timestamps)
 
         joint_deadline = (
-            recording_wall_start + (joint_index / joint_fps)
+            recording_wall_start + (joint_index / joint_fps) + jitter
             if joint_due
             else float("inf")
         )
         video_deadline = (
-            recording_wall_start + (video_index / video_fps)
+            recording_wall_start + (video_index / video_fps) + jitter
             if video_due
             else float("inf")
         )
@@ -317,14 +336,17 @@ def log_synchronous_frames(
             remaining = joint_deadline - time.time()
             if remaining > 0:
                 time.sleep(remaining)
-            timestamp = (
-                None
-                if use_real_timestamps
-                else timestamp_start_s + (joint_index / joint_fps)
-            )
+            if use_real_timestamps:
+                timestamp = None
+            else:
+                intended = timestamp_start_s + (joint_index / joint_fps)
+                timestamp = intended + jitter
             joint_values = generate_joint_values(joint_index, joint_fps, joint_names)
             with Timer(
-                MAX_TIME_TO_LOG_S, label="nc.log_joint_positions", assert_limit=False
+                MAX_TIME_TO_LOG_S,
+                label="nc.log_joint_positions",
+                deadline=joint_deadline if assert_deadline else None,
+                timing_tolerance=timing_tolerance,
             ):
                 nc.log_joint_positions(
                     joint_values, robot_name=robot_name, timestamp=timestamp
@@ -332,18 +354,27 @@ def log_synchronous_frames(
             with Timer(
                 MAX_TIME_TO_LOG_S,
                 label="nc.log_joint_velocities",
-                assert_limit=False,
+                deadline=joint_deadline if assert_deadline else None,
+                timing_tolerance=timing_tolerance,
             ):
                 nc.log_joint_velocities(
                     joint_values, robot_name=robot_name, timestamp=timestamp
                 )
             with Timer(
-                MAX_TIME_TO_LOG_S, label="nc.log_joint_torques", assert_limit=False
+                MAX_TIME_TO_LOG_S,
+                label="nc.log_joint_torques",
+                deadline=joint_deadline if assert_deadline else None,
+                timing_tolerance=timing_tolerance,
             ):
                 nc.log_joint_torques(
                     joint_values, robot_name=robot_name, timestamp=timestamp
                 )
-            with Timer(MAX_TIME_TO_LOG_S, label="nc.log_custom_1d", assert_limit=False):
+            with Timer(
+                MAX_TIME_TO_LOG_S,
+                label="nc.log_custom_1d",
+                deadline=joint_deadline if assert_deadline else None,
+                timing_tolerance=timing_tolerance,
+            ):
                 nc.log_custom_1d(
                     marker_name,
                     np.array([float(joint_index)], dtype=np.float32),
@@ -355,11 +386,12 @@ def log_synchronous_frames(
             remaining = video_deadline - time.time()
             if remaining > 0:
                 time.sleep(remaining)
-            timestamp = (
-                None
-                if use_real_timestamps
-                else timestamp_start_s + (video_index / video_fps)
-            )
+            if use_real_timestamps:
+                timestamp = None
+            else:
+                intended = timestamp_start_s + (video_index / video_fps)
+                timestamp = intended + jitter
+
             for camera_index, camera_name in enumerate(camera_name_list):
                 frame_code = (
                     (context_index * 1_000_000_000)
@@ -368,7 +400,12 @@ def log_synchronous_frames(
                     + video_index
                 )
                 rgb_image = encode_frame_number(frame_code, image_width, image_height)
-                with Timer(MAX_TIME_TO_LOG_S, label="nc.log_rgb", assert_limit=False):
+                with Timer(
+                    MAX_TIME_TO_LOG_S,
+                    label="nc.log_rgb",
+                    deadline=video_deadline if assert_deadline else None,
+                    timing_tolerance=timing_tolerance,
+                ):
                     nc.log_rgb(
                         camera_name,
                         rgb_image,
@@ -415,6 +452,8 @@ def run_threaded_logging(
     image_width: int | None,
     image_height: int | None,
     use_real_timestamps: bool = False,
+    use_stochastic_timestamps: bool = False,
+    assert_deadline: bool = False,  # only set by performance tests
 ) -> list[str]:
     """Run logging across multiple threads, one per data role."""
     roles = build_thread_roles(
@@ -433,16 +472,20 @@ def run_threaded_logging(
             frame_count = video_frame_count if is_rgb else joint_frame_count
             fps = video_fps if is_rgb else joint_fps
             thread_wall_start = time.time()
+            jitter = get_jitter(use_stochastic_timestamps)
+            timing_tolerance = (
+                STOCHASTIC_JITTER_S if use_stochastic_timestamps else None
+            )
             for frame_index in range(frame_count):
-                deadline = thread_wall_start + (frame_index / fps)
-                remaining = deadline - time.time()
+                frame_deadline = thread_wall_start + (frame_index / fps)
+                remaining = frame_deadline - time.time()
                 if remaining > 0:
                     time.sleep(remaining)
-                timestamp = (
-                    None
-                    if use_real_timestamps
-                    else timestamp_start_s + (frame_index / fps)
-                )
+                if use_real_timestamps:
+                    timestamp = None
+                else:
+                    intended = timestamp_start_s + (frame_index / fps)
+                    timestamp = intended + jitter
                 if is_rgb:
                     for camera_offset, camera_name in enumerate(
                         role_spec["camera_names"]
@@ -461,7 +504,8 @@ def run_threaded_logging(
                         with Timer(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_rgb",
-                            assert_limit=False,
+                            deadline=frame_deadline if assert_deadline else None,
+                            timing_tolerance=timing_tolerance,
                         ):
                             nc.log_rgb(
                                 camera_id,
@@ -478,7 +522,8 @@ def run_threaded_logging(
                         with Timer(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_joint_positions",
-                            assert_limit=False,
+                            deadline=frame_deadline if assert_deadline else None,
+                            timing_tolerance=timing_tolerance,
                         ):
                             nc.log_joint_positions(
                                 joint_values,
@@ -489,7 +534,8 @@ def run_threaded_logging(
                         with Timer(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_joint_velocities",
-                            assert_limit=False,
+                            deadline=frame_deadline if assert_deadline else None,
+                            timing_tolerance=timing_tolerance,
                         ):
                             nc.log_joint_velocities(
                                 joint_values,
@@ -500,7 +546,8 @@ def run_threaded_logging(
                         with Timer(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_joint_torques",
-                            assert_limit=False,
+                            deadline=frame_deadline if assert_deadline else None,
+                            timing_tolerance=timing_tolerance,
                         ):
                             nc.log_joint_torques(
                                 joint_values,
@@ -510,7 +557,8 @@ def run_threaded_logging(
                 with Timer(
                     MAX_TIME_TO_LOG_S,
                     label="nc.log_custom_1d",
-                    assert_limit=False,
+                    deadline=frame_deadline if assert_deadline else None,
+                    timing_tolerance=timing_tolerance,
                 ):
                     nc.log_custom_1d(
                         marker_name,
@@ -548,6 +596,7 @@ def log_frames(
     Derives timestamp mode and all frame parameters from *spec*.
     """
     use_real_timestamps = spec.case.timestamp_mode == TIMESTAMP_MODE_REAL
+    use_stochastic_timestamps = spec.case.timestamp_mode == TIMESTAMP_MODE_STOCHASTIC
     recording_timestamp_start_s = (
         spec.timestamp_start_s + recording_index * spec.case.duration_sec
     )
@@ -569,6 +618,8 @@ def log_frames(
             image_width=spec.case.image_width,
             image_height=spec.case.image_height,
             use_real_timestamps=use_real_timestamps,
+            use_stochastic_timestamps=use_stochastic_timestamps,
+            assert_deadline=spec.assert_deadline,
         )
 
     log_synchronous_frames(
@@ -586,6 +637,8 @@ def log_frames(
         marker_name=marker_name,
         context_index=spec.context_index,
         use_real_timestamps=use_real_timestamps,
+        use_stochastic_timestamps=use_stochastic_timestamps,
+        assert_deadline=spec.assert_deadline,
     )
     return [marker_name]
 
@@ -613,6 +666,18 @@ def _bind_worker_dataset(*, dataset_name: str, create_dataset: bool) -> None:
     ) from last_error
 
 
+def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
+    """Subprocess wrapper for context_worker used by multiprocessing.Pool.
+
+    On Linux, Pool uses fork so workers inherit a copy of the parent's
+    Timer._stats. Clearing it here ensures workers only capture their own
+    timers and the parent's pre-fork timers (e.g. nc.login) are not
+    double-counted when stats are merged back.
+    """
+    Timer._stats.clear()
+    return context_worker(spec)
+
+
 def context_worker(spec: ContextSpec) -> ContextResult:
     """Execute recordings for a single parallel context."""
     case = spec.case
@@ -630,8 +695,6 @@ def context_worker(spec: ContextSpec) -> ContextResult:
     wall_stopped_at: float = 0.0
 
     try:
-        with Timer(MAX_TIME_TO_START_S, label="nc.login", always_log=True):
-            nc.login()
         _bind_worker_dataset(
             dataset_name=spec.dataset_name,
             create_dataset=spec.context_index == 0,
@@ -720,6 +783,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 nc.stop_recording(robot_name=spec.robot_name, wait=case.wait)
             wall_stopped_at = time.time()
 
+        captured_timer_stats = {k: dict(v) for k, v in Timer._stats.items()}
         return ContextResult(
             dataset_name=spec.dataset_name,
             recording_ids=recording_ids,
@@ -744,6 +808,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 if expected_by_recording is not None
                 else None
             ),
+            timer_stats=captured_timer_stats,
         )
     except Exception:
         if robot is not None:
@@ -765,6 +830,9 @@ def run_case_contexts(
     case: DataDaemonTestCase,
     *,
     specs: list[ContextSpec] | None = None,
+    assert_deadline: bool = False,
+    assert_mode: bool = True,
+    wait_for_traces: bool = False,
 ) -> list[ContextResult]:
     """Run all parallel contexts for a matrix test case.
 
@@ -776,68 +844,39 @@ def run_case_contexts(
         case: The test case defining parallelism level and context matrix.
         specs: Pre-built context specs to run. If None, built from ``case``
             via :func:`build_context_specs`.
+        assert_deadline: Passed through to :func:`build_context_specs` when
+            ``specs`` is ``None``.
+        assert_mode: When ``True`` (default), calls :func:`assert_context_mode`
+            after running to verify expected parallelization behaviour.
+        wait_for_traces: When ``True``, waits for all traces to be written to
+            disk after running (implies ``assert_mode``).
 
     Returns:
         List of result dicts from each context worker, one per spec.
     """
     if specs is None:
-        specs = build_context_specs(case)
+        specs = build_context_specs(case, assert_deadline=assert_deadline)
 
     if case.parallel_contexts == 1:
-        return [context_worker(specs[0])]
+        results = [context_worker(specs[0])]
+    else:
+        with multiprocessing.Pool(case.parallel_contexts) as pool:
+            results = list(  # type: ignore[return-value]
+                pool.map(_subprocess_context_worker, specs)
+            )
+        for result in results:
+            Timer.merge_stats(result.timer_stats)
 
-    with multiprocessing.Pool(case.parallel_contexts) as pool:
-        return list(pool.map(context_worker, specs))  # type: ignore[return-value]
+    if assert_mode or wait_for_traces:
+        assert_context_mode(case, results)
 
+    if wait_for_traces:
+        from tests.integration.platform.data_daemon.shared.db_helpers import (
+            wait_for_all_traces_written,
+        )
 
-def run_and_assert_case_contexts(
-    case: DataDaemonTestCase,
-    *,
-    specs: list[ContextSpec] | None = None,
-) -> list[ContextResult]:
-    """Run all contexts and assert expected parallelization mode behavior.
+        wait_for_all_traces_written(results=results)
 
-    This helper keeps the execution flow explicit while avoiding duplicated
-    `run_case_contexts` + `assert_context_mode` boilerplate across suites.
-
-    Args:
-        case: The active :class:`DataDaemonTestCase`.
-        specs: Optional pre-built context specs; passed through to
-            :func:`run_case_contexts`.
-
-    Returns:
-        The list of per-context result dicts.
-    """
-    results = run_case_contexts(case, specs=specs)
-    assert_context_mode(case, results)
-    return results
-
-
-def run_and_verify_case_contexts(
-    case: DataDaemonTestCase,
-    *,
-    specs: list[ContextSpec] | None = None,
-) -> list[ContextResult]:
-    """Run all contexts, assert mode, and wait for all traces to be written.
-
-    Combines the three steps that always appear together:
-    :func:`run_case_contexts`, :func:`assert_context_mode`, and
-    :func:`~tests.integration.platform.data_daemon.shared.db_helpers.wait_for_all_traces_written`.
-
-    Args:
-        case: The active :class:`DataDaemonTestCase`.
-        specs: Optional pre-built context specs; passed through to
-            :func:`run_case_contexts`.
-
-    Returns:
-        The list of per-context result dicts.
-    """
-    from tests.integration.platform.data_daemon.shared.db_helpers import (
-        wait_for_all_traces_written,
-    )
-
-    results = run_and_assert_case_contexts(case, specs=specs)
-    wait_for_all_traces_written(results=results)
     return results
 
 

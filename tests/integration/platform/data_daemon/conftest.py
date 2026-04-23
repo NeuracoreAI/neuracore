@@ -17,7 +17,6 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     SESSION_RUNS,
     DataDaemonTestCase,
     _format_timer_stats_line,
-    log_run_analysis,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
     ContextResult,
@@ -29,6 +28,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     OFFLINE_DB_PATH,
     OFFLINE_RECORDINGS_ROOT,
     apply_storage_state_action,
+    build_isolation_run_analysis,
 )
 
 # cspell:ignore terminalreporter exitstatus finalizer NODEIDS exitfirst unparameterized
@@ -117,10 +117,13 @@ def log_run_analysis_on_teardown(
 
     def finalizer() -> None:
         if state.get("results"):
-            request.node.run_analysis_report = log_run_analysis(
-                case=state["case"],  # type: ignore[arg-type]
-                results=state["results"],  # type: ignore[arg-type]
-            )
+            try:
+                request.node.run_analysis_report = build_isolation_run_analysis(
+                    case=state["case"],  # type: ignore[arg-type]
+                    results=state["results"],  # type: ignore[arg-type]
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     request.addfinalizer(finalizer)
     return register
@@ -151,9 +154,10 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         )
         for label in all_labels:
             stats = run["timer_stats"].get(label)
-            if stats is None:
-                continue
-            lines.append(_format_timer_stats_line(label, stats))
+            if stats is not None:
+                lines.append(_format_timer_stats_line(label, stats))
+            else:
+                lines.append(f"    {label:<42}  ---")
 
     infra_labels = sorted(label for label in Timer._stats if label not in all_labels)
     if infra_labels:

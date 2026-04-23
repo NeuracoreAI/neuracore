@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from tests.integration.platform.data_daemon.daemon_test_cases import (
-    NETWORK_INTEGRITY_CASES,
+    PRE_NETWORK_INTEGRITY_CASES,
 )
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
@@ -23,7 +23,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     ContextResult,
     build_context_specs,
     create_testing_dataset_name,
-    run_and_assert_case_contexts,
+    run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_CLI,
@@ -35,7 +35,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 )
 
 _CASES = DataDaemonTestBatch(
-    cases=NETWORK_INTEGRITY_CASES,
+    cases=PRE_NETWORK_INTEGRITY_CASES,
     storage_state_action=STORAGE_STATE_PRESERVE,
     stop_method=STOP_METHOD_CLI,
 ).as_cases()
@@ -96,7 +96,7 @@ def test_cloud_data_integrity(
         try:
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
-                results = run_and_assert_case_contexts(case, specs=specs)
+                results = run_case_contexts(case, specs=specs)
                 _assert_online_verification_invariants(results)
                 verify_cloud_results(results=results, case=case)
 

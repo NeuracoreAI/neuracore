@@ -11,14 +11,21 @@ from __future__ import annotations
 from collections.abc import Generator
 from contextlib import contextmanager
 
+import neuracore as nc
 from neuracore.data_daemon.lifecycle.daemon_os_control import ensure_daemon_running
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_daemon_cleanup,
 )
-from tests.integration.platform.data_daemon.shared.process_control import stop_daemon
+from tests.integration.platform.data_daemon.shared.process_control import (
+    Timer,
+    stop_daemon,
+)
 from tests.integration.platform.data_daemon.shared.profiles import (
     scoped_offline_profile,
     scoped_online_mode,
+)
+from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    MAX_TIME_TO_START_S,
 )
 
 
@@ -42,6 +49,8 @@ def offline_daemon_running() -> Generator[None, None, None]:
         assert_daemon_cleanup()
         ensure_daemon_running(timeout_s=10.0)
         try:
+            with Timer(MAX_TIME_TO_START_S, label="nc.login", always_log=True):
+                nc.login()
             yield
         finally:
             stop_daemon()
@@ -68,6 +77,8 @@ def online_daemon_running() -> Generator[None, None, None]:
         stop_daemon()
         ensure_daemon_running(timeout_s=10.0)
         try:
+            with Timer(MAX_TIME_TO_START_S, label="nc.login", always_log=True):
+                nc.login()
             yield
         finally:
             stop_daemon()

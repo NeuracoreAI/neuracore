@@ -82,6 +82,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     FRAME_GRID_SIZE,
     MODE_SEQUENTIAL,
     TIMESTAMP_MODE_REAL,
+    TIMESTAMP_MODE_STOCHASTIC,
 )
 
 logger = logging.getLogger(__name__)
@@ -392,15 +393,16 @@ def _assert_synced_episode_timestamps_are_sane(
             f"valid epoch values (< year 2000) — e.g. {non_epoch[:5]}"
         )
 
-    non_monotonic = [
-        (i, timestamps[i], timestamps[i + 1])
-        for i in range(len(timestamps) - 1)
-        if timestamps[i] >= timestamps[i + 1]
-    ]
-    assert not non_monotonic, (
-        f"Synced episode timestamps are not monotonically non-decreasing — "
-        f"e.g. {non_monotonic[:5]}"
-    )
+    if result.timestamp_mode != TIMESTAMP_MODE_STOCHASTIC:
+        non_monotonic = [
+            (i, timestamps[i], timestamps[i + 1])
+            for i in range(len(timestamps) - 1)
+            if timestamps[i] >= timestamps[i + 1]
+        ]
+        assert not non_monotonic, (
+            f"Synced episode timestamps are not monotonically non-decreasing — "
+            f"e.g. {non_monotonic[:5]}"
+        )
 
 
 def _assert_synced_camera_codes_are_sane(
@@ -472,6 +474,19 @@ def _assert_synced_camera_codes_are_sane(
             for i, p, c in violations[:8]
         ],
     ])
+
+    expected_codes = set(range(base_code, base_code + expected_video_frame_count))
+    missing_codes = expected_codes - set(actual_codes)
+    if missing_codes:
+        sample = sorted(missing_codes)[: len(missing_codes) // 2 + 1]
+        duplicate_count = len(actual_codes) - (len(expected_codes) - len(missing_codes))
+        assert not missing_codes, (
+            f"Camera {camera_name!r}: {len(missing_codes)} missing frame code(s) "
+            f"(received {len(actual_codes)} frames, "
+            f"{duplicate_count} duplicate code(s), "
+            f"{len(missing_codes)} expected codes absent from range "
+            f"[{base_code}, {max_code}]); first missing codes: {sample}"
+        )
 
 
 def _verify_synched_episode_summary(
@@ -818,40 +833,6 @@ def verify_cloud_results(
         except AssertionError as exc:
             data_failures[recording_id] = [str(exc)]
         verified_ids.add(recording_id)
-
-        # Loose: warn on missing frame codes but do not fail the test.
-        if result.has_video:
-            for camera_index, camera_name in enumerate(result.camera_names):
-                actual_codes = list(summary["frame_codes"].get(camera_name, []))
-                base_code = (
-                    (result.context_index * 1_000_000_000)
-                    + (recording_index * 10_000_000)
-                    + (camera_index * 100_000)
-                )
-                expected_codes = set(
-                    range(base_code, base_code + result.video_frame_count)
-                )
-                missing_codes = expected_codes - set(actual_codes)
-                if missing_codes:
-                    sample = sorted(missing_codes)[: len(missing_codes) // 2 + 1]
-                    duplicate_count = len(actual_codes) - (
-                        len(expected_codes) - len(missing_codes)
-                    )
-                    logger.warning(
-                        "recording %s camera %r: %d missing frame code(s) "
-                        "(received %d frames, %d duplicate(s), "
-                        "%d expected codes absent from [%d, %d]); "
-                        "first missing: %s",
-                        recording_id,
-                        camera_name,
-                        len(missing_codes),
-                        len(actual_codes),
-                        duplicate_count,
-                        len(missing_codes),
-                        base_code,
-                        base_code + result.video_frame_count - 1,
-                        sample,
-                    )
 
     missing = set(recording_lookup.keys()) - verified_ids
     data_errors: list[str] = []

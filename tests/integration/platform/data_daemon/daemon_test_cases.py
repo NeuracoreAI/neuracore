@@ -9,9 +9,10 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MODE_STAGGERED,
     PRODUCER_PER_THREAD,
     TIMESTAMP_MODE_REAL,
+    TIMESTAMP_MODE_STOCHASTIC,
 )
 
-BASE_CASES = (
+INTEGRITY_CASES = (
     DataDaemonTestCase(
         duration_sec=10,
         joint_count=7,
@@ -78,10 +79,22 @@ BASE_CASES = (
         timestamp_mode=TIMESTAMP_MODE_REAL,
         wait=False,
     ),
+    DataDaemonTestCase(
+        duration_sec=10,
+        recording_count=4,
+        video_count=1,
+        image_height=120,
+        image_width=120,
+        video_fps=120,
+        joint_fps=500,
+        producer_channels=PRODUCER_PER_THREAD,
+        timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
+        wait=False,
+    ),
 )
 
-PRE_NETWORK_INTEGRITY_CASES = BASE_CASES
-NETWORK_INTEGRITY_CASES = BASE_CASES + (
+PRE_NETWORK_INTEGRITY_CASES = INTEGRITY_CASES
+NETWORK_INTEGRITY_CASES = INTEGRITY_CASES + (
     DataDaemonTestCase(
         duration_sec=5,
         joint_count=7,
@@ -158,6 +171,19 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         parallel_contexts=2,
         recording_count=16,
         context_duration_mode=DURATION_MODE_FIXED,
+    ),
+    DataDaemonTestCase(
+        duration_sec=300,
+        joint_count=10,
+        video_count=1,
+        image_width=1920,
+        image_height=1080,
+        parallel_contexts=2,
+        recording_count=16,
+        context_duration_mode=DURATION_MODE_VARIABLE,
+        video_fps=30,
+        joint_fps=15,
+        timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
     ),
 )
 

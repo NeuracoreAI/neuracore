@@ -73,7 +73,6 @@ def test_cancel_recording_produces_no_data(
     request: pytest.FixtureRequest,
 ) -> None:
     """Verify that cancelling a recording discards all logged data."""
-    nc.login()
     if not has_configured_org():
         pytest.skip(
             "Cancel-recording behavioural tests require NEURACORE_ORG_ID"
@@ -90,8 +89,6 @@ def test_cancel_recording_produces_no_data(
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
 
-                with Timer(MAX_TIME_TO_START_S, label="nc.login", always_log=True):
-                    nc.login()
                 with Timer(
                     MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True
                 ):
@@ -153,7 +150,6 @@ def test_cancel_then_start_new_recording(
     Two variants are tested: resuming immediately (gap_s=0) and after a 10s
     pause (gap_s=10) to cover both tight and relaxed timing paths.
     """
-    nc.login()
     if not has_configured_org():
         pytest.skip(
             "Cancel-recording behavioural tests require NEURACORE_ORG_ID"
@@ -171,8 +167,6 @@ def test_cancel_then_start_new_recording(
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
 
-                with Timer(MAX_TIME_TO_START_S, label="nc.login", always_log=True):
-                    nc.login()
                 with Timer(
                     MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True
                 ):
