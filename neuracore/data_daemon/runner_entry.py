@@ -18,6 +18,13 @@ from neuracore.data_daemon.runtime import DaemonContext, DaemonRuntime
 logger = logging.getLogger(__name__)
 
 
+def _configure_third_party_logging() -> None:
+    """Silence noisy third-party INFO logs that do not help daemon users."""
+    logging.getLogger("zerobuffer").setLevel(logging.WARNING)
+    logging.getLogger("zerobuffer.reader").setLevel(logging.WARNING)
+    logging.getLogger("zerobuffer.writer").setLevel(logging.WARNING)
+
+
 def main() -> None:
     """Runner entrypoint for the Neuracore data daemon.
 
@@ -37,6 +44,7 @@ def main() -> None:
 
     The daemon will shut down when it receives a SIGINT or SIGTERM signal.
     """
+    _configure_third_party_logging()
     debug_mode = is_debug_mode()
     profiler = None
     if debug_mode:
