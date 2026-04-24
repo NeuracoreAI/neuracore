@@ -33,6 +33,8 @@ DURATION_VARIABLE_MAX_FACTOR = 1.25
 # timestamp_mode
 TIMESTAMP_MODE_MANUAL = "manual"
 TIMESTAMP_MODE_REAL = "real"
+TIMESTAMP_MODE_STOCHASTIC = "stochastic"
+STOCHASTIC_JITTER_S = 0.05
 
 # ---------------------------------------------------------------------------
 # Value sets (tuples for static validation)
@@ -47,7 +49,11 @@ STORAGE_STATE_ACTIONS = (
 MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
 PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
-TIMESTAMP_MODES = (TIMESTAMP_MODE_MANUAL, TIMESTAMP_MODE_REAL)
+TIMESTAMP_MODES = (
+    TIMESTAMP_MODE_MANUAL,
+    TIMESTAMP_MODE_REAL,
+    TIMESTAMP_MODE_STOCHASTIC,
+)
 
 # ---------------------------------------------------------------------------
 # Type aliases (for type hints)
@@ -55,7 +61,7 @@ TIMESTAMP_MODES = (TIMESTAMP_MODE_MANUAL, TIMESTAMP_MODE_REAL)
 
 StopMethod = Literal["cli", "sigterm", "sigkill"]
 StorageStateAction = Literal["delete", "preserve", "empty"]
-TimestampMode = Literal["manual", "real"]
+TimestampMode = Literal["manual", "real", "stochastic"]
 
 MAX_TIME_TO_START_S = 20.0
 STOP_RECORDING_OVERHEAD_PER_SEC = 0.5

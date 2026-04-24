@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING
 
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    STOCHASTIC_JITTER_S,
     TIMESTAMP_MODE_REAL,
+    TIMESTAMP_MODE_STOCHASTIC,
 )
 
 if TYPE_CHECKING:
@@ -290,6 +292,56 @@ def _assert_real_timestamps(
         )
 
 
+def _assert_stochastic_timestamps(
+    *,
+    recording_id: str,
+    trace_key: str,
+    timestamps: list[float],
+    expected_timestamps: list[float],
+    failures: list[TraceFailure],
+    durations: dict[str, float],
+) -> None:
+    """Assert every timestamp is within STOCHASTIC_JITTER_S of its intended value.
+
+    The intended timestamps are the pre-jitter values (``start + i / fps``).
+    Each actual timestamp must satisfy
+    ``|actual - intended| <= STOCHASTIC_JITTER_S``.
+    """
+    if len(timestamps) != len(expected_timestamps):
+        failures.append(
+            TraceFailure(
+                trace_key=trace_key,
+                body=(
+                    f"timestamp count mismatch: expected"
+                    f" {len(expected_timestamps)}, got {len(timestamps)}"
+                ),
+            )
+        )
+        return
+
+    out_of_window = [
+        (i, actual, intended)
+        for i, (actual, intended) in enumerate(zip(timestamps, expected_timestamps))
+        if abs(actual - intended) > STOCHASTIC_JITTER_S
+    ]
+    if out_of_window:
+        examples = "; ".join(
+            f"[{i}] actual={actual:.6f} intended={intended:.6f}"
+            f" delta={actual - intended:+.6f}"
+            for i, actual, intended in out_of_window[:3]
+        )
+        body = (
+            f"{len(out_of_window)}/{len(timestamps)} timestamp(s) outside"
+            f" ±{STOCHASTIC_JITTER_S}s jitter window — {examples}"
+            + (f" (+ {len(out_of_window) - 3} more)" if len(out_of_window) > 3 else "")
+        )
+        failures.append(TraceFailure(trace_key=trace_key, body=body))
+        return
+
+    if timestamps:
+        durations[f"{recording_id}:{trace_key}"] = timestamps[-1] - timestamps[0]
+
+
 def assert_disk_recording_properties(
     results: list[ContextResult],
     clock_tolerance_s: float = 1.0,
@@ -333,6 +385,7 @@ def assert_disk_recording_properties(
 
     for result in results:
         use_real = result.timestamp_mode == TIMESTAMP_MODE_REAL
+        use_stochastic = result.timestamp_mode == TIMESTAMP_MODE_STOCHASTIC
         for recording_id in result.recording_ids:
             recording_dir = recordings_root / recording_id
             if not recording_dir.exists():
@@ -387,20 +440,15 @@ def assert_disk_recording_properties(
 
             trace_failures: list[TraceFailure] = []
 
-            if use_real:
-                for trace_key, timestamps in mapped_trace_timestamps.items():
-                    _assert_real_timestamps(
-                        recording_id=recording_id,
-                        trace_key=trace_key,
-                        timestamps=timestamps,
-                        wall_started_at=result.wall_started_at,
-                        wall_stopped_at=result.wall_stopped_at,
-                        duration_sec=result.duration_sec,
-                        clock_tolerance_s=clock_tolerance_s,
-                        failures=trace_failures,
-                        durations=durations,
-                    )
-            else:
+            # Resolve mode-specific state once before iterating traces.
+            assert_ts = None
+            expected: dict[str, list[float]] = {}
+            if not use_real:
+                assert_ts = (
+                    _assert_stochastic_timestamps
+                    if use_stochastic
+                    else _assert_manual_timestamps
+                )
                 per_recording = (
                     result.expected_timestamps.by_recording.get(recording_id)
                     if result.expected_timestamps is not None
@@ -424,7 +472,21 @@ def assert_disk_recording_properties(
                     )
                     continue
                 expected = per_recording.by_trace
-                for trace_key, timestamps in mapped_trace_timestamps.items():
+
+            for trace_key, timestamps in mapped_trace_timestamps.items():
+                if use_real:
+                    _assert_real_timestamps(
+                        recording_id=recording_id,
+                        trace_key=trace_key,
+                        timestamps=timestamps,
+                        wall_started_at=result.wall_started_at,
+                        wall_stopped_at=result.wall_stopped_at,
+                        duration_sec=result.duration_sec,
+                        clock_tolerance_s=clock_tolerance_s,
+                        failures=trace_failures,
+                        durations=durations,
+                    )
+                else:
                     if trace_key not in expected:
                         trace_failures.append(
                             TraceFailure(
@@ -437,7 +499,7 @@ def assert_disk_recording_properties(
                             )
                         )
                         continue
-                    _assert_manual_timestamps(
+                    assert_ts(
                         recording_id=recording_id,
                         trace_key=trace_key,
                         timestamps=timestamps,

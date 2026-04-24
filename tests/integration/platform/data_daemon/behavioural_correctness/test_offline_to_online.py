@@ -1,6 +1,5 @@
 import pytest
 
-import neuracore as nc
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
     verify_cloud_results,
@@ -23,7 +22,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     ContextResult,
     build_context_specs,
     create_testing_dataset_name,
-    run_and_assert_case_contexts,
+    run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
@@ -62,7 +61,6 @@ def test_offline_pending_data_recovers_when_online(
     - waits for every recording to reach ``upload_complete`` in the daemon DB
     - performs structural and per-episode frame verification via the cloud
     """
-    nc.login()
     if not has_configured_org():
         pytest.skip(
             "Offline-to-online behavioural tests require NEURACORE_ORG_ID"
@@ -77,12 +75,11 @@ def test_offline_pending_data_recovers_when_online(
         with scoped_storage_state(case, dataset_name=dataset_name):
             with offline_daemon_running():
                 assert_exactly_one_daemon_pid()
-                results = run_and_assert_case_contexts(case, specs=specs)
+                results = run_case_contexts(case, specs=specs)
                 wait_for_all_traces_written(results=results)
             # offline_daemon_running() stops the daemon on exit, preserving
             # offline artefacts for the online recovery phase below.
 
-            nc.login()
             with online_daemon_running():
                 for result in results:
                     for recording_id in result.recording_ids:

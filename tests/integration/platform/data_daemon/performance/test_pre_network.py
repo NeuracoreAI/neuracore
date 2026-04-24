@@ -16,7 +16,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
     create_testing_dataset_name,
-    run_and_verify_case_contexts,
+    run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_CLI,
@@ -55,6 +55,6 @@ def test_disk_db_write_performance(
             results = []
             try:
                 assert_exactly_one_daemon_pid()
-                results = run_and_verify_case_contexts(case)
+                results = run_case_contexts(case, wait_for_traces=True)
             finally:
                 log_run_analysis_on_teardown(case, results)

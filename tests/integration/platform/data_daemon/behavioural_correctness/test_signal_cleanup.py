@@ -23,7 +23,6 @@ import time
 
 import pytest
 
-import neuracore as nc
 from neuracore.data_daemon.helpers import get_daemon_pid_path
 from neuracore.data_daemon.lifecycle.daemon_os_control import pid_is_running
 from tests.integration.platform.data_daemon.shared.assertions import (
@@ -45,7 +44,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
     build_context_specs,
-    run_and_assert_case_contexts,
+    run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_SIGKILL,
@@ -83,7 +82,6 @@ def test_cli_stop_exits_daemon_and_cleans_up() -> None:
     SIGKILL if needed.  Either way the daemon process must be gone and all
     IPC artefacts removed.
     """
-    nc.login()
 
     with online_daemon_running():
         pid = _single_runner_pid()
@@ -93,7 +91,6 @@ def test_cli_stop_exits_daemon_and_cleans_up() -> None:
 
 def test_cli_stop_removes_pid_file() -> None:
     """PID file is absent after a clean CLI stop."""
-    nc.login()
 
     with online_daemon_running():
         pid_path = get_daemon_pid_path()
@@ -105,7 +102,6 @@ def test_cli_stop_removes_pid_file() -> None:
 
 def test_cli_stop_unlinks_socket() -> None:
     """Unix domain socket is removed after a clean CLI stop."""
-    nc.login()
 
     with online_daemon_running():
         stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
@@ -125,7 +121,6 @@ def test_sigterm_exits_daemon_and_cleans_up() -> None:
     which propagates to the ``except KeyboardInterrupt`` block in
     ``runner_entry.main``, running ``runtime.shutdown()`` and ``shutdown()``.
     """
-    nc.login()
 
     with online_daemon_running():
         pid = _single_runner_pid()
@@ -135,7 +130,6 @@ def test_sigterm_exits_daemon_and_cleans_up() -> None:
 
 def test_sigterm_removes_pid_file() -> None:
     """PID file is absent after the daemon receives SIGTERM."""
-    nc.login()
 
     with online_daemon_running():
         stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
@@ -145,7 +139,6 @@ def test_sigterm_removes_pid_file() -> None:
 
 def test_sigterm_unlinks_socket() -> None:
     """Unix domain socket is removed after the daemon receives SIGTERM."""
-    nc.login()
 
     with online_daemon_running():
         stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
@@ -165,7 +158,6 @@ def test_sigint_exits_daemon_and_cleans_up() -> None:
     ``KeyboardInterrupt`` which is caught by the same ``except`` block used
     for SIGTERM.
     """
-    nc.login()
 
     with online_daemon_running():
         pid = _single_runner_pid()
@@ -175,7 +167,6 @@ def test_sigint_exits_daemon_and_cleans_up() -> None:
 
 def test_sigint_removes_pid_file() -> None:
     """PID file is absent after the daemon receives SIGINT."""
-    nc.login()
 
     with online_daemon_running():
         stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
@@ -185,7 +176,6 @@ def test_sigint_removes_pid_file() -> None:
 
 def test_sigint_unlinks_socket() -> None:
     """Unix domain socket is removed after the daemon receives SIGINT."""
-    nc.login()
 
     with online_daemon_running():
         stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
@@ -207,7 +197,6 @@ def test_sigkill_terminates_daemon_process() -> None:
     Teardown (``daemon_setup_teardown`` + ``online_daemon_running``) is
     responsible for removing stale artefacts after an unclean kill.
     """
-    nc.login()
 
     with online_daemon_running():
         pid = _single_runner_pid()
@@ -226,7 +215,6 @@ def test_sigkill_allows_clean_restart() -> None:
     any stale artefacts left by SIGKILL.  A second ``online_daemon_running``
     block must succeed without manual intervention and produce a new PID.
     """
-    nc.login()
 
     with online_daemon_running():
         pid_before = _single_runner_pid()
@@ -254,7 +242,6 @@ def test_sigterm_then_cli_stop_is_idempotent() -> None:
     The CLI stop command reads the PID file and no-ops gracefully when the
     daemon has already stopped.
     """
-    nc.login()
 
     with online_daemon_running():
         stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
@@ -268,7 +255,6 @@ def test_sigint_then_sigterm_exits_cleanly() -> None:
     Both signals use the same handler; the first one begins teardown.
     The second call must not deadlock or leave stale artefacts.
     """
-    nc.login()
 
     with online_daemon_running():
         stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
@@ -291,7 +277,6 @@ def test_online_daemon_running_exit_leaves_no_pids() -> None:
     block; this test asserts that ``stop_daemon()`` fully reaps all runner
     subprocesses so the process table is clean for the subsequent test.
     """
-    nc.login()
 
     with online_daemon_running():
         pid = _single_runner_pid()
@@ -311,7 +296,6 @@ def test_online_daemon_running_exit_cleans_up_after_active_recording() -> None:
     without an explicit stop inside the block — relying solely on the
     ``finally: stop_daemon()`` in ``online_daemon_running()``.
     """
-    nc.login()
 
     with online_daemon_running():
         pids_before = get_runner_pids()
@@ -356,12 +340,11 @@ def test_sigkill_after_recording_allows_clean_restart(case: DataDaemonTestCase) 
     fixture relies on between tests: stale IPC artefacts from the SIGKILL must
     not prevent ``ensure_daemon_running`` from succeeding.
     """
-    nc.login()
 
     with online_daemon_running():
         pid_first = assert_exactly_one_daemon_pid()
         specs = build_context_specs(case=case)
-        results = run_and_assert_case_contexts(case, specs=specs)
+        results = run_case_contexts(case, specs=specs)
         if results:
             wait_for_all_traces_written(results=results)
         logger.info("SIGKILL daemon pid=%d after completed recording", pid_first)
@@ -403,8 +386,6 @@ def test_sigkill_mid_recording_allows_clean_restart(case: DataDaemonTestCase) ->
       4. Restart daemon in a new block — assert new PID and healthy state.
       5. Assert full cleanup after the second block exits.
     """
-    nc.login()
-
     with online_daemon_running():
         pid_first = assert_exactly_one_daemon_pid()
         specs = build_context_specs(case=case)
@@ -414,7 +395,7 @@ def test_sigkill_mid_recording_allows_clean_restart(case: DataDaemonTestCase) ->
 
         def _run() -> None:
             try:
-                run_and_assert_case_contexts(case, specs=specs)
+                run_case_contexts(case, specs=specs)
             except Exception as exc:  # noqa: BLE001
                 worker_exc.append(exc)
 

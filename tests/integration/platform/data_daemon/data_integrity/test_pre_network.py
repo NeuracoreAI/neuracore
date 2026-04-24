@@ -25,7 +25,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     ContextResult,
     build_context_specs,
     create_testing_dataset_name,
-    run_and_assert_case_contexts,
+    run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_CLI,
@@ -41,7 +41,6 @@ CASES = DataDaemonTestBatch(
     cases=PRE_NETWORK_INTEGRITY_CASES,
     storage_state_action=STORAGE_STATE_PRESERVE,
     stop_method=STOP_METHOD_CLI,
-    # timestamp_mode=TIMESTAMP_MODE_REAL,
 ).as_cases()
 
 # ---------------------------------------------------------------------------
@@ -81,7 +80,7 @@ def test_disk_db_data_integrity(
             with offline_daemon_running():
                 assert_exactly_one_daemon_pid()
                 specs = build_context_specs(case, dataset_name=dataset_name)
-                results = run_and_assert_case_contexts(case, specs=specs)
+                results = run_case_contexts(case, specs=specs)
                 wait_for_all_traces_written(results=results)
                 assert_disk_recording_properties(results)
 

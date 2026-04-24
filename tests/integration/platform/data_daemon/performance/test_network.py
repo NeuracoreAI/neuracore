@@ -6,7 +6,6 @@ import neuracore as nc
 from tests.integration.platform.data_daemon.daemon_test_cases import (
     NETWORK_PERFORMANCE_CASES,
 )
-from tests.integration.platform.data_daemon.shared.assertions import assert_context_mode
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
 )
@@ -70,7 +69,6 @@ def test_cloud_upload_and_readiness_performance(
         try:
             with online_daemon_running():
                 results = run_case_contexts(case, specs=specs)
-                assert_context_mode(case, results)
                 wait_for_dataset_ready(
                     results[0].dataset_name,
                     expected_recording_count=case.recording_count,

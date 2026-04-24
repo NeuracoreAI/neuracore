@@ -90,14 +90,19 @@ class Timer:
         always_log: bool = False,
         log_threshold: float | None = None,
         assert_limit: bool = True,
+        deadline: float | None = None,
+        timing_tolerance: float | None = None,
     ) -> None:
         self.max_time = max_time
         self.label = label
         self.always_log = always_log
         self.log_threshold = log_threshold
         self.assert_limit = assert_limit
+        self.deadline = deadline
+        self.timing_tolerance = timing_tolerance
 
     def __enter__(self) -> Timer:
+        self.wall_start = time.time()
         self.start = time.perf_counter()
         return self
 
@@ -135,11 +140,29 @@ class Timer:
             return False
 
         if self.assert_limit:
+            if self.deadline is not None and self.timing_tolerance is not None:
+                lateness = self.wall_start - self.deadline
+                assert abs(lateness) <= self.timing_tolerance, (
+                    f"{self.label or 'Function'} logged at wrong moment: "
+                    f"lateness={lateness:+.3f}s, "
+                    f"tolerance=±{self.timing_tolerance:.3f}s"
+                )
             assert self.interval < self.max_time, (
                 f"{self.label or 'Function'} took too long: "
                 f"{self.interval:.3f}s >= {self.max_time:.3f}s"
             )
         return None
+
+    @classmethod
+    def merge_stats(cls, stats: dict[str, dict[str, float]]) -> None:
+        """Merge external timer stats (e.g. from a worker process) into the accumulator."""  # noqa: E501
+        for label, incoming in stats.items():
+            existing = cls._stats.setdefault(
+                label, {"count": 0.0, "total": 0.0, "max": 0.0}
+            )
+            existing["count"] += incoming["count"]
+            existing["total"] += incoming["total"]
+            existing["max"] = max(existing["max"], incoming["max"])
 
 
 # ---------------------------------------------------------------------------
