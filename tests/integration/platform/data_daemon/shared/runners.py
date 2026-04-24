@@ -46,9 +46,9 @@ def offline_daemon_running() -> Generator[None, None, None]:
         executes.
     """
     with scoped_offline_profile():
-        assert_daemon_cleanup()
-        ensure_daemon_running(timeout_s=10.0)
         try:
+            assert_daemon_cleanup()
+            ensure_daemon_running(timeout_s=10.0)
             with Timer(MAX_TIME_TO_START_S, label="nc.login", always_log=True):
                 nc.login()
             yield
@@ -73,10 +73,11 @@ def online_daemon_running() -> Generator[None, None, None]:
         executes.
     """
     with scoped_online_mode():
-        assert_daemon_cleanup()
-        stop_daemon()
-        ensure_daemon_running(timeout_s=10.0)
         try:
+            assert_daemon_cleanup()
+            stop_daemon()
+            ensure_daemon_running(timeout_s=10.0)
+
             with Timer(MAX_TIME_TO_START_S, label="nc.login", always_log=True):
                 nc.login()
             yield
