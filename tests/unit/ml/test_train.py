@@ -39,6 +39,7 @@ from neuracore.ml.train import (
     _resolve_cross_embodiment_description,
     _resolve_output_dir,
     _resolve_recording_cache_dir,
+    assert_valid_batch_size,
     determine_optimal_batch_size,
     get_model_and_algorithm_config,
     main,
@@ -161,6 +162,11 @@ class MainTestSetup:
         )
         self.monkeypatch.setattr(
             "neuracore.ml.train.run_training", self.mock_run_training
+        )
+        self.mock_assert_valid_batch_size = Mock()
+        self.monkeypatch.setattr(
+            "neuracore.ml.train.assert_valid_batch_size",
+            self.mock_assert_valid_batch_size,
         )
         self.monkeypatch.setattr("torch.cuda.device_count", self.mock_cuda_device_count)
         self.monkeypatch.setattr(
@@ -926,6 +932,208 @@ class TestDetermineOptimalBatchSize:
                 mock_cfg_batch_size.output_cross_embodiment_description,
                 device=device,
             )
+
+
+class TestAssertValidBatchSize:
+    """Tests for assert_valid_batch_size function."""
+
+    @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
+    def test_assert_valid_batch_size_returns_none_when_check_passes(
+        self,
+        mock_cfg_batch_size,
+        mock_dataset,
+        model_init_description,
+        mock_model_class,
+        monkeypatch,
+    ):
+        mock_get_device = Mock(return_value=torch.device("cuda:0"))
+        mock_is_valid = Mock(return_value=True)
+        mock_get_model_config = Mock(
+            return_value=(mock_model_class(model_init_description), {})
+        )
+
+        monkeypatch.setattr("neuracore.ml.train.get_default_device", mock_get_device)
+        monkeypatch.setattr("neuracore.ml.train.is_valid_batch_size", mock_is_valid)
+        monkeypatch.setattr(
+            "neuracore.ml.train.get_model_and_algorithm_config", mock_get_model_config
+        )
+        monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+
+        result = assert_valid_batch_size(
+            batch_size=8,
+            cfg=mock_cfg_batch_size,
+            dataset=mock_dataset,
+            input_cross_embodiment_description=(
+                mock_cfg_batch_size.input_cross_embodiment_description
+            ),
+            output_cross_embodiment_description=(
+                mock_cfg_batch_size.output_cross_embodiment_description
+            ),
+        )
+
+        assert result is None
+        mock_is_valid.assert_called_once()
+        kwargs = mock_is_valid.call_args.kwargs
+        assert kwargs["batch_size"] == 8
+        assert kwargs["cfg"] is mock_cfg_batch_size
+
+    @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
+    def test_assert_valid_batch_size_raises_when_check_fails(
+        self,
+        mock_cfg_batch_size,
+        mock_dataset,
+        model_init_description,
+        mock_model_class,
+        monkeypatch,
+    ):
+        mock_get_device = Mock(return_value=torch.device("cuda:0"))
+        mock_is_valid = Mock(return_value=False)
+        mock_get_model_config = Mock(
+            return_value=(mock_model_class(model_init_description), {})
+        )
+
+        monkeypatch.setattr("neuracore.ml.train.get_default_device", mock_get_device)
+        monkeypatch.setattr("neuracore.ml.train.is_valid_batch_size", mock_is_valid)
+        monkeypatch.setattr(
+            "neuracore.ml.train.get_model_and_algorithm_config", mock_get_model_config
+        )
+        monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+
+        with pytest.raises(ValueError, match="Batch size 64 is not valid"):
+            assert_valid_batch_size(
+                batch_size=64,
+                cfg=mock_cfg_batch_size,
+                dataset=mock_dataset,
+                input_cross_embodiment_description=(
+                    mock_cfg_batch_size.input_cross_embodiment_description
+                ),
+                output_cross_embodiment_description=(
+                    mock_cfg_batch_size.output_cross_embodiment_description
+                ),
+            )
+
+        mock_is_valid.assert_called_once()
+
+    def test_assert_valid_batch_size_skips_check_on_cpu(
+        self, mock_cfg_batch_size, mock_dataset, monkeypatch
+    ):
+        """On CPU the memory check must be skipped without raising."""
+        mock_is_valid = Mock()
+        monkeypatch.setattr("neuracore.ml.train.is_valid_batch_size", mock_is_valid)
+        monkeypatch.setattr("torch.cuda.is_available", lambda: False)
+
+        result = assert_valid_batch_size(
+            batch_size=8,
+            cfg=mock_cfg_batch_size,
+            dataset=mock_dataset,
+            input_cross_embodiment_description=(
+                mock_cfg_batch_size.input_cross_embodiment_description
+            ),
+            output_cross_embodiment_description=(
+                mock_cfg_batch_size.output_cross_embodiment_description
+            ),
+        )
+
+        assert result is None
+        mock_is_valid.assert_not_called()
+
+    def test_assert_valid_batch_size_skips_check_when_cpu_device_provided(
+        self, mock_cfg_batch_size, mock_dataset, monkeypatch
+    ):
+        """Explicit CPU device should also skip the memory check."""
+        mock_is_valid = Mock()
+        monkeypatch.setattr("neuracore.ml.train.is_valid_batch_size", mock_is_valid)
+        monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+
+        result = assert_valid_batch_size(
+            batch_size=8,
+            cfg=mock_cfg_batch_size,
+            dataset=mock_dataset,
+            input_cross_embodiment_description=(
+                mock_cfg_batch_size.input_cross_embodiment_description
+            ),
+            output_cross_embodiment_description=(
+                mock_cfg_batch_size.output_cross_embodiment_description
+            ),
+            device=torch.device("cpu"),
+        )
+
+        assert result is None
+        mock_is_valid.assert_not_called()
+
+    @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
+    def test_assert_valid_batch_size_cleans_up_on_success_and_failure(
+        self,
+        mock_cfg_batch_size,
+        mock_dataset,
+        model_init_description,
+        mock_model_class,
+        monkeypatch,
+    ):
+        """Cleanup must run both when validation succeeds and when it fails."""
+        mock_get_device = Mock(return_value=torch.device("cuda:0"))
+        mock_is_valid = Mock()
+        mock_get_model_config = Mock(
+            return_value=(mock_model_class(model_init_description), {})
+        )
+
+        cleanup_call_counts = {"gc_collect": 0, "cuda_empty_cache": 0}
+
+        original_gc_collect = gc.collect
+        original_cuda_empty_cache = torch.cuda.empty_cache
+
+        def mock_gc_collect():
+            cleanup_call_counts["gc_collect"] += 1
+            return original_gc_collect()
+
+        def mock_cuda_empty_cache():
+            cleanup_call_counts["cuda_empty_cache"] += 1
+            return original_cuda_empty_cache()
+
+        monkeypatch.setattr("neuracore.ml.train.get_default_device", mock_get_device)
+        monkeypatch.setattr("neuracore.ml.train.is_valid_batch_size", mock_is_valid)
+        monkeypatch.setattr(
+            "neuracore.ml.train.get_model_and_algorithm_config", mock_get_model_config
+        )
+        monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+        monkeypatch.setattr("gc.collect", mock_gc_collect)
+        monkeypatch.setattr("torch.cuda.empty_cache", mock_cuda_empty_cache)
+
+        # Success path: is_valid_batch_size returns True, no raise, cleanup.
+        mock_is_valid.return_value = True
+        assert_valid_batch_size(
+            batch_size=8,
+            cfg=mock_cfg_batch_size,
+            dataset=mock_dataset,
+            input_cross_embodiment_description=(
+                mock_cfg_batch_size.input_cross_embodiment_description
+            ),
+            output_cross_embodiment_description=(
+                mock_cfg_batch_size.output_cross_embodiment_description
+            ),
+        )
+
+        assert cleanup_call_counts["gc_collect"] == 1
+        assert cleanup_call_counts["cuda_empty_cache"] == 1
+
+        # Failure path: is_valid_batch_size returns False, ValueError is raised,
+        # cleanup must run a second time before the exception propagates.
+        mock_is_valid.return_value = False
+        with pytest.raises(ValueError, match="is not valid"):
+            assert_valid_batch_size(
+                batch_size=16,
+                cfg=mock_cfg_batch_size,
+                dataset=mock_dataset,
+                input_cross_embodiment_description=(
+                    mock_cfg_batch_size.input_cross_embodiment_description
+                ),
+                output_cross_embodiment_description=(
+                    mock_cfg_batch_size.output_cross_embodiment_description
+                ),
+            )
+
+        assert cleanup_call_counts["gc_collect"] == 2
+        assert cleanup_call_counts["cuda_empty_cache"] == 2
 
 
 class TestRunTraining:
@@ -1784,7 +1992,45 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
         main(cfg)
 
         setup.mock_determine_optimal_batch_size.assert_not_called()
+        setup.mock_assert_valid_batch_size.assert_called_once()
+        assert setup.mock_assert_valid_batch_size.call_args.kwargs["batch_size"] == 16
         assert setup.mock_run_training.call_args[0][3] == 16
+
+    def test_main_propagates_invalid_batch_size_error(
+        self, monkeypatch, temp_output_dir
+    ):
+        """If assert_valid_batch_size raises ValueError, _main propagates it."""
+        cfg = OmegaConf.create({
+            "algorithm_id": "test-algorithm-id",
+            "dataset_id": "test-dataset-id",
+            "dataset_name": None,
+            "org_id": None,
+            "device": None,
+            "local_output_dir": str(temp_output_dir),
+            "batch_size": 64,
+            "input_data_types": {},
+            "output_data_types": {},
+            "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
+            "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
+            "output_prediction_horizon": 5,
+            "frequency": 30,
+            "algorithm_params": None,
+            "max_prefetch_workers": 4,
+            "max_delay_s": 0.5,
+            "allow_duplicates": True,
+            "trim_start_end": True,
+        })
+
+        setup = MainTestSetup(monkeypatch)
+        setup.setup_mocks()
+        setup.mock_assert_valid_batch_size.side_effect = ValueError(
+            "Batch size 64 is not valid."
+        )
+
+        with pytest.raises(ValueError, match="Batch size 64 is not valid"):
+            main(cfg)
+
+        setup.mock_run_training.assert_not_called()
 
     def test_main_loads_algorithm_by_id_when_algorithm_not_in_cfg_but_algorithm_id_provided(  # noqa: E501
         self, monkeypatch, temp_output_dir
