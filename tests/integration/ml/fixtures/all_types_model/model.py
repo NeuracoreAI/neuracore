@@ -20,6 +20,23 @@ class AllTypesModel(NeuracoreModel):
     training treat every input as its own prediction.
     """
 
+    CANONICAL_OUTPUT_DATA_TYPE_ORDER = (
+        DataType.JOINT_TARGET_POSITIONS,
+        DataType.JOINT_POSITIONS,
+        DataType.JOINT_VELOCITIES,
+        DataType.JOINT_TORQUES,
+        DataType.VISUAL_JOINT_POSITIONS,
+        DataType.END_EFFECTOR_POSES,
+        DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+        DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        DataType.RGB_IMAGES,
+        DataType.DEPTH_IMAGES,
+        DataType.POINT_CLOUDS,
+        DataType.POSES,
+        DataType.LANGUAGE,
+        DataType.CUSTOM_1D,
+    )
+
     def __init__(self, model_init_description: ModelInitDescription):
         super().__init__(model_init_description)
         # Learnable offset ensures a non-zero gradient during the backward pass
