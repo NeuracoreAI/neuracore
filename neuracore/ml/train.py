@@ -9,6 +9,7 @@ import re
 import sys
 import time
 import traceback
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -396,6 +397,14 @@ def get_model_and_algorithm_config(
     return model, algorithm_config
 
 
+def _create_model_for_batch_validation(
+    cfg: DictConfig, model_init_description: ModelInitDescription
+) -> NeuracoreModel:
+    """Create a model instance for batch size validation (called inside subprocess)."""
+    model, _ = get_model_and_algorithm_config(cfg, model_init_description)
+    return model
+
+
 def assert_valid_batch_size(
     batch_size: int,
     cfg: DictConfig,
@@ -434,14 +443,14 @@ def assert_valid_batch_size(
         output_data_types=extract_data_types(output_cross_embodiment_description),
         output_prediction_horizon=cfg.output_prediction_horizon,
     )
-    model, _algorithm_config = get_model_and_algorithm_config(
-        cfg, model_init_description
+    model_factory = partial(
+        _create_model_for_batch_validation, cfg, model_init_description
     )
 
     try:
         valid = is_valid_batch_size(
             cfg=cfg,
-            model=model,
+            model_factory=model_factory,
             dataset=assert_dataset,
             batch_size=batch_size,
             device=device,
@@ -450,7 +459,6 @@ def assert_valid_batch_size(
         logger.error("Batch size validation failed", exc_info=True)
         raise
     finally:
-        del model
         del assert_dataset
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -496,14 +504,14 @@ def determine_optimal_batch_size(
         output_data_types=extract_data_types(output_cross_embodiment_description),
         output_prediction_horizon=cfg.output_prediction_horizon,
     )
-    model, algorithm_config = get_model_and_algorithm_config(
-        cfg, model_init_description
+    model_factory = partial(
+        _create_model_for_batch_validation, cfg, model_init_description
     )
 
     try:
         optimal_batch_size = find_optimal_batch_size(
             cfg=cfg,
-            model=model,
+            model_factory=model_factory,
             dataset=autotuning_dataset,
             device=device,
         )
@@ -512,7 +520,6 @@ def determine_optimal_batch_size(
         raise
     finally:
         # Clean up
-        del model
         del autotuning_dataset
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
