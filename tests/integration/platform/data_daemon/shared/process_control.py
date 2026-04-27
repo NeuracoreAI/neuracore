@@ -31,6 +31,7 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import (
     wait_for_exit,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    STOP_METHOD_SIGINT,
     STOP_METHOD_SIGKILL,
     STOP_METHOD_SIGTERM,
 )
@@ -172,8 +173,9 @@ class Timer:
 
 def get_runner_pids() -> set[int]:
     """Return the PIDs of all running neuracore data-daemon runner processes."""
-    env = {**os.environ, "COLUMNS": "32768"}
-    output = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True, env=env)
+    output = subprocess.check_output(
+        ["ps", "-eo", "pid=,args="], text=True, env={**os.environ, "COLUMNS": "32768"}
+    )
     runner_pids: set[int] = set()
     for line in output.splitlines():
         parts = line.strip().split(None, 1)
@@ -185,10 +187,19 @@ def get_runner_pids() -> set[int]:
     return runner_pids
 
 
+def _get_living_runner_pids() -> set[int]:
+    """Return daemon runner PIDs that are actually running (excludes zombies/dead)."""
+    living_pids: set[int] = set()
+    for pid in get_runner_pids():
+        if pid_is_running(pid):
+            living_pids.add(pid)
+    return living_pids
+
+
 def _live_daemon_pids() -> set[int]:
     """Return PIDs of all live daemon processes (runner and PID-file)."""
     pid_path = get_daemon_pid_path()
-    pids: set[int] = set(get_runner_pids())
+    pids: set[int] = _get_living_runner_pids()
     stored_pid = read_pid_from_file(pid_path)
     if stored_pid is not None and pid_is_running(stored_pid):
         pids.add(stored_pid)
@@ -222,7 +233,7 @@ def _send_initial_stop(method: str, candidate_pids: set[int]) -> None:
         for pid in sorted(candidate_pids):
             if pid_is_running(pid):
                 terminate_pid(pid)
-    elif method == "sigint":
+    elif method == STOP_METHOD_SIGINT:
         for pid in sorted(candidate_pids):
             if pid_is_running(pid):
                 try:
@@ -237,15 +248,25 @@ def _send_initial_stop(method: str, candidate_pids: set[int]) -> None:
         raise ValueError(f"Unknown stop method: {method!r}")
 
 
-def _wait_and_escalate(candidate_pids: set[int], *, graceful_timeout_s: float) -> None:
+def _wait_and_escalate(
+    candidate_pids: set[int],
+    *,
+    graceful_timeout_s: float,
+    kill_timeout_s: float = 5.0,
+) -> None:
     """Wait for each PID to exit, escalating to SIGKILL on timeout."""
     for pid in sorted(candidate_pids):
         if not pid_is_running(pid):
             continue
-        if not wait_for_exit(pid, timeout_s=graceful_timeout_s):
-            with Timer(5.0, label="stop_daemon_escalated", assert_limit=False):
-                force_kill(pid)
-                wait_for_exit(pid, timeout_s=5.0)
+        if wait_for_exit(pid, timeout_s=graceful_timeout_s):
+            continue
+        with Timer(kill_timeout_s, label="stop_daemon_escalated", assert_limit=False):
+            force_kill(pid)
+            if not wait_for_exit(pid, timeout_s=kill_timeout_s):
+                logger.warning(
+                    "PID %d did not exit after SIGKILL - " "process may be in D-state",
+                    pid,
+                )
 
 
 def _remove_ipc_artefacts() -> None:
@@ -347,7 +368,7 @@ def wait_for_daemon_shutdown(
     deadline = time.monotonic() + timeout_s
 
     while True:
-        live_pids = _collect_candidate_pids()
+        live_pids = _live_daemon_pids()
         pid_file_gone = not pid_path.exists()
         socket_gone = not socket_path.exists()
 
@@ -355,7 +376,7 @@ def wait_for_daemon_shutdown(
             return
 
         if time.monotonic() >= deadline:
-            still_running = {p for p in live_pids if pid_is_running(p)}
+            still_running = live_pids
             details: list[str] = []
             if still_running:
                 details.append(f"live PIDs: {sorted(still_running)}")

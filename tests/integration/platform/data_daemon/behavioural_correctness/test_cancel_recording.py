@@ -14,7 +14,6 @@ import pytest
 import neuracore as nc
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
-    assert_post_test_storage_state,
     verify_cloud_results,
 )
 from tests.integration.platform.data_daemon.shared.process_control import Timer
@@ -84,8 +83,8 @@ def test_cancel_recording_produces_no_data(
     spec = specs[0]
     robot_name = spec.robot_name
 
-    try:
-        with scoped_storage_state(case, dataset_name=dataset_name):
+    with scoped_storage_state(case, dataset_name=dataset_name):
+        try:
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
 
@@ -127,14 +126,12 @@ def test_cancel_recording_produces_no_data(
                 assert (
                     len(dataset) == 0
                 ), f"Expected 0 recordings after cancel, got {len(dataset)}"
-    finally:
-        set_case_analysis_report(
-            request=request,
-            case=case,
-            results=[],
-        )
-
-    assert_post_test_storage_state(case.storage_state_action)
+        finally:
+            set_case_analysis_report(
+                request=request,
+                case=case,
+                results=[],
+            )
 
 
 @pytest.mark.parametrize("case", _CASES, ids=case_ids(_CASES))
@@ -162,8 +159,8 @@ def test_cancel_then_start_new_recording(
     robot_name = spec.robot_name
     results: list[ContextResult] = []
 
-    try:
-        with scoped_storage_state(case, dataset_name=dataset_name):
+    with scoped_storage_state(case, dataset_name=dataset_name):
+        try:
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
 
@@ -242,9 +239,9 @@ def test_cancel_then_start_new_recording(
                     )
                 ]
                 verify_cloud_results(results=results, case=case)
-    finally:
-        set_case_analysis_report(
-            request=request,
-            case=case,
-            results=results,
-        )
+        finally:
+            set_case_analysis_report(
+                request=request,
+                case=case,
+                results=results,
+            )

@@ -36,7 +36,6 @@ _CASES = DataDaemonTestBatch(
 @pytest.mark.parametrize("case", _CASES, ids=case_ids(_CASES))
 def test_disk_db_write_performance(
     case: DataDaemonTestCase,
-    daemon_offline_env,
     clear_daemon_timer_stats,
     log_run_analysis_on_teardown,
 ) -> None:

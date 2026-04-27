@@ -33,9 +33,7 @@ def scoped_offline_profile() -> Generator[None, None, None]:
 
     Creates a uniquely-named YAML profile under
     ``~/.neuracore/data_daemon/profiles/`` that sets ``offline: true``, points
-    ``NEURACORE_DAEMON_PROFILE`` at it, then restores the previous value on
-    exit.  The profile path is added to :data:`TEST_PROFILE_PATHS` so that
-    :func:`cleanup_test_profiles` can remove it at teardown.
+    ``NEURACORE_DAEMON_PROFILE`` at it, then cleans up on exit.
 
     Does **not** start, stop, or clean up any daemon processes or storage.
 
@@ -60,14 +58,21 @@ def scoped_offline_profile() -> Generator[None, None, None]:
             os.environ.pop("NEURACORE_DAEMON_PROFILE", None)
         else:
             os.environ["NEURACORE_DAEMON_PROFILE"] = previous_profile
+        try:
+            profile_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        finally:
+            cleanup_test_profiles()
 
 
 @contextmanager
 def scoped_online_mode() -> Generator[None, None, None]:
-    """Force online daemon config for the block.
+    """Force online daemon config for the block and clean up test profiles.
 
     Sets ``NCD_OFFLINE=0`` and clears ``NEURACORE_DAEMON_PROFILE`` so callers
-    cannot inherit an offline profile or mode from prior tests.
+    cannot inherit an offline profile or mode from prior tests. Cleans up any
+    test profiles created during test execution on exit.
 
     Yields:
         ``None`` — online daemon configuration is active while the body runs.
@@ -88,3 +93,4 @@ def scoped_online_mode() -> Generator[None, None, None]:
             os.environ.pop("NEURACORE_DAEMON_PROFILE", None)
         else:
             os.environ["NEURACORE_DAEMON_PROFILE"] = previous_profile
+        cleanup_test_profiles()

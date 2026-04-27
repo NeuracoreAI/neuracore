@@ -47,7 +47,10 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    STOP_METHOD_CLI,
+    STOP_METHOD_SIGINT,
     STOP_METHOD_SIGKILL,
+    STOP_METHOD_SIGTERM,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,7 +89,7 @@ def test_cli_stop_exits_daemon_and_cleans_up() -> None:
     with online_daemon_running():
         pid = _single_runner_pid()
         logger.info("CLI stop for daemon pid=%d", pid)
-        stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(method=STOP_METHOD_CLI, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
 
 
 def test_cli_stop_removes_pid_file() -> None:
@@ -95,7 +98,7 @@ def test_cli_stop_removes_pid_file() -> None:
     with online_daemon_running():
         pid_path = get_daemon_pid_path()
         assert pid_path.exists(), f"PID file missing before stop: {pid_path}"
-        stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(method=STOP_METHOD_CLI, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
 
     assert_no_pid_file()
 
@@ -104,7 +107,7 @@ def test_cli_stop_unlinks_socket() -> None:
     """Unix domain socket is removed after a clean CLI stop."""
 
     with online_daemon_running():
-        stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(method=STOP_METHOD_CLI, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
 
     assert_socket_unlinked()
 
@@ -125,14 +128,18 @@ def test_sigterm_exits_daemon_and_cleans_up() -> None:
     with online_daemon_running():
         pid = _single_runner_pid()
         logger.info("SIGTERM to daemon pid=%d", pid)
-        stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(
+            method=STOP_METHOD_SIGTERM, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S
+        )
 
 
 def test_sigterm_removes_pid_file() -> None:
     """PID file is absent after the daemon receives SIGTERM."""
 
     with online_daemon_running():
-        stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(
+            method=STOP_METHOD_SIGTERM, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S
+        )
 
     assert_no_pid_file()
 
@@ -141,7 +148,9 @@ def test_sigterm_unlinks_socket() -> None:
     """Unix domain socket is removed after the daemon receives SIGTERM."""
 
     with online_daemon_running():
-        stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(
+            method=STOP_METHOD_SIGTERM, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S
+        )
 
     assert_socket_unlinked()
 
@@ -162,14 +171,18 @@ def test_sigint_exits_daemon_and_cleans_up() -> None:
     with online_daemon_running():
         pid = _single_runner_pid()
         logger.info("SIGINT to daemon pid=%d", pid)
-        stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(
+            method=STOP_METHOD_SIGINT, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S
+        )
 
 
 def test_sigint_removes_pid_file() -> None:
     """PID file is absent after the daemon receives SIGINT."""
 
     with online_daemon_running():
-        stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(
+            method=STOP_METHOD_SIGINT, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S
+        )
 
     assert_no_pid_file()
 
@@ -178,7 +191,9 @@ def test_sigint_unlinks_socket() -> None:
     """Unix domain socket is removed after the daemon receives SIGINT."""
 
     with online_daemon_running():
-        stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(
+            method=STOP_METHOD_SIGINT, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S
+        )
 
     assert_socket_unlinked()
 
@@ -244,9 +259,11 @@ def test_sigterm_then_cli_stop_is_idempotent() -> None:
     """
 
     with online_daemon_running():
-        stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(
+            method=STOP_METHOD_SIGTERM, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S
+        )
         # Daemon is gone; CLI stop must handle the already-stopped case cleanly.
-        stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(method=STOP_METHOD_CLI, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
 
 
 def test_sigint_then_sigterm_exits_cleanly() -> None:
@@ -257,8 +274,43 @@ def test_sigint_then_sigterm_exits_cleanly() -> None:
     """
 
     with online_daemon_running():
-        stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
-        stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(
+            method=STOP_METHOD_SIGINT, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S
+        )
+        stop_daemon(
+            method=STOP_METHOD_SIGTERM, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S
+        )
+
+
+def test_sigint_then_cli_stop_is_idempotent() -> None:
+    """CLI stop after SIGINT completes without error or stale artefacts.
+
+    SIGINT initiates graceful shutdown; CLI stop on an already-stopped daemon
+    must handle the already-stopped case cleanly.
+    """
+
+    with online_daemon_running():
+        stop_daemon(
+            method=STOP_METHOD_SIGINT, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S
+        )
+        # Daemon is gone; CLI stop must handle the already-stopped case cleanly.
+        stop_daemon(method=STOP_METHOD_CLI, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+
+
+def test_sigterm_then_sigint_exits_cleanly() -> None:
+    """SIGTERM followed by SIGINT results in a clean exit.
+
+    Both signals trigger the same handler; the second signal is delivered to
+    an already-shutting-down process. Must not deadlock or leave stale artefacts.
+    """
+
+    with online_daemon_running():
+        stop_daemon(
+            method=STOP_METHOD_SIGTERM, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S
+        )
+        stop_daemon(
+            method=STOP_METHOD_SIGINT, graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S
+        )
 
 
 # ---------------------------------------------------------------------------

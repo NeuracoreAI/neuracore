@@ -6,27 +6,20 @@ from pathlib import Path
 import pytest
 
 import neuracore as nc
-from tests.integration.platform.data_daemon.shared.process_control import (
-    stop_daemon,
-    wait_for_daemon_shutdown,
-)
 from tests.integration.platform.data_daemon.shared.profiles import cleanup_test_profiles
 
 # cspell:ignore hookwrapper makereport terminalreporter pluginmanager
 # cspell:ignore getplugin nodeid longreprtext
 
 logger = logging.getLogger(__name__)
-
-_SUITE_TERMINATION_CLEANUP_RAN = False
-_PREVIOUS_TERMINATION_HANDLERS: dict[int, object] = {}
-
 sys.path.append(str(Path(__file__).resolve().parent))
 
 
-def daemon_cleanup() -> None:
-    """Force-stop the daemon and wait until its IPC artefacts are gone."""
-    stop_daemon(method="sigkill")
-    wait_for_daemon_shutdown()
+def pytest_configure(_config: pytest.Config) -> None:  # noqa: ARG001
+    """Configure logging to ensure warnings are captured."""
+    logging.getLogger(
+        "tests.integration.platform.data_daemon.shared.process_control"
+    ).setLevel(logging.WARNING)
 
 
 @pytest.fixture(autouse=True)

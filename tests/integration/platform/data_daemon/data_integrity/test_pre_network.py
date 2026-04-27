@@ -51,7 +51,6 @@ CASES = DataDaemonTestBatch(
 @pytest.mark.parametrize("case", CASES, ids=case_ids(CASES))
 def test_disk_db_data_integrity(
     case: DataDaemonTestCase,
-    daemon_offline_env,
     clear_daemon_timer_stats,
     request: pytest.FixtureRequest,
 ) -> None:

@@ -12,7 +12,6 @@ from tests.integration.platform.data_daemon.shared.process_control import (
     Timer,
     stop_daemon,
 )
-from tests.integration.platform.data_daemon.shared.profiles import cleanup_test_profiles
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     SESSION_RUNS,
     DataDaemonTestCase,
@@ -35,7 +34,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 # cspell:ignore nodeid getfixturevalue
 
 
-_BATCH_START_CLEANED_NODEIDS: set[str] = set()
+_BATCH_CLEANED: set[str] = set()
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -65,37 +64,23 @@ def daemon_test_state_env():
             os.environ["NEURACORE_DAEMON_DB_PATH"] = previous_db_path
 
 
-@pytest.fixture()
-def daemon_offline_env():
-    """Compatibility shim — session env already points to test state dir."""
-    yield
-
-
-@pytest.fixture(autouse=True)
-def cleanup_profiles():
-    """Remove test-created daemon profiles after each test."""
-    yield
-    cleanup_test_profiles()
-
-
 @pytest.fixture(autouse=True)
 def apply_batch_start_storage_state(request: pytest.FixtureRequest) -> None:
-    """Apply local storage cleanup once before the first case in each batch.
+    """Apply storage cleanup once per parametrized test batch.
 
-    A batch is defined as one parametrized test function over ``case``.  The
-    fixture keys by the unparameterized node id, so cleanup runs once before
-    the first case and is skipped for the remaining cases in that batch.
+    Runs before the first ``case`` parameter in each batch. Skipped for
+    subsequent cases in the same batch and non-parametrized tests.
     """
     if "case" not in request.fixturenames:
         return
 
-    nodeid_without_param = request.node.nodeid.split("[", 1)[0]
-    if nodeid_without_param in _BATCH_START_CLEANED_NODEIDS:
+    batch_nodeid = request.node.nodeid.split("[", 1)[0]
+    if batch_nodeid in _BATCH_CLEANED:
         return
 
     request.getfixturevalue("case")
     apply_storage_state_action(STORAGE_STATE_DELETE)
-    _BATCH_START_CLEANED_NODEIDS.add(nodeid_without_param)
+    _BATCH_CLEANED.add(batch_nodeid)
 
 
 @pytest.fixture()

@@ -9,6 +9,7 @@ from typing import Literal
 # stop_method
 STOP_METHOD_CLI = "cli"
 STOP_METHOD_SIGTERM = "sigterm"
+STOP_METHOD_SIGINT = "sigint"
 STOP_METHOD_SIGKILL = "sigkill"
 
 # storage_state_action (governs both the SQLite DB and the recordings folder)
@@ -40,7 +41,12 @@ STOCHASTIC_JITTER_S = 0.05
 # Value sets (tuples for static validation)
 # ---------------------------------------------------------------------------
 
-STOP_METHODS = (STOP_METHOD_CLI, STOP_METHOD_SIGTERM, STOP_METHOD_SIGKILL)
+STOP_METHODS = (
+    STOP_METHOD_CLI,
+    STOP_METHOD_SIGTERM,
+    STOP_METHOD_SIGINT,
+    STOP_METHOD_SIGKILL,
+)
 STORAGE_STATE_ACTIONS = (
     STORAGE_STATE_DELETE,
     STORAGE_STATE_PRESERVE,
@@ -59,7 +65,7 @@ TIMESTAMP_MODES = (
 # Type aliases (for type hints)
 # ---------------------------------------------------------------------------
 
-StopMethod = Literal["cli", "sigterm", "sigkill"]
+StopMethod = Literal["cli", "sigterm", "sigint", "sigkill"]
 StorageStateAction = Literal["delete", "preserve", "empty"]
 TimestampMode = Literal["manual", "real", "stochastic"]
 
