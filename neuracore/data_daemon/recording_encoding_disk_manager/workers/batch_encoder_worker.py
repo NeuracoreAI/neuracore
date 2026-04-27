@@ -55,6 +55,7 @@ class _BatchEncoderWorker:
         abort_trace: Callable[[_TraceKey], None],
         emitter: Emitter,
         loop: asyncio.AbstractEventLoop,
+        batch_writer_semaphore: asyncio.Semaphore,
     ) -> None:
         """Initialise _BatchEncoderWorker.
 
@@ -65,6 +66,7 @@ class _BatchEncoderWorker:
             abort_trace: Callback used to abort traces on failure.
             emitter: Event emitter for cross-component signaling.
             loop: The current event loop.
+            batch_writer_semaphore: Semaphore used to coordinate batch writes.
         """
         self._filesystem = filesystem
         self._encoder_manager = encoder_manager
@@ -91,6 +93,7 @@ class _BatchEncoderWorker:
 
         self._emitter.on(Emitter.BATCH_READY, self._on_batch_ready)
         self._emitter.on(Emitter.TRACE_ABORTED, self._on_trace_aborted)
+        self._batch_writer_semaphore = batch_writer_semaphore
 
     @property
     def in_flight_count(self) -> int:
@@ -350,7 +353,11 @@ class _BatchEncoderWorker:
                 otherwise False (trace aborted).
         """
         try:
-            async with aiofiles.open(batch_job.batch_path, "rb") as f:
+            # Note: order matters here the semaphore must be acquired first.
+            async with (
+                self._batch_writer_semaphore,
+                aiofiles.open(batch_job.batch_path, "rb") as f,
+            ):
                 raw_bytes = await f.read()
 
             def encoding_work(raw_bytes: bytes) -> None:

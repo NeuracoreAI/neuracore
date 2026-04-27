@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import mmap
 import os
 import struct
@@ -13,6 +14,8 @@ _WRITE_INDEX_OFFSET = 8
 _SHARED_INDEX_FORMAT = "!Q"
 _SHARED_HEADER_SIZE = 16
 _FULL_WAIT_SLEEP_S = 0.0005
+
+logger = logging.getLogger(__name__)
 
 
 class RingBuffer:
@@ -77,6 +80,7 @@ class RingBuffer:
         struct.pack_into(_SHARED_INDEX_FORMAT, mapping, _READ_INDEX_OFFSET, 0)
         struct.pack_into(_SHARED_INDEX_FORMAT, mapping, _WRITE_INDEX_OFFSET, 0)
         shared_name = f"/proc/{os.getpid()}/fd/{fd}"
+        logger.debug(f"RingBuffer opened {shared_name}, {fd}")
         return cls(
             size=int(size),
             _mapping=mapping,
@@ -213,6 +217,7 @@ class RingBuffer:
         if self._mapping is not None:
             self._mapping.close()
             self._mapping = None
+        logger.debug(f"RingBuffer closed {self._shared_name}, {self._fd}")
         if self._fd is not None:
             os.close(self._fd)
             self._fd = None

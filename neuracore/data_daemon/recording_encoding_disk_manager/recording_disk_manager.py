@@ -11,6 +11,7 @@ from neuracore.data_daemon.config_manager.helpers import calculate_storage_limit
 from neuracore.data_daemon.const import (
     DEFAULT_FLUSH_BYTES,
     DEFAULT_STORAGE_FREE_FRACTION,
+    MAX_OPEN_BATCHES,
     MIN_FREE_DISK_BYTES,
     SENTINEL,
     STORAGE_REFRESH_SECONDS,
@@ -83,6 +84,8 @@ class RecordingDiskManager:
         self._loop_manager = loop_manager
         self._writer_future: Future[Any] | None = None
 
+        self._batch_writer_semaphore = asyncio.Semaphore(value=MAX_OPEN_BATCHES)
+
         self._init_state()
 
         self.start()
@@ -133,6 +136,7 @@ class RecordingDiskManager:
             abort_trace=self._controller.abort_trace_due_to_storage,
             sentinel=SENTINEL,
             emitter=self._emitter,
+            batch_writer_semaphore=self._batch_writer_semaphore,
         )
         assert (
             self._loop_manager.is_running() and self._loop_manager.general_loop
@@ -144,6 +148,7 @@ class RecordingDiskManager:
             abort_trace=self._controller.abort_trace_due_to_storage,
             emitter=self._emitter,
             loop=self._loop_manager.general_loop,
+            batch_writer_semaphore=self._batch_writer_semaphore,
         )
 
     def start(self) -> None:

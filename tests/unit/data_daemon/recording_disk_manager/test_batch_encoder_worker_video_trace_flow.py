@@ -226,6 +226,8 @@ async def make_worker(tmp_path: Path, patched_modules, fake_emitter: _FakeEmitte
 
     aborted: list[Any] = []
 
+    batch_writer_semaphore = asyncio.Semaphore(100)
+
     def abort_trace(key: Any) -> None:
         aborted.append(key)
 
@@ -241,6 +243,7 @@ async def make_worker(tmp_path: Path, patched_modules, fake_emitter: _FakeEmitte
         abort_trace=abort_trace,
         emitter=fake_emitter,
         loop=asyncio.get_running_loop(),
+        batch_writer_semaphore=batch_writer_semaphore,
     )
 
     return worker, manager, filesystem, budget, aborted, worker_module, manager_module

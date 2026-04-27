@@ -200,7 +200,6 @@ def delete_cloud_dataset(dataset_name: str) -> None:
         dataset_name: Name of the cloud dataset to delete.
     """
     try:
-        nc.login()
         nc.get_dataset(dataset_name).delete()
         logger.info(
             "Deleted cloud dataset %r (storage_state_action=delete)", dataset_name

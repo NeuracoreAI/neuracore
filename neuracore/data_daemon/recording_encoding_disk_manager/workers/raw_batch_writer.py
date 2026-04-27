@@ -44,6 +44,7 @@ class _RawBatchWriter:
         abort_trace: Callable[[_TraceKey], None],
         sentinel: object,
         emitter: Emitter,
+        batch_writer_semaphore: asyncio.Semaphore,
     ) -> None:
         """Initialise _RawBatchWriter.
 
@@ -56,6 +57,7 @@ class _RawBatchWriter:
             abort_trace: Callback used to abort traces on failure.
             sentinel: Sentinel object used to stop the worker.
             emitter: Event emitter for cross-component signaling.
+            batch_writer_semaphore: Semaphore used to coordinate batch writes.
         """
         self.flush_bytes = flush_bytes
         self.trace_message_queue = trace_message_queue
@@ -77,6 +79,8 @@ class _RawBatchWriter:
 
         self._emitter.on(Emitter.TRACE_ABORTED, self._on_trace_aborted)
         self._emitter.on(Emitter.RECORDING_STOPPED, self._on_recording_stopped)
+
+        self._batch_writer_semaphore = batch_writer_semaphore
 
     def _on_trace_aborted(self, trace_key: _TraceKey) -> None:
         """Handle TRACE_ABORTED event.
@@ -120,7 +124,6 @@ class _RawBatchWriter:
         writer_state.batch_index += 1
         payload_bytes = bytes(writer_state.buffer)
         writer_state.buffer.clear()
-
         if not self._storage_budget.has_free_disk_for_write(buffered_bytes):
             self._abort_trace(trace_key)
             return
@@ -132,7 +135,12 @@ class _RawBatchWriter:
         batch_file_name = f"batch_{batch_index:06d}.raw"
         batch_path = trace_dir / batch_file_name
         try:
-            async with aiofiles.open(batch_path, "wb") as f:
+            # Note: order matters here the semaphore must be acquired first.
+            async with (
+                self._batch_writer_semaphore,
+                aiofiles.open(batch_path, "wb") as f,
+            ):
+
                 await f.write(payload_bytes)
         except Exception:
             self._storage_budget.release(buffered_bytes)

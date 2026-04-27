@@ -16,11 +16,10 @@ class ProducerHeartbeatService:
         self,
         *,
         interval_s: float,
-        send_heartbeat: Callable[[], None],
     ) -> None:
         """Configure the heartbeat interval and callback."""
         self._interval_s = interval_s
-        self._send_heartbeat = send_heartbeat
+        self._heartbeat_listeners = set[Callable[[], None]]()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -36,6 +35,22 @@ class ProducerHeartbeatService:
             daemon=True,
         )
         self._thread.start()
+
+    def register_heartbeat_listener(self, listener: Callable[[], None]) -> None:
+        """Register a listener for heartbeat events.
+
+        Args:
+            listener: The listener to register.
+        """
+        self._heartbeat_listeners.add(listener)
+
+    def unregister_heartbeat_listener(self, listener: Callable[[], None]) -> None:
+        """Unregister a listener for heartbeat events.
+
+        Args:
+            listener: The listener to unregister.
+        """
+        self._heartbeat_listeners.discard(listener)
 
     def stop(self, *, join_timeout_s: float = 1.0) -> None:
         """Stop the heartbeat loop and wait briefly for shutdown."""
@@ -59,10 +74,28 @@ class ProducerHeartbeatService:
         return self._stop_event
 
     def _heartbeat_loop(self) -> None:
-        self._send_heartbeat()
+        while True:
+            for listener in self._heartbeat_listeners:
+                try:
+                    listener()
+                except Exception as exc:
+                    logger.warning("Heartbeat failed: %s", exc)
 
-        while not self._stop_event.wait(self._interval_s):
-            try:
-                self._send_heartbeat()
-            except Exception as exc:
-                logger.warning("Heartbeat failed: %s", exc)
+            if self._stop_event.wait(self._interval_s):
+                break
+
+
+_producer_heartbeat_service: ProducerHeartbeatService | None = None
+
+
+def get_producer_heartbeat_service() -> ProducerHeartbeatService:
+    """Return the producer heartbeat service singleton.
+
+    Returns:
+        The producer heartbeat service singleton.
+    """
+    global _producer_heartbeat_service
+    if _producer_heartbeat_service is None:
+        _producer_heartbeat_service = ProducerHeartbeatService(interval_s=1.0)
+        _producer_heartbeat_service.start()
+    return _producer_heartbeat_service

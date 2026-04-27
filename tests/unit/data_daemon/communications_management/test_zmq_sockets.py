@@ -316,7 +316,7 @@ def test_heartbeat_timeout_cleanup_and_partial_trace_finalization_and_crash_dete
 
     rdm_emitter.on(Emitter.TRACE_WRITTEN, on_trace_written)
     try:
-        producer._stop_event.set()
+        producer._heartbeat_service.stop_event.set()
 
         start = time.monotonic()
         assert _wait_for(
@@ -356,7 +356,7 @@ def test_socket_cleanup_on_disconnect(daemon_runtime) -> None:
 
     assert _wait_for(lambda: producer.channel_id in daemon.channels, timeout=0.5)
 
-    producer._stop_event.set()
+    producer._heartbeat_service.stop_event.set()
 
     assert _wait_for(
         lambda: producer.channel_id not in daemon.channels,

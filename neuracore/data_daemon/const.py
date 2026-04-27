@@ -72,3 +72,8 @@ COMPLETED_RECORDING_RETENTION_HOURS = 24 * 30
 
 # default profile name
 DEFAULT_PROFILE_NAME = "default_profile"
+
+# The number of simultaneous batch files that can be open at once
+MAX_OPEN_BATCHES = 100
+# on many linux machines there is a limit of 1024 file descriptors
+assert MAX_OPEN_BATCHES <= 1024

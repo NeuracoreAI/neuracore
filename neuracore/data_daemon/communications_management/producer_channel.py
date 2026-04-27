@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import math
 import queue
-import threading
 import uuid
 from collections.abc import Iterator, Sequence
 
@@ -28,7 +27,10 @@ from .producer_channel_message_sender import (
     ProducerChannelMessageSender,
     QueuedSharedRingWrite,
 )
-from .producer_heartbeat_service import ProducerHeartbeatService
+from .producer_heartbeat_service import (
+    ProducerHeartbeatService,
+    get_producer_heartbeat_service,
+)
 from .producer_shared_ring_buffer_transport import ProducerSharedRingBufferTransport
 from .producer_transport_debug_models import ProducerTransportDebugStats
 from .ring_buffer import RingBuffer
@@ -71,10 +73,15 @@ class ProducerChannel:
         send_queue_maxsize: int | None = None,
         recording_id: str | None = None,
         ring_buffer_size: int | None = None,
+        heartbeat_service: ProducerHeartbeatService | None = None,
     ) -> None:
         """Initialize the producer channel."""
         if data_type is None:
             raise ValueError("data_type is required")
+
+        self._heartbeat_service = heartbeat_service or get_producer_heartbeat_service()
+
+        self._heartbeat_service.register_heartbeat_listener(self.heartbeat)
 
         (
             default_chunk_size,
@@ -96,7 +103,7 @@ class ProducerChannel:
         )
         self.trace_id: str | None = None
         self.recording_id: str | None = recording_id
-        self._heartbeat_interval = 1.0
+
         self._shared_ring_transport = ProducerSharedRingBufferTransport(
             int(
                 default_ring_buffer_size
@@ -110,10 +117,6 @@ class ProducerChannel:
             send_queue_maxsize=self.send_queue_maxsize,
             write_shared_ring_record=self._shared_ring_transport.write_record,
         )
-        self._heartbeat_service = ProducerHeartbeatService(
-            interval_s=self._heartbeat_interval,
-            send_heartbeat=self.heartbeat,
-        )
 
     @property
     def _send_queue(
@@ -121,15 +124,6 @@ class ProducerChannel:
     ) -> queue.Queue[MessageEnvelope | QueuedSharedRingWrite | None]:
         """Expose the sender queue for compatibility with existing tests."""
         return self._message_sender.queue
-
-    @property
-    def _stop_event(self) -> threading.Event:
-        """Expose the heartbeat stop event for compatibility with existing tests."""
-        return self._heartbeat_service.stop_event
-
-    def start_producer_channel(self) -> None:
-        """Starts the producer channel's heartbeat loop."""
-        self._heartbeat_service.start()
 
     def heartbeat(self) -> None:
         """Send a heartbeat message to the daemon."""
@@ -164,9 +158,10 @@ class ProducerChannel:
         self.trace_id = None
         self.recording_id = None
 
+    # TODO: cleanup producer channels after inactivity
     def stop_producer_channel(self) -> None:
         """Stops the producer channel and cleans up any associated resources."""
-        self._stop_heartbeat_service()
+        self._heartbeat_service.unregister_heartbeat_listener(self.heartbeat)
         self._stop_message_sender()
         self._close_shared_ring_transport()
         self._comm.cleanup_producer()
@@ -357,15 +352,11 @@ class ProducerChannel:
         if not self.trace_id:
             self.start_new_trace()
 
-        self.start_producer_channel()
         self.open_ring_buffer(size=ring_buffer_size)
 
     def cleanup_producer_channel(self) -> None:
         """Clean up the producer channel."""
         self.end_trace()
-
-    def _stop_heartbeat_service(self) -> None:
-        self._heartbeat_service.stop(join_timeout_s=1.0)
 
     def _stop_message_sender(self) -> None:
         self._message_sender.close(join_timeout_s=2.0)
