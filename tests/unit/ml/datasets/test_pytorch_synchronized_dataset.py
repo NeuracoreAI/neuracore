@@ -14,6 +14,11 @@ from neuracore_types import (
     SynchronizedPoint,
 )
 from omegaconf import OmegaConf
+from neuracore_types.preprocessing import (
+    PreProcessingConfiguration,
+    PreProcessingMethod,
+    PreprocessingPhase,
+)
 
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
@@ -232,6 +237,160 @@ def _stats_cache_path(cache_root, sync_id, input_spec, output_spec):
         sort_keys=True,
         separators=(",", ":"),
     )
+@pytest.fixture
+def synchronization_point_with_depth() -> SynchronizedPoint:
+    """Create a sample SynchronizedPoint including depth data."""
+    all_data_types = [
+        DataType.JOINT_POSITIONS,
+        DataType.JOINT_TARGET_POSITIONS,
+        DataType.RGB_IMAGES,
+        DataType.DEPTH_IMAGES,
+    ]
+
+    return SynchronizedPoint(
+        robot_id="robot_0",
+        timestamp=1234567890.0,
+        data={
+            data_type: {
+                f"{data_type.value}_{i}": DATA_TYPE_TO_NC_DATA_CLASS[data_type].sample()
+                for i in range(DATA_ITEMS)
+            }
+            for data_type in all_data_types
+        },
+    )
+
+
+@pytest.fixture
+def dataset_statistics_with_depth(
+    synchronization_point_with_depth: SynchronizedPoint,
+) -> dict[DataType, list[NCDataStats]]:
+    """Create sample dataset statistics for tests including depth."""
+    stats = {
+        DataType.JOINT_POSITIONS: [
+            list(
+                synchronization_point_with_depth.data[DataType.JOINT_POSITIONS].values()
+            )[i].calculate_statistics()
+            for i in range(DATA_ITEMS)
+        ],
+        DataType.JOINT_TARGET_POSITIONS: [
+            list(
+                synchronization_point_with_depth.data[
+                    DataType.JOINT_TARGET_POSITIONS
+                ].values()
+            )[i].calculate_statistics()
+            for i in range(DATA_ITEMS)
+        ],
+        DataType.RGB_IMAGES: [
+            list(synchronization_point_with_depth.data[DataType.RGB_IMAGES].values())[
+                i
+            ].calculate_statistics()
+            for i in range(DATA_ITEMS)
+        ],
+        DataType.DEPTH_IMAGES: [
+            list(synchronization_point_with_depth.data[DataType.DEPTH_IMAGES].values())[
+                i
+            ].calculate_statistics()
+            for i in range(DATA_ITEMS)
+        ],
+    }
+    for data_type_stats in stats.values():
+        for stat in data_type_stats:
+            for attr_name, attr_value in vars(stat).items():
+                if isinstance(attr_value, DataItemStats):
+                    attr_value.count[0] = NUM_EPISODES * NUM_OBSERVATIONS_PER_EPISODE
+    return stats
+
+
+@pytest.fixture
+def mock_synced_recording_with_depth(
+    synchronization_point_with_depth: SynchronizedPoint,
+) -> SynchronizedRecording:
+    """Create a mock recording including depth data."""
+    sync_points = [synchronization_point_with_depth] * 10
+
+    class MockSynchronizedRecording(SynchronizedRecording):
+        def __init__(self):
+            self.sync_points = sync_points
+            self.robot_id = "robot_0"
+
+        def __len__(self):
+            return len(self.sync_points)
+
+        def __getitem__(self, idx):
+            if isinstance(idx, int):
+                return self.sync_points[idx]
+            elif isinstance(idx, slice):
+                start = idx.start or 0
+                stop = idx.stop or len(self.sync_points)
+                step = idx.step or 1
+                return self.sync_points[start:stop:step]
+            else:
+                raise TypeError(f"Invalid index type: {type(idx)}")
+
+        def __iter__(self):
+            return iter(self.sync_points)
+
+    return MockSynchronizedRecording()
+
+
+@pytest.fixture
+def mock_synchronized_dataset_with_depth(
+    mock_synced_recording_with_depth: SynchronizedRecording,
+    dataset_statistics_with_depth: dict[DataType, list[NCDataStats]],
+) -> SynchronizedDataset:
+    """Create a mock synchronized dataset including depth data."""
+
+    class MockSynchronizedDataset(SynchronizedDataset):
+        def __init__(self):
+            self.id = "mock_dataset"
+            self.dataset = MagicMock()
+            self.robot_data_spec = {
+                "robot_0": {
+                    DataType.JOINT_POSITIONS: [
+                        f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
+                    ],
+                    DataType.JOINT_TARGET_POSITIONS: [
+                        f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
+                    ],
+                    DataType.RGB_IMAGES: [
+                        f"{DataType.RGB_IMAGES.value}_{i}" for i in range(3)
+                    ],
+                    DataType.DEPTH_IMAGES: [
+                        f"{DataType.DEPTH_IMAGES.value}_{i}" for i in range(3)
+                    ],
+                }
+            }
+
+        def calculate_statistics(
+            self, robot_data_spec: RobotDataSpec
+        ) -> SynchronizedDatasetStatistics:
+            return SynchronizedDatasetStatistics(
+                synchronized_dataset_id="mock_dataset",
+                robot_data_spec=robot_data_spec,
+                dataset_statistics=dataset_statistics_with_depth,
+            )
+
+        def __len__(self):
+            return NUM_EPISODES
+
+        def __getitem__(self, idx):
+            return mock_synced_recording_with_depth
+
+        def __next__(self) -> SynchronizedRecording:
+            if self._recording_idx >= NUM_EPISODES:
+                raise StopIteration
+            self._recording_idx += 1
+            return mock_synced_recording_with_depth
+
+    return MockSynchronizedDataset()
+
+
+def _stats_cache_path(cache_root, sync_id, robot_data_spec):
+    if hasattr(robot_data_spec, "model_dump"):
+        spec_payload = robot_data_spec.model_dump(mode="json")
+    else:
+        spec_payload = robot_data_spec
+    spec_key = json.dumps(spec_payload, sort_keys=True, separators=(",", ":"))
     spec_hash = hashlib.sha256(spec_key.encode("utf-8")).hexdigest()[:12]
     return cache_root / "dataset_cache" / f"{sync_id}_statistics_{spec_hash}.json"
 
@@ -535,6 +694,263 @@ class TestDataLoading:
 
             # Memory should be checked at least once
             assert mock_monitor.check_memory.call_count >= 1
+
+    @patch("neuracore.login")
+    def test_load_sample_applies_input_preprocessing(
+        self, mock_login, mock_synchronized_dataset
+    ):
+        input_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_POSITIONS: [
+                    f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
+                ],
+                DataType.RGB_IMAGES: [
+                    f"{DataType.RGB_IMAGES.value}_{i}" for i in range(3)
+                ],
+            }
+        }
+        output_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_TARGET_POSITIONS: [
+                    f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
+                ]
+            }
+        }
+        input_preprocessing_config = PreProcessingConfiguration(
+            steps={
+                DataType.RGB_IMAGES: {
+                    0: [
+                        PreProcessingMethod(
+                            name="resize_pad",
+                            phase=PreprocessingPhase.TRAIN_INFERENCE,
+                            args={"size": [224, 224]},
+                        )
+                    ]
+                }
+            }
+        )
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_robot_data_spec=input_spec,
+            output_robot_data_spec=output_spec,
+            output_prediction_horizon=3,
+            input_preprocessing_config=input_preprocessing_config,
+        )
+
+        with patch.object(dataset, "_memory_monitor") as mock_monitor:
+            mock_monitor.check_memory.return_value = None
+            sample = dataset.load_sample(episode_idx=0, timestep=0)
+
+        assert sample.inputs[DataType.RGB_IMAGES][0].frame.shape[-2:] == (224, 224)
+
+    @patch("neuracore.login")
+    def test_load_sample_applies_output_preprocessing(
+        self, mock_login, mock_synchronized_dataset
+    ):
+        input_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_POSITIONS: [
+                    f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
+                ],
+                DataType.RGB_IMAGES: [
+                    f"{DataType.RGB_IMAGES.value}_{i}" for i in range(3)
+                ],
+            }
+        }
+        output_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.RGB_IMAGES: [
+                    f"{DataType.RGB_IMAGES.value}_{i}" for i in range(3)
+                ],
+                DataType.JOINT_TARGET_POSITIONS: [
+                    f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
+                ],
+            }
+        }
+        output_preprocessing_config = PreProcessingConfiguration(
+            steps={
+                DataType.RGB_IMAGES: {
+                    0: [
+                        PreProcessingMethod(
+                            name="resize_pad",
+                            phase=PreprocessingPhase.TRAIN_INFERENCE,
+                            args={"size": [160, 200]},
+                        )
+                    ]
+                }
+            }
+        )
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_robot_data_spec=input_spec,
+            output_robot_data_spec=output_spec,
+            output_prediction_horizon=3,
+            output_preprocessing_config=output_preprocessing_config,
+        )
+
+        with patch.object(dataset, "_memory_monitor") as mock_monitor:
+            mock_monitor.check_memory.return_value = None
+            sample = dataset.load_sample(episode_idx=0, timestep=0)
+
+        assert sample.outputs[DataType.RGB_IMAGES][0].frame.shape[-2:] == (160, 200)
+
+    @patch("neuracore.login")
+    def test_load_sample_applies_input_preprocessing_for_depth(
+        self, mock_login, mock_synchronized_dataset_with_depth
+    ):
+        input_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_POSITIONS: [
+                    f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
+                ],
+                DataType.RGB_IMAGES: [
+                    f"{DataType.RGB_IMAGES.value}_{i}" for i in range(3)
+                ],
+                DataType.DEPTH_IMAGES: [
+                    f"{DataType.DEPTH_IMAGES.value}_{i}" for i in range(3)
+                ],
+            }
+        }
+        output_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_TARGET_POSITIONS: [
+                    f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
+                ]
+            }
+        }
+        input_preprocessing_config = PreProcessingConfiguration(
+            steps={
+                DataType.DEPTH_IMAGES: {
+                    0: [
+                        PreProcessingMethod(
+                            name="resize_pad",
+                            phase=PreprocessingPhase.TRAIN_INFERENCE,
+                            args={"size": [200, 300]},
+                        )
+                    ]
+                }
+            }
+        )
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset_with_depth,
+            input_robot_data_spec=input_spec,
+            output_robot_data_spec=output_spec,
+            output_prediction_horizon=3,
+            input_preprocessing_config=input_preprocessing_config,
+        )
+
+        with patch.object(dataset, "_memory_monitor") as mock_monitor:
+            mock_monitor.check_memory.return_value = None
+            sample = dataset.load_sample(episode_idx=0, timestep=0)
+
+        assert sample.inputs[DataType.DEPTH_IMAGES][0].frame.shape[-2:] == (200, 300)
+
+    @patch("neuracore.login")
+    def test_load_sample_applies_preprocessing_to_exact_slots_only(
+        self, mock_login, mock_synchronized_dataset
+    ):
+        input_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_POSITIONS: [
+                    f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
+                ],
+                DataType.RGB_IMAGES: [
+                    f"{DataType.RGB_IMAGES.value}_{i}" for i in range(3)
+                ],
+            }
+        }
+        output_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_TARGET_POSITIONS: [
+                    f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
+                ]
+            }
+        }
+        input_preprocessing_config = PreProcessingConfiguration(
+            steps={
+                DataType.RGB_IMAGES: {
+                    0: [
+                        PreProcessingMethod(
+                            name="resize_pad",
+                            phase=PreprocessingPhase.TRAIN_INFERENCE,
+                            args={"size": [128, 128]},
+                        )
+                    ],
+                    1: [
+                        PreProcessingMethod(
+                            name="resize_pad",
+                            phase=PreprocessingPhase.TRAIN_INFERENCE,
+                            args={"size": [240, 320]},
+                        )
+                    ],
+                }
+            }
+        )
+        configured_dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_robot_data_spec=input_spec,
+            output_robot_data_spec=output_spec,
+            output_prediction_horizon=3,
+            input_preprocessing_config=input_preprocessing_config,
+        )
+        baseline_dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_robot_data_spec=input_spec,
+            output_robot_data_spec=output_spec,
+            output_prediction_horizon=3,
+        )
+
+        with patch.object(configured_dataset, "_memory_monitor") as configured_monitor:
+            configured_monitor.check_memory.return_value = None
+            configured_sample = configured_dataset.load_sample(
+                episode_idx=0, timestep=0
+            )
+        with patch.object(baseline_dataset, "_memory_monitor") as baseline_monitor:
+            baseline_monitor.check_memory.return_value = None
+            baseline_sample = baseline_dataset.load_sample(episode_idx=0, timestep=0)
+
+        configured_rgb = configured_sample.inputs[DataType.RGB_IMAGES]
+        baseline_rgb = baseline_sample.inputs[DataType.RGB_IMAGES]
+        assert configured_rgb[0].frame.shape[-2:] == (128, 128)
+        assert configured_rgb[1].frame.shape[-2:] == (240, 320)
+        assert configured_rgb[2].frame.shape[-2:] == baseline_rgb[2].frame.shape[-2:]
+
+    @patch("neuracore.login")
+    def test_load_sample_without_preprocessing_keeps_original_shapes(
+        self, mock_login, mock_synchronized_dataset
+    ):
+        input_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_POSITIONS: [
+                    f"{DataType.JOINT_POSITIONS.value}_{i}" for i in range(3)
+                ],
+                DataType.RGB_IMAGES: [
+                    f"{DataType.RGB_IMAGES.value}_{i}" for i in range(3)
+                ],
+            }
+        }
+        output_spec: RobotDataSpec = {
+            "robot_0": {
+                DataType.JOINT_TARGET_POSITIONS: [
+                    f"{DataType.JOINT_TARGET_POSITIONS.value}_{i}" for i in range(3)
+                ]
+            }
+        }
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_robot_data_spec=input_spec,
+            output_robot_data_spec=output_spec,
+            output_prediction_horizon=3,
+        )
+
+        with patch.object(dataset, "_memory_monitor") as mock_monitor:
+            mock_monitor.check_memory.return_value = None
+            sample = dataset.load_sample(episode_idx=0, timestep=0)
+
+        rgb_shapes = [
+            item.frame.shape[-2:] for item in sample.inputs[DataType.RGB_IMAGES]
+        ]
+        assert len(set(rgb_shapes)) == 1
 
 
 class TestDataTypeProcessing:

@@ -782,6 +782,9 @@ class TestDetermineOptimalBatchSize:
         mock_find_optimal.assert_called_once()
         # kwargs = mock_find_optimal.call_args.kwargs
         # assert set(kwargs.keys()) == {"cfg", "model", "dataset", "device"}
+        model_init_description = mock_get_model_config.call_args[0][1]
+        assert model_init_description.input_preprocessing_config is not None
+        assert model_init_description.output_preprocessing_config is not None
 
     def test_determine_optimal_batch_size_raises_error_when_no_gpu(
         self, mock_cfg_batch_size, mock_dataset, monkeypatch
