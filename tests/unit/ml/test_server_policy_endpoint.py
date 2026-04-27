@@ -1,7 +1,12 @@
+"""Tests for server endpoint connection, deployment, and inference."""
+
+import re
 from typing import cast
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import requests
 import torch
 from neuracore_types import BatchedJointData, BatchedNCData, DataType
 from neuracore_types.endpoints.endpoint_requests import DeploymentRequest
@@ -9,9 +14,14 @@ from neuracore_types.training.training import GPUType
 
 import neuracore as nc
 from neuracore.core.const import API_URL
+from neuracore.core.endpoint import EndpointError, Policy
+from neuracore.core.exceptions import InsufficientSynchronizedPointError
 
 B = 1
 PREDICTION_HORIZON = 3
+TEST_API_KEY = "test_api_key"
+TEST_ROBOT_ID = "test_robot"
+TEST_ROBOT_PAYLOAD = {"robot_id": "mock_robot_id", "has_urdf": True}
 FAKE_PREDICTED_DATA: dict[DataType, dict[str, BatchedNCData]] = {
     DataType.JOINT_TARGET_POSITIONS: {
         "joint1": BatchedJointData(value=torch.full((B, PREDICTION_HORIZON, 1), 0.1)),
@@ -29,6 +39,60 @@ def _indexed_names(names: list[str] | tuple[str, ...]) -> dict[int, str]:
     return {index: name for index, name in enumerate(names)}
 
 
+def _login_and_connect_robot(mock_auth_requests, mocked_org_id: str) -> None:
+    nc.login(TEST_API_KEY)
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json=TEST_ROBOT_PAYLOAD,
+        status_code=200,
+    )
+    nc.connect_robot(TEST_ROBOT_ID)
+
+
+def _log_default_inputs() -> None:
+    nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
+    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
+
+
+def _assert_joint_prediction_matches_expected(
+    predictions: dict[DataType, dict[str, BatchedNCData]],
+) -> None:
+    assert isinstance(predictions, dict)
+    assert DataType.JOINT_TARGET_POSITIONS in predictions
+    assert (
+        predictions[DataType.JOINT_TARGET_POSITIONS].keys()
+        == FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].keys()
+    )
+    prediction_values = [
+        cast(BatchedJointData, batched_joint_data).value.numpy()
+        for batched_joint_data in predictions[DataType.JOINT_TARGET_POSITIONS].values()
+    ]
+    expected_values = [
+        cast(BatchedJointData, batched_joint_data).value.numpy()
+        for batched_joint_data in FAKE_PREDICTED_DATA[
+            DataType.JOINT_TARGET_POSITIONS
+        ].values()
+    ]
+    assert np.array_equal(prediction_values, expected_values)
+
+
+def _connect_test_remote_endpoint(mock_auth_requests, mocked_org_id: str):
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints",
+        json=[{"id": "test_endpoint_id", "name": "test_endpoint", "status": "active"}],
+        status_code=200,
+    )
+    return nc.policy_remote_server("test_endpoint")
+
+
+class _StubPolicy(Policy):
+    def __init__(self, predict_impl):
+        self._predict_impl = predict_impl
+
+    def _predict(self, sync_point=None):
+        return self._predict_impl(sync_point)
+
+
 INPUT_EMBODIMENT_DESCRIPTION = {
     DataType.JOINT_POSITIONS: _indexed_names(["joint1", "joint2", "joint3"]),
     DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: _indexed_names(["left_arm", "right_arm"]),
@@ -41,8 +105,9 @@ OUTPUT_EMBODIMENT_DESCRIPTION = {
 }
 
 
-# Mock torchserve subprocess
 def mock_subprocess_popen(*args, **kwargs):
+    """Mock subprocess.Popen for local endpoint tests."""
+
     class MockProcess:
         def __init__(self):
             self.stdout = None
@@ -61,25 +126,11 @@ def mock_subprocess_popen(*args, **kwargs):
     return MockProcess()
 
 
-def test_connect_endpoint(
+def test_connect_remote_endpoint(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
-    """Test connecting to an endpoint."""
-    # Ensure login
-    nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
-    nc.connect_robot("test_robot")
-
-    # Mock endpoint list
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/models/endpoints",
-        json=[{"id": "test_endpoint_id", "name": "test_endpoint", "status": "active"}],
-        status_code=200,
-    )
+    """Test connecting to a remote server endpoint."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
 
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/models/endpoints/test_endpoint_id/predict",
@@ -87,42 +138,18 @@ def test_connect_endpoint(
         status_code=200,
     )
 
-    endpoint = nc.policy_remote_server("test_endpoint")
+    endpoint = _connect_test_remote_endpoint(mock_auth_requests, mocked_org_id)
 
-    nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
-    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
+    _log_default_inputs()
 
-    # Test prediction
-    preds = endpoint.predict()
-    assert isinstance(preds, dict)
-    assert isinstance(preds, dict)
-    assert DataType.JOINT_TARGET_POSITIONS in preds
-    assert (
-        preds[DataType.JOINT_TARGET_POSITIONS].keys()
-        == FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].keys()
-    )
-    pred_values = [
-        cast(BatchedJointData, bjp).value.numpy()
-        for bjp in preds[DataType.JOINT_TARGET_POSITIONS].values()
-    ]
-    expected_values = [
-        cast(BatchedJointData, bjp).value.numpy()
-        for bjp in FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].values()
-    ]
-    assert np.array_equal(pred_values, expected_values)
+    _assert_joint_prediction_matches_expected(endpoint.predict())
 
 
 def test_remote_endpoint_filters_sync_point_from_endpoint_input_description(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Remote endpoints should only receive data types declared in metadata."""
-    nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
-    nc.connect_robot("test_robot")
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
 
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/models/endpoints",
@@ -148,8 +175,7 @@ def test_remote_endpoint_filters_sync_point_from_endpoint_input_description(
 
     endpoint = nc.policy_remote_server("test_endpoint")
 
-    nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
-    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
+    _log_default_inputs()
 
     endpoint.predict()
 
@@ -162,14 +188,171 @@ def test_remote_endpoint_filters_sync_point_from_endpoint_input_description(
     }
 
 
-def test_connect_nonexistent_endpoint(
+def test_policy_predict_raises_for_non_positive_timeout():
+    """Policy should reject timeout values <= 0."""
+    policy = _StubPolicy(lambda _sync_point: {})
+
+    with pytest.raises(ValueError, match="Timeout must be a positive number."):
+        policy.predict(timeout=0)
+
+
+def test_policy_predict_retries_until_success_before_timeout(monkeypatch):
+    """Policy should retry on insufficient sync point until success."""
+    attempts = {"count": 0}
+    expected_prediction = {
+        DataType.JOINT_TARGET_POSITIONS: {
+            "joint1": BatchedJointData(value=torch.full((1, 1, 1), 0.1))
+        }
+    }
+
+    def predict_impl(_sync_point):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise InsufficientSynchronizedPointError("not enough data yet")
+        return expected_prediction
+
+    time_values = iter([100.0, 100.1, 100.2])
+    monkeypatch.setattr("neuracore.core.endpoint.time.time", lambda: next(time_values))
+    monkeypatch.setattr("neuracore.core.endpoint.time.sleep", lambda _seconds: None)
+    policy = _StubPolicy(predict_impl)
+
+    prediction = policy.predict(timeout=1)
+    assert prediction == expected_prediction
+    assert attempts["count"] == 3
+
+
+def test_policy_predict_raises_after_timeout_when_insufficient_data(monkeypatch):
+    """Policy.predict should re-raise insufficient data error after timeout."""
+    policy = _StubPolicy(
+        lambda _sync_point: (_ for _ in ()).throw(
+            InsufficientSynchronizedPointError("not enough data")
+        )
+    )
+
+    time_values = iter([100.0, 100.05, 100.2])
+    monkeypatch.setattr("neuracore.core.endpoint.time.time", lambda: next(time_values))
+    monkeypatch.setattr("neuracore.core.endpoint.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(InsufficientSynchronizedPointError, match="not enough data"):
+        policy.predict(timeout=0.1)
+
+
+def test_set_checkpoint_success(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """Server policy should post epoch to set_checkpoint endpoint."""
+    nc.login(TEST_API_KEY)
+    endpoint = _connect_test_remote_endpoint(mock_auth_requests, mocked_org_id)
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints/test_endpoint_id/set_checkpoint",
+        json={},
+        status_code=200,
+    )
+
+    endpoint.set_checkpoint(epoch=3)
+
+    request_body = mock_auth_requests.request_history[-1].json()
+    assert request_body == {"epoch": 3}
+
+
+@pytest.mark.parametrize(
+    "kwargs,error_message",
+    [
+        (
+            {"checkpoint_file": "checkpoint.pt"},
+            "Setting checkpoint by file is not supported in server policies.",
+        ),
+        ({"epoch": None}, "Must specify epoch to set checkpoint."),
+        (
+            {"epoch": -2},
+            re.escape("Epoch must be -1 (last) or a non-negative integer."),
+        ),
+    ],
+)
+def test_set_checkpoint_validation_errors(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    kwargs,
+    error_message,
+):
+    """set_checkpoint should validate epoch/checkpoint_file arguments."""
+    nc.login(TEST_API_KEY)
+    endpoint = _connect_test_remote_endpoint(mock_auth_requests, mocked_org_id)
+
+    with pytest.raises(ValueError, match=error_message):
+        endpoint.set_checkpoint(**kwargs)
+
+
+def test_set_checkpoint_raises_endpoint_error_for_non_200_response(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """set_checkpoint should raise EndpointError when response is non-200."""
+    nc.login(TEST_API_KEY)
+    endpoint = _connect_test_remote_endpoint(mock_auth_requests, mocked_org_id)
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints/test_endpoint_id/set_checkpoint",
+        status_code=500,
+        text="Internal Server Error",
+    )
+
+    with pytest.raises(
+        EndpointError,
+        match="Failed to set checkpoint: 500 - Internal Server Error",
+    ):
+        endpoint.set_checkpoint(epoch=1)
+
+
+def test_set_checkpoint_raises_endpoint_error_for_connection_error(
+    monkeypatch,
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+):
+    """set_checkpoint should wrap requests ConnectionError in EndpointError."""
+    nc.login(TEST_API_KEY)
+    endpoint = _connect_test_remote_endpoint(mock_auth_requests, mocked_org_id)
+    monkeypatch.setattr(
+        "neuracore.core.endpoint.requests.post",
+        MagicMock(side_effect=requests.exceptions.ConnectionError()),
+    )
+
+    with pytest.raises(
+        EndpointError,
+        match=(
+            "Failed to connect to endpoint, please check your internet "
+            "connection and try again."
+        ),
+    ):
+        endpoint.set_checkpoint(epoch=1)
+
+
+def test_set_checkpoint_raises_endpoint_error_for_request_exception(
+    monkeypatch,
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+):
+    """set_checkpoint should wrap generic RequestException in EndpointError."""
+    nc.login(TEST_API_KEY)
+    endpoint = _connect_test_remote_endpoint(mock_auth_requests, mocked_org_id)
+    monkeypatch.setattr(
+        "neuracore.core.endpoint.requests.post",
+        MagicMock(side_effect=requests.exceptions.Timeout("timeout")),
+    )
+
+    with pytest.raises(EndpointError, match="Failed to set checkpoint: timeout"):
+        endpoint.set_checkpoint(epoch=1)
+
+
+def test_connect_nonexistent_remote_endpoint(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Test connecting to a non-existent endpoint."""
-    # Ensure login
-    nc.login("test_api_key")
-
-    # Mock empty endpoint list
+    nc.login(TEST_API_KEY)
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/models/endpoints",
         json=[],
@@ -183,14 +366,11 @@ def test_connect_nonexistent_endpoint(
         nc.policy_remote_server("non_existent_endpoint")
 
 
-def test_connect_inactive_endpoint(
+def test_connect_inactive_remote_endpoint(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Test connecting to an inactive endpoint."""
-    # Ensure login
-    nc.login("test_api_key")
-
-    # Mock endpoint list with inactive endpoint
+    nc.login(TEST_API_KEY)
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/models/endpoints",
         json=[
@@ -204,17 +384,11 @@ def test_connect_inactive_endpoint(
         nc.policy_remote_server("test_endpoint")
 
 
-def test_connect_active_endpoint_with_duplicate_name(
+def test_connect_active_remote_endpoint_with_duplicate_name(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Test connecting to active endpoint when duplicate names exist."""
-    nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
-    nc.connect_robot("test_robot")
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
 
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/models/endpoints",
@@ -232,22 +406,16 @@ def test_connect_active_endpoint_with_duplicate_name(
 
     endpoint = nc.policy_remote_server("test_endpoint")
 
-    nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
-    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
+    _log_default_inputs()
 
-    preds = endpoint.predict()
-    assert DataType.JOINT_TARGET_POSITIONS in preds
-    assert (
-        preds[DataType.JOINT_TARGET_POSITIONS].keys()
-        == FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].keys()
-    )
+    _assert_joint_prediction_matches_expected(endpoint.predict())
 
 
-def test_connect_multiple_active_endpoints_with_duplicate_name(
+def test_connect_multiple_active_remote_endpoints_with_duplicate_name(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Test error when multiple active endpoints have the same name."""
-    nc.login("test_api_key")
+    nc.login(TEST_API_KEY)
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/models/endpoints",
         json=[
@@ -290,13 +458,7 @@ def test_connect_local_endpoint(
     monkeypatch.setattr("subprocess.Popen", mock_subprocess_popen)
     monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: None)
 
-    nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
-    nc.connect_robot("test_robot")
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
 
     local_endpoint = nc.policy_local_server(
         input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
@@ -305,25 +467,56 @@ def test_connect_local_endpoint(
         port=port,
     )
 
-    nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
-    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
+    _log_default_inputs()
 
-    preds = local_endpoint.predict()
-    assert isinstance(preds, dict)
-    assert DataType.JOINT_TARGET_POSITIONS in preds
-    assert (
-        preds[DataType.JOINT_TARGET_POSITIONS].keys()
-        == FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].keys()
+    _assert_joint_prediction_matches_expected(local_endpoint.predict())
+
+    local_endpoint.disconnect()
+
+
+def test_local_endpoint_filters_sync_point_from_input_description(
+    temp_config_dir,
+    mock_model_mar,
+    reset_neuracore,
+    monkeypatch,
+    mock_auth_requests,
+    mocked_org_id,
+):
+    """Local endpoints should only receive configured input data types."""
+    port = np.random.randint(8000, 9000)
+    localhost = f"http://127.0.0.1:{port}"
+
+    mock_auth_requests.get(f"{localhost}/ping", status_code=200)
+    mock_auth_requests.post(
+        f"{localhost}/predict",
+        json=FAKE_PREDICTED_DATA_JSON,
+        status_code=200,
     )
-    pred_values = [
-        cast(BatchedJointData, bjp).value.numpy()
-        for bjp in preds[DataType.JOINT_TARGET_POSITIONS].values()
-    ]
-    expected_values = [
-        cast(BatchedJointData, bjp).value.numpy()
-        for bjp in FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].values()
-    ]
-    assert np.array_equal(pred_values, expected_values)
+
+    monkeypatch.setattr("subprocess.Popen", mock_subprocess_popen)
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: None)
+
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+
+    local_endpoint = nc.policy_local_server(
+        input_embodiment_description={
+            DataType.JOINT_POSITIONS: _indexed_names(["joint1", "joint2", "joint3"]),
+        },
+        output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
+        model_file=mock_model_mar,
+        port=port,
+    )
+
+    _log_default_inputs()
+    local_endpoint.predict()
+
+    request_body = mock_auth_requests.request_history[-1].json()
+    assert set(request_body["data"]) == {"JOINT_POSITIONS"}
+    assert set(request_body["data"]["JOINT_POSITIONS"]) == {
+        "joint1",
+        "joint2",
+        "joint3",
+    }
 
     local_endpoint.disconnect()
 
@@ -332,10 +525,8 @@ def test_deploy_model(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Test model deployment."""
-    # Ensure login
-    nc.login("test_api_key")
+    nc.login(TEST_API_KEY)
 
-    # Mock deployment endpoint
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/models/deploy",
         json={"id": "endpoint_123", "name": "test_endpoint", "status": "deploying"},
@@ -396,7 +587,7 @@ def test_deploy_model_includes_ttl_and_default_config(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Test model deployment serializes ttl and the default config."""
-    nc.login("test_api_key")
+    nc.login(TEST_API_KEY)
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/models/deploy",
         json={"id": "endpoint_123", "name": "test_endpoint", "status": "deploying"},
@@ -434,14 +625,12 @@ def test_deploy_model_includes_ttl_and_default_config(
     )
 
 
-def test_get_endpoint_status(
+def test_get_remote_endpoint_status(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Test getting endpoint status."""
-    # Ensure login
-    nc.login("test_api_key")
+    nc.login(TEST_API_KEY)
 
-    # Mock endpoint status
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/models/endpoints/endpoint_123",
         json={"id": "endpoint_123", "name": "test_endpoint", "status": "active"},
@@ -455,14 +644,12 @@ def test_get_endpoint_status(
     assert status == "active"
 
 
-def test_delete_endpoint(
+def test_delete_remote_endpoint(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Test deleting an endpoint."""
-    # Ensure login
-    nc.login("test_api_key")
+    nc.login(TEST_API_KEY)
 
-    # Mock delete endpoint
     mock_auth_requests.delete(
         f"{API_URL}/org/{mocked_org_id}/models/endpoints/endpoint_123",
         status_code=200,
@@ -484,10 +671,8 @@ def test_deploy_model_failure(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Test handling of deployment failures."""
-    # Ensure login
-    nc.login("test_api_key")
+    nc.login(TEST_API_KEY)
 
-    # Mock deployment endpoint to return an error
     mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/models/deploy",
         status_code=500,
@@ -517,17 +702,9 @@ def test_connect_local_endpoint_with_train_run(
     temp_config_dir, mock_auth_requests, reset_neuracore, monkeypatch, mocked_org_id
 ):
     """Test connecting to a local endpoint using a training run name."""
-    # Ensure login
-    nc.login("test_api_key")
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json={"robot_id": "mock_robot_id", "has_urdf": True},
-        status_code=200,
-    )
-    nc.connect_robot("test_robot")
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
     port = np.random.randint(8000, 9000)
 
-    # Mock training jobs endpoint
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/training/jobs",
         json=[{
@@ -540,7 +717,6 @@ def test_connect_local_endpoint_with_train_run(
 
     localhost = f"http://127.0.0.1:{port}"
 
-    # Mock model download
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/training/jobs/job_123/model_url",
         json={
@@ -565,7 +741,6 @@ def test_connect_local_endpoint_with_train_run(
         status_code=200,
     )
 
-    # Apply mocks
     monkeypatch.setattr("subprocess.Popen", mock_subprocess_popen)
     monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: None)
 
@@ -576,25 +751,9 @@ def test_connect_local_endpoint_with_train_run(
         train_run_name="test_run",
         port=port,
     )
-    nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
-    nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
+    _log_default_inputs()
 
-    preds = local_endpoint.predict()
-    assert isinstance(preds, dict)
-    assert DataType.JOINT_TARGET_POSITIONS in preds
-    assert (
-        preds[DataType.JOINT_TARGET_POSITIONS].keys()
-        == FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].keys()
-    )
-    pred_values = [
-        cast(BatchedJointData, bjp).value.numpy()
-        for bjp in preds[DataType.JOINT_TARGET_POSITIONS].values()
-    ]
-    expected_values = [
-        cast(BatchedJointData, bjp).value.numpy()
-        for bjp in FAKE_PREDICTED_DATA[DataType.JOINT_TARGET_POSITIONS].values()
-    ]
-    assert np.array_equal(pred_values, expected_values)
+    _assert_joint_prediction_matches_expected(local_endpoint.predict())
 
     local_endpoint.disconnect()
 
@@ -603,10 +762,8 @@ def test_connect_local_endpoint_invalid_args(
     temp_config_dir, mock_auth_requests, reset_neuracore
 ):
     """Test connecting to a local endpoint with invalid arguments."""
-    # Ensure login
-    nc.login("test_api_key")
+    nc.login(TEST_API_KEY)
 
-    # Both arguments provided should raise an error
     with pytest.raises(
         ValueError, match="Cannot specify both train_run_name and model_file"
     ):
@@ -617,7 +774,6 @@ def test_connect_local_endpoint_invalid_args(
             train_run_name="test_run",
         )
 
-    # Neither argument provided should raise an error
     with pytest.raises(
         ValueError, match="Must specify either train_run_name or model_file"
     ):

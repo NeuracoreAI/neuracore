@@ -1,3 +1,5 @@
+"""Tests for server utility helpers."""
+
 import json
 
 from neuracore_types import DataType, JointData, SynchronizedPoint
@@ -6,6 +8,7 @@ from neuracore.core.utils.server import _parse_embodiment_description
 
 
 def test_parse_embodiment_description_restores_numeric_indices():
+    """Parser should convert JSON string indices back to numeric ordering."""
     joint_names = [f"joint{i}" for i in range(12)]
     raw_description = json.dumps(
         {DataType.JOINT_POSITIONS.value: dict(enumerate(joint_names))}
