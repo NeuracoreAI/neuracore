@@ -158,7 +158,7 @@ def _collect_demo_data(
         #  stability is being improved.
         #  Delete after data daemon refactor is in.
         # Check with s das/ Cougar before deleting
-        time.sleep(60)
+        time.sleep(120)
     return dataset
 
 
