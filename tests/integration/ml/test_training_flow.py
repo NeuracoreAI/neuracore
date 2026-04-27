@@ -153,6 +153,12 @@ def _collect_demo_data(
             )
         nc.stop_recording(wait=True, robot_name=robot_name, instance=instance_id)
         logger.info(f"Episode {ep_idx + 1} recorded ({len(action_traj)} frames)")
+
+        # TODO: Remove the sleep it is a temporary addition while the data daemon
+        #  stability is being improved.
+        #  Delete after data daemon refactor is in.
+        # Check with s das/ Cougar before deleting
+        time.sleep(60)
     return dataset
 
 
