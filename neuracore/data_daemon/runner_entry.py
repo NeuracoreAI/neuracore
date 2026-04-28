@@ -18,6 +18,13 @@ from neuracore.data_daemon.runtime import DaemonContext, DaemonRuntime
 logger = logging.getLogger(__name__)
 
 
+def _configure_third_party_logging() -> None:
+    """Silence noisy third-party INFO logs that do not help daemon users."""
+    logging.getLogger("zerobuffer").setLevel(logging.WARNING)
+    logging.getLogger("zerobuffer.reader").setLevel(logging.WARNING)
+    logging.getLogger("zerobuffer.writer").setLevel(logging.WARNING)
+
+
 def main() -> None:
     """Runner entrypoint for the Neuracore data daemon.
 
@@ -37,6 +44,7 @@ def main() -> None:
 
     The daemon will shut down when it receives a SIGINT or SIGTERM signal.
     """
+    _configure_third_party_logging()
     debug_mode = is_debug_mode()
     profiler = None
     if debug_mode:
@@ -52,6 +60,20 @@ def main() -> None:
         pid_path=pid_path,
         socket_paths=(SOCKET_PATH,),
     )
+    cleaned_up = False
+
+    def shutdown_runtime() -> None:
+        """Run the standard daemon shutdown path at most once."""
+        nonlocal cleaned_up
+        if cleaned_up:
+            return
+        runtime.shutdown()
+        shutdown(
+            pid_path=pid_path,
+            socket_paths=(SOCKET_PATH,),
+            db_path=db_path,
+        )
+        cleaned_up = True
 
     try:
         # Make SIGTERM raise KeyboardInterrupt
@@ -69,19 +91,19 @@ def main() -> None:
 
         atexit.register(on_exit)
         logger.info("Daemon starting main loop...")
-        runtime.run_forever()
+        try:
+            runtime.run_forever()
+        except Exception:
+            logger.exception("Fatal error while daemon main loop was running")
+            shutdown_runtime()
+            raise
 
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt")
     except SystemExit:
         pass
     finally:
-        runtime.shutdown()
-        shutdown(
-            pid_path=pid_path,
-            socket_paths=(SOCKET_PATH,),
-            db_path=db_path,
-        )
+        shutdown_runtime()
         if profiler:
             profiler.stop()
             profiler.write_html("profile-daemon-main.html")

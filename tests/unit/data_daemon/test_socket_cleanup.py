@@ -6,10 +6,8 @@ from unittest.mock import MagicMock
 import pytest
 import zmq
 
-from neuracore.data_daemon.communications_management import (
-    communications_manager as comms_module,
-)
-from neuracore.data_daemon.communications_management.communications_manager import (
+import neuracore.data_daemon.communications_management.shared_transport.communications_manager as comms_module
+from neuracore.data_daemon.communications_management.shared_transport.communications_manager import (
     CommunicationsManager,
 )
 

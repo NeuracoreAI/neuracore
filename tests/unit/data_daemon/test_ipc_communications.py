@@ -9,14 +9,12 @@ import zmq
 from neuracore_types import DataType
 
 import neuracore.data_daemon.const as const_module
-from neuracore.data_daemon.communications_management import (
-    communications_manager as comms_module,
-)
-from neuracore.data_daemon.communications_management.communications_manager import (
+import neuracore.data_daemon.communications_management.shared_transport.communications_manager as comms_module
+from neuracore.data_daemon.communications_management.shared_transport.communications_manager import (
     CommunicationsManager,
 )
-from neuracore.data_daemon.communications_management.data_bridge import Daemon
-from neuracore.data_daemon.communications_management.producer_channel import (
+from neuracore.data_daemon.communications_management.data_bridge import DataBridge
+from neuracore.data_daemon.communications_management.producer.producer_channel import (
     ProducerChannel,
 )
 from neuracore.data_daemon.models import CommandType, DataChunkPayload, MessageEnvelope
@@ -64,7 +62,7 @@ def zmq_context() -> Generator[zmq.Context, None, None]:
 
 
 def _drain_messages(
-    daemon: Daemon,
+    daemon: DataBridge,
     comm: CommunicationsManager,
     expected: int,
     timeout: float = 2.0,
@@ -87,7 +85,6 @@ def _drain_messages(
             message = MessageEnvelope.from_bytes(raw)
             daemon.handle_message(message)
             received += 1
-        daemon._drain_channel_messages()
     assert received == expected
     if until is not None:
         assert until()
@@ -127,8 +124,15 @@ def test_create_producer_socket_returns_continues_without_daemon(
 def test_message_envelope_round_trip_bytes() -> None:
     envelope = MessageEnvelope(
         producer_id="producer-abc",
-        command=CommandType.OPEN_RING_BUFFER,
-        payload={"open_ring_buffer": {"size": 4096}},
+        command=CommandType.OPEN_FIXED_SHARED_SLOTS,
+        payload={
+            "open_fixed_shared_slots": {
+                "transport_mode": "FIXED_SHARED_SLOTS_DAEMON_OWNED",
+                "control_endpoint": "ipc://test-envelope-round-trip",
+                "slot_size": 4096,
+                "slot_count": 16,
+            }
+        },
     )
 
     parsed = MessageEnvelope.from_bytes(envelope.to_bytes())
@@ -175,7 +179,7 @@ def test_large_payload_chunked_round_trip_over_ipc(
     daemon_comm = CommunicationsManager(context=zmq_context)
     daemon_comm.start_consumer()
     rdm = CaptureRDM()
-    daemon = Daemon(
+    daemon = DataBridge(
         comm_manager=daemon_comm,
         recording_disk_manager=rdm,
         emitter=emitter,
@@ -189,9 +193,7 @@ def test_large_payload_chunked_round_trip_over_ipc(
         data_type=DataType.CUSTOM_1D,
     )
 
-    producer.open_ring_buffer(size=128 * 1024)
     producer.start_new_trace()
-    _drain_messages(daemon, daemon_comm, expected=1)
 
     payload = b"x" * 50_000
     producer.send_data(
@@ -207,7 +209,7 @@ def test_large_payload_chunked_round_trip_over_ipc(
     _drain_messages(
         daemon,
         daemon_comm,
-        expected=0,
+        expected=1,
         until=lambda: len(rdm.enqueued) == 1,
     )
 
@@ -222,7 +224,7 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context, emitter) 
     daemon_comm = CommunicationsManager(context=zmq_context)
     daemon_comm.start_consumer()
     rdm = CaptureRDM()
-    daemon = Daemon(
+    daemon = DataBridge(
         comm_manager=daemon_comm,
         recording_disk_manager=rdm,
         emitter=emitter,
@@ -243,11 +245,8 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context, emitter) 
         data_type=DataType.CUSTOM_1D,
     )
 
-    producer_a.open_ring_buffer(size=4096)
-    producer_b.open_ring_buffer(size=4096)
     producer_a.start_new_trace()
     producer_b.start_new_trace()
-    _drain_messages(daemon, daemon_comm, expected=2)
 
     payload_a = b"payload-a"
     payload_b = b"payload-b"
@@ -271,7 +270,7 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context, emitter) 
     _drain_messages(
         daemon,
         daemon_comm,
-        expected=0,
+        expected=2,
         until=lambda: len(rdm.enqueued) == 2,
     )
 
@@ -290,7 +289,7 @@ def test_interleaved_chunks_reassemble_per_producer(
     daemon_comm = CommunicationsManager(context=zmq_context)
     daemon_comm.start_consumer()
     rdm = CaptureRDM()
-    daemon = Daemon(
+    daemon = DataBridge(
         comm_manager=daemon_comm,
         recording_disk_manager=rdm,
         emitter=emitter,
@@ -306,8 +305,8 @@ def test_interleaved_chunks_reassemble_per_producer(
         comm.send_message(
             MessageEnvelope(
                 producer_id=producer_id,
-                command=CommandType.OPEN_RING_BUFFER,
-                payload={"open_ring_buffer": {"size": 4096}},
+                command=CommandType.HEARTBEAT,
+                payload={CommandType.HEARTBEAT.value: {}},
             ),
         )
 
@@ -411,7 +410,7 @@ def test_unknown_command_logs_warning_and_continues(
     class FakeCommand(Enum):
         UNKNOWN = "unknown_command"
 
-    daemon = Daemon(
+    daemon = DataBridge(
         comm_manager=CommunicationsManager(),
         recording_disk_manager=CaptureRDM(),
         emitter=emitter,
@@ -430,11 +429,11 @@ def test_unknown_command_logs_warning_and_continues(
     daemon.handle_message(
         MessageEnvelope(
             producer_id="producer-1",
-            command=CommandType.OPEN_RING_BUFFER,
-            payload={"open_ring_buffer": {"size": 1024}},
+            command=CommandType.HEARTBEAT,
+            payload={CommandType.HEARTBEAT.value: {}},
         )
     )
-    assert daemon.channels["producer-1"].ring_buffer is not None
+    assert daemon.channels.get("producer-1").is_open()
 
 
 def test_garbage_messages_are_logged_and_daemon_survives(
@@ -445,7 +444,7 @@ def test_garbage_messages_are_logged_and_daemon_survives(
 ) -> None:
     daemon_comm = CommunicationsManager(context=zmq_context)
     daemon_comm.start_consumer()
-    daemon = Daemon(
+    daemon = DataBridge(
         comm_manager=daemon_comm,
         recording_disk_manager=CaptureRDM(),
         emitter=emitter,
@@ -482,14 +481,14 @@ def test_garbage_messages_are_logged_and_daemon_survives(
     sender.send(
         MessageEnvelope(
             producer_id="prod",
-            command=CommandType.OPEN_RING_BUFFER,
-            payload={"open_ring_buffer": {"size": 1024}},
+            command=CommandType.HEARTBEAT,
+            payload={CommandType.HEARTBEAT.value: {}},
         ).to_bytes()
     )
     raw = daemon_comm._consumer_socket.recv()
     daemon.process_raw_message(raw)
     assert len(handled_messages) == 1
-    assert daemon.channels["prod"].ring_buffer is not None
+    assert daemon.channels.get("prod").is_open()
 
     sender.close(0)
     daemon_comm.cleanup_daemon()

@@ -5,15 +5,23 @@ import sqlite3
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+from neuracore.data_daemon.const import DEFAULT_SHARED_MEMORY_SIZE
 from neuracore.data_daemon.lifecycle.daemon_os_control import (
     acquire_pid_file,
     pid_is_running,
     read_pid_from_file,
 )
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
+    SharedMemoryCapacityError,
     cleanup_socket_files,
+    cleanup_stale_shared_memory_buffers,
+    ensure_shared_memory_capacity,
     reconcile_state_with_filesystem,
+    shared_memory_required_bytes,
     shutdown,
     validate_or_recover_sqlite,
 )
@@ -79,6 +87,105 @@ def test_validate_or_recover_sqlite_rotates_corrupt_db(tmp_path: Path) -> None:
     assert ok is False
     assert not db_path.exists()
     assert any(path.name.startswith("state.db.corrupt-") for path in tmp_path.iterdir())
+
+
+def test_cleanup_stale_shared_memory_buffers_removes_orphaned_entries(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    shm_dir = tmp_path / "dev-shm"
+    temp_dir = tmp_path / "zerobuffer"
+    shm_dir.mkdir()
+    temp_dir.mkdir()
+
+    stale_name = "neuracore-ring-buffer-stale"
+    live_name = "neuracore-ring-buffer-live"
+    for buffer_name in (stale_name, live_name):
+        (shm_dir / buffer_name).write_bytes(b"shm")
+        (shm_dir / f"sem.sem-r-{buffer_name}").write_text("", encoding="utf-8")
+        (shm_dir / f"sem.sem-w-{buffer_name}").write_text("", encoding="utf-8")
+        (temp_dir / f"{buffer_name}.lock").write_text("", encoding="utf-8")
+
+    class _FakeShm:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def get_memoryview(self, _offset: int, _length: int) -> str:
+            return self.name
+
+        def close(self) -> None:
+            return
+
+        def unlink(self) -> None:
+            (shm_dir / self.name).unlink(missing_ok=True)
+
+    class _FakeOieb:
+        def __init__(self, reader_pid: int, writer_pid: int) -> None:
+            self.reader_pid = reader_pid
+            self.writer_pid = writer_pid
+
+        def dispose(self) -> None:
+            return
+
+    oieb_map = {
+        stale_name: _FakeOieb(reader_pid=0, writer_pid=0),
+        live_name: _FakeOieb(reader_pid=111, writer_pid=222),
+    }
+    fake_oieb_view = type(
+        "_FakeOIEBView",
+        (),
+        {
+            "SIZE": 128,
+            "__new__": staticmethod(lambda _cls, name: oieb_map[name]),
+        },
+    )
+
+    monkeypatch.setattr(
+        "neuracore.data_daemon.lifecycle.runtime_recovery.SharedMemoryFactory",
+        SimpleNamespace(open=lambda name: _FakeShm(name), remove=lambda _name: None),
+    )
+    monkeypatch.setattr(
+        "neuracore.data_daemon.lifecycle.runtime_recovery.OIEBView",
+        fake_oieb_view,
+    )
+    monkeypatch.setattr(
+        "neuracore.data_daemon.lifecycle.runtime_recovery._shared_platform",
+        SimpleNamespace(process_exists=lambda pid: pid in {111, 222}),
+    )
+
+    cleaned = cleanup_stale_shared_memory_buffers(shm_dir=shm_dir, temp_dir=temp_dir)
+
+    assert cleaned == 1
+    assert not (shm_dir / stale_name).exists()
+    assert not (shm_dir / f"sem.sem-r-{stale_name}").exists()
+    assert not (shm_dir / f"sem.sem-w-{stale_name}").exists()
+    assert not (temp_dir / f"{stale_name}.lock").exists()
+    assert (shm_dir / live_name).exists()
+    assert (shm_dir / f"sem.sem-r-{live_name}").exists()
+    assert (temp_dir / f"{live_name}.lock").exists()
+
+
+def test_ensure_shared_memory_capacity_raises_when_tmpfs_is_full(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    shm_dir = tmp_path / "dev-shm"
+    shm_dir.mkdir()
+
+    monkeypatch.setattr(
+        "neuracore.data_daemon.lifecycle.runtime_recovery.shared_memory_free_bytes",
+        lambda _shm_dir=shm_dir: 1024,
+    )
+
+    with pytest.raises(SharedMemoryCapacityError, match="Insufficient shared memory"):
+        ensure_shared_memory_capacity(2048, shm_dir=shm_dir)
+
+
+def test_shared_memory_required_bytes_matches_default_allocation() -> None:
+    assert (
+        shared_memory_required_bytes(DEFAULT_SHARED_MEMORY_SIZE, metadata_size=4096)
+        == 8392832
+    )
 
 
 def test_runtime_recovery_primitives_reconcile_missing_and_orphaned_traces(

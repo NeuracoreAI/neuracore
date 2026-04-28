@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from neuracore.data_daemon.communications_management.communications_manager import (
+from neuracore.data_daemon.communications_management.shared_transport.communications_manager import (
     CommunicationsManager,
     MessageEnvelope,
 )

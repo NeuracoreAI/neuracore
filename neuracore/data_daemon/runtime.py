@@ -8,24 +8,35 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from neuracore.core.auth import login
-from neuracore.data_daemon.communications_management.communications_manager import (
+from neuracore.data_daemon.communications_management.shared_transport.communications_manager import (
     CommunicationsManager,
 )
-from neuracore.data_daemon.communications_management.data_bridge import Daemon
+from neuracore.data_daemon.communications_management.consumer.data_bridge import (
+    DataBridge,
+)
 from neuracore.data_daemon.config_manager.config import ConfigManager
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.config_manager.profiles import (
     ProfileAlreadyExist,
     ProfileManager,
 )
-from neuracore.data_daemon.const import DEFAULT_PROFILE_NAME
+from neuracore.data_daemon.const import (
+    DEFAULT_PROFILE_NAME,
+    DEFAULT_SHARED_MEMORY_SIZE,
+    DEFAULT_VIDEO_SLOT_COUNT,
+    DEFAULT_VIDEO_SLOT_SIZE,
+)
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.helpers import is_debug_mode
 from neuracore.data_daemon.lifecycle.daemon_os_control import acquire_pid_file
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
+    cleanup_stale_shared_slot_segments,
     cleanup_socket_files,
+    cleanup_stale_shared_memory_buffers,
     reconcile_state_with_filesystem,
+    shared_memory_free_bytes,
+    shared_memory_required_bytes,
     validate_or_recover_sqlite,
 )
 from neuracore.data_daemon.recording_encoding_disk_manager import (
@@ -64,7 +75,7 @@ class DaemonRuntime:
         self._socket_paths = socket_paths
         self._manage_pid = os.environ.get("NEURACORE_DAEMON_MANAGE_PID", "1") != "0"
         self._context: DaemonContext | None = None
-        self._daemon: Daemon | None = None
+        self._daemon: DataBridge | None = None
         self._event_logger: EventLogger | None = None
 
     def _get_recordings_root(self, config: DaemonConfig) -> Path:
@@ -76,11 +87,54 @@ class DaemonRuntime:
         if self._manage_pid:
             acquire_pid_file(self._pid_path)
 
+        cleaned_shared_buffers = cleanup_stale_shared_memory_buffers()
+        if cleaned_shared_buffers:
+            logger.info(
+                "Recovered %d stale shared-memory allocation(s) from /dev/shm",
+                cleaned_shared_buffers,
+            )
+
+        cleaned_shared_slots = cleanup_stale_shared_slot_segments()
+        if cleaned_shared_slots:
+            logger.info(
+                "Recovered %d stale shared-slot segment(s) from /dev/shm",
+                cleaned_shared_slots,
+            )
+
         cleanup_socket_files(self._socket_paths)
 
         sqlite_ok = validate_or_recover_sqlite(self._db_path, recover=True)
         if not sqlite_ok:
             logger.warning("SQLite recovered by rotation; new DB will be created.")
+
+        try:
+            free_shared_bytes = shared_memory_free_bytes()
+            min_required_bytes = shared_memory_required_bytes(
+                DEFAULT_SHARED_MEMORY_SIZE,
+                metadata_size=4096,
+            )
+            video_required_bytes = shared_memory_required_bytes(
+                DEFAULT_VIDEO_SLOT_SIZE * DEFAULT_VIDEO_SLOT_COUNT,
+                metadata_size=4096,
+            )
+            if free_shared_bytes < min_required_bytes:
+                logger.warning(
+                    "Shared-memory startup preflight: only %d bytes free in /dev/shm; "
+                    "%d bytes are required for default shared memory. "
+                    "New shared-memory sessions will fail until space is reclaimed.",
+                    free_shared_bytes,
+                    min_required_bytes,
+                )
+            elif free_shared_bytes < video_required_bytes:
+                logger.warning(
+                    "Shared-memory startup preflight: %d bytes free in /dev/shm; "
+                    "default non-video traffic fits, but default video shared "
+                    "memory needs %d bytes.",
+                    free_shared_bytes,
+                    video_required_bytes,
+                )
+        except Exception as exc:
+            logger.debug("Skipping shared-memory startup preflight: %s", exc)
 
         recordings_root = self._get_recordings_root(config)
         recordings_root.mkdir(parents=True, exist_ok=True)
@@ -97,7 +151,6 @@ class DaemonRuntime:
                 reconcile_state_with_filesystem(services.state_store, recordings_root)
             )
             future.result(timeout=30.0)
-            logger.debug("       Runtime state reconciled with filesystem")
             return True
         except Exception:
             logger.exception("Failed to reconcile runtime state")
@@ -129,7 +182,6 @@ class DaemonRuntime:
 
             config = config_manager.resolve_effective_config()
 
-            logger.debug("Configuration resolved")
             return config
         except Exception:
             logger.exception("Failed to resolve configuration")
@@ -139,8 +191,6 @@ class DaemonRuntime:
         loop_manager = EventLoopManager()
         try:
             emitter = loop_manager.start()
-            logger.debug("       General Loop: started (I/O-bound work)")
-            logger.debug("       Encoder Loop: started (CPU-bound work)")
             return loop_manager, emitter
         except Exception as error:
             logger.exception(f"Failed to start EventLoopManager: {str(error)}")
@@ -157,11 +207,6 @@ class DaemonRuntime:
                 DaemonServices.create(config, emitter, self._db_path)
             )
             services = future.result(timeout=30.0)
-            logger.debug("       SqliteStateStore: initialized")
-            logger.debug("       StateManager: listening for events")
-            logger.debug("       UploadManager: ready for uploads")
-            logger.debug("       ConnectionManager: monitoring API")
-            logger.debug("       ProgressReporter: ready to report")
             return services
         except Exception:
             logger.exception("Failed to bootstrap async services")
@@ -181,8 +226,6 @@ class DaemonRuntime:
                 emitter=emitter,
                 recordings_root=config.path_to_store_record,
             )
-            logger.debug("       _RawBatchWriter: scheduled on General Loop")
-            logger.debug("       _BatchEncoderWorker: scheduled on Encoder Loop")
             return recording_disk_manager
         except Exception:
             logger.exception("Failed to initialize RecordingDiskManager")
@@ -198,8 +241,6 @@ class DaemonRuntime:
                 ctx.recording_disk_manager.shutdown()
             )
             future.result(timeout=30.0)
-            logger.debug("       _RawBatchWriter: stopped")
-            logger.debug("       _BatchEncoderWorker: stopped")
         except Exception:
             logger.exception("Error shutting down RecordingDiskManager")
 
@@ -213,8 +254,6 @@ class DaemonRuntime:
     def _stop_event_loops(self, ctx: DaemonContext) -> None:
         try:
             ctx.loop_manager.stop()
-            logger.debug("       General Loop: stopped (I/O-bound work)")
-            logger.debug("       Encoder Loop: stopped (CPU-bound work)")
         except Exception:
             logger.exception("Error stopping EventLoopManager")
 
@@ -234,23 +273,19 @@ class DaemonRuntime:
         """Resolve configuration, start services, and build the daemon context."""
         logger.info("Daemon runtime initialization starting")
 
-        logger.debug("[1/8] Resolving configuration...")
         config = self._resolve_configuration()
         if config is None:
             return None
 
-        logger.debug("[2/8] Preparing runtime state...")
         try:
             recordings_root = self._prepare_runtime_state(config)
         except Exception:
             logger.exception("Failed to prepare runtime state")
             return None
 
-        logger.debug("[3/8] Initializing authentication...")
         if not self._initialize_auth(config):
             return None
 
-        logger.debug("[4/8] Starting EventLoopManager...")
         loop_result = self._start_event_loops()
         if loop_result is None:
             return None
@@ -263,31 +298,25 @@ class DaemonRuntime:
             self._event_logger.attach(emitter)
             logger.info("Debug Mode enabled")
 
-        logger.debug("[5/8] Bootstrapping async services on General Loop...")
         services = self._bootstrap_async_services(config, loop_manager, emitter)
         if services is None:
             return None
 
-        logger.debug("[6/8] Reconciling runtime state...")
         if not self._reconcile_runtime_state(loop_manager, services, recordings_root):
             return None
 
-        logger.debug("[7/8] Initializing RecordingDiskManager...")
         recording_disk_manager = self._init_recording_disk_manager(
             config, loop_manager, emitter, services
         )
         if recording_disk_manager is None:
             return None
 
-        logger.debug("[8/8] Creating communications runtime...")
         comm_manager = CommunicationsManager()
-        self._daemon = Daemon(
+        self._daemon = DataBridge(
             recording_disk_manager=recording_disk_manager,
             emitter=emitter,
             comm_manager=comm_manager,
         )
-        logger.debug("       ZMQ sockets ready")
-
         self._context = DaemonContext(
             config=config,
             loop_manager=loop_manager,
@@ -320,13 +349,10 @@ class DaemonRuntime:
         logger.info("Daemon runtime shutdown starting")
         ctx = self._context
 
-        logger.debug("[1/3] Shutting down RecordingDiskManager...")
         self._shutdown_recording_disk_manager(ctx)
 
-        logger.debug("[2/3] Shutting down async services...")
         self._shutdown_async_services(ctx)
 
-        logger.debug("[3/3] Stopping EventLoopManager...")
         self._stop_event_loops(ctx)
 
         if self._event_logger is not None:
@@ -335,6 +361,13 @@ class DaemonRuntime:
 
         self._daemon = None
         self._context = None
+
+        cleaned_shared_slots = cleanup_stale_shared_slot_segments()
+        if cleaned_shared_slots:
+            logger.info(
+                "Cleaned %d shared-slot segment(s) during daemon shutdown",
+                cleaned_shared_slots,
+            )
 
         logger.info("Daemon runtime shutdown complete")
 
