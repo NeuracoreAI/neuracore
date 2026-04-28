@@ -410,6 +410,16 @@ class SharedSlotRegistry:
                 "unhealthy_reason": self._unhealthy_reason,
             }
 
+    def get_in_flight_count(self) -> int:
+        """Return the number of descriptors still awaiting ACK handling."""
+        with self._condition:
+            return len(self._in_flight)
+
+    def get_unhealthy_reason(self) -> str | None:
+        """Return the current unhealthy reason, if any."""
+        with self._condition:
+            return self._unhealthy_reason
+
     def shared_memory_view(self, offset: int, length: int) -> memoryview:
         """Return a writable view into one slot-sized shared-memory span."""
         return self._shm.buf[offset : offset + length]
@@ -703,6 +713,15 @@ class SharedSlotVideoWorker:
             "worker_error": worker_error,
         }
 
+    def is_idle(self) -> bool:
+        """Return True when the worker has no queued packets left."""
+        return self._queue.qsize() == 0
+
+    def get_error(self) -> Exception | None:
+        """Return the worker error, if the background thread failed."""
+        with self._error_lock:
+            return self._error
+
     def _ensure_running(self) -> None:
         self._registry.ensure_healthy()
         with self._error_lock:
@@ -848,6 +867,30 @@ class SharedSlotVideoTransport:
         """Mark the shared-slot transport unhealthy after sender failure."""
         self._registry.notify_sender_failure()
 
+    def wait_until_drained(self, timeout_s: float = 30.0) -> None:
+        """Wait until all queued packets and in-flight ACKs are settled."""
+        deadline = time.monotonic() + timeout_s
+        last_stats: ProducerSharedRingBufferDebugStats | None = None
+
+        while time.monotonic() < deadline:
+            last_stats = self.get_stats()
+
+            if self._worker.get_error() is not None:
+                raise RuntimeError(
+                    "Shared-slot transport worker failed before drain completed. "
+                    f"last_stats={last_stats}"
+                )
+
+            if self._is_drained():
+                return
+
+            time.sleep(0.05)
+
+        raise RuntimeError(
+            "Timed out waiting for shared-slot transport to drain before close. "
+            f"last_stats={last_stats}"
+        )
+
     def close(self) -> None:
         """Release this channel's references to the shared-slot runtime."""
         SharedSlotVideoWorker.release_shared_instance()
@@ -894,3 +937,7 @@ class SharedSlotVideoTransport:
                 else str(registry_stats["unhealthy_reason"])
             ),
         )
+
+    def _is_drained(self) -> bool:
+        """Return True when shutdown can proceed without queued local work."""
+        return self._worker.is_idle() and self._registry.get_in_flight_count() == 0

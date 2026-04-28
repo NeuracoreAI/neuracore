@@ -216,8 +216,8 @@ class ProducerChannel:
         cutoff_sequence = self.get_last_enqueued_sequence_number()
         self.wait_until_sequence_sent(cutoff_sequence)
 
-        # NEW: wait for daemon ACKs before destroying shared memory
-        self._wait_for_shared_slot_transport_to_drain(timeout_s=30.0)
+        if self._shared_slot_transport is not None:
+            self._shared_slot_transport.wait_until_drained(timeout_s=30.0)
 
         self._close_shared_slot_transport()
         self._stop_message_sender()
@@ -251,32 +251,6 @@ class ProducerChannel:
     def wait_until_sequence_sent(self, sequence_number: int) -> bool:
         """Block until the sender thread has sent up to `sequence_number`."""
         return self._message_sender.wait_until_sequence_sent(sequence_number)
-
-    def _wait_for_shared_slot_transport_to_drain(self, timeout_s: float = 30.0) -> None:
-        if self._shared_slot_transport is None:
-            return
-
-        deadline = time.monotonic() + timeout_s
-        last_stats = None
-
-        while time.monotonic() < deadline:
-            stats = self._shared_slot_transport.get_stats()
-            last_stats = stats
-
-            if (
-                stats.in_flight_slot_count == 0
-                and stats.worker_queue_qsize == 0
-                and stats.worker_error is None
-                and stats.unhealthy_reason is None
-            ):
-                return
-
-            time.sleep(0.05)
-
-        raise RuntimeError(
-            "Timed out waiting for shared-slot transport to drain before close. "
-            f"last_stats={last_stats}"
-        )
 
     def get_transport_stats(self) -> ProducerTransportDebugStats:
         """Return a typed snapshot of producer transport debug state."""
@@ -528,7 +502,8 @@ class ProducerChannel:
         cutoff_sequence = self.get_last_enqueued_sequence_number()
         self.wait_until_sequence_sent(cutoff_sequence)
 
-        self._wait_for_shared_slot_transport_to_drain(timeout_s=30.0)
+        if self._shared_slot_transport is not None:
+            self._shared_slot_transport.wait_until_drained(timeout_s=30.0)
 
         self.end_trace()
 
