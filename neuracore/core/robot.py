@@ -9,7 +9,9 @@ state across multiple robot instances.
 import io
 import logging
 import os
+import sqlite3
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
@@ -29,6 +31,7 @@ from neuracore.data_daemon.communications_management.producer_channel import (
 from neuracore.data_daemon.communications_management.recording_context import (
     RecordingContext as DaemonRecordingContext,
 )
+from neuracore.data_daemon.helpers import get_daemon_db_path
 
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
@@ -36,6 +39,9 @@ from .exceptions import RobotError, ValidationError
 from .utils.http_errors import extract_error_detail
 
 logger = logging.getLogger(__name__)
+
+_STOP_REPORT_WAIT_TIMEOUT_S = 30.0
+_STOP_REPORT_POLL_INTERVAL_S = 0.1
 
 
 @dataclass
@@ -336,28 +342,8 @@ class Robot:
             recording_id=recording_id,
             producer_stop_sequence_numbers=producer_stop_sequence_numbers,
         )
-
-        try:
-            response = requests.post(
-                f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}",
-                headers=self._auth.get_headers(),
-            )
-
-            response.raise_for_status()
-
-            if response.json() == "WrongUser":
-                raise RobotError("Cannot stop recording initiated by another user")
-
-            if response.json() == "UsageLimitExceeded":
-                raise RobotError("Storage limit exceeded. Please upgrade your plan.")
-
-        except requests.exceptions.ConnectionError:
-            raise RobotError(
-                "Failed to connect to neuracore server, "
-                "please check your internet connection and try again."
-            )
-        except requests.exceptions.RequestException as e:
-            raise RobotError(f"Failed to stop recording: {str(e)}")
+        if wait_for_producer_drain:
+            self._wait_for_daemon_stop_report(recording_id)
 
     def _stop_all_streams(
         self,
@@ -700,6 +686,38 @@ class Robot:
         if self._daemon_recording_context is None:
             self._daemon_recording_context = DaemonRecordingContext()
         return self._daemon_recording_context
+
+    def _wait_for_daemon_stop_report(self, recording_id: str) -> None:
+        """Wait for the daemon to finish backend stop reporting for a recording."""
+        db_path = get_daemon_db_path()
+        deadline = time.monotonic() + _STOP_REPORT_WAIT_TIMEOUT_S
+        last_status: str | None = None
+
+        while time.monotonic() < deadline:
+            try:
+                with sqlite3.connect(str(db_path), timeout=0.25) as conn:
+                    row = conn.execute(
+                        """
+                        SELECT stop_report_status
+                        FROM recordings
+                        WHERE recording_id = ?
+                        """,
+                        (recording_id,),
+                    ).fetchone()
+            except sqlite3.OperationalError:
+                row = None
+
+            if row is not None and row[0] is not None:
+                last_status = str(row[0])
+                if last_status == "reported":
+                    return
+
+            time.sleep(_STOP_REPORT_POLL_INTERVAL_S)
+
+        raise RobotError(
+            "Timed out waiting for the daemon to report recording stop to the backend "
+            f"for recording_id={recording_id}. Last stop_report_status={last_status!r}."
+        )
 
     def _cleanup_daemon_recording_context(self) -> None:
         """Release daemon recording context resources."""

@@ -12,6 +12,7 @@ from sqlalchemy import select, text, update
 from neuracore.data_daemon.models import (
     DATA_TYPE_CONTENT_MAPPING,
     ProgressReportStatus,
+    RecordingStopReportStatus,
     TraceErrorCode,
     TraceRegistrationStatus,
     TraceUploadStatus,
@@ -60,6 +61,30 @@ def _create_legacy_schema_db(db_path: Path) -> None:
         )
         conn.execute("CREATE INDEX idx_traces_status ON traces(status)")
         conn.execute("CREATE INDEX idx_traces_next_retry_at ON traces(next_retry_at)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _create_pre_stop_report_recordings_db(db_path: Path) -> None:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE recordings (
+                recording_id TEXT PRIMARY KEY,
+                org_id TEXT,
+                expected_trace_count INTEGER NOT NULL DEFAULT 0,
+                trace_count INTEGER NOT NULL DEFAULT 0,
+                expected_trace_count_reported INTEGER NOT NULL DEFAULT 0,
+                uploaded_trace_count INTEGER NOT NULL DEFAULT 0,
+                progress_reported TEXT NOT NULL DEFAULT 'pending',
+                stopped_at DATETIME,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -257,6 +282,8 @@ async def test_init_async_store_migrates_legacy_trace_schema(tmp_path: Path) -> 
         assert int(recording["uploaded_trace_count"]) == 1
         assert int(recording["expected_trace_count_reported"]) == 1
         assert recording["progress_reported"] == ProgressReportStatus.PENDING
+        assert recording["stop_report_status"] == RecordingStopReportStatus.PENDING
+        assert recording["stop_reported_at"] is None
 
         async with store._engine.begin() as async_conn:
             legacy_exists = (
@@ -268,6 +295,30 @@ async def test_init_async_store_migrates_legacy_trace_schema(tmp_path: Path) -> 
                 )
             ).scalar_one_or_none()
         assert legacy_exists is None
+    finally:
+        await store._engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_init_async_store_adds_stop_report_columns_to_existing_recordings(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "pre-stop-report.db"
+    _create_pre_stop_report_recordings_db(db_path)
+
+    store = SqliteStateStore(db_path)
+    await store.init_async_store()
+    try:
+        row = await _get_recording_row(store, "missing-row")
+        assert row is None
+
+        async with store._engine.begin() as conn:
+            columns = (
+                await conn.execute(text("PRAGMA table_info(recordings)"))
+            ).mappings().all()
+        column_names = {str(column["name"]) for column in columns}
+        assert "stop_report_status" in column_names
+        assert "stop_reported_at" in column_names
     finally:
         await store._engine.dispose()
 
@@ -688,6 +739,50 @@ async def test_find_unreported_traces_filters_reported(store: SqliteStateStore) 
 
     unreported = await store.find_unreported_traces()
     assert sorted(trace.trace_id for trace in unreported) == ["trace-12"]
+
+
+@pytest.mark.asyncio
+async def test_recording_stop_report_transitions_are_atomic_and_idempotent(
+    store: SqliteStateStore,
+) -> None:
+    await store.set_expected_trace_count("rec-stop", 1)
+
+    await store.mark_recording_stop_report_pending("rec-stop")
+    assert await store.claim_recording_stop_report("rec-stop") is True
+    assert await store.claim_recording_stop_report("rec-stop") is False
+
+    row = await _get_recording_row(store, "rec-stop")
+    assert row is not None
+    assert row["stop_report_status"] == RecordingStopReportStatus.REPORTING
+
+    reset_count = await store.reset_recording_stop_reporting_to_pending()
+    assert reset_count == 1
+    assert await store.claim_recording_stop_report("rec-stop") is True
+
+    await store.mark_recording_stop_reported("rec-stop")
+    assert await store.recording_stop_has_been_reported("rec-stop") is True
+
+    row = await _get_recording_row(store, "rec-stop")
+    assert row is not None
+    assert row["stop_report_status"] == RecordingStopReportStatus.REPORTED
+    assert row["stop_reported_at"] is not None
+
+    await store.mark_recording_stop_report_pending("rec-stop")
+    row = await _get_recording_row(store, "rec-stop")
+    assert row is not None
+    assert row["stop_report_status"] == RecordingStopReportStatus.REPORTED
+
+
+@pytest.mark.asyncio
+async def test_list_pending_recording_stop_reports(store: SqliteStateStore) -> None:
+    await store.mark_recording_stop_report_pending("rec-pending-a")
+    await store.mark_recording_stop_report_pending("rec-pending-b")
+    await store.claim_recording_stop_report("rec-pending-b")
+    await store.mark_recording_stop_report_pending("rec-pending-c")
+    await store.mark_recording_stop_reported("rec-pending-c")
+
+    pending = await store.list_pending_recording_stop_reports()
+    assert pending == ["rec-pending-a"]
 
 
 @pytest.mark.asyncio

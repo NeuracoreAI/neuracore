@@ -127,6 +127,14 @@ class ProgressReportStatus(str, Enum):
     REPORTED = "reported"
 
 
+class RecordingStopReportStatus(str, Enum):
+    """Status of backend stop reporting for a recording."""
+
+    PENDING = "pending"
+    REPORTING = "reporting"
+    REPORTED = "reported"
+
+
 def _parse_progress_reported(value: Any) -> ProgressReportStatus:
     """Parse progress_reported from DB (int 0/1 or enum string) to enum."""
     if value is None or value == 0 or value == "pending":
@@ -138,6 +146,19 @@ def _parse_progress_reported(value: Any) -> ProgressReportStatus:
     if isinstance(value, ProgressReportStatus):
         return value
     return ProgressReportStatus(str(value))
+
+
+def _parse_recording_stop_report_status(value: Any) -> RecordingStopReportStatus:
+    """Parse stop-report status from DB (int 0/1 or enum string) to enum."""
+    if value is None or value == 0 or value == "pending":
+        return RecordingStopReportStatus.PENDING
+    if value == "reporting":
+        return RecordingStopReportStatus.REPORTING
+    if value == 1 or value == "reported":
+        return RecordingStopReportStatus.REPORTED
+    if isinstance(value, RecordingStopReportStatus):
+        return value
+    return RecordingStopReportStatus(str(value))
 
 
 def _parse_write_status(value: Any) -> TraceWriteStatus:
