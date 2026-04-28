@@ -290,7 +290,7 @@ class SharedSlotRegistry:
     def is_healthy(self) -> bool:
         """Return True while the shared-slot transport is still healthy."""
         with self._condition:
-            return self._healthy and not self._closed
+            return self._is_healthy_locked()
 
     def ensure_healthy(self) -> None:
         """Raise when the shared-slot transport is unhealthy."""
@@ -304,7 +304,7 @@ class SharedSlotRegistry:
         with self._condition:
             while not self._free_slots:
                 self._check_for_timeouts_locked()
-                if not self._healthy:
+                if not self._is_healthy_locked():
                     raise RuntimeError("Shared-slot transport is unhealthy")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -317,7 +317,7 @@ class SharedSlotRegistry:
         """Record that the slot now backs one sent descriptor."""
         with self._condition:
             self._check_for_timeouts_locked()
-            if not self._healthy:
+            if not self._is_healthy_locked():
                 raise RuntimeError("Shared-slot transport is unhealthy")
             sequence_id = self._sequence_id
             self._sequence_id += 1
@@ -385,30 +385,14 @@ class SharedSlotRegistry:
     def notify_sender_failure(self) -> None:
         """Fail fast when a descriptor could not be written to ZMQ."""
         with self._condition:
-            if not self._healthy:
+            if not self._is_healthy_locked():
                 return
-            self._healthy = False
-            self._unhealthy_reason = "sender_failure"
-            for sequence_id in list(self._in_flight):
-                self._release_sequence_locked(sequence_id)
-            self._condition.notify_all()
+            self._mark_unhealthy_locked("sender_failure")
 
     def get_debug_stats(self) -> dict[str, object]:
         """Return a snapshot of shared-slot occupancy and ACK health."""
         with self._condition:
-            return {
-                "slot_count": self.slot_count,
-                "free_slot_count": len(self._free_slots),
-                "in_flight_slot_count": len(self._in_flight),
-                "max_in_flight_slot_count": self._max_in_flight_slot_count,
-                "acked_sequence_count": self._acked_sequence_count,
-                "ack_timeout_count": self._ack_timeout_count,
-                "last_acked_sequence_id": self._last_acked_sequence_id,
-                "last_ack_latency_s": self._last_ack_latency_s,
-                "max_ack_latency_s": self._max_ack_latency_s,
-                "healthy": self._healthy and not self._closed,
-                "unhealthy_reason": self._unhealthy_reason,
-            }
+            return self._debug_stats_locked()
 
     def get_in_flight_count(self) -> int:
         """Return the number of descriptors still awaiting ACK handling."""
@@ -429,10 +413,7 @@ class SharedSlotRegistry:
         with self._condition:
             if self._closed:
                 return
-
-            self._closed = True
-            self._healthy = False
-            self._condition.notify_all()
+            self._mark_closed_locked()
 
         self._stop_event.set()
 
@@ -440,52 +421,9 @@ class SharedSlotRegistry:
         self._ack_thread.join(timeout=1.0)
         self._watchdog_thread.join(timeout=1.0)
 
-        try:
-            self._ack_socket.close(0)
-        except Exception:
-            logger.warning(
-                "Failed to close shared-slot ACK socket",
-                exc_info=True,
-            )
-
-        try:
-            self._context.term()
-        except Exception:
-            logger.warning(
-                "Failed to terminate shared-slot ACK context",
-                exc_info=True,
-            )
-
-        try:
-            self._shm.close()
-        except Exception:
-            logger.warning(
-                "Failed to close shared-memory handle",
-                exc_info=True,
-            )
-
-        try:
-            self._shm.unlink()
-        except FileNotFoundError:
-            pass
-        except Exception:
-            logger.warning(
-                "Failed to unlink shared-memory object %s",
-                self.shm_name,
-                exc_info=True,
-            )
-
-        try:
-            self._ack_socket_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            logger.warning(
-                "Failed to remove shared-slot ACK socket file %s",
-                self._ack_socket_path,
-                exc_info=True,
-            )
-
+        self._close_ack_resources()
+        self._close_shared_memory()
+        self._remove_ack_socket_path()
 
     def _should_trace_ack(self, sequence_id: int | None) -> bool:
         return (
@@ -572,7 +510,7 @@ class SharedSlotRegistry:
                 self._check_for_timeouts_locked()
 
     def _check_for_timeouts_locked(self) -> None:
-        if not self._healthy:
+        if not self._is_healthy_locked():
             return
         now = time.monotonic()
         timed_out = [
@@ -583,12 +521,12 @@ class SharedSlotRegistry:
         ]
         if not timed_out:
             return
-        self._healthy = False
         self._ack_timeout_count += len(timed_out)
+        last_reason: str | None = None
         for sequence_id in timed_out:
             entry = self._in_flight.get(sequence_id)
             if entry is not None:
-                self._unhealthy_reason = (
+                last_reason = (
                     f"ack_timeout(sequence_id={entry.sequence_id},slot_id={entry.slot_id})"
                 )
                 logger.warning(
@@ -608,8 +546,7 @@ class SharedSlotRegistry:
                     entry.slot_id,
                     entry.sequence_id,
                 )
-            self._release_sequence_locked(sequence_id)
-        self._condition.notify_all()
+        self._mark_unhealthy_locked(last_reason or "ack_timeout", sequence_ids=timed_out)
 
     def _release_sequence_locked(self, sequence_id: int) -> None:
         entry = self._in_flight.pop(sequence_id, None)
@@ -617,6 +554,102 @@ class SharedSlotRegistry:
             return
         self._free_slots.append(entry.slot_id)
         self._condition.notify_all()
+
+    def _is_healthy_locked(self) -> bool:
+        """Return True when the registry can still accept work."""
+        return self._healthy and not self._closed
+
+    def _mark_closed_locked(self) -> None:
+        """Mark the registry closed and wake any waiters."""
+        self._closed = True
+        self._healthy = False
+        self._condition.notify_all()
+
+    def _mark_unhealthy_locked(
+        self,
+        reason: str,
+        *,
+        sequence_ids: list[int] | None = None,
+    ) -> None:
+        """Transition to unhealthy state and release affected slots."""
+        self._healthy = False
+        self._unhealthy_reason = reason
+        ids_to_release = (
+            list(self._in_flight)
+            if sequence_ids is None
+            else sequence_ids
+        )
+        for sequence_id in ids_to_release:
+            self._release_sequence_locked(sequence_id)
+        self._condition.notify_all()
+
+    def _debug_stats_locked(self) -> dict[str, object]:
+        """Return a debug snapshot while the condition is already held."""
+        return {
+            "slot_count": self.slot_count,
+            "free_slot_count": len(self._free_slots),
+            "in_flight_slot_count": len(self._in_flight),
+            "max_in_flight_slot_count": self._max_in_flight_slot_count,
+            "acked_sequence_count": self._acked_sequence_count,
+            "ack_timeout_count": self._ack_timeout_count,
+            "last_acked_sequence_id": self._last_acked_sequence_id,
+            "last_ack_latency_s": self._last_ack_latency_s,
+            "max_ack_latency_s": self._max_ack_latency_s,
+            "healthy": self._is_healthy_locked(),
+            "unhealthy_reason": self._unhealthy_reason,
+        }
+
+    def _close_ack_resources(self) -> None:
+        """Close the producer-side ACK socket and its ZMQ context."""
+        try:
+            self._ack_socket.close(0)
+        except Exception:
+            logger.warning(
+                "Failed to close shared-slot ACK socket",
+                exc_info=True,
+            )
+
+        try:
+            self._context.term()
+        except Exception:
+            logger.warning(
+                "Failed to terminate shared-slot ACK context",
+                exc_info=True,
+            )
+
+    def _close_shared_memory(self) -> None:
+        """Close and unlink the producer-owned shared-memory region."""
+        try:
+            self._shm.close()
+        except Exception:
+            logger.warning(
+                "Failed to close shared-memory handle",
+                exc_info=True,
+            )
+
+        try:
+            self._shm.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            logger.warning(
+                "Failed to unlink shared-memory object %s",
+                self.shm_name,
+                exc_info=True,
+            )
+
+    def _remove_ack_socket_path(self) -> None:
+        """Remove the filesystem entry backing the ACK IPC endpoint."""
+        try:
+            self._ack_socket_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning(
+                "Failed to remove shared-slot ACK socket file %s",
+                self._ack_socket_path,
+                exc_info=True,
+            )
 
 
 class SharedSlotVideoWorker:
