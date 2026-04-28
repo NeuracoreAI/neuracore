@@ -1,18 +1,14 @@
 """Main neuracore data daemon."""
 
 from __future__ import annotations
-from multiprocessing import resource_tracker
 import time
 
-import json
 import logging
-from multiprocessing.shared_memory import SharedMemory
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from neuracore_types import DataType
-import zmq
 
 from neuracore.data_daemon.communications_management.channel_reader import (
     ChannelMessageReader,
@@ -23,8 +19,8 @@ from neuracore.data_daemon.communications_management.communications_manager impo
     CommunicationsManager,
 )
 from neuracore.data_daemon.communications_management.ring_buffer import RingBuffer
-from neuracore.data_daemon.communications_management.shared_slot_transport import (
-    parse_shared_frame_packet,
+from neuracore.data_daemon.communications_management.shared_slot_daemon_handler import (
+    SharedSlotDaemonHandler,
 )
 from neuracore.data_daemon.const import (
     DEFAULT_RING_BUFFER_SIZE,
@@ -38,10 +34,6 @@ from neuracore.data_daemon.models import (
     CompleteMessage,
     DataChunkPayload,
     MessageEnvelope,
-    OpenFixedSharedSlotsModel,
-    SharedRingChunkMetadata,
-    SharedSlotDescriptor,
-    SlotReleaseAck,
     TraceTransportMetadata,
 )
 from neuracore.data_daemon.recording_encoding_disk_manager import (
@@ -329,8 +321,7 @@ class Daemon:
         self._closed_recordings: set[str] = set()
         self._closing_recordings: dict[str, RecordingClosingState] = {}
         self._producer_last_sequence_numbers: dict[str, int] = {}
-        self._shared_memory_cache: dict[str, SharedMemory] = {}
-        self._ack_sender_sockets: dict[str, object] = {}
+        self._shared_slot_handler = SharedSlotDaemonHandler(self.comm)
         self._command_handlers: dict[CommandType, CommandHandler] = {
             CommandType.OPEN_RING_BUFFER: self._handle_open_ring_buffer,
             CommandType.OPEN_FIXED_SHARED_SLOTS: self._handle_open_fixed_shared_slots,
@@ -389,7 +380,7 @@ class Daemon:
         except KeyboardInterrupt:
             logger.info("Shutting down daemon...")
         finally:
-            self._close_shared_slot_resources()
+            self._shared_slot_handler.close()
             self.comm.cleanup_daemon()
 
     def stop(
@@ -541,134 +532,22 @@ class Daemon:
     ) -> None:
         """Handle an OPEN_FIXED_SHARED_SLOTS command from a producer."""
         payload = message.payload.get(message.command.value, {})
-        setup = OpenFixedSharedSlotsModel(**payload)
-        channel.mark_shared_slot_transport_open(setup)
-        logger.info(
-            "Opened fixed shared slots for producer_id=%s slot_size=%d slot_count=%d "
-            "total_shared_memory_bytes=%d max_in_flight_packets=%d",
-            channel.producer_id,
-            setup.slot_size,
-            setup.slot_count,
-            setup.slot_size * setup.slot_count,
-            setup.slot_count,
-        )
-
-
+        self._shared_slot_handler.handle_open(channel, payload)
 
     def _handle_shared_slot_descriptor(
         self, channel: ChannelState, message: MessageEnvelope
     ) -> None:
         """Copy one producer-owned shared-memory packet and ACK immediately."""
         descriptor_payload = message.payload.get(message.command.value, {})
-        descriptor = SharedSlotDescriptor.from_dict(descriptor_payload)
-
-        should_trace = (
-            descriptor.sequence_id < 10
-            or descriptor.sequence_id % 100 == 0
-            or 1090 <= descriptor.sequence_id <= 1130
+        transport_result = self._shared_slot_handler.handle_descriptor(
+            channel,
+            descriptor_payload,
         )
-
-        if should_trace:
-            logger.info(
-                "Shared-slot descriptor received "
-                "producer_id=%s sequence_id=%s slot_id=%s "
-                "offset=%s length=%s shm_name=%s ack_endpoint=%s",
-                channel.producer_id,
-                descriptor.sequence_id,
-                descriptor.slot_id,
-                descriptor.offset,
-                descriptor.length,
-                descriptor.shm_name,
-                descriptor.ack_endpoint,
-            )
-
-        # ----------------------------
-        # Shared memory copy timing
-        # ----------------------------
-        copy_start = time.monotonic()
-
-        try:
-            packet = self._copy_shared_slot_packet(descriptor)
-        except Exception:
-            logger.exception(
-                "Shared-slot copy failed "
-                "producer_id=%s sequence_id=%s slot_id=%s",
-                channel.producer_id,
-                descriptor.sequence_id,
-                descriptor.slot_id,
-            )
-            raise
-
-        copy_elapsed = time.monotonic() - copy_start
-
-        if should_trace or copy_elapsed > 0.5:
-            logger.info(
-                "Shared-slot copied "
-                "producer_id=%s sequence_id=%s slot_id=%s "
-                "bytes=%d copy_elapsed=%.3fs",
-                channel.producer_id,
-                descriptor.sequence_id,
-                descriptor.slot_id,
-                len(packet),
-                copy_elapsed,
-            )
-
-        # ----------------------------
-        # ACK timing
-        # ----------------------------
-        ack_start = time.monotonic()
-
-        try:
-            self._send_slot_release_ack(channel, descriptor)
-        except Exception:
-            logger.exception(
-                "Shared-slot ACK failed "
-                "producer_id=%s sequence_id=%s slot_id=%s",
-                channel.producer_id,
-                descriptor.sequence_id,
-                descriptor.slot_id,
-            )
-            raise
-
-        ack_elapsed = time.monotonic() - ack_start
-
-        if should_trace or ack_elapsed > 0.1:
-            logger.info(
-                "Shared-slot ACK sent "
-                "producer_id=%s sequence_id=%s slot_id=%s "
-                "ack_elapsed=%.3fs endpoint=%s",
-                channel.producer_id,
-                descriptor.sequence_id,
-                descriptor.slot_id,
-                ack_elapsed,
-                descriptor.ack_endpoint,
-            )
-
-        # ----------------------------
-        # Normal accounting
-        # ----------------------------
-        channel.shared_slot_descriptors_received += 1
-        channel.shared_slot_copied_bytes += len(packet)
-
-        # Progress logging every 100 descriptors
-        if channel.shared_slot_descriptors_received % 100 == 0:
-            logger.info(
-                "Shared-slot daemon progress "
-                "producer_id=%s last_sequence_id=%s "
-                "descriptors_received=%d completed_messages=%d "
-                "copied_mib=%.2f pending_traces=%d",
-                channel.producer_id,
-                descriptor.sequence_id,
-                channel.shared_slot_descriptors_received,
-                channel.shared_slot_completed_messages,
-                channel.shared_slot_copied_bytes / (1024 * 1024),
-                len(channel.socket_pending_messages),
-            )
-
-        metadata_dict, chunk_data = parse_shared_frame_packet(packet)
-        chunk_metadata = SharedRingChunkMetadata.from_dict(metadata_dict)
-        trace_id = chunk_metadata.trace_id
-        trace_metadata = chunk_metadata.trace_metadata
+        descriptor = transport_result.descriptor
+        chunk_metadata = transport_result.chunk_metadata
+        chunk_data = transport_result.chunk_data
+        trace_id = transport_result.trace_id
+        trace_metadata = transport_result.trace_metadata
 
         recording_id = self._trace_recordings.get(trace_id)
         if recording_id is None and trace_metadata is not None:
@@ -691,13 +570,6 @@ class Daemon:
             sequence_number=descriptor.sequence_id,
         ):
             return
-
-        channel.shared_slot_transport_opened = True
-        channel.shared_slot_ack_endpoint = descriptor.ack_endpoint
-        channel.shared_slot_shm_name = descriptor.shm_name
-
-        if channel.opened_at is None:
-            channel.opened_at = datetime.now(timezone.utc)
 
         channel.set_trace_id(trace_id)
 
@@ -1011,51 +883,6 @@ class Daemon:
 
         if not traces:
             self._recording_traces.pop(recording_id, None)
-
-    def _copy_shared_slot_packet(self, descriptor: SharedSlotDescriptor) -> bytes:
-        """Copy one packet out of cached shared memory."""
-        shm = self._shared_memory_cache.get(descriptor.shm_name)
-        if shm is None:
-            shm = SharedMemory(name=descriptor.shm_name, create=False)
-
-            try:
-                resource_tracker.unregister(shm._name, "shared_memory")
-            except Exception:
-                logger.debug(
-                    "Failed to unregister daemon shared-memory handle %s",
-                    descriptor.shm_name,
-                    exc_info=True,
-                )
-
-            self._shared_memory_cache[descriptor.shm_name] = shm
-
-        return bytes(shm.buf[descriptor.offset : descriptor.offset + descriptor.length])
-    def _send_slot_release_ack(
-        self,
-        channel: ChannelState,
-        descriptor: SharedSlotDescriptor,
-    ) -> None:
-        """Send the slot-release ACK immediately after shared-memory copy-out."""
-        endpoint = descriptor.ack_endpoint
-        socket_obj = self._ack_sender_sockets.get(endpoint)
-        if socket_obj is None:
-            socket_obj = self.comm._context.socket(zmq.PUSH)
-            socket_obj.setsockopt(zmq.LINGER, 0)
-            socket_obj.connect(endpoint)
-            self._ack_sender_sockets[endpoint] = socket_obj
-        ack = SlotReleaseAck(
-            shm_name=descriptor.shm_name,
-            slot_id=descriptor.slot_id,
-            sequence_id=descriptor.sequence_id,
-        )
-        try:
-            socket_obj.send(json.dumps(ack.to_dict()).encode("utf-8"))
-        except Exception:
-            logger.exception(
-                "Failed to send shared-slot ACK producer_id=%s sequence_id=%s",
-                channel.producer_id,
-                descriptor.sequence_id,
-            )
 
     def _should_drop_recording_data(
         self,
@@ -1443,7 +1270,7 @@ class Daemon:
         )
         if channel is not None:
             channel.trace_id = None
-            self._cleanup_shared_slot_channel_resources(channel)
+            self._shared_slot_handler.cleanup_channel_resources(channel)
             channel.clear_ring_buffer()
 
     def _cleanup_expired_channels(self) -> None:
@@ -1509,50 +1336,7 @@ class Daemon:
                     self._producer_last_sequence_numbers.get(channel.producer_id, 0),
                     channel.last_sequence_number,
                 )
-            self._cleanup_shared_slot_channel_resources(channel)
+            self._shared_slot_handler.cleanup_channel_resources(channel)
             channel.clear_ring_buffer()
             del self.channels[producer_id]
             self._closed_producers.add(producer_id)
-
-    def _cleanup_shared_slot_channel_resources(self, channel: ChannelState) -> None:
-        """Close daemon-side shared-slot resources associated with one channel."""
-        shm_name = channel.shared_slot_shm_name
-        if shm_name:
-            shm = self._shared_memory_cache.pop(shm_name, None)
-            if shm is not None:
-                try:
-                    shm.close()
-                except Exception:
-                    logger.warning(
-                        "Failed to close cached shared memory %s",
-                        shm_name,
-                        exc_info=True,
-                    )
-        endpoint = channel.shared_slot_ack_endpoint
-        if endpoint:
-            socket_obj = self._ack_sender_sockets.pop(endpoint, None)
-            if socket_obj is not None:
-                try:
-                    socket_obj.close(0)
-                except Exception:
-                    logger.warning(
-                        "Failed to close shared-slot ACK sender %s",
-                        endpoint,
-                        exc_info=True,
-                    )
-
-    def _close_shared_slot_resources(self) -> None:
-        """Close all daemon-side shared-slot handles during shutdown."""
-        for socket_obj in self._ack_sender_sockets.values():
-            try:
-                socket_obj.close(0)
-            except Exception:
-                logger.warning("Failed to close shared-slot ACK sender", exc_info=True)
-        self._ack_sender_sockets.clear()
-
-        for shm in self._shared_memory_cache.values():
-            try:
-                shm.close()
-            except Exception:
-                logger.warning("Failed to close cached shared memory", exc_info=True)
-        self._shared_memory_cache.clear()
