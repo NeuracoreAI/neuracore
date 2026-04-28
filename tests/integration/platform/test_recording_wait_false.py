@@ -509,3 +509,168 @@ def test_stop_recording_wait_false_rgb_realistic_large_payload(dataset_cleanup):
         transport_drain_timeout_s=float(os.getenv("NCD_LARGE_RGB_DRAIN_TIMEOUT_S", "180")),
         trace_written_timeout_s=float(os.getenv("NCD_LARGE_RGB_TRACE_TIMEOUT_S", "300")),
     )
+
+@pytest.mark.slow
+@pytest.mark.stress
+def test_stop_recording_wait_false_rgb_blowaway_payload(dataset_cleanup):
+    """Unrealistically heavy RGB payload stress test.
+
+    Defaults:
+    - 4K RGB frames: 3840x2160
+    - 300 frames
+    - ~7.0 GiB raw RGB payload
+
+    Override with:
+    NCD_BLOWAWAY_RGB_FRAME_WIDTH
+    NCD_BLOWAWAY_RGB_FRAME_HEIGHT
+    NCD_BLOWAWAY_RGB_FRAME_COUNT
+    NCD_BLOWAWAY_RGB_LOG_MAX_TIME_S
+    NCD_BLOWAWAY_RGB_DRAIN_TIMEOUT_S
+    NCD_BLOWAWAY_RGB_TRACE_TIMEOUT_S
+    """
+    old_limit = os.environ.get("NCD_BANDWIDTH_LIMIT")
+    os.environ["NCD_BANDWIDTH_LIMIT"] = str(1024 * 1024 * 1024)
+
+    try:
+        _run_wait_false_rgb_payload_test(
+            dataset_cleanup=dataset_cleanup,
+            label="blowaway",
+            frame_width=int(os.getenv("NCD_BLOWAWAY_RGB_FRAME_WIDTH", "3840")),
+            frame_height=int(os.getenv("NCD_BLOWAWAY_RGB_FRAME_HEIGHT", "2160")),
+            frame_count=int(os.getenv("NCD_BLOWAWAY_RGB_FRAME_COUNT", "300")),
+            log_rgb_max_time_s=float(
+                os.getenv("NCD_BLOWAWAY_RGB_LOG_MAX_TIME_S", "60")
+            ),
+            transport_drain_timeout_s=float(
+                os.getenv("NCD_BLOWAWAY_RGB_DRAIN_TIMEOUT_S", "600")
+            ),
+            trace_written_timeout_s=float(
+                os.getenv("NCD_BLOWAWAY_RGB_TRACE_TIMEOUT_S", "900")
+            ),
+        )
+    finally:
+        if old_limit is None:
+            os.environ.pop("NCD_BANDWIDTH_LIMIT", None)
+        else:
+            os.environ["NCD_BANDWIDTH_LIMIT"] = old_limit
+
+@pytest.mark.slow
+@pytest.mark.stress
+def test_stop_recording_wait_false_multi_camera_4k_burst(dataset_cleanup):
+    """
+    Burst stress test:
+    - 4 simultaneous RGB cameras
+    - 4K frames
+    - short burst to avoid blowing container RAM/disk
+
+    Default total payload:
+    3840 * 2160 * 3 * 80 * 4 ~= 7.42 GiB
+    """
+
+    robot_name = f"multi_cam_burst_robot_{uuid.uuid4().hex[:8]}"
+    dataset_name = f"multi_cam_burst_dataset_{uuid.uuid4().hex[:8]}"
+    dataset_cleanup(dataset_name)
+
+    camera_count = int(os.getenv("NCD_BURST_CAMERA_COUNT", "4"))
+    frame_width = int(os.getenv("NCD_BURST_RGB_FRAME_WIDTH", "3840"))
+    frame_height = int(os.getenv("NCD_BURST_RGB_FRAME_HEIGHT", "2160"))
+    frame_count = int(os.getenv("NCD_BURST_RGB_FRAME_COUNT", "80"))
+
+    camera_names = [f"camera_{i}" for i in range(camera_count)]
+
+    bytes_per_frame = frame_width * frame_height * 3
+    total_payload_bytes = bytes_per_frame * frame_count * camera_count
+
+    logger.info(
+        "Starting multi-camera 4K burst test cameras=%d frames=%d "
+        "resolution=%dx%d bytes_per_frame=%d total_payload_gib=%.2f",
+        camera_count,
+        frame_count,
+        frame_width,
+        frame_height,
+        bytes_per_frame,
+        total_payload_bytes / (1024**3),
+    )
+
+    robot: Robot | None = None
+
+    try:
+        nc.login()
+
+        robot = nc.connect_robot(
+            robot_name,
+            urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
+            overwrite=False,
+        )
+
+        nc.create_dataset(
+            dataset_name,
+            description="Multi-camera 4K RGB burst stress test",
+        )
+
+        nc.start_recording()
+
+        recording_id = robot.get_current_recording_id()
+        assert recording_id is not None
+
+        enqueue_start = time.perf_counter()
+
+        for frame_num in range(frame_count):
+            timestamp = frame_num * 0.1
+
+            # Generate once per frame number, reuse across cameras to avoid extra RAM churn.
+            frame = encode_frame_number(frame_num, frame_width, frame_height)
+
+            for camera_name in camera_names:
+                nc.log_rgb(camera_name, frame, timestamp=timestamp)
+
+            if frame_num in {0, frame_count // 2, frame_count - 1}:
+                for camera_name in camera_names:
+                    _log_rgb_stream_transport_stats(
+                        robot,
+                        camera_name=camera_name,
+                        phase=f"burst_after_frame_{frame_num}_{camera_name}",
+                    )
+
+        enqueue_elapsed = time.perf_counter() - enqueue_start
+
+        logger.info(
+            "Finished enqueueing 4K burst frames elapsed=%.2fs throughput_gib_s=%.2f",
+            enqueue_elapsed,
+            (total_payload_bytes / (1024**3)) / max(enqueue_elapsed, 0.001),
+        )
+
+        with Timer(
+            label="multi_camera_4k_burst.nc.stop_recording(wait=False)",
+            max_time=MAX_TIME_TO_STOP_S,
+            always_log=True,
+        ):
+            nc.stop_recording(wait=False)
+
+        for camera_name in camera_names:
+            _wait_for_rgb_transport_to_drain(
+                robot,
+                camera_name=camera_name,
+                timeout_s=float(os.getenv("NCD_BURST_RGB_DRAIN_TIMEOUT_S", "300")),
+            )
+
+        for camera_name in camera_names:
+            _wait_for_rgb_trace_written(
+                recording_id=recording_id,
+                camera_name=camera_name,
+                expected_frame_count=frame_count,
+                timeout_s=float(os.getenv("NCD_BURST_RGB_TRACE_TIMEOUT_S", "600")),
+            )
+
+        logger.info(
+            "Multi-camera 4K burst test completed recording_id=%s "
+            "cameras=%d frames_per_camera=%d total_payload_gib=%.2f",
+            recording_id,
+            camera_count,
+            frame_count,
+            total_payload_bytes / (1024**3),
+        )
+
+    finally:
+        if robot is not None:
+            _stop_robot_producer_channels(robot)
