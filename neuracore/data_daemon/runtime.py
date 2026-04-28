@@ -18,14 +18,21 @@ from neuracore.data_daemon.config_manager.profiles import (
     ProfileAlreadyExist,
     ProfileManager,
 )
-from neuracore.data_daemon.const import DEFAULT_PROFILE_NAME
+from neuracore.data_daemon.const import (
+    DEFAULT_PROFILE_NAME,
+    DEFAULT_RING_BUFFER_SIZE,
+    DEFAULT_VIDEO_RING_BUFFER_SIZE,
+)
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.helpers import is_debug_mode
 from neuracore.data_daemon.lifecycle.daemon_os_control import acquire_pid_file
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
     cleanup_socket_files,
+    cleanup_stale_shared_memory_buffers,
     reconcile_state_with_filesystem,
+    shared_memory_free_bytes,
+    shared_memory_required_bytes,
     validate_or_recover_sqlite,
 )
 from neuracore.data_daemon.recording_encoding_disk_manager import (
@@ -76,11 +83,47 @@ class DaemonRuntime:
         if self._manage_pid:
             acquire_pid_file(self._pid_path)
 
+        cleaned_shared_buffers = cleanup_stale_shared_memory_buffers()
+        if cleaned_shared_buffers:
+            logger.info(
+                "Recovered %d stale shared-memory ring buffer(s) from /dev/shm",
+                cleaned_shared_buffers,
+            )
+
         cleanup_socket_files(self._socket_paths)
 
         sqlite_ok = validate_or_recover_sqlite(self._db_path, recover=True)
         if not sqlite_ok:
             logger.warning("SQLite recovered by rotation; new DB will be created.")
+
+        try:
+            free_shared_bytes = shared_memory_free_bytes()
+            min_required_bytes = shared_memory_required_bytes(
+                DEFAULT_RING_BUFFER_SIZE,
+                metadata_size=4096,
+            )
+            video_required_bytes = shared_memory_required_bytes(
+                DEFAULT_VIDEO_RING_BUFFER_SIZE,
+                metadata_size=4096,
+            )
+            if free_shared_bytes < min_required_bytes:
+                logger.warning(
+                    "Shared-memory startup preflight: only %d bytes free in /dev/shm; "
+                    "%d bytes are required for a default ring buffer. "
+                    "New shared ring creation will fail until space is reclaimed.",
+                    free_shared_bytes,
+                    min_required_bytes,
+                )
+            elif free_shared_bytes < video_required_bytes:
+                logger.warning(
+                    "Shared-memory startup preflight: %d bytes free in /dev/shm; "
+                    "default non-video ring buffers fit, but default video ring "
+                    "buffers need %d bytes.",
+                    free_shared_bytes,
+                    video_required_bytes,
+                )
+        except Exception:
+            logger.exception("Failed shared-memory startup preflight")
 
         recordings_root = self._get_recordings_root(config)
         recordings_root.mkdir(parents=True, exist_ok=True)

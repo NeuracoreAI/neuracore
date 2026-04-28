@@ -1,139 +1,171 @@
-"""Single-producer/single-consumer ring buffer used by the data daemon."""
+"""Shared zerobuffer transport used by video producers and the daemon."""
 
 from __future__ import annotations
 
-import mmap
-import os
-import struct
-import threading
+import logging
 import time
+import uuid
+from datetime import timedelta
 
-_READ_INDEX_OFFSET = 0
-_WRITE_INDEX_OFFSET = 8
-_SHARED_INDEX_FORMAT = "!Q"
-_SHARED_HEADER_SIZE = 16
-_FULL_WAIT_SLEEP_S = 0.0005
+from neuracore.data_daemon.lifecycle.runtime_recovery import (
+    ensure_shared_memory_capacity,
+    shared_memory_required_bytes,
+)
+
+logger = logging.getLogger(__name__)
+
+_SHARED_METADATA_SIZE = 4096
+_WRITE_TIMEOUT = timedelta(days=1)
+_OPEN_SHARED_TIMEOUT_S = 5.0
+_OPEN_SHARED_RETRY_SLEEP_S = 0.01
+
+try:
+    from zerobuffer import BufferConfig as _SharedBufferConfig
+    from zerobuffer import Reader as _SharedReader
+    from zerobuffer import Writer as _SharedWriter
+    from zerobuffer.exceptions import (
+        WriterAlreadyConnectedException as _SharedWriterAlreadyConnectedException,
+    )
+    from zerobuffer.exceptions import WriterDeadException as _SharedWriterDeadException
+    from zerobuffer.exceptions import ZeroBufferException as _SharedZeroBufferException
+
+    _SHARED_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # pragma: no cover - exercised in envs without deps
+    _SharedBufferConfig = None
+    _SharedReader = None
+    _SharedWriter = None
+    _SharedWriterAlreadyConnectedException = Exception
+    _SharedWriterDeadException = Exception
+    _SharedZeroBufferException = Exception
+    _SHARED_IMPORT_ERROR = exc
 
 
 class RingBuffer:
-    """Circular byte buffer with optional shared-memory backing.
-
-    Local buffers use a bytearray plus a condition variable. Shared buffers use a
-    memfd-backed mmap and two monotonic counters:
-
-    - read_index: bytes consumed by the single consumer
-    - write_index: bytes committed by the single producer
-
-    This avoids cross-process lost updates because the producer only mutates the
-    write counter and the consumer only mutates the read counter.
-    """
+    """Shared zerobuffer transport for packet-sized producer/daemon exchange."""
 
     def __init__(
         self,
         size: int = 1024,
         *,
-        _mapping: mmap.mmap | None = None,
-        _fd: int | None = None,
         _shared_name: str | None = None,
+        _shared_reader: _SharedReader | None = None,
+        _shared_writer: _SharedWriter | None = None,
     ) -> None:
-        """Initialize a RingBuffer with a given size and optional shared-memory backing.
+        """Initialize one shared ring endpoint.
 
-        If _mapping, _fd, and _shared_name are all None, a local RingBuffer is created
-        with a bytearray backing. Otherwise, a shared RingBuffer is created with a
-        memfd-backed mmap and two monotonic counters.
-
-        The size must be greater than 0.
-
-        :param size: size of the RingBuffer in bytes
-        :param _mapping: optional mmap used to back the shared RingBuffer
-        :param _fd: optional file descriptor used to create the shared RingBuffer
-        :param _shared_name: optional name used to identify the shared RingBuffer in
-            /proc/<pid>/fd/<fd>
-        :raises ValueError: if size is <= 0
+        Args:
+            size: Maximum packet size supported by the shared buffer.
+            _shared_name: Existing shared-memory name for diagnostics.
+            _shared_reader: Reader endpoint when the daemon owns the buffer.
+            _shared_writer: Writer endpoint when a producer attaches to the buffer.
         """
         if size <= 0:
             raise ValueError("RingBuffer size must be > 0")
+        if (_shared_reader is None) == (_shared_writer is None):
+            raise ValueError("RingBuffer requires exactly one shared endpoint")
 
         self.size = int(size)
-        self.buffer = bytearray(self.size) if _mapping is None else None
-        self._mapping = _mapping
-        self._fd = _fd
         self._shared_name = _shared_name
-        self._read_index = 0
-        self._write_index = 0
-        self._lock = threading.RLock()
-        self._not_full = threading.Condition(self._lock)
+        self._shared_reader = _shared_reader
+        self._shared_writer = _shared_writer
 
     @classmethod
-    def create_shared(cls, size: int) -> RingBuffer:
-        """Create a RAM-backed shared ring buffer using memfd."""
-        fd = os.memfd_create(
-            "neuracore-ring-buffer",
-            flags=getattr(os, "MFD_CLOEXEC", 0),
+    def supports_shared_transport(cls) -> bool:
+        """Return True when zerobuffer shared transport is available."""
+        return _SharedReader is not None and _SharedWriter is not None
+
+    @classmethod
+    def create_shared(
+        cls,
+        size: int,
+        *,
+        name: str | None = None,
+    ) -> RingBuffer:
+        """Create the daemon-owned shared buffer endpoint.
+
+        ``zerobuffer`` requires the reader/owner side to create the shared
+        resources first, so this method is used by the daemon when it processes
+        ``OPEN_RING_BUFFER``.
+        """
+        cls._require_shared_support()
+        ensure_shared_memory_capacity(
+            shared_memory_required_bytes(
+                int(size),
+                metadata_size=_SHARED_METADATA_SIZE,
+            )
         )
-        total_size = _SHARED_HEADER_SIZE + int(size)
-        os.ftruncate(fd, total_size)
-        mapping = mmap.mmap(fd, total_size, access=mmap.ACCESS_WRITE)
-        struct.pack_into(_SHARED_INDEX_FORMAT, mapping, _READ_INDEX_OFFSET, 0)
-        struct.pack_into(_SHARED_INDEX_FORMAT, mapping, _WRITE_INDEX_OFFSET, 0)
-        shared_name = f"/proc/{os.getpid()}/fd/{fd}"
+        shared_name = name or f"neuracore-ring-buffer-{uuid.uuid4().hex}"
+        reader = _SharedReader(
+            shared_name,
+            config=_SharedBufferConfig(
+                metadata_size=_SHARED_METADATA_SIZE,
+                payload_size=int(size),
+            ),
+        )
         return cls(
             size=int(size),
-            _mapping=mapping,
-            _fd=fd,
             _shared_name=shared_name,
+            _shared_reader=reader,
         )
 
     @classmethod
-    def open_shared(cls, name: str, size: int) -> RingBuffer:
-        """Open an existing shared ring buffer from its procfs fd path."""
-        fd = os.open(name, os.O_RDWR)
-        total_size = _SHARED_HEADER_SIZE + int(size)
-        mapping = mmap.mmap(fd, total_size, access=mmap.ACCESS_WRITE)
-        return cls(
-            size=int(size),
-            _mapping=mapping,
-            _fd=fd,
-            _shared_name=name,
-        )
+    def open_shared(
+        cls,
+        name: str,
+        size: int,
+    ) -> RingBuffer:
+        """Open the producer-side writer endpoint for an existing shared buffer."""
+        cls._require_shared_support()
+
+        deadline = time.monotonic() + _OPEN_SHARED_TIMEOUT_S
+        while True:
+            try:
+                writer = _SharedWriter(name)
+                writer.write_timeout = _WRITE_TIMEOUT
+                return cls(
+                    size=int(size),
+                    _shared_name=name,
+                    _shared_writer=writer,
+                )
+            except (
+                _SharedZeroBufferException,
+                _SharedWriterAlreadyConnectedException,
+            ) as exc:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"Timed out opening shared ring buffer '{name}'"
+                    ) from exc
+                time.sleep(_OPEN_SHARED_RETRY_SLEEP_S)
 
     @property
     def shared_name(self) -> str | None:
-        """Return the shared-memory attachment string, if any."""
+        """Return the shared transport name, if any."""
         return self._shared_name
 
     @property
     def read_pos(self) -> int:
-        """Current logical read position within the ring."""
-        if self._mapping is None:
-            with self._lock:
-                return self._read_index % self.size
-        return self._shared_read_index() % self.size
+        """Current logical read position within the shared buffer."""
+        return 0
 
     @property
     def write_pos(self) -> int:
-        """Current logical write position within the ring."""
-        if self._mapping is None:
-            with self._lock:
-                return self._write_index % self.size
-        return self._shared_write_index() % self.size
+        """Current logical write position within the shared buffer."""
+        return 0
 
     @property
     def used(self) -> int:
-        """Return currently occupied bytes."""
-        return self.available()
+        """Return currently occupied bytes.
 
-    def available(self) -> int:
-        """Return the number of bytes currently available to read."""
-        if self._mapping is None:
-            with self._lock:
-                return self._write_index - self._read_index
-        write_index = self._shared_write_index()
-        read_index = self._shared_read_index()
-        return max(0, write_index - read_index)
+        Shared transport is frame-based, so byte occupancy is not exposed here.
+        """
+        return 0
+
+    def is_shared_transport(self) -> bool:
+        """Return True when this ring buffer uses shared zerobuffer transport."""
+        return True
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
-        """Write bytes into the ring buffer, blocking until space is available."""
+        """Write one complete packet as one zerobuffer frame."""
         view = data if isinstance(data, memoryview) else memoryview(data)
         if view.ndim != 1 or view.itemsize != 1 or view.format != "B":
             view = view.cast("B")
@@ -142,152 +174,58 @@ class RingBuffer:
             return
         if length > self.size:
             raise ValueError("chunk exceeds ring buffer capacity")
+        if self._shared_writer is None:
+            raise RuntimeError("Shared ring buffer is read-only")
+        try:
+            frame_buffer = self._shared_writer.get_frame_buffer(length)
+            frame_buffer[:] = view
+            self._shared_writer.commit_frame()
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to write shared ring packet "
+                f"(length={length}, capacity={self.size}, "
+                f"shared_name={self._shared_name})"
+            ) from exc
 
-        if self._mapping is None:
-            with self._not_full:
-                while self.size - (self._write_index - self._read_index) < length:
-                    self._not_full.wait(timeout=0.1)
-                self._write_into_storage(self._write_index % self.size, view)
-                self._write_index += length
-            return
-
-        while True:
-            read_index = self._shared_read_index()
-            write_index = self._shared_write_index()
-            if self.size - (write_index - read_index) >= length:
-                self._write_into_storage(write_index % self.size, view)
-                self._shared_store_write_index(write_index + length)
-                return
-            time.sleep(_FULL_WAIT_SLEEP_S)
-
-    def read(self, size: int) -> bytes | None:
-        """Read and consume exactly `size` bytes, or return None if unavailable."""
-        if size < 0:
-            raise ValueError("size must be >= 0")
-        if size == 0:
-            return b""
-
-        if self._mapping is None:
-            with self._not_full:
-                available = self._write_index - self._read_index
-                if available < size:
-                    return None
-                result = self._read_from_storage(self._read_index % self.size, size)
-                self._read_index += size
-                if self._read_index == self._write_index:
-                    self._read_index = 0
-                    self._write_index = 0
-                self._not_full.notify_all()
-                return result
-
-        read_index = self._shared_read_index()
-        write_index = self._shared_write_index()
-        if write_index - read_index < size:
+    def read_frame_packet(self) -> bytes | None:
+        """Read exactly one committed zerobuffer frame as a packet."""
+        if self._shared_reader is None:
+            raise RuntimeError("Shared ring buffer is write-only")
+        try:
+            frame = self._shared_reader.read_frame(timeout=0.0)
+        except _SharedWriterDeadException:
             return None
-        result = self._read_from_storage(read_index % self.size, size)
-        self._shared_store_read_index(read_index + size)
-        return result
-
-    def peek(self, size: int) -> bytes | None:
-        """Read exactly `size` bytes without consuming them."""
-        if size < 0:
-            raise ValueError("size must be >= 0")
-        if size == 0:
-            return b""
-
-        if self._mapping is None:
-            with self._lock:
-                available = self._write_index - self._read_index
-                if available < size:
-                    return None
-                return self._read_from_storage(self._read_index % self.size, size)
-
-        read_index = self._shared_read_index()
-        write_index = self._shared_write_index()
-        if write_index - read_index < size:
+        except Exception as exc:
+            logger.debug("Shared ring read unavailable: %s", exc)
             return None
-        return self._read_from_storage(read_index % self.size, size)
+        if frame is None:
+            return None
+        try:
+            return bytes(frame.data)
+        finally:
+            frame.dispose()
 
     def close(self) -> None:
         """Close local handles to the underlying storage."""
-        if self._mapping is not None:
-            self._mapping.close()
-            self._mapping = None
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
+        if self._shared_writer is not None:
+            self._shared_writer.close()
+            self._shared_writer = None
+        if self._shared_reader is not None:
+            self._shared_reader.close()
+            self._shared_reader = None
 
     def unlink(self) -> None:
         """Release underlying storage when possible.
 
-        Memfd-backed shared buffers are reference-counted by open file descriptors,
-        so there is nothing explicit to unlink here.
+        ``zerobuffer`` performs cleanup when the reader/owner endpoint closes, so
+        this method intentionally stays as a no-op wrapper hook.
         """
 
-    def _shared_read_index(self) -> int:
-        mapping = self._require_mapping()
-        return struct.unpack_from(
-            _SHARED_INDEX_FORMAT,
-            mapping,
-            _READ_INDEX_OFFSET,
-        )[0]
-
-    def _shared_write_index(self) -> int:
-        mapping = self._require_mapping()
-        return struct.unpack_from(
-            _SHARED_INDEX_FORMAT,
-            mapping,
-            _WRITE_INDEX_OFFSET,
-        )[0]
-
-    def _shared_store_read_index(self, value: int) -> None:
-        mapping = self._require_mapping()
-        struct.pack_into(_SHARED_INDEX_FORMAT, mapping, _READ_INDEX_OFFSET, value)
-
-    def _shared_store_write_index(self, value: int) -> None:
-        mapping = self._require_mapping()
-        struct.pack_into(_SHARED_INDEX_FORMAT, mapping, _WRITE_INDEX_OFFSET, value)
-
-    def _require_mapping(self) -> mmap.mmap:
-        if self._mapping is None:
-            raise RuntimeError("Shared ring buffer is closed")
-        return self._mapping
-
-    def _data_offset(self) -> int:
-        return 0 if self._mapping is None else _SHARED_HEADER_SIZE
-
-    def _read_from_storage(self, start: int, size: int) -> bytes:
-        storage = self._storage()
-        base = self._data_offset()
-        first = min(size, self.size - start)
-        first_slice = bytes(storage[base + start : base + start + first])
-        if first == size:
-            return first_slice
-        second = size - first
-        return first_slice + bytes(storage[base : base + second])
-
-    def _write_into_storage(self, start: int, data: memoryview) -> None:
-        storage = self._storage()
-        base = self._data_offset()
-        length = len(data)
-        first = min(length, self.size - start)
-        storage[base + start : base + start + first] = data[:first]
-        if first < length:
-            storage[base : base + (length - first)] = data[first:]
-
-    def _storage(self) -> bytearray | mmap.mmap:
-        """Return the underlying storage for the ring buffer.
-
-        If the ring buffer is shared (i.e. created with memfd), this returns the
-        mmap object used to back the shared buffer. Otherwise, this returns the
-        local bytearray backing the ring buffer.
-
-        Raises:
-            RuntimeError: If the ring buffer is closed.
-        """
-        mapping = self._mapping
-        if mapping is not None:
-            return mapping
-        if self.buffer is None:
-            raise RuntimeError("Ring buffer storage is closed")
-        return self.buffer
+    @classmethod
+    def _require_shared_support(cls) -> None:
+        if cls.supports_shared_transport():
+            return
+        detail = ""
+        if _SHARED_IMPORT_ERROR is not None:
+            detail = f": {_SHARED_IMPORT_ERROR}"
+        raise RuntimeError(f"Shared ring transport unavailable{detail}")
