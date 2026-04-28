@@ -137,16 +137,13 @@ class SharedSlotDaemonHandler:
                 descriptor.ack_endpoint,
             )
 
-        channel.shared_slot_descriptors_received += 1
-        channel.shared_slot_copied_bytes += len(packet)
-        channel.shared_slot_transport_opened = True
-        channel.shared_slot_ack_endpoint = descriptor.ack_endpoint
-        channel.shared_slot_shm_name = descriptor.shm_name
+        channel.mark_shared_slot_descriptor_seen(
+            ack_endpoint=descriptor.ack_endpoint,
+            shm_name=descriptor.shm_name,
+            copied_bytes=len(packet),
+        )
 
-        if channel.opened_at is None:
-            channel.opened_at = datetime.now(timezone.utc)
-
-        if channel.shared_slot_descriptors_received % 100 == 0:
+        if channel.shared_slot.descriptors_received % 100 == 0:
             logger.info(
                 "Shared-slot daemon progress "
                 "producer_id=%s last_sequence_id=%s "
@@ -154,9 +151,9 @@ class SharedSlotDaemonHandler:
                 "copied_mib=%.2f pending_traces=%d",
                 channel.producer_id,
                 descriptor.sequence_id,
-                channel.shared_slot_descriptors_received,
-                channel.shared_slot_completed_messages,
-                channel.shared_slot_copied_bytes / (1024 * 1024),
+                channel.shared_slot.descriptors_received,
+                channel.shared_slot.completed_messages,
+                channel.shared_slot.copied_bytes / (1024 * 1024),
                 len(channel.socket_pending_messages),
             )
 
@@ -175,7 +172,7 @@ class SharedSlotDaemonHandler:
 
     def cleanup_channel_resources(self, channel: ChannelState) -> None:
         """Close daemon-side shared-slot resources associated with one channel."""
-        shm_name = channel.shared_slot_shm_name
+        shm_name = channel.shared_slot.shm_name
         if shm_name:
             shm = self._shared_memory_cache.pop(shm_name, None)
             if shm is not None:
@@ -188,7 +185,7 @@ class SharedSlotDaemonHandler:
                         exc_info=True,
                     )
 
-        endpoint = channel.shared_slot_ack_endpoint
+        endpoint = channel.shared_slot.ack_endpoint
         if endpoint:
             socket_obj = self._ack_sender_sockets.pop(endpoint, None)
             if socket_obj is not None:

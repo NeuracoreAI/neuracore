@@ -7,6 +7,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 
 from neuracore_types import DataType
 
@@ -34,6 +35,7 @@ from neuracore.data_daemon.models import (
     CompleteMessage,
     DataChunkPayload,
     MessageEnvelope,
+    OpenFixedSharedSlotsModel,
     TraceTransportMetadata,
 )
 from neuracore.data_daemon.recording_encoding_disk_manager import (
@@ -61,6 +63,34 @@ def _trace_metadata_dict(
     return {} if metadata is None else metadata.to_dict()
 
 
+class TransportMode(str, Enum):
+    """Active transport mode for one producer channel."""
+
+    NONE = "none"
+    SOCKET = "socket"
+    RING_BUFFER = "ring_buffer"
+    SHARED_SLOT = "shared_slot"
+
+
+@dataclass
+class SharedSlotTransportState:
+    """Daemon-side state for the shared-slot transport."""
+
+    ack_endpoint: str | None = None
+    shm_name: str | None = None
+    descriptors_received: int = 0
+    completed_messages: int = 0
+    copied_bytes: int = 0
+
+    def reset(self) -> None:
+        """Clear transport-specific state."""
+        self.ack_endpoint = None
+        self.shm_name = None
+        self.descriptors_received = 0
+        self.completed_messages = 0
+        self.copied_bytes = 0
+
+
 @dataclass
 class ChannelState:
     """Per-producer channel state owned by the daemon."""
@@ -74,22 +104,15 @@ class ChannelState:
     last_sequence_number: int = 0
     opened_at: datetime | None = None
     heartbeat_expired_at: datetime | None = None
-    socket_transport_opened: bool = False
+    transport_mode: TransportMode = TransportMode.NONE
     socket_pending_messages: dict[str, PartialMessage] = field(default_factory=dict)
-    shared_slot_transport_opened: bool = False
-    shared_slot_ack_endpoint: str | None = None
-    shared_slot_shm_name: str | None = None
-    shared_slot_descriptors_received: int = 0
-    shared_slot_completed_messages: int = 0
-    shared_slot_copied_bytes: int = 0
+    shared_slot: SharedSlotTransportState = field(
+        default_factory=SharedSlotTransportState
+    )
 
     def is_opened(self) -> bool:
         """Check if the channel has been opened with a ring buffer."""
-        return (
-            self.ring_buffer is not None
-            or self.shared_slot_transport_opened
-            or self.socket_transport_opened
-        )
+        return self.transport_mode is not TransportMode.NONE
 
     def touch(self) -> None:
         """Update the last heartbeat time for the channel.
@@ -117,35 +140,48 @@ class ChannelState:
                 self.ring_buffer.close()
             finally:
                 self.ring_buffer.unlink()
-        self.socket_transport_opened = False
-        self.shared_slot_transport_opened = False
-        self.shared_slot_ack_endpoint = None
-        self.shared_slot_shm_name = None
+        self.transport_mode = TransportMode.RING_BUFFER
+        self.shared_slot.reset()
         self.ring_buffer = ring_buffer
         self.reader = ChannelMessageReader(ring_buffer)
         self.opened_at = datetime.now(timezone.utc)
 
     def is_open(self) -> bool:
         """Check if the channel is open (i.e. has an initialized ring buffer)."""
-        return (
-            self.ring_buffer is not None
-            or self.shared_slot_transport_opened
-            or self.socket_transport_opened
-        )
+        return self.transport_mode is not TransportMode.NONE
 
     def mark_socket_transport_open(self) -> None:
         """Mark this channel as active on direct socket transport."""
-        self.socket_transport_opened = True
+        self.transport_mode = TransportMode.SOCKET
         if self.opened_at is None:
             self.opened_at = datetime.now(timezone.utc)
 
     def mark_shared_slot_transport_open(self, setup: OpenFixedSharedSlotsModel) -> None:
         """Mark this channel as active on the fixed shared-slot transport."""
-        self.shared_slot_transport_opened = True
-        self.socket_transport_opened = False
-        self.shared_slot_ack_endpoint = setup.ack_endpoint
-        self.shared_slot_shm_name = setup.shm_name
+        self.transport_mode = TransportMode.SHARED_SLOT
+        self.shared_slot.ack_endpoint = setup.ack_endpoint
+        self.shared_slot.shm_name = setup.shm_name
         self.opened_at = datetime.now(timezone.utc)
+
+    def mark_shared_slot_descriptor_seen(
+        self,
+        *,
+        ack_endpoint: str,
+        shm_name: str,
+        copied_bytes: int,
+    ) -> None:
+        """Record one shared-slot descriptor processed by the daemon."""
+        self.transport_mode = TransportMode.SHARED_SLOT
+        self.shared_slot.ack_endpoint = ack_endpoint
+        self.shared_slot.shm_name = shm_name
+        self.shared_slot.descriptors_received += 1
+        self.shared_slot.copied_bytes += copied_bytes
+        if self.opened_at is None:
+            self.opened_at = datetime.now(timezone.utc)
+
+    def mark_shared_slot_message_completed(self) -> None:
+        """Record one fully assembled shared-slot message."""
+        self.shared_slot.completed_messages += 1
 
     def clear_ring_buffer(self) -> None:
         """Close and forget the current transport state for this channel."""
@@ -153,10 +189,8 @@ class ChannelState:
         self.ring_buffer = None
         self.reader = None
         self.opened_at = None
-        self.socket_transport_opened = False
-        self.shared_slot_transport_opened = False
-        self.shared_slot_ack_endpoint = None
-        self.shared_slot_shm_name = None
+        self.transport_mode = TransportMode.NONE
+        self.shared_slot.reset()
         self.socket_pending_messages.clear()
         if ring_buffer is None:
             return
@@ -599,20 +633,20 @@ class Daemon:
         if completed is None:
             return
 
-        channel.shared_slot_completed_messages += 1
+        channel.mark_shared_slot_message_completed()
 
         if (
-            channel.shared_slot_completed_messages == 1
-            or channel.shared_slot_completed_messages % 60 == 0
+            channel.shared_slot.completed_messages == 1
+            or channel.shared_slot.completed_messages % 60 == 0
         ):
             logger.info(
                 "Shared-slot assembled message "
                 "producer_id=%s completed_messages=%d "
                 "descriptors_received=%d copied_mib=%.2f trace_id=%s",
                 channel.producer_id,
-                channel.shared_slot_completed_messages,
-                channel.shared_slot_descriptors_received,
-                channel.shared_slot_copied_bytes / (1024 * 1024),
+                channel.shared_slot.completed_messages,
+                channel.shared_slot.descriptors_received,
+                channel.shared_slot.copied_bytes / (1024 * 1024),
                 trace_id,
             )
 
