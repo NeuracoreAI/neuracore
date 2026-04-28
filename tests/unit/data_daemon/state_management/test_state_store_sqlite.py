@@ -314,8 +314,10 @@ async def test_init_async_store_adds_stop_report_columns_to_existing_recordings(
 
         async with store._engine.begin() as conn:
             columns = (
-                await conn.execute(text("PRAGMA table_info(recordings)"))
-            ).mappings().all()
+                (await conn.execute(text("PRAGMA table_info(recordings)")))
+                .mappings()
+                .all()
+            )
         column_names = {str(column["name"]) for column in columns}
         assert "stop_report_status" in column_names
         assert "stop_reported_at" in column_names

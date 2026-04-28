@@ -1337,8 +1337,7 @@ class SqliteStateStore(StateStore):
                 update(recordings)
                 .where(recordings.c.recording_id == recording_id)
                 .where(
-                    recordings.c.stop_report_status
-                    == RecordingStopReportStatus.PENDING
+                    recordings.c.stop_report_status == RecordingStopReportStatus.PENDING
                 )
                 .values(
                     stop_report_status=RecordingStopReportStatus.REPORTING,
@@ -1396,13 +1395,17 @@ class SqliteStateStore(StateStore):
         """Return recording IDs whose stop still needs backend reporting."""
         async with self._engine.begin() as conn:
             rows = (
-                await conn.execute(
-                    select(recordings.c.recording_id).where(
-                        recordings.c.stop_report_status
-                        == RecordingStopReportStatus.PENDING
+                (
+                    await conn.execute(
+                        select(recordings.c.recording_id).where(
+                            recordings.c.stop_report_status
+                            == RecordingStopReportStatus.PENDING
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         return [str(recording_id) for recording_id in rows]
 
     async def reset_reporting_recordings_to_pending(self) -> int:

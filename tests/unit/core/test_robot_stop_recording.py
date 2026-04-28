@@ -9,7 +9,9 @@ from neuracore.core.exceptions import RobotError
 
 
 class _FakeRecordingStateManager:
-    def recording_stopped(self, robot_id: str, instance: int, recording_id: str) -> None:
+    def recording_stopped(
+        self, robot_id: str, instance: int, recording_id: str
+    ) -> None:
         return None
 
 
@@ -30,11 +32,17 @@ class _FakeDaemonRecordingContext:
 def robot(monkeypatch) -> robot_module.Robot:
     monkeypatch.setattr(robot_module, "get_current_org", lambda: "org-1")
     monkeypatch.setattr(
-        robot_module, "get_recording_state_manager", lambda: _FakeRecordingStateManager()
+        robot_module,
+        "get_recording_state_manager",
+        lambda: _FakeRecordingStateManager(),
     )
     robot = robot_module.Robot("robot", 0)
     robot.id = "robot-id"
-    robot._stop_all_streams = lambda wait_for_producer_drain=True: {"producer": 7}  # type: ignore[method-assign]
+
+    def stop_all_streams_stub(wait_for_producer_drain: bool = True) -> dict[str, int]:
+        return {"producer": 7}
+
+    robot._stop_all_streams = stop_all_streams_stub  # type: ignore[method-assign]
     return robot
 
 
