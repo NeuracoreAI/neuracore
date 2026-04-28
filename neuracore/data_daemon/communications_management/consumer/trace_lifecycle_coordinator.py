@@ -314,7 +314,9 @@ class TraceLifecycleCoordinator:
         producer_stop_sequence_numbers_raw = payload.get(
             "producer_stop_sequence_numbers", {}
         )
+        ack_endpoint_raw = payload.get("ack_endpoint")
         producer_stop_sequence_numbers: dict[str, int] = {}
+        ack_endpoint: str | None = None
         if isinstance(producer_stop_sequence_numbers_raw, dict):
             for (
                 producer_id,
@@ -334,6 +336,11 @@ class TraceLifecycleCoordinator:
             logger.warning(
                 "recording_stopped.producer_stop_sequence_numbers must be a dict"
             )
+        if ack_endpoint_raw is not None:
+            if isinstance(ack_endpoint_raw, str):
+                ack_endpoint = ack_endpoint_raw
+            else:
+                logger.warning("recording_stopped.ack_endpoint must be a string")
 
         self._closing_recordings.mark_closing(
             recording_id,
@@ -342,7 +349,7 @@ class TraceLifecycleCoordinator:
                 stop_requested_at=utc_now(),
             ),
         )
-        self._emitter.emit(Emitter.STOP_RECORDING_REQUESTED, recording_id)
+        self._emitter.emit(Emitter.STOP_RECORDING_REQUESTED, recording_id, ack_endpoint)
 
     def finalize_closing_recordings(self) -> None:
         """Finalize recordings after stop cutoffs and final trace chunks are written."""

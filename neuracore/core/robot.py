@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import tempfile
+import threading
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
@@ -38,6 +39,8 @@ from .utils.http_errors import extract_error_detail
 
 logger = logging.getLogger(__name__)
 DaemonRecordingContext = recording_context.RecordingContext
+
+_STOP_REPORT_WAIT_TIMEOUT_S = 30.0
 
 
 @dataclass
@@ -113,6 +116,11 @@ class Robot:
         self._data_streams: dict[str, DataStream] = dict()
         self._data_stream_counts: dict[DataType, int] = defaultdict(int)
         self._daemon_recording_context: DaemonRecordingContext | None = None
+        self._daemon_stop_ack_listener_thread: threading.Thread | None = None
+        self._daemon_stop_ack_listener_shutdown = threading.Event()
+        self._daemon_stop_ack_lock = threading.Lock()
+        self._daemon_stop_ack_events: dict[str, threading.Event] = {}
+        self._daemon_stop_acked_at: dict[str, float] = {}
 
         self.org_id = org_id or get_current_org()
 
@@ -333,33 +341,15 @@ class Robot:
         producer_stop_sequence_numbers = self._stop_all_streams(
             wait_for_producer_drain=wait_for_producer_drain
         )
+        if wait_for_producer_drain:
+            self._prepare_daemon_stop_ack_wait(recording_id)
 
         self._get_daemon_recording_context().stop_recording(
             recording_id=recording_id,
             producer_stop_sequence_numbers=producer_stop_sequence_numbers,
         )
-
-        try:
-            response = get_session().post(
-                f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}",
-                headers=self._auth.get_headers(),
-            )
-
-            response.raise_for_status()
-
-            if response.json() == "WrongUser":
-                raise RobotError("Cannot stop recording initiated by another user")
-
-            if response.json() == "UsageLimitExceeded":
-                raise RobotError("Storage limit exceeded. Please upgrade your plan.")
-
-        except requests.exceptions.ConnectionError:
-            raise RobotError(
-                "Failed to connect to neuracore server, "
-                "please check your internet connection and try again."
-            )
-        except requests.exceptions.RequestException as e:
-            raise RobotError(f"Failed to stop recording: {str(e)}")
+        if wait_for_producer_drain:
+            self._wait_for_daemon_stop_ack(recording_id)
 
     def _stop_all_streams(
         self,
@@ -701,11 +691,112 @@ class Robot:
         """Return a reusable daemon recording context, creating it lazily."""
         if self._daemon_recording_context is None:
             self._daemon_recording_context = DaemonRecordingContext()
+            self._start_daemon_stop_ack_listener(self._daemon_recording_context)
         return self._daemon_recording_context
+
+    def _start_daemon_stop_ack_listener(
+        self, daemon_recording_context: DaemonRecordingContext
+    ) -> None:
+        """Start the long-lived background listener for daemon stop acks."""
+        if (
+            self._daemon_stop_ack_listener_thread is not None
+            and self._daemon_stop_ack_listener_thread.is_alive()
+        ):
+            return
+        self._daemon_stop_ack_listener_shutdown.clear()
+        self._daemon_stop_ack_listener_thread = threading.Thread(
+            target=self._daemon_stop_ack_listener_loop,
+            args=(daemon_recording_context,),
+            name=f"neuracore-stop-ack-{self.name}-{self.instance}",
+            daemon=True,
+        )
+        self._daemon_stop_ack_listener_thread.start()
+
+    def _daemon_stop_ack_listener_loop(
+        self, daemon_recording_context: DaemonRecordingContext
+    ) -> None:
+        """Listen for daemon stop acks and publish them into local robot state."""
+        while not self._daemon_stop_ack_listener_shutdown.is_set():
+            try:
+                payload = daemon_recording_context.receive_stop_ack(timeout_ms=100)
+            except RuntimeError:
+                if self._daemon_stop_ack_listener_shutdown.is_set():
+                    break
+                logger.exception("Failed receiving daemon stop ack")
+                continue
+            except Exception:
+                if self._daemon_stop_ack_listener_shutdown.is_set():
+                    break
+                logger.exception("Unexpected error receiving daemon stop ack")
+                continue
+
+            if payload is None:
+                continue
+            self._record_daemon_stop_ack(payload)
+
+    def _record_daemon_stop_ack(self, payload: dict[str, object]) -> None:
+        """Persist one daemon stop ack into local robot state."""
+        if payload.get("event") != "recording_stop_acked":
+            logger.debug("Ignoring daemon control payload without stop ack event")
+            return
+
+        recording_id = payload.get("recording_id")
+        stopped_at = payload.get("stopped_at")
+        if not isinstance(recording_id, str):
+            logger.warning("Ignoring daemon stop ack without recording_id: %r", payload)
+            return
+        if not isinstance(stopped_at, (int, float)):
+            logger.warning("Ignoring daemon stop ack without stopped_at: %r", payload)
+            return
+
+        with self._daemon_stop_ack_lock:
+            self._daemon_stop_acked_at[recording_id] = float(stopped_at)
+            event = self._daemon_stop_ack_events.get(recording_id)
+            if event is None:
+                event = threading.Event()
+                self._daemon_stop_ack_events[recording_id] = event
+            event.set()
+
+    def _prepare_daemon_stop_ack_wait(self, recording_id: str) -> None:
+        """Reset local stop-ack state before sending a stop command."""
+        with self._daemon_stop_ack_lock:
+            self._daemon_stop_acked_at.pop(recording_id, None)
+            self._daemon_stop_ack_events[recording_id] = threading.Event()
+
+    def _wait_for_daemon_stop_ack(
+        self,
+        recording_id: str,
+    ) -> None:
+        """Wait for a previously requested recording stop to be acknowledged."""
+        with self._daemon_stop_ack_lock:
+            event = self._daemon_stop_ack_events.get(recording_id)
+            if event is None:
+                event = threading.Event()
+                if recording_id in self._daemon_stop_acked_at:
+                    event.set()
+                self._daemon_stop_ack_events[recording_id] = event
+
+        if not event.wait(_STOP_REPORT_WAIT_TIMEOUT_S):
+            raise RobotError(
+                "Timed out waiting for the daemon to acknowledge recording stop "
+                f"for recording_id={recording_id}."
+            )
+
+        with self._daemon_stop_ack_lock:
+            stopped_at = self._daemon_stop_acked_at.get(recording_id)
+            self._daemon_stop_ack_events.pop(recording_id, None)
+
+        if stopped_at is None:
+            raise RobotError(
+                "Received a recording-stop acknowledgement without a persisted "
+                f"stop time for recording_id={recording_id}."
+            )
 
     def _cleanup_daemon_recording_context(self) -> None:
         """Release daemon recording context resources."""
+        self._daemon_stop_ack_listener_shutdown.set()
         if self._daemon_recording_context is None:
+            self._daemon_stop_ack_listener_thread = None
             return
         try:
             self._daemon_recording_context.close()
@@ -713,6 +804,9 @@ class Robot:
             logger.exception("Failed to cleanup daemon recording context")
         finally:
             self._daemon_recording_context = None
+            if self._daemon_stop_ack_listener_thread is not None:
+                self._daemon_stop_ack_listener_thread.join(timeout=1.0)
+            self._daemon_stop_ack_listener_thread = None
 
     def close(self) -> None:
         """Release local resources owned by this Robot instance."""

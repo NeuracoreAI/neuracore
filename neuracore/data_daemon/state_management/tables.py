@@ -17,6 +17,7 @@ from sqlalchemy import (
 from neuracore.data_daemon.models import (
     DataType,
     ProgressReportStatus,
+    RecordingStopReportStatus,
     TraceRegistrationStatus,
     TraceUploadStatus,
     TraceWriteStatus,
@@ -43,7 +44,18 @@ recordings = Table(
         nullable=False,
         default=ProgressReportStatus.PENDING,
     ),
+    Column(
+        "stop_report_status",
+        Enum(
+            RecordingStopReportStatus,
+            native_enum=False,
+            values_callable=lambda x: [e.value for e in x],
+        ),
+        nullable=False,
+        default=RecordingStopReportStatus.PENDING,
+    ),
     Column("stopped_at", DateTime(timezone=False), nullable=True, default=None),
+    Column("stop_reported_at", DateTime(timezone=False), nullable=True, default=None),
     Column(
         "created_at",
         DateTime(timezone=False),

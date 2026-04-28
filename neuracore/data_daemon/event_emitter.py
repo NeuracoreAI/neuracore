@@ -8,9 +8,9 @@ from pyee.asyncio import AsyncIOEventEmitter
 class Emitter(AsyncIOEventEmitter):
     """Shared event emitter for cross-component signaling."""
 
-    # DAemon -> State manager (set metadata stopped_ats only)
+    # DAemon -> State manager (record stop ownership and optional ack)
     STOP_RECORDING_REQUESTED = "STOP_RECORDING_REQUESTED"
-    # (recording_id)
+    # (recording_id, ack_endpoint:str|None)
 
     # Daemon -> State manager -> RDM (flush states and close traces)
     STOP_RECORDING = "STOP_RECORDING"
@@ -60,6 +60,10 @@ class Emitter(AsyncIOEventEmitter):
 
     # Progress reporter -> State manager
     PROGRESS_REPORTED = "PROGRESS_REPORTED"
+    # (recording_id:str)
+
+    # State manager -> client-observable completion state
+    RECORDING_STOP_REPORTED = "RECORDING_STOP_REPORTED"
     # (recording_id:str)
 
     # Progress reporter -> State manager

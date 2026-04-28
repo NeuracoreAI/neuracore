@@ -423,3 +423,4 @@ Oieb
 popleft
 reannounce
 tmpfs
+SNDTIMEO

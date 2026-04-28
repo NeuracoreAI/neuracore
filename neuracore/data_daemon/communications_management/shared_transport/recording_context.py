@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
+
+import zmq
+
 from neuracore.data_daemon.models import CommandType
 
 from .communications_manager import CommunicationsManager, MessageEnvelope
+from .runtime import create_stop_ack_socket_path
 
 
 class RecordingContext:
@@ -19,6 +24,17 @@ class RecordingContext:
         self.recording_id = recording_id
         self._comm = comm_manager or CommunicationsManager()
         self._comm.create_producer_socket()
+        self._ack_socket_path = create_stop_ack_socket_path()
+        self._ack_endpoint = f"ipc://{self._ack_socket_path}"
+        self._ack_context = zmq.Context()
+        self._ack_socket = self._ack_context.socket(zmq.PULL)
+        self._ack_socket.setsockopt(zmq.LINGER, 0)
+        self._ack_socket.bind(self._ack_endpoint)
+
+    @property
+    def stop_ack_endpoint(self) -> str:
+        """Return the daemon-to-client endpoint for stop acknowledgements."""
+        return self._ack_endpoint
 
     def set_recording_id(self, recording_id: str | None) -> None:
         """Set or clear the recording identifier for this context."""
@@ -41,14 +57,40 @@ class RecordingContext:
             recording_stopped_payload["producer_stop_sequence_numbers"] = (
                 producer_stop_sequence_numbers
             )
+        recording_stopped_payload["ack_endpoint"] = self._ack_endpoint
         self._send(
             CommandType.RECORDING_STOPPED,
             {"recording_stopped": recording_stopped_payload},
         )
         self.recording_id = effective_recording_id
 
+    def receive_stop_ack(self, timeout_ms: int = 0) -> dict[str, object] | None:
+        """Receive one stop-ack payload from the daemon, if available."""
+        if self._ack_socket is None:
+            raise RuntimeError("Stop-ack socket is not initialized.")
+        if timeout_ms > 0 and not self._ack_socket.poll(timeout=timeout_ms):
+            return None
+        if timeout_ms == 0 and not self._ack_socket.poll(timeout=0):
+            return None
+        payload = self._ack_socket.recv()
+        try:
+            message = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Invalid stop-ack payload from daemon.") from exc
+        if not isinstance(message, dict):
+            raise RuntimeError("Unexpected stop-ack payload type from daemon.")
+        return message
+
     def close(self) -> None:
         """Close sockets and cleanup context resources owned by this instance."""
+        if self._ack_socket is not None:
+            self._ack_socket.close(0)
+            self._ack_socket = None
+        self._ack_context.term()
+        try:
+            self._ack_socket_path.unlink()
+        except FileNotFoundError:
+            pass
         self._comm.cleanup_producer()
 
     def _send(self, command: CommandType, payload: dict | None = None) -> None:
