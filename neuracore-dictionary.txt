@@ -413,4 +413,13 @@ memfd
 CLOEXEC
 ftruncate
 RDWR
-
+acked
+acks
+backpressure
+blowaway
+oieb
+OIEB
+Oieb
+popleft
+reannounce
+tmpfs
