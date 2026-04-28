@@ -1,6 +1,7 @@
 """Tests for batch size autotuner."""
 
-from typing import cast
+import functools
+import pickle
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -8,7 +9,7 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import Dataset
 
-from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
+from neuracore.ml import BatchedTrainingOutputs
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
@@ -42,6 +43,8 @@ class DummyModel(torch.nn.Module):
         super().__init__()
         self.device = device
         self.weight = torch.nn.Parameter(torch.tensor(1.0))
+        # Simulate transformer models (e.g. GemmaConfig) that are not picklable.
+        self._non_picklable = lambda: None
 
     def forward(self, batch):
         return batch
@@ -64,9 +67,9 @@ def test_find_optimal_runs_probe_batch():
     device = torch.device("cuda:0")
 
     with patch("torch.cuda.is_available", return_value=True):
-        model = cast(NeuracoreModel, DummyModel(device=device))
         autotuner = BatchSizeAutotuner(
-            model=model,
+            model_factory=functools.partial(DummyModel, device=device),
+            device=device,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             train_dataloader_kwargs={},
@@ -107,7 +110,7 @@ def test_find_optimal_batch_size_passes_default_min_max_to_batch_size_autotuner(
     mock_dataset.collate_fn = lambda x: x
 
     device = torch.device("cuda:0")
-    model = cast(NeuracoreModel, DummyModel(device=device))
+    model_factory = functools.partial(DummyModel, device=device)
 
     def fake_random_split(dataset, lengths, generator=None):
         assert len(dataset) == 100
@@ -119,7 +122,6 @@ def test_find_optimal_batch_size_passes_default_min_max_to_batch_size_autotuner(
 
     with (
         patch("torch.cuda.is_available", return_value=True),
-        patch.object(model, "to", return_value=model),
         patch(
             "neuracore.ml.trainers.batch_autotuner.random_split",
             side_effect=fake_random_split,
@@ -129,7 +131,7 @@ def test_find_optimal_batch_size_passes_default_min_max_to_batch_size_autotuner(
             return_value=mock_autotuner_instance,
         ) as mock_autotuner_cls,
     ):
-        result = find_optimal_batch_size(cfg, model, mock_dataset, device)
+        result = find_optimal_batch_size(cfg, model_factory, mock_dataset, device)
 
     assert result == 4
     mock_autotuner_cls.assert_called_once()
@@ -145,9 +147,9 @@ def test_batch_size_validator_test_batch_size_success():
     device = torch.device("cuda:0")
 
     with patch("torch.cuda.is_available", return_value=True):
-        model = cast(NeuracoreModel, DummyModel(device=device))
         validator = BatchSizeValidator(
-            model=model,
+            model_factory=functools.partial(DummyModel, device=device),
+            device=device,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             train_dataloader_kwargs={},
@@ -171,9 +173,9 @@ def test_batch_size_validator_test_batch_size_returns_false_on_subprocess_failur
     device = torch.device("cuda:0")
 
     with patch("torch.cuda.is_available", return_value=True):
-        model = cast(NeuracoreModel, DummyModel(device=device))
         validator = BatchSizeValidator(
-            model=model,
+            model_factory=functools.partial(DummyModel, device=device),
+            device=device,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             train_dataloader_kwargs={},
@@ -197,9 +199,9 @@ def test_batch_size_validator_spawns_subprocess_and_returns_worker_result():
     device = torch.device("cuda:0")
 
     with patch("torch.cuda.is_available", return_value=True):
-        model = cast(NeuracoreModel, DummyModel(device=device))
         validator = BatchSizeValidator(
-            model=model,
+            model_factory=functools.partial(DummyModel, device=device),
+            device=device,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             train_dataloader_kwargs={},
@@ -238,9 +240,9 @@ def test_batch_size_validator_treats_nonzero_exit_code_as_failure():
     device = torch.device("cuda:0")
 
     with patch("torch.cuda.is_available", return_value=True):
-        model = cast(NeuracoreModel, DummyModel(device=device))
         validator = BatchSizeValidator(
-            model=model,
+            model_factory=functools.partial(DummyModel, device=device),
+            device=device,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             train_dataloader_kwargs={},
@@ -274,9 +276,9 @@ def test_batch_size_validator_raises_on_worker_failure_result():
     device = torch.device("cuda:0")
 
     with patch("torch.cuda.is_available", return_value=True):
-        model = cast(NeuracoreModel, DummyModel(device=device))
         validator = BatchSizeValidator(
-            model=model,
+            model_factory=functools.partial(DummyModel, device=device),
+            device=device,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             train_dataloader_kwargs={},
@@ -312,9 +314,9 @@ def test_batch_size_validator_returns_false_on_worker_oom_failure():
     device = torch.device("cuda:0")
 
     with patch("torch.cuda.is_available", return_value=True):
-        model = cast(NeuracoreModel, DummyModel(device=device))
         validator = BatchSizeValidator(
-            model=model,
+            model_factory=functools.partial(DummyModel, device=device),
+            device=device,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             train_dataloader_kwargs={},
@@ -346,14 +348,15 @@ def test_batch_size_validator_requires_cuda_device():
     """BatchSizeValidator rejects non-CUDA devices."""
     train_dataset = DummyDataset(length=16)
     val_dataset = DummyDataset(length=16)
-    model = cast(NeuracoreModel, DummyModel(device=torch.device("cpu")))
+    device = torch.device("cpu")
 
     with (
         patch("torch.cuda.is_available", return_value=False),
         pytest.raises(ValueError, match="only supported on GPUs"),
     ):
         BatchSizeValidator(
-            model=model,
+            model_factory=functools.partial(DummyModel, device=device),
+            device=device,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             train_dataloader_kwargs={},
@@ -442,6 +445,62 @@ def test_probe_batch_size_raises_on_generic_exception():
             )
 
 
+def test_batch_size_validator_handles_non_picklable_model_attributes():
+    """test_batch_size succeeds even when model instances have non-picklable attributes.
+
+    Simulates a transformer model where instance attributes (e.g. GemmaConfig)
+    are not picklable. The subprocess receives a picklable factory callable rather
+    than a model instance, so the pickling error never occurs.
+    """
+    train_dataset = DummyDataset(length=16)
+    val_dataset = DummyDataset(length=16)
+    device = torch.device("cuda:0")
+
+    # DummyModel has self._non_picklable = lambda: None — instances are not picklable.
+    # However, functools.partial(DummyModel, device=device) is picklable because
+    # it holds only the class reference and a plain torch.device, never an instance.
+    model_factory = functools.partial(DummyModel, device=device)
+
+    with patch("torch.cuda.is_available", return_value=True):
+        validator = BatchSizeValidator(
+            model_factory=model_factory,
+            device=device,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            train_dataloader_kwargs={},
+            val_dataloader_kwargs={},
+            num_iterations=2,
+        )
+
+    fake_queue = MagicMock()
+    fake_queue.get_nowait.return_value = ("ok", True)
+    fake_proc = MagicMock()
+    fake_proc.exitcode = 0
+    fake_proc.is_alive.return_value = False
+
+    fake_ctx = MagicMock()
+    fake_ctx.Queue.return_value = fake_queue
+    fake_ctx.Process.return_value = fake_proc
+
+    def start_that_pickles_args():
+        # Reproduce what spawn does: pickle-serialize every arg before sending to
+        # the subprocess. Skip args[0] (the result_queue IPC object) since it is
+        # always an OS primitive, not a plain Python value. Check all remaining
+        # args: none of them should be a model instance.
+        for arg in fake_ctx.Process.call_args.kwargs["args"][1:]:
+            pickle.dumps(arg)
+
+    fake_proc.start.side_effect = start_that_pickles_args
+
+    with patch(
+        "neuracore.ml.trainers.batch_autotuner.multiprocessing.get_context",
+        return_value=fake_ctx,
+    ):
+        result = validator.test_batch_size(batch_size=4)
+
+    assert result is True
+
+
 def test_is_valid_batch_size_clamps_when_exceeding_train_dataset_size():
     """is_valid_batch_size clamps oversized batch_size to train dataset length."""
     cfg = OmegaConf.create({
@@ -456,7 +515,7 @@ def test_is_valid_batch_size_clamps_when_exceeding_train_dataset_size():
     mock_dataset.collate_fn = lambda x: x
 
     device = torch.device("cuda:0")
-    model = cast(NeuracoreModel, DummyModel(device=device))
+    model_factory = functools.partial(DummyModel, device=device)
 
     def fake_random_split(dataset, lengths, generator=None):
         assert lengths == [80, 20]
@@ -464,7 +523,6 @@ def test_is_valid_batch_size_clamps_when_exceeding_train_dataset_size():
 
     with (
         patch("torch.cuda.is_available", return_value=True),
-        patch.object(model, "to", return_value=model),
         patch(
             "neuracore.ml.trainers.batch_autotuner.random_split",
             side_effect=fake_random_split,
@@ -476,7 +534,7 @@ def test_is_valid_batch_size_clamps_when_exceeding_train_dataset_size():
     ):
         result = is_valid_batch_size(
             cfg=cfg,
-            model=model,
+            model_factory=model_factory,
             dataset=mock_dataset,
             batch_size=256,
             device=device,

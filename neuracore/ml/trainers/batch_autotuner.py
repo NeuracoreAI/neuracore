@@ -5,6 +5,7 @@ import logging
 import multiprocessing
 import queue as queue_module
 import time
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -38,21 +39,21 @@ class BatchSizeValidator:
 
     def __init__(
         self,
-        model: NeuracoreModel,
+        model_factory: Callable[[], NeuracoreModel],
+        device: torch.device,
         train_dataset: Dataset,
         val_dataset: Dataset,
         train_dataloader_kwargs: dict[str, Any],
         val_dataloader_kwargs: dict[str, Any],
         num_iterations: int = 2,
     ):
-        """Initialize a batch-size validator for a specific model and datasets."""
-        self.device = model.device
+        """Initialize a batch-size validator."""
+        self.device = device
 
         if not torch.cuda.is_available() or "cuda" not in self.device.type:
             raise ValueError("Batch size testing is only supported on GPUs.")
 
-        # Keep the parent-side copy on CPU to avoid unnecessary VRAM usage.
-        self.model = model.to("cpu")
+        self.model_factory = model_factory
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.train_dataloader_kwargs = train_dataloader_kwargs
@@ -93,7 +94,7 @@ class BatchSizeValidator:
             target=_run_batch_size_test_worker,
             args=(
                 result_queue,
-                self.model,
+                self.model_factory,
                 self.train_dataset,
                 self.val_dataset,
                 self.train_dataloader_kwargs,
@@ -154,7 +155,7 @@ class BatchSizeValidator:
 
 def _run_batch_size_test_worker(
     result_queue: Any,
-    model: NeuracoreModel,
+    model_factory: Callable[[], NeuracoreModel],
     train_dataset: Dataset,
     val_dataset: Dataset,
     train_dataloader_kwargs: dict[str, Any],
@@ -169,7 +170,7 @@ def _run_batch_size_test_worker(
 
     try:
         device = torch.device(device_str)
-        model = model.to(device)
+        model = model_factory().to(device)
 
         success = _probe_batch_size(
             model=model,
@@ -368,7 +369,8 @@ class BatchSizeAutotuner:
 
     def __init__(
         self,
-        model: NeuracoreModel,
+        model_factory: Callable[[], NeuracoreModel],
+        device: torch.device,
         train_dataset: Dataset,
         val_dataset: Dataset,
         train_dataloader_kwargs: dict[str, Any] | None = None,
@@ -381,7 +383,8 @@ class BatchSizeAutotuner:
         """Initialize the batch size auto-tuner.
 
         Args:
-            model: Model to use for testing
+            model_factory: Callable that constructs a fresh model for testing
+            device: CUDA device to test on
             train_dataset: Dataset to use for training
             val_dataset: Dataset to use for validation
             train_dataloader_kwargs: Additional arguments for the train DataLoader
@@ -393,7 +396,6 @@ class BatchSizeAutotuner:
         """
         assert num_iterations >= 2, "At least two consecutive batches must be loaded"
 
-        self.model = model
         self.train_dataset = train_dataset
         self.train_dataloader_kwargs = train_dataloader_kwargs or {}
         self.val_dataset = val_dataset
@@ -402,7 +404,7 @@ class BatchSizeAutotuner:
         self.max_batch_size = max_batch_size
         self.num_iterations = num_iterations
         self.safety_factor = safety_factor
-        self.device = model.device
+        self.device = device
 
         if not torch.cuda.is_available() or "cuda" not in self.device.type:
             raise ValueError("Autotuning batch size is only supported on GPUs.")
@@ -425,7 +427,8 @@ class BatchSizeAutotuner:
             )
 
         self.validator = BatchSizeValidator(
-            model=self.model,
+            model_factory=model_factory,
+            device=self.device,
             train_dataset=self.train_dataset,
             val_dataset=self.val_dataset,
             train_dataloader_kwargs=self.train_dataloader_kwargs,
@@ -493,13 +496,12 @@ class BatchSizeAutotuner:
 
 def find_optimal_batch_size(
     cfg: DictConfig,
-    model: NeuracoreModel,
+    model_factory: Callable[[], NeuracoreModel],
     dataset: PytorchSynchronizedDataset,
     device: torch.device,
 ) -> int:
     """Tune the batch size automatically via binary search."""
     train_dataset, val_dataset = _split_train_val_dataset(cfg, dataset)
-    model = model.to(device)
 
     max_batch_size = (
         cfg.max_batch_size if "max_batch_size" in cfg else len(train_dataset)
@@ -520,7 +522,8 @@ def find_optimal_batch_size(
     start_time = time.perf_counter()
 
     autotuner = BatchSizeAutotuner(
-        model=model,
+        model_factory=model_factory,
+        device=device,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         train_dataloader_kwargs={
@@ -550,14 +553,13 @@ def find_optimal_batch_size(
 
 def is_valid_batch_size(
     cfg: DictConfig,
-    model: NeuracoreModel,
+    model_factory: Callable[[], NeuracoreModel],
     dataset: PytorchSynchronizedDataset,
     batch_size: int,
     device: torch.device,
 ) -> bool:
     """Check whether a specific batch size fits in RAM and GPU memory."""
     train_dataset, val_dataset = _split_train_val_dataset(cfg, dataset)
-    model = model.to(device)
 
     if batch_size > len(train_dataset):
         batch_size = len(train_dataset)
@@ -576,7 +578,8 @@ def is_valid_batch_size(
     )
 
     validator = BatchSizeValidator(
-        model=model,
+        model_factory=model_factory,
+        device=device,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         train_dataloader_kwargs={
