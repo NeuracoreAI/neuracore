@@ -848,14 +848,76 @@ def test_shared_slot_timeout_clock_starts_after_socket_send() -> None:
         time.sleep(0.03)
         with registry._condition:
             registry._check_for_timeouts_locked()
-            assert registry._healthy is True
-            assert sequence_id in registry._in_flight
+        snapshot = registry.debug_snapshot()
+        assert snapshot["healthy"] is True
+        assert sequence_id in snapshot["in_flight_sequence_ids"]
 
         registry.mark_sent(sequence_id)
         time.sleep(0.03)
         with registry._condition:
             registry._check_for_timeouts_locked()
-            assert registry._healthy is False
+        assert registry.is_healthy() is False
+    finally:
+        SharedSlotRegistry.reset_shared_instance_for_tests()
+        shm.close()
+        shm.unlink()
+
+
+def test_shared_slot_registry_runtime_starts_and_stops_cleanly() -> None:
+    registry = SharedSlotRegistry.acquire(slot_size=2048, slot_count=2)
+
+    try:
+        assert registry.control_endpoint.startswith("ipc://")
+        assert registry._runtime.control_thread.is_alive()
+        assert registry._runtime.watchdog_thread.is_alive()
+    finally:
+        SharedSlotRegistry.reset_shared_instance_for_tests()
+
+    assert not registry._runtime.control_thread.is_alive()
+    assert not registry._runtime.watchdog_thread.is_alive()
+
+
+def test_shared_slot_ready_message_populates_free_slots() -> None:
+    registry = SharedSlotRegistry.acquire(slot_size=2048, slot_count=3)
+    shm = SharedMemory(name="test-ready-populates-free-slots", create=True, size=2048 * 3)
+
+    try:
+        registry._apply_ready_message(
+            SharedSlotReadyModel(
+                shm_name="test-ready-populates-free-slots",
+                slot_size=2048,
+                slot_count=3,
+            )
+        )
+
+        snapshot = registry.debug_snapshot()
+        assert snapshot["ready"] is True
+        assert snapshot["free_slot_count"] == 3
+        assert registry.slot_size == 2048
+        assert registry.slot_count == 3
+    finally:
+        SharedSlotRegistry.reset_shared_instance_for_tests()
+        shm.close()
+        shm.unlink()
+
+
+def test_shared_slot_ready_message_adopts_daemon_slot_dimensions() -> None:
+    registry = SharedSlotRegistry.acquire(slot_size=1024, slot_count=1)
+    shm = SharedMemory(name="test-ready-adopts-slot-dimensions", create=True, size=4096 * 4)
+
+    try:
+        registry._apply_ready_message(
+            SharedSlotReadyModel(
+                shm_name="test-ready-adopts-slot-dimensions",
+                slot_size=4096,
+                slot_count=4,
+            )
+        )
+
+        assert registry.slot_size == 4096
+        assert registry.slot_count == 4
+        assert registry.total_shared_memory_bytes == 4096 * 4
+        assert registry.debug_snapshot()["free_slot_count"] == 4
     finally:
         SharedSlotRegistry.reset_shared_instance_for_tests()
         shm.close()
