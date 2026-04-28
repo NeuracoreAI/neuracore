@@ -91,6 +91,17 @@ FAILURE_CNNMLP_CONFIG = {
     "output_prediction_horizon": 5,
 }
 
+BACK_TO_BACK_NUM_EPISODES = 25
+BACK_TO_BACK_EPISODE_LENGTH_MULTIPLIER = 5
+BACK_TO_BACK_FREQUENCY = 50
+BACK_TO_BACK_NUM_CAMERAS = 2
+BACK_TO_BACK_NUM_JOBS = 2
+BACK_TO_BACK_CNNMLP_CONFIG = {
+    "batch_size": 8,
+    "epochs": 1,
+    "output_prediction_horizon": 5,
+}
+
 
 def _unique_name(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
@@ -110,12 +121,25 @@ def _make_sync_point(obs) -> SynchronizedPoint:
 
 
 def _collect_demo_data(
-    robot_name: str, dataset_name: str, num_episodes: int = 3, instance_id: int = 0
+    robot_name: str,
+    dataset_name: str,
+    num_episodes: int = 3,
+    instance_id: int = 0,
+    episode_length_multiplier: int = 1,
+    num_cameras: int = 1,
 ) -> Dataset:
     """Collect scripted demonstrations and log them to neuracore.
 
     Use different instances for different tests since they are run in parallel.
+    Increase episode_length_multiplier to inflate episode length by repeating
+    the rollout trajectory steps.
+    Increase num_cameras to log multiple RGB streams per timestep.
     """
+    assert episode_length_multiplier >= 1, (
+        "episode_length_multiplier must be >= 1, " f"got {episode_length_multiplier}"
+    )
+    assert num_cameras >= 1, f"num_cameras must be >= 1, got {num_cameras}"
+
     nc.connect_robot(
         robot_name,
         instance=instance_id,
@@ -127,9 +151,19 @@ def _collect_demo_data(
     for ep_idx in range(num_episodes):
         logger.info(f"Collecting episode {ep_idx + 1}/{num_episodes}")
         action_traj = rollout_policy()
+        expanded_action_traj = [
+            action_dict
+            for action_dict in action_traj
+            for _ in range(episode_length_multiplier)
+        ]
+        camera_names = [
+            f"{NC_CAM_NAME}_{camera_index}"
+            for camera_index in range(1, num_cameras + 1)
+        ]
         nc.start_recording(robot_name=robot_name, instance=instance_id)
-        for frame_idx, action_dict in enumerate(action_traj):
-            t = time.time()
+        t = time.time()
+        for frame_idx, action_dict in enumerate(expanded_action_traj):
+            t += 0.02
             joint_positions = {
                 k: v for k, v in action_dict.items() if "gripper" not in k
             }
@@ -141,33 +175,73 @@ def _collect_demo_data(
             )
             img = np.zeros((480, 640, 3), dtype=np.uint8)
             img.fill(50 + frame_idx % 200)
-            nc.log_rgb(
-                NC_CAM_NAME,
-                img,
+            for camera_name in camera_names:
+                nc.log_rgb(
+                    camera_name,
+                    img,
+                    timestamp=t,
+                    robot_name=robot_name,
+                    instance=instance_id,
+                )
+            nc.log_joint_target_positions(
+                action_dict, timestamp=t, robot_name=robot_name, instance=instance_id
+            )
+            nc.log_parallel_gripper_target_open_amounts(
+                {"gripper1": 0.5, "gripper2": 0.5},
                 timestamp=t,
                 robot_name=robot_name,
                 instance=instance_id,
             )
-            nc.log_joint_target_positions(
-                action_dict, timestamp=t, robot_name=robot_name, instance=instance_id
+            nc.log_parallel_gripper_open_amounts(
+                {"gripper1": 0.5, "gripper2": 0.5},
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+            nc.log_language(
+                name="instruction",
+                language="Pick up the red cube",
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
             )
         nc.stop_recording(wait=True, robot_name=robot_name, instance=instance_id)
-        logger.info(f"Episode {ep_idx + 1} recorded ({len(action_traj)} frames)")
+        logger.info(
+            "Episode %s recorded (%s frames)",
+            ep_idx + 1,
+            len(expanded_action_traj),
+            episode_length_multiplier,
+            num_cameras,
+        )
     return dataset
 
 
 def _wait_for_training(
-    job_id: str, timeout_minutes: int = TRAINING_TIMEOUT_MINUTES
-) -> str:
+    job_id: str | list[str], timeout_minutes: int = TRAINING_TIMEOUT_MINUTES
+) -> str | dict[str, str]:
+    job_ids = [job_id] if isinstance(job_id, str) else list(job_id)
+    assert job_ids, "Expected at least one training job id"
+
     deadline = time.time() + timeout_minutes * 60
+    final_statuses: dict[str, str] = {}
+
     while True:
-        status = nc.get_training_job_status(job_id)
-        logger.info(f"Training job {job_id}: {status}")
-        if status in TERMINAL_STATES:
-            return status
+        for current_job_id in job_ids:
+            if current_job_id in final_statuses:
+                continue
+            status = nc.get_training_job_status(current_job_id)
+            logger.info(f"Training job {current_job_id}: {status}")
+            if status in TERMINAL_STATES:
+                final_statuses[current_job_id] = status
+
+        if len(final_statuses) == len(job_ids):
+            if isinstance(job_id, str):
+                return final_statuses[job_id]
+            return final_statuses
+
         assert (
             time.time() < deadline
-        ), f"Training job {job_id} did not finish within {timeout_minutes} minutes"
+        ), f"Training job(s) {job_ids} did not finish within {timeout_minutes} minutes"
         time.sleep(20)
 
 
@@ -648,4 +722,129 @@ def test_training_failure_error_reporting():
                 dataset.delete()
             except Exception:
                 logger.warning(f"Failed to delete dataset {dataset_name}")
-        pass
+
+
+def test_back_to_back_training_jobs_same_dataset():
+    """Launch multiple training jobs back-to-back against the same dataset.
+
+    Steps:
+      1. Collect demonstration data for a single dataset
+      2. Build cross-embodiment data specs
+      3. Submit multiple training jobs back-to-back
+      4. Wait for both jobs to complete successfully
+    """
+    nc.login()
+
+    dataset = None
+    dataset_name = _unique_name("back_to_back_training")
+    training_names = [
+        _unique_name("cnnmlp_back_to_back") for _ in range(BACK_TO_BACK_NUM_JOBS)
+    ]
+    job_ids: list[str] = []
+
+    input_cross_embodiment_description = {}
+    output_cross_embodiment_description = {}
+
+    try:
+        # ------------------------------------------------------------------
+        # Step 1: Collect demo data (requires measurable synchronization time)
+        # ------------------------------------------------------------------
+        try:
+            dataset = _collect_demo_data(
+                ROBOT_NAME,
+                dataset_name,
+                num_episodes=BACK_TO_BACK_NUM_EPISODES,
+                instance_id=2,
+                episode_length_multiplier=BACK_TO_BACK_EPISODE_LENGTH_MULTIPLIER,
+                num_cameras=BACK_TO_BACK_NUM_CAMERAS,
+            )
+            assert len(dataset) == BACK_TO_BACK_NUM_EPISODES, (
+                f"Expected {BACK_TO_BACK_NUM_EPISODES} recordings in dataset "
+                f"{dataset_name!r}, got {len(dataset)}"
+            )
+        except Exception as e:
+            pytest.fail(f"Step 1 (collect demo data) failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Step 2: Build cross-embodiment data specs
+        # ------------------------------------------------------------------
+        try:
+            robot_ids = dataset.robot_ids
+            assert robot_ids, "Expected at least one robot in collected dataset"
+
+            for robot_id in robot_ids:
+                data_spec = dataset.get_full_embodiment_description(robot_id)
+                input_cross_embodiment_description[robot_id] = {
+                    DataType.JOINT_POSITIONS: data_spec[DataType.JOINT_POSITIONS],
+                    DataType.RGB_IMAGES: data_spec[DataType.RGB_IMAGES],
+                    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: data_spec[
+                        DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS
+                    ],
+                    DataType.LANGUAGE: data_spec[DataType.LANGUAGE],
+                }
+                output_cross_embodiment_description[robot_id] = {
+                    DataType.JOINT_TARGET_POSITIONS: data_spec[
+                        DataType.JOINT_TARGET_POSITIONS
+                    ],
+                    DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS: data_spec[
+                        DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS
+                    ],
+                }
+        except Exception as e:
+            pytest.fail(f"Step 2 (build data specs) failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Step 3: Submit multiple training jobs back-to-back
+        # ------------------------------------------------------------------
+        try:
+            for train_run_name in training_names:
+                job_data = nc.start_training_run(
+                    name=train_run_name,
+                    dataset_name=dataset_name,
+                    algorithm_name="CNNMLP",
+                    algorithm_config=BACK_TO_BACK_CNNMLP_CONFIG,
+                    gpu_type=GPU_TYPE,
+                    num_gpus=NUM_GPUS,
+                    frequency=BACK_TO_BACK_FREQUENCY,
+                    input_cross_embodiment_description=(
+                        input_cross_embodiment_description
+                    ),
+                    output_cross_embodiment_description=(
+                        output_cross_embodiment_description
+                    ),
+                )
+                job_ids.append(job_data["id"])
+            assert len(set(job_ids)) == BACK_TO_BACK_NUM_JOBS, (
+                "Expected two distinct training jobs, got duplicate job ids: "
+                f"{job_ids}"
+            )
+            assert (
+                len(job_ids) == BACK_TO_BACK_NUM_JOBS
+            ), f"Expected {BACK_TO_BACK_NUM_JOBS} submitted jobs, got {len(job_ids)}"
+        except Exception as e:
+            pytest.fail(f"Step 3 (submit back-to-back trainings) failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Step 4: Wait for both jobs to complete
+        # ------------------------------------------------------------------
+        try:
+            final_statuses = _wait_for_training(job_ids, timeout_minutes=60)
+            for job_id in job_ids:
+                final_status = final_statuses[job_id]
+                assert final_status == "COMPLETED", (
+                    f"Back-to-back training job {job_id} ended with "
+                    f"non-COMPLETED status: {final_status}"
+                )
+        except Exception as e:
+            pytest.fail(f"Step 4 (wait for back-to-back trainings) failed: {e}")
+    finally:
+        for job_id in job_ids:
+            try:
+                nc.delete_training_job(job_id)
+            except Exception:
+                logger.warning(f"Failed to delete training job {job_id}")
+        if dataset:
+            try:
+                dataset.delete()
+            except Exception:
+                logger.warning(f"Failed to delete dataset {dataset_name}")
