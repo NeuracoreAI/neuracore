@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from multiprocessing import resource_tracker
 from multiprocessing.shared_memory import SharedMemory
@@ -81,7 +82,7 @@ class SharedSlotDaemonHandler:
     ) -> None:
         """Open daemon-owned fixed shared slots for one channel."""
         request = OpenFixedSharedSlotsModel(**payload)
-        shm_name = f"neuracore-slots-{channel.producer_id}-{int(time.time() * 1000)}"
+        shm_name = f"neuracore-slots-{uuid.uuid4().hex}-{int(time.time() * 1000)}"
         shm = SharedMemory(
             name=shm_name,
             create=True,

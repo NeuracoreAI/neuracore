@@ -497,12 +497,25 @@ class ProducerChannel:
         """Initialize a new producer channel for recording."""
         self.start_recording_session(ring_buffer_size=ring_buffer_size)
 
-    def cleanup_producer_channel(self) -> None:
-        """Clean up the producer channel after all queued payload data is delivered."""
+    def cleanup_producer_channel(
+        self,
+        *,
+        wait_for_slot_drain: bool = True,
+    ) -> None:
+        """Finish one trace after all queued payload descriptors are sent.
+
+        When ``wait_for_slot_drain`` is False, this returns after the producer has
+        pushed all currently queued shared-slot descriptors and the TRACE_END
+        control message onto the socket. Slot credits may still return
+        asynchronously while the channel remains alive for later cleanup.
+        """
+        if self._shared_slot_transport is not None:
+            self._shared_slot_transport.wait_until_payload_handed_off(timeout_s=30.0)
+
         cutoff_sequence = self.get_last_enqueued_sequence_number()
         self.wait_until_sequence_sent(cutoff_sequence)
 
-        if self._shared_slot_transport is not None:
+        if wait_for_slot_drain and self._shared_slot_transport is not None:
             self._shared_slot_transport.wait_until_drained(timeout_s=30.0)
 
         self.end_trace()

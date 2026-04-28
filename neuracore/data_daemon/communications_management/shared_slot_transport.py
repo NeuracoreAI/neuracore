@@ -127,6 +127,8 @@ class SharedSlotVideoWorker:
         self._queue: queue.Queue[QueuedSharedSlotPacket | None] = queue.Queue(
             maxsize=max(1, registry.slot_count)
         )
+        self._active_items = 0
+        self._active_items_lock = threading.Lock()
         self._error: Exception | None = None
         self._error_lock = threading.Lock()
         self._thread = threading.Thread(
@@ -198,7 +200,8 @@ class SharedSlotVideoWorker:
 
     def is_idle(self) -> bool:
         """Return True when the worker has no queued packets left."""
-        return self._queue.qsize() == 0
+        with self._active_items_lock:
+            return self._queue.qsize() == 0 and self._active_items == 0
 
     def get_error(self) -> Exception | None:
         """Return the worker error, if the background thread failed."""
@@ -219,6 +222,8 @@ class SharedSlotVideoWorker:
             try:
                 if item is None:
                     break
+                with self._active_items_lock:
+                    self._active_items += 1
                 try:
                     self._process_item(item)
                 except Exception as exc:
@@ -226,6 +231,9 @@ class SharedSlotVideoWorker:
                         self._error = exc
                     logger.exception("Shared-slot video worker failed")
                     break
+                finally:
+                    with self._active_items_lock:
+                        self._active_items = max(0, self._active_items - 1)
             finally:
                 self._queue.task_done()
 
@@ -379,6 +387,25 @@ class SharedSlotVideoTransport:
 
         raise RuntimeError(
             "Timed out waiting for shared-slot transport to drain before close"
+        )
+
+    def wait_until_payload_handed_off(self, timeout_s: float = 30.0) -> None:
+        """Wait until queued payloads have been copied and descriptor-enqueued."""
+        deadline = time.monotonic() + timeout_s
+
+        while time.monotonic() < deadline:
+            if self._worker.get_error() is not None:
+                raise RuntimeError(
+                    "Shared-slot transport worker failed before payload handoff completed"
+                )
+
+            if self._worker.is_idle():
+                return
+
+            time.sleep(0.01)
+
+        raise RuntimeError(
+            "Timed out waiting for shared-slot payload handoff before stop"
         )
 
     def close(self) -> None:

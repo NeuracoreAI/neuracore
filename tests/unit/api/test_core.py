@@ -160,3 +160,38 @@ def test_update_robot_name_forwards_arguments(monkeypatch):
     robot_id = nc.update_robot_name("old", "new")
 
     assert robot_id == "robot_id_123"
+
+
+def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
+    calls: list[tuple[str, bool]] = []
+    active_trace_rows = iter(([{"id": "trace-1"}], []))
+
+    class _FakeRobot:
+        def is_recording(self) -> bool:
+            return True
+
+        def get_current_recording_id(self) -> str:
+            return "rec-123"
+
+        def stop_recording(
+            self,
+            recording_id: str,
+            *,
+            wait_for_producer_drain: bool = True,
+        ) -> None:
+            calls.append((recording_id, wait_for_producer_drain))
+
+    monkeypatch.setattr(api_core, "_get_robot", lambda robot_name, instance: _FakeRobot())
+    monkeypatch.setattr(
+        api_core.backend_utils,
+        "get_active_data_traces",
+        lambda recording_id: next(active_trace_rows),
+    )
+
+    nc.stop_recording(wait=False)
+    nc.stop_recording(wait=True)
+
+    assert calls == [
+        ("rec-123", False),
+        ("rec-123", True),
+    ]

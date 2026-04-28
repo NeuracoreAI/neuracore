@@ -12,8 +12,8 @@ from neuracore.data_daemon.communications_management.producer_channel import (
 )
 from neuracore.data_daemon.const import (
     DEFAULT_VIDEO_CHUNK_SIZE,
-    DEFAULT_VIDEO_RING_BUFFER_SIZE,
     DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
+    DEFAULT_VIDEO_SLOT_SIZE,
 )
 
 
@@ -49,6 +49,7 @@ class _FakeProducerChannel:
         )
         self.reopened_ring_buffer_sizes: list[int] = []
         self.send_data_parts_calls: list[dict[str, object]] = []
+        self.cleanup_wait_for_slot_drain_calls: list[bool] = []
         self.trace_id = None
         _FakeProducerChannel.instances.append(self)
 
@@ -90,7 +91,12 @@ class _FakeProducerChannel:
     def start_new_trace(self) -> None:
         self.trace_id = "trace-1"
 
-    def cleanup_producer_channel(self) -> None:
+    def cleanup_producer_channel(
+        self,
+        *,
+        wait_for_slot_drain: bool = True,
+    ) -> None:
+        self.cleanup_wait_for_slot_drain_calls.append(wait_for_slot_drain)
         return
 
     def send_data_parts(self, **kwargs: object) -> None:
@@ -138,7 +144,7 @@ def test_rgb_stream_uses_video_specific_producer_settings(monkeypatch) -> None:
     assert producer.data_type == DataType.RGB_IMAGES
     assert producer.chunk_size == DEFAULT_VIDEO_CHUNK_SIZE
     assert producer.send_queue_maxsize == DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE
-    assert producer.reopened_ring_buffer_sizes == [DEFAULT_VIDEO_RING_BUFFER_SIZE]
+    assert producer.reopened_ring_buffer_sizes == [DEFAULT_VIDEO_SLOT_SIZE]
 
 
 def test_rgb_stream_sends_frame_as_multipart_payload(monkeypatch) -> None:
@@ -180,3 +186,19 @@ def test_rgb_stream_sends_frame_as_multipart_payload(monkeypatch) -> None:
     assert isinstance(frame_view, memoryview)
     assert len(frame_view) == frame.nbytes
     assert total_bytes == len(header) + len(metadata_json) + frame.nbytes
+
+
+def test_stream_stop_recording_wait_false_skips_slot_drain(monkeypatch) -> None:
+    _FakeProducerChannel.instances.clear()
+    monkeypatch.setattr(
+        "neuracore.core.streaming.data_stream.ProducerChannel",
+        _FakeProducerChannel,
+    )
+
+    stream = RGBDataStream("front_camera", width=640, height=480)
+    stream.start_recording(_context())
+
+    producer = _FakeProducerChannel.instances[0]
+    stream.stop_recording(wait_for_drain=False)
+
+    assert producer.cleanup_wait_for_slot_drain_calls == [False]
