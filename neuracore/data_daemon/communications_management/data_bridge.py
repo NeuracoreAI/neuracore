@@ -183,6 +183,21 @@ class ChannelState:
         """Record one fully assembled shared-slot message."""
         self.shared_slot.completed_messages += 1
 
+    def uses_ring_buffer_transport(self) -> bool:
+        """Return True when the channel is active on ring-buffer transport."""
+        return self.transport_mode is TransportMode.RING_BUFFER
+
+    def uses_shared_slot_transport(self) -> bool:
+        """Return True when the channel is active on shared-slot transport."""
+        return self.transport_mode is TransportMode.SHARED_SLOT
+
+    def has_local_buffered_data(self) -> bool:
+        """Return True when the daemon still has unread local ring-buffer data."""
+        if not self.uses_ring_buffer_transport() or self.ring_buffer is None:
+            return False
+        available = getattr(self.ring_buffer, "available", None)
+        return bool(callable(available) and available() > 0)
+
     def clear_ring_buffer(self) -> None:
         """Close and forget the current transport state for this channel."""
         ring_buffer = self.ring_buffer
@@ -728,7 +743,9 @@ class Daemon:
 
     def _drain_single_channel_messages(self, channel: ChannelState) -> None:
         """Drain all currently-complete messages for a single channel."""
-        # guard against uninitialised channels
+        if not channel.uses_ring_buffer_transport():
+            return
+
         if channel.reader is None or channel.ring_buffer is None:
             return
 
@@ -843,7 +860,7 @@ class Daemon:
         suitable for use in a high-throughput system.
         """
         channel.touch()
-        if not channel.is_open():
+        if channel.transport_mode is TransportMode.NONE:
             channel.mark_socket_transport_open()
 
     def _register_trace(self, recording_id: str, trace_id: str) -> None:
@@ -1304,7 +1321,8 @@ class Daemon:
         )
         if channel is not None:
             channel.trace_id = None
-            self._shared_slot_handler.cleanup_channel_resources(channel)
+            if channel.uses_shared_slot_transport():
+                self._shared_slot_handler.cleanup_channel_resources(channel)
             channel.clear_ring_buffer()
 
     def _cleanup_expired_channels(self) -> None:
@@ -1338,11 +1356,8 @@ class Daemon:
 
             # If the daemon already has unread bytes queued locally, let the normal
             # drain step run before deciding to synthesize TRACE_END.
-            if state.ring_buffer is not None:
-                available = getattr(state.ring_buffer, "available", None)
-                if callable(available):
-                    if available() > 0:
-                        continue
+            if state.has_local_buffered_data():
+                continue
 
             to_remove.append(producer_id)
 
@@ -1370,7 +1385,8 @@ class Daemon:
                     self._producer_last_sequence_numbers.get(channel.producer_id, 0),
                     channel.last_sequence_number,
                 )
-            self._shared_slot_handler.cleanup_channel_resources(channel)
+            if channel.uses_shared_slot_transport():
+                self._shared_slot_handler.cleanup_channel_resources(channel)
             channel.clear_ring_buffer()
             del self.channels[producer_id]
             self._closed_producers.add(producer_id)
