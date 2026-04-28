@@ -178,15 +178,6 @@ class DiffusionPolicy(NeuracoreModel):
                 combined_stats = DataItemStats()
                 for stat in stats:
                     combined_stats = combined_stats.concatenate(stat.value)
-                data_stats[data_type] = combined_stats
-                output_stats.append(combined_stats)
-                dim = len(combined_stats.mean)
-                self.output_dims[data_type] = (
-                    current_output_dim,
-                    current_output_dim + dim,
-                )
-                current_output_dim += dim
-                self.max_output_size += dim
             elif data_type in [
                 DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
                 DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
@@ -198,15 +189,14 @@ class DiffusionPolicy(NeuracoreModel):
                 combined_stats = DataItemStats()
                 for stat in stats:
                     combined_stats = combined_stats.concatenate(stat.open_amount)
-                data_stats[data_type] = combined_stats
-                output_stats.append(combined_stats)
-                dim = len(combined_stats.mean)
-                self.output_dims[data_type] = (
-                    current_output_dim,
-                    current_output_dim + dim,
-                )
-                current_output_dim += dim
-                self.max_output_size += dim
+            else:
+                raise ValueError(f"Unsupported output data type: {data_type}")
+            data_stats[data_type] = combined_stats
+            output_stats.append(combined_stats)
+            dim = len(combined_stats.mean)
+            self.output_dims[data_type] = (current_output_dim, current_output_dim + dim)
+            current_output_dim += dim
+            self.max_output_size += dim
 
         # Setup normalizers
         # Only create proprio_normalizer if there are proprioception stats
@@ -315,6 +305,8 @@ class DiffusionPolicy(NeuracoreModel):
             DataType.JOINT_TORQUES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         ]:
+            if data_type not in self.input_data_types:
+                continue
             if data_type not in batch.inputs:
                 continue
 
@@ -482,15 +474,18 @@ class DiffusionPolicy(NeuracoreModel):
         # Normalize and combine joint states
         joint_states = self._combine_proprio(batch)
 
-        # Encode image features and concatenate them all together along
-        # with the state vector.
-        if DataType.RGB_IMAGES not in batch.inputs:
-            raise ValueError("Failed to find RGB images")
-        global_cond = self._prepare_global_conditioning(
-            joint_states,
-            batch.inputs[DataType.RGB_IMAGES],
-            batch.inputs_mask[DataType.RGB_IMAGES],
-        )  # (B, global_cond_dim)
+        # Build global conditioning from images (if available) or proprio only
+        if (
+            DataType.RGB_IMAGES in self.input_data_types
+            and DataType.RGB_IMAGES in batch.inputs
+        ):
+            global_cond = self._prepare_global_conditioning(
+                joint_states,
+                batch.inputs[DataType.RGB_IMAGES],
+                batch.inputs_mask[DataType.RGB_IMAGES],
+            )  # (B, global_cond_dim)
+        else:
+            global_cond = joint_states  # proprio-only conditioning
 
         # run sampling
         actions = self._conditional_sample(
@@ -563,20 +558,24 @@ class DiffusionPolicy(NeuracoreModel):
             batch_size=batch.batch_size,
         )
 
-        if DataType.RGB_IMAGES not in batch.inputs:
-            raise ValueError("Failed to find RGB images")
-
         joint_states = self._combine_proprio(inference_sample)
-        global_cond = self._prepare_global_conditioning(
-            joint_states,
-            batch.inputs[DataType.RGB_IMAGES],
-            batch.inputs_mask[DataType.RGB_IMAGES],
-        )
+        if (
+            DataType.RGB_IMAGES in self.input_data_types
+            and DataType.RGB_IMAGES in batch.inputs
+        ):
+            global_cond = self._prepare_global_conditioning(
+                joint_states,
+                batch.inputs[DataType.RGB_IMAGES],
+                batch.inputs_mask[DataType.RGB_IMAGES],
+            )
+        else:
+            global_cond = joint_states  # proprio-only conditioning
 
-        if set(batch.outputs.keys()) != set(self.output_data_types):
+        if not set(self.output_data_types).issubset(set(batch.outputs.keys())):
             raise ValueError(
-                "Batch outputs do not match model output configuration."
-                f" Expected {self.output_data_types}, got {list(batch.outputs.keys())}"
+                "Batch is missing required output types."
+                f" Model needs {self.output_data_types}, batch has "
+                f"{list(batch.outputs.keys())}"
             )
 
         # Concatenate all output actions
@@ -590,7 +589,8 @@ class DiffusionPolicy(NeuracoreModel):
                 DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             ]:
                 grippers = cast(
-                    list[BatchedParallelGripperOpenAmountData], batch.outputs[data_type]
+                    list[BatchedParallelGripperOpenAmountData],
+                    batch.outputs[data_type],
                 )
                 action_targets.extend([gripper.open_amount for gripper in grippers])
             else:

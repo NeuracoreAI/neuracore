@@ -244,13 +244,15 @@ class Pi0(NeuracoreModel):
             name="actions", statistics=output_stats
         )
 
-        # Setup RGB cameras
-        if DataType.RGB_IMAGES in self.input_data_types:
-            stats = cast(
+        # Track RGB camera statistics for optional image conditioning.
+        self.rgb_input_statistics: list[CameraDataStats] = (
+            cast(
                 list[CameraDataStats],
                 self.input_dataset_statistics[DataType.RGB_IMAGES],
             )
-        len(stats)
+            if DataType.RGB_IMAGES in self.input_data_types
+            else []
+        )
 
         # Build PI0 config
         self.config = PI0Config(
@@ -358,27 +360,36 @@ class Pi0(NeuracoreModel):
             DataType.JOINT_TORQUES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         ]:
-            if data_type not in batch.inputs:
+            if data_type not in self.input_data_types:
                 continue
 
-            batched_nc_data = batch.inputs[data_type]
-            mask = batch.inputs_mask[data_type]
+            if data_type in batch.inputs:
+                batched_nc_data = batch.inputs[data_type]
+                mask = batch.inputs_mask[data_type]
 
-            if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
-                batched_gripper_data = cast(
-                    list[BatchedParallelGripperOpenAmountData], batched_nc_data
-                )
-                proprio_data = torch.cat(
-                    [bgd.open_amount for bgd in batched_gripper_data], dim=-1
-                )
+                if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                    batched_gripper_data = cast(
+                        list[BatchedParallelGripperOpenAmountData], batched_nc_data
+                    )
+                    proprio_data = torch.cat(
+                        [bgd.open_amount for bgd in batched_gripper_data], dim=-1
+                    )
+                else:
+                    batched_joint_data = cast(list[BatchedJointData], batched_nc_data)
+                    proprio_data = torch.cat(
+                        [bjd.value for bjd in batched_joint_data], dim=-1
+                    )
+
+                last_proprio = proprio_data[:, -1, :]  # (B, num_features)
+                masked_proprio = last_proprio * mask
             else:
-                batched_joint_data = cast(list[BatchedJointData], batched_nc_data)
-                proprio_data = torch.cat(
-                    [bjd.value for bjd in batched_joint_data], dim=-1
+                start_idx, end_idx = self.proprio_dims[data_type]
+                dim = end_idx - start_idx
+                masked_proprio = torch.zeros(
+                    (len(batch), dim),
+                    dtype=torch.float32,
+                    device=self.device,
                 )
-
-            last_proprio = proprio_data[:, -1, :]  # (B, num_features)
-            masked_proprio = last_proprio * mask
             proprio_list.append(masked_proprio)
 
         # If no proprioception data is available, return None
@@ -419,6 +430,8 @@ class Pi0(NeuracoreModel):
             Tuple of (images, masks) where images is a list of tensors
             [B, C, H, W] per camera and masks is a list of [B] tensors.
         """
+        if DataType.RGB_IMAGES not in self.input_data_types:
+            return [], []
         if DataType.RGB_IMAGES not in batch.inputs:
             raise ValueError("RGB images are required but not provided")
 
@@ -451,7 +464,7 @@ class Pi0(NeuracoreModel):
             and mask is [B, L] attention mask.
         """
         batch_size = len(batch)
-        if DataType.LANGUAGE not in batch.inputs:
+        if DataType.LANGUAGE not in self.input_data_types:
             # Return zero tensor with appropriate dimensions if no language input
             # Use torch.long for token IDs (embedding layer expects integer indices)
             language_tokens = torch.zeros(
@@ -607,9 +620,9 @@ class Pi0(NeuracoreModel):
             self._build_inputs_from_batch(inference_sample)
         )
 
-        if set(batch.outputs.keys()) != set(self.output_data_types):
+        if not set(self.output_data_types).issubset(set(batch.outputs.keys())):
             raise ValueError(
-                "Batch outputs do not match model output configuration."
+                "Batch outputs do not include the model output configuration."
                 f" Expected {self.output_data_types}, got {list(batch.outputs.keys())}"
             )
 

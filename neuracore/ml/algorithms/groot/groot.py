@@ -303,11 +303,6 @@ class Groot(NeuracoreModel):
             current_dim += dim
 
         self.actual_state_dim = current_dim
-        assert self.actual_state_dim > 0, (
-            "GR00T N1.6 requires at least one proprioceptive input data type "
-            "(JOINT_POSITIONS, JOINT_VELOCITIES, JOINT_TORQUES, or "
-            "PARALLEL_GRIPPER_OPEN_AMOUNTS)."
-        )
         assert self.actual_state_dim <= max_state_dim, (
             f"Proprioceptive state dim {self.actual_state_dim} exceeds "
             f"max_state_dim={max_state_dim}"
@@ -356,8 +351,10 @@ class Groot(NeuracoreModel):
             f"max_action_dim={max_action_dim}"
         )
 
-        self.proprio_normalizer = PROPRIO_NORMALIZER(
-            name="proprioception", statistics=proprio_stats
+        self.proprio_normalizer = (
+            PROPRIO_NORMALIZER(name="proprioception", statistics=proprio_stats)
+            if proprio_stats
+            else None
         )
         self.action_normalizer = ACTION_NORMALIZER(
             name="actions", statistics=output_stats
@@ -611,21 +608,48 @@ class Groot(NeuracoreModel):
             DataType.JOINT_TORQUES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         ]:
-            if data_type not in batch.inputs:
+            if data_type not in self.input_data_types:
                 continue
-            mask = batch.inputs_mask[data_type]
-            if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
-                batched = cast(
-                    list[BatchedParallelGripperOpenAmountData],
-                    batch.inputs[data_type],
-                )
-                data = torch.cat([b.open_amount for b in batched], dim=-1)
+
+            if data_type in batch.inputs:
+                mask = batch.inputs_mask[data_type]
+                if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                    batched = cast(
+                        list[BatchedParallelGripperOpenAmountData],
+                        batch.inputs[data_type],
+                    )
+                    data = torch.cat([b.open_amount for b in batched], dim=-1)
+                else:
+                    batched = cast(list[BatchedJointData], batch.inputs[data_type])
+                    data = torch.cat([b.value for b in batched], dim=-1)
+                proprio = data[:, -1, :] * mask
             else:
-                batched = cast(list[BatchedJointData], batch.inputs[data_type])
-                data = torch.cat([b.value for b in batched], dim=-1)
-            proprio_list.append(data[:, -1, :] * mask)  # last timestep
+                start_idx, end_idx = self.proprio_dims[data_type]
+                dim = end_idx - start_idx
+                proprio = torch.zeros(
+                    (len(batch), dim),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+
+            proprio_list.append(proprio)  # last timestep / masked fallback
+
+        # If no proprioceptive inputs are requested, return zero state.
+        if not proprio_list:
+            return self._pad_state(
+                torch.zeros(
+                    (len(batch), self.actual_state_dim),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+            )
 
         all_proprio = torch.cat(proprio_list, dim=-1)  # (B, actual_state_dim)
+        if self.proprio_normalizer is None:
+            raise ValueError(
+                "Proprioceptive normalizer was not initialized despite "
+                "proprioceptive data being requested."
+            )
         normalized = self.proprio_normalizer.normalize(all_proprio)
         return self._pad_state(normalized)  # (B, max_state_dim)
 
@@ -640,7 +664,10 @@ class Groot(NeuracoreModel):
         Returns:
             Tuple of (pixel_values, input_ids, attention_mask).
         """
-        if DataType.RGB_IMAGES in batch.inputs:
+        if (
+            DataType.RGB_IMAGES in self.input_data_types
+            and DataType.RGB_IMAGES in batch.inputs
+        ):
             rgb_data = cast(list[BatchedRGBData], batch.inputs[DataType.RGB_IMAGES])
             num_cameras = len(rgb_data)
             pixel_values = self.image_processor.preprocess_images(rgb_data)
@@ -657,7 +684,10 @@ class Groot(NeuracoreModel):
             )
 
         language_data = None
-        if DataType.LANGUAGE in batch.inputs:
+        if (
+            DataType.LANGUAGE in self.input_data_types
+            and DataType.LANGUAGE in batch.inputs
+        ):
             language_data = cast(
                 list[BatchedLanguageData], batch.inputs[DataType.LANGUAGE]
             )
@@ -709,17 +739,25 @@ class Groot(NeuracoreModel):
             # that the input and output data indices are matching.
             start_idx, end_idx = self.output_dims[data_type]
             expected_dim = end_idx - start_idx
-            if input_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
-                batched = cast(
-                    list[BatchedParallelGripperOpenAmountData],
-                    batch.inputs[input_type],
-                )
-                data = torch.cat([b.open_amount for b in batched], dim=-1)
+            if input_type in self.input_data_types and input_type in batch.inputs:
+                if input_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                    batched = cast(
+                        list[BatchedParallelGripperOpenAmountData],
+                        batch.inputs[input_type],
+                    )
+                    data = torch.cat([b.open_amount for b in batched], dim=-1)
+                else:
+                    batched = cast(list[BatchedJointData], batch.inputs[input_type])
+                    data = torch.cat([b.value for b in batched], dim=-1)
+                current_data = data[:, -1, :expected_dim]  # (B, dim)
             else:
-                batched = cast(list[BatchedJointData], batch.inputs[input_type])
-                data = torch.cat([b.value for b in batched], dim=-1)
+                current_data = torch.zeros(
+                    (len(batch), expected_dim),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
             # Slice to match output dim (input may have more joints than output)
-            current_list.append(data[:, -1, :expected_dim])  # (B, dim)
+            current_list.append(current_data)  # (B, dim)
 
         return torch.cat(current_list, dim=-1)  # (B, actual_action_dim)
 
