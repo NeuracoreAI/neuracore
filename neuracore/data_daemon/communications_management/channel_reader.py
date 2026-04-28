@@ -12,9 +12,6 @@ from neuracore_types import DataType
 
 from neuracore.data_daemon.communications_management.ring_buffer import RingBuffer
 from neuracore.data_daemon.const import (
-    CHUNK_HEADER_FORMAT,
-    CHUNK_HEADER_SIZE,
-    DATA_TYPE_FIELD_SIZE,
     SHARED_RING_RECORD_HEADER_FORMAT,
     SHARED_RING_RECORD_HEADER_SIZE,
     SHARED_RING_RECORD_MAGIC,
@@ -159,79 +156,51 @@ class ChannelMessageReader:
 
     def poll_one(self) -> CompletedChannelMessage | None:
         """Try to read and assemble one complete message."""
-        available = self._ring_buffer.available()
-        if available < 4:
+        packet = self._ring_buffer.read_frame_packet()
+        if packet is None:
             return None
 
-        prefix = self._ring_buffer.peek(4)
-        if prefix is None:
-            return None
-
-        if prefix == SHARED_RING_RECORD_MAGIC:
-            if available < SHARED_RING_RECORD_HEADER_SIZE:
-                return None
-
-            header_bytes = self._ring_buffer.peek(SHARED_RING_RECORD_HEADER_SIZE)
-            if header_bytes is None:
-                return None
-
-            _magic, metadata_len, chunk_len = struct.unpack(
-                SHARED_RING_RECORD_HEADER_FORMAT,
-                header_bytes,
+        if len(packet) < SHARED_RING_RECORD_HEADER_SIZE:
+            raise ValueError(
+                "Shared ring packet shorter than header: "
+                f"packet_len={len(packet)} header_len={SHARED_RING_RECORD_HEADER_SIZE}"
             )
-            required = SHARED_RING_RECORD_HEADER_SIZE + metadata_len + chunk_len
-            if available < required:
-                return None
 
-            packet = self._ring_buffer.read(required)
-            if packet is None:
-                return None
-
-            metadata_bytes = packet[
-                SHARED_RING_RECORD_HEADER_SIZE : SHARED_RING_RECORD_HEADER_SIZE
-                + metadata_len
-            ]
-            chunk_metadata = SharedRingChunkMetadata.from_dict(
-                json.loads(metadata_bytes.decode("utf-8"))
+        magic, metadata_len, chunk_len = struct.unpack(
+            SHARED_RING_RECORD_HEADER_FORMAT,
+            packet[:SHARED_RING_RECORD_HEADER_SIZE],
+        )
+        if magic != SHARED_RING_RECORD_MAGIC:
+            raise ValueError(
+                "Invalid shared ring magic: "
+                f"expected={SHARED_RING_RECORD_MAGIC!r} actual={magic!r}"
             )
-            trace_id = chunk_metadata.trace_id
-            chunk_index = chunk_metadata.chunk_index
-            total_chunks = chunk_metadata.total_chunks
-            chunk_data = packet[SHARED_RING_RECORD_HEADER_SIZE + metadata_len :]
-        else:
-            if available < CHUNK_HEADER_SIZE:
-                return None
 
-            header_bytes = self._ring_buffer.peek(CHUNK_HEADER_SIZE)
-            if header_bytes is None:
-                return None
-
-            raw_trace_id, raw_data_type, chunk_index, total_chunks, chunk_len = (
-                struct.unpack(CHUNK_HEADER_FORMAT, header_bytes)
-            )
-            trace_id = raw_trace_id.rstrip(b"\x00").decode("utf-8", errors="ignore")
-            data_type_str = raw_data_type.rstrip(b"\x00").decode(
-                "utf-8", errors="ignore"
-            )
-            if len(data_type_str) > DATA_TYPE_FIELD_SIZE:
-                data_type_str = data_type_str[:DATA_TYPE_FIELD_SIZE]
-            try:
-                data_type = DataType(data_type_str)
-            except ValueError as exc:
+        required = SHARED_RING_RECORD_HEADER_SIZE + metadata_len + chunk_len
+        if len(packet) != required:
+            if len(packet) < required:
                 raise ValueError(
-                    f"Unknown data_type '{data_type_str}' for trace_id={trace_id}. "
-                ) from exc
+                    "Shared ring packet shorter than declared lengths: "
+                    f"packet_len={len(packet)} required={required} "
+                    f"metadata_len={metadata_len} chunk_len={chunk_len}"
+                )
+            raise ValueError(
+                "Shared ring packet has trailing bytes: "
+                f"packet_len={len(packet)} required={required} "
+                f"trailing_bytes={len(packet) - required}"
+            )
 
-            required = CHUNK_HEADER_SIZE + chunk_len
-            if available < required:
-                return None
-
-            packet = self._ring_buffer.read(required)
-            if packet is None:
-                return None
-
-            chunk_data = packet[CHUNK_HEADER_SIZE:]
-            chunk_metadata = None
+        metadata_start = SHARED_RING_RECORD_HEADER_SIZE
+        metadata_end = metadata_start + metadata_len
+        chunk_end = metadata_end + chunk_len
+        metadata_bytes = packet[metadata_start:metadata_end]
+        chunk_data = packet[metadata_end:chunk_end]
+        chunk_metadata = SharedRingChunkMetadata.from_dict(
+            json.loads(metadata_bytes.decode("utf-8"))
+        )
+        trace_id = chunk_metadata.trace_id
+        chunk_index = chunk_metadata.chunk_index
+        total_chunks = chunk_metadata.total_chunks
 
         partial_message = self._pending.get(trace_id)
         if partial_message is None:
@@ -264,7 +233,7 @@ class ChannelMessageReader:
         trace_metadata = partial_message.metadata
         if trace_metadata is not None:
             data_type = trace_metadata.data_type
-        elif chunk_metadata is not None:
+        else:
             raise ValueError(
                 f"Missing trace metadata for shared-ring trace_id={trace_id}."
             )

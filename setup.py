@@ -61,6 +61,8 @@ setup(
         "filelock>=3.0.0",
         "omegaconf",
         "msgpack",
+        "zerobuffer-ipc==1.2.8",
+        "posix-ipc==1.3.2"
     ],
     extras_require={
         "examples": [

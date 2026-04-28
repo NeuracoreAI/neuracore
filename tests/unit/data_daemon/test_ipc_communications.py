@@ -128,7 +128,12 @@ def test_message_envelope_round_trip_bytes() -> None:
     envelope = MessageEnvelope(
         producer_id="producer-abc",
         command=CommandType.OPEN_RING_BUFFER,
-        payload={"open_ring_buffer": {"size": 4096}},
+        payload={
+            "open_ring_buffer": {
+                "size": 4096,
+                "shared_memory_name": "test-envelope-round-trip",
+            }
+        },
     )
 
     parsed = MessageEnvelope.from_bytes(envelope.to_bytes())
@@ -302,7 +307,12 @@ def test_interleaved_chunks_reassemble_per_producer(
             MessageEnvelope(
                 producer_id=producer_id,
                 command=CommandType.OPEN_RING_BUFFER,
-                payload={"open_ring_buffer": {"size": 4096}},
+                payload={
+                    "open_ring_buffer": {
+                        "size": 4096,
+                        "shared_memory_name": f"test-open-{producer_id}",
+                    }
+                },
             ),
         )
 
@@ -426,7 +436,12 @@ def test_unknown_command_logs_warning_and_continues(
         MessageEnvelope(
             producer_id="producer-1",
             command=CommandType.OPEN_RING_BUFFER,
-            payload={"open_ring_buffer": {"size": 1024}},
+            payload={
+                "open_ring_buffer": {
+                    "size": 1024,
+                    "shared_memory_name": "test-handle-message",
+                }
+            },
         )
     )
     assert daemon.channels["producer-1"].ring_buffer is not None
@@ -478,7 +493,12 @@ def test_garbage_messages_are_logged_and_daemon_survives(
         MessageEnvelope(
             producer_id="prod",
             command=CommandType.OPEN_RING_BUFFER,
-            payload={"open_ring_buffer": {"size": 1024}},
+            payload={
+                "open_ring_buffer": {
+                    "size": 1024,
+                    "shared_memory_name": "test-process-raw",
+                }
+            },
         ).to_bytes()
     )
     raw = daemon_comm._consumer_socket.recv()

@@ -9,6 +9,7 @@ import uuid
 
 from neuracore.data_daemon.const import (
     SHARED_RING_RECORD_HEADER_FORMAT,
+    SHARED_RING_RECORD_HEADER_SIZE,
     SHARED_RING_RECORD_MAGIC,
 )
 from neuracore.data_daemon.models import OpenRingBufferModel
@@ -93,17 +94,25 @@ class ProducerSharedRingBufferTransport:
             raise RuntimeError("Shared ring buffer not initialized")
 
         metadata_bytes = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+        chunk_len = len(chunk)
+        packet_len = SHARED_RING_RECORD_HEADER_SIZE + len(metadata_bytes) + chunk_len
+        if packet_len > ring_buffer.size:
+            raise ValueError(
+                "Shared-ring record exceeds capacity: "
+                f"packet_len={packet_len} capacity={ring_buffer.size} "
+                f"metadata_len={len(metadata_bytes)} chunk_len={chunk_len}"
+            )
         packet = struct.pack(
             SHARED_RING_RECORD_HEADER_FORMAT,
             SHARED_RING_RECORD_MAGIC,
             len(metadata_bytes),
-            len(chunk),
+            chunk_len,
         ) + metadata_bytes + bytes(chunk)
         started_at = self._debug_helper.start_timer()
         ring_buffer.write(packet)
         self._debug_helper.record_shared_ring_write(
             started_at=started_at,
-            bytes_written=len(packet),
+            bytes_written=packet_len,
         )
 
     def get_stats(self) -> ProducerSharedRingBufferDebugStats:

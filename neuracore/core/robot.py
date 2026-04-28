@@ -355,21 +355,20 @@ class Robot:
     def _stop_all_streams(self) -> dict[str, int]:
         """Stop recording on all data streams for this robot instance."""
         producer_stop_sequence_numbers: dict[str, int] = {}
+
         for stream_id, stream in self._data_streams.items():
             try:
-                stream.stop_recording()
                 producer_channel = getattr(stream, "_producer_channel", None)
+
                 if isinstance(producer_channel, ProducerChannel):
-                    cutoff_sequence_number = (
-                        producer_channel.get_last_enqueued_sequence_number()
-                    )
+                    cutoff_sequence_number = producer_channel.get_last_enqueued_sequence_number()
+
                     drained = producer_channel.wait_until_sequence_sent(
                         cutoff_sequence_number
                     )
+
                     if not drained:
-                        sent_sequence_number = (
-                            producer_channel.get_last_sent_sequence_number()
-                        )
+                        sent_sequence_number = producer_channel.get_last_sent_sequence_number()
                         logger.warning(
                             "ProducerChannel %s sender stopped before draining cutoff "
                             "(requested=%s sent=%s); using sent cutoff",
@@ -382,8 +381,12 @@ class Robot:
                     producer_stop_sequence_numbers[producer_channel.channel_id] = (
                         cutoff_sequence_number
                     )
+
+                stream.stop_recording()
+
             except Exception:
                 logger.exception("Failed to stop data stream %s", stream_id)
+
         return producer_stop_sequence_numbers
 
     def is_recording(self) -> bool:

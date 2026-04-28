@@ -413,4 +413,5 @@ memfd
 CLOEXEC
 ftruncate
 RDWR
+zerobuffer
 

@@ -28,6 +28,8 @@ class CommandType(Enum):
     """Commands sent from the producer to the daemon."""
 
     OPEN_RING_BUFFER = "open_ring_buffer"
+    OPEN_FIXED_SHARED_SLOTS = "open_fixed_shared_slots"
+    SHARED_SLOT_DESCRIPTOR = "shared_slot_descriptor"
     HEARTBEAT = "heartbeat"
     DATA_CHUNK = "data_chunk"
     TRACE_END = "trace_end"
@@ -257,12 +259,23 @@ class OpenRingBufferModel(BaseModel):
     shared_memory_name: str | None = None
 
 
+class OpenFixedSharedSlotsModel(BaseModel):
+    """Model for the OPEN_FIXED_SHARED_SLOTS command."""
+
+    transport_mode: str = "FIXED_SHARED_SLOTS"
+    ack_endpoint: str
+    shm_name: str
+    slot_size: int
+    slot_count: int
+
+
 class ManagementModel(BaseModel):
     """Model for management commands from the producer to the daemon."""
 
     producer_id: str
     command: CommandType
     open_ring_buffer: OpenRingBufferModel | None = None
+    open_fixed_shared_slots: OpenFixedSharedSlotsModel | None = None
 
 
 @dataclass(frozen=True)
@@ -392,6 +405,70 @@ class SharedRingChunkMetadata:
         if self.trace_metadata is not None:
             payload.update(self.trace_metadata.to_dict())
         return payload
+
+
+@dataclass(frozen=True)
+class SharedSlotDescriptor:
+    """Descriptor for one packet stored in producer-owned shared memory."""
+
+    shm_name: str
+    slot_id: int
+    offset: int
+    length: int
+    sequence_id: int
+    slot_size: int
+    ack_endpoint: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SharedSlotDescriptor":
+        """Parse a shared-slot descriptor from a dict payload."""
+        return cls(
+            shm_name=str(data["shm_name"]),
+            slot_id=int(data["slot_id"]),
+            offset=int(data["offset"]),
+            length=int(data["length"]),
+            sequence_id=int(data["sequence_id"]),
+            slot_size=int(data["slot_size"]),
+            ack_endpoint=str(data["ack_endpoint"]),
+        )
+
+    def to_dict(self) -> dict[str, str | int]:
+        """Serialize the descriptor to a JSON-friendly dict."""
+        return {
+            "shm_name": self.shm_name,
+            "slot_id": self.slot_id,
+            "offset": self.offset,
+            "length": self.length,
+            "sequence_id": self.sequence_id,
+            "slot_size": self.slot_size,
+            "ack_endpoint": self.ack_endpoint,
+        }
+
+
+@dataclass(frozen=True)
+class SlotReleaseAck:
+    """Acknowledgement for one shared-memory slot release."""
+
+    shm_name: str
+    slot_id: int
+    sequence_id: int
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SlotReleaseAck":
+        """Parse a slot ACK from a dict payload."""
+        return cls(
+            shm_name=str(data["shm_name"]),
+            slot_id=int(data["slot_id"]),
+            sequence_id=int(data["sequence_id"]),
+        )
+
+    def to_dict(self) -> dict[str, str | int]:
+        """Serialize the ACK to a JSON-friendly dict."""
+        return {
+            "shm_name": self.shm_name,
+            "slot_id": self.slot_id,
+            "sequence_id": self.sequence_id,
+        }
 
 
 @dataclass
