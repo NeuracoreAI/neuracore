@@ -188,6 +188,7 @@ def test_rdm_stop_recording_drops_future_messages(
             data_type=DataType.JOINT_POSITIONS,
             data_type_name="joint_position",
             robot_instance=0,
+            sequence_number=0,
             data=_json_bytes({"x": 1}),
             final_chunk=False,
         )
@@ -212,6 +213,7 @@ def test_rdm_stop_recording_drops_future_messages(
             data_type=DataType.JOINT_POSITIONS,
             data_type_name="joint_position",
             robot_instance=0,
+            sequence_number=0,
             data=_json_bytes({"x": 2}),
             final_chunk=False,
         )
@@ -221,6 +223,51 @@ def test_rdm_stop_recording_drops_future_messages(
     after_files = sorted(p.name for p in trace_dir.rglob("*") if p.is_file())
     assert after_files == before_files
     assert len(written) == 1
+
+
+def test_rdm_stop_recording_drops_future_rgb_messages_and_cleans_spool(
+    rdm_module,
+    rdm_factory,
+    loop_manager_with_emitter: tuple[EventLoopManager, Emitter],
+) -> None:
+    _loop_manager, emitter = loop_manager_with_emitter
+    RdmEmitter = rdm_module.Emitter
+
+    rdm, recordings_root = rdm_factory(storage_limit=None, flush_bytes=1)
+
+    recording_id = str(uuid.uuid4())
+    trace_id = "camera_trace"
+
+    width = 2
+    height = 2
+    metadata = _json_bytes({
+        "timestamp": 1.23,
+        "width": width,
+        "height": height,
+        "encoding": "rgb24",
+        "frame_nbytes": width * height * 3,
+    })
+    frame_bytes = bytes(range(width * height * 3))
+    rgb_payload = len(metadata).to_bytes(4, "little") + metadata + frame_bytes
+
+    emitter.emit(RdmEmitter.STOP_ALL_TRACES_FOR_RECORDING, recording_id)
+    trace_dir = recordings_root / recording_id / "RGB_IMAGES" / trace_id
+
+    rdm.enqueue(
+        CompleteMessage.from_bytes(
+            producer_id="p",
+            recording_id=recording_id,
+            trace_id=trace_id,
+            data_type=DataType.RGB_IMAGES,
+            data_type_name="camera_0",
+            robot_instance=0,
+            sequence_number=0,
+            data=rgb_payload,
+            final_chunk=False,
+        )
+    )
+
+    assert _wait_for(lambda: not (trace_dir / "frames.rgb").exists(), timeout=5.0)
 
 
 def test_rdm_delete_trace_event_deletes_trace_dir(
@@ -252,6 +299,7 @@ def test_rdm_delete_trace_event_deletes_trace_dir(
                 data_type=DataType.JOINT_POSITIONS,
                 data_type_name="joint_position",
                 robot_instance=0,
+                sequence_number=0,
                 data=_json_bytes({"x": 1}),
                 final_chunk=False,
             )
@@ -313,6 +361,7 @@ def test_rdm_storage_limit_aborts_trace_and_emits_trace_written_zero(
             data_type=DataType.JOINT_POSITIONS,
             data_type_name="joint_position",
             robot_instance=0,
+            sequence_number=0,
             data=b"x" * 2048,
             final_chunk=False,
         )
@@ -364,6 +413,7 @@ def test_rdm_emits_trace_write_progress(
                 data_type=DataType.JOINT_POSITIONS,
                 data_type_name="joint_position",
                 robot_instance=0,
+                sequence_number=0,
                 data=_json_bytes({"x": 1}),
                 final_chunk=False,
             )
@@ -434,6 +484,7 @@ def test_rdm_encoder_creation_failure_aborts_one_trace_but_other_completes(
             data_type=DataType.JOINT_POSITIONS,
             data_type_name="joint_position",
             robot_instance=0,
+            sequence_number=0,
             data=_json_bytes({"x": 1}),
             final_chunk=False,
         )
@@ -446,6 +497,7 @@ def test_rdm_encoder_creation_failure_aborts_one_trace_but_other_completes(
             data_type=DataType.JOINT_POSITIONS,
             data_type_name="joint_position",
             robot_instance=0,
+            sequence_number=0,
             data=_json_bytes({"y": 2}),
             final_chunk=False,
         )

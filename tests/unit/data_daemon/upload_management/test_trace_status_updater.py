@@ -54,7 +54,9 @@ def mock_client_session():
 @pytest_asyncio.fixture
 async def trace_status_updater(mock_client_session, mock_auth_and_org):
     # Initialize the actual class with the mocked session
-    return TraceStatusUpdater(client_session=mock_client_session)
+    updater = TraceStatusUpdater(client_session=mock_client_session)
+    yield updater
+    await updater.shutdown()
 
 
 # --- Tests ---
@@ -340,3 +342,25 @@ async def test_completed_update_is_sent_earlier_than_in_progress(
 
     # Assert: request already sent (did NOT wait 1s)
     assert mock_client_session.put.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_pending_batch_tasks(
+    trace_status_updater: TraceStatusUpdater,
+) -> None:
+    TraceStatusUpdater.MINIMUM_REQUEST_INTERVAL_COMPLETE_S = 1000.0
+    TraceStatusUpdater.MINIMUM_REQUEST_INTERVAL_IN_PROGRESS_S = 1000.0
+
+    await asyncio.wait_for(
+        trace_status_updater.update_trace_progress(
+            "rec-1", "trace-1", 100, wait_for_completion=False
+        ),
+        timeout=0.01,
+    )
+
+    assert len(trace_status_updater._batch_update_tasks) == 1
+    await trace_status_updater.shutdown()
+
+    assert trace_status_updater._pending_update_batch == {}
+    assert trace_status_updater._in_progress_updates == {}
+    assert trace_status_updater._batch_update_tasks == set()

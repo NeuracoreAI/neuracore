@@ -2,6 +2,7 @@
 
 # cspell:ignore getfixturevalue
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
 from pytest import FixtureRequest
@@ -18,3 +19,12 @@ def emitter(request: FixtureRequest) -> Generator[Emitter, None, None]:
     test_emitter = init_emitter(loop=runner.get_loop())
     yield test_emitter
     test_emitter.remove_all_listeners()
+
+
+@pytest.fixture(scope="function", autouse=True)
+def isolated_recordings_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep daemon-owned spool files inside pytest temp directories."""
+    monkeypatch.setenv(
+        "NEURACORE_DAEMON_RECORDINGS_ROOT",
+        str(tmp_path / "recordings"),
+    )

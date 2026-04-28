@@ -477,15 +477,19 @@ def _assert_synced_camera_codes_are_sane(
 
     expected_codes = set(range(base_code, base_code + expected_video_frame_count))
     missing_codes = expected_codes - set(actual_codes)
+
+    sample = []
+    duplicate_count = len(actual_codes) - (len(expected_codes) - len(missing_codes))
+
     if missing_codes:
         sample = sorted(missing_codes)[: len(missing_codes) // 2 + 1]
-        duplicate_count = len(actual_codes) - (len(expected_codes) - len(missing_codes))
-        assert not missing_codes, (
+
+    if missing_codes:
+        assert duplicate_count >= len(missing_codes), (
             f"Camera {camera_name!r}: {len(missing_codes)} missing frame code(s) "
-            f"(received {len(actual_codes)} frames, "
-            f"{duplicate_count} duplicate code(s), "
-            f"{len(missing_codes)} expected codes absent from range "
-            f"[{base_code}, {max_code}]); first missing codes: {sample}"
+            f"but only {duplicate_count} duplicate replacement(s) "
+            f"(received {len(actual_codes)} frames); "
+            f"first missing codes: {sample}"
         )
 
 

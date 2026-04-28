@@ -116,3 +116,40 @@ def test_main_still_shuts_down_after_keyboard_interrupt(
     runtime.shutdown.assert_called_once()
     assert "Received keyboard interrupt" in caplog.text
     assert shutdown_calls == [(pid_path, (runner_entry.SOCKET_PATH,), db_path)]
+
+
+def test_main_logs_fatal_error_when_run_forever_crashes(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    pid_path: Path,
+    db_path: Path,
+) -> None:
+    runtime = MagicMock()
+    runtime.initialize.return_value = DaemonContext(
+        config=MagicMock(),
+        loop_manager=MagicMock(),
+        comm_manager=MagicMock(),
+        services=MagicMock(),
+        recording_disk_manager=MagicMock(),
+    )
+    runtime.run_forever.side_effect = RuntimeError("boom")
+
+    monkeypatch.setattr(runner_entry, "get_daemon_pid_path", lambda: pid_path)
+    monkeypatch.setattr(runner_entry, "get_daemon_db_path", lambda: db_path)
+    monkeypatch.setattr(runner_entry, "DaemonRuntime", lambda **_: runtime)
+    monkeypatch.setattr(runner_entry, "install_signal_handlers", lambda *_: None)
+    shutdown_calls: list[tuple[Path, tuple[Path, ...], Path]] = []
+    monkeypatch.setattr(
+        runner_entry,
+        "shutdown",
+        lambda *, pid_path, socket_paths, db_path: shutdown_calls.append(
+            (pid_path, socket_paths, db_path)
+        ),
+    )
+
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="boom"):
+        runner_entry.main()
+
+    runtime.shutdown.assert_called_once()
+    assert "Fatal error while daemon main loop was running" in caplog.text
+    assert shutdown_calls == [(pid_path, (runner_entry.SOCKET_PATH,), db_path)]

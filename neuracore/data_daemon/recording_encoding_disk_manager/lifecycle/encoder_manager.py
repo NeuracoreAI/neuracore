@@ -15,7 +15,7 @@ from neuracore.data_daemon.recording_encoding_disk_manager.encoding.video_trace 
 )
 
 from ..core.trace_filesystem import _TraceFilesystem
-from ..core.types import _TraceKey
+from ..core.types import TraceKey
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ class _EncoderManager:
         self,
         *,
         filesystem: _TraceFilesystem,
-        abort_trace: Callable[[_TraceKey], None],
+        abort_trace: Callable[[TraceKey], None],
         emitter: Emitter,
     ) -> None:
         """Initialise _EncoderManager.
@@ -48,12 +48,12 @@ class _EncoderManager:
         self._filesystem = filesystem
         self._abort_trace = abort_trace
 
-        self._encoders: dict[_TraceKey, JsonTrace | VideoTrace] = {}
+        self._encoders: dict[TraceKey, JsonTrace | VideoTrace] = {}
 
         self._emitter = emitter
         self._emitter.on(Emitter.TRACE_ABORTED, self._on_trace_aborted)
 
-    def _on_trace_aborted(self, trace_key: _TraceKey) -> None:
+    def _on_trace_aborted(self, trace_key: TraceKey) -> None:
         """Handle TRACE_ABORTED event.
 
         Args:
@@ -68,7 +68,7 @@ class _EncoderManager:
                     "Encoder finish failed during abort for trace %s", trace_key
                 )
 
-    def _get_encoder(self, trace_key: _TraceKey) -> JsonTrace | VideoTrace:
+    def _get_encoder(self, trace_key: TraceKey) -> JsonTrace | VideoTrace:
         """Get or create the encoder instance for a trace.
 
         Args:
@@ -97,7 +97,7 @@ class _EncoderManager:
         self._encoders[trace_key] = created_encoder
         return created_encoder
 
-    def safe_get_encoder(self, trace_key: _TraceKey) -> JsonTrace | VideoTrace | None:
+    def safe_get_encoder(self, trace_key: TraceKey) -> JsonTrace | VideoTrace | None:
         """Get or create an encoder for a trace, converting failures into a trace abort.
 
         Args:
@@ -112,7 +112,7 @@ class _EncoderManager:
             self._abort_trace(trace_key)
             return None
 
-    def pop_encoder(self, trace_key: _TraceKey) -> JsonTrace | VideoTrace | None:
+    def pop_encoder(self, trace_key: TraceKey) -> JsonTrace | VideoTrace | None:
         """Remove and return an encoder for a trace if present.
 
         Args:
@@ -123,7 +123,7 @@ class _EncoderManager:
         """
         return self._encoders.pop(trace_key, None)
 
-    def clear_all_encoders(self) -> list[tuple[_TraceKey, JsonTrace | VideoTrace]]:
+    def clear_all_encoders(self) -> list[tuple[TraceKey, JsonTrace | VideoTrace]]:
         """Remove and return all active encoders.
 
         Returns:

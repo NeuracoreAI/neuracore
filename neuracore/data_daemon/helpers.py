@@ -1,10 +1,13 @@
 """Helper functions for the data daemon."""
 
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 from neuracore.data_daemon.const import DEFAULT_DAEMON_DB_PATH
+
+logger = logging.getLogger(__name__)
 
 
 def get_daemon_pid_path() -> Path:
@@ -21,6 +24,18 @@ def get_daemon_pid_path() -> Path:
             str(Path.home() / ".neuracore" / "daemon.pid"),
         )
     )
+
+
+def env_float(name: str, default: float) -> float:
+    """Read a float override from the environment, falling back safely."""
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %s", name, raw, default)
+        return float(default)
 
 
 def get_daemon_db_path() -> Path:

@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from neuracore.data_daemon.communications_management.communications_manager import (
-    CommunicationsManager,
-    MessageEnvelope,
-)
 from neuracore.data_daemon.models import CommandType
+
+from .communications_manager import CommunicationsManager, MessageEnvelope
 
 
 class RecordingContext:
