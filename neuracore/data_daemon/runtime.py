@@ -8,24 +8,35 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from neuracore.core.auth import login
-from neuracore.data_daemon.communications_management.communications_manager import (
-    CommunicationsManager,
+from neuracore.data_daemon.communications_management.consumer.data_bridge import (
+    DataBridge,
 )
-from neuracore.data_daemon.communications_management.data_bridge import Daemon
+from neuracore.data_daemon.communications_management.shared_transport import (
+    communications_manager,
+)
 from neuracore.data_daemon.config_manager.config import ConfigManager
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.config_manager.profiles import (
     ProfileAlreadyExist,
     ProfileManager,
 )
-from neuracore.data_daemon.const import DEFAULT_PROFILE_NAME
+from neuracore.data_daemon.const import (
+    DEFAULT_PROFILE_NAME,
+    DEFAULT_SHARED_MEMORY_SIZE,
+    DEFAULT_VIDEO_SLOT_COUNT,
+    DEFAULT_VIDEO_SLOT_SIZE,
+)
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.helpers import is_debug_mode
 from neuracore.data_daemon.lifecycle.daemon_os_control import acquire_pid_file
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
     cleanup_socket_files,
+    cleanup_stale_shared_memory_buffers,
+    cleanup_stale_shared_slot_segments,
     reconcile_state_with_filesystem,
+    shared_memory_free_bytes,
+    shared_memory_required_bytes,
     validate_or_recover_sqlite,
 )
 from neuracore.data_daemon.recording_encoding_disk_manager import (
@@ -35,6 +46,7 @@ from neuracore.data_daemon.services import DaemonServices
 from neuracore.data_daemon.tools.event_logger import EventLogger
 
 logger = logging.getLogger(__name__)
+CommunicationsManager = communications_manager.CommunicationsManager
 
 
 @dataclass
@@ -64,7 +76,7 @@ class DaemonRuntime:
         self._socket_paths = socket_paths
         self._manage_pid = os.environ.get("NEURACORE_DAEMON_MANAGE_PID", "1") != "0"
         self._context: DaemonContext | None = None
-        self._daemon: Daemon | None = None
+        self._daemon: DataBridge | None = None
         self._event_logger: EventLogger | None = None
 
     def _get_recordings_root(self, config: DaemonConfig) -> Path:
@@ -76,11 +88,54 @@ class DaemonRuntime:
         if self._manage_pid:
             acquire_pid_file(self._pid_path)
 
+        cleaned_shared_buffers = cleanup_stale_shared_memory_buffers()
+        if cleaned_shared_buffers:
+            logger.info(
+                "Recovered %d stale shared-memory allocation(s) from /dev/shm",
+                cleaned_shared_buffers,
+            )
+
+        cleaned_shared_slots = cleanup_stale_shared_slot_segments()
+        if cleaned_shared_slots:
+            logger.info(
+                "Recovered %d stale shared-slot segment(s) from /dev/shm",
+                cleaned_shared_slots,
+            )
+
         cleanup_socket_files(self._socket_paths)
 
         sqlite_ok = validate_or_recover_sqlite(self._db_path, recover=True)
         if not sqlite_ok:
             logger.warning("SQLite recovered by rotation; new DB will be created.")
+
+        try:
+            free_shared_bytes = shared_memory_free_bytes()
+            min_required_bytes = shared_memory_required_bytes(
+                DEFAULT_SHARED_MEMORY_SIZE,
+                metadata_size=4096,
+            )
+            video_required_bytes = shared_memory_required_bytes(
+                DEFAULT_VIDEO_SLOT_SIZE * DEFAULT_VIDEO_SLOT_COUNT,
+                metadata_size=4096,
+            )
+            if free_shared_bytes < min_required_bytes:
+                logger.warning(
+                    "Shared-memory startup preflight: only %d bytes free in /dev/shm; "
+                    "%d bytes are required for default shared memory. "
+                    "New shared-memory sessions will fail until space is reclaimed.",
+                    free_shared_bytes,
+                    min_required_bytes,
+                )
+            elif free_shared_bytes < video_required_bytes:
+                logger.warning(
+                    "Shared-memory startup preflight: %d bytes free in /dev/shm; "
+                    "default non-video traffic fits, but default video shared "
+                    "memory needs %d bytes.",
+                    free_shared_bytes,
+                    video_required_bytes,
+                )
+        except Exception:
+            logger.exception("Failed shared-memory startup preflight")
 
         recordings_root = self._get_recordings_root(config)
         recordings_root.mkdir(parents=True, exist_ok=True)
@@ -281,7 +336,7 @@ class DaemonRuntime:
 
         logger.debug("[8/8] Creating communications runtime...")
         comm_manager = CommunicationsManager()
-        self._daemon = Daemon(
+        self._daemon = DataBridge(
             recording_disk_manager=recording_disk_manager,
             emitter=emitter,
             comm_manager=comm_manager,
@@ -335,6 +390,13 @@ class DaemonRuntime:
 
         self._daemon = None
         self._context = None
+
+        cleaned_shared_slots = cleanup_stale_shared_slot_segments()
+        if cleaned_shared_slots:
+            logger.info(
+                "Cleaned %d shared-slot segment(s) during daemon shutdown",
+                cleaned_shared_slots,
+            )
 
         logger.info("Daemon runtime shutdown complete")
 

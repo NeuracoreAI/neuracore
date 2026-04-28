@@ -92,13 +92,17 @@ def cleanup_stale_client_state(
     if existing_pid is None and not pid_file_present and not sockets_present:
         return
 
-    from neuracore.data_daemon.lifecycle.runtime_recovery import shutdown
+    from neuracore.data_daemon.lifecycle.runtime_recovery import (
+        cleanup_stale_shared_slot_segments,
+        shutdown,
+    )
 
     shutdown(
         pid_path=pid_path,
         socket_paths=tuple(Path(path) for path in socket_paths),
         db_path=db_path,
     )
+    cleanup_stale_shared_slot_segments()
 
 
 def _build_daemon_runner_command() -> list[str]:
@@ -132,6 +136,8 @@ def _start_daemon_subprocess(
     db_path: Path,
     background: bool,
     env_overrides: dict[str, str] | None = None,
+    stdout: int | None = None,
+    stderr: int | None = None,
 ) -> subprocess.Popen:
     """Start the daemon runner subprocess with the requested terminal mode."""
     environment = _build_daemon_launch_env(
@@ -150,8 +156,8 @@ def _start_daemon_subprocess(
                 env=environment,
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL if stdout is None else stdout,
+                stderr=subprocess.DEVNULL if stderr is None else stderr,
             )
 
         return subprocess.Popen(
@@ -160,6 +166,8 @@ def _start_daemon_subprocess(
             cwd=current_working_directory,
             env=environment,
             start_new_session=False,
+            stdout=stdout,
+            stderr=stderr,
         )
     except OSError as error:
         raise RuntimeError(f"Failed to start daemon: {error}") from error
@@ -170,8 +178,10 @@ def launch_daemon_subprocess(
     pid_path: Path,
     db_path: Path,
     background: bool = True,
-    timeout_s: float = 5.0,
+    timeout_s: float = 10.0,
     env_overrides: dict[str, str] | None = None,
+    stdout: int | None = None,
+    stderr: int | None = None,
 ) -> subprocess.Popen:
     """Launch the daemon runner subprocess and poll until it is ready."""
     pid_path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,6 +191,8 @@ def launch_daemon_subprocess(
         db_path=db_path,
         background=background,
         env_overrides=env_overrides,
+        stdout=stdout,
+        stderr=stderr,
     )
 
     socket_poll_interval_s = 0.05
@@ -211,8 +223,10 @@ def launch_new_daemon_subprocess(
     pid_path: Path,
     db_path: Path,
     background: bool,
-    timeout_s: float = 5.0,
+    timeout_s: float = 10.0,
     env_overrides: dict[str, str] | None = None,
+    stdout: int | None = None,
+    stderr: int | None = None,
 ) -> subprocess.Popen:
     """Launch a new daemon subprocess, rejecting an already-running daemon."""
     pid_path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,12 +249,14 @@ def launch_new_daemon_subprocess(
             background=background,
             timeout_s=timeout_s,
             env_overrides=env_overrides,
+            stdout=stdout,
+            stderr=stderr,
         )
 
 
 def ensure_daemon_running(
     *,
-    timeout_s: float = 5.0,
+    timeout_s: float = 10.0,
     env_overrides: dict[str, str] | None = None,
 ) -> int:
     """Ensure the data daemon is running and ready to accept connections."""
