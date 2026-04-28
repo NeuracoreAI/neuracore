@@ -50,64 +50,32 @@ jobs:
 
     - name: Get PRs merged to main since last release
       id: get_prs
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const tag = '${{ steps.get_tag.outputs.latest_tag }}';
+      run: |
+        TAG="${{ steps.get_tag.outputs.latest_tag }}"
 
-          // Get the tag commit date
-          const tagCommit = await github.rest.repos.getCommit({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            ref: tag
-          });
+        echo "Finding PRs in git history since tag: $TAG"
 
-          const tagDate = tagCommit.data.commit.committer.date;
-          console.log(`Tag ${tag} was created at: ${tagDate}`);
+        PR_NUMBERS=$(
+          git log "$TAG..HEAD" --pretty=format:%s |
+          grep -oE '\(#[0-9]+\)' |
+          grep -oE '[0-9]+' |
+          sort -n |
+          uniq |
+          jq -R . |
+          jq -s -c .
+        )
 
-          // Search for PRs merged to main after the tag date
-          const query = `repo:${context.repo.owner}/${context.repo.repo} is:pr is:merged base:main merged:>${tagDate}`;
-          console.log(`Search query: ${query}`);
-
-          let allPRs = [];
-          let page = 1;
-          let hasMore = true;
-
-          while (hasMore) {
-            const searchResult = await github.rest.search.issuesAndPullRequests({
-              q: query,
-              sort: 'updated',
-              order: 'asc',
-              per_page: 100,
-              page: page
-            });
-
-            allPRs = allPRs.concat(searchResult.data.items);
-            hasMore = searchResult.data.items.length === 100;
-            page++;
-
-            if (page > 10) {
-              console.log('Warning: More than 1000 PRs found, stopping pagination');
-              break;
-            }
-          }
-
-          const prNumbers = allPRs.map(pr => pr.number);
-
-          if (prNumbers.length === 0) {
-            core.setFailed(`No merged PRs found on main since ${tag}`);
-            return [];
-          }
-
-          console.log(`Found ${prNumbers.length} merged PRs to main: ${prNumbers.join(', ')}`);
-          return prNumbers;
+        echo "Found PRs: $PR_NUMBERS"
+        echo "pr_numbers=$PR_NUMBERS" >> "$GITHUB_OUTPUT"
 
     - name: Fetch PR data and determine version bump
       id: analyze
       uses: actions/github-script@v7
+      env:
+        PR_NUMBERS: ${{ steps.get_prs.outputs.pr_numbers || '[]' }}
       with:
         script: |
-          const prNumbers = ${{ steps.get_prs.outputs.result }};
+          const prNumbers = JSON.parse(process.env.PR_NUMBERS);
           const versionLabels = ['version:major', 'version:minor', 'version:patch', 'version:none'];
           const versionPriority = { 'major': 4, 'minor': 3, 'patch': 2, 'none': 1 };
 
