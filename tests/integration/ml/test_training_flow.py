@@ -58,18 +58,25 @@ def _indexed_names(names: list[str] | tuple[str, ...]) -> dict[int, str]:
     return {index: name for index, name in enumerate(names)}
 
 
-INPUT_DATA_SPEC = {
+INPUT_EMBODIMENT_DESCRIPTION = {
     DataType.RGB_IMAGES: {0: NC_CAM_NAME},
     DataType.JOINT_POSITIONS: _indexed_names(JOINT_NAMES),
 }
-OUTPUT_DATA_SPEC = {
+OUTPUT_EMBODIMENT_DESCRIPTION = {
     DataType.JOINT_POSITIONS: _indexed_names(JOINT_NAMES),
 }
 
-INPUT_DATA_TYPES = [
-    DataType.RGB_IMAGES,
+INPUT_DATA_TYPES = {
     DataType.JOINT_POSITIONS,
-]
+    DataType.JOINT_VELOCITIES,
+    DataType.JOINT_TORQUES,
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+    DataType.POSES,
+    DataType.RGB_IMAGES,
+    DataType.DEPTH_IMAGES,
+    DataType.POINT_CLOUDS,
+    DataType.LANGUAGE,
+}
 
 # "auto" lets the backend select an appropriate batch size automatically
 CNNMLP_CONFIG = {
@@ -110,7 +117,10 @@ def _make_sync_point(obs) -> SynchronizedPoint:
 
 
 def _collect_demo_data(
-    robot_name: str, dataset_name: str, num_episodes: int = 3, instance_id: int = 0
+    robot_name: str,
+    dataset_name: str,
+    num_episodes: int = 3,
+    instance_id: int = 0,
 ) -> Dataset:
     """Collect scripted demonstrations and log them to neuracore.
 
@@ -128,11 +138,13 @@ def _collect_demo_data(
         logger.info(f"Collecting episode {ep_idx + 1}/{num_episodes}")
         action_traj = rollout_policy()
         nc.start_recording(robot_name=robot_name, instance=instance_id)
+
         for frame_idx, action_dict in enumerate(action_traj):
             t = time.time()
             joint_positions = {
                 k: v for k, v in action_dict.items() if "gripper" not in k
             }
+
             nc.log_joint_positions(
                 joint_positions,
                 timestamp=t,
@@ -151,8 +163,82 @@ def _collect_demo_data(
             nc.log_joint_target_positions(
                 action_dict, timestamp=t, robot_name=robot_name, instance=instance_id
             )
+
+            nc.log_joint_velocities(
+                {name: float(value) * 0.01 for name, value in joint_positions.items()},
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+            nc.log_joint_torques(
+                {name: float(value) * 0.02 for name, value in joint_positions.items()},
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+            nc.log_parallel_gripper_open_amounts(
+                {
+                    "left_gripper": min(0.4 + 0.01 * frame_idx, 1.0),
+                    "right_gripper": min(0.6 + 0.01 * frame_idx, 1.0),
+                },
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+            nc.log_pose(
+                "ee_pose",
+                np.array(
+                    [
+                        0.4 + 0.01 * frame_idx,
+                        0.3,
+                        0.2,
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                    ],
+                    dtype=np.float32,
+                ),
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+
+            depth = np.ones((240, 320), dtype=np.float32) * (0.5 + 0.01 * frame_idx)
+            nc.log_depth(
+                "depth_camera",
+                depth,
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+
+            points = np.array(
+                [
+                    [float(frame_idx), 0.0, 0.0],
+                    [float(frame_idx) + 0.1, 0.1, 0.2],
+                ],
+                dtype=np.float16,
+            )
+            nc.log_point_cloud(
+                "lidar",
+                points,
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+            nc.log_language(
+                name="instruction",
+                language=f"Episode {ep_idx + 1}, frame {frame_idx}",
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+
         nc.stop_recording(wait=True, robot_name=robot_name, instance=instance_id)
         logger.info(f"Episode {ep_idx + 1} recorded ({len(action_traj)} frames)")
+        # Sleep so that data daemon uploads all episodes before next step
+        time.sleep(2)
     return dataset
 
 
@@ -313,9 +399,10 @@ def test_training_flow():
                 embodiment_description = dataset.get_full_embodiment_description(
                     robot_id
                 )
-                assert (
-                    DataType.JOINT_POSITIONS in embodiment_description
-                ), f"JOINT_POSITIONS missing from robot {robot_id} data spec"
+                assert DataType.JOINT_POSITIONS in embodiment_description, (
+                    f"JOINT_POSITIONS missing from robot {robot_id}"
+                    " embodiment_description"
+                )
 
                 input_cross_embodiment_description[robot_id] = {
                     DataType.JOINT_POSITIONS: embodiment_description[
@@ -428,10 +515,7 @@ def test_training_flow():
             assert resumed_job["status"] in {
                 "PENDING",
                 "RUNNING",
-            }, (
-                "Expected PENDING/RUNNING after resume, got: "
-                f"{resumed_job['status']!r}"
-            )
+            }, f"Expected PENDING/RUNNING after resume, got: {resumed_job['status']!r}"
             assert resumed_job.get(
                 "resume_points"
             ), "Expected non-empty resume_points after resume"
@@ -465,8 +549,8 @@ def test_training_flow():
         try:
             nc.connect_robot(MUJOCO_ROBOT_NAME)
             policy = nc.policy(
-                input_embodiment_description=INPUT_DATA_SPEC,
-                output_embodiment_description=OUTPUT_DATA_SPEC,
+                input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+                output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
                 train_run_name=training_name,
             )
             _run_policy_inference(policy)
@@ -478,8 +562,8 @@ def test_training_flow():
         # ------------------------------------------------------------------
         try:
             policy = nc.policy_local_server(
-                input_embodiment_description=INPUT_DATA_SPEC,
-                output_embodiment_description=OUTPUT_DATA_SPEC,
+                input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+                output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
                 train_run_name=training_name,
                 port=8181,
             )
@@ -495,8 +579,8 @@ def test_training_flow():
             endpoint_data = nc.deploy_model(
                 job_id=job_id,
                 name=endpoint_name,
-                input_embodiment_description=INPUT_DATA_SPEC,
-                output_embodiment_description=OUTPUT_DATA_SPEC,
+                input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+                output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
                 ttl=60 * 30,
             )
             endpoint_id = endpoint_data["id"]
@@ -554,32 +638,42 @@ def test_training_failure_error_reporting():
     dataset_name = _unique_name("failure_report_test")
 
     try:
-        dataset = _collect_demo_data(
-            ROBOT_NAME, dataset_name, num_episodes=1, instance_id=1
-        )
-    except Exception as e:
-        pytest.fail(f"Data collection failed: {e}")
+        try:
+            dataset = _collect_demo_data(
+                ROBOT_NAME, dataset_name, num_episodes=1, instance_id=1
+            )
+        except Exception as e:
+            pytest.fail(f"Data collection failed: {e}")
 
         # ------------------------------------------------------------------
-        # Build a per-robot data spec from the collected dataset
+        # Build a per-robot embodiment_description from the collected dataset
         # ------------------------------------------------------------------
         try:
             robot_ids = dataset.robot_ids
             input_cross_embodiment_description: dict = {}
             output_cross_embodiment_description: dict = {}
             for robot_id in robot_ids:
-                data_spec = dataset.get_full_embodiment_description(robot_id)
-                filtered = {
-                    data_type: item
-                    for data_type, item in data_spec.items()
-                    if data_type in INPUT_DATA_TYPES
+                embodiment_description = dataset.get_full_embodiment_description(
+                    robot_id
+                )
+                missing_input_types = INPUT_DATA_TYPES - set(
+                    embodiment_description.keys()
+                )
+                assert not missing_input_types, (
+                    f"Robot {robot_id!r} is missing required input types:"
+                    f" {sorted(missing_input_types)}"
+                )
+                input_cross_embodiment_description[robot_id] = {
+                    data_type: embodiment_description[data_type]
+                    for data_type in INPUT_DATA_TYPES
                 }
-                input_cross_embodiment_description[robot_id] = filtered
                 output_cross_embodiment_description[robot_id] = {
-                    DataType.JOINT_POSITIONS: filtered[DataType.JOINT_POSITIONS],
+                    DataType.JOINT_POSITIONS: embodiment_description[
+                        DataType.JOINT_POSITIONS
+                    ],
                 }
         except Exception as e:
-            pytest.fail(f"Building data spec failed: {e}")
+            pytest.fail(f"Building embodiment_description failed: {e}")
 
         # ------------------------------------------------------------------
         # Submit a training job that will fail at runtime
@@ -593,10 +687,8 @@ def test_training_failure_error_reporting():
                 gpu_type=GPU_TYPE,
                 num_gpus=NUM_GPUS,
                 frequency=FREQUENCY,
-                input_cross_embodiment_description=(input_cross_embodiment_description),
-                output_cross_embodiment_description=(
-                    output_cross_embodiment_description
-                ),
+                input_cross_embodiment_description=input_cross_embodiment_description,
+                output_cross_embodiment_description=output_cross_embodiment_description,
             )
             job_id = job_data["id"]
             logger.info(f"Failure-reporting test job started: {job_id}")
@@ -648,4 +740,3 @@ def test_training_failure_error_reporting():
                 dataset.delete()
             except Exception:
                 logger.warning(f"Failed to delete dataset {dataset_name}")
-        pass
