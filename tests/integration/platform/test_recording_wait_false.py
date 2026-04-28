@@ -136,6 +136,25 @@ def _log_rgb_stream_transport_stats(
     )
 
 
+def _get_rgb_transport_stats(
+    robot: Robot,
+    *,
+    camera_name: str,
+) -> dict[str, object]:
+    """Return current RGB producer transport stats for one camera stream."""
+    stream_id = f"{DataType.RGB_IMAGES.value}:{camera_name}"
+    stream = robot.get_data_stream(stream_id)
+
+    if stream is None:
+        raise AssertionError(f"Missing RGB stream for stream_id={stream_id}")
+
+    producer_channel: ProducerChannel | None = getattr(stream, "_producer_channel", None)
+    if producer_channel is None:
+        raise AssertionError(f"Missing producer channel for stream_id={stream_id}")
+
+    return producer_channel.get_transport_stats().to_dict()
+
+
 def _wait_for_rgb_transport_to_drain(
     robot: Robot,
     *,
@@ -146,22 +165,10 @@ def _wait_for_rgb_transport_to_drain(
     last_stats: dict[str, object] | None = None
 
     while time.monotonic() < deadline:
-        stream_id = f"{DataType.RGB_IMAGES.value}:{camera_name}"
-        stream = robot.get_data_stream(stream_id)
-
-        if stream is None:
-            raise AssertionError(f"Missing RGB stream for stream_id={stream_id}")
-
-        producer_channel: ProducerChannel | None = getattr(
-            stream,
-            "_producer_channel",
-            None,
+        stats = _get_rgb_transport_stats(
+            robot,
+            camera_name=camera_name,
         )
-
-        if producer_channel is None:
-            raise AssertionError(f"Missing producer channel for stream_id={stream_id}")
-
-        stats = producer_channel.get_transport_stats().to_dict()
         last_stats = stats
 
         if (
@@ -413,6 +420,10 @@ def _run_wait_false_rgb_payload_test(
             camera_name=camera_name,
             phase=f"{label}_before_stop",
         )
+        pre_stop_transport_stats = _get_rgb_transport_stats(
+            robot,
+            camera_name=camera_name,
+        )
 
         with Timer(
             label=f"{label}.nc.stop_recording(wait=False)",
@@ -452,10 +463,35 @@ def _run_wait_false_rgb_payload_test(
         assert drained_transport_stats["last_send_error"] is None
         assert drained_transport_stats["pending_sequence_count"] == 0
         assert drained_transport_stats["send_queue_qsize"] == 0
+        assert drained_transport_stats["free_slot_count"] == drained_transport_stats["slot_count"]
         assert drained_transport_stats["in_flight_slot_count"] == 0
         assert drained_transport_stats["worker_queue_qsize"] == 0
         assert drained_transport_stats["worker_error"] is None
         assert drained_transport_stats["unhealthy_reason"] is None
+        assert (
+            pre_stop_transport_stats["free_slot_count"]
+            < pre_stop_transport_stats["slot_count"]
+        ), (
+            "Expected some shared slots to be occupied before stop_recording(wait=False). "
+            f"pre_stop_transport_stats={pre_stop_transport_stats}"
+        )
+        assert (
+            pre_stop_transport_stats["in_flight_slot_count"] > 0
+            or pre_stop_transport_stats["worker_queue_qsize"] > 0
+            or pre_stop_transport_stats["free_slot_count"] < pre_stop_transport_stats["slot_count"]
+        ), (
+            "Expected shared-slot transport backlog before drain, but transport already "
+            f"looked idle. pre_stop_transport_stats={pre_stop_transport_stats}"
+        )
+        assert drained_transport_stats["acked_sequence_count"] >= frame_count
+        assert (
+            drained_transport_stats["acked_sequence_count"]
+            >= pre_stop_transport_stats["acked_sequence_count"]
+        )
+        assert (
+            drained_transport_stats["max_in_flight_slot_count"]
+            >= pre_stop_transport_stats["in_flight_slot_count"]
+        )
 
         logger.info(
             "wait=False RGB payload test completed label=%s recording_id=%s "
