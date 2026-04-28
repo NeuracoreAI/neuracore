@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import aiofiles
+from neuracore_types import DataType
 
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.models import CompleteMessage
@@ -16,7 +17,15 @@ from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget i
 )
 
 from ..core.trace_filesystem import _TraceFilesystem
-from ..core.types import _BatchJob, _TraceKey, _WriteState
+from ..core.types import (
+    _BatchJob,
+    _RGBIndexedFrame,
+    _RGBSpoolJob,
+    _RGBTraceMessage,
+    _RGBWriteState,
+    _TraceKey,
+    _WriteState,
+)
 
 
 @dataclass(frozen=True)
@@ -71,6 +80,7 @@ class _RawBatchWriter:
         self._emitter = emitter
 
         self._writer_states: dict[_TraceKey, _WriteState] = {}
+        self._rgb_writer_states: dict[_TraceKey, _RGBWriteState] = {}
         self._aborted_traces: set[_TraceKey] = set()
         self._stopped_recordings: set[str] = set()
         self._closed_traces: set[_TraceKey] = set()
@@ -87,6 +97,9 @@ class _RawBatchWriter:
         self._aborted_traces.add(trace_key)
         self._closed_traces.add(trace_key)
         self._writer_states.pop(trace_key, None)
+        rgb_state = self._rgb_writer_states.pop(trace_key, None)
+        if rgb_state is not None and rgb_state.frames:
+            rgb_state.frames[0].frame_ref.spool_path.unlink(missing_ok=True)
 
     async def _on_recording_stopped(self, recording_id: str) -> None:
         """Handle RECORDING_STOPPED event.
@@ -159,12 +172,18 @@ class _RawBatchWriter:
 
             if queue_item is self.SENTINEL:
                 writer_states_remaining = list(self._writer_states.values())
+                rgb_writer_states_remaining = list(self._rgb_writer_states.values())
 
                 for state_to_flush in writer_states_remaining:
                     state_to_flush.trace_done = True
                     await self._flush_state(state_to_flush)
 
+                for rgb_state in rgb_writer_states_remaining:
+                    rgb_state.trace_done = True
+                    await self._flush_rgb_state(rgb_state)
+
                 self._writer_states.clear()
+                self._rgb_writer_states.clear()
 
                 self._emitter.remove_listener(
                     Emitter.TRACE_ABORTED, self._on_trace_aborted
@@ -185,6 +204,11 @@ class _RawBatchWriter:
                     for ws in self._writer_states.values()
                     if ws.trace_key.recording_id == recording_id
                 ]
+                rgb_states_to_flush = [
+                    ws
+                    for ws in self._rgb_writer_states.values()
+                    if ws.trace_key.recording_id == recording_id
+                ]
 
                 for ws in writer_states_to_flush:
                     self._closed_traces.add(ws.trace_key)
@@ -192,6 +216,17 @@ class _RawBatchWriter:
                     await self._flush_state(ws)
                     self._writer_states.pop(ws.trace_key, None)
 
+                for rgb_state in rgb_states_to_flush:
+                    self._closed_traces.add(rgb_state.trace_key)
+                    rgb_state.trace_done = True
+                    await self._flush_rgb_state(rgb_state)
+                    self._rgb_writer_states.pop(rgb_state.trace_key, None)
+
+                self.trace_message_queue.task_done()
+                continue
+
+            if isinstance(queue_item, _RGBTraceMessage):
+                await self._handle_rgb_trace_message(queue_item)
                 self.trace_message_queue.task_done()
                 continue
 
@@ -270,3 +305,78 @@ class _RawBatchWriter:
                         self._closed_traces.add(trace_key)
 
             self.trace_message_queue.task_done()
+
+    async def _handle_rgb_trace_message(self, raw_message: _RGBTraceMessage) -> None:
+        """Track RGB frame refs until the trace can be handed to the encoder."""
+        trace_key = raw_message.trace_key
+        recording_id_value = str(trace_key.recording_id)
+
+        if recording_id_value in self._stopped_recordings:
+            return
+
+        if trace_key in self._aborted_traces or trace_key in self._closed_traces:
+            if raw_message.frame_ref is not None:
+                raw_message.frame_ref.spool_path.unlink(missing_ok=True)
+            return
+
+        recording_entry = self.recording_traces.setdefault(recording_id_value, {})
+        is_new_trace = trace_key.trace_id not in recording_entry
+        if is_new_trace:
+            recording_entry[trace_key.trace_id] = {}
+
+        trace_dir = self._filesystem.trace_dir_for(trace_key)
+        rgb_writer_state = self._rgb_writer_states.get(trace_key)
+        if rgb_writer_state is None:
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            rgb_writer_state = _RGBWriteState(
+                trace_key=trace_key,
+                trace_dir=trace_dir,
+                frames=[],
+                trace_done=False,
+                data_type_name=raw_message.data_type_name,
+                robot_instance=raw_message.robot_instance,
+                dataset_id=raw_message.dataset_id,
+                dataset_name=raw_message.dataset_name,
+                robot_name=raw_message.robot_name,
+                robot_id=raw_message.robot_id,
+            )
+            self._rgb_writer_states[trace_key] = rgb_writer_state
+
+        if is_new_trace:
+            self._emitter.emit(
+                Emitter.START_TRACE,
+                trace_key.trace_id,
+                trace_key.recording_id,
+                DataType.RGB_IMAGES,
+                rgb_writer_state.data_type_name,
+                rgb_writer_state.robot_instance,
+                rgb_writer_state.dataset_id,
+                rgb_writer_state.dataset_name,
+                rgb_writer_state.robot_name,
+                rgb_writer_state.robot_id,
+                str(trace_dir),
+            )
+
+        if raw_message.frame_metadata is not None and raw_message.frame_ref is not None:
+            rgb_writer_state.frames.append(
+                _RGBIndexedFrame(
+                    metadata=raw_message.frame_metadata,
+                    frame_ref=raw_message.frame_ref,
+                )
+            )
+
+        if raw_message.final_chunk:
+            rgb_writer_state.trace_done = True
+            await self._flush_rgb_state(rgb_writer_state)
+            self._rgb_writer_states.pop(trace_key, None)
+
+    async def _flush_rgb_state(self, writer_state: _RGBWriteState) -> None:
+        """Emit one RGB spool job for a trace backed by frame refs."""
+        self._emitter.emit(
+            Emitter.BATCH_READY,
+            _RGBSpoolJob(
+                trace_key=writer_state.trace_key,
+                frames=list(writer_state.frames),
+                trace_done=writer_state.trace_done,
+            ),
+        )

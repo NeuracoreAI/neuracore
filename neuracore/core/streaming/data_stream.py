@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 from neuracore_types import CameraData, DataType, NCData
 
-from neuracore.data_daemon.communications_management.producer_channel import (
+from neuracore.data_daemon.communications_management.producer.producer_channel import (
     ProducerChannel,
 )
 
@@ -93,8 +93,8 @@ class DataStream(ABC):
         """Ensures a producer is available for this data stream.
 
         If the producer does not exist, it is created with the given context.
-        If the producer already exists, its recording ID is updated if necessary.
-        Finally, a new trace is started for this producer.
+        Afterwards, the producer channel starts a fresh recording session for
+        the supplied recording context.
 
         Args:
             context: Recording context containing identifiers for
@@ -108,28 +108,27 @@ class DataStream(ABC):
                 recording_id=context.recording_id,
                 data_type=self._data_type,
             )
-            self._producer_channel.initialize_new_producer_channel()
-            return
-        if (
-            self._producer_channel.recording_id is None
-            or self._producer_channel.recording_id != context.recording_id
-        ):
-            self._producer_channel.set_recording_id(context.recording_id)
 
-        # Reopen producer channel state for each new recording in case
-        # the daemon expired the channel while this producer channel was idle.
-        self._producer_channel.start_producer_channel()
-        self._producer_channel.open_ring_buffer()
-        self._producer_channel.start_new_trace()
+        self._producer_channel.start_recording_session(
+            recording_id=context.recording_id
+        )
 
-    def stop_recording(self) -> None:
-        """Stop recording data and end trace if producer exists."""
+    def stop_recording(self, *, wait_for_drain: bool = True) -> None:
+        """Stop recording data and tear down the active producer, if any."""
         self._recording = False
-        if (
-            isinstance(self._producer_channel, ProducerChannel)
-            and self._producer_channel.trace_id
-        ):
-            self._producer_channel.cleanup_producer_channel()
+        producer_channel = self._producer_channel
+        self._producer_channel = None
+
+        if not isinstance(producer_channel, ProducerChannel):
+            return
+
+        try:
+            if producer_channel.trace_id:
+                producer_channel.cleanup_producer_channel(
+                    wait_for_slot_drain=wait_for_drain
+                )
+        finally:
+            producer_channel.stop_producer_channel()
 
     def is_recording(self) -> bool:
         """Check if recording is active.
