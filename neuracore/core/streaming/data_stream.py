@@ -118,7 +118,6 @@ class DataStream(ABC):
 
         # Reopen producer channel state for each new recording in case
         # the daemon expired the channel while this producer channel was idle.
-        self._producer_channel.start_producer_channel()
         self._producer_channel.open_ring_buffer()
         self._producer_channel.start_new_trace()
 

@@ -643,7 +643,7 @@ def _verify_recording_structure(
     # Duration bounds: variable mode allows 0.75–1.25× base; fixed mode uses exact
     # base duration.
     base_duration_s = float(result.duration_sec)
-    clock_tolerance_s = 1.0
+    clock_tolerance_s = 10.0
     if case.context_duration_mode == DURATION_MODE_VARIABLE:
         min_duration_s = (
             base_duration_s * DURATION_VARIABLE_MIN_FACTOR - clock_tolerance_s

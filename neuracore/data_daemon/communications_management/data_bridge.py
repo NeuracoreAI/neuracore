@@ -72,7 +72,6 @@ class ChannelState:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_sequence_number: int = 0
     opened_at: datetime | None = None
-    heartbeat_expired_at: datetime | None = None
 
     def is_opened(self) -> bool:
         """Check if the channel has been opened with a ring buffer."""
@@ -84,7 +83,6 @@ class ChannelState:
         This is called when a ManagementMessage is received from a producer.
         """
         self.last_heartbeat = datetime.now(timezone.utc)
-        self.heartbeat_expired_at = None
 
     def set_ring_buffer(self, ring_buffer: RingBuffer) -> None:
         """Set the ring buffer for the channel.
@@ -131,13 +129,6 @@ class ChannelState:
         if never_opened_timeout is None:
             never_opened_timeout = timedelta(seconds=NEVER_OPENED_TIMEOUT_SECS)
         return (not self.is_open()) and (now - self.created_at > never_opened_timeout)
-
-    def should_expire(
-        self,
-    ) -> bool:
-        """Return True if channel should be removed from daemon state."""
-        now = utc_now()
-        return self.has_missed_heartbeat(now) or (self.is_stale_unopened(now))
 
     def set_trace_id(self, trace_id: str) -> None:
         """Set the trace ID for the current channel.
@@ -963,7 +954,6 @@ class Daemon:
                 continue
 
             if not state.has_missed_heartbeat(now):
-                state.heartbeat_expired_at = None
                 continue
 
             if state.trace_id is None:
@@ -977,8 +967,6 @@ class Daemon:
                 cutoff_sequence_number is not None
                 and state.last_sequence_number < cutoff_sequence_number
             ):
-                if state.heartbeat_expired_at is None:
-                    state.heartbeat_expired_at = now
                 continue
 
             # If the daemon already has unread bytes queued locally, let the normal
