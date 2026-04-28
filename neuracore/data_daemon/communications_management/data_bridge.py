@@ -3,28 +3,30 @@
 from __future__ import annotations
 
 import logging
-import struct
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 
 from neuracore_types import DataType
 
 from neuracore.data_daemon.communications_management.channel_reader import (
-    CHUNK_HEADER_FORMAT,
     ChannelMessageReader,
     CompletedChannelMessage,
+    PartialMessage,
 )
 from neuracore.data_daemon.communications_management.communications_manager import (
     CommunicationsManager,
 )
 from neuracore.data_daemon.communications_management.ring_buffer import RingBuffer
+from neuracore.data_daemon.communications_management.shared_slot_daemon_handler import (
+    SharedSlotDaemonHandler,
+)
 from neuracore.data_daemon.const import (
-    DATA_TYPE_FIELD_SIZE,
     DEFAULT_RING_BUFFER_SIZE,
     HEARTBEAT_TIMEOUT_SECS,
     NEVER_OPENED_TIMEOUT_SECS,
-    TRACE_ID_FIELD_SIZE,
 )
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.helpers import utc_now
@@ -60,6 +62,28 @@ def _trace_metadata_dict(
     return {} if metadata is None else metadata.to_dict()
 
 
+class TransportMode(str, Enum):
+    """Active transport mode for one producer channel."""
+
+    NONE = "none"
+    SOCKET = "socket"
+    RING_BUFFER = "ring_buffer"
+    SHARED_SLOT = "shared_slot"
+
+
+@dataclass
+class SharedSlotTransportState:
+    """Daemon-side state for the shared-slot transport."""
+
+    control_endpoint: str | None = None
+    shm_name: str | None = None
+
+    def reset(self) -> None:
+        """Clear transport-specific state."""
+        self.control_endpoint = None
+        self.shm_name = None
+
+
 @dataclass
 class ChannelState:
     """Per-producer channel state owned by the daemon."""
@@ -73,10 +97,15 @@ class ChannelState:
     last_sequence_number: int = 0
     opened_at: datetime | None = None
     heartbeat_expired_at: datetime | None = None
+    transport_mode: TransportMode = TransportMode.NONE
+    socket_pending_messages: dict[str, PartialMessage] = field(default_factory=dict)
+    shared_slot: SharedSlotTransportState = field(
+        default_factory=SharedSlotTransportState
+    )
 
     def is_opened(self) -> bool:
         """Check if the channel has been opened with a ring buffer."""
-        return self.ring_buffer is not None
+        return self.transport_mode is not TransportMode.NONE
 
     def touch(self) -> None:
         """Update the last heartbeat time for the channel.
@@ -104,13 +133,140 @@ class ChannelState:
                 self.ring_buffer.close()
             finally:
                 self.ring_buffer.unlink()
+        self.transport_mode = TransportMode.RING_BUFFER
+        self.shared_slot.reset()
         self.ring_buffer = ring_buffer
         self.reader = ChannelMessageReader(ring_buffer)
         self.opened_at = datetime.now(timezone.utc)
 
     def is_open(self) -> bool:
         """Check if the channel is open (i.e. has an initialized ring buffer)."""
-        return self.ring_buffer is not None
+        return self.transport_mode is not TransportMode.NONE
+
+    def mark_socket_transport_open(self) -> None:
+        """Mark this channel as active on direct socket transport."""
+        self.transport_mode = TransportMode.SOCKET
+        if self.opened_at is None:
+            self.opened_at = datetime.now(timezone.utc)
+
+    def mark_shared_slot_transport_open(
+        self,
+        *,
+        control_endpoint: str,
+        shm_name: str,
+    ) -> None:
+        """Mark this channel as active on the fixed shared-slot transport."""
+        self.transport_mode = TransportMode.SHARED_SLOT
+        self.shared_slot.control_endpoint = control_endpoint
+        self.shared_slot.shm_name = shm_name
+        self.opened_at = datetime.now(timezone.utc)
+
+    def mark_shared_slot_descriptor_seen(
+        self,
+        *,
+        shm_name: str,
+    ) -> None:
+        """Record one shared-slot descriptor processed by the daemon."""
+        self.transport_mode = TransportMode.SHARED_SLOT
+        self.shared_slot.shm_name = shm_name
+        if self.opened_at is None:
+            self.opened_at = datetime.now(timezone.utc)
+
+    def uses_ring_buffer_transport(self) -> bool:
+        """Return True when the channel is active on ring-buffer transport."""
+        return self.transport_mode is TransportMode.RING_BUFFER
+
+    def uses_shared_slot_transport(self) -> bool:
+        """Return True when the channel is active on shared-slot transport."""
+        return self.transport_mode is TransportMode.SHARED_SLOT
+
+    def has_local_buffered_data(self) -> bool:
+        """Return True when the daemon still has unread local ring-buffer data."""
+        if not self.uses_ring_buffer_transport() or self.ring_buffer is None:
+            return False
+        available = getattr(self.ring_buffer, "available", None)
+        return bool(callable(available) and available() > 0)
+
+    def clear_ring_buffer(self) -> None:
+        """Close and forget the current transport state for this channel."""
+        ring_buffer = self.ring_buffer
+        self.ring_buffer = None
+        self.reader = None
+        self.opened_at = None
+        self.transport_mode = TransportMode.NONE
+        self.shared_slot.reset()
+        self.socket_pending_messages.clear()
+        if ring_buffer is None:
+            return
+        try:
+            ring_buffer.close()
+        finally:
+            ring_buffer.unlink()
+
+    def add_socket_data_chunk(
+        self, data_chunk: DataChunkPayload
+    ) -> CompletedChannelMessage | None:
+        """Register one socket DATA_CHUNK and return a completed payload when ready."""
+        self.mark_socket_transport_open()
+        return self.add_transport_chunk(
+            trace_id=data_chunk.trace_id,
+            chunk_index=data_chunk.chunk_index,
+            total_chunks=data_chunk.total_chunks,
+            chunk_data=data_chunk.data,
+            trace_metadata=data_chunk.trace_metadata,
+            fallback_data_type=data_chunk.data_type,
+        )
+
+    def add_transport_chunk(
+        self,
+        *,
+        trace_id: str,
+        chunk_index: int,
+        total_chunks: int,
+        chunk_data: bytes,
+        trace_metadata: TraceTransportMetadata | None,
+        fallback_data_type: DataType | None = None,
+    ) -> CompletedChannelMessage | None:
+        """Register one transport chunk and return a completed payload when ready."""
+        partial_message = self.socket_pending_messages.get(trace_id)
+        if partial_message is None:
+            partial_message = PartialMessage(total_chunks=total_chunks)
+            self.socket_pending_messages[trace_id] = partial_message
+        elif partial_message.total_chunks != total_chunks:
+            logger.warning(
+                "Inconsistent total_chunks for trace_id=%s (existing=%d, new=%d)",
+                trace_id,
+                partial_message.total_chunks,
+                total_chunks,
+            )
+
+        partial_message.register_metadata(trace_id, trace_metadata)
+        complete = partial_message.add_chunk(chunk_index, chunk_data)
+        if not complete:
+            return None
+
+        try:
+            payload = partial_message.assemble()
+        except ValueError as exc:
+            logger.error("Failed to assemble trace_id=%s: %s", trace_id, exc)
+            self.socket_pending_messages.pop(trace_id, None)
+            return None
+
+        metadata = partial_message.metadata
+        if metadata is not None:
+            data_type = metadata.data_type
+        elif fallback_data_type is not None:
+            data_type = fallback_data_type
+        else:
+            raise ValueError(f"Missing data_type in metadata for trace_id={trace_id}.")
+
+        self.socket_pending_messages.pop(trace_id, None)
+        return CompletedChannelMessage(
+            trace_id=trace_id,
+            data_type=data_type,
+            payload=payload,
+            metadata=metadata,
+        )
 
     def has_missed_heartbeat(
         self,
@@ -153,6 +309,17 @@ CommandHandler = Callable[[ChannelState, MessageEnvelope], None]
 
 
 @dataclass
+class PendingTraceEnd:
+    """Producer stop marker waiting for the final trace chunk to be enqueued."""
+
+    producer_id: str
+    recording_id: str
+    trace_id: str
+    data_type: DataType
+    sequence_number: int | None
+
+
+@dataclass
 class RecordingClosingState:
     """Recording-level stop/drain state."""
 
@@ -184,6 +351,8 @@ class Daemon:
                 If not provided, a new instance will be created.
         """
         self.comm = comm_manager or CommunicationsManager()
+        self._pending_trace_ends: dict[str, PendingTraceEnd] = {}
+        self._final_chunk_enqueued_traces: set[str] = set()
         self.recording_disk_manager = recording_disk_manager
         self.channels: dict[str, ChannelState] = {}
         self._closed_producers: set[str] = set()
@@ -194,8 +363,11 @@ class Daemon:
         self._closed_recordings: set[str] = set()
         self._closing_recordings: dict[str, RecordingClosingState] = {}
         self._producer_last_sequence_numbers: dict[str, int] = {}
+        self._shared_slot_handler = SharedSlotDaemonHandler(self.comm)
         self._command_handlers: dict[CommandType, CommandHandler] = {
             CommandType.OPEN_RING_BUFFER: self._handle_open_ring_buffer,
+            CommandType.OPEN_FIXED_SHARED_SLOTS: self._handle_open_fixed_shared_slots,
+            CommandType.SHARED_SLOT_DESCRIPTOR: self._handle_shared_slot_descriptor,
             CommandType.DATA_CHUNK: self._handle_write_data_chunk,
             CommandType.HEARTBEAT: self._handle_heartbeat,
             CommandType.TRACE_END: self._handle_end_trace,
@@ -227,16 +399,30 @@ class Daemon:
 
         logger.info("Daemon started and ready to receive messages...")
         try:
+            last_receive_log_at = datetime.now(timezone.utc)
+            datetime.now(timezone.utc)
+            loop_count = 0
+
             while self._running:
+                loop_count += 1
                 self._finalize_closing_recordings()
+
                 raw = self.comm.receive_raw()
+
+                now = datetime.now(timezone.utc)
+
                 if raw:
                     self.process_raw_message(raw)
+
+                if (now - last_receive_log_at).total_seconds() >= 1.0:
+                    last_receive_log_at = now
+
                 self._cleanup_expired_channels()
                 self._drain_channel_messages()
         except KeyboardInterrupt:
             logger.info("Shutting down daemon...")
         finally:
+            self._shared_slot_handler.close()
             self.comm.cleanup_daemon()
 
     def stop(
@@ -292,14 +478,18 @@ class Daemon:
             self._handle_recording_stopped(message)
             return
 
-        if (
-            producer_id in self._closed_producers
-            and cmd != CommandType.OPEN_RING_BUFFER
+        if producer_id in self._closed_producers and cmd not in (
+            CommandType.OPEN_RING_BUFFER,
+            CommandType.OPEN_FIXED_SHARED_SLOTS,
         ):
             return
 
         if (
-            cmd == CommandType.OPEN_RING_BUFFER
+            cmd
+            in (
+                CommandType.OPEN_RING_BUFFER,
+                CommandType.OPEN_FIXED_SHARED_SLOTS,
+            )
             and producer_id in self._closed_producers
         ):
             self._closed_producers.discard(producer_id)
@@ -365,13 +555,125 @@ class Daemon:
         payload = message.payload.get(message.command.value, {})
         size = payload.get("size", DEFAULT_RING_BUFFER_SIZE)
         shared_memory_name = payload.get("shared_memory_name")
-        if shared_memory_name:
-            channel.set_ring_buffer(
-                RingBuffer.open_shared(str(shared_memory_name), int(size))
+        if not shared_memory_name:
+            raise ValueError(
+                "OPEN_RING_BUFFER requires shared_memory_name for shared transport"
+            )
+        channel.set_ring_buffer(
+            RingBuffer.create_shared(
+                int(size),
+                name=str(shared_memory_name),
+            )
+        )
+
+    def _handle_open_fixed_shared_slots(
+        self, channel: ChannelState, message: MessageEnvelope
+    ) -> None:
+        """Handle an OPEN_FIXED_SHARED_SLOTS command from a producer."""
+        payload = message.payload.get(message.command.value, {})
+        self._shared_slot_handler.handle_open(channel, payload)
+
+    def _handle_shared_slot_descriptor(
+        self, channel: ChannelState, message: MessageEnvelope
+    ) -> None:
+        """Copy one producer-owned shared-memory packet and ACK immediately."""
+        descriptor_payload = message.payload.get(message.command.value, {})
+        transport_result = self._shared_slot_handler.handle_descriptor(
+            channel,
+            descriptor_payload,
+        )
+        descriptor = transport_result.descriptor
+        chunk_metadata = transport_result.chunk_metadata
+        chunk_data = transport_result.chunk_data
+        trace_id = transport_result.trace_id
+        trace_metadata = transport_result.trace_metadata
+
+        recording_id = self._trace_recordings.get(trace_id)
+        if recording_id is None and trace_metadata is not None:
+            recording_id = trace_metadata.recording_id
+
+        if recording_id is None:
+            logger.warning(
+                "Shared-slot packet missing recording metadata "
+                "trace_id=%s producer_id=%s sequence_id=%s",
+                trace_id,
+                channel.producer_id,
+                descriptor.sequence_id,
             )
             return
 
-        channel.set_ring_buffer(RingBuffer(int(size)))
+        if self._should_drop_recording_data(
+            channel=channel,
+            recording_id=recording_id,
+            trace_id=trace_id,
+            sequence_number=descriptor.sequence_id,
+        ):
+            return
+
+        channel.set_trace_id(trace_id)
+
+        if trace_metadata is not None:
+            self._register_trace(recording_id, trace_id)
+            self._register_trace_metadata(
+                trace_id,
+                {
+                    "dataset_id": trace_metadata.dataset_id,
+                    "dataset_name": trace_metadata.dataset_name,
+                    "robot_name": trace_metadata.robot_name,
+                    "robot_id": trace_metadata.robot_id,
+                    "robot_instance": trace_metadata.robot_instance,
+                    "data_type": trace_metadata.data_type.value,
+                    "data_type_name": trace_metadata.data_type_name,
+                },
+            )
+
+        completed = channel.add_transport_chunk(
+            trace_id=trace_id,
+            chunk_index=chunk_metadata.chunk_index,
+            total_chunks=chunk_metadata.total_chunks,
+            chunk_data=chunk_data,
+            trace_metadata=trace_metadata,
+        )
+
+        if completed is None:
+            return
+
+        resolved_recording_id = self._ensure_result_trace_registered(
+            channel=channel,
+            result=completed,
+        )
+
+        if not resolved_recording_id:
+            logger.warning(
+                "No recording_id found for shared-slot "
+                "trace_id=%s producer_id=%s sequence_id=%s",
+                trace_id,
+                channel.producer_id,
+                descriptor.sequence_id,
+            )
+            return
+
+        on_complete_start = time.monotonic()
+
+        self._on_complete_message(
+            channel=channel,
+            trace_id=completed.trace_id,
+            data_type=completed.data_type,
+            data=completed.payload,
+            recording_id=resolved_recording_id,
+        )
+
+        on_complete_elapsed = time.monotonic() - on_complete_start
+
+        logger.info(
+            "Shared-slot complete handled producer_id=%s sequence_id=%s "
+            "trace_id=%s bytes=%d elapsed=%.3fs",
+            channel.producer_id,
+            descriptor.sequence_id,
+            completed.trace_id,
+            len(completed.payload),
+            on_complete_elapsed,
+        )
 
     def _ensure_result_trace_registered(
         self,
@@ -414,7 +716,9 @@ class Daemon:
 
     def _drain_single_channel_messages(self, channel: ChannelState) -> None:
         """Drain all currently-complete messages for a single channel."""
-        # guard against uninitialised channels
+        if not channel.uses_ring_buffer_transport():
+            return
+
         if channel.reader is None or channel.ring_buffer is None:
             return
 
@@ -486,6 +790,7 @@ class Daemon:
         metadata = self._trace_metadata.get(trace_id, {})
         robot_instance = int(metadata.get("robot_instance") or 0)
         try:
+            enqueue_start = time.monotonic()
             self.recording_disk_manager.enqueue(
                 CompleteMessage.from_bytes(
                     producer_id=channel.producer_id,
@@ -502,6 +807,18 @@ class Daemon:
                     robot_id=_str_or_none(metadata.get("robot_id")),
                 )
             )
+            enqueue_elapsed = time.monotonic() - enqueue_start
+
+            if enqueue_elapsed > 0.05:
+                logger.warning(
+                    "RecordingDiskManager enqueue slow producer_id=%s trace_id=%s "
+                    "recording_id=%s bytes=%d elapsed=%.3fs",
+                    channel.producer_id,
+                    trace_id,
+                    recording_id,
+                    len(data),
+                    enqueue_elapsed,
+                )
         except Exception:
             logger.exception(
                 "Failed to enqueue message for trace_id=%s producer_id=%s",
@@ -516,6 +833,8 @@ class Daemon:
         suitable for use in a high-throughput system.
         """
         channel.touch()
+        if channel.transport_mode is TransportMode.NONE:
+            channel.mark_socket_transport_open()
 
     def _register_trace(self, recording_id: str, trace_id: str) -> None:
         """Register a trace to a recording.
@@ -575,24 +894,70 @@ class Daemon:
                 )
 
     def _remove_trace(self, recording_id: str, trace_id: str) -> None:
-        """Remove a trace from the recording-trace mapping.
-
-        This method removes a trace from the recording-trace mapping and
-        updates the internal state accordingly. It does not perform any
-        checks or validation beyond ensuring the trace is removed from
-        the mapping.
-
-        :param recording_id: The recording ID to remove the trace from.
-        :param trace_id: The trace ID to remove.
-        """
         self._trace_recordings.pop(trace_id, None)
         self._trace_metadata.pop(trace_id, None)
+        self._pending_trace_ends.pop(trace_id, None)
+        self._final_chunk_enqueued_traces.discard(trace_id)
+
         traces = self._recording_traces.get(recording_id)
         if traces is None:
             return
+
         traces.discard(trace_id)
+
         if not traces:
             self._recording_traces.pop(recording_id, None)
+
+    def _should_drop_recording_data(
+        self,
+        *,
+        channel: ChannelState,
+        recording_id: str,
+        trace_id: str,
+        sequence_number: int | None,
+    ) -> bool:
+        """Return True when recording state says this data should be dropped."""
+        if recording_id in self._closed_recordings:
+            logger.warning(
+                "Dropping data for closed recording_id=%s trace_id=%s",
+                recording_id,
+                trace_id,
+            )
+            return True
+
+        closing_state = self._closing_recordings.get(recording_id)
+        if closing_state is None or not closing_state.producer_stop_sequence_numbers:
+            return False
+        cutoff_sequence_number = closing_state.producer_stop_sequence_numbers.get(
+            channel.producer_id
+        )
+        if cutoff_sequence_number is None:
+            logger.warning(
+                "Dropping data from producer_id=%s while recording_id=%s is closing "
+                "(missing stop sequence number)",
+                channel.producer_id,
+                recording_id,
+            )
+            return True
+        if sequence_number is None:
+            logger.warning(
+                "Dropping data for producer_id=%s recording_id=%s without "
+                "sequence_number while recording is closing",
+                channel.producer_id,
+                recording_id,
+            )
+            return True
+        if sequence_number > cutoff_sequence_number:
+            logger.warning(
+                "Dropping post-stop data for producer_id=%s recording_id=%s "
+                "(sequence_number=%s, cutoff_sequence_number=%s)",
+                channel.producer_id,
+                recording_id,
+                sequence_number,
+                cutoff_sequence_number,
+            )
+            return True
+        return False
 
     def _handle_write_data_chunk(
         self, channel: ChannelState, message: MessageEnvelope
@@ -617,12 +982,6 @@ class Daemon:
         :param channel: channel state of the producer
         :param message: message envelope containing the data chunk payload
         """
-        if channel.ring_buffer is None:
-            logger.warning(
-                "DATA_CHUNK received but no ring buffer initialized for producer_id=%s",
-                channel.producer_id,
-            )
-            return
         data_chunk_payload = message.payload.get("data_chunk")
         if data_chunk_payload is None:
             data_chunk_payload = message.payload
@@ -651,47 +1010,13 @@ class Daemon:
             )
         channel.set_trace_id(trace_id)
 
-        if recording_id in self._closed_recordings:
-            logger.warning(
-                "Dropping data for closed recording_id=%s trace_id=%s",
-                recording_id,
-                trace_id,
-            )
+        if self._should_drop_recording_data(
+            channel=channel,
+            recording_id=recording_id,
+            trace_id=trace_id,
+            sequence_number=message.sequence_number,
+        ):
             return
-
-        closing_state = self._closing_recordings.get(recording_id)
-        if closing_state is not None and closing_state.producer_stop_sequence_numbers:
-            cutoff_sequence_number = closing_state.producer_stop_sequence_numbers.get(
-                channel.producer_id
-            )
-            if cutoff_sequence_number is None:
-                logger.warning(
-                    "Dropping data from producer_id=%s while "
-                    "recording_id=%s is closing "
-                    "(missing stop sequence number)",
-                    channel.producer_id,
-                    recording_id,
-                )
-                return
-            if message.sequence_number is None:
-                logger.warning(
-                    "Dropping data for producer_id=%s recording_id=%s "
-                    "without sequence_number "
-                    "while recording is closing",
-                    channel.producer_id,
-                    recording_id,
-                )
-                return
-            if message.sequence_number > cutoff_sequence_number:
-                logger.warning(
-                    "Dropping post-stop data for producer_id=%s recording_id=%s "
-                    "(sequence_number=%s, cutoff_sequence_number=%s)",
-                    channel.producer_id,
-                    recording_id,
-                    message.sequence_number,
-                    cutoff_sequence_number,
-                )
-                return
 
         if recording_id:
             self._register_trace(recording_id, trace_id)
@@ -707,43 +1032,16 @@ class Daemon:
                     "data_type_name": data_chunk.data_type_name,
                 },
             )
-        chunk_index = data_chunk.chunk_index
-        total_chunks = data_chunk.total_chunks
-        data = data_chunk.data
-        chunk_len = len(data)
-
-        trace_id_bytes = trace_id.encode("utf-8")
-        if len(trace_id_bytes) > TRACE_ID_FIELD_SIZE:
-            logger.warning(
-                "Trace ID '%s' truncated to %d bytes",
-                trace_id,
-                TRACE_ID_FIELD_SIZE,
-            )
-        trace_id_field = trace_id_bytes[:TRACE_ID_FIELD_SIZE].ljust(
-            TRACE_ID_FIELD_SIZE, b"\x00"
+        completed = channel.add_socket_data_chunk(data_chunk)
+        if completed is None:
+            return
+        self._on_complete_message(
+            channel=channel,
+            trace_id=completed.trace_id,
+            data_type=completed.data_type,
+            data=completed.payload,
+            recording_id=recording_id,
         )
-        data_type_bytes = data_chunk.data_type.value.encode("utf-8")
-        if len(data_type_bytes) > DATA_TYPE_FIELD_SIZE:
-            logger.warning(
-                "Data type '%s' truncated to %d bytes",
-                data_chunk.data_type.value,
-                DATA_TYPE_FIELD_SIZE,
-            )
-        data_type_field = data_type_bytes[:DATA_TYPE_FIELD_SIZE].ljust(
-            DATA_TYPE_FIELD_SIZE, b"\x00"
-        )
-
-        header = struct.pack(
-            CHUNK_HEADER_FORMAT,
-            trace_id_field,
-            data_type_field,
-            chunk_index,
-            total_chunks,
-            chunk_len,
-        )
-
-        packet = header + data
-        channel.ring_buffer.write(packet)
 
     def _handle_end_trace(
         self,
@@ -809,17 +1107,22 @@ class Daemon:
             )
             return
 
-        # Send final_chunk=True message to RDM to signal trace end
-        self._on_complete_message(
-            channel=channel,
+        self._pending_trace_ends[str(trace_id)] = PendingTraceEnd(
+            producer_id=channel.producer_id,
+            recording_id=str(recording_id),
             trace_id=str(trace_id),
             data_type=data_type,
-            data=b"",
-            recording_id=str(recording_id),
-            final_chunk=True,
+            sequence_number=message.sequence_number,
         )
 
-        self._remove_trace(str(recording_id), str(trace_id))
+        logger.info(
+            "Deferred TRACE_END until recording cutoff is reached "
+            "producer_id=%s recording_id=%s trace_id=%s sequence_number=%s",
+            channel.producer_id,
+            recording_id,
+            trace_id,
+            message.sequence_number,
+        )
 
     def _handle_recording_stopped(self, message: MessageEnvelope) -> None:
         """Handle a RECORDING_STOPPED message from a producer.
@@ -872,38 +1175,79 @@ class Daemon:
         self._emitter.emit(Emitter.STOP_RECORDING_REQUESTED, recording_id)
 
     def _finalize_closing_recordings(self) -> None:
-        """Finalize recordings that have reached the stop sequence number.
-
-        This function is called periodically by the daemon to finalize recordings
-        that have reached the stop sequence number. It will emit a STOP_RECORDING
-        event for each finalized recording.
-
-        :return: None
-        """
+        """Finalize recordings after stop cutoffs and final trace chunks are written."""
         to_close: list[str] = []
+
         for recording_id, closing_state in self._closing_recordings.items():
-            # Not processed all chunks up to stop yet
             if not self._has_reached_sequence_cutoffs(closing_state):
                 continue
 
-            traces = self._recording_traces.get(recording_id, set())
-            # traces have been processed and removed
-            if not traces:
+            traces = set(self._recording_traces.get(recording_id, set()))
+
+            for trace_id in traces:
+                if trace_id in self._final_chunk_enqueued_traces:
+                    continue
+
+                pending_trace_end = self._pending_trace_ends.get(trace_id)
+                if pending_trace_end is None:
+                    logger.info(
+                        "Waiting for TRACE_END before finalizing "
+                        "recording_id=%s trace_id=%s",
+                        recording_id,
+                        trace_id,
+                    )
+                    continue
+
+                channel = self.channels.get(pending_trace_end.producer_id)
+                if channel is None:
+                    logger.warning(
+                        "Cannot enqueue final chunk; missing channel producer_id=%s "
+                        "recording_id=%s trace_id=%s",
+                        pending_trace_end.producer_id,
+                        recording_id,
+                        trace_id,
+                    )
+                    continue
+
+                logger.info(
+                    "Enqueuing deferred final chunk producer_id=%s recording_id=%s "
+                    "trace_id=%s",
+                    pending_trace_end.producer_id,
+                    recording_id,
+                    trace_id,
+                )
+
+                self._on_complete_message(
+                    channel=channel,
+                    trace_id=trace_id,
+                    data_type=pending_trace_end.data_type,
+                    data=b"",
+                    recording_id=recording_id,
+                    final_chunk=True,
+                )
+
+                self._final_chunk_enqueued_traces.add(trace_id)
+
+            # TRACE_WRITTEN will call cleanup_channel_on_trace_written(),
+            # which removes traces from self._recording_traces.
+            if not self._recording_traces.get(recording_id, set()):
                 to_close.append(recording_id)
 
-        # Only stop recording (signal flush RDM) when all traces have been processed
         for recording_id in to_close:
             expected_trace_count = len(
                 self._recording_unique_traces.get(recording_id, set())
             )
+
             self._emitter.emit(
                 Emitter.SET_EXPECTED_TRACE_COUNT,
                 recording_id,
                 expected_trace_count,
             )
+
             self._closing_recordings.pop(recording_id, None)
             self._closed_recordings.add(recording_id)
             self._recording_unique_traces.pop(recording_id, None)
+
             self._emitter.emit(Emitter.STOP_RECORDING, recording_id)
 
     def _has_reached_sequence_cutoffs(
@@ -951,6 +1295,9 @@ class Daemon:
         )
         if channel is not None:
             channel.trace_id = None
+            if channel.uses_shared_slot_transport():
+                self._shared_slot_handler.cleanup_channel_resources(channel)
+            channel.clear_ring_buffer()
 
     def _cleanup_expired_channels(self) -> None:
         """Remove channels whose heartbeat has not been seen within the timeout."""
@@ -983,7 +1330,7 @@ class Daemon:
 
             # If the daemon already has unread bytes queued locally, let the normal
             # drain step run before deciding to synthesize TRACE_END.
-            if state.ring_buffer is not None and state.ring_buffer.available() > 0:
+            if state.has_local_buffered_data():
                 continue
 
             to_remove.append(producer_id)
@@ -1012,5 +1359,8 @@ class Daemon:
                     self._producer_last_sequence_numbers.get(channel.producer_id, 0),
                     channel.last_sequence_number,
                 )
+            if channel.uses_shared_slot_transport():
+                self._shared_slot_handler.cleanup_channel_resources(channel)
+            channel.clear_ring_buffer()
             del self.channels[producer_id]
             self._closed_producers.add(producer_id)

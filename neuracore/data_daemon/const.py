@@ -21,17 +21,25 @@ SHARED_RING_RECORD_MAGIC = b"NCR1"
 SHARED_RING_RECORD_HEADER_FORMAT = "!4sII"
 SHARED_RING_RECORD_HEADER_SIZE = struct.calcsize(SHARED_RING_RECORD_HEADER_FORMAT)
 
-# This mismatches the front nd need to agree on a size
-# ...(PFE's - 67,108,864 seems very large and created to suite GCS constraints)
-DEFAULT_CHUNK_SIZE = 16384  # (16kb)
-DEFAULT_RING_BUFFER_SIZE = 4184304  # (4mb)
+# Shared transport sizing.
+# Keep these aligned with frontend/PFE expectations.
+DEFAULT_CHUNK_SIZE = 64 * 1024  # 64 KiB
+DEFAULT_RING_BUFFER_SIZE = 8 * 1024 * 1024  # 8 MiB
+
+# 4K RGB frame: 3840 * 2160 * 3 = 24,883,200 bytes ~= 23.73 MiB.
+# A video record must fit in the ring, including header + metadata.
 DEFAULT_VIDEO_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB
-DEFAULT_VIDEO_RING_BUFFER_SIZE = 16 * 1024 * 1024  # 16 MiB
-DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE = 8
+DEFAULT_VIDEO_RING_BUFFER_SIZE = 128 * 1024 * 1024  # 128 MiB
+DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE = 0
+DEFAULT_VIDEO_SLOT_SIZE = 8 * 1024 * 1024  # 8 MiB
+DEFAULT_VIDEO_SLOT_COUNT = 16
+DEFAULT_VIDEO_ACK_TIMEOUT_SECONDS = 5.0
+DEFAULT_VIDEO_SLOT_ALLOCATE_TIMEOUT_SECONDS = 5.0
 
 
 BASE_DIR = Path("/tmp/ndd")
 SOCKET_PATH = BASE_DIR / "management.sock"
+ACK_BASE_DIR = BASE_DIR / "slot_acks"
 
 # Uploads Configuration paths and files
 CONFIG_DIR = Path.home() / ".neuracore"

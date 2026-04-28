@@ -317,7 +317,7 @@ def stop_recording(
     recording_id = robot.get_current_recording_id()
     if not recording_id:
         raise ValueError("Recording_id is None, no current recording")
-    robot.stop_recording(recording_id)
+    robot.stop_recording(recording_id, wait_for_producer_drain=wait)
 
     if not wait:
         return
