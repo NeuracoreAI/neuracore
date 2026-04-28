@@ -7,6 +7,7 @@ from multiprocessing.shared_memory import SharedMemory
 
 import pytest
 from neuracore_types import DataType
+import zmq
 
 from neuracore.data_daemon.communications_management.channel_reader import (
     ChannelMessageReader,
@@ -37,7 +38,9 @@ from neuracore.data_daemon.models import (
     CompleteMessage,
     DataChunkPayload,
     MessageEnvelope,
+    SharedSlotCreditReturn,
     SharedSlotDescriptor,
+    SharedSlotReadyModel,
 )
 
 
@@ -333,18 +336,93 @@ def _wait_for_envelopes(
 
 def _stub_producer_transport(monkeypatch) -> list[MessageEnvelope]:
     messages: list[MessageEnvelope] = []
+    control_context = zmq.Context()
+    control_sockets: dict[str, zmq.Socket] = {}
+    control_endpoints: dict[str, str] = {}
+    shared_memories: dict[str, SharedMemory] = {}
 
     monkeypatch.setattr(
         "neuracore.data_daemon.communications_management.communications_manager.CommunicationsManager.create_producer_socket",
         lambda self: None,
     )
+
+    def _send_message(_self, message):
+        messages.append(message)
+
+        if message.command == CommandType.OPEN_FIXED_SHARED_SLOTS:
+            payload = message.payload["open_fixed_shared_slots"]
+            control_endpoint = payload["control_endpoint"]
+            shm_name = f"neuracore-slots-test-{len(shared_memories)}"
+            shm = SharedMemory(
+                name=shm_name,
+                create=True,
+                size=int(payload["slot_size"]) * int(payload["slot_count"]),
+            )
+            shared_memories[shm_name] = shm
+            control_endpoints[str(message.producer_id)] = control_endpoint
+            socket_obj = control_sockets.get(control_endpoint)
+            if socket_obj is None:
+                socket_obj = control_context.socket(zmq.PUSH)
+                socket_obj.setsockopt(zmq.LINGER, 0)
+                socket_obj.connect(control_endpoint)
+                control_sockets[control_endpoint] = socket_obj
+            socket_obj.send(
+                MessageEnvelope(
+                    producer_id=None,
+                    command=CommandType.SHARED_SLOT_READY,
+                    payload={
+                        CommandType.SHARED_SLOT_READY.value: SharedSlotReadyModel(
+                            shm_name=shm_name,
+                            slot_size=int(payload["slot_size"]),
+                            slot_count=int(payload["slot_count"]),
+                        ).model_dump()
+                    },
+                ).to_bytes()
+            )
+            return
+
+        if message.command == CommandType.SHARED_SLOT_DESCRIPTOR:
+            descriptor = SharedSlotDescriptor.from_dict(
+                message.payload[CommandType.SHARED_SLOT_DESCRIPTOR.value]
+            )
+            control_endpoint = control_endpoints.get(str(message.producer_id))
+            if control_endpoint is None:
+                raise RuntimeError("Missing control endpoint for shared-slot descriptor")
+            socket_obj = control_sockets[control_endpoint]
+            socket_obj.send(
+                MessageEnvelope(
+                    producer_id=None,
+                    command=CommandType.SHARED_SLOT_CREDIT_RETURN,
+                    payload={
+                        CommandType.SHARED_SLOT_CREDIT_RETURN.value: SharedSlotCreditReturn(
+                            shm_name=descriptor.shm_name,
+                            slot_id=descriptor.slot_id,
+                            sequence_id=descriptor.sequence_id,
+                        ).to_dict()
+                    },
+                ).to_bytes()
+            )
+
     monkeypatch.setattr(
         "neuracore.data_daemon.communications_management.communications_manager.CommunicationsManager.send_message",
-        lambda self, message: messages.append(message),
+        _send_message,
     )
+    def _cleanup_producer(_self) -> None:
+        for socket_obj in control_sockets.values():
+            socket_obj.close(0)
+        control_sockets.clear()
+        for shm in shared_memories.values():
+            shm.close()
+            try:
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+        shared_memories.clear()
+        control_context.term()
+
     monkeypatch.setattr(
         "neuracore.data_daemon.communications_management.communications_manager.CommunicationsManager.cleanup_producer",
-        lambda self: None,
+        _cleanup_producer,
     )
 
     return messages
@@ -366,8 +444,7 @@ def test_producer_open_ring_buffer_sends_payload(monkeypatch) -> None:
     payload = envelope.payload["open_fixed_shared_slots"]
     assert payload["slot_size"] == 2048
     assert payload["slot_count"] == 16
-    assert payload["shm_name"].startswith("neuracore-slots-")
-    assert payload["ack_endpoint"].startswith("ipc://")
+    assert payload["control_endpoint"].startswith("ipc://")
 
 
 def test_producer_send_data_parts_lazily_opens_shared_ring_buffer(
@@ -459,7 +536,7 @@ def test_producer_ensure_shared_ring_buffer_does_not_reannounce(
         producer.start_new_trace()
         producer.open_ring_buffer(size=2048)
         _wait_for_envelopes(messages, 1)
-        announced_name = messages[0].payload["open_fixed_shared_slots"]["shm_name"]
+        control_endpoint = messages[0].payload["open_fixed_shared_slots"]["control_endpoint"]
         trace_id = producer.trace_id
 
         producer.send_data(
@@ -478,7 +555,7 @@ def test_producer_ensure_shared_ring_buffer_does_not_reannounce(
         producer.stop_producer_channel()
 
     assert len(messages) == 2
-    assert messages[0].payload["open_fixed_shared_slots"]["shm_name"] == announced_name
+    assert messages[0].payload["open_fixed_shared_slots"]["control_endpoint"] == control_endpoint
     assert metadata["trace_id"] == trace_id
 
 
@@ -530,7 +607,7 @@ def test_producer_send_data_parts_chunks_across_multiple_buffers(monkeypatch) ->
     assert envelope.command == CommandType.OPEN_FIXED_SHARED_SLOTS
     payload = envelope.payload["open_fixed_shared_slots"]
     assert payload["slot_size"] == 2048
-    assert payload["shm_name"].startswith("neuracore-slots-")
+    assert payload["control_endpoint"].startswith("ipc://")
     assert [chunk for _, chunk in packets] == [b"abc", b"def", b"gh"]
     assert packets[0][0]["recording_id"] == "rec-1"
     assert "recording_id" not in packets[1][0]
@@ -620,9 +697,42 @@ def test_producer_shared_ring_rejects_oversized_packet(monkeypatch) -> None:
 def test_producer_sender_failure_stops_waiters(monkeypatch) -> None:
     monkeypatch.setenv("NDD_DEBUG", "true")
     sent = {"count": 0}
+    control_context = zmq.Context()
+    control_sockets: dict[str, zmq.Socket] = {}
+    shared_memories: dict[str, SharedMemory] = {}
 
     def flaky_send(_self, message):
         sent["count"] += 1
+        if message.command == CommandType.OPEN_FIXED_SHARED_SLOTS:
+            payload = message.payload["open_fixed_shared_slots"]
+            control_endpoint = payload["control_endpoint"]
+            shm_name = "neuracore-slots-test-failure"
+            shm = SharedMemory(
+                name=shm_name,
+                create=True,
+                size=int(payload["slot_size"]) * int(payload["slot_count"]),
+            )
+            shared_memories[shm_name] = shm
+            socket_obj = control_sockets.get(control_endpoint)
+            if socket_obj is None:
+                socket_obj = control_context.socket(zmq.PUSH)
+                socket_obj.setsockopt(zmq.LINGER, 0)
+                socket_obj.connect(control_endpoint)
+                control_sockets[control_endpoint] = socket_obj
+            socket_obj.send(
+                MessageEnvelope(
+                    producer_id=None,
+                    command=CommandType.SHARED_SLOT_READY,
+                    payload={
+                        CommandType.SHARED_SLOT_READY.value: SharedSlotReadyModel(
+                            shm_name=shm_name,
+                            slot_size=int(payload["slot_size"]),
+                            slot_count=int(payload["slot_count"]),
+                        ).model_dump()
+                    },
+                ).to_bytes()
+            )
+            return
         if message.command == CommandType.SHARED_SLOT_DESCRIPTOR:
             raise RuntimeError("boom")
 
@@ -634,9 +744,22 @@ def test_producer_sender_failure_stops_waiters(monkeypatch) -> None:
         "neuracore.data_daemon.communications_management.communications_manager.CommunicationsManager.send_message",
         flaky_send,
     )
+    def _cleanup_producer(_self) -> None:
+        for socket_obj in control_sockets.values():
+            socket_obj.close(0)
+        control_sockets.clear()
+        for shm in shared_memories.values():
+            shm.close()
+            try:
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+        shared_memories.clear()
+        control_context.term()
+
     monkeypatch.setattr(
         "neuracore.data_daemon.communications_management.communications_manager.CommunicationsManager.cleanup_producer",
-        lambda self: None,
+        _cleanup_producer,
     )
 
     producer = ProducerChannel(
@@ -709,8 +832,16 @@ def test_shared_slot_timeout_clock_starts_after_socket_send() -> None:
         ack_timeout_s=0.01,
         allocate_timeout_s=0.01,
     )
+    shm = SharedMemory(name="test-credit-timeout", create=True, size=2048 * 2)
 
     try:
+        registry._apply_ready_message(
+            SharedSlotReadyModel(
+                shm_name="test-credit-timeout",
+                slot_size=2048,
+                slot_count=2,
+            )
+        )
         slot_id, _offset = registry.allocate_slot()
         sequence_id = registry.mark_in_flight(slot_id)
 
@@ -727,6 +858,8 @@ def test_shared_slot_timeout_clock_starts_after_socket_send() -> None:
             assert registry._healthy is False
     finally:
         SharedSlotRegistry.reset_shared_instance_for_tests()
+        shm.close()
+        shm.unlink()
 
 
 def test_producer_sequences_follow_enqueue_order_under_concurrent_senders(

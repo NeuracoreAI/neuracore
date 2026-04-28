@@ -35,7 +35,6 @@ from neuracore.data_daemon.models import (
     CompleteMessage,
     DataChunkPayload,
     MessageEnvelope,
-    OpenFixedSharedSlotsModel,
     TraceTransportMetadata,
 )
 from neuracore.data_daemon.recording_encoding_disk_manager import (
@@ -76,7 +75,7 @@ class TransportMode(str, Enum):
 class SharedSlotTransportState:
     """Daemon-side state for the shared-slot transport."""
 
-    ack_endpoint: str | None = None
+    control_endpoint: str | None = None
     shm_name: str | None = None
     descriptors_received: int = 0
     completed_messages: int = 0
@@ -84,7 +83,7 @@ class SharedSlotTransportState:
 
     def reset(self) -> None:
         """Clear transport-specific state."""
-        self.ack_endpoint = None
+        self.control_endpoint = None
         self.shm_name = None
         self.descriptors_received = 0
         self.completed_messages = 0
@@ -156,23 +155,26 @@ class ChannelState:
         if self.opened_at is None:
             self.opened_at = datetime.now(timezone.utc)
 
-    def mark_shared_slot_transport_open(self, setup: OpenFixedSharedSlotsModel) -> None:
+    def mark_shared_slot_transport_open(
+        self,
+        *,
+        control_endpoint: str,
+        shm_name: str,
+    ) -> None:
         """Mark this channel as active on the fixed shared-slot transport."""
         self.transport_mode = TransportMode.SHARED_SLOT
-        self.shared_slot.ack_endpoint = setup.ack_endpoint
-        self.shared_slot.shm_name = setup.shm_name
+        self.shared_slot.control_endpoint = control_endpoint
+        self.shared_slot.shm_name = shm_name
         self.opened_at = datetime.now(timezone.utc)
 
     def mark_shared_slot_descriptor_seen(
         self,
         *,
-        ack_endpoint: str,
         shm_name: str,
         copied_bytes: int,
     ) -> None:
         """Record one shared-slot descriptor processed by the daemon."""
         self.transport_mode = TransportMode.SHARED_SLOT
-        self.shared_slot.ack_endpoint = ack_endpoint
         self.shared_slot.shm_name = shm_name
         self.shared_slot.descriptors_received += 1
         self.shared_slot.copied_bytes += copied_bytes

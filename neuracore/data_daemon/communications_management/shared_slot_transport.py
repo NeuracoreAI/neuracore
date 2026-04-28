@@ -31,8 +31,9 @@ from neuracore.data_daemon.models import (
     CommandType,
     MessageEnvelope,
     OpenFixedSharedSlotsModel,
+    SharedSlotCreditReturn,
     SharedSlotDescriptor,
-    SlotReleaseAck,
+    SharedSlotReadyModel,
 )
 
 from .producer_channel_message_sender import ProducerChannelMessageSender
@@ -61,12 +62,12 @@ class PacketTooLarge(ValueError):
 
 
 class SharedSlotTimeout(TimeoutError):
-    """Raised when shared-slot allocation or ACK release times out."""
+    """Raised when shared-slot setup, allocation, or credit return times out."""
 
 
 @dataclass(frozen=True)
 class InFlightSlot:
-    """Tracked producer-side state for one descriptor awaiting ACK."""
+    """Tracked producer-side state for one descriptor awaiting slot credit."""
 
     shm_name: str
     slot_id: int
@@ -138,46 +139,32 @@ def parse_shared_frame_packet(packet: bytes) -> tuple[dict[str, object], bytes]:
 
 
 class SharedSlotRegistry:
-    """Process-scoped shared-memory registry plus ACK listener/watchdog."""
+    """Producer-side session state for one daemon-owned shared-slot transport."""
 
     _instance: SharedSlotRegistry | None = None
     _refcount = 0
     _instance_lock = threading.Lock()
 
     def __init__(
-    self,
-    *,
-    slot_size: int,
-    slot_count: int,
-    ack_timeout_s: float,
-    allocate_timeout_s: float,
-) -> None:
+        self,
+        *,
+        slot_size: int,
+        slot_count: int,
+        ack_timeout_s: float,
+        allocate_timeout_s: float,
+    ) -> None:
         self.slot_size = int(slot_size)
         self.slot_count = int(slot_count)
         self.ack_timeout_s = float(ack_timeout_s)
         self.allocate_timeout_s = float(allocate_timeout_s)
-        self.shm_name = f"neuracore-slots-{os.getpid()}-{uuid.uuid4().hex}"
-        self._shm = SharedMemory(
-            name=self.shm_name,
-            create=True,
-            size=self.slot_size * self.slot_count,
-        )
+        self.shm_name: str | None = None
+        self._shm: SharedMemory | None = None
 
-        # Prevent Python's resource_tracker from unlinking this shared memory
-        # when the producer process exits. We explicitly unlink it in close().
-        try:
-            resource_tracker.unregister(self._shm._name, "shared_memory")
-        except Exception:
-            logger.debug(
-                "Failed to unregister shared-memory object %s from resource tracker",
-                self.shm_name,
-                exc_info=True,
-            )
-
-        self._free_slots = deque(range(self.slot_count))
+        self._free_slots: deque[int] = deque()
         self._condition = threading.Condition()
         self._sequence_id = 1
         self._healthy = True
+        self._ready = False
         self._in_flight: dict[int, InFlightSlot] = {}
         self._closed = False
         self._acked_sequence_count = 0
@@ -189,23 +176,23 @@ class SharedSlotRegistry:
         self._unhealthy_reason: str | None = None
 
         ACK_BASE_DIR.mkdir(parents=True, exist_ok=True)
-        socket_path = ACK_BASE_DIR / f"slot_acks_{os.getpid()}_{uuid.uuid4().hex}.ipc"
+        socket_path = ACK_BASE_DIR / f"slot_control_{os.getpid()}_{uuid.uuid4().hex}.ipc"
         try:
             socket_path.unlink()
         except FileNotFoundError:
             pass
-        self._ack_socket_path = socket_path
-        self.ack_endpoint = f"ipc://{socket_path}"
+        self._control_socket_path = socket_path
+        self.control_endpoint = f"ipc://{socket_path}"
 
         self._context = zmq.Context()
-        self._ack_socket = self._context.socket(zmq.PULL)
-        self._ack_socket.setsockopt(zmq.LINGER, 0)
-        self._ack_socket.bind(self.ack_endpoint)
+        self._control_socket = self._context.socket(zmq.PULL)
+        self._control_socket.setsockopt(zmq.LINGER, 0)
+        self._control_socket.bind(self.control_endpoint)
 
         self._stop_event = threading.Event()
-        self._ack_thread = threading.Thread(
-            target=self._ack_listener_loop,
-            name="shared-slot-ack-listener",
+        self._control_thread = threading.Thread(
+            target=self._control_listener_loop,
+            name="shared-slot-control-listener",
             daemon=True,
         )
         self._watchdog_thread = threading.Thread(
@@ -213,8 +200,9 @@ class SharedSlotRegistry:
             name="shared-slot-watchdog",
             daemon=True,
         )
-        self._ack_thread.start()
-        self._watchdog_thread.start()    
+        self._control_thread.start()
+        self._watchdog_thread.start()
+
     @classmethod
     def acquire(
         cls,
@@ -224,7 +212,7 @@ class SharedSlotRegistry:
         ack_timeout_s: float | None = None,
         allocate_timeout_s: float | None = None,
     ) -> "SharedSlotRegistry":
-        """Acquire the process-scoped shared-slot registry."""
+        """Acquire a singleton registry instance for isolated unit tests."""
         with cls._instance_lock:
             if cls._instance is None:
                 cls._instance = cls(
@@ -232,19 +220,15 @@ class SharedSlotRegistry:
                     slot_count=slot_count,
                     ack_timeout_s=_env_float(
                         "NCD_VIDEO_ACK_TIMEOUT_SECONDS",
-                        (
-                            DEFAULT_VIDEO_ACK_TIMEOUT_SECONDS
-                            if ack_timeout_s is None
-                            else ack_timeout_s
-                        ),
+                        DEFAULT_VIDEO_ACK_TIMEOUT_SECONDS
+                        if ack_timeout_s is None
+                        else ack_timeout_s,
                     ),
                     allocate_timeout_s=_env_float(
                         "NCD_VIDEO_SLOT_ALLOCATE_TIMEOUT_SECONDS",
-                        (
-                            DEFAULT_VIDEO_SLOT_ALLOCATE_TIMEOUT_SECONDS
-                            if allocate_timeout_s is None
-                            else allocate_timeout_s
-                        ),
+                        DEFAULT_VIDEO_SLOT_ALLOCATE_TIMEOUT_SECONDS
+                        if allocate_timeout_s is None
+                        else allocate_timeout_s,
                     ),
                 )
             cls._refcount += 1
@@ -252,7 +236,7 @@ class SharedSlotRegistry:
 
     @classmethod
     def release_shared_instance(cls) -> None:
-        """Release one registry reference and close when the last user exits."""
+        """Release one singleton test registry reference."""
         with cls._instance_lock:
             if cls._instance is None:
                 return
@@ -265,7 +249,7 @@ class SharedSlotRegistry:
 
     @classmethod
     def reset_shared_instance_for_tests(cls) -> None:
-        """Tear down the process singleton, if any, for test isolation."""
+        """Tear down the singleton test registry, if any."""
         with cls._instance_lock:
             instance = cls._instance
             cls._instance = None
@@ -278,14 +262,32 @@ class SharedSlotRegistry:
         """Return the total bytes reserved in shared memory."""
         return self.slot_size * self.slot_count
 
-    def setup_payload(self) -> OpenFixedSharedSlotsModel:
-        """Return the daemon setup payload for fixed shared slots."""
+    def request_payload(self) -> OpenFixedSharedSlotsModel:
+        """Return the setup request payload for daemon-owned fixed shared slots."""
         return OpenFixedSharedSlotsModel(
-            ack_endpoint=self.ack_endpoint,
-            shm_name=self.shm_name,
+            control_endpoint=self.control_endpoint,
             slot_size=self.slot_size,
             slot_count=self.slot_count,
         )
+
+    def is_ready(self) -> bool:
+        """Return True when the daemon has opened the shared memory session."""
+        with self._condition:
+            return self._ready
+
+    def wait_until_ready(self) -> bool:
+        """Block until the daemon has opened the shared-slot session."""
+        deadline = time.monotonic() + self.allocate_timeout_s
+        with self._condition:
+            while not self._ready:
+                if not self._is_healthy_locked():
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._mark_unhealthy_locked("open_timeout")
+                    return False
+                self._condition.wait(timeout=min(0.1, remaining))
+            return True
 
     def is_healthy(self) -> bool:
         """Return True while the shared-slot transport is still healthy."""
@@ -302,16 +304,22 @@ class SharedSlotRegistry:
         """Reserve one free slot or fail when backpressure persists."""
         deadline = time.monotonic() + self.allocate_timeout_s
         with self._condition:
-            while not self._free_slots:
+            while True:
                 self._check_for_timeouts_locked()
                 if not self._is_healthy_locked():
                     raise RuntimeError("Shared-slot transport is unhealthy")
+                if self._ready and self._free_slots:
+                    slot_id = self._free_slots.popleft()
+                    return int(slot_id), int(slot_id) * self.slot_size
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    if not self._ready:
+                        self._mark_unhealthy_locked("open_timeout")
+                        raise SharedSlotTimeout(
+                            "Timed out waiting for daemon-owned shared slots to open"
+                        )
                     raise SharedSlotTimeout("Timed out waiting for a free shared slot")
                 self._condition.wait(timeout=min(0.1, remaining))
-            slot_id = self._free_slots.popleft()
-            return int(slot_id), int(slot_id) * self.slot_size
 
     def mark_in_flight(self, slot_id: int) -> int:
         """Record that the slot now backs one sent descriptor."""
@@ -322,15 +330,15 @@ class SharedSlotRegistry:
             return self._reserve_slot_for_descriptor_locked(slot_id)
 
     def mark_sent(self, sequence_id: int) -> None:
-        """Start the ACK timeout clock once the descriptor is on the socket."""
+        """Start the credit-return timeout clock once the descriptor is on the socket."""
         with self._condition:
             self._mark_descriptor_sent_locked(sequence_id)
 
     def release_slot(self, shm_name: str, slot_id: int, sequence_id: int) -> bool:
-        """Release one in-flight slot after a matching ACK arrives."""
+        """Release one in-flight slot after a matching credit return arrives."""
         with self._condition:
             self._check_for_timeouts_locked()
-            return self._apply_slot_release_ack_locked(
+            return self._apply_slot_credit_locked(
                 shm_name=shm_name,
                 slot_id=slot_id,
                 sequence_id=sequence_id,
@@ -349,12 +357,12 @@ class SharedSlotRegistry:
             self._mark_unhealthy_locked("sender_failure")
 
     def get_debug_stats(self) -> dict[str, object]:
-        """Return a snapshot of shared-slot occupancy and ACK health."""
+        """Return a snapshot of shared-slot occupancy and credit health."""
         with self._condition:
             return self._debug_stats_locked()
 
     def get_in_flight_count(self) -> int:
-        """Return the number of descriptors still awaiting ACK handling."""
+        """Return the number of descriptors still awaiting slot credit."""
         with self._condition:
             return len(self._in_flight)
 
@@ -365,6 +373,8 @@ class SharedSlotRegistry:
 
     def shared_memory_view(self, offset: int, length: int) -> memoryview:
         """Return a writable view into one slot-sized shared-memory span."""
+        if self._shm is None:
+            raise RuntimeError("Shared-slot transport is not ready")
         return self._shm.buf[offset : offset + length]
 
     def close(self) -> None:
@@ -375,16 +385,13 @@ class SharedSlotRegistry:
             self._mark_closed_locked()
 
         self._stop_event.set()
-
-        # Stop background threads before closing the socket they poll.
-        self._ack_thread.join(timeout=1.0)
+        self._control_thread.join(timeout=1.0)
         self._watchdog_thread.join(timeout=1.0)
-
-        self._close_ack_resources()
+        self._close_control_resources()
         self._close_shared_memory()
-        self._remove_ack_socket_path()
+        self._remove_control_socket_path()
 
-    def _should_trace_ack(self, sequence_id: int | None) -> bool:
+    def _should_trace_credit(self, sequence_id: int | None) -> bool:
         return (
             sequence_id is None
             or sequence_id < 10
@@ -392,15 +399,13 @@ class SharedSlotRegistry:
             or 1090 <= sequence_id <= 1150
         )
 
-    def _ack_listener_loop(self) -> None:
+    def _control_listener_loop(self) -> None:
         logger.info(
-            "Shared-slot ACK receiver started endpoint=%s shm_name=%s",
-            self.ack_endpoint,
-            self.shm_name,
+            "Shared-slot control receiver started endpoint=%s",
+            self.control_endpoint,
         )
-
         poller = zmq.Poller()
-        poller.register(self._ack_socket, zmq.POLLIN)
+        poller.register(self._control_socket, zmq.POLLIN)
 
         try:
             while not self._stop_event.is_set():
@@ -408,32 +413,70 @@ class SharedSlotRegistry:
                     events = dict(poller.poll(100))
                 except zmq.ZMQError:
                     logger.exception(
-                        "Shared-slot ACK receiver poll failed endpoint=%s",
-                        self.ack_endpoint,
+                        "Shared-slot control receiver poll failed endpoint=%s",
+                        self.control_endpoint,
                     )
                     break
 
-                if self._ack_socket not in events:
+                if self._control_socket not in events:
                     continue
 
                 try:
-                    self._process_slot_release_ack(
-                        SlotReleaseAck.from_dict(
-                            json.loads(self._ack_socket.recv().decode("utf-8"))
-                        )
-                    )
-
+                    message = MessageEnvelope.from_bytes(self._control_socket.recv())
+                    self._process_control_message(message)
                 except Exception:
-                    logger.exception("Failed to process shared-slot ACK")
+                    logger.exception("Failed to process shared-slot control message")
         finally:
             log_fn = logger.info if self._stop_event.is_set() and self._closed else logger.warning
             log_fn(
-                "Shared-slot ACK receiver exiting endpoint=%s stop_event=%s closed=%s healthy=%s",
-                self.ack_endpoint,
+                "Shared-slot control receiver exiting endpoint=%s stop_event=%s closed=%s healthy=%s",
+                self.control_endpoint,
                 self._stop_event.is_set(),
                 self._closed,
                 self._healthy,
             )
+
+    def _process_control_message(self, message: MessageEnvelope) -> None:
+        if message.command == CommandType.SHARED_SLOT_READY:
+            ready = SharedSlotReadyModel(**message.payload[message.command.value])
+            self._apply_ready_message(ready)
+            return
+        if message.command == CommandType.SHARED_SLOT_CREDIT_RETURN:
+            credit = SharedSlotCreditReturn.from_dict(message.payload[message.command.value])
+            self._process_slot_credit_return(credit)
+            return
+        logger.warning("Ignoring unexpected shared-slot control command %s", message.command)
+
+    def _apply_ready_message(self, ready: SharedSlotReadyModel) -> None:
+        try:
+            shm = SharedMemory(name=ready.shm_name, create=False)
+            try:
+                resource_tracker.unregister(shm._name, "shared_memory")
+            except Exception:
+                logger.debug(
+                    "Failed to unregister daemon-owned shared-memory handle %s",
+                    ready.shm_name,
+                    exc_info=True,
+                )
+        except Exception:
+            logger.exception("Failed to attach daemon-owned shared memory %s", ready.shm_name)
+            with self._condition:
+                self._mark_unhealthy_locked("attach_failed")
+            return
+
+        with self._condition:
+            if self._closed:
+                shm.close()
+                return
+            if self._shm is not None:
+                self._shm.close()
+            self._shm = shm
+            self.shm_name = ready.shm_name
+            self.slot_size = int(ready.slot_size)
+            self.slot_count = int(ready.slot_count)
+            self._free_slots = deque(range(self.slot_count))
+            self._ready = True
+            self._condition.notify_all()
 
     def _watchdog_loop(self) -> None:
         while not self._stop_event.wait(0.1):
@@ -458,26 +501,15 @@ class SharedSlotRegistry:
             entry = self._in_flight.get(sequence_id)
             if entry is not None:
                 last_reason = (
-                    f"ack_timeout(sequence_id={entry.sequence_id},slot_id={entry.slot_id})"
+                    f"credit_timeout(sequence_id={entry.sequence_id},slot_id={entry.slot_id})"
                 )
                 logger.warning(
-                    "Shared-slot ACK timeout snapshot sequence_id=%s slot_id=%s "
-                    "socket_sent_age=%.3fs in_flight=%d free=%d last_acked=%s acked=%d",
-                    entry.sequence_id,
-                    entry.slot_id,
-                    now - entry.socket_sent_at if entry.socket_sent_at is not None else -1.0,
-                    len(self._in_flight),
-                    len(self._free_slots),
-                    self._last_acked_sequence_id,
-                    self._acked_sequence_count,
-                )
-                logger.warning(
-                    "Shared-slot ACK timed out shm_name=%s slot_id=%s sequence_id=%s",
+                    "Shared-slot credit timed out shm_name=%s slot_id=%s sequence_id=%s",
                     entry.shm_name,
                     entry.slot_id,
                     entry.sequence_id,
                 )
-        self._mark_unhealthy_locked(last_reason or "ack_timeout", sequence_ids=timed_out)
+        self._mark_unhealthy_locked(last_reason or "credit_timeout", sequence_ids=timed_out)
 
     def _release_sequence_locked(self, sequence_id: int) -> None:
         entry = self._in_flight.pop(sequence_id, None)
@@ -488,6 +520,8 @@ class SharedSlotRegistry:
 
     def _reserve_slot_for_descriptor_locked(self, slot_id: int) -> int:
         """Create in-flight tracking for a reserved slot."""
+        if self.shm_name is None:
+            raise RuntimeError("Shared-slot transport is not ready")
         sequence_id = self._sequence_id
         self._sequence_id += 1
         self._in_flight[sequence_id] = InFlightSlot(
@@ -503,7 +537,7 @@ class SharedSlotRegistry:
         return sequence_id
 
     def _mark_descriptor_sent_locked(self, sequence_id: int) -> None:
-        """Start the ACK timeout clock for one in-flight descriptor."""
+        """Start the credit timeout clock for one in-flight descriptor."""
         entry = self._in_flight.get(sequence_id)
         if entry is None or entry.socket_sent_at is not None:
             return
@@ -515,66 +549,66 @@ class SharedSlotRegistry:
             socket_sent_at=time.monotonic(),
         )
 
-    def _apply_slot_release_ack_locked(
+    def _apply_slot_credit_locked(
         self,
         *,
         shm_name: str,
         slot_id: int,
         sequence_id: int,
     ) -> bool:
-        """Apply one release ACK to the in-flight slot state."""
+        """Apply one returned slot credit to the in-flight state."""
         entry = self._in_flight.get(sequence_id)
         if entry is None or entry.shm_name != shm_name or entry.slot_id != slot_id:
             logger.warning(
-                "Ignoring stale or unknown slot ACK shm_name=%s slot_id=%s sequence_id=%s",
+                "Ignoring stale or unknown slot credit shm_name=%s slot_id=%s sequence_id=%s",
                 shm_name,
                 slot_id,
                 sequence_id,
             )
             return False
 
-        self._record_ack_stats_locked(entry)
+        self._record_credit_stats_locked(entry)
         self._release_sequence_locked(sequence_id)
         return True
 
-    def _record_ack_stats_locked(self, entry: InFlightSlot) -> None:
-        """Update ACK latency and release metrics for one completed slot."""
-        ack_started_at = (
+    def _record_credit_stats_locked(self, entry: InFlightSlot) -> None:
+        """Update credit-return latency and release metrics for one completed slot."""
+        started_at = (
             entry.socket_sent_at
             if entry.socket_sent_at is not None
             else entry.reserved_at
         )
-        ack_latency_s = max(0.0, time.monotonic() - ack_started_at)
+        latency_s = max(0.0, time.monotonic() - started_at)
         self._acked_sequence_count += 1
         self._last_acked_sequence_id = entry.sequence_id
-        self._last_ack_latency_s = ack_latency_s
-        self._max_ack_latency_s = max(self._max_ack_latency_s, ack_latency_s)
+        self._last_ack_latency_s = latency_s
+        self._max_ack_latency_s = max(self._max_ack_latency_s, latency_s)
 
-    def _process_slot_release_ack(self, ack: SlotReleaseAck) -> None:
-        """Apply one ACK and emit trace logging when enabled."""
-        if self._should_trace_ack(ack.sequence_id):
+    def _process_slot_credit_return(self, credit: SharedSlotCreditReturn) -> None:
+        """Apply one returned slot credit and emit trace logging when enabled."""
+        if self._should_trace_credit(credit.sequence_id):
             logger.info(
-                "Shared-slot ACK received sequence_id=%s slot_id=%s shm_name=%s",
-                ack.sequence_id,
-                ack.slot_id,
-                ack.shm_name,
+                "Shared-slot credit received sequence_id=%s slot_id=%s shm_name=%s",
+                credit.sequence_id,
+                credit.slot_id,
+                credit.shm_name,
             )
 
         applied = self.release_slot(
-            ack.shm_name,
-            ack.slot_id,
-            ack.sequence_id,
+            credit.shm_name,
+            credit.slot_id,
+            credit.sequence_id,
         )
 
-        if self._should_trace_ack(ack.sequence_id):
+        if self._should_trace_credit(credit.sequence_id):
             stats = self.get_debug_stats()
             logger.info(
-                "Shared-slot ACK applied=%s sequence_id=%s slot_id=%s "
+                "Shared-slot credit applied=%s sequence_id=%s slot_id=%s "
                 "acked=%s inflight=%s free=%s last_ack_latency=%.3fs "
                 "max_ack_latency=%.3fs healthy=%s unhealthy_reason=%s",
                 applied,
-                ack.sequence_id,
-                ack.slot_id,
+                credit.sequence_id,
+                credit.slot_id,
                 stats["acked_sequence_count"],
                 stats["in_flight_slot_count"],
                 stats["free_slot_count"],
@@ -603,11 +637,7 @@ class SharedSlotRegistry:
         """Transition to unhealthy state and release affected slots."""
         self._healthy = False
         self._unhealthy_reason = reason
-        ids_to_release = (
-            list(self._in_flight)
-            if sequence_ids is None
-            else sequence_ids
-        )
+        ids_to_release = list(self._in_flight) if sequence_ids is None else sequence_ids
         for sequence_id in ids_to_release:
             self._release_sequence_locked(sequence_id)
         self._condition.notify_all()
@@ -628,61 +658,43 @@ class SharedSlotRegistry:
             "unhealthy_reason": self._unhealthy_reason,
         }
 
-    def _close_ack_resources(self) -> None:
-        """Close the producer-side ACK socket and its ZMQ context."""
+    def _close_control_resources(self) -> None:
+        """Close the producer-side control socket and its ZMQ context."""
         try:
-            self._ack_socket.close(0)
+            self._control_socket.close(0)
         except Exception:
-            logger.warning(
-                "Failed to close shared-slot ACK socket",
-                exc_info=True,
-            )
-
+            logger.warning("Failed to close shared-slot control socket", exc_info=True)
         try:
             self._context.term()
         except Exception:
-            logger.warning(
-                "Failed to terminate shared-slot ACK context",
-                exc_info=True,
-            )
+            logger.warning("Failed to terminate shared-slot control context", exc_info=True)
 
     def _close_shared_memory(self) -> None:
-        """Close and unlink the producer-owned shared-memory region."""
+        """Close the local attachment to the daemon-owned shared-memory region."""
+        if self._shm is None:
+            return
         try:
             self._shm.close()
         except Exception:
-            logger.warning(
-                "Failed to close shared-memory handle",
-                exc_info=True,
-            )
+            logger.warning("Failed to close shared-memory handle", exc_info=True)
+        self._shm = None
 
+    def _remove_control_socket_path(self) -> None:
+        """Remove the filesystem entry backing the control IPC endpoint."""
         try:
-            self._shm.unlink()
-        except FileNotFoundError:
-            pass
-        except Exception:
-            logger.warning(
-                "Failed to unlink shared-memory object %s",
-                self.shm_name,
-                exc_info=True,
-            )
-
-    def _remove_ack_socket_path(self) -> None:
-        """Remove the filesystem entry backing the ACK IPC endpoint."""
-        try:
-            self._ack_socket_path.unlink()
+            self._control_socket_path.unlink()
         except FileNotFoundError:
             pass
         except OSError:
             logger.warning(
-                "Failed to remove shared-slot ACK socket file %s",
-                self._ack_socket_path,
+                "Failed to remove shared-slot control socket file %s",
+                self._control_socket_path,
                 exc_info=True,
             )
 
 
 class SharedSlotVideoWorker:
-    """Process-scoped worker that writes packets into shared-memory slots."""
+    """Background worker that writes packets into daemon-owned shared-memory slots."""
 
     _instance: SharedSlotVideoWorker | None = None
     _refcount = 0
@@ -690,8 +702,6 @@ class SharedSlotVideoWorker:
 
     def __init__(self, registry: SharedSlotRegistry) -> None:
         self._registry = registry
-        # Bound the staging queue so large video frames apply backpressure
-        # instead of retaining an unbounded number of frame-backed memoryviews.
         self._queue: queue.Queue[QueuedSharedSlotPacket | None] = queue.Queue(
             maxsize=max(1, registry.slot_count)
         )
@@ -706,7 +716,7 @@ class SharedSlotVideoWorker:
 
     @classmethod
     def acquire(cls, registry: SharedSlotRegistry) -> "SharedSlotVideoWorker":
-        """Acquire the process-scoped shared-slot worker."""
+        """Acquire a singleton worker instance for isolated unit tests."""
         with cls._instance_lock:
             if cls._instance is None:
                 cls._instance = cls(registry)
@@ -715,7 +725,7 @@ class SharedSlotVideoWorker:
 
     @classmethod
     def release_shared_instance(cls) -> None:
-        """Release one worker reference and stop it when unused."""
+        """Release one singleton test worker reference."""
         with cls._instance_lock:
             if cls._instance is None:
                 return
@@ -728,7 +738,7 @@ class SharedSlotVideoWorker:
 
     @classmethod
     def reset_shared_instance_for_tests(cls) -> None:
-        """Tear down the process singleton, if any, for test isolation."""
+        """Tear down the singleton test worker, if any."""
         with cls._instance_lock:
             instance = cls._instance
             cls._instance = None
@@ -828,6 +838,8 @@ class SharedSlotVideoWorker:
                 shm_view.release()
 
             sequence_id = self._registry.mark_in_flight(slot_id)
+            if self._registry.shm_name is None:
+                raise RuntimeError("Shared-slot transport is not ready")
             descriptor = SharedSlotDescriptor(
                 shm_name=self._registry.shm_name,
                 slot_id=slot_id,
@@ -835,7 +847,6 @@ class SharedSlotVideoWorker:
                 length=item.packet_length,
                 sequence_id=sequence_id,
                 slot_size=self._registry.slot_size,
-                ack_endpoint=self._registry.ack_endpoint,
             )
             envelope = MessageEnvelope(
                 producer_id=item.producer_id,
@@ -859,7 +870,7 @@ class SharedSlotVideoWorker:
 
 
 class SharedSlotVideoTransport:
-    """Producer-facing adapter over the process-scoped shared-slot runtime."""
+    """Producer-facing adapter over one daemon-owned shared-slot session."""
 
     def __init__(
         self,
@@ -869,13 +880,19 @@ class SharedSlotVideoTransport:
         ack_timeout_s: float = DEFAULT_VIDEO_ACK_TIMEOUT_SECONDS,
         allocate_timeout_s: float = DEFAULT_VIDEO_SLOT_ALLOCATE_TIMEOUT_SECONDS,
     ) -> None:
-        self._registry = SharedSlotRegistry.acquire(
+        self._registry = SharedSlotRegistry(
             slot_size=slot_size,
             slot_count=slot_count,
-            ack_timeout_s=ack_timeout_s,
-            allocate_timeout_s=allocate_timeout_s,
+            ack_timeout_s=_env_float(
+                "NCD_VIDEO_ACK_TIMEOUT_SECONDS",
+                ack_timeout_s,
+            ),
+            allocate_timeout_s=_env_float(
+                "NCD_VIDEO_SLOT_ALLOCATE_TIMEOUT_SECONDS",
+                allocate_timeout_s,
+            ),
         )
-        self._worker = SharedSlotVideoWorker.acquire(self._registry)
+        self._worker = SharedSlotVideoWorker(self._registry)
         self._announced = False
 
     @property
@@ -884,13 +901,21 @@ class SharedSlotVideoTransport:
         return self._registry.slot_size
 
     def open_payload(self) -> OpenFixedSharedSlotsModel:
-        """Return the setup payload and mark the transport announced."""
+        """Return the setup request payload and mark the transport announced."""
         self._announced = True
-        return self._registry.setup_payload()
+        return self._registry.request_payload()
 
     def is_announced(self) -> bool:
         """Return True when setup has been announced to the daemon."""
         return self._announced
+
+    def is_ready(self) -> bool:
+        """Return True when the daemon has opened the shared-memory session."""
+        return self._registry.is_ready()
+
+    def wait_until_ready(self) -> bool:
+        """Block until the daemon has opened the shared-memory session."""
+        return self._registry.wait_until_ready()
 
     def enqueue_packet(
         self,
@@ -900,7 +925,7 @@ class SharedSlotVideoTransport:
         metadata: dict[str, str | int | None],
         chunk: bytes | bytearray | memoryview,
     ) -> None:
-        """Serialize one transport packet and hand it to the process worker."""
+        """Serialize one transport packet and hand it to the background worker."""
         metadata_bytes, packet_length = build_shared_frame_packet_metadata(
             metadata, chunk
         )
@@ -915,7 +940,7 @@ class SharedSlotVideoTransport:
         )
 
     def next_sequence_number(self) -> int:
-        """Reserve a process-scoped sequence number for control messages."""
+        """Reserve a channel-scoped sequence number for control messages."""
         with self._registry._condition:
             sequence_id = self._registry._sequence_id
             self._registry._sequence_id += 1
@@ -930,7 +955,7 @@ class SharedSlotVideoTransport:
         self._registry.notify_sender_failure()
 
     def wait_until_drained(self, timeout_s: float = 30.0) -> None:
-        """Wait until all queued packets and in-flight ACKs are settled."""
+        """Wait until all queued packets and in-flight credits are settled."""
         deadline = time.monotonic() + timeout_s
         last_stats: ProducerSharedRingBufferDebugStats | None = None
 
@@ -954,9 +979,9 @@ class SharedSlotVideoTransport:
         )
 
     def close(self) -> None:
-        """Release this channel's references to the shared-slot runtime."""
-        SharedSlotVideoWorker.release_shared_instance()
-        SharedSlotRegistry.release_shared_instance()
+        """Release this channel's shared-slot runtime."""
+        self._worker.close()
+        self._registry.close()
 
     def get_stats(self) -> ProducerSharedRingBufferDebugStats:
         """Return a best-effort debug snapshot during the transport migration."""

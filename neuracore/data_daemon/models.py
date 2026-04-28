@@ -30,6 +30,8 @@ class CommandType(Enum):
     OPEN_RING_BUFFER = "open_ring_buffer"
     OPEN_FIXED_SHARED_SLOTS = "open_fixed_shared_slots"
     SHARED_SLOT_DESCRIPTOR = "shared_slot_descriptor"
+    SHARED_SLOT_READY = "shared_slot_ready"
+    SHARED_SLOT_CREDIT_RETURN = "shared_slot_credit_return"
     HEARTBEAT = "heartbeat"
     DATA_CHUNK = "data_chunk"
     TRACE_END = "trace_end"
@@ -260,10 +262,17 @@ class OpenRingBufferModel(BaseModel):
 
 
 class OpenFixedSharedSlotsModel(BaseModel):
-    """Model for the OPEN_FIXED_SHARED_SLOTS command."""
+    """Producer request to open daemon-owned fixed shared slots."""
 
-    transport_mode: str = "FIXED_SHARED_SLOTS"
-    ack_endpoint: str
+    transport_mode: str = "FIXED_SHARED_SLOTS_DAEMON_OWNED"
+    control_endpoint: str
+    slot_size: int
+    slot_count: int
+
+
+class SharedSlotReadyModel(BaseModel):
+    """Daemon response describing one opened shared-slot transport."""
+
     shm_name: str
     slot_size: int
     slot_count: int
@@ -409,7 +418,7 @@ class SharedRingChunkMetadata:
 
 @dataclass(frozen=True)
 class SharedSlotDescriptor:
-    """Descriptor for one packet stored in producer-owned shared memory."""
+    """Descriptor for one packet stored in shared memory."""
 
     shm_name: str
     slot_id: int
@@ -417,7 +426,7 @@ class SharedSlotDescriptor:
     length: int
     sequence_id: int
     slot_size: int
-    ack_endpoint: str
+    ack_endpoint: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SharedSlotDescriptor":
@@ -429,10 +438,14 @@ class SharedSlotDescriptor:
             length=int(data["length"]),
             sequence_id=int(data["sequence_id"]),
             slot_size=int(data["slot_size"]),
-            ack_endpoint=str(data["ack_endpoint"]),
+            ack_endpoint=(
+                None
+                if data.get("ack_endpoint") is None
+                else str(data["ack_endpoint"])
+            ),
         )
 
-    def to_dict(self) -> dict[str, str | int]:
+    def to_dict(self) -> dict[str, str | int | None]:
         """Serialize the descriptor to a JSON-friendly dict."""
         return {
             "shm_name": self.shm_name,
@@ -446,16 +459,16 @@ class SharedSlotDescriptor:
 
 
 @dataclass(frozen=True)
-class SlotReleaseAck:
-    """Acknowledgement for one shared-memory slot release."""
+class SharedSlotCreditReturn:
+    """Credit return for one daemon-owned shared-memory slot."""
 
     shm_name: str
     slot_id: int
     sequence_id: int
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SlotReleaseAck":
-        """Parse a slot ACK from a dict payload."""
+    def from_dict(cls, data: dict[str, Any]) -> "SharedSlotCreditReturn":
+        """Parse a slot credit return from a dict payload."""
         return cls(
             shm_name=str(data["shm_name"]),
             slot_id=int(data["slot_id"]),
@@ -463,7 +476,7 @@ class SlotReleaseAck:
         )
 
     def to_dict(self) -> dict[str, str | int]:
-        """Serialize the ACK to a JSON-friendly dict."""
+        """Serialize the credit return to a JSON-friendly dict."""
         return {
             "shm_name": self.shm_name,
             "slot_id": self.slot_id,
