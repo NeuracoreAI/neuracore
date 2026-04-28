@@ -28,6 +28,7 @@ import logging
 import sqlite3
 import time
 from collections.abc import Callable, Iterable
+from contextlib import closing
 from typing import Any
 
 import pytest
@@ -109,13 +110,13 @@ class DaemonDbStore:
     def fetch_all_rows(self, table: str) -> list[dict[str, Any]]:
         """Return every row from the named table in the daemon state DB."""
         table_name = self._table_name(table)
-        with self.connect() as conn:
+        with closing(self.connect()) as conn:
             rows = conn.execute(f"SELECT * FROM {table_name}").fetchall()  # noqa: S608
         return [dict(row) for row in rows]
 
     def list_tables(self) -> set[str]:
         """Return the names of all user tables currently present in the daemon DB."""
-        with self.connect() as conn:
+        with closing(self.connect()) as conn:
             rows = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
@@ -145,7 +146,7 @@ class DaemonDbStore:
 
     def fetch_recording(self, recording_id: str) -> dict[str, Any] | None:
         """Return the recording row for ``recording_id`` if it exists."""
-        with self.connect() as conn:
+        with closing(self.connect()) as conn:
             row = conn.execute(
                 f"SELECT * FROM {RECORDINGS_TABLE} " f"WHERE {COLUMN_RECORDING_ID} = ?",
                 (recording_id,),
@@ -159,7 +160,7 @@ class DaemonDbStore:
         columns: Iterable[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Return trace rows for one recording, limited to available columns."""
-        with self.connect_read_only() as conn:
+        with closing(self.connect_read_only()) as conn:
             if not self.table_exists(conn, TRACES_TABLE):
                 return []
 

@@ -91,6 +91,17 @@ INTEGRITY_CASES = (
         timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
         wait=False,
     ),
+    # High frequency robot control at 210Hz joint data
+    # Tests: high-frequency sampling, temporal jitter, joint-only streaming
+    DataDaemonTestCase(
+        duration_sec=60,
+        joint_count=7,
+        video_count=0,
+        parallel_contexts=1,
+        recording_count=5,
+        context_duration_mode=DURATION_MODE_FIXED,
+        joint_fps=210,
+    ),
 )
 
 PRE_NETWORK_INTEGRITY_CASES = INTEGRITY_CASES

@@ -259,10 +259,27 @@ def build_context_specs(
 # ---------------------------------------------------------------------------
 
 
+def _cleanup_producer_channels(robot: object | None) -> None:
+    """Stop any producer channels left open on a worker robot."""
+    for stream in getattr(robot, "_data_streams", {}).values():
+        producer_channel = getattr(stream, "_producer_channel", None)
+        if producer_channel is not None:
+            try:
+                producer_channel.stop_producer_channel()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Failed to stop producer channel during cleanup", exc_info=True
+                )
+            finally:
+                stream._producer_channel = None
+
+
 def _cleanup_test_worker_robot(robot: object | None) -> None:
     """Clean up temp dirs and recording context on a worker robot."""
     if robot is None:
         return
+
+    _cleanup_producer_channels(robot)
 
     temp_dir = getattr(robot, "_temp_dir", None)
     if temp_dir is not None:

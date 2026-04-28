@@ -10,6 +10,7 @@ from tests.integration.platform.data_daemon.shared.assertions import (
 )
 from tests.integration.platform.data_daemon.shared.process_control import (
     Timer,
+    close_ring_buffer_fds,
     stop_daemon,
 )
 from tests.integration.platform.data_daemon.shared.profiles import cleanup_test_profiles
@@ -32,7 +33,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 )
 
 # cspell:ignore terminalreporter exitstatus finalizer NODEIDS exitfirst unparameterized
-# cspell:ignore nodeid getfixturevalue
+# cspell:ignore nodeid getfixturevalue modifyitems fspath
 
 
 _BATCH_START_CLEANED_NODEIDS: set[str] = set()
@@ -69,6 +70,13 @@ def daemon_test_state_env():
 def daemon_offline_env():
     """Compatibility shim — session env already points to test state dir."""
     yield
+
+
+@pytest.fixture(autouse=True)
+def cleanup_ring_buffer_fds():
+    """Close leaked neuracore-ring-buffer memfd file descriptors after each test."""
+    yield
+    close_ring_buffer_fds()
 
 
 @pytest.fixture(autouse=True)
@@ -127,6 +135,23 @@ def log_run_analysis_on_teardown(
 
     request.addfinalizer(finalizer)
     return register
+
+
+def pytest_collection_modifyitems(items):
+    """Ensure pre_network tests run before network tests within data_daemon."""
+
+    def _order(item):
+        name = item.fspath.basename
+        if "pre_network" in name:
+            return 0
+        if "network" in name:
+            return 1
+        return 2
+
+    data_daemon_items = [i for i in items if "data_daemon" in str(i.fspath)]
+    other_items = [i for i in items if "data_daemon" not in str(i.fspath)]
+    data_daemon_items.sort(key=_order)
+    items[:] = other_items + data_daemon_items
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):

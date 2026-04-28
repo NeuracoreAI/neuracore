@@ -368,3 +368,30 @@ def wait_for_daemon_shutdown(
             )
 
         time.sleep(poll_interval_s)
+
+
+def close_ring_buffer_fds() -> int:
+    """Close any open neuracore-ring-buffer memfd file descriptors in this process.
+
+    Returns the number of file descriptors that were closed.
+    """
+    closed = 0
+    proc_fd_dir = f"/proc/{os.getpid()}/fd"
+    try:
+        entries = os.listdir(proc_fd_dir)
+    except OSError:
+        return closed
+    for entry in entries:
+        try:
+            target = os.readlink(f"{proc_fd_dir}/{entry}")
+        except OSError:
+            continue
+        if "neuracore-ring-buffer" in target:
+            try:
+                os.close(int(entry))
+                closed += 1
+            except OSError:
+                pass
+    if closed:
+        logger.debug("Closed %d leaked ring-buffer fd(s)", closed)
+    return closed

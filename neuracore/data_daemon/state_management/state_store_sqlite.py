@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import and_, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from neuracore.data_daemon.models import (
     DataType,
@@ -27,6 +28,7 @@ from neuracore.data_daemon.models import (
 from .state_store import StateStore
 from .tables import metadata, recordings, traces
 
+# cspell:ignore poolclass
 logger = logging.getLogger(__name__)
 
 
@@ -59,6 +61,7 @@ class SqliteStateStore(StateStore):
         self._engine: AsyncEngine = create_async_engine(
             f"sqlite+aiosqlite:///{db_path}",
             future=True,
+            poolclass=NullPool,
         )
         self._write_semaphore = asyncio.Semaphore(1)
 
