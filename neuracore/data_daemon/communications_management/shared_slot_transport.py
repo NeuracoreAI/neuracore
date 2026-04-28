@@ -319,63 +319,22 @@ class SharedSlotRegistry:
             self._check_for_timeouts_locked()
             if not self._is_healthy_locked():
                 raise RuntimeError("Shared-slot transport is unhealthy")
-            sequence_id = self._sequence_id
-            self._sequence_id += 1
-            self._in_flight[sequence_id] = InFlightSlot(
-                shm_name=self.shm_name,
-                slot_id=int(slot_id),
-                sequence_id=sequence_id,
-                reserved_at=time.monotonic(),
-            )
-            self._max_in_flight_slot_count = max(
-                self._max_in_flight_slot_count,
-                len(self._in_flight),
-            )
-            return sequence_id
+            return self._reserve_slot_for_descriptor_locked(slot_id)
 
     def mark_sent(self, sequence_id: int) -> None:
         """Start the ACK timeout clock once the descriptor is on the socket."""
         with self._condition:
-            entry = self._in_flight.get(sequence_id)
-            if entry is None or entry.socket_sent_at is not None:
-                return
-            self._in_flight[sequence_id] = InFlightSlot(
-                shm_name=entry.shm_name,
-                slot_id=entry.slot_id,
-                sequence_id=entry.sequence_id,
-                reserved_at=entry.reserved_at,
-                socket_sent_at=time.monotonic(),
-            )
+            self._mark_descriptor_sent_locked(sequence_id)
 
     def release_slot(self, shm_name: str, slot_id: int, sequence_id: int) -> bool:
         """Release one in-flight slot after a matching ACK arrives."""
         with self._condition:
             self._check_for_timeouts_locked()
-            entry = self._in_flight.get(sequence_id)
-            if (
-                entry is None
-                or entry.shm_name != shm_name
-                or entry.slot_id != slot_id
-            ):
-                logger.warning(
-                    "Ignoring stale or unknown slot ACK shm_name=%s slot_id=%s sequence_id=%s",
-                    shm_name,
-                    slot_id,
-                    sequence_id,
-                )
-                return False
-            ack_started_at = (
-                entry.socket_sent_at
-                if entry.socket_sent_at is not None
-                else entry.reserved_at
+            return self._apply_slot_release_ack_locked(
+                shm_name=shm_name,
+                slot_id=slot_id,
+                sequence_id=sequence_id,
             )
-            ack_latency_s = max(0.0, time.monotonic() - ack_started_at)
-            self._acked_sequence_count += 1
-            self._last_acked_sequence_id = sequence_id
-            self._last_ack_latency_s = ack_latency_s
-            self._max_ack_latency_s = max(self._max_ack_latency_s, ack_latency_s)
-            self._release_sequence_locked(sequence_id)
-            return True
 
     def rollback_enqueued_slot(self, sequence_id: int) -> None:
         """Return a slot immediately when descriptor enqueue fails."""
@@ -458,45 +417,17 @@ class SharedSlotRegistry:
                     continue
 
                 try:
-                    raw = self._ack_socket.recv()
-                    ack = SlotReleaseAck.from_dict(json.loads(raw.decode("utf-8")))
-
-                    if self._should_trace_ack(ack.sequence_id):
-                        logger.info(
-                            "Shared-slot ACK received sequence_id=%s slot_id=%s shm_name=%s",
-                            ack.sequence_id,
-                            ack.slot_id,
-                            ack.shm_name,
+                    self._process_slot_release_ack(
+                        SlotReleaseAck.from_dict(
+                            json.loads(self._ack_socket.recv().decode("utf-8"))
                         )
-
-                    applied = self.release_slot(
-                        ack.shm_name,
-                        ack.slot_id,
-                        ack.sequence_id,
                     )
-
-                    if self._should_trace_ack(ack.sequence_id):
-                        stats = self.get_debug_stats()
-                        logger.info(
-                            "Shared-slot ACK applied=%s sequence_id=%s slot_id=%s "
-                            "acked=%s inflight=%s free=%s last_ack_latency=%.3fs "
-                            "max_ack_latency=%.3fs healthy=%s unhealthy_reason=%s",
-                            applied,
-                            ack.sequence_id,
-                            ack.slot_id,
-                            stats["acked_sequence_count"],
-                            stats["in_flight_slot_count"],
-                            stats["free_slot_count"],
-                            float(stats["last_ack_latency_s"] or 0.0),
-                            float(stats["max_ack_latency_s"] or 0.0),
-                            stats["healthy"],
-                            stats["unhealthy_reason"],
-                        )
 
                 except Exception:
                     logger.exception("Failed to process shared-slot ACK")
         finally:
-            logger.warning(
+            log_fn = logger.info if self._stop_event.is_set() and self._closed else logger.warning
+            log_fn(
                 "Shared-slot ACK receiver exiting endpoint=%s stop_event=%s closed=%s healthy=%s",
                 self.ack_endpoint,
                 self._stop_event.is_set(),
@@ -554,6 +485,104 @@ class SharedSlotRegistry:
             return
         self._free_slots.append(entry.slot_id)
         self._condition.notify_all()
+
+    def _reserve_slot_for_descriptor_locked(self, slot_id: int) -> int:
+        """Create in-flight tracking for a reserved slot."""
+        sequence_id = self._sequence_id
+        self._sequence_id += 1
+        self._in_flight[sequence_id] = InFlightSlot(
+            shm_name=self.shm_name,
+            slot_id=int(slot_id),
+            sequence_id=sequence_id,
+            reserved_at=time.monotonic(),
+        )
+        self._max_in_flight_slot_count = max(
+            self._max_in_flight_slot_count,
+            len(self._in_flight),
+        )
+        return sequence_id
+
+    def _mark_descriptor_sent_locked(self, sequence_id: int) -> None:
+        """Start the ACK timeout clock for one in-flight descriptor."""
+        entry = self._in_flight.get(sequence_id)
+        if entry is None or entry.socket_sent_at is not None:
+            return
+        self._in_flight[sequence_id] = InFlightSlot(
+            shm_name=entry.shm_name,
+            slot_id=entry.slot_id,
+            sequence_id=entry.sequence_id,
+            reserved_at=entry.reserved_at,
+            socket_sent_at=time.monotonic(),
+        )
+
+    def _apply_slot_release_ack_locked(
+        self,
+        *,
+        shm_name: str,
+        slot_id: int,
+        sequence_id: int,
+    ) -> bool:
+        """Apply one release ACK to the in-flight slot state."""
+        entry = self._in_flight.get(sequence_id)
+        if entry is None or entry.shm_name != shm_name or entry.slot_id != slot_id:
+            logger.warning(
+                "Ignoring stale or unknown slot ACK shm_name=%s slot_id=%s sequence_id=%s",
+                shm_name,
+                slot_id,
+                sequence_id,
+            )
+            return False
+
+        self._record_ack_stats_locked(entry)
+        self._release_sequence_locked(sequence_id)
+        return True
+
+    def _record_ack_stats_locked(self, entry: InFlightSlot) -> None:
+        """Update ACK latency and release metrics for one completed slot."""
+        ack_started_at = (
+            entry.socket_sent_at
+            if entry.socket_sent_at is not None
+            else entry.reserved_at
+        )
+        ack_latency_s = max(0.0, time.monotonic() - ack_started_at)
+        self._acked_sequence_count += 1
+        self._last_acked_sequence_id = entry.sequence_id
+        self._last_ack_latency_s = ack_latency_s
+        self._max_ack_latency_s = max(self._max_ack_latency_s, ack_latency_s)
+
+    def _process_slot_release_ack(self, ack: SlotReleaseAck) -> None:
+        """Apply one ACK and emit trace logging when enabled."""
+        if self._should_trace_ack(ack.sequence_id):
+            logger.info(
+                "Shared-slot ACK received sequence_id=%s slot_id=%s shm_name=%s",
+                ack.sequence_id,
+                ack.slot_id,
+                ack.shm_name,
+            )
+
+        applied = self.release_slot(
+            ack.shm_name,
+            ack.slot_id,
+            ack.sequence_id,
+        )
+
+        if self._should_trace_ack(ack.sequence_id):
+            stats = self.get_debug_stats()
+            logger.info(
+                "Shared-slot ACK applied=%s sequence_id=%s slot_id=%s "
+                "acked=%s inflight=%s free=%s last_ack_latency=%.3fs "
+                "max_ack_latency=%.3fs healthy=%s unhealthy_reason=%s",
+                applied,
+                ack.sequence_id,
+                ack.slot_id,
+                stats["acked_sequence_count"],
+                stats["in_flight_slot_count"],
+                stats["free_slot_count"],
+                float(stats["last_ack_latency_s"] or 0.0),
+                float(stats["max_ack_latency_s"] or 0.0),
+                stats["healthy"],
+                stats["unhealthy_reason"],
+            )
 
     def _is_healthy_locked(self) -> bool:
         """Return True when the registry can still accept work."""
