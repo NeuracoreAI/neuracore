@@ -128,23 +128,8 @@ class SharedSlotDaemonHandler:
         channel: ChannelState,
         payload: dict,
     ) -> SharedSlotTransportResult:
-        """Copy, credit, parse, and account for one shared-slot descriptor."""
+        """Copy, credit, and parse one shared-slot descriptor."""
         descriptor = SharedSlotDescriptor.from_dict(payload)
-
-        logger.debug(
-            "Shared-slot descriptor received "
-            "producer_id=%s sequence_id=%s slot_id=%s "
-            "offset=%s length=%s shm_name=%s control_endpoint=%s",
-            channel.producer_id,
-            descriptor.sequence_id,
-            descriptor.slot_id,
-            descriptor.offset,
-            descriptor.length,
-            descriptor.shm_name,
-            channel.shared_slot.control_endpoint,
-        )
-
-        copy_start = time.monotonic()
         try:
             packet = self._copy_shared_slot_packet(descriptor)
         except Exception:
@@ -156,29 +141,10 @@ class SharedSlotDaemonHandler:
                 descriptor.slot_id,
             )
             raise
-
-        copy_elapsed = time.monotonic() - copy_start
-
-        ack_start = time.monotonic()
         self._send_slot_credit_return(channel, descriptor)
-        ack_elapsed = time.monotonic() - ack_start
 
         channel.mark_shared_slot_descriptor_seen(
             shm_name=descriptor.shm_name,
-            copied_bytes=len(packet),
-        )
-
-        logger.debug(
-            "Shared-slot daemon progress "
-            "producer_id=%s last_sequence_id=%s "
-            "descriptors_received=%d completed_messages=%d "
-            "copied_mib=%.2f pending_traces=%d",
-            channel.producer_id,
-            descriptor.sequence_id,
-            channel.shared_slot.descriptors_received,
-            channel.shared_slot.completed_messages,
-            channel.shared_slot.copied_bytes / (1024 * 1024),
-            len(channel.socket_pending_messages),
         )
 
         metadata_dict, chunk_data = parse_shared_frame_packet(packet)
@@ -189,8 +155,6 @@ class SharedSlotDaemonHandler:
             chunk_data=chunk_data,
             trace_id=chunk_metadata.trace_id,
             trace_metadata=chunk_metadata.trace_metadata,
-            copy_elapsed=copy_elapsed,
-            ack_elapsed=ack_elapsed,
         )
 
     def cleanup_channel_resources(self, channel: ChannelState) -> None:

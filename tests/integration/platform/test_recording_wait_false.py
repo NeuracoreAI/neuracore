@@ -190,6 +190,25 @@ def _wait_for_rgb_transport_to_drain(
     )
 
 
+def _transport_showed_post_stop_progress(
+    *,
+    pre_stop_stats: dict[str, object],
+    drained_stats: dict[str, object],
+) -> bool:
+    """Return True when stop(wait=False) left producer-side work to flush."""
+    pre_stop_sent = int(pre_stop_stats["last_socket_sent_sequence_number"])
+    drained_sent = int(drained_stats["last_socket_sent_sequence_number"])
+    pre_stop_enqueued = int(pre_stop_stats["last_enqueued_sequence_number"])
+    drained_enqueued = int(drained_stats["last_enqueued_sequence_number"])
+
+    return (
+        int(pre_stop_stats["send_queue_qsize"]) > 0
+        or int(pre_stop_stats["pending_sequence_count"]) > 0
+        or drained_sent > pre_stop_sent
+        or drained_enqueued > pre_stop_enqueued
+    )
+
+
 def _wait_for_rgb_trace_written(
     *,
     recording_id: str,
@@ -463,34 +482,17 @@ def _run_wait_false_rgb_payload_test(
         assert drained_transport_stats["last_send_error"] is None
         assert drained_transport_stats["pending_sequence_count"] == 0
         assert drained_transport_stats["send_queue_qsize"] == 0
-        assert drained_transport_stats["free_slot_count"] == drained_transport_stats["slot_count"]
-        assert drained_transport_stats["in_flight_slot_count"] == 0
-        assert drained_transport_stats["worker_queue_qsize"] == 0
-        assert drained_transport_stats["worker_error"] is None
-        assert drained_transport_stats["unhealthy_reason"] is None
         assert (
-            pre_stop_transport_stats["free_slot_count"]
-            < pre_stop_transport_stats["slot_count"]
+            _transport_showed_post_stop_progress(
+                pre_stop_stats=pre_stop_transport_stats,
+                drained_stats=drained_transport_stats,
+            )
         ), (
-            "Expected some shared slots to be occupied before stop_recording(wait=False). "
-            f"pre_stop_transport_stats={pre_stop_transport_stats}"
-        )
-        assert (
-            pre_stop_transport_stats["in_flight_slot_count"] > 0
-            or pre_stop_transport_stats["worker_queue_qsize"] > 0
-            or pre_stop_transport_stats["free_slot_count"] < pre_stop_transport_stats["slot_count"]
-        ), (
-            "Expected shared-slot transport backlog before drain, but transport already "
-            f"looked idle. pre_stop_transport_stats={pre_stop_transport_stats}"
-        )
-        assert drained_transport_stats["acked_sequence_count"] >= frame_count
-        assert (
-            drained_transport_stats["acked_sequence_count"]
-            >= pre_stop_transport_stats["acked_sequence_count"]
-        )
-        assert (
-            drained_transport_stats["max_in_flight_slot_count"]
-            >= pre_stop_transport_stats["in_flight_slot_count"]
+            "Expected producer transport activity to continue after "
+            "stop_recording(wait=False), but producer-side sender state already "
+            "looked fully flushed before stop. "
+            f"pre_stop_transport_stats={pre_stop_transport_stats} "
+            f"drained_transport_stats={drained_transport_stats}"
         )
 
         logger.info(

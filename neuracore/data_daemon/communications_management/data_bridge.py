@@ -77,17 +77,11 @@ class SharedSlotTransportState:
 
     control_endpoint: str | None = None
     shm_name: str | None = None
-    descriptors_received: int = 0
-    completed_messages: int = 0
-    copied_bytes: int = 0
 
     def reset(self) -> None:
         """Clear transport-specific state."""
         self.control_endpoint = None
         self.shm_name = None
-        self.descriptors_received = 0
-        self.completed_messages = 0
-        self.copied_bytes = 0
 
 
 @dataclass
@@ -171,19 +165,12 @@ class ChannelState:
         self,
         *,
         shm_name: str,
-        copied_bytes: int,
     ) -> None:
         """Record one shared-slot descriptor processed by the daemon."""
         self.transport_mode = TransportMode.SHARED_SLOT
         self.shared_slot.shm_name = shm_name
-        self.shared_slot.descriptors_received += 1
-        self.shared_slot.copied_bytes += copied_bytes
         if self.opened_at is None:
             self.opened_at = datetime.now(timezone.utc)
-
-    def mark_shared_slot_message_completed(self) -> None:
-        """Record one fully assembled shared-slot message."""
-        self.shared_slot.completed_messages += 1
 
     def uses_ring_buffer_transport(self) -> bool:
         """Return True when the channel is active on ring-buffer transport."""
@@ -649,23 +636,6 @@ class Daemon:
 
         if completed is None:
             return
-
-        channel.mark_shared_slot_message_completed()
-
-        if (
-            channel.shared_slot.completed_messages == 1
-            or channel.shared_slot.completed_messages % 60 == 0
-        ):
-            logger.info(
-                "Shared-slot assembled message "
-                "producer_id=%s completed_messages=%d "
-                "descriptors_received=%d copied_mib=%.2f trace_id=%s",
-                channel.producer_id,
-                channel.shared_slot.completed_messages,
-                channel.shared_slot.descriptors_received,
-                channel.shared_slot.copied_bytes / (1024 * 1024),
-                trace_id,
-            )
 
         resolved_recording_id = self._ensure_result_trace_registered(
             channel=channel,

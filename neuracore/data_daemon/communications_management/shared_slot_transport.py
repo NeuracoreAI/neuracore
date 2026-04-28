@@ -167,12 +167,6 @@ class SharedSlotRegistry:
         self._ready = False
         self._in_flight: dict[int, InFlightSlot] = {}
         self._closed = False
-        self._acked_sequence_count = 0
-        self._ack_timeout_count = 0
-        self._last_acked_sequence_id: int | None = None
-        self._last_ack_latency_s: float | None = None
-        self._max_ack_latency_s = 0.0
-        self._max_in_flight_slot_count = 0
         self._unhealthy_reason: str | None = None
 
         ACK_BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -356,11 +350,6 @@ class SharedSlotRegistry:
                 return
             self._mark_unhealthy_locked("sender_failure")
 
-    def get_debug_stats(self) -> dict[str, object]:
-        """Return a snapshot of shared-slot occupancy and credit health."""
-        with self._condition:
-            return self._debug_stats_locked()
-
     def get_in_flight_count(self) -> int:
         """Return the number of descriptors still awaiting slot credit."""
         with self._condition:
@@ -390,14 +379,6 @@ class SharedSlotRegistry:
         self._close_control_resources()
         self._close_shared_memory()
         self._remove_control_socket_path()
-
-    def _should_trace_credit(self, sequence_id: int | None) -> bool:
-        return (
-            sequence_id is None
-            or sequence_id < 10
-            or sequence_id % 100 == 0
-            or 1090 <= sequence_id <= 1150
-        )
 
     def _control_listener_loop(self) -> None:
         logger.info(
@@ -495,7 +476,6 @@ class SharedSlotRegistry:
         ]
         if not timed_out:
             return
-        self._ack_timeout_count += len(timed_out)
         last_reason: str | None = None
         for sequence_id in timed_out:
             entry = self._in_flight.get(sequence_id)
@@ -530,10 +510,6 @@ class SharedSlotRegistry:
             sequence_id=sequence_id,
             reserved_at=time.monotonic(),
         )
-        self._max_in_flight_slot_count = max(
-            self._max_in_flight_slot_count,
-            len(self._in_flight),
-        )
         return sequence_id
 
     def _mark_descriptor_sent_locked(self, sequence_id: int) -> None:
@@ -567,56 +543,16 @@ class SharedSlotRegistry:
             )
             return False
 
-        self._record_credit_stats_locked(entry)
         self._release_sequence_locked(sequence_id)
         return True
 
-    def _record_credit_stats_locked(self, entry: InFlightSlot) -> None:
-        """Update credit-return latency and release metrics for one completed slot."""
-        started_at = (
-            entry.socket_sent_at
-            if entry.socket_sent_at is not None
-            else entry.reserved_at
-        )
-        latency_s = max(0.0, time.monotonic() - started_at)
-        self._acked_sequence_count += 1
-        self._last_acked_sequence_id = entry.sequence_id
-        self._last_ack_latency_s = latency_s
-        self._max_ack_latency_s = max(self._max_ack_latency_s, latency_s)
-
     def _process_slot_credit_return(self, credit: SharedSlotCreditReturn) -> None:
-        """Apply one returned slot credit and emit trace logging when enabled."""
-        if self._should_trace_credit(credit.sequence_id):
-            logger.info(
-                "Shared-slot credit received sequence_id=%s slot_id=%s shm_name=%s",
-                credit.sequence_id,
-                credit.slot_id,
-                credit.shm_name,
-            )
-
-        applied = self.release_slot(
+        """Apply one returned slot credit."""
+        self.release_slot(
             credit.shm_name,
             credit.slot_id,
             credit.sequence_id,
         )
-
-        if self._should_trace_credit(credit.sequence_id):
-            stats = self.get_debug_stats()
-            logger.info(
-                "Shared-slot credit applied=%s sequence_id=%s slot_id=%s "
-                "acked=%s inflight=%s free=%s last_ack_latency=%.3fs "
-                "max_ack_latency=%.3fs healthy=%s unhealthy_reason=%s",
-                applied,
-                credit.sequence_id,
-                credit.slot_id,
-                stats["acked_sequence_count"],
-                stats["in_flight_slot_count"],
-                stats["free_slot_count"],
-                float(stats["last_ack_latency_s"] or 0.0),
-                float(stats["max_ack_latency_s"] or 0.0),
-                stats["healthy"],
-                stats["unhealthy_reason"],
-            )
 
     def _is_healthy_locked(self) -> bool:
         """Return True when the registry can still accept work."""
@@ -641,22 +577,6 @@ class SharedSlotRegistry:
         for sequence_id in ids_to_release:
             self._release_sequence_locked(sequence_id)
         self._condition.notify_all()
-
-    def _debug_stats_locked(self) -> dict[str, object]:
-        """Return a debug snapshot while the condition is already held."""
-        return {
-            "slot_count": self.slot_count,
-            "free_slot_count": len(self._free_slots),
-            "in_flight_slot_count": len(self._in_flight),
-            "max_in_flight_slot_count": self._max_in_flight_slot_count,
-            "acked_sequence_count": self._acked_sequence_count,
-            "ack_timeout_count": self._ack_timeout_count,
-            "last_acked_sequence_id": self._last_acked_sequence_id,
-            "last_ack_latency_s": self._last_ack_latency_s,
-            "max_ack_latency_s": self._max_ack_latency_s,
-            "healthy": self._is_healthy_locked(),
-            "unhealthy_reason": self._unhealthy_reason,
-        }
 
     def _close_control_resources(self) -> None:
         """Close the producer-side control socket and its ZMQ context."""
@@ -773,17 +693,6 @@ class SharedSlotVideoWorker:
         except queue.Full:
             pass
         self._thread.join(timeout=1.0)
-
-    def get_debug_stats(self) -> dict[str, object]:
-        """Return a snapshot of worker queue/backlog state."""
-        with self._error_lock:
-            worker_error = None if self._error is None else str(self._error)
-        return {
-            "worker_queue_qsize": self._queue.qsize(),
-            "worker_queue_maxsize": self._queue.maxsize,
-            "worker_thread_alive": self._thread.is_alive(),
-            "worker_error": worker_error,
-        }
 
     def is_idle(self) -> bool:
         """Return True when the worker has no queued packets left."""
@@ -957,15 +866,11 @@ class SharedSlotVideoTransport:
     def wait_until_drained(self, timeout_s: float = 30.0) -> None:
         """Wait until all queued packets and in-flight credits are settled."""
         deadline = time.monotonic() + timeout_s
-        last_stats: ProducerSharedRingBufferDebugStats | None = None
 
         while time.monotonic() < deadline:
-            last_stats = self.get_stats()
-
             if self._worker.get_error() is not None:
                 raise RuntimeError(
-                    "Shared-slot transport worker failed before drain completed. "
-                    f"last_stats={last_stats}"
+                    "Shared-slot transport worker failed before drain completed"
                 )
 
             if self._is_drained():
@@ -974,8 +879,7 @@ class SharedSlotVideoTransport:
             time.sleep(0.05)
 
         raise RuntimeError(
-            "Timed out waiting for shared-slot transport to drain before close. "
-            f"last_stats={last_stats}"
+            "Timed out waiting for shared-slot transport to drain before close"
         )
 
     def close(self) -> None:
@@ -985,44 +889,12 @@ class SharedSlotVideoTransport:
 
     def get_stats(self) -> ProducerSharedRingBufferDebugStats:
         """Return a best-effort debug snapshot during the transport migration."""
-        registry_stats = self._registry.get_debug_stats()
-        worker_stats = self._worker.get_debug_stats()
         return ProducerSharedRingBufferDebugStats(
             shared_ring_buffer_name=self._registry.shm_name,
             shared_ring_buffer_size=self._registry.total_shared_memory_bytes,
             shared_ring_open=ProducerTransportTimingStats(),
             shared_ring_write=ProducerTransportTimingStats(),
             shared_ring_write_bytes=0,
-            slot_count=int(registry_stats["slot_count"]),
-            free_slot_count=int(registry_stats["free_slot_count"]),
-            in_flight_slot_count=int(registry_stats["in_flight_slot_count"]),
-            max_in_flight_slot_count=int(registry_stats["max_in_flight_slot_count"]),
-            acked_sequence_count=int(registry_stats["acked_sequence_count"]),
-            ack_timeout_count=int(registry_stats["ack_timeout_count"]),
-            worker_queue_qsize=int(worker_stats["worker_queue_qsize"]),
-            worker_queue_maxsize=int(worker_stats["worker_queue_maxsize"]),
-            worker_thread_alive=bool(worker_stats["worker_thread_alive"]),
-            worker_error=(
-                None
-                if worker_stats["worker_error"] is None
-                else str(worker_stats["worker_error"])
-            ),
-            last_acked_sequence_id=(
-                None
-                if registry_stats["last_acked_sequence_id"] is None
-                else int(registry_stats["last_acked_sequence_id"])
-            ),
-            last_ack_latency_s=(
-                None
-                if registry_stats["last_ack_latency_s"] is None
-                else float(registry_stats["last_ack_latency_s"])
-            ),
-            max_ack_latency_s=float(registry_stats["max_ack_latency_s"]),
-            unhealthy_reason=(
-                None
-                if registry_stats["unhealthy_reason"] is None
-                else str(registry_stats["unhealthy_reason"])
-            ),
         )
 
     def _is_drained(self) -> bool:
