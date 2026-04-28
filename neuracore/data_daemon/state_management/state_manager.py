@@ -146,6 +146,9 @@ class StateManager:
         Records stop time immediately when the producer requests stop.
         """
         await self._store.set_stopped_at(recording_id)
+        await self._store.mark_recording_stop_report_pending(recording_id)
+        if not (self._config and self._config.offline):
+            asyncio.create_task(self._report_recording_stop(recording_id))
 
     async def handle_stop_recording(self, recording_id: str) -> None:
         """Handle phase-2 stop event from the data bridge.
@@ -180,6 +183,14 @@ class StateManager:
             logger.info(
                 "Reset reporting recordings to pending on reconnect (count=%d)",
                 reset_reporting_count,
+            )
+        reset_stop_reporting_count = (
+            await self._store.reset_recording_stop_reporting_to_pending()
+        )
+        if reset_stop_reporting_count:
+            logger.info(
+                "Reset recording stop reports to pending on reconnect (count=%d)",
+                reset_stop_reporting_count,
             )
         await self._store.reconcile_recordings_from_traces()
         pruned_count = await self._store.prune_old_empty_recordings(
@@ -218,6 +229,7 @@ class StateManager:
 
     async def recover_startup_state(self) -> None:
         """Run one-time startup recovery that does not require connectivity."""
+        await self._store.reset_recording_stop_reporting_to_pending()
         traces = await self._store.list_traces()
         recording_ids = sorted({str(trace.recording_id) for trace in traces})
         if not recording_ids:
@@ -238,6 +250,10 @@ class StateManager:
                 await self._set_expected_trace_count(recording_id, trace_count)
 
             await self._emit_progress_report_if_last_trace_written(recording_id)
+
+        pending_stop_reports = await self._store.list_pending_recording_stop_reports()
+        for recording_id in pending_stop_reports:
+            await self._report_recording_stop(recording_id)
 
     async def _emit_ready_for_upload_from_trace(
         self,
@@ -566,6 +582,123 @@ class StateManager:
             return False
         finally:
             self.expected_trace_count_reporting.pop(recording_id, None)
+
+    async def _report_recording_stop(self, recording_id: str) -> bool:
+        """Post recording stop to the backend as soon as daemon stop is requested."""
+        if not recording_id:
+            return False
+
+        if self._config and self._config.offline:
+            return False
+
+        if await self._store.recording_stop_has_been_reported(recording_id):
+            return True
+
+        claimed = await self._store.claim_recording_stop_report(recording_id)
+        if not claimed:
+            return await self._store.recording_stop_has_been_reported(recording_id)
+
+        loop = asyncio.get_running_loop()
+        auth = get_auth()
+        last_error: str | None = None
+
+        try:
+            try:
+                org_id = await self._store.get_recording_org_id(recording_id)
+                if not org_id:
+                    org_id = str(await loop.run_in_executor(None, get_current_org))
+                    await self._store.set_recording_org_id(recording_id, org_id)
+                headers = await loop.run_in_executor(None, auth.get_headers)
+            except Exception:
+                logger.exception(
+                    "Failed preparing recording stop report for recording %s",
+                    recording_id,
+                )
+                await self._store.mark_recording_stop_report_pending(recording_id)
+                return False
+
+            url = f"{API_URL}/org/{org_id}/recording/stop?recording_id={recording_id}"
+
+            async with aiohttp.ClientSession() as session:
+                for attempt in range(BACKEND_API_MAX_RETRIES):
+                    try:
+                        async with session.post(
+                            url,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as response:
+                            if response.status < 400:
+                                body = await response.json(content_type=None)
+                                if body == "WrongUser":
+                                    last_error = "WrongUser"
+                                elif body == "UsageLimitExceeded":
+                                    last_error = "UsageLimitExceeded"
+                                else:
+                                    await self._store.mark_recording_stop_reported(
+                                        recording_id
+                                    )
+                                    self._emitter.emit(
+                                        Emitter.RECORDING_STOP_REPORTED, recording_id
+                                    )
+                                    return True
+                            elif response.status == 401:
+                                await loop.run_in_executor(None, auth.login)
+                                headers = await loop.run_in_executor(
+                                    None, auth.get_headers
+                                )
+                                continue
+                            else:
+                                error_text = await response.text()
+                                last_error = f"HTTP {response.status}: {error_text}"
+                                logger.warning(
+                                    (
+                                        "Recording stop post failed "
+                                        "(attempt %d/%d) for %s: %s"
+                                    ),
+                                    attempt + 1,
+                                    BACKEND_API_MAX_RETRIES,
+                                    recording_id,
+                                    last_error,
+                                )
+                                if (
+                                    response.status
+                                    not in BACKEND_API_RETRYABLE_STATUS_CODES
+                                ):
+                                    break
+                    except (
+                        aiohttp.ClientError,
+                        asyncio.TimeoutError,
+                        ValueError,
+                    ) as exc:
+                        last_error = str(exc)
+                        logger.warning(
+                            (
+                                "Recording stop request failed "
+                                "(attempt %d/%d) for %s: %s"
+                            ),
+                            attempt + 1,
+                            BACKEND_API_MAX_RETRIES,
+                            recording_id,
+                            exc,
+                        )
+
+                    if last_error in {"WrongUser", "UsageLimitExceeded"}:
+                        break
+
+                    if attempt < BACKEND_API_MAX_RETRIES - 1:
+                        delay = min(2**attempt, BACKEND_API_MAX_BACKOFF_SECONDS)
+                        await asyncio.sleep(delay)
+
+            logger.error(
+                "Failed to post recording stop for recording %s: %s",
+                recording_id,
+                last_error or "unknown error",
+            )
+            await self._store.mark_recording_stop_report_pending(recording_id)
+            return False
+        except Exception:
+            await self._store.mark_recording_stop_report_pending(recording_id)
+            raise
 
     async def mark_progress_as_reported(self, recording_id: str) -> None:
         """Mark a recording as progress-reported.

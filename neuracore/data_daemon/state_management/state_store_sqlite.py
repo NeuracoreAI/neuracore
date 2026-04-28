@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from neuracore.data_daemon.models import (
     DataType,
     ProgressReportStatus,
+    RecordingStopReportStatus,
     TraceErrorCode,
     TraceRecord,
     TraceRegistrationStatus,
@@ -46,6 +47,20 @@ def _parse_progress_status(value: Any) -> ProgressReportStatus:
             raw = raw.split(".", 1)[1]
         return ProgressReportStatus(raw.lower())
     return ProgressReportStatus(str(value))
+
+
+def _parse_stop_report_status(value: Any) -> RecordingStopReportStatus:
+    """Normalize DB/SQLAlchemy stop-report status values to enum."""
+    if isinstance(value, RecordingStopReportStatus):
+        return value
+    if value is None:
+        return RecordingStopReportStatus.PENDING
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.startswith("RecordingStopReportStatus."):
+            raw = raw.split(".", 1)[1]
+        return RecordingStopReportStatus(raw.lower())
+    return RecordingStopReportStatus(str(value))
 
 
 class SqliteStateStore(StateStore):
@@ -97,6 +112,7 @@ class SqliteStateStore(StateStore):
             await conn.run_sync(metadata.create_all)
             await self._ensure_recordings_trace_count_col(conn)
             await self._ensure_recordings_org_id_col(conn)
+            await self._ensure_recordings_stop_report_columns(conn)
 
     async def _table_exists(self, conn: AsyncConnection, table_name: str) -> bool:
         """Return True when a SQLite table exists."""
@@ -179,7 +195,9 @@ class SqliteStateStore(StateStore):
                     expected_trace_count_reported INTEGER NOT NULL DEFAULT 0,
                     uploaded_trace_count INTEGER NOT NULL DEFAULT 0,
                     progress_reported TEXT NOT NULL DEFAULT 'pending',
+                    stop_report_status TEXT NOT NULL DEFAULT 'pending',
                     stopped_at DATETIME,
+                    stop_reported_at DATETIME,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
@@ -276,7 +294,9 @@ class SqliteStateStore(StateStore):
                     expected_trace_count_reported,
                     uploaded_trace_count,
                     progress_reported,
+                    stop_report_status,
                     stopped_at,
+                    stop_reported_at,
                     created_at,
                     last_updated
                 )
@@ -332,7 +352,9 @@ class SqliteStateStore(StateStore):
                             THEN 'reporting'
                         ELSE 'pending'
                     END AS progress_reported,
+                    'pending' AS stop_report_status,
                     MAX(stopped_at) AS stopped_at,
+                    NULL AS stop_reported_at,
                     COALESCE(MIN(created_at), CURRENT_TIMESTAMP) AS created_at,
                     COALESCE(MAX(last_updated), CURRENT_TIMESTAMP) AS last_updated
                 FROM traces
@@ -386,6 +408,27 @@ class SqliteStateStore(StateStore):
         logger.info("Adding missing recordings.org_id column")
         await conn.execute(text("ALTER TABLE recordings " "ADD COLUMN org_id TEXT"))
 
+    async def _ensure_recordings_stop_report_columns(
+        self, conn: AsyncConnection
+    ) -> None:
+        """Add stop-reporting columns for pre-column databases."""
+        if not await self._table_exists(conn, "recordings"):
+            return
+        recording_columns = await self._table_column_names(conn, "recordings")
+        if "stop_report_status" not in recording_columns:
+            logger.info("Adding missing recordings.stop_report_status column")
+            await conn.execute(
+                text(
+                    "ALTER TABLE recordings "
+                    "ADD COLUMN stop_report_status TEXT NOT NULL DEFAULT 'pending'"
+                )
+            )
+        if "stop_reported_at" not in recording_columns:
+            logger.info("Adding missing recordings.stop_reported_at column")
+            await conn.execute(
+                text("ALTER TABLE recordings " "ADD COLUMN stop_reported_at DATETIME")
+            )
+
     @staticmethod
     def _recording_row_insert_query(recording_id: str, now: datetime) -> Any:
         return (
@@ -398,7 +441,9 @@ class SqliteStateStore(StateStore):
                 expected_trace_count_reported=0,
                 uploaded_trace_count=0,
                 progress_reported=ProgressReportStatus.PENDING,
+                stop_report_status=RecordingStopReportStatus.PENDING,
                 stopped_at=None,
+                stop_reported_at=None,
                 created_at=now,
                 last_updated=now,
             )
@@ -485,7 +530,9 @@ class SqliteStateStore(StateStore):
                                 recordings.c.expected_trace_count_reported,
                                 recordings.c.uploaded_trace_count,
                                 recordings.c.progress_reported,
+                                recordings.c.stop_report_status,
                                 recordings.c.stopped_at,
+                                recordings.c.stop_reported_at,
                                 recordings.c.created_at,
                             ).where(recordings.c.recording_id == recording_id)
                         )
@@ -552,6 +599,16 @@ class SqliteStateStore(StateStore):
                 stopped_at_value = (
                     existing_row["stopped_at"] if existing_row is not None else None
                 )
+                stop_report_status_value = (
+                    existing_row["stop_report_status"]
+                    if existing_row is not None
+                    else RecordingStopReportStatus.PENDING
+                )
+                stop_reported_at_value = (
+                    existing_row["stop_reported_at"]
+                    if existing_row is not None
+                    else None
+                )
                 created_at_value = (
                     existing_row["created_at"] if existing_row is not None else now
                 )
@@ -578,7 +635,11 @@ class SqliteStateStore(StateStore):
                         progress_reported=_parse_progress_status(
                             progress_reported_value
                         ),
+                        stop_report_status=_parse_stop_report_status(
+                            stop_report_status_value
+                        ),
                         stopped_at=stopped_at_value,
+                        stop_reported_at=stop_reported_at_value,
                         created_at=created_at_value,
                         last_updated=now,
                     )
@@ -599,7 +660,11 @@ class SqliteStateStore(StateStore):
                             "progress_reported": _parse_progress_status(
                                 progress_reported_value
                             ),
+                            "stop_report_status": _parse_stop_report_status(
+                                stop_report_status_value
+                            ),
                             "stopped_at": stopped_at_value,
+                            "stop_reported_at": stop_reported_at_value,
                             "last_updated": now,
                         },
                     )
@@ -725,6 +790,18 @@ class SqliteStateStore(StateStore):
                     last_updated=now,
                 )
             )
+
+    async def get_recording_org_id(self, recording_id: str) -> str | None:
+        """Return the persisted org_id for a recording."""
+        async with self._engine.begin() as conn:
+            value = (
+                await conn.execute(
+                    select(recordings.c.org_id).where(
+                        recordings.c.recording_id == recording_id
+                    )
+                )
+            ).scalar_one_or_none()
+        return str(value) if value is not None else None
 
     async def update_bytes_uploaded(self, trace_id: str, bytes_uploaded: int) -> None:
         """Increment the number of bytes uploaded for a trace.
@@ -1231,6 +1308,102 @@ class SqliteStateStore(StateStore):
                     last_updated=now,
                 )
             )
+
+    async def mark_recording_stop_report_pending(self, recording_id: str) -> None:
+        """Set stop-report state to PENDING without regressing REPORTED rows."""
+        now = _utc_now()
+        await self._ensure_recording_row(recording_id)
+        async with self._write_lock() as conn:
+            await conn.execute(
+                update(recordings)
+                .where(recordings.c.recording_id == recording_id)
+                .where(
+                    recordings.c.stop_report_status
+                    != RecordingStopReportStatus.REPORTED
+                )
+                .values(
+                    stop_report_status=RecordingStopReportStatus.PENDING,
+                    stop_reported_at=None,
+                    last_updated=now,
+                )
+            )
+
+    async def claim_recording_stop_report(self, recording_id: str) -> bool:
+        """Atomically move stop-report state from PENDING to REPORTING."""
+        now = _utc_now()
+        await self._ensure_recording_row(recording_id)
+        async with self._write_lock() as conn:
+            result = await conn.execute(
+                update(recordings)
+                .where(recordings.c.recording_id == recording_id)
+                .where(
+                    recordings.c.stop_report_status
+                    == RecordingStopReportStatus.PENDING
+                )
+                .values(
+                    stop_report_status=RecordingStopReportStatus.REPORTING,
+                    last_updated=now,
+                )
+            )
+        return int(result.rowcount or 0) > 0
+
+    async def mark_recording_stop_reported(self, recording_id: str) -> None:
+        """Mark a recording stop as backend-reported."""
+        now = _utc_now()
+        await self._ensure_recording_row(recording_id)
+        async with self._write_lock() as conn:
+            await conn.execute(
+                update(recordings)
+                .where(recordings.c.recording_id == recording_id)
+                .values(
+                    stop_report_status=RecordingStopReportStatus.REPORTED,
+                    stop_reported_at=now,
+                    last_updated=now,
+                )
+            )
+
+    async def reset_recording_stop_reporting_to_pending(self) -> int:
+        """Reset in-flight stop-report rows to PENDING and return affected count."""
+        now = _utc_now()
+        async with self._write_lock() as conn:
+            result = await conn.execute(
+                update(recordings)
+                .where(
+                    recordings.c.stop_report_status
+                    == RecordingStopReportStatus.REPORTING
+                )
+                .values(
+                    stop_report_status=RecordingStopReportStatus.PENDING,
+                    stop_reported_at=None,
+                    last_updated=now,
+                )
+            )
+        return int(result.rowcount or 0)
+
+    async def recording_stop_has_been_reported(self, recording_id: str) -> bool:
+        """Return True when recording stop-report status is REPORTED."""
+        async with self._engine.begin() as conn:
+            value = (
+                await conn.execute(
+                    select(recordings.c.stop_report_status).where(
+                        recordings.c.recording_id == recording_id
+                    )
+                )
+            ).scalar_one_or_none()
+        return _parse_stop_report_status(value) == RecordingStopReportStatus.REPORTED
+
+    async def list_pending_recording_stop_reports(self) -> list[str]:
+        """Return recording IDs whose stop still needs backend reporting."""
+        async with self._engine.begin() as conn:
+            rows = (
+                await conn.execute(
+                    select(recordings.c.recording_id).where(
+                        recordings.c.stop_report_status
+                        == RecordingStopReportStatus.PENDING
+                    )
+                )
+            ).scalars().all()
+        return [str(recording_id) for recording_id in rows]
 
     async def reset_reporting_recordings_to_pending(self) -> int:
         """Reset in-flight REPORTING rows to PENDING and return affected count."""

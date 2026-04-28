@@ -83,6 +83,30 @@ class StateStore(Protocol):
         """Reset in-flight REPORTING rows to PENDING and return affected count."""
         ...
 
+    async def mark_recording_stop_report_pending(self, recording_id: str) -> None:
+        """Persist that a recording still needs backend stop reporting."""
+        ...
+
+    async def claim_recording_stop_report(self, recording_id: str) -> bool:
+        """Atomically move stop-report state from PENDING to REPORTING."""
+        ...
+
+    async def mark_recording_stop_reported(self, recording_id: str) -> None:
+        """Mark a recording stop as backend-reported and set stop_reported_at."""
+        ...
+
+    async def reset_recording_stop_reporting_to_pending(self) -> int:
+        """Reset in-flight stop-report rows from REPORTING back to PENDING."""
+        ...
+
+    async def recording_stop_has_been_reported(self, recording_id: str) -> bool:
+        """Return True when recording stop-report status is REPORTED."""
+        ...
+
+    async def list_pending_recording_stop_reports(self) -> list[str]:
+        """Return recording IDs with pending backend stop reporting."""
+        ...
+
     async def recording_has_reported_progress(self, recording_id: str) -> bool:
         """Return True when recording progress status is REPORTED."""
         ...
@@ -282,4 +306,8 @@ class StateStore(Protocol):
 
     async def set_recording_org_id(self, recording_id: str, org_id: str) -> None:
         """Backfill org_id for a recording when it becomes known."""
+        ...
+
+    async def get_recording_org_id(self, recording_id: str) -> str | None:
+        """Return persisted org_id for a recording, if any."""
         ...

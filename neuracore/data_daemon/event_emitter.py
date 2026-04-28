@@ -62,6 +62,10 @@ class Emitter(AsyncIOEventEmitter):
     PROGRESS_REPORTED = "PROGRESS_REPORTED"
     # (recording_id:str)
 
+    # State manager -> client-observable completion state
+    RECORDING_STOP_REPORTED = "RECORDING_STOP_REPORTED"
+    # (recording_id:str)
+
     # Progress reporter -> State manager
     PROGRESS_REPORT_FAILED = "PROGRESS_REPORT_FAILED"
     # (recording_id:str, error_message:str)

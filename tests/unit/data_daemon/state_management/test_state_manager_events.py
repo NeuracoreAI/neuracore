@@ -7,10 +7,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import pytest_asyncio
 
+from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.models import (
     DataType,
     ProgressReportStatus,
+    RecordingStopReportStatus,
     TraceErrorCode,
     TraceRecord,
     TraceRegistrationStatus,
@@ -32,6 +34,8 @@ class FakeStateStore:
         self._traces_by_recording: dict[str, list[TraceRecord]] = {}
         self._recording_stopped: dict[str, bool] = {}
         self._recording_progress_reported: dict[str, bool] = {}
+        self._recording_stop_report_status: dict[str, RecordingStopReportStatus] = {}
+        self._recording_org_ids: dict[str, str] = {}
         self._expected_trace_count_reported: dict[str, bool] = {}
         self._expected_trace_count: dict[str, int] = {}
         self.uploaded_count_increments: list[str] = []
@@ -104,6 +108,55 @@ class FakeStateStore:
         count = len(self._recording_reporting)
         self._recording_reporting.clear()
         return count
+
+    async def mark_recording_stop_report_pending(self, recording_id: str) -> None:
+        if (
+            self._recording_stop_report_status.get(recording_id)
+            == RecordingStopReportStatus.REPORTED
+        ):
+            return
+        self._recording_stop_report_status[recording_id] = (
+            RecordingStopReportStatus.PENDING
+        )
+
+    async def claim_recording_stop_report(self, recording_id: str) -> bool:
+        status = self._recording_stop_report_status.get(
+            recording_id, RecordingStopReportStatus.PENDING
+        )
+        if status != RecordingStopReportStatus.PENDING:
+            return False
+        self._recording_stop_report_status[recording_id] = (
+            RecordingStopReportStatus.REPORTING
+        )
+        return True
+
+    async def mark_recording_stop_reported(self, recording_id: str) -> None:
+        self._recording_stop_report_status[recording_id] = (
+            RecordingStopReportStatus.REPORTED
+        )
+
+    async def reset_recording_stop_reporting_to_pending(self) -> int:
+        count = 0
+        for recording_id, status in list(self._recording_stop_report_status.items()):
+            if status == RecordingStopReportStatus.REPORTING:
+                self._recording_stop_report_status[recording_id] = (
+                    RecordingStopReportStatus.PENDING
+                )
+                count += 1
+        return count
+
+    async def recording_stop_has_been_reported(self, recording_id: str) -> bool:
+        return (
+            self._recording_stop_report_status.get(recording_id)
+            == RecordingStopReportStatus.REPORTED
+        )
+
+    async def list_pending_recording_stop_reports(self) -> list[str]:
+        return [
+            recording_id
+            for recording_id, status in self._recording_stop_report_status.items()
+            if status == RecordingStopReportStatus.PENDING
+        ]
 
     async def delete_uploaded_traces_for_recording(self, recording_id: str) -> int:
         traces = self._traces_by_recording.get(recording_id, [])
@@ -495,6 +548,12 @@ class FakeStateStore:
     async def increment_uploaded_trace_count(self, recording_id: str) -> None:
         self.uploaded_count_increments.append(recording_id)
 
+    async def set_recording_org_id(self, recording_id: str, org_id: str) -> None:
+        self._recording_org_ids[recording_id] = org_id
+
+    async def get_recording_org_id(self, recording_id: str) -> str | None:
+        return self._recording_org_ids.get(recording_id)
+
     async def delete_recording_and_traces_if_fully_uploaded(
         self, recording_id: str
     ) -> bool:
@@ -629,6 +688,82 @@ async def test_stop_recording_emits_stop_all_and_sets_stopped(
         assert received == ["rec-1"]
     finally:
         emitter.remove_listener(Emitter.STOP_ALL_TRACES_FOR_RECORDING, handler)
+
+
+@pytest.mark.asyncio
+async def test_stop_recording_requested_marks_pending_stop_report_and_starts_reporting(
+    state_manager, emitter: Emitter
+) -> None:
+    manager, store = state_manager
+    reported: list[str] = []
+
+    async def fake_report(recording_id: str) -> bool:
+        reported.append(recording_id)
+        return True
+
+    manager._report_recording_stop = fake_report  # type: ignore[method-assign]
+
+    emitter.emit(Emitter.STOP_RECORDING_REQUESTED, "rec-stop")
+    await asyncio.sleep(0.2)
+
+    assert store.stopped == ["rec-stop"]
+    assert (
+        store._recording_stop_report_status["rec-stop"]
+        == RecordingStopReportStatus.PENDING
+    )
+    assert reported == ["rec-stop"]
+
+
+@pytest.mark.asyncio
+async def test_stop_recording_requested_offline_leaves_pending_stop_report(
+    emitter: Emitter,
+) -> None:
+    store = FakeStateStore()
+    manager = StateManager(store, DaemonConfig(offline=True), emitter=emitter)
+
+    called: list[str] = []
+
+    async def fake_report(recording_id: str) -> bool:
+        called.append(recording_id)
+        return True
+
+    manager._report_recording_stop = fake_report  # type: ignore[method-assign]
+
+    emitter.emit(Emitter.STOP_RECORDING_REQUESTED, "rec-offline")
+    await asyncio.sleep(0.2)
+
+    assert store.stopped == ["rec-offline"]
+    assert (
+        store._recording_stop_report_status["rec-offline"]
+        == RecordingStopReportStatus.PENDING
+    )
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_is_connected_replays_pending_stop_reports(
+    state_manager, emitter: Emitter
+) -> None:
+    manager, store = state_manager
+    store._recording_stop_report_status["rec-replay"] = (
+        RecordingStopReportStatus.REPORTING
+    )
+    replayed: list[str] = []
+
+    async def fake_report(recording_id: str) -> bool:
+        replayed.append(recording_id)
+        return True
+
+    manager._report_recording_stop = fake_report  # type: ignore[method-assign]
+
+    emitter.emit(Emitter.IS_CONNECTED, True)
+    await asyncio.sleep(0.2)
+
+    assert (
+        store._recording_stop_report_status["rec-replay"]
+        == RecordingStopReportStatus.PENDING
+    )
+    assert replayed == ["rec-replay"]
 
 
 @pytest.mark.asyncio
