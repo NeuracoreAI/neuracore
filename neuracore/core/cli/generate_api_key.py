@@ -14,6 +14,7 @@ from pydantic import BaseModel, ValidationError
 from neuracore.core.cli.get_user_confirmation import get_user_confirmation
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.exceptions import AuthenticationError, InputError
+from neuracore.core.utils.http_session import get_session
 
 from ..const import API_URL, MAX_INPUT_ATTEMPTS
 
@@ -62,7 +63,7 @@ def generate_api_key(email: str | None = None, password: str | None = None) -> s
             if not password:
                 password = getpass("Enter your password: ")
 
-            auth_response = requests.post(
+            auth_response = get_session().post(
                 f"{API_URL}/auth/token",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 data={"username": email, "password": password},
@@ -103,7 +104,7 @@ def generate_api_key(email: str | None = None, password: str | None = None) -> s
     # Use the access token to request an API key
     try:
         headers = {"Authorization": f"Bearer {access_token}"}
-        api_key_response = requests.get(
+        api_key_response = get_session().get(
             f"{API_URL}/auth/api-key",
             headers=headers,
         )

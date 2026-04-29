@@ -6,7 +6,6 @@ from collections import defaultdict
 from pathlib import Path
 from typing import cast
 
-import requests
 import torch
 from neuracore_types import (
     DATA_TYPE_TO_BATCHED_NC_DATA_CLASS,
@@ -19,6 +18,7 @@ from neuracore_types import (
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.utils.download import download_with_progress
+from neuracore.core.utils.http_session import get_session
 from neuracore.ml import BatchedInferenceInputs
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.nc_archive import load_model_from_nc_archive
@@ -151,7 +151,7 @@ class PolicyInference:
             )
             if not checkpoint_path.exists():
                 checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-                response = requests.get(
+                response = get_session().get(
                     f"{API_URL}/org/{self.org_id}/training/jobs/{self.job_id}/checkpoint_url/{checkpoint_name}",
                     headers=get_auth().get_headers(),
                     timeout=30,

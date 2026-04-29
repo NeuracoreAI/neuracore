@@ -8,6 +8,7 @@ import requests
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
+from neuracore.core.utils.http_session import get_session
 from neuracore.ml.utils.upload_storage_mixin import UploadStorageMixin
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ class EndpointStorageHandler(UploadStorageMixin):
         self.log_to_cloud = self.endpoint_id is not None
         self.org_id = get_current_org()
         if self.log_to_cloud:
-            response = requests.get(
+            response = get_session().get(
                 f"{API_URL}/org/{self.org_id}/models/endpoints/{self.endpoint_id}",
                 headers=get_auth().get_headers(),
             )
@@ -38,7 +39,7 @@ class EndpointStorageHandler(UploadStorageMixin):
     def _get_upload_url(self, filepath: str, content_type: str) -> str:
         """Get a signed upload URL for endpoint logs."""
         assert self.endpoint_id is not None, "Endpoint ID not provided"
-        response = requests.get(
+        response = get_session().get(
             f"{API_URL}/org/{self.org_id}/models/endpoints/{self.endpoint_id}/upload-url",
             headers=get_auth().get_headers(),
             params={"filepath": filepath, "content_type": content_type},
@@ -55,7 +56,7 @@ class EndpointStorageHandler(UploadStorageMixin):
         data: bytes | IO[bytes],
         content_type: str,
     ) -> requests.Response:
-        return requests.put(
+        return get_session().put(
             upload_url,
             data=data,
             headers={"Content-Type": content_type},
@@ -67,7 +68,7 @@ class EndpointStorageHandler(UploadStorageMixin):
             return
 
         assert self.endpoint_id is not None, "Endpoint ID not provided"
-        response = requests.put(
+        response = get_session().put(
             f"{API_URL}/org/{self.org_id}/models/endpoints/{self.endpoint_id}/update",
             headers=get_auth().get_headers(),
             json={"error": error},

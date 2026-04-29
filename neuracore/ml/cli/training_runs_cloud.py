@@ -19,6 +19,7 @@ from neuracore.core.cli.training_display import RunDisplayRow, print_run_table
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import AuthenticationError, ConfigError, TrainingRunError
+from neuracore.core.utils.http_session import get_session
 
 TRAINING_JOB_LIST_ADAPTER = TypeAdapter(list[TrainingJob])
 console = Console()
@@ -127,7 +128,7 @@ def _fetch_training_jobs(auth: Any, org_id: str) -> list[TrainingJob]:
         TrainingRunError: If the API request fails.
     """
     try:
-        response = requests.get(
+        response = get_session().get(
             f"{API_URL}/org/{org_id}/training/jobs",
             headers=auth.get_headers(),
         )
@@ -164,7 +165,7 @@ def _fetch_training_job(auth: Any, org_id: str, job_id: str) -> TrainingJob:
         TrainingRunError: If the job is not found or API request fails.
     """
     try:
-        response = requests.get(
+        response = get_session().get(
             f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
             headers=auth.get_headers(),
         )

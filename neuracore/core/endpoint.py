@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING
 import requests
 from neuracore_types import DataType, EmbodimentDescription, SynchronizedPoint
 
+from neuracore.core.utils.http_session import get_session
+
 if TYPE_CHECKING:
     from neuracore_types import BatchedNCData
 
@@ -252,7 +254,7 @@ class ServerPolicy(Policy):
         if epoch < -1:
             raise ValueError("Epoch must be -1 (last) or a non-negative integer.")
         try:
-            response = requests.post(
+            response = get_session().post(
                 f"{self._base_url}{SET_CHECKPOINT_ENDPOINT}",
                 headers=self._headers,
                 json={"epoch": epoch},
@@ -308,7 +310,7 @@ class ServerPolicy(Policy):
             sync_point.data = filtered_data
         response = None
         try:
-            response = requests.post(
+            response = get_session().post(
                 f"{self._base_url}{PREDICT_ENDPOINT}",
                 headers=self._headers,
                 json=sync_point.model_dump(mode="json"),
@@ -502,7 +504,7 @@ class LocalServerPolicy(ServerPolicy):
             if self.server_process and self.server_process.poll() is not None:
                 raise EndpointError("Local server process terminated unexpectedly.")
             try:
-                response = requests.get(
+                response = get_session().get(
                     f"http://{self.host}:{self.port}{PING_ENDPOINT}", timeout=1
                 )
                 if response.status_code == 200:
@@ -710,7 +712,7 @@ def policy_remote_server(
 
     try:
         # Find endpoint by name
-        response = requests.get(
+        response = get_session().get(
             f"{API_URL}/org/{org_id}/models/endpoints", headers=auth.get_headers()
         )
         response.raise_for_status()
@@ -759,7 +761,7 @@ def _download_model(job_id: str, org_id: str) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     print("Downloading model from training run...")
-    response = requests.get(
+    response = get_session().get(
         f"{API_URL}/org/{org_id}/training/jobs/{job_id}/model_url",
         headers=auth.get_headers(),
         timeout=30,
@@ -779,7 +781,7 @@ def _download_model(job_id: str, org_id: str) -> Path:
 def _get_job_id(train_run_name: str, org_id: str) -> str:
     """Get job ID from training run name."""
     auth = get_auth()
-    response = requests.get(
+    response = get_session().get(
         f"{API_URL}/org/{org_id}/training/jobs", headers=auth.get_headers()
     )
     response.raise_for_status()

@@ -23,6 +23,7 @@ from neuracore_types import DataType, RobotInstanceIdentifier
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
+from neuracore.core.utils.http_session import get_session
 from neuracore.data_daemon.communications_management.producer_channel import (
     ProducerChannel,
 )
@@ -176,7 +177,7 @@ class Robot:
             )
 
         try:
-            response = requests.post(
+            response = get_session().post(
                 f"{API_URL}/org/{self.org_id}/robots?is_shared={self.shared}",
                 json={
                     "name": self.name,
@@ -269,7 +270,7 @@ class Robot:
 
         try:
 
-            response = requests.post(
+            response = get_session().post(
                 f"{API_URL}/org/{self.org_id}/recording/start",
                 headers=self._auth.get_headers(),
                 json={
@@ -331,7 +332,7 @@ class Robot:
         )
 
         try:
-            response = requests.post(
+            response = get_session().post(
                 f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}",
                 headers=self._auth.get_headers(),
             )
@@ -539,7 +540,7 @@ class Robot:
             )
 
         try:
-            response = requests.get(
+            response = get_session().get(
                 f"{API_URL}/org/{self.org_id}/robots/{self.id}/package?is_shared={self.shared}",
                 headers=self._auth.get_headers(),
             )
@@ -586,7 +587,7 @@ class Robot:
             files = self._package_urdf()
 
             # Upload the package
-            response = requests.put(
+            response = get_session().put(
                 f"{API_URL}/org/{self.org_id}/robots/{self.id}/package?is_shared={self.shared}",
                 headers=self._auth.get_headers(),
                 files=files,
@@ -675,7 +676,7 @@ class Robot:
         self._get_daemon_recording_context().stop_recording(recording_id=recording_id)
 
         try:
-            response = requests.post(
+            response = get_session().post(
                 f"{API_URL}/org/{self.org_id}/recording/cancel?recording_id={recording_id}",
                 headers=self._auth.get_headers(),
             )
@@ -832,7 +833,7 @@ def update_robot_name(
         raise RobotError("No organization selected. Please call nc.select_org() first.")
     robot_id = _robot_name_id_mapping.get(robot_key, robot_key)
     try:
-        response = requests.post(
+        response = get_session().post(
             f"{API_URL}/org/{resolved_org_id}/robots?is_shared={shared}&robot_id={robot_id}",
             json={"name": new_robot_name, "instance": instance},
             headers=get_auth().get_headers(),
@@ -868,7 +869,7 @@ def list_organization_robots(
             "Invalid robot list mode. Please use 'current', 'archived', or 'mixed'."
         )
     try:
-        response = requests.get(
+        response = get_session().get(
             f"{API_URL}/org/{org_id}/robots?is_shared={is_shared}&mode={mode}",
             headers=get_auth().get_headers(),
         )
@@ -902,13 +903,13 @@ def get_robot_id_from_name(robot_name: str, org_id: str | None = None) -> str:
     if org_id is None:
         org_id = get_current_org()
 
-    response_private = requests.get(
+    response_private = get_session().get(
         f"{API_URL}/org/{org_id}/robots",
         headers=get_auth().get_headers(),
         params={"is_shared": False},
     )
 
-    response_shared = requests.get(
+    response_shared = get_session().get(
         f"{API_URL}/org/{org_id}/robots",
         headers=get_auth().get_headers(),
         params={"is_shared": True},

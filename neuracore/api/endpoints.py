@@ -5,7 +5,6 @@ managing local model endpoints, and handling the lifecycle of model deployments
 including deployment, status monitoring, and deletion operations.
 """
 
-import requests
 from neuracore_types import (
     DeploymentConfig,
     DeploymentRequest,
@@ -28,6 +27,7 @@ from neuracore.core.get_latest_sync_point import (
 from neuracore.core.get_latest_sync_point import (
     get_latest_sync_point as _get_latest_sync_point,
 )
+from neuracore.core.utils.http_session import get_session
 
 
 def policy(
@@ -175,7 +175,7 @@ def deploy_model(
         config=DeploymentConfig(gpu_type=gpu_type),
     ).model_dump(mode="json")
     try:
-        response = requests.post(
+        response = get_session().post(
             f"{API_URL}/org/{org_id}/models/deploy",
             headers=auth.get_headers(),
             json=payload,
@@ -210,7 +210,7 @@ def get_endpoint_status(endpoint_id: str) -> str:
     auth = get_auth()
     org_id = get_current_org()
     try:
-        response = requests.get(
+        response = get_session().get(
             f"{API_URL}/org/{org_id}/models/endpoints/{endpoint_id}",
             headers=auth.get_headers(),
         )
@@ -243,7 +243,7 @@ def delete_endpoint(endpoint_id: str) -> None:
     auth = get_auth()
     org_id = get_current_org()
     try:
-        response = requests.delete(
+        response = get_session().delete(
             f"{API_URL}/org/{org_id}/models/endpoints/{endpoint_id}",
             headers=auth.get_headers(),
         )

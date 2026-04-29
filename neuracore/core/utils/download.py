@@ -3,8 +3,9 @@
 import tempfile
 from pathlib import Path
 
-import requests
 from tqdm import tqdm
+
+from neuracore.core.utils.http_session import get_session
 
 
 def download_with_progress(
@@ -21,7 +22,7 @@ def download_with_progress(
     Returns:
         Path to the downloaded file.
     """
-    response = requests.get(
+    response = get_session().get(
         url,
         timeout=120,
         stream=True,

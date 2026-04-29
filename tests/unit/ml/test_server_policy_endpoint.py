@@ -2,7 +2,7 @@
 
 import re
 from typing import cast
-from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -305,21 +305,19 @@ def test_set_checkpoint_raises_endpoint_error_for_non_200_response(
 
 
 def test_set_checkpoint_raises_endpoint_error_for_connection_error(
-    monkeypatch,
     temp_config_dir,
     mock_auth_requests,
     reset_neuracore,
     mocked_org_id,
+    mock_session,
 ):
     """set_checkpoint should wrap requests ConnectionError in EndpointError."""
     nc.login(TEST_API_KEY)
     endpoint = _connect_test_remote_endpoint(mock_auth_requests, mocked_org_id)
-    monkeypatch.setattr(
-        "neuracore.core.endpoint.requests.post",
-        MagicMock(side_effect=requests.exceptions.ConnectionError()),
-    )
-
-    with pytest.raises(
+    mock_session.post.side_effect = requests.exceptions.ConnectionError()
+    with patch(
+        "neuracore.core.endpoint.get_session", return_value=mock_session
+    ), pytest.raises(
         EndpointError,
         match=(
             "Failed to connect to endpoint, please check your internet "
@@ -330,21 +328,19 @@ def test_set_checkpoint_raises_endpoint_error_for_connection_error(
 
 
 def test_set_checkpoint_raises_endpoint_error_for_request_exception(
-    monkeypatch,
     temp_config_dir,
     mock_auth_requests,
     reset_neuracore,
     mocked_org_id,
+    mock_session,
 ):
     """set_checkpoint should wrap generic RequestException in EndpointError."""
     nc.login(TEST_API_KEY)
     endpoint = _connect_test_remote_endpoint(mock_auth_requests, mocked_org_id)
-    monkeypatch.setattr(
-        "neuracore.core.endpoint.requests.post",
-        MagicMock(side_effect=requests.exceptions.Timeout("timeout")),
-    )
-
-    with pytest.raises(EndpointError, match="Failed to set checkpoint: timeout"):
+    mock_session.post.side_effect = requests.exceptions.Timeout("timeout")
+    with patch(
+        "neuracore.core.endpoint.get_session", return_value=mock_session
+    ), pytest.raises(EndpointError, match="Failed to set checkpoint: timeout"):
         endpoint.set_checkpoint(epoch=1)
 
 

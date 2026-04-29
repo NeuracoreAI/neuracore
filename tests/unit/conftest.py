@@ -2,7 +2,7 @@ import pathlib
 import re
 import tempfile
 from collections.abc import Generator
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import requests_mock
@@ -168,3 +168,8 @@ def reset_neuracore():
     yield
 
     nc.core.auth._auth = original_auth
+
+
+@pytest.fixture
+def mock_session():
+    return MagicMock()

@@ -321,13 +321,16 @@ class TestLibraryFunctions:
         mock_auth_requests,
         reset_neuracore,
         mocked_org_id,
+        mock_session,
     ):
         """Test handling of connection errors."""
         nc.login("test_api_key")
 
-        with patch("requests.get") as mock_get:
-            mock_get.side_effect = requests.exceptions.ConnectionError()
-
+        mock_session.get.side_effect = requests.exceptions.ConnectionError()
+        with patch(
+            "neuracore.ml.cli.training_runs_cloud.get_session",
+            return_value=mock_session,
+        ):
             with pytest.raises(TrainingRunError, match="connect"):
                 list_training_runs()
 

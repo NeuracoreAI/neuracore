@@ -25,6 +25,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import EncodingError
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
+from neuracore.core.utils.http_session import get_session
 
 from .bucket_uploader import TRACE_FILE, BucketUploader
 from .resumable_upload import ResumableUpload
@@ -393,7 +394,7 @@ class StreamingVideoUploader(BucketUploader):
         }
         org_id = get_current_org()
         try:
-            upload_url_response = requests.get(
+            upload_url_response = get_session().get(
                 f"{API_URL}/org/{org_id}/recording/{self.uploader.recording_id}/resumable_upload_url",
                 params=params,
                 headers=get_auth().get_headers(),
@@ -406,7 +407,7 @@ class StreamingVideoUploader(BucketUploader):
         for i in range(0, len(self.frame_metadatas)):
             self.frame_metadatas[i].frame_idx = i
         data = json.dumps([fm.model_dump(mode="json") for fm in self.frame_metadatas])
-        response = requests.put(
+        response = get_session().put(
             upload_url, headers={"Content-Length": str(len(data))}, data=data
         )
         response.raise_for_status()
