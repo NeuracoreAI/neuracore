@@ -65,12 +65,6 @@ def daemon_test_state_env():
             os.environ["NEURACORE_DAEMON_DB_PATH"] = previous_db_path
 
 
-@pytest.fixture()
-def daemon_offline_env():
-    """Compatibility shim — session env already points to test state dir."""
-    yield
-
-
 @pytest.fixture(autouse=True)
 def cleanup_profiles():
     """Remove test-created daemon profiles after each test."""
