@@ -726,30 +726,12 @@ def verify_cloud_results(
         poll_interval_s=2.0,
     )
 
-    # Compute duration bounds (mirrors _verify_recording_structure) so we can
-    # wait until the backend has finalized end_time for every recording before
-    # performing the structural pass.
-    base_duration_s = float(case.duration_sec)
-    clock_tolerance_s = 2.0
-    if case.context_duration_mode == DURATION_MODE_VARIABLE:
-        finalized_min_s = (
-            base_duration_s * DURATION_VARIABLE_MIN_FACTOR - clock_tolerance_s
-        )
-        finalized_max_s = (
-            base_duration_s * DURATION_VARIABLE_MAX_FACTOR + clock_tolerance_s
-        )
-    else:
-        finalized_min_s = base_duration_s - clock_tolerance_s
-        finalized_max_s = base_duration_s + clock_tolerance_s
-
     all_recording_ids = {
         str(rec_id) for result in results for rec_id in result.recording_ids
     }
     wait_for_recordings_finalized(
         dataset_name,
         all_recording_ids,
-        min_duration_s=finalized_min_s,
-        max_duration_s=finalized_max_s,
         timeout_s=case_timeout_seconds(case),
         poll_interval_s=2.0,
     )
