@@ -19,6 +19,9 @@ from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.utils.download import download_with_progress
 from neuracore.core.utils.http_session import get_session
+from neuracore.core.utils.robot_data_spec_utils import (
+    resolve_embodiment_descriptions_with_override,
+)
 from neuracore.ml import BatchedInferenceInputs
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.nc_archive import load_model_from_nc_archive
@@ -46,34 +49,52 @@ class PolicyInference:
 
     def __init__(
         self,
-        input_embodiment_description: EmbodimentDescription,
-        output_embodiment_description: EmbodimentDescription,
         model_file: Path,
         org_id: str,
+        input_embodiment_description: EmbodimentDescription | None = None,
+        output_embodiment_description: EmbodimentDescription | None = None,
         job_id: str | None = None,
         device: str | None = None,
+        robot_id: str | None = None,
     ) -> None:
         """Initialize the policy inference.
 
         Args:
-            input_embodiment_description: Input mapping per supported robot type.
-            output_embodiment_description: Output mapping per supported robot type.
             model_file: Path to the model file to load.
             org_id: ID of the organization for loading checkpoints.
+            input_embodiment_description: Input mapping per supported robot type.
+            output_embodiment_description: Output mapping per supported robot type.
             job_id: ID of the training job for loading checkpoints.
             device: Torch device to run the model inference on.
-            robot_to_output_mapping: Output mapping per supported robot type.
+            robot_id: Robot ID used to select embodiments from cross-embodiment
+                metadata in the model archive when explicit embodiments are not
+                provided.
         """
         self.org_id = org_id
         self.job_id = job_id
-        self.model = load_model_from_nc_archive(model_file, device=device)
+        (
+            self.model,
+            input_cross_embodiment_description,
+            output_cross_embodiment_description,
+        ) = load_model_from_nc_archive(model_file, device=device)
         self.model.eval()
         self.input_dataset_statistics = (
             self.model.model_init_description.input_dataset_statistics
         )
         self.device = torch.device(device) if device else get_default_device()
-        self.input_embodiment_description = input_embodiment_description
-        self.output_embodiment_description = output_embodiment_description
+        (
+            self.input_embodiment_description,
+            self.output_embodiment_description,
+        ) = resolve_embodiment_descriptions_with_override(
+            input_embodiment_description=input_embodiment_description,
+            output_embodiment_description=output_embodiment_description,
+            robot_id=robot_id,
+            job_id=job_id,
+            model_file=model_file,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
+        )
+
         self.prediction_horizon = (
             self.model.model_init_description.output_prediction_horizon
         )

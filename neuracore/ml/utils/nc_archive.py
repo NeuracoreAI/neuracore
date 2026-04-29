@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from neuracore_types import ModelInitDescription
+from neuracore_types import CrossEmbodimentDescription, ModelInitDescription
 
 from neuracore.ml.core.neuracore_model import NeuracoreModel
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
@@ -47,7 +47,11 @@ def _build_archive_metadata() -> dict[str, str | None]:
 
 
 def create_nc_archive(
-    model: NeuracoreModel, output_dir: Path, algorithm_config: dict = {}
+    model: NeuracoreModel,
+    output_dir: Path,
+    algorithm_config: dict = {},
+    input_cross_embodiment_description: dict[str, Any] = {},
+    output_cross_embodiment_description: dict[str, Any] = {},
 ) -> Path:
     """Create a Neuracore model archive (NC.ZIP) file from a Neuracore model.
 
@@ -59,6 +63,8 @@ def create_nc_archive(
         model: Trained Neuracore model instance to package for deployment.
         output_dir: Directory path where the NC.ZIP file will be created.
         algorithm_config: Custom configuration for the algorithm.
+        input_cross_embodiment_description: Input embodiment mapping.
+        output_cross_embodiment_description: Output embodiment mapping.
 
     Returns:
         Path to the created NC.ZIP file.
@@ -90,6 +96,12 @@ def create_nc_archive(
         with open(temp_path / "algorithm_config.json", "w") as f:
             json.dump(algorithm_config, f, indent=2)
 
+        # Save cross-embodiment descriptions
+        with open(temp_path / "input_cross_embodiment_description.json", "w") as f:
+            json.dump(input_cross_embodiment_description, f, indent=2)
+        with open(temp_path / "output_cross_embodiment_description.json", "w") as f:
+            json.dump(output_cross_embodiment_description, f, indent=2)
+
         # Save archive metadata
         with open(temp_path / "metadata", "w") as f:
             json.dump(_build_archive_metadata(), f, indent=2)
@@ -107,6 +119,16 @@ def create_nc_archive(
 
             # Add algorithm config (always present)
             zip_file.write(temp_path / "algorithm_config.json", "algorithm_config.json")
+
+            # Add cross-embodiment descriptions
+            zip_file.write(
+                temp_path / "input_cross_embodiment_description.json",
+                "input_cross_embodiment_description.json",
+            )
+            zip_file.write(
+                temp_path / "output_cross_embodiment_description.json",
+                "output_cross_embodiment_description.json",
+            )
 
             # Add archive metadata
             zip_file.write(temp_path / "metadata", "metadata")
@@ -166,6 +188,10 @@ def extract_nc_archive(archive_file: Path, output_dir: Path) -> dict[str, Path]:
                 extracted_files["model_init_description"] = file_path
             elif file_info.filename == "algorithm_config.json":
                 extracted_files["algorithm_config"] = file_path
+            elif file_info.filename == "input_cross_embodiment_description.json":
+                extracted_files["input_cross_embodiment_description"] = file_path
+            elif file_info.filename == "output_cross_embodiment_description.json":
+                extracted_files["output_cross_embodiment_description"] = file_path
             elif file_info.filename == "metadata":
                 extracted_files["metadata"] = file_path
             elif file_info.filename == "algorithm/requirements.txt":
@@ -178,9 +204,54 @@ def extract_nc_archive(archive_file: Path, output_dir: Path) -> dict[str, Path]:
     return extracted_files
 
 
+def load_cross_embodiment_descriptions_from_nc_archive(
+    archive_file: Path,
+    extract_to: Path | None = None,
+) -> tuple[CrossEmbodimentDescription, CrossEmbodimentDescription]:
+    """Load cross-embodiment descriptions from a Neuracore model archive.
+
+    Args:
+        archive_file: Path to the NC.ZIP file.
+        extract_to: Optional directory to extract files to.
+            If None, uses a temporary directory.
+
+    Returns:
+        Tuple of input and output cross-embodiment descriptions.
+    """
+    use_temp_dir = extract_to is None
+
+    if use_temp_dir:
+        temp_dir_context = tempfile.TemporaryDirectory()
+        extract_to = Path(temp_dir_context.__enter__())
+    else:
+        temp_dir_context = None
+
+    assert extract_to is not None
+
+    try:
+        extracted_files = extract_nc_archive(archive_file, extract_to)
+        if "input_cross_embodiment_description" not in extracted_files:
+            raise FileNotFoundError(
+                "input_cross_embodiment_description.json not found in archive"
+            )
+        if "output_cross_embodiment_description" not in extracted_files:
+            raise FileNotFoundError(
+                "output_cross_embodiment_description.json not found in archive"
+            )
+
+        with open(extracted_files["input_cross_embodiment_description"]) as f:
+            input_cross_embodiment_description = json.load(f)
+        with open(extracted_files["output_cross_embodiment_description"]) as f:
+            output_cross_embodiment_description = json.load(f)
+        return input_cross_embodiment_description, output_cross_embodiment_description
+    finally:
+        if use_temp_dir and temp_dir_context:
+            temp_dir_context.__exit__(None, None, None)
+
+
 def load_model_from_nc_archive(
     archive_file: Path, extract_to: Path | None = None, device: str | None = None
-) -> NeuracoreModel:
+) -> tuple[NeuracoreModel, CrossEmbodimentDescription, CrossEmbodimentDescription]:
     """Load a Neuracore model from a NC.ZIP archive file.
 
     Extracts the archive file and reconstructs the original Neuracore model instance
@@ -193,7 +264,10 @@ def load_model_from_nc_archive(
         device: Optional device model to be loaded on
 
     Returns:
-        NeuracoreModel: The reconstructed model instance ready for inference.
+        A tuple containing:
+          - The reconstructed model instance ready for inference.
+          - Input cross-embodiment description loaded from the archive (if present).
+          - Output cross-embodiment description loaded from the archive (if present).
     """
     use_temp_dir = extract_to is None
 
@@ -225,6 +299,16 @@ def load_model_from_nc_archive(
             with open(extracted_files["algorithm_config"]) as f:
                 algorithm_config = json.load(f)
 
+        # Load cross-embodiment descriptions if present
+        input_cross_embodiment_description = {}
+        if "input_cross_embodiment_description" in extracted_files:
+            with open(extracted_files["input_cross_embodiment_description"]) as f:
+                input_cross_embodiment_description = json.load(f)
+        output_cross_embodiment_description = {}
+        if "output_cross_embodiment_description" in extracted_files:
+            with open(extracted_files["output_cross_embodiment_description"]) as f:
+                output_cross_embodiment_description = json.load(f)
+
         # Find the algorithm directory
         algorithm_dir = extract_to / "algorithm"
         if not algorithm_dir.exists():
@@ -251,7 +335,11 @@ def load_model_from_nc_archive(
             )
             model.load_state_dict(state_dict)
 
-        return model
+        return (
+            model,
+            input_cross_embodiment_description,
+            output_cross_embodiment_description,
+        )
 
     finally:
         if use_temp_dir and temp_dir_context:

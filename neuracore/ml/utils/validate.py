@@ -250,7 +250,13 @@ def run_validation(
         with tempfile.TemporaryDirectory():
             try:
                 artifacts_dir = output_dir
-                create_nc_archive(model, artifacts_dir, algorithm_config)
+                create_nc_archive(
+                    model,
+                    artifacts_dir,
+                    algorithm_config,
+                    input_cross_embodiment_description,
+                    output_cross_embodiment_description,
+                )
 
                 algo_check.successfully_exported_model = True
                 logger.info("NC archive export successful")

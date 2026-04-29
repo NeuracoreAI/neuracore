@@ -694,6 +694,58 @@ def test_deploy_model_failure(
         )
 
 
+def test_deploy_model_loads_embodiments_from_job_metadata_for_robot_name(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id, monkeypatch
+):
+    """Deploy model should resolve robot_name and load job metadata embodiments."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/models/deploy",
+        json={"id": "endpoint_123", "name": "test_endpoint", "status": "deploying"},
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/job_123",
+        json={
+            "input_cross_embodiment_description": {
+                "mock_robot_id": {"JOINT_POSITIONS": {"0": "joint1"}}
+            },
+            "output_cross_embodiment_description": {
+                "mock_robot_id": {"JOINT_TARGET_POSITIONS": {"0": "joint1"}}
+            },
+        },
+        status_code=200,
+    )
+
+    nc.deploy_model(
+        job_id="job_123",
+        name="test_endpoint",
+        robot_name=TEST_ROBOT_ID,
+    )
+
+    request_body = mock_auth_requests.request_history[-1].json()
+    assert request_body["input_embodiment_description"]["JOINT_POSITIONS"] == {
+        "0": "joint1"
+    }
+    assert request_body["output_embodiment_description"]["JOINT_TARGET_POSITIONS"] == {
+        "0": "joint1"
+    }
+
+
+def test_deploy_model_raises_when_missing_embodiments_and_robot_selector(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """Deploy model requires embodiments or a robot_id/robot_name."""
+    nc.login(TEST_API_KEY)
+    with pytest.raises(
+        ValueError, match="Must provide both input_embodiment_description"
+    ):
+        nc.deploy_model(
+            job_id="job_123",
+            name="test_endpoint",
+        )
+
+
 def test_connect_local_endpoint_with_train_run(
     temp_config_dir, mock_auth_requests, reset_neuracore, monkeypatch, mocked_org_id
 ):

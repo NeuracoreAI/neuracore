@@ -8,12 +8,25 @@ would be the natural home for these shared utilities.
 
 import re
 from collections.abc import Mapping
+from pathlib import Path
 
-from neuracore_types import CrossEmbodimentDescription, CrossEmbodimentUnion, DataType
+import requests
+from neuracore_types import (
+    CrossEmbodimentDescription,
+    CrossEmbodimentUnion,
+    DataType,
+    EmbodimentDescription,
+)
 from omegaconf import DictConfig
 from ordered_set import OrderedSet
 
+from neuracore.core.auth import get_auth
+from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.const import API_URL
 from neuracore.core.robot import get_robot_id_from_name
+from neuracore.ml.utils.nc_archive import (
+    load_cross_embodiment_descriptions_from_nc_archive,
+)
 
 ID_REGEX = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
@@ -177,3 +190,133 @@ def extract_data_types(
     for data_types in robot_id_to_data_types.values():
         unique_data_types.update(data_types.keys())
     return unique_data_types
+
+
+def normalize_embodiment_description(
+    embodiment_description: dict[DataType | str, object],
+) -> EmbodimentDescription:
+    """Normalize embodiment description keys to DataType enum values."""
+    return {
+        data_type if isinstance(data_type, DataType) else DataType(data_type): names
+        for data_type, names in embodiment_description.items()
+    }
+
+
+def resolve_embodiment_descriptions(
+    input_cross_embodiment_description: CrossEmbodimentDescription,
+    output_cross_embodiment_description: CrossEmbodimentDescription,
+    robot_id: str,
+) -> tuple[EmbodimentDescription, EmbodimentDescription]:
+    """Resolve concrete input/output embodiments for a specific robot."""
+    if robot_id not in input_cross_embodiment_description:
+        raise ValueError(
+            f"Robot ID '{robot_id}' not found in input cross-embodiment description."
+        )
+    if robot_id not in output_cross_embodiment_description:
+        raise ValueError(
+            f"Robot ID '{robot_id}' not found in output cross-embodiment description."
+        )
+    return (
+        normalize_embodiment_description(input_cross_embodiment_description[robot_id]),
+        normalize_embodiment_description(output_cross_embodiment_description[robot_id]),
+    )
+
+
+def resolve_embodiment_descriptions_with_override(
+    input_embodiment_description: EmbodimentDescription | None = None,
+    output_embodiment_description: EmbodimentDescription | None = None,
+    robot_id: str | None = None,
+    job_id: str | None = None,
+    model_file: Path | None = None,
+    input_cross_embodiment_description: CrossEmbodimentDescription | None = None,
+    output_cross_embodiment_description: CrossEmbodimentDescription | None = None,
+) -> tuple[EmbodimentDescription, EmbodimentDescription]:
+    """Resolve embodiments from archive/cross-specs and apply explicit overrides.
+
+    1. Prioritize explicit overrides of embodiment descriptions.
+    2. If no explicit overrides, resolve using robot ID from
+       cross-embodiment descriptions.
+    3. If no cross-embodiment descriptions, resolve from training metadata
+       or model archive.
+    """
+    resolved_input_embodiment_description = None
+    resolved_output_embodiment_description = None
+
+    if (
+        input_embodiment_description is not None
+        and output_embodiment_description is not None
+    ):
+        return input_embodiment_description, output_embodiment_description
+
+    # Retrieve cross-embodiment descriptions and resolve embodiments from them
+    if robot_id is not None:
+        if (
+            not input_cross_embodiment_description
+            or not output_cross_embodiment_description
+        ):
+            if job_id is not None:
+                auth = get_auth()
+                org_id = get_current_org()
+                response = requests.get(
+                    f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
+                    headers=auth.get_headers(),
+                    timeout=30,
+                )
+                if response.status_code == 200:
+                    training_job = response.json()
+                    input_cross_embodiment_description = training_job.get(
+                        "input_cross_embodiment_description"
+                    )
+                    output_cross_embodiment_description = training_job.get(
+                        "output_cross_embodiment_description"
+                    )
+
+            elif model_file is not None:
+                (
+                    archive_input_cross_embodiment_description,
+                    archive_output_cross_embodiment_description,
+                ) = load_cross_embodiment_descriptions_from_nc_archive(model_file)
+                if input_cross_embodiment_description is None:
+                    input_cross_embodiment_description = (
+                        archive_input_cross_embodiment_description
+                    )
+                if output_cross_embodiment_description is None:
+                    output_cross_embodiment_description = (
+                        archive_output_cross_embodiment_description
+                    )
+
+        if (
+            input_cross_embodiment_description is None
+            or output_cross_embodiment_description is None
+        ):
+            raise ValueError(
+                "Must provide both input_cross_embodiment_description and "
+                "output_cross_embodiment_description, or provide robot_id "
+                "with job_id or model_file to load them from training "
+                "metadata or the model archive."
+            )
+
+        (
+            resolved_input_embodiment_description,
+            resolved_output_embodiment_description,
+        ) = resolve_embodiment_descriptions(
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
+            robot_id=robot_id,
+        )
+
+    if input_embodiment_description is not None:
+        resolved_input_embodiment_description = input_embodiment_description
+    if output_embodiment_description is not None:
+        resolved_output_embodiment_description = output_embodiment_description
+
+    if (
+        resolved_input_embodiment_description is None
+        or resolved_output_embodiment_description is None
+    ):
+        raise ValueError(
+            "Must provide both input_embodiment_description and "
+            "output_embodiment_description, or provide robot_id with job_id/model_file "
+            "to load them from training metadata or the model archive."
+        )
+    return resolved_input_embodiment_description, resolved_output_embodiment_description

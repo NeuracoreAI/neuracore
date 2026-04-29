@@ -14,6 +14,8 @@ ORG_ID = "test-org-id"
 JOB_ID = "test-job-id"
 BASE_JOB_URL = f"{API_URL}/org/{ORG_ID}/training/jobs/{JOB_ID}"
 SIGNED_URL = "https://storage.example.com/signed-url"
+INPUT_CROSS_EMBODIMENT_DESCRIPTION = {"robot": {"joints": {"0": {"name": "j0"}}}}
+OUTPUT_CROSS_EMBODIMENT_DESCRIPTION = {"robot": {"actions": {"0": {"name": "a0"}}}}
 
 
 @pytest.fixture
@@ -42,13 +44,19 @@ def handler(tmp_path, requests_mock, mock_auth, mock_org):
     return TrainingStorageHandler(
         local_dir=str(tmp_path),
         training_job_id=JOB_ID,
+        input_cross_embodiment_description=INPUT_CROSS_EMBODIMENT_DESCRIPTION,
+        output_cross_embodiment_description=OUTPUT_CROSS_EMBODIMENT_DESCRIPTION,
     )
 
 
 @pytest.fixture
 def local_handler(tmp_path, mock_auth, mock_org):
     """Create a local-only TrainingStorageHandler (no cloud)."""
-    return TrainingStorageHandler(local_dir=str(tmp_path))
+    return TrainingStorageHandler(
+        local_dir=str(tmp_path),
+        input_cross_embodiment_description=INPUT_CROSS_EMBODIMENT_DESCRIPTION,
+        output_cross_embodiment_description=OUTPUT_CROSS_EMBODIMENT_DESCRIPTION,
+    )
 
 
 class TestInit:
@@ -57,7 +65,10 @@ class TestInit:
     ):
         requests_mock.get(BASE_JOB_URL, json={}, status_code=200)
         cloud_handler = TrainingStorageHandler(
-            local_dir=str(tmp_path), training_job_id=JOB_ID
+            local_dir=str(tmp_path),
+            training_job_id=JOB_ID,
+            input_cross_embodiment_description=INPUT_CROSS_EMBODIMENT_DESCRIPTION,
+            output_cross_embodiment_description=OUTPUT_CROSS_EMBODIMENT_DESCRIPTION,
         )
         assert cloud_handler.log_to_cloud is True
         assert cloud_handler.training_job_id == JOB_ID
@@ -68,17 +79,30 @@ class TestInit:
     ):
         requests_mock.get(BASE_JOB_URL, json={"detail": "Not found"}, status_code=404)
         with pytest.raises(ValueError, match=JOB_ID):
-            TrainingStorageHandler(local_dir=str(tmp_path), training_job_id=JOB_ID)
+            TrainingStorageHandler(
+                local_dir=str(tmp_path),
+                training_job_id=JOB_ID,
+                input_cross_embodiment_description=INPUT_CROSS_EMBODIMENT_DESCRIPTION,
+                output_cross_embodiment_description=OUTPUT_CROSS_EMBODIMENT_DESCRIPTION,
+            )
 
     def test_init_without_job_id_disables_cloud_logging(
         self, tmp_path, mock_auth, mock_org
     ):
-        local_only_handler = TrainingStorageHandler(local_dir=str(tmp_path))
+        local_only_handler = TrainingStorageHandler(
+            local_dir=str(tmp_path),
+            input_cross_embodiment_description=INPUT_CROSS_EMBODIMENT_DESCRIPTION,
+            output_cross_embodiment_description=OUTPUT_CROSS_EMBODIMENT_DESCRIPTION,
+        )
         assert local_only_handler.log_to_cloud is False
         assert local_only_handler.training_job_id is None
 
     def test_init_sets_local_dir_to_output_when_none_given(self, mock_auth, mock_org):
-        handler_with_default_dir = TrainingStorageHandler(local_dir=None)
+        handler_with_default_dir = TrainingStorageHandler(
+            local_dir=None,
+            input_cross_embodiment_description=INPUT_CROSS_EMBODIMENT_DESCRIPTION,
+            output_cross_embodiment_description=OUTPUT_CROSS_EMBODIMENT_DESCRIPTION,
+        )
         assert handler_with_default_dir.local_dir == Path("./output")
 
 
@@ -314,6 +338,8 @@ class TestSaveModelArtifacts:
             model=mock_model,
             output_dir=artifacts_dir,
             algorithm_config={},
+            input_cross_embodiment_description=INPUT_CROSS_EMBODIMENT_DESCRIPTION,
+            output_cross_embodiment_description=OUTPUT_CROSS_EMBODIMENT_DESCRIPTION,
         )
 
     def test_save_model_artifacts_uploads_each_artifact_file_to_cloud(
@@ -327,7 +353,13 @@ class TestSaveModelArtifacts:
         )
         requests_mock.put(SIGNED_URL, status_code=200)
 
-        def fake_archive(model, output_dir, algorithm_config):
+        def fake_archive(
+            model,
+            output_dir,
+            algorithm_config,
+            input_cross_embodiment_description,
+            output_cross_embodiment_description,
+        ):
             (output_dir / "model.pt").write_bytes(b"model_data")
             (output_dir / "config.json").write_bytes(b"{}")
 

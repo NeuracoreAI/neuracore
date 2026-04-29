@@ -661,6 +661,8 @@ def run_training(
             local_dir=cfg.local_output_dir,
             training_job_id=cfg.training_id,
             algorithm_config=algorithm_config,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
         )
 
         logger.info(
