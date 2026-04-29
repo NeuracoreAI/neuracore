@@ -532,24 +532,20 @@ def wait_for_recordings_finalized(
     dataset_name: str,
     recording_ids: set[str],
     *,
-    min_duration_s: float,
-    max_duration_s: float,
     timeout_s: float = 120.0,
     poll_interval_s: float = 2.0,
 ) -> None:
     """Block until every recording in ``recording_ids`` has a finalized end_time.
 
-    The backend updates a recording's ``end_time`` asynchronously as traces are
-    ingested.  This helper re-fetches the dataset on each poll and returns only
-    once every expected recording has ``end_time - start_time`` within the
-    supplied duration bounds, signalling that the backend has finished processing
-    all trace data for those recordings.
+    The backend updates a recording's ``end_time`` asynchronously.  This helper
+    re-fetches the dataset on each poll and returns once every expected
+    recording exists and has a non-null ``end_time``.  Duration correctness is
+    checked later by the structural verification pass so failures surface
+    immediately instead of polling for a duration value that is already final.
 
     Args:
         dataset_name: Name of the dataset to poll.
         recording_ids: Set of recording IDs that must all be finalized.
-        min_duration_s: Minimum acceptable ``end_time - start_time`` in seconds.
-        max_duration_s: Maximum acceptable ``end_time - start_time`` in seconds.
         timeout_s: Maximum time to wait before raising.
         poll_interval_s: Seconds between successive polls.
 
@@ -557,7 +553,8 @@ def wait_for_recordings_finalized(
         TimeoutError: If not all recordings are finalized within ``timeout_s``.
     """
     deadline = time.monotonic() + timeout_s
-    last_bad: dict[str, float] = {}
+    last_missing = set(recording_ids)
+    last_without_end_time: set[str] = set()
 
     while time.monotonic() < deadline:
         try:
@@ -566,25 +563,28 @@ def wait_for_recordings_finalized(
             time.sleep(poll_interval_s)
             continue
 
-        bad: dict[str, float] = {}
+        seen: set[str] = set()
+        without_end_time: set[str] = set()
         for recording in dataset:
             rec_id = str(recording.id)
             if rec_id not in recording_ids:
                 continue
-            duration = float(recording.end_time) - float(recording.start_time)
-            if not (min_duration_s <= duration <= max_duration_s):
-                bad[rec_id] = duration
+            seen.add(rec_id)
+            if recording.end_time is None:
+                without_end_time.add(rec_id)
 
-        if not bad:
+        missing = recording_ids - seen
+        if not missing and not without_end_time:
             return
 
-        last_bad = bad
+        last_missing = missing
+        last_without_end_time = without_end_time
         time.sleep(min(poll_interval_s, max(0.0, deadline - time.monotonic())))
 
     raise TimeoutError(
-        f"Recordings in dataset '{dataset_name}' did not reach expected duration "
-        f"[{min_duration_s:.1f}s, {max_duration_s:.1f}s] within {timeout_s}s. "
-        f"Still outside range: {last_bad}"
+        f"Recordings in dataset '{dataset_name}' did not finalize within "
+        f"{timeout_s}s. Missing: {sorted(last_missing)}. "
+        f"Without end_time: {sorted(last_without_end_time)}"
     )
 
 
