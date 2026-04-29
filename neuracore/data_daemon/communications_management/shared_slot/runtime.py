@@ -48,6 +48,13 @@ class SharedSlotRegistryState:
     healthy: bool = True
     ready: bool = False
     in_flight: dict[int, InFlightSlot] = field(default_factory=dict)
+    max_in_flight_count: int = 0
+    acked_sequence_count: int = 0
+    ack_timeout_count: int = 0
+    last_acked_sequence_id: int | None = None
+    last_ack_latency_s: float | None = None
+    max_ack_latency_s: float = 0.0
+    last_credit_return_at: float | None = None
     closed: bool = False
     unhealthy_reason: str | None = None
 

@@ -20,14 +20,16 @@ from neuracore.data_daemon.config_manager.profiles import (
 )
 from neuracore.data_daemon.const import (
     DEFAULT_PROFILE_NAME,
-    DEFAULT_RING_BUFFER_SIZE,
-    DEFAULT_VIDEO_RING_BUFFER_SIZE,
+    DEFAULT_SHARED_MEMORY_SIZE,
+    DEFAULT_VIDEO_SLOT_COUNT,
+    DEFAULT_VIDEO_SLOT_SIZE,
 )
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.helpers import is_debug_mode
 from neuracore.data_daemon.lifecycle.daemon_os_control import acquire_pid_file
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
+    cleanup_stale_shared_slot_segments,
     cleanup_socket_files,
     cleanup_stale_shared_memory_buffers,
     reconcile_state_with_filesystem,
@@ -86,8 +88,15 @@ class DaemonRuntime:
         cleaned_shared_buffers = cleanup_stale_shared_memory_buffers()
         if cleaned_shared_buffers:
             logger.info(
-                "Recovered %d stale shared-memory ring buffer(s) from /dev/shm",
+                "Recovered %d stale shared-memory allocation(s) from /dev/shm",
                 cleaned_shared_buffers,
+            )
+
+        cleaned_shared_slots = cleanup_stale_shared_slot_segments()
+        if cleaned_shared_slots:
+            logger.info(
+                "Recovered %d stale shared-slot segment(s) from /dev/shm",
+                cleaned_shared_slots,
             )
 
         cleanup_socket_files(self._socket_paths)
@@ -99,26 +108,26 @@ class DaemonRuntime:
         try:
             free_shared_bytes = shared_memory_free_bytes()
             min_required_bytes = shared_memory_required_bytes(
-                DEFAULT_RING_BUFFER_SIZE,
+                DEFAULT_SHARED_MEMORY_SIZE,
                 metadata_size=4096,
             )
             video_required_bytes = shared_memory_required_bytes(
-                DEFAULT_VIDEO_RING_BUFFER_SIZE,
+                DEFAULT_VIDEO_SLOT_SIZE * DEFAULT_VIDEO_SLOT_COUNT,
                 metadata_size=4096,
             )
             if free_shared_bytes < min_required_bytes:
                 logger.warning(
                     "Shared-memory startup preflight: only %d bytes free in /dev/shm; "
-                    "%d bytes are required for a default ring buffer. "
-                    "New shared ring creation will fail until space is reclaimed.",
+                    "%d bytes are required for default shared memory. "
+                    "New shared-memory sessions will fail until space is reclaimed.",
                     free_shared_bytes,
                     min_required_bytes,
                 )
             elif free_shared_bytes < video_required_bytes:
                 logger.warning(
                     "Shared-memory startup preflight: %d bytes free in /dev/shm; "
-                    "default non-video ring buffers fit, but default video ring "
-                    "buffers need %d bytes.",
+                    "default non-video traffic fits, but default video shared "
+                    "memory needs %d bytes.",
                     free_shared_bytes,
                     video_required_bytes,
                 )
@@ -378,6 +387,13 @@ class DaemonRuntime:
 
         self._daemon = None
         self._context = None
+
+        cleaned_shared_slots = cleanup_stale_shared_slot_segments()
+        if cleaned_shared_slots:
+            logger.info(
+                "Cleaned %d shared-slot segment(s) during daemon shutdown",
+                cleaned_shared_slots,
+            )
 
         logger.info("Daemon runtime shutdown complete")
 

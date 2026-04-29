@@ -9,9 +9,6 @@ import pytest
 import zmq
 from neuracore_types import DataType
 
-from neuracore.data_daemon.communications_management.channel_reader import (
-    ChannelMessageReader,
-)
 from neuracore.data_daemon.communications_management.data_bridge import (
     ChannelState,
     Daemon,
@@ -19,7 +16,6 @@ from neuracore.data_daemon.communications_management.data_bridge import (
 from neuracore.data_daemon.communications_management.producer_channel import (
     ProducerChannel,
 )
-from neuracore.data_daemon.communications_management.ring_buffer import RingBuffer
 from neuracore.data_daemon.communications_management.shared_slot_transport import (
     PacketTooLarge,
     QueuedSharedSlotPacket,
@@ -29,9 +25,10 @@ from neuracore.data_daemon.communications_management.shared_slot_transport impor
 )
 from neuracore.data_daemon.const import (
     DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
+    DEFAULT_VIDEO_SLOT_COUNT,
     HEARTBEAT_TIMEOUT_SECS,
-    SHARED_RING_RECORD_HEADER_FORMAT,
-    SHARED_RING_RECORD_MAGIC,
+    SHARED_MEMORY_RECORD_HEADER_FORMAT,
+    SHARED_MEMORY_RECORD_MAGIC,
 )
 from neuracore.data_daemon.models import (
     CommandType,
@@ -44,49 +41,12 @@ from neuracore.data_daemon.models import (
 )
 
 
-class FakeSharedFrame:
-    def __init__(self, payload: bytes) -> None:
-        self.data = memoryview(payload)
-        self.disposed = False
-
-    def dispose(self) -> None:
-        self.disposed = True
-        self.data.release()
-
-
-class FakeSharedReader:
-    def __init__(self, packets: list[bytes]) -> None:
-        self._packets = list(packets)
-        self.frames: list[FakeSharedFrame] = []
-        self.closed = False
-
-    def read_frame(self, timeout: float = 0.0) -> FakeSharedFrame | None:
-        del timeout
-        if not self._packets:
-            return None
-        frame = FakeSharedFrame(self._packets.pop(0))
-        self.frames.append(frame)
-        return frame
-
-    def close(self) -> None:
-        self.closed = True
-
-
-def _make_shared_ring_reader(*packets: bytes) -> RingBuffer:
-    size = max((len(packet) for packet in packets), default=1)
-    return RingBuffer(
-        size=size,
-        _shared_name="test-shared",
-        _shared_reader=FakeSharedReader(list(packets)),
-    )
-
-
-def _decode_shared_ring_write(packet: bytes) -> tuple[dict, bytes]:
+def _decode_shared_memory_write(packet: bytes) -> tuple[dict, bytes]:
     _magic, metadata_len, chunk_len = struct.unpack(
-        SHARED_RING_RECORD_HEADER_FORMAT,
-        packet[: struct.calcsize(SHARED_RING_RECORD_HEADER_FORMAT)],
+        SHARED_MEMORY_RECORD_HEADER_FORMAT,
+        packet[: struct.calcsize(SHARED_MEMORY_RECORD_HEADER_FORMAT)],
     )
-    metadata_start = struct.calcsize(SHARED_RING_RECORD_HEADER_FORMAT)
+    metadata_start = struct.calcsize(SHARED_MEMORY_RECORD_HEADER_FORMAT)
     metadata_end = metadata_start + metadata_len
     metadata = json.loads(packet[metadata_start:metadata_end].decode("utf-8"))
     chunk = packet[metadata_end : metadata_end + chunk_len]
@@ -108,17 +68,24 @@ def _read_shared_slot_packet(envelope: MessageEnvelope) -> tuple[dict, bytes]:
 
 
 def test_message_envelope_round_trip() -> None:
-    payload = {"open_ring_buffer": {"size": 2048}}
+    payload = {
+        "open_fixed_shared_slots": {
+            "transport_mode": "FIXED_SHARED_SLOTS_DAEMON_OWNED",
+            "control_endpoint": "ipc://test-message-round-trip",
+            "slot_size": 2048,
+            "slot_count": 16,
+        }
+    }
     envelope = MessageEnvelope(
         producer_id="producer-123",
-        command=CommandType.OPEN_RING_BUFFER,
+        command=CommandType.OPEN_FIXED_SHARED_SLOTS,
         payload=payload,
     )
 
     parsed = MessageEnvelope.from_bytes(envelope.to_bytes())
 
     assert parsed.producer_id == "producer-123"
-    assert parsed.command == CommandType.OPEN_RING_BUFFER
+    assert parsed.command == CommandType.OPEN_FIXED_SHARED_SLOTS
     assert parsed.payload == payload
 
 
@@ -180,116 +147,6 @@ def test_complete_message_batch_record_round_trip() -> None:
     assert parsed.final_chunk is True
 
 
-def test_channel_reader_reassembles_shared_ring_records() -> None:
-    packets: list[bytes] = []
-
-    for idx, chunk in enumerate((b"robot", b"ics")):
-        metadata = {
-            "trace_id": "trace-shared",
-            "chunk_index": idx,
-            "total_chunks": 2,
-        }
-        if idx == 0:
-            metadata.update({
-                "recording_id": "rec-shared",
-                "data_type": DataType.CUSTOM_1D.value,
-                "data_type_name": "custom",
-                "robot_instance": 1,
-                "robot_id": "robot-1",
-                "dataset_id": "dataset-1",
-            })
-        metadata_bytes = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
-        packets.append(
-            struct.pack(
-                SHARED_RING_RECORD_HEADER_FORMAT,
-                SHARED_RING_RECORD_MAGIC,
-                len(metadata_bytes),
-                len(chunk),
-            )
-            + metadata_bytes
-            + chunk
-        )
-
-    reader = ChannelMessageReader(_make_shared_ring_reader(*packets))
-
-    assembled = reader.poll_one()
-    while assembled is None:
-        assembled = reader.poll_one()
-
-    assert assembled == ("trace-shared", DataType.CUSTOM_1D, b"robotics")
-    assert assembled.metadata is not None
-    assert assembled.metadata.recording_id == "rec-shared"
-
-
-def test_channel_reader_rejects_shared_ring_trailing_bytes() -> None:
-    metadata_bytes = json.dumps(
-        {
-            "trace_id": "trace-shared",
-            "recording_id": "rec-shared",
-            "chunk_index": 0,
-            "total_chunks": 1,
-            "data_type": DataType.CUSTOM_1D.value,
-            "data_type_name": "custom",
-            "robot_instance": 1,
-        },
-        separators=(",", ":"),
-    ).encode("utf-8")
-    payload = b"robotics"
-    packet = (
-        struct.pack(
-            SHARED_RING_RECORD_HEADER_FORMAT,
-            SHARED_RING_RECORD_MAGIC,
-            len(metadata_bytes),
-            len(payload),
-        )
-        + metadata_bytes
-        + payload
-        + b"!"
-    )
-
-    reader = ChannelMessageReader(_make_shared_ring_reader(packet))
-
-    try:
-        reader.poll_one()
-    except ValueError as exc:
-        assert "trailing bytes" in str(exc)
-    else:  # pragma: no cover
-        raise AssertionError("Expected trailing-byte packet to be rejected")
-
-
-def test_channel_reader_rejects_short_shared_ring_packet() -> None:
-    metadata_bytes = json.dumps(
-        {
-            "trace_id": "trace-shared",
-            "recording_id": "rec-shared",
-            "chunk_index": 0,
-            "total_chunks": 1,
-            "data_type": DataType.CUSTOM_1D.value,
-            "data_type_name": "custom",
-            "robot_instance": 1,
-        },
-        separators=(",", ":"),
-    ).encode("utf-8")
-    payload = b"robotics"
-    packet = (
-        struct.pack(
-            SHARED_RING_RECORD_HEADER_FORMAT,
-            SHARED_RING_RECORD_MAGIC,
-            len(metadata_bytes),
-            len(payload) + 1,
-        )
-        + metadata_bytes
-        + payload
-    )
-
-    reader = ChannelMessageReader(_make_shared_ring_reader(packet))
-
-    try:
-        reader.poll_one()
-    except ValueError as exc:
-        assert "shorter than declared lengths" in str(exc)
-    else:  # pragma: no cover
-        raise AssertionError("Expected short packet to be rejected")
 
 
 class DummyComm:
@@ -433,12 +290,12 @@ def _stub_producer_transport(monkeypatch) -> list[MessageEnvelope]:
     return messages
 
 
-def test_producer_open_ring_buffer_sends_payload(monkeypatch) -> None:
+def test_producer_open_fixed_shared_slots_sends_payload(monkeypatch) -> None:
     messages = _stub_producer_transport(monkeypatch)
     producer = ProducerChannel(data_type=DataType.RGB_IMAGES)
 
     try:
-        producer.open_ring_buffer(size=2048)
+        producer.open_fixed_shared_slots(slot_size=2048)
         _wait_for_envelopes(messages, 1)
     finally:
         producer.stop_producer_channel()
@@ -448,11 +305,11 @@ def test_producer_open_ring_buffer_sends_payload(monkeypatch) -> None:
     assert envelope.command == CommandType.OPEN_FIXED_SHARED_SLOTS
     payload = envelope.payload["open_fixed_shared_slots"]
     assert payload["slot_size"] == 2048
-    assert payload["slot_count"] == 16
+    assert payload["slot_count"] == DEFAULT_VIDEO_SLOT_COUNT
     assert payload["control_endpoint"].startswith("ipc://")
 
 
-def test_producer_send_data_parts_lazily_opens_shared_ring_buffer(
+def test_producer_send_data_parts_lazily_opens_shared_memory(
     monkeypatch,
 ) -> None:
     messages = _stub_producer_transport(monkeypatch)
@@ -460,7 +317,7 @@ def test_producer_send_data_parts_lazily_opens_shared_ring_buffer(
     producer = ProducerChannel(
         chunk_size=2,
         recording_id="rec-1",
-        ring_buffer_size=2048,
+        shared_memory_size=2048,
         data_type=DataType.RGB_IMAGES,
     )
 
@@ -526,20 +383,20 @@ def test_producer_send_data_parts_uses_socket_for_non_video(monkeypatch) -> None
     assert payload.data == b"abcd"
 
 
-def test_producer_ensure_shared_ring_buffer_does_not_reannounce(
+def test_producer_ensure_shared_memory_does_not_reannounce(
     monkeypatch,
 ) -> None:
     messages = _stub_producer_transport(monkeypatch)
 
     producer = ProducerChannel(
         recording_id="rec-1",
-        ring_buffer_size=2048,
+        shared_memory_size=2048,
         data_type=DataType.RGB_IMAGES,
     )
 
     try:
         producer.start_new_trace()
-        producer.open_ring_buffer(size=2048)
+        producer.open_fixed_shared_slots(slot_size=2048)
         _wait_for_envelopes(messages, 1)
         control_endpoint = messages[0].payload["open_fixed_shared_slots"][
             "control_endpoint"
@@ -569,27 +426,13 @@ def test_producer_ensure_shared_ring_buffer_does_not_reannounce(
     assert metadata["trace_id"] == trace_id
 
 
-class DummySharedRingBuffer:
-    def __init__(self, shared_name: str = "test-shared", size: int = 2048) -> None:
-        self.shared_name = shared_name
-        self.size = size
-        self.writes: list[bytes] = []
-        self.closed = False
-
-    def write(self, data: bytes | bytearray | memoryview) -> None:
-        self.writes.append(bytes(data))
-
-    def close(self) -> None:
-        self.closed = True
-
-
 def test_producer_send_data_parts_chunks_across_multiple_buffers(monkeypatch) -> None:
     messages = _stub_producer_transport(monkeypatch)
 
     producer = ProducerChannel(
         chunk_size=3,
         recording_id="rec-1",
-        ring_buffer_size=2048,
+        shared_memory_size=2048,
         data_type=DataType.RGB_IMAGES,
     )
 
@@ -624,7 +467,7 @@ def test_producer_send_data_parts_chunks_across_multiple_buffers(monkeypatch) ->
     assert "recording_id" not in packets[2][0]
 
 
-def test_producer_transport_stats_include_sender_and_shared_ring_metrics(
+def test_producer_transport_stats_include_sender_and_shared_memory_metrics(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("NDD_DEBUG", "true")
@@ -633,7 +476,7 @@ def test_producer_transport_stats_include_sender_and_shared_ring_metrics(
     producer = ProducerChannel(
         chunk_size=2,
         recording_id="rec-1",
-        ring_buffer_size=2048,
+        shared_memory_size=2048,
         data_type=DataType.RGB_IMAGES,
     )
 
@@ -655,31 +498,31 @@ def test_producer_transport_stats_include_sender_and_shared_ring_metrics(
     assert stats["channel_id"] == producer.channel_id
     assert stats["recording_id"] == "rec-1"
     assert stats["trace_id"] is not None
-    assert str(stats["shared_ring_buffer_name"]).startswith("neuracore-slots-")
-    assert stats["shared_ring_buffer_size"] == 2048 * 16
+    assert str(stats["shared_memory_name"]).startswith("neuracore-slots-")
+    assert stats["shared_memory_size"] == 2048 * 16
     assert stats["send_queue_qsize"] == 0
     assert stats["send_queue_maxsize"] == DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE
     assert stats["last_enqueued_sequence_number"] >= 1
     assert stats["last_socket_sent_sequence_number"] >= 1
     assert stats["pending_sequence_count"] == 0
     assert stats["sender_thread_alive"] is True
-    assert stats["shared_ring_open_count"] == 0
-    assert stats["shared_ring_write_count"] == 0
-    assert stats["shared_ring_dispatch_count"] == 0
+    assert stats["shared_memory_open_count"] == 0
+    assert stats["shared_memory_write_count"] == 0
+    assert stats["shared_memory_dispatch_count"] == 0
     assert stats["socket_send_count"] >= 1
     assert stats["queue_put_count"] >= 3
     assert stats["send_error_count"] == 0
     assert stats["last_send_error"] is None
 
 
-def test_producer_shared_ring_rejects_oversized_packet(monkeypatch) -> None:
+def test_producer_shared_memory_rejects_oversized_packet(monkeypatch) -> None:
     monkeypatch.setenv("NDD_DEBUG", "true")
     _stub_producer_transport(monkeypatch)
 
     producer = ProducerChannel(
         chunk_size=16,
         recording_id="rec-1",
-        ring_buffer_size=8,
+        shared_memory_size=8,
         data_type=DataType.RGB_IMAGES,
     )
 
@@ -776,7 +619,7 @@ def test_producer_sender_failure_stops_waiters(monkeypatch) -> None:
     producer = ProducerChannel(
         chunk_size=2,
         recording_id="rec-1",
-        ring_buffer_size=2048,
+        shared_memory_size=2048,
         data_type=DataType.RGB_IMAGES,
     )
 
@@ -1013,51 +856,6 @@ class DummyRecordingDiskManager:
 
     def enqueue(self, msg):
         self.messages.append(msg)
-
-
-def test_daemon_registers_trace_from_shared_ring_metadata(emitter) -> None:
-    rdm = DummyRecordingDiskManager()
-    daemon = Daemon(
-        comm_manager=DummyComm(),
-        recording_disk_manager=rdm,
-        emitter=emitter,
-    )
-    channel = ChannelState(producer_id="shared")
-    daemon.channels["shared"] = channel
-
-    metadata = {
-        "trace_id": "trace-shared",
-        "recording_id": "rec-shared",
-        "chunk_index": 0,
-        "total_chunks": 1,
-        "data_type": DataType.CUSTOM_1D.value,
-        "data_type_name": "custom",
-        "robot_instance": 1,
-        "robot_id": "robot-1",
-        "dataset_id": "dataset-1",
-    }
-    payload = b"robotics"
-    metadata_bytes = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
-    channel.set_ring_buffer(
-        _make_shared_ring_reader(
-            struct.pack(
-                SHARED_RING_RECORD_HEADER_FORMAT,
-                SHARED_RING_RECORD_MAGIC,
-                len(metadata_bytes),
-                len(payload),
-            )
-            + metadata_bytes
-            + payload
-        )
-    )
-
-    daemon._drain_single_channel_messages(channel)
-
-    assert daemon._trace_recordings["trace-shared"] == "rec-shared"
-    assert (
-        daemon._trace_metadata["trace-shared"]["data_type"] == DataType.CUSTOM_1D.value
-    )
-    assert len(rdm.messages) == 1
 
 
 def test_cleanup_removes_channel_without_heartbeat(emitter) -> None:

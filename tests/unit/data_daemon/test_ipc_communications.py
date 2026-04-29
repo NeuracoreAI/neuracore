@@ -87,7 +87,6 @@ def _drain_messages(
             message = MessageEnvelope.from_bytes(raw)
             daemon.handle_message(message)
             received += 1
-        daemon._drain_channel_messages()
     assert received == expected
     if until is not None:
         assert until()
@@ -127,11 +126,13 @@ def test_create_producer_socket_returns_continues_without_daemon(
 def test_message_envelope_round_trip_bytes() -> None:
     envelope = MessageEnvelope(
         producer_id="producer-abc",
-        command=CommandType.OPEN_RING_BUFFER,
+        command=CommandType.OPEN_FIXED_SHARED_SLOTS,
         payload={
-            "open_ring_buffer": {
-                "size": 4096,
-                "shared_memory_name": "test-envelope-round-trip",
+            "open_fixed_shared_slots": {
+                "transport_mode": "FIXED_SHARED_SLOTS_DAEMON_OWNED",
+                "control_endpoint": "ipc://test-envelope-round-trip",
+                "slot_size": 4096,
+                "slot_count": 16,
             }
         },
     )
@@ -306,13 +307,8 @@ def test_interleaved_chunks_reassemble_per_producer(
         comm.send_message(
             MessageEnvelope(
                 producer_id=producer_id,
-                command=CommandType.OPEN_RING_BUFFER,
-                payload={
-                    "open_ring_buffer": {
-                        "size": 4096,
-                        "shared_memory_name": f"test-open-{producer_id}",
-                    }
-                },
+                command=CommandType.HEARTBEAT,
+                payload={CommandType.HEARTBEAT.value: {}},
             ),
         )
 
@@ -435,16 +431,11 @@ def test_unknown_command_logs_warning_and_continues(
     daemon.handle_message(
         MessageEnvelope(
             producer_id="producer-1",
-            command=CommandType.OPEN_RING_BUFFER,
-            payload={
-                "open_ring_buffer": {
-                    "size": 1024,
-                    "shared_memory_name": "test-handle-message",
-                }
-            },
+            command=CommandType.HEARTBEAT,
+            payload={CommandType.HEARTBEAT.value: {}},
         )
     )
-    assert daemon.channels["producer-1"].ring_buffer is not None
+    assert daemon.channels["producer-1"].is_open()
 
 
 def test_garbage_messages_are_logged_and_daemon_survives(
@@ -492,19 +483,14 @@ def test_garbage_messages_are_logged_and_daemon_survives(
     sender.send(
         MessageEnvelope(
             producer_id="prod",
-            command=CommandType.OPEN_RING_BUFFER,
-            payload={
-                "open_ring_buffer": {
-                    "size": 1024,
-                    "shared_memory_name": "test-process-raw",
-                }
-            },
+            command=CommandType.HEARTBEAT,
+            payload={CommandType.HEARTBEAT.value: {}},
         ).to_bytes()
     )
     raw = daemon_comm._consumer_socket.recv()
     daemon.process_raw_message(raw)
     assert len(handled_messages) == 1
-    assert daemon.channels["prod"].ring_buffer is not None
+    assert daemon.channels["prod"].is_open()
 
     sender.close(0)
     daemon_comm.cleanup_daemon()

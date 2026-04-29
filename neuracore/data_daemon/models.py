@@ -27,7 +27,6 @@ def get_content_type(data_type: DataType) -> str:
 class CommandType(Enum):
     """Commands sent from the producer to the daemon."""
 
-    OPEN_RING_BUFFER = "open_ring_buffer"
     OPEN_FIXED_SHARED_SLOTS = "open_fixed_shared_slots"
     SHARED_SLOT_DESCRIPTOR = "shared_slot_descriptor"
     SHARED_SLOT_READY = "shared_slot_ready"
@@ -254,13 +253,6 @@ class TraceRecord:
         )
 
 
-class OpenRingBufferModel(BaseModel):
-    """Model for the OPEN_RING_BUFFER command."""
-
-    size: int = 1024
-    shared_memory_name: str | None = None
-
-
 class OpenFixedSharedSlotsModel(BaseModel):
     """Producer request to open daemon-owned fixed shared slots."""
 
@@ -283,7 +275,6 @@ class ManagementModel(BaseModel):
 
     producer_id: str
     command: CommandType
-    open_ring_buffer: OpenRingBufferModel | None = None
     open_fixed_shared_slots: OpenFixedSharedSlotsModel | None = None
 
 
@@ -386,8 +377,8 @@ class TraceTransportMetadata:
 
 
 @dataclass(frozen=True)
-class SharedRingChunkMetadata:
-    """Per-chunk metadata written into the shared ring buffer."""
+class SharedMemoryChunkMetadata:
+    """Per-chunk metadata written into shared memory."""
 
     trace_id: str
     chunk_index: int
@@ -395,8 +386,8 @@ class SharedRingChunkMetadata:
     trace_metadata: TraceTransportMetadata | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SharedRingChunkMetadata":
-        """Parse a shared-ring chunk metadata record from JSON."""
+    def from_dict(cls, data: dict[str, Any]) -> "SharedMemoryChunkMetadata":
+        """Parse a shared-memory chunk metadata record from JSON."""
         return cls(
             trace_id=str(data["trace_id"]),
             chunk_index=int(data["chunk_index"]),
@@ -405,7 +396,7 @@ class SharedRingChunkMetadata:
         )
 
     def to_dict(self) -> dict[str, str | int | None]:
-        """Serialize the shared-ring chunk metadata to a JSON-friendly dict."""
+        """Serialize the shared-memory chunk metadata to a JSON-friendly dict."""
         payload: dict[str, str | int | None] = {
             "trace_id": self.trace_id,
             "chunk_index": self.chunk_index,

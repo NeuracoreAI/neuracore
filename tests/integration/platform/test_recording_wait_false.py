@@ -4,6 +4,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -320,25 +321,63 @@ def isolated_daemon_for_test():
     cleanup_script = REPO_ROOT / "cleanup.sh"
 
     previous_env = {key: os.environ.get(key) for key in _TEST_DAEMON_ENV_OVERRIDES}
+    daemon_log_handle = None
+    daemon_log_path: Path | None = None
 
     try:
         daemon_cleanup()
         subprocess.run(["bash", str(cleanup_script)], cwd=REPO_ROOT, check=True)
 
         os.environ.update(_TEST_DAEMON_ENV_OVERRIDES)
+        daemon_log_file = tempfile.NamedTemporaryFile(
+            mode="w+b",
+            prefix="neuracore-daemon-test-",
+            suffix=".log",
+            delete=False,
+        )
+        daemon_log_handle = daemon_log_file
+        daemon_log_path = Path(daemon_log_file.name)
 
         daemon_process = launch_new_daemon_subprocess(
             pid_path=get_daemon_pid_path(),
             db_path=get_daemon_db_path(),
             background=False,
             timeout_s=10.0,
+            stdout=daemon_log_file.fileno(),
+            stderr=daemon_log_file.fileno(),
         )
 
-        logger.info("Launched clean data daemon for test pid=%s", daemon_process.pid)
+        logger.info(
+            "Launched clean data daemon for test pid=%s log_path=%s",
+            daemon_process.pid,
+            daemon_log_path,
+        )
 
         yield
 
     finally:
+        if daemon_log_handle is not None:
+            daemon_log_handle.flush()
+            daemon_log_handle.close()
+
+        if daemon_log_path is not None and daemon_log_path.exists():
+            try:
+                tail_lines = daemon_log_path.read_text(encoding="utf-8").splitlines()[
+                    -120:
+                ]
+                if tail_lines:
+                    logger.info(
+                        "Daemon log tail path=%s\n%s",
+                        daemon_log_path,
+                        "\n".join(tail_lines),
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to read daemon log tail path=%s",
+                    daemon_log_path,
+                    exc_info=True,
+                )
+
         daemon_cleanup()
         subprocess.run(["bash", str(cleanup_script)], cwd=REPO_ROOT, check=True)
 

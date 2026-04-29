@@ -16,7 +16,7 @@ from neuracore.data_daemon.communications_management.communications_manager impo
 )
 from neuracore.data_daemon.const import (
     DEFAULT_CHUNK_SIZE,
-    DEFAULT_RING_BUFFER_SIZE,
+    DEFAULT_SHARED_MEMORY_SIZE,
     DEFAULT_VIDEO_CHUNK_SIZE,
     DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
     DEFAULT_VIDEO_SLOT_SIZE,
@@ -25,7 +25,7 @@ from neuracore.data_daemon.models import (
     CommandType,
     DataChunkPayload,
     DataType,
-    SharedRingChunkMetadata,
+    SharedMemoryChunkMetadata,
     TraceTransportMetadata,
 )
 
@@ -35,7 +35,7 @@ from .producer_channel_message_sender import (
 )
 from .producer_heartbeat_service import ProducerHeartbeatService
 from .producer_transport_debug_models import (
-    ProducerSharedRingBufferDebugStats,
+    ProducerSharedMemoryDebugStats,
     ProducerTransportDebugStats,
     ProducerTransportTimingStats,
 )
@@ -66,8 +66,8 @@ def producer_transport_args_for_data_type(
 
     return (
         DEFAULT_CHUNK_SIZE,
-        DEFAULT_RING_BUFFER_SIZE,
-        0,
+        DEFAULT_SHARED_MEMORY_SIZE,
+        512,
     )
 
 
@@ -83,7 +83,7 @@ class ProducerChannel:
         chunk_size: int | None = None,
         send_queue_maxsize: int | None = None,
         recording_id: str | None = None,
-        ring_buffer_size: int | None = None,
+        shared_memory_size: int | None = None,
     ) -> None:
         """Initialize the producer channel."""
         if data_type is None:
@@ -91,7 +91,7 @@ class ProducerChannel:
 
         (
             default_chunk_size,
-            default_ring_buffer_size,
+            default_shared_memory_size,
             default_send_queue_maxsize,
         ) = producer_transport_args_for_data_type(data_type)
 
@@ -117,9 +117,9 @@ class ProducerChannel:
         self._shared_slot_transport = (
             SharedSlotVideoTransport(
                 slot_size=int(
-                    default_ring_buffer_size
-                    if ring_buffer_size is None
-                    else ring_buffer_size
+                    default_shared_memory_size
+                    if shared_memory_size is None
+                    else shared_memory_size
                 )
             )
             if self._use_shared_slot_transport
@@ -163,7 +163,7 @@ class ProducerChannel:
         self,
         *,
         recording_id: str | None = None,
-        ring_buffer_size: int | None = None,
+        shared_memory_size: int | None = None,
     ) -> None:
         """Start a fresh recording session for this producer channel."""
         if recording_id is not None:
@@ -178,9 +178,7 @@ class ProducerChannel:
         self.start_producer_channel()
         self.start_new_trace()
         if self._use_shared_slot_transport:
-            self.open_fixed_shared_slots(slot_size=ring_buffer_size)
-        else:
-            self.open_ring_buffer(size=ring_buffer_size)
+            self.open_fixed_shared_slots(slot_size=shared_memory_size)
 
     def start_new_trace(self) -> None:
         """Start a new trace for the given recording."""
@@ -261,36 +259,19 @@ class ProducerChannel:
             heartbeat_thread_alive=self._heartbeat_service.get_stats()[
                 "heartbeat_thread_alive"
             ],
-            shared_ring=(
+            shared_memory=(
                 self._shared_slot_transport.get_stats()
                 if self._shared_slot_transport is not None
-                else ProducerSharedRingBufferDebugStats(
-                    shared_ring_buffer_name=None,
-                    shared_ring_buffer_size=0,
-                    shared_ring_open=ProducerTransportTimingStats(),
-                    shared_ring_write=ProducerTransportTimingStats(),
-                    shared_ring_write_bytes=0,
+                else ProducerSharedMemoryDebugStats(
+                    shared_memory_name=None,
+                    shared_memory_size=0,
+                    shared_memory_open=ProducerTransportTimingStats(),
+                    shared_memory_write=ProducerTransportTimingStats(),
+                    shared_memory_write_bytes=0,
                 )
             ),
             message_sender=self._message_sender.get_stats(),
         )
-
-    def open_ring_buffer(self, size: int | None = None) -> None:
-        """Open the legacy control-plane ring buffer for non-video channels."""
-        if self._use_shared_slot_transport:
-            self.open_fixed_shared_slots(slot_size=size)
-            return
-        sequence_number = self._send(
-            CommandType.OPEN_RING_BUFFER,
-            {
-                "open_ring_buffer": {
-                    "size": int(DEFAULT_RING_BUFFER_SIZE if size is None else size),
-                    "shared_memory_name": f"neuracore-ring-buffer-{uuid.uuid4().hex}",
-                }
-            },
-        )
-        if not self.wait_until_sequence_sent(sequence_number):
-            raise RuntimeError("Failed to send OPEN_RING_BUFFER before transport use")
 
     def open_fixed_shared_slots(self, slot_size: int | None = None) -> None:
         """Announce the fixed shared-slot transport for this producer."""
@@ -478,7 +459,7 @@ class ProducerChannel:
             shared_slot_transport.enqueue_packet(
                 producer_id=self.channel_id,
                 sender=self._message_sender,
-                metadata=SharedRingChunkMetadata(
+                metadata=SharedMemoryChunkMetadata(
                     trace_id=trace_id,
                     chunk_index=idx,
                     total_chunks=total_chunks,
@@ -494,10 +475,10 @@ class ProducerChannel:
 
     def initialize_new_producer_channel(
         self,
-        ring_buffer_size: int | None = None,
+        shared_memory_size: int | None = None,
     ) -> None:
         """Initialize a new producer channel for recording."""
-        self.start_recording_session(ring_buffer_size=ring_buffer_size)
+        self.start_recording_session(shared_memory_size=shared_memory_size)
 
     def cleanup_producer_channel(
         self,

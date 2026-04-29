@@ -35,6 +35,11 @@ from .runtime import (
 logger = logging.getLogger(__name__)
 
 
+def _should_log_credit_event(sequence_id: int) -> bool:
+    """Sample per-sequence investigation logs without hiding early activity."""
+    return sequence_id <= 8 or sequence_id % 25 == 0
+
+
 class SharedSlotTimeout(TimeoutError):
     """Raised when shared-slot setup, allocation, or credit return times out."""
 
@@ -287,8 +292,17 @@ class SharedSlotRegistry:
                 "ready": self._state.ready,
                 "healthy": self._state.healthy,
                 "closed": self._state.closed,
+                "slot_count": self.slot_count,
                 "free_slot_count": len(self._state.free_slots),
+                "in_flight_slot_count": len(self._state.in_flight),
+                "max_in_flight_slot_count": self._state.max_in_flight_count,
+                "acked_sequence_count": self._state.acked_sequence_count,
+                "ack_timeout_count": self._state.ack_timeout_count,
+                "last_acked_sequence_id": self._state.last_acked_sequence_id,
+                "last_ack_latency_s": self._state.last_ack_latency_s,
+                "max_ack_latency_s": self._state.max_ack_latency_s,
                 "in_flight_sequence_ids": tuple(self._state.in_flight),
+                "last_credit_return_at": self._state.last_credit_return_at,
                 "unhealthy_reason": self._state.unhealthy_reason,
             }
 
@@ -304,6 +318,16 @@ class SharedSlotRegistry:
         with self._condition:
             if self._state.closed:
                 return
+            in_flight_count = len(self._state.in_flight)
+            if in_flight_count > 0:
+                logger.info(
+                    "Closing shared-slot registry with in-flight slots "
+                    "shm_name=%s in_flight=%d free_slots=%d unhealthy_reason=%s",
+                    self._state.shm_name,
+                    in_flight_count,
+                    len(self._state.free_slots),
+                    self._state.unhealthy_reason,
+                )
             self._mark_closed_locked()
 
         self._runtime.stop_event.set()
@@ -425,38 +449,48 @@ class SharedSlotRegistry:
         self._state.shm = shm
         self._state.shm_name = ready.shm_name
         self._state.free_slots = type(self._state.free_slots)(range(self.slot_count))
+        self._state.last_credit_return_at = None
         self._state.ready = True
         self._condition.notify_all()
 
     def _check_for_timeouts_locked(self) -> None:
         if not self._is_healthy_locked():
             return
-        now = time.monotonic()
-        timed_out = [
-            sequence_id
-            for sequence_id, entry in self._state.in_flight.items()
-            if entry.socket_sent_at is not None
-            and now - entry.socket_sent_at >= self.ack_timeout_s
-        ]
-        if not timed_out:
+        if self._state.free_slots:
             return
-        last_reason: str | None = None
-        for sequence_id in timed_out:
-            entry = self._state.in_flight.get(sequence_id)
-            if entry is not None:
-                last_reason = (
-                    "credit_timeout("
-                    f"sequence_id={entry.sequence_id},slot_id={entry.slot_id})"
-                )
-                logger.warning(
-                    "Shared-slot credit timed out shm_name=%s "
-                    "slot_id=%s sequence_id=%s",
-                    entry.shm_name,
-                    entry.slot_id,
-                    entry.sequence_id,
-                )
+        sent_entries = [
+            entry
+            for entry in self._state.in_flight.values()
+            if entry.socket_sent_at is not None
+        ]
+        if not sent_entries:
+            return
+
+        now = time.monotonic()
+        oldest_entry = min(sent_entries, key=lambda entry: entry.socket_sent_at or now)
+        last_progress_at = self._state.last_credit_return_at
+        stalled_since = (
+            oldest_entry.socket_sent_at
+            if last_progress_at is None
+            else last_progress_at
+        )
+        if stalled_since is None or now - stalled_since < self.ack_timeout_s:
+            return
+
+        logger.warning(
+            "Shared-slot credit stalled shm_name=%s slot_id=%s sequence_id=%s "
+            "in_flight=%d free_slots=%d stalled_for=%.3fs",
+            oldest_entry.shm_name,
+            oldest_entry.slot_id,
+            oldest_entry.sequence_id,
+            len(self._state.in_flight),
+            len(self._state.free_slots),
+            now - stalled_since,
+        )
+        self._state.ack_timeout_count += 1
         self._mark_unhealthy_locked(
-            last_reason or "credit_timeout", sequence_ids=timed_out
+            "credit_stall("
+            f"sequence_id={oldest_entry.sequence_id},slot_id={oldest_entry.slot_id})"
         )
 
     def _release_sequence_locked(self, sequence_id: int) -> None:
@@ -478,6 +512,10 @@ class SharedSlotRegistry:
             slot_id=int(slot_id),
             sequence_id=sequence_id,
             reserved_at=time.monotonic(),
+        )
+        self._state.max_in_flight_count = max(
+            self._state.max_in_flight_count,
+            len(self._state.in_flight),
         )
         return sequence_id
 
@@ -513,7 +551,29 @@ class SharedSlotRegistry:
             )
             return False
 
+        now = time.monotonic()
+        if entry.socket_sent_at is not None:
+            ack_latency_s = now - entry.socket_sent_at
+            self._state.last_ack_latency_s = ack_latency_s
+            self._state.max_ack_latency_s = max(
+                self._state.max_ack_latency_s,
+                ack_latency_s,
+            )
+        self._state.last_acked_sequence_id = sequence_id
+        self._state.acked_sequence_count += 1
         self._release_sequence_locked(sequence_id)
+        self._state.last_credit_return_at = now
+        if _should_log_credit_event(sequence_id):
+            logger.info(
+                "Shared-slot credit applied shm_name=%s sequence_id=%s slot_id=%s "
+                "free_slots=%d in_flight=%d ack_latency=%.3fs",
+                shm_name,
+                sequence_id,
+                slot_id,
+                len(self._state.free_slots),
+                len(self._state.in_flight),
+                float(self._state.last_ack_latency_s or 0.0),
+            )
         return True
 
     def _process_slot_credit_return(self, credit: SharedSlotCreditReturn) -> None:

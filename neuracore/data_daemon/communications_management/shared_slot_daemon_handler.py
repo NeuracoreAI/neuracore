@@ -16,7 +16,7 @@ from neuracore.data_daemon.models import (
     CommandType,
     MessageEnvelope,
     OpenFixedSharedSlotsModel,
-    SharedRingChunkMetadata,
+    SharedMemoryChunkMetadata,
     SharedSlotCreditReturn,
     SharedSlotDescriptor,
     SharedSlotReadyModel,
@@ -30,6 +30,11 @@ if TYPE_CHECKING:
     from neuracore.data_daemon.communications_management.data_bridge import ChannelState
 
 logger = logging.getLogger(__name__)
+
+
+def _should_log_credit_event(sequence_id: int) -> bool:
+    """Sample per-sequence investigation logs without hiding early activity."""
+    return sequence_id <= 8 or sequence_id % 25 == 0
 
 
 class _AckSenderSocket(Protocol):
@@ -47,7 +52,7 @@ class SharedSlotTransportResult:
     """Parsed result of one shared-slot descriptor."""
 
     descriptor: SharedSlotDescriptor
-    chunk_metadata: SharedRingChunkMetadata
+    chunk_metadata: SharedMemoryChunkMetadata
     chunk_data: bytes
     trace_id: str
     trace_metadata: TraceTransportMetadata | None
@@ -142,6 +147,16 @@ class SharedSlotDaemonHandler:
     ) -> SharedSlotTransportResult:
         """Copy, credit, and parse one shared-slot descriptor."""
         descriptor = SharedSlotDescriptor.from_dict(payload)
+        if _should_log_credit_event(descriptor.sequence_id):
+            logger.info(
+                "Shared-slot descriptor received producer_id=%s sequence_id=%s "
+                "slot_id=%s length=%s shm_name=%s",
+                channel.producer_id,
+                descriptor.sequence_id,
+                descriptor.slot_id,
+                descriptor.length,
+                descriptor.shm_name,
+            )
         try:
             packet = self._copy_shared_slot_packet(descriptor)
         except Exception:
@@ -159,7 +174,7 @@ class SharedSlotDaemonHandler:
         )
 
         metadata_dict, chunk_data = parse_shared_frame_packet(packet)
-        chunk_metadata = SharedRingChunkMetadata.from_dict(metadata_dict)
+        chunk_metadata = SharedMemoryChunkMetadata.from_dict(metadata_dict)
         return SharedSlotTransportResult(
             descriptor=descriptor,
             chunk_metadata=chunk_metadata,
@@ -290,6 +305,15 @@ class SharedSlotDaemonHandler:
                     },
                 ).to_bytes()
             )
+            if _should_log_credit_event(descriptor.sequence_id):
+                logger.info(
+                    "Shared-slot credit sent producer_id=%s sequence_id=%s "
+                    "slot_id=%s endpoint=%s",
+                    channel.producer_id,
+                    descriptor.sequence_id,
+                    descriptor.slot_id,
+                    endpoint,
+                )
         except Exception:
             logger.exception(
                 "Failed to return shared-slot credit producer_id=%s sequence_id=%s",

@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 _SHARED_MEMORY_DIR = Path("/dev/shm")
 _ZEROBUFFER_LOCK_DIR = Path("/tmp/zerobuffer")
 _NEURACORE_SHARED_RING_PREFIX = "neuracore-ring-buffer-"
+_NEURACORE_SHARED_SLOT_PREFIX = "neuracore-slots-"
 
 try:
     import zerobuffer.platform as _shared_platform
@@ -38,7 +39,7 @@ except Exception as exc:  # pragma: no cover - exercised in envs without deps
 
 
 class SharedMemoryCapacityError(RuntimeError):
-    """Raised when /dev/shm does not have enough free space for a ring buffer."""
+    """Raised when /dev/shm lacks space for a new shared-memory allocation."""
 
 
 def _format_bytes(value: int) -> str:
@@ -85,7 +86,7 @@ def ensure_shared_memory_capacity(
     *,
     shm_dir: Path = _SHARED_MEMORY_DIR,
 ) -> int:
-    """Raise when /dev/shm cannot hold a new shared ring buffer."""
+    """Raise when /dev/shm cannot hold a new shared-memory allocation."""
     if required_bytes <= 0:
         raise ValueError("required_bytes must be > 0")
     free_bytes = shared_memory_free_bytes(shm_dir)
@@ -218,6 +219,33 @@ def cleanup_stale_shared_memory_buffers(
     return cleaned
 
 
+def cleanup_stale_shared_slot_segments(
+    *,
+    shm_dir: Path = _SHARED_MEMORY_DIR,
+) -> int:
+    """Remove stale daemon-owned shared-slot segments from /dev/shm."""
+    if not shm_dir.exists():
+        return 0
+
+    cleaned = 0
+    for shm_path in shm_dir.iterdir():
+        if not shm_path.name.startswith(_NEURACORE_SHARED_SLOT_PREFIX):
+            continue
+        try:
+            shm_path.unlink()
+            cleaned += 1
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning(
+                "Failed to remove shared-slot segment %s: %s",
+                shm_path,
+                exc,
+            )
+
+    return cleaned
+
+
 def cleanup_socket_files(paths: Iterable[Path]) -> None:
     """Remove socket files that exist on disk."""
     for socket_path in paths:
@@ -332,6 +360,7 @@ def shutdown(
 
 __all__ = [
     "checkpoint_sqlite",
+    "cleanup_stale_shared_slot_segments",
     "cleanup_stale_shared_memory_buffers",
     "cleanup_socket_files",
     "ensure_shared_memory_capacity",

@@ -16,9 +16,9 @@ from neuracore.data_daemon.const import (
     DEFAULT_VIDEO_SLOT_ALLOCATE_TIMEOUT_SECONDS,
     DEFAULT_VIDEO_SLOT_COUNT,
     DEFAULT_VIDEO_SLOT_SIZE,
-    SHARED_RING_RECORD_HEADER_FORMAT,
-    SHARED_RING_RECORD_HEADER_SIZE,
-    SHARED_RING_RECORD_MAGIC,
+    SHARED_MEMORY_RECORD_HEADER_FORMAT,
+    SHARED_MEMORY_RECORD_HEADER_SIZE,
+    SHARED_MEMORY_RECORD_MAGIC,
 )
 from neuracore.data_daemon.models import (
     CommandType,
@@ -29,7 +29,7 @@ from neuracore.data_daemon.models import (
 
 from .producer_channel_message_sender import ProducerChannelMessageSender
 from .producer_transport_debug_models import (
-    ProducerSharedRingBufferDebugStats,
+    ProducerSharedMemoryDebugStats,
     ProducerTransportTimingStats,
 )
 from .shared_slot import SharedSlotRegistry
@@ -73,8 +73,8 @@ def build_shared_frame_packet(
     payload = bytes(chunk)
     return (
         struct.pack(
-            SHARED_RING_RECORD_HEADER_FORMAT,
-            SHARED_RING_RECORD_MAGIC,
+            SHARED_MEMORY_RECORD_HEADER_FORMAT,
+            SHARED_MEMORY_RECORD_MAGIC,
             len(metadata_bytes),
             len(payload),
         )
@@ -90,26 +90,26 @@ def build_shared_frame_packet_metadata(
     """Return serialized metadata plus total packet length without copying the chunk."""
     metadata_bytes = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
     chunk_len = len(chunk)
-    packet_length = SHARED_RING_RECORD_HEADER_SIZE + len(metadata_bytes) + chunk_len
+    packet_length = SHARED_MEMORY_RECORD_HEADER_SIZE + len(metadata_bytes) + chunk_len
     return metadata_bytes, packet_length
 
 
 def parse_shared_frame_packet(packet: bytes) -> tuple[dict[str, object], bytes]:
     """Parse one self-describing packet copied out of a shared slot."""
-    if len(packet) < SHARED_RING_RECORD_HEADER_SIZE:
+    if len(packet) < SHARED_MEMORY_RECORD_HEADER_SIZE:
         raise ValueError("Shared-slot packet shorter than record header")
     magic, metadata_len, chunk_len = struct.unpack(
-        SHARED_RING_RECORD_HEADER_FORMAT,
-        packet[:SHARED_RING_RECORD_HEADER_SIZE],
+        SHARED_MEMORY_RECORD_HEADER_FORMAT,
+        packet[:SHARED_MEMORY_RECORD_HEADER_SIZE],
     )
-    if magic != SHARED_RING_RECORD_MAGIC:
+    if magic != SHARED_MEMORY_RECORD_MAGIC:
         raise ValueError("Shared-slot packet missing shared record magic")
-    expected = SHARED_RING_RECORD_HEADER_SIZE + metadata_len + chunk_len
+    expected = SHARED_MEMORY_RECORD_HEADER_SIZE + metadata_len + chunk_len
     if len(packet) < expected:
         raise ValueError("Shared-slot packet shorter than declared lengths")
     if len(packet) > expected:
         raise ValueError("Shared-slot packet contains trailing bytes")
-    metadata_start = SHARED_RING_RECORD_HEADER_SIZE
+    metadata_start = SHARED_MEMORY_RECORD_HEADER_SIZE
     metadata_end = metadata_start + metadata_len
     metadata = json.loads(packet[metadata_start:metadata_end].decode("utf-8"))
     return metadata, packet[metadata_end:]
@@ -244,12 +244,12 @@ class SharedSlotVideoWorker:
             shm_view = self._registry.shared_memory_view(offset, item.packet_length)
             try:
                 header = struct.pack(
-                    SHARED_RING_RECORD_HEADER_FORMAT,
-                    SHARED_RING_RECORD_MAGIC,
+                    SHARED_MEMORY_RECORD_HEADER_FORMAT,
+                    SHARED_MEMORY_RECORD_MAGIC,
                     len(item.metadata_bytes),
                     len(item.chunk),
                 )
-                header_end = SHARED_RING_RECORD_HEADER_SIZE
+                header_end = SHARED_MEMORY_RECORD_HEADER_SIZE
                 metadata_end = header_end + len(item.metadata_bytes)
                 shm_view[:header_end] = header
                 shm_view[header_end:metadata_end] = item.metadata_bytes
@@ -423,14 +423,35 @@ class SharedSlotVideoTransport:
         self._worker.close()
         self._registry.close()
 
-    def get_stats(self) -> ProducerSharedRingBufferDebugStats:
-        """Return a best-effort debug snapshot during the transport migration."""
-        return ProducerSharedRingBufferDebugStats(
-            shared_ring_buffer_name=self._registry.shm_name,
-            shared_ring_buffer_size=self._registry.total_shared_memory_bytes,
-            shared_ring_open=ProducerTransportTimingStats(),
-            shared_ring_write=ProducerTransportTimingStats(),
-            shared_ring_write_bytes=0,
+    def get_stats(self) -> ProducerSharedMemoryDebugStats:
+        """Return a best-effort debug snapshot for shared-memory transport."""
+        snapshot = self._registry.debug_snapshot()
+        return ProducerSharedMemoryDebugStats(
+            shared_memory_name=self._registry.shm_name,
+            shared_memory_size=self._registry.total_shared_memory_bytes,
+            shared_memory_open=ProducerTransportTimingStats(),
+            shared_memory_write=ProducerTransportTimingStats(),
+            shared_memory_write_bytes=0,
+            slot_count=int(snapshot.get("slot_count") or 0),
+            free_slot_count=int(snapshot.get("free_slot_count") or 0),
+            in_flight_slot_count=int(snapshot.get("in_flight_slot_count") or 0),
+            max_in_flight_slot_count=int(
+                snapshot.get("max_in_flight_slot_count") or 0
+            ),
+            acked_sequence_count=int(snapshot.get("acked_sequence_count") or 0),
+            ack_timeout_count=int(snapshot.get("ack_timeout_count") or 0),
+            worker_queue_qsize=self._worker._queue.qsize(),
+            worker_queue_maxsize=self._worker._queue.maxsize,
+            worker_thread_alive=self._worker._thread.is_alive(),
+            worker_error=(
+                None
+                if self._worker.get_error() is None
+                else str(self._worker.get_error())
+            ),
+            last_acked_sequence_id=snapshot.get("last_acked_sequence_id"),
+            last_ack_latency_s=snapshot.get("last_ack_latency_s"),
+            max_ack_latency_s=float(snapshot.get("max_ack_latency_s") or 0.0),
+            unhealthy_reason=snapshot.get("unhealthy_reason"),
         )
 
     def _is_drained(self) -> bool:

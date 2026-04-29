@@ -32,7 +32,7 @@ class ProducerChannelMessageSenderDebugStats:
     sender_thread_alive: bool
     queue_put: ProducerTransportTimingStats
     socket_send: ProducerTransportTimingStats
-    shared_ring_dispatch: ProducerTransportTimingStats
+    shared_memory_dispatch: ProducerTransportTimingStats
     send_error_count: int
     last_send_error: str | None
 
@@ -53,24 +53,24 @@ class ProducerChannelMessageSenderDebugStats:
             "socket_send_total_s": self.socket_send.total_s,
             "socket_send_avg_s": self.socket_send.avg_s,
             "socket_send_max_s": self.socket_send.max_s,
-            "shared_ring_dispatch_count": self.shared_ring_dispatch.count,
-            "shared_ring_dispatch_total_s": self.shared_ring_dispatch.total_s,
-            "shared_ring_dispatch_avg_s": self.shared_ring_dispatch.avg_s,
-            "shared_ring_dispatch_max_s": self.shared_ring_dispatch.max_s,
+            "shared_memory_dispatch_count": self.shared_memory_dispatch.count,
+            "shared_memory_dispatch_total_s": self.shared_memory_dispatch.total_s,
+            "shared_memory_dispatch_avg_s": self.shared_memory_dispatch.avg_s,
+            "shared_memory_dispatch_max_s": self.shared_memory_dispatch.max_s,
             "send_error_count": self.send_error_count,
             "last_send_error": self.last_send_error,
         }
 
 
 @dataclass(frozen=True)
-class ProducerSharedRingBufferDebugStats:
-    """Debug stats for the shared ring buffer transport."""
+class ProducerSharedMemoryDebugStats:
+    """Debug stats for the shared-memory transport."""
 
-    shared_ring_buffer_name: str | None
-    shared_ring_buffer_size: int
-    shared_ring_open: ProducerTransportTimingStats
-    shared_ring_write: ProducerTransportTimingStats
-    shared_ring_write_bytes: int
+    shared_memory_name: str | None
+    shared_memory_size: int
+    shared_memory_open: ProducerTransportTimingStats
+    shared_memory_write: ProducerTransportTimingStats
+    shared_memory_write_bytes: int
     slot_count: int = 0
     free_slot_count: int = 0
     in_flight_slot_count: int = 0
@@ -89,17 +89,17 @@ class ProducerSharedRingBufferDebugStats:
     def to_dict(self) -> dict[str, object]:
         """Serialize to the legacy flat dict shape."""
         return {
-            "shared_ring_buffer_name": self.shared_ring_buffer_name,
-            "shared_ring_buffer_size": self.shared_ring_buffer_size,
-            "shared_ring_open_count": self.shared_ring_open.count,
-            "shared_ring_open_total_s": self.shared_ring_open.total_s,
-            "shared_ring_open_avg_s": self.shared_ring_open.avg_s,
-            "shared_ring_open_max_s": self.shared_ring_open.max_s,
-            "shared_ring_write_count": self.shared_ring_write.count,
-            "shared_ring_write_bytes": self.shared_ring_write_bytes,
-            "shared_ring_write_total_s": self.shared_ring_write.total_s,
-            "shared_ring_write_avg_s": self.shared_ring_write.avg_s,
-            "shared_ring_write_max_s": self.shared_ring_write.max_s,
+            "shared_memory_name": self.shared_memory_name,
+            "shared_memory_size": self.shared_memory_size,
+            "shared_memory_open_count": self.shared_memory_open.count,
+            "shared_memory_open_total_s": self.shared_memory_open.total_s,
+            "shared_memory_open_avg_s": self.shared_memory_open.avg_s,
+            "shared_memory_open_max_s": self.shared_memory_open.max_s,
+            "shared_memory_write_count": self.shared_memory_write.count,
+            "shared_memory_write_bytes": self.shared_memory_write_bytes,
+            "shared_memory_write_total_s": self.shared_memory_write.total_s,
+            "shared_memory_write_avg_s": self.shared_memory_write.avg_s,
+            "shared_memory_write_max_s": self.shared_memory_write.max_s,
             "slot_count": self.slot_count,
             "free_slot_count": self.free_slot_count,
             "in_flight_slot_count": self.in_flight_slot_count,
@@ -126,7 +126,7 @@ class ProducerTransportDebugStats:
     trace_id: str | None
     chunk_size: int
     heartbeat_thread_alive: bool
-    shared_ring: ProducerSharedRingBufferDebugStats
+    shared_memory: ProducerSharedMemoryDebugStats
     message_sender: ProducerChannelMessageSenderDebugStats
 
     def to_dict(self) -> dict[str, object]:
@@ -138,7 +138,7 @@ class ProducerTransportDebugStats:
             "chunk_size": self.chunk_size,
             "heartbeat_thread_alive": self.heartbeat_thread_alive,
         }
-        payload.update(self.shared_ring.to_dict())
+        payload.update(self.shared_memory.to_dict())
         payload.update(self.message_sender.to_dict())
         return payload
 

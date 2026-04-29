@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from neuracore.data_daemon.const import DEFAULT_RING_BUFFER_SIZE
+from neuracore.data_daemon.const import DEFAULT_SHARED_MEMORY_SIZE
 from neuracore.data_daemon.lifecycle.daemon_os_control import (
     acquire_pid_file,
     pid_is_running,
@@ -181,10 +181,10 @@ def test_ensure_shared_memory_capacity_raises_when_tmpfs_is_full(
         ensure_shared_memory_capacity(2048, shm_dir=shm_dir)
 
 
-def test_shared_memory_required_bytes_matches_default_ring_allocation() -> None:
+def test_shared_memory_required_bytes_matches_default_allocation() -> None:
     assert (
-        shared_memory_required_bytes(DEFAULT_RING_BUFFER_SIZE, metadata_size=4096)
-        == 4188544
+        shared_memory_required_bytes(DEFAULT_SHARED_MEMORY_SIZE, metadata_size=4096)
+        == 8392832
     )
 
 
