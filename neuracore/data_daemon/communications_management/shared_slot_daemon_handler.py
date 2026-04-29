@@ -23,8 +23,9 @@ from neuracore.data_daemon.models import (
     TraceTransportMetadata,
 )
 
+from .bridge_chunk_spool import BridgeChunkSpool, ChunkSpoolRef
 from .communications_manager import CommunicationsManager
-from .shared_slot_transport import parse_shared_frame_packet
+from .shared_slot_transport import parse_shared_frame_packet_view
 
 if TYPE_CHECKING:
     from neuracore.data_daemon.communications_management.data_bridge import ChannelState
@@ -53,7 +54,7 @@ class SharedSlotTransportResult:
 
     descriptor: SharedSlotDescriptor
     chunk_metadata: SharedMemoryChunkMetadata
-    chunk_data: bytes
+    chunk_spool_ref: ChunkSpoolRef
     trace_id: str
     trace_metadata: TraceTransportMetadata | None
 
@@ -144,8 +145,9 @@ class SharedSlotDaemonHandler:
         self,
         channel: ChannelState,
         payload: dict,
+        chunk_spool: BridgeChunkSpool,
     ) -> SharedSlotTransportResult:
-        """Copy, credit, and parse one shared-slot descriptor."""
+        """Spool, credit, and parse one shared-slot descriptor."""
         descriptor = SharedSlotDescriptor.from_dict(payload)
         if _should_log_credit_event(descriptor.sequence_id):
             logger.info(
@@ -158,7 +160,9 @@ class SharedSlotDaemonHandler:
                 descriptor.shm_name,
             )
         try:
-            packet = self._copy_shared_slot_packet(descriptor)
+            metadata_dict, chunk_spool_ref = self._spool_shared_slot_packet(
+                descriptor, chunk_spool
+            )
         except Exception:
             logger.exception(
                 "Shared-slot copy failed " "producer_id=%s sequence_id=%s slot_id=%s",
@@ -173,12 +177,11 @@ class SharedSlotDaemonHandler:
             shm_name=descriptor.shm_name,
         )
 
-        metadata_dict, chunk_data = parse_shared_frame_packet(packet)
         chunk_metadata = SharedMemoryChunkMetadata.from_dict(metadata_dict)
         return SharedSlotTransportResult(
             descriptor=descriptor,
             chunk_metadata=chunk_metadata,
-            chunk_data=chunk_data,
+            chunk_spool_ref=chunk_spool_ref,
             trace_id=chunk_metadata.trace_id,
             trace_metadata=chunk_metadata.trace_metadata,
         )
@@ -233,8 +236,28 @@ class SharedSlotDaemonHandler:
                 logger.warning("Failed to close cached shared memory", exc_info=True)
         self._shared_memory_cache.clear()
 
-    def _copy_shared_slot_packet(self, descriptor: SharedSlotDescriptor) -> bytes:
-        """Copy one packet out of cached shared memory."""
+    def _spool_shared_slot_packet(
+        self,
+        descriptor: SharedSlotDescriptor,
+        chunk_spool: BridgeChunkSpool,
+    ) -> tuple[dict[str, object], ChunkSpoolRef]:
+        """Copy one payload chunk from shared memory into the disk-backed spool."""
+        packet_view = self._shared_slot_packet_view(descriptor)
+        try:
+            metadata, chunk_start, chunk_end = parse_shared_frame_packet_view(
+                packet_view
+            )
+            chunk_view = packet_view[chunk_start:chunk_end]
+            try:
+                chunk_spool_ref = chunk_spool.append(chunk_view)
+            finally:
+                chunk_view.release()
+            return metadata, chunk_spool_ref
+        finally:
+            packet_view.release()
+
+    def _shared_slot_packet_view(self, descriptor: SharedSlotDescriptor) -> memoryview:
+        """Return one packet view out of cached shared memory."""
         shm = self._shared_memory_cache.get(descriptor.shm_name)
         if shm is None:
             shm = SharedMemory(name=descriptor.shm_name, create=False)
@@ -252,7 +275,7 @@ class SharedSlotDaemonHandler:
 
             self._shared_memory_cache[descriptor.shm_name] = shm
 
-        return bytes(shm.buf[descriptor.offset : descriptor.offset + descriptor.length])
+        return shm.buf[descriptor.offset : descriptor.offset + descriptor.length]
 
     def _send_ready_message(
         self,

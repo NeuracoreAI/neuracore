@@ -15,6 +15,10 @@ from enum import Enum
 
 from neuracore_types import DataType
 
+from neuracore.data_daemon.communications_management.bridge_chunk_spool import (
+    BridgeChunkSpool,
+    ChunkSpoolRef,
+)
 from neuracore.data_daemon.communications_management.channel_reader import (
     CompletedChannelMessage,
     PartialMessage,
@@ -30,7 +34,7 @@ from neuracore.data_daemon.const import (
     NEVER_OPENED_TIMEOUT_SECS,
 )
 from neuracore.data_daemon.event_emitter import Emitter
-from neuracore.data_daemon.helpers import utc_now
+from neuracore.data_daemon.helpers import get_daemon_recordings_root_path, utc_now
 from neuracore.data_daemon.models import (
     CommandType,
     CompleteMessage,
@@ -88,16 +92,63 @@ class SharedSlotTransportState:
 
 @dataclass(frozen=True)
 class CompletionChunkWork:
-    """One copied chunk waiting for background assembly and persistence handoff."""
+    """One spooled chunk waiting for background assembly and persistence handoff."""
 
     producer_id: str
     trace_id: str
     recording_id: str
     chunk_index: int
     total_chunks: int
-    chunk_data: bytes
+    chunk_spool_ref: ChunkSpoolRef
     trace_metadata: TraceTransportMetadata | None = None
     fallback_data_type: DataType | None = None
+
+
+@dataclass
+class SpoolPartialMessage:
+    """One partially assembled trace backed by chunk spool references."""
+
+    total_chunks: int
+    received_chunks: int = 0
+    chunks: dict[int, ChunkSpoolRef] = field(default_factory=dict)
+    metadata: TraceTransportMetadata | None = None
+
+    def add_chunk(self, index: int, ref: ChunkSpoolRef) -> bool:
+        """Track one spooled chunk reference for the trace."""
+        if index in self.chunks:
+            return self.received_chunks == self.total_chunks
+
+        self.chunks[index] = ref
+        self.received_chunks += 1
+        return self.received_chunks == self.total_chunks
+
+    def ordered_refs(self) -> list[ChunkSpoolRef]:
+        """Return chunk refs in assembly order."""
+        missing = [i for i in range(self.total_chunks) if i not in self.chunks]
+        if missing:
+            raise ValueError(f"Missing chunks: {missing}")
+        return [self.chunks[i] for i in range(self.total_chunks)]
+
+    def register_metadata(
+        self, trace_id: str, metadata: TraceTransportMetadata | None
+    ) -> None:
+        """Remember the trace-level metadata associated with this message."""
+        if metadata is None:
+            return
+        if self.metadata is None:
+            self.metadata = metadata
+            return
+
+        merged_metadata, mismatches = self.metadata.merged_with(metadata)
+        self.metadata = merged_metadata
+        for key, (existing, incoming) in mismatches.items():
+            logger.warning(
+                "Metadata mismatch for trace_id=%s field=%s (%s -> %s)",
+                trace_id,
+                key,
+                existing,
+                incoming,
+            )
 
 
 @dataclass(frozen=True)
@@ -117,15 +168,17 @@ class _CompletionShard:
     def __init__(
         self,
         *,
+        chunk_spool: BridgeChunkSpool,
         recording_disk_manager: RecordingDiskManager,
         shard_index: int,
     ) -> None:
         self._shard_index = shard_index
+        self._chunk_spool = chunk_spool
         self._recording_disk_manager = recording_disk_manager
         self._queue: queue.Queue[CompletionChunkWork | FinalTraceWork | None] = (
             queue.Queue()
         )
-        self._partials: dict[tuple[str, str], PartialMessage] = {}
+        self._partials: dict[tuple[str, str], SpoolPartialMessage] = {}
         self._error: Exception | None = None
         self._error_lock = threading.Lock()
         self._thread = threading.Thread(
@@ -181,7 +234,7 @@ class _CompletionShard:
         key = (work.producer_id, work.trace_id)
         partial = self._partials.get(key)
         if partial is None:
-            partial = PartialMessage(total_chunks=work.total_chunks)
+            partial = SpoolPartialMessage(total_chunks=work.total_chunks)
             self._partials[key] = partial
         elif partial.total_chunks != work.total_chunks:
             logger.warning(
@@ -194,33 +247,43 @@ class _CompletionShard:
             )
 
         partial.register_metadata(work.trace_id, work.trace_metadata)
-        complete = partial.add_chunk(work.chunk_index, work.chunk_data)
+        if work.chunk_index in partial.chunks:
+            self._chunk_spool.release(work.chunk_spool_ref)
+            complete = partial.received_chunks == partial.total_chunks
+        else:
+            complete = partial.add_chunk(work.chunk_index, work.chunk_spool_ref)
         if not complete:
             return
 
-        self._partials.pop(key, None)
-        payload = partial.assemble()
-        metadata_dict = _trace_metadata_dict(partial.metadata)
-        if partial.metadata is not None:
-            data_type = partial.metadata.data_type
-        elif work.fallback_data_type is not None:
-            data_type = work.fallback_data_type
-        else:
-            raise ValueError(
-                f"Missing data_type in metadata for trace_id={work.trace_id}."
-            )
+        try:
+            ordered_refs = partial.ordered_refs()
+            payload = self._chunk_spool.materialize(ordered_refs)
+            metadata_dict = _trace_metadata_dict(partial.metadata)
+            if partial.metadata is not None:
+                data_type = partial.metadata.data_type
+            elif work.fallback_data_type is not None:
+                data_type = work.fallback_data_type
+            else:
+                raise ValueError(
+                    f"Missing data_type in metadata for trace_id={work.trace_id}."
+                )
 
-        self._enqueue_complete_message(
-            producer_id=work.producer_id,
-            trace_id=work.trace_id,
-            recording_id=work.recording_id,
-            data_type=data_type,
-            metadata=metadata_dict,
-            data=payload,
-        )
+            self._enqueue_complete_message(
+                producer_id=work.producer_id,
+                trace_id=work.trace_id,
+                recording_id=work.recording_id,
+                data_type=data_type,
+                metadata=metadata_dict,
+                data=payload,
+            )
+        finally:
+            self._partials.pop(key, None)
+            self._release_partial_refs(partial)
 
     def _process_final_trace_work(self, work: FinalTraceWork) -> None:
-        self._partials.pop((work.producer_id, work.trace_id), None)
+        partial = self._partials.pop((work.producer_id, work.trace_id), None)
+        if partial is not None:
+            self._release_partial_refs(partial)
         self._enqueue_complete_message(
             producer_id=work.producer_id,
             trace_id=work.trace_id,
@@ -272,6 +335,11 @@ class _CompletionShard:
                 enqueue_elapsed,
             )
 
+    def _release_partial_refs(self, partial: SpoolPartialMessage) -> None:
+        """Release all chunk spool refs retained for one partial trace."""
+        for ref in partial.chunks.values():
+            self._chunk_spool.release(ref)
+
 
 class CompletionWorker:
     """Non-blocking sharded completion pipeline for shared-slot ingest."""
@@ -279,15 +347,18 @@ class CompletionWorker:
     def __init__(
         self,
         *,
+        chunk_spool: BridgeChunkSpool,
         recording_disk_manager: RecordingDiskManager,
         shard_count: int | None = None,
     ) -> None:
+        self._chunk_spool = chunk_spool
         resolved_shard_count = shard_count or min(
             8,
             max(1, os.cpu_count() or DEFAULT_COMPLETION_WORKER_SHARD_COUNT),
         )
         self._shards = [
             _CompletionShard(
+                chunk_spool=chunk_spool,
                 recording_disk_manager=recording_disk_manager,
                 shard_index=index,
             )
@@ -306,6 +377,7 @@ class CompletionWorker:
         """Drain queued work and stop all completion shards."""
         for shard in self._shards:
             shard.close()
+        self._chunk_spool.cleanup()
 
     def _shard_for(self, producer_id: str, trace_id: str) -> _CompletionShard:
         shard_key = f"{producer_id}:{trace_id}".encode("utf-8", errors="replace")
@@ -560,7 +632,11 @@ class Daemon:
         self._closing_recordings: dict[str, RecordingClosingState] = {}
         self._producer_last_sequence_numbers: dict[str, int] = {}
         self._shared_slot_handler = SharedSlotDaemonHandler(self.comm)
+        self._chunk_spool = BridgeChunkSpool(
+            get_daemon_recordings_root_path() / ".bridge_chunk_spool"
+        )
         self._completion_worker = CompletionWorker(
+            chunk_spool=self._chunk_spool,
             recording_disk_manager=self.recording_disk_manager
         )
         self._command_handlers: dict[CommandType, CommandHandler] = {
@@ -731,10 +807,10 @@ class Daemon:
         transport_result = self._shared_slot_handler.handle_descriptor(
             channel,
             descriptor_payload,
+            self._chunk_spool,
         )
         descriptor = transport_result.descriptor
         chunk_metadata = transport_result.chunk_metadata
-        chunk_data = transport_result.chunk_data
         trace_id = transport_result.trace_id
         trace_metadata = transport_result.trace_metadata
 
@@ -784,7 +860,7 @@ class Daemon:
                 recording_id=str(recording_id),
                 chunk_index=chunk_metadata.chunk_index,
                 total_chunks=chunk_metadata.total_chunks,
-                chunk_data=chunk_data,
+                chunk_spool_ref=transport_result.chunk_spool_ref,
                 trace_metadata=trace_metadata,
                 fallback_data_type=(
                     trace_metadata.data_type if trace_metadata is not None else None

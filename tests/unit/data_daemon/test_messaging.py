@@ -11,7 +11,12 @@ from neuracore_types import DataType
 
 from neuracore.data_daemon.communications_management.data_bridge import (
     ChannelState,
+    CompletionChunkWork,
+    CompletionWorker,
     Daemon,
+)
+from neuracore.data_daemon.communications_management.bridge_chunk_spool import (
+    BridgeChunkSpool,
 )
 from neuracore.data_daemon.communications_management.producer_channel import (
     ProducerChannel,
@@ -38,6 +43,7 @@ from neuracore.data_daemon.models import (
     SharedSlotCreditReturn,
     SharedSlotDescriptor,
     SharedSlotReadyModel,
+    TraceTransportMetadata,
 )
 
 
@@ -856,6 +862,65 @@ class DummyRecordingDiskManager:
 
     def enqueue(self, msg):
         self.messages.append(msg)
+
+
+def test_completion_worker_assembles_spooled_chunks(tmp_path) -> None:
+    rdm = DummyRecordingDiskManager()
+    chunk_spool = BridgeChunkSpool(tmp_path / "chunk-spool", segment_max_bytes=8)
+    worker = CompletionWorker(
+        chunk_spool=chunk_spool,
+        recording_disk_manager=rdm,
+        shard_count=1,
+    )
+    metadata = TraceTransportMetadata(
+        recording_id="rec-1",
+        data_type=DataType.RGB_IMAGES,
+        data_type_name="camera_0",
+        dataset_id="dataset-1",
+        robot_id="robot-1",
+        robot_instance=2,
+    )
+
+    try:
+        worker.enqueue_chunk(
+            CompletionChunkWork(
+                producer_id="producer-1",
+                trace_id="trace-1",
+                recording_id="rec-1",
+                chunk_index=0,
+                total_chunks=2,
+                chunk_spool_ref=chunk_spool.append(memoryview(b"ab")),
+                trace_metadata=metadata,
+                fallback_data_type=DataType.RGB_IMAGES,
+            )
+        )
+        worker.enqueue_chunk(
+            CompletionChunkWork(
+                producer_id="producer-1",
+                trace_id="trace-1",
+                recording_id="rec-1",
+                chunk_index=1,
+                total_chunks=2,
+                chunk_spool_ref=chunk_spool.append(memoryview(b"cd")),
+                trace_metadata=metadata,
+                fallback_data_type=DataType.RGB_IMAGES,
+            )
+        )
+
+        deadline = time.monotonic() + 1.0
+        while len(rdm.messages) < 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+    finally:
+        worker.close()
+
+    assert len(rdm.messages) == 1
+    message = rdm.messages[0]
+    assert message.trace_id == "trace-1"
+    assert message.recording_id == "rec-1"
+    assert message.data == b"abcd"
+    assert message.data_type == DataType.RGB_IMAGES
+    assert message.data_type_name == "camera_0"
+    assert (tmp_path / "chunk-spool").exists() is False
 
 
 def test_cleanup_removes_channel_without_heartbeat(emitter) -> None:

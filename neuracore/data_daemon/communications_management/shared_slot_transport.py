@@ -96,6 +96,16 @@ def build_shared_frame_packet_metadata(
 
 def parse_shared_frame_packet(packet: bytes) -> tuple[dict[str, object], bytes]:
     """Parse one self-describing packet copied out of a shared slot."""
+    metadata, chunk_start, chunk_end = parse_shared_frame_packet_view(
+        memoryview(packet)
+    )
+    return metadata, packet[chunk_start:chunk_end]
+
+
+def parse_shared_frame_packet_view(
+    packet: memoryview,
+) -> tuple[dict[str, object], int, int]:
+    """Parse one shared-slot packet view without copying the payload chunk."""
     if len(packet) < SHARED_MEMORY_RECORD_HEADER_SIZE:
         raise ValueError("Shared-slot packet shorter than record header")
     magic, metadata_len, chunk_len = struct.unpack(
@@ -110,9 +120,9 @@ def parse_shared_frame_packet(packet: bytes) -> tuple[dict[str, object], bytes]:
     if len(packet) > expected:
         raise ValueError("Shared-slot packet contains trailing bytes")
     metadata_start = SHARED_MEMORY_RECORD_HEADER_SIZE
-    metadata_end = metadata_start + metadata_len
-    metadata = json.loads(packet[metadata_start:metadata_end].decode("utf-8"))
-    return metadata, packet[metadata_end:]
+    chunk_start = metadata_start + metadata_len
+    metadata = json.loads(packet[metadata_start:chunk_start].tobytes().decode("utf-8"))
+    return metadata, chunk_start, expected
 
 
 class SharedSlotVideoWorker:

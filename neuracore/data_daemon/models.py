@@ -712,7 +712,7 @@ class CompleteMessage:
             robot_instance=robot_instance,
             final_chunk=final_chunk,
             received_at=datetime.now(timezone.utc).isoformat(),
-            data=bytes(data),
+            data=data if isinstance(data, bytes) else bytes(data),
         )
 
     def to_batch_record(self) -> bytes:
