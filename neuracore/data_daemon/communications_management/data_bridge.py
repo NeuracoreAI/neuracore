@@ -227,6 +227,14 @@ class TraceRecordingLookupRequest:
     trace_id: str
 
 
+@dataclass(frozen=True)
+class SharedSlotSequenceProgressRequest:
+    """Typed input for shared-slot sequence progress tracking."""
+
+    producer_id: str
+    sequence_number: int
+
+
 class _CompletionShard:
     """One completion shard that preserves ordering for its assigned traces."""
 
@@ -296,6 +304,7 @@ class _CompletionShard:
     def _process_chunk_work(self, work: CompletionChunkWork) -> None:
         key = (work.producer_id, work.trace_id)
         partial = self._partials.get(key)
+        partial_released = False
         if partial is None:
             partial = SpoolPartialMessage(total_chunks=work.total_chunks)
             self._partials[key] = partial
@@ -343,6 +352,10 @@ class _CompletionShard:
                     f"Missing data_type in metadata for trace_id={work.trace_id}."
                 )
 
+            self._partials.pop(key, None)
+            self._release_partial_refs(partial)
+            partial_released = True
+
             self._enqueue_complete_message(
                 producer_id=work.producer_id,
                 trace_id=work.trace_id,
@@ -352,8 +365,9 @@ class _CompletionShard:
                 data=payload,
             )
         finally:
-            self._partials.pop(key, None)
-            self._release_partial_refs(partial)
+            if not partial_released:
+                self._partials.pop(key, None)
+                self._release_partial_refs(partial)
 
     def _process_final_trace_work(self, work: FinalTraceWork) -> None:
         partial = self._partials.pop((work.producer_id, work.trace_id), None)
@@ -481,6 +495,7 @@ class _SpoolShard:
         acquire_spool_admission: Callable[[], None],
         release_spool_admission: Callable[[], None],
         should_drop_recording_data: Callable[[RecordingDataDropRequest], bool],
+        mark_sequence_completed: Callable[[SharedSlotSequenceProgressRequest], None],
         register_trace: Callable[[str, str], None],
         register_trace_metadata: Callable[[TraceMetadataRegistrationRequest], None],
         get_trace_recording: Callable[[TraceRecordingLookupRequest], str | None],
@@ -492,6 +507,7 @@ class _SpoolShard:
         self._acquire_spool_admission = acquire_spool_admission
         self._release_spool_admission = release_spool_admission
         self._should_drop_recording_data = should_drop_recording_data
+        self._mark_sequence_completed = mark_sequence_completed
         self._register_trace = register_trace
         self._register_trace_metadata = register_trace_metadata
         self._get_trace_recording = get_trace_recording
@@ -569,6 +585,12 @@ class _SpoolShard:
             if recording_id is None:
                 self._release_chunk_ref(transport_result.chunk_spool_ref)
                 chunk_spool_ref = None
+                self._mark_sequence_completed(
+                    SharedSlotSequenceProgressRequest(
+                        producer_id=work.channel.producer_id,
+                        sequence_number=descriptor.sequence_id,
+                    )
+                )
                 logger.warning(
                     "Shared-slot packet missing recording metadata "
                     "trace_id=%s producer_id=%s sequence_id=%s",
@@ -588,6 +610,12 @@ class _SpoolShard:
             ):
                 self._release_chunk_ref(transport_result.chunk_spool_ref)
                 chunk_spool_ref = None
+                self._mark_sequence_completed(
+                    SharedSlotSequenceProgressRequest(
+                        producer_id=work.channel.producer_id,
+                        sequence_number=descriptor.sequence_id,
+                    )
+                )
                 return
 
             work.channel.set_trace_id(trace_id)
@@ -624,6 +652,12 @@ class _SpoolShard:
                     ),
                 )
             )
+            self._mark_sequence_completed(
+                SharedSlotSequenceProgressRequest(
+                    producer_id=work.channel.producer_id,
+                    sequence_number=descriptor.sequence_id,
+                )
+            )
             chunk_spool_ref = None
         finally:
             if chunk_spool_ref is not None:
@@ -648,6 +682,7 @@ class SpoolWorker:
         acquire_spool_admission: Callable[[], None],
         release_spool_admission: Callable[[], None],
         should_drop_recording_data: Callable[[RecordingDataDropRequest], bool],
+        mark_sequence_completed: Callable[[SharedSlotSequenceProgressRequest], None],
         register_trace: Callable[[str, str], None],
         register_trace_metadata: Callable[[TraceMetadataRegistrationRequest], None],
         get_trace_recording: Callable[[TraceRecordingLookupRequest], str | None],
@@ -661,6 +696,7 @@ class SpoolWorker:
                 acquire_spool_admission=acquire_spool_admission,
                 release_spool_admission=release_spool_admission,
                 should_drop_recording_data=should_drop_recording_data,
+                mark_sequence_completed=mark_sequence_completed,
                 register_trace=register_trace,
                 register_trace_metadata=register_trace_metadata,
                 get_trace_recording=get_trace_recording,
@@ -929,6 +965,8 @@ class Daemon:
         self._closed_recordings: set[str] = set()
         self._closing_recordings: dict[str, RecordingClosingState] = {}
         self._producer_last_sequence_numbers: dict[str, int] = {}
+        self._pending_shared_slot_sequences: dict[str, set[int]] = {}
+        self._pending_shared_slot_sequences_lock = threading.Lock()
         self._shared_slot_handler = SharedSlotDaemonHandler(self.comm)
         self._spool_admission = threading.BoundedSemaphore(DEFAULT_MAX_SPOOLED_CHUNKS)
         self._completion_worker = CompletionWorker(
@@ -942,6 +980,7 @@ class Daemon:
             acquire_spool_admission=self._spool_admission.acquire,
             release_spool_admission=self._spool_admission.release,
             should_drop_recording_data=self._should_drop_recording_data,
+            mark_sequence_completed=self._mark_shared_slot_sequence_completed,
             register_trace=self._register_trace,
             register_trace_metadata=self._register_trace_metadata,
             get_trace_recording=self._get_trace_recording,
@@ -1114,7 +1153,26 @@ class Daemon:
     ) -> None:
         """Queue one shared-slot descriptor for sharded spool processing."""
         descriptor_payload = message.payload.get(message.command.value, {})
-        self._spool_worker.enqueue(channel, descriptor_payload)
+        sequence_number = message.sequence_number
+        if sequence_number is None:
+            raise ValueError("Shared-slot descriptor missing sequence_number")
+
+        self._mark_shared_slot_sequence_pending(
+            SharedSlotSequenceProgressRequest(
+                producer_id=channel.producer_id,
+                sequence_number=sequence_number,
+            )
+        )
+        try:
+            self._spool_worker.enqueue(channel, descriptor_payload)
+        except Exception:
+            self._mark_shared_slot_sequence_completed(
+                SharedSlotSequenceProgressRequest(
+                    producer_id=channel.producer_id,
+                    sequence_number=sequence_number,
+                )
+            )
+            raise
 
     def _ensure_result_trace_registered(
         self,
@@ -1319,6 +1377,27 @@ class Daemon:
     def _get_trace_recording(self, request: TraceRecordingLookupRequest) -> str | None:
         """Return the recording currently associated with one trace, if any."""
         return self._trace_recordings.get(request.trace_id)
+
+    def _mark_shared_slot_sequence_pending(
+        self, request: SharedSlotSequenceProgressRequest
+    ) -> None:
+        """Record that one shared-slot descriptor still needs spool processing."""
+        with self._pending_shared_slot_sequences_lock:
+            self._pending_shared_slot_sequences.setdefault(request.producer_id, set()).add(
+                request.sequence_number
+            )
+
+    def _mark_shared_slot_sequence_completed(
+        self, request: SharedSlotSequenceProgressRequest
+    ) -> None:
+        """Record that one shared-slot descriptor reached completion handoff."""
+        with self._pending_shared_slot_sequences_lock:
+            pending = self._pending_shared_slot_sequences.get(request.producer_id)
+            if pending is None:
+                return
+            pending.discard(request.sequence_number)
+            if not pending:
+                self._pending_shared_slot_sequences.pop(request.producer_id, None)
 
     def _should_drop_recording_data(self, request: RecordingDataDropRequest) -> bool:
         """Return True when recording state says this data should be dropped."""
@@ -1669,6 +1748,15 @@ class Daemon:
                 or last_sequence_number < cutoff_sequence_number
             ):
                 return False
+            with self._pending_shared_slot_sequences_lock:
+                pending_sequences = self._pending_shared_slot_sequences.get(
+                    producer_id, set()
+                )
+                if any(
+                    sequence_number <= cutoff_sequence_number
+                    for sequence_number in pending_sequences
+                ):
+                    return False
         return True
 
     def cleanup_channel_on_trace_written(
