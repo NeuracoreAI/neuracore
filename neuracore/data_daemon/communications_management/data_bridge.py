@@ -50,8 +50,9 @@ RecordingDiskManager = rdm_module.RecordingDiskManager
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_COMPLETION_WORKER_SHARD_COUNT = 4
 
+DEFAULT_COMPLETION_WORKER_SHARD_COUNT = 4
+DEFAULT_MAX_SPOOLED_CHUNKS = int(os.getenv("NCD_MAX_SPOOLED_CHUNKS", "128"))
 
 def _str_or_none(value: str | int | None) -> str | None:
     """Convert value to string or None.
@@ -92,13 +93,12 @@ class SharedSlotTransportState:
 
 @dataclass(frozen=True)
 class CompletionChunkWork:
-    """One spooled chunk waiting for background assembly and persistence handoff."""
-
     producer_id: str
     trace_id: str
     recording_id: str
     chunk_index: int
     total_chunks: int
+    chunk_spool: BridgeChunkSpool
     chunk_spool_ref: ChunkSpoolRef
     trace_metadata: TraceTransportMetadata | None = None
     fallback_data_type: DataType | None = None
@@ -110,19 +110,26 @@ class SpoolPartialMessage:
 
     total_chunks: int
     received_chunks: int = 0
-    chunks: dict[int, ChunkSpoolRef] = field(default_factory=dict)
+    chunks: dict[int, tuple[BridgeChunkSpool, ChunkSpoolRef]] = field(
+        default_factory=dict
+    )
     metadata: TraceTransportMetadata | None = None
 
-    def add_chunk(self, index: int, ref: ChunkSpoolRef) -> bool:
+    def add_chunk(
+        self,
+        index: int,
+        spool: BridgeChunkSpool,
+        ref: ChunkSpoolRef,
+    ) -> bool:
         """Track one spooled chunk reference for the trace."""
         if index in self.chunks:
             return self.received_chunks == self.total_chunks
 
-        self.chunks[index] = ref
+        self.chunks[index] = (spool, ref)
         self.received_chunks += 1
         return self.received_chunks == self.total_chunks
 
-    def ordered_refs(self) -> list[ChunkSpoolRef]:
+    def ordered_refs(self) -> list[tuple[BridgeChunkSpool, ChunkSpoolRef]]:
         """Return chunk refs in assembly order."""
         missing = [i for i in range(self.total_chunks) if i not in self.chunks]
         if missing:
@@ -162,21 +169,79 @@ class FinalTraceWork:
     metadata: dict[str, str | int | None]
 
 
+@dataclass(frozen=True)
+class SpoolDescriptorWork:
+    """One shared-slot descriptor waiting to be copied out of shared memory."""
+
+    channel: ChannelState
+    descriptor_payload: dict
+
+
+@dataclass(frozen=True)
+class RecordingDataDropRequest:
+    """Typed input for recording-state drop decisions."""
+
+    channel: ChannelState
+    recording_id: str
+    trace_id: str
+    sequence_number: int | None
+
+
+@dataclass(frozen=True)
+class TraceMetadataSnapshot:
+    """Canonical trace metadata stored by the daemon."""
+
+    dataset_id: str | None = None
+    dataset_name: str | None = None
+    robot_name: str | None = None
+    robot_id: str | None = None
+    robot_instance: int | None = None
+    data_type: str | None = None
+    data_type_name: str | None = None
+
+    def to_dict(self) -> dict[str, str | int | None]:
+        """Convert the typed snapshot to daemon storage shape."""
+        return {
+            "dataset_id": self.dataset_id,
+            "dataset_name": self.dataset_name,
+            "robot_name": self.robot_name,
+            "robot_id": self.robot_id,
+            "robot_instance": self.robot_instance,
+            "data_type": self.data_type,
+            "data_type_name": self.data_type_name,
+        }
+
+
+@dataclass(frozen=True)
+class TraceMetadataRegistrationRequest:
+    """Typed input for trace metadata registration."""
+
+    trace_id: str
+    metadata: TraceMetadataSnapshot
+
+
+@dataclass(frozen=True)
+class TraceRecordingLookupRequest:
+    """Typed input for trace-to-recording lookup."""
+
+    trace_id: str
+
+
 class _CompletionShard:
     """One completion shard that preserves ordering for its assigned traces."""
 
     def __init__(
         self,
         *,
-        chunk_spool: BridgeChunkSpool,
         recording_disk_manager: RecordingDiskManager,
         shard_index: int,
+        release_spool_admission: Callable[[], None],
     ) -> None:
         self._shard_index = shard_index
-        self._chunk_spool = chunk_spool
         self._recording_disk_manager = recording_disk_manager
+        self._release_spool_admission = release_spool_admission
         self._queue: queue.Queue[CompletionChunkWork | FinalTraceWork | None] = (
-            queue.Queue(maxsize=1)
+            queue.Queue()
         )
         self._partials: dict[tuple[str, str], SpoolPartialMessage] = {}
         self._error: Exception | None = None
@@ -245,18 +310,30 @@ class _CompletionShard:
             )
 
         partial.register_metadata(work.trace_id, work.trace_metadata)
+
         if work.chunk_index in partial.chunks:
-            self._chunk_spool.release(work.chunk_spool_ref)
+            self._release_chunk_ref(work.chunk_spool, work.chunk_spool_ref)
             complete = partial.received_chunks == partial.total_chunks
         else:
-            complete = partial.add_chunk(work.chunk_index, work.chunk_spool_ref)
+            complete = partial.add_chunk(
+                work.chunk_index,
+                work.chunk_spool,
+                work.chunk_spool_ref,
+            )
+
         if not complete:
             return
 
         try:
             ordered_refs = partial.ordered_refs()
-            payload = self._chunk_spool.materialize(ordered_refs)
+            if any(spool is not work.chunk_spool for spool, _ in ordered_refs):
+                raise ValueError(
+                    "Trace chunks were routed to multiple spools for "
+                    f"trace_id={work.trace_id}."
+                )
+            payload = work.chunk_spool.materialize([ref for _, ref in ordered_refs])
             metadata_dict = _trace_metadata_dict(partial.metadata)
+
             if partial.metadata is not None:
                 data_type = partial.metadata.data_type
             elif work.fallback_data_type is not None:
@@ -282,6 +359,7 @@ class _CompletionShard:
         partial = self._partials.pop((work.producer_id, work.trace_id), None)
         if partial is not None:
             self._release_partial_refs(partial)
+
         self._enqueue_complete_message(
             producer_id=work.producer_id,
             trace_id=work.trace_id,
@@ -305,6 +383,7 @@ class _CompletionShard:
     ) -> None:
         robot_instance = int(metadata.get("robot_instance") or 0)
         enqueue_start = time.monotonic()
+
         self._recording_disk_manager.enqueue(
             CompleteMessage.from_bytes(
                 producer_id=producer_id,
@@ -321,6 +400,7 @@ class _CompletionShard:
                 robot_id=_str_or_none(metadata.get("robot_id")),
             )
         )
+
         enqueue_elapsed = time.monotonic() - enqueue_start
         if enqueue_elapsed > 0.05:
             logger.warning(
@@ -333,10 +413,17 @@ class _CompletionShard:
                 enqueue_elapsed,
             )
 
+    def _release_chunk_ref(
+        self, chunk_spool: BridgeChunkSpool, ref: ChunkSpoolRef
+    ) -> None:
+        try:
+            chunk_spool.release(ref)
+        finally:
+            self._release_spool_admission()
+
     def _release_partial_refs(self, partial: SpoolPartialMessage) -> None:
-        """Release all chunk spool refs retained for one partial trace."""
-        for ref in partial.chunks.values():
-            self._chunk_spool.release(ref)
+        for chunk_spool, ref in partial.chunks.values():
+            self._release_chunk_ref(chunk_spool, ref)
 
 
 class CompletionWorker:
@@ -345,42 +432,255 @@ class CompletionWorker:
     def __init__(
         self,
         *,
-        chunk_spool: BridgeChunkSpool,
+        chunk_spool: BridgeChunkSpool | None = None,
         recording_disk_manager: RecordingDiskManager,
+        release_spool_admission: Callable[[], None] = lambda: None,
         shard_count: int | None = None,
     ) -> None:
-        self._chunk_spool = chunk_spool
+        self._owned_chunk_spools = [chunk_spool] if chunk_spool is not None else []
         resolved_shard_count = shard_count or min(
             8,
             max(1, os.cpu_count() or DEFAULT_COMPLETION_WORKER_SHARD_COUNT),
         )
         self._shards = [
             _CompletionShard(
-                chunk_spool=chunk_spool,
                 recording_disk_manager=recording_disk_manager,
                 shard_index=index,
+                release_spool_admission=release_spool_admission,
             )
             for index in range(resolved_shard_count)
         ]
 
     def enqueue_chunk(self, work: CompletionChunkWork) -> None:
-        """Queue one copied chunk for background completion processing."""
         self._shard_for(work.producer_id, work.trace_id).enqueue(work)
 
     def enqueue_final_trace(self, work: FinalTraceWork) -> None:
-        """Queue one final trace marker after all chunk jobs for the trace."""
         self._shard_for(work.producer_id, work.trace_id).enqueue(work)
 
     def close(self) -> None:
-        """Drain queued work and stop all completion shards."""
         for shard in self._shards:
             shard.close()
-        self._chunk_spool.cleanup()
+        for chunk_spool in self._owned_chunk_spools:
+            chunk_spool.cleanup()
 
     def _shard_for(self, producer_id: str, trace_id: str) -> _CompletionShard:
         shard_key = f"{producer_id}:{trace_id}".encode("utf-8", errors="replace")
         shard_index = zlib.crc32(shard_key) % len(self._shards)
         return self._shards[shard_index]
+
+
+class _SpoolShard:
+    """One spool shard that copies shared-slot chunks before ACKing them."""
+
+    def __init__(
+        self,
+        *,
+        chunk_spool: BridgeChunkSpool,
+        shared_slot_handler: SharedSlotDaemonHandler,
+        completion_worker: CompletionWorker,
+        acquire_spool_admission: Callable[[], None],
+        release_spool_admission: Callable[[], None],
+        should_drop_recording_data: Callable[[RecordingDataDropRequest], bool],
+        register_trace: Callable[[str, str], None],
+        register_trace_metadata: Callable[[TraceMetadataRegistrationRequest], None],
+        get_trace_recording: Callable[[TraceRecordingLookupRequest], str | None],
+        shard_index: int,
+    ) -> None:
+        self._chunk_spool = chunk_spool
+        self._shared_slot_handler = shared_slot_handler
+        self._completion_worker = completion_worker
+        self._acquire_spool_admission = acquire_spool_admission
+        self._release_spool_admission = release_spool_admission
+        self._should_drop_recording_data = should_drop_recording_data
+        self._register_trace = register_trace
+        self._register_trace_metadata = register_trace_metadata
+        self._get_trace_recording = get_trace_recording
+        self._queue: queue.Queue[SpoolDescriptorWork | None] = queue.Queue(maxsize=32)
+        self._error: Exception | None = None
+        self._error_lock = threading.Lock()
+        self._thread = threading.Thread(
+            target=self._worker_loop,
+            name=f"daemon-spool-shard-{shard_index}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def enqueue(self, channel: ChannelState, descriptor_payload: dict) -> None:
+        self._ensure_running()
+        self._queue.put(
+            SpoolDescriptorWork(channel=channel, descriptor_payload=descriptor_payload)
+        )
+
+    def close(self) -> None:
+        self._queue.put(None)
+        self._thread.join(timeout=10.0)
+
+    def cleanup(self) -> None:
+        self._chunk_spool.cleanup()
+
+    def _ensure_running(self) -> None:
+        with self._error_lock:
+            if self._error is not None:
+                raise RuntimeError("Daemon spool shard failed") from self._error
+        if not self._thread.is_alive():
+            raise RuntimeError("Daemon spool shard is not running")
+
+    def _worker_loop(self) -> None:
+        while True:
+            work = self._queue.get()
+            try:
+                if work is None:
+                    break
+                self._process(work)
+            except Exception as exc:
+                with self._error_lock:
+                    self._error = exc
+                logger.exception("Daemon spool shard failed")
+                break
+            finally:
+                self._queue.task_done()
+
+    def _process(self, work: SpoolDescriptorWork) -> None:
+        self._acquire_spool_admission()
+        chunk_spool_ref: ChunkSpoolRef | None = None
+        try:
+            transport_result = self._shared_slot_handler.handle_descriptor(
+                work.channel,
+                work.descriptor_payload,
+                self._chunk_spool,
+            )
+            chunk_spool_ref = transport_result.chunk_spool_ref
+        except Exception:
+            self._release_spool_admission()
+            raise
+
+        try:
+            descriptor = transport_result.descriptor
+            chunk_metadata = transport_result.chunk_metadata
+            trace_id = transport_result.trace_id
+            trace_metadata = transport_result.trace_metadata
+
+            recording_id = self._get_trace_recording(
+                TraceRecordingLookupRequest(trace_id=trace_id)
+            )
+            if recording_id is None and trace_metadata is not None:
+                recording_id = trace_metadata.recording_id
+
+            if recording_id is None:
+                self._release_chunk_ref(transport_result.chunk_spool_ref)
+                chunk_spool_ref = None
+                logger.warning(
+                    "Shared-slot packet missing recording metadata "
+                    "trace_id=%s producer_id=%s sequence_id=%s",
+                    trace_id,
+                    work.channel.producer_id,
+                    descriptor.sequence_id,
+                )
+                return
+
+            if self._should_drop_recording_data(
+                RecordingDataDropRequest(
+                    channel=work.channel,
+                    recording_id=recording_id,
+                    trace_id=trace_id,
+                    sequence_number=descriptor.sequence_id,
+                )
+            ):
+                self._release_chunk_ref(transport_result.chunk_spool_ref)
+                chunk_spool_ref = None
+                return
+
+            work.channel.set_trace_id(trace_id)
+
+            if trace_metadata is not None:
+                self._register_trace(recording_id, trace_id)
+                self._register_trace_metadata(
+                    TraceMetadataRegistrationRequest(
+                        trace_id=trace_id,
+                        metadata=TraceMetadataSnapshot(
+                            dataset_id=trace_metadata.dataset_id,
+                            dataset_name=trace_metadata.dataset_name,
+                            robot_name=trace_metadata.robot_name,
+                            robot_id=trace_metadata.robot_id,
+                            robot_instance=trace_metadata.robot_instance,
+                            data_type=trace_metadata.data_type.value,
+                            data_type_name=trace_metadata.data_type_name,
+                        ),
+                    )
+                )
+
+            self._completion_worker.enqueue_chunk(
+                CompletionChunkWork(
+                    producer_id=work.channel.producer_id,
+                    trace_id=trace_id,
+                    recording_id=str(recording_id),
+                    chunk_index=chunk_metadata.chunk_index,
+                    total_chunks=chunk_metadata.total_chunks,
+                    chunk_spool=self._chunk_spool,
+                    chunk_spool_ref=transport_result.chunk_spool_ref,
+                    trace_metadata=trace_metadata,
+                    fallback_data_type=(
+                        trace_metadata.data_type if trace_metadata is not None else None
+                    ),
+                )
+            )
+            chunk_spool_ref = None
+        finally:
+            if chunk_spool_ref is not None:
+                self._release_chunk_ref(chunk_spool_ref)
+
+    def _release_chunk_ref(self, ref: ChunkSpoolRef) -> None:
+        try:
+            self._chunk_spool.release(ref)
+        finally:
+            self._release_spool_admission()
+
+
+class SpoolWorker:
+    """Route shared-slot descriptors onto per-producer spool shards."""
+
+    def __init__(
+        self,
+        *,
+        root,
+        shared_slot_handler: SharedSlotDaemonHandler,
+        completion_worker: CompletionWorker,
+        acquire_spool_admission: Callable[[], None],
+        release_spool_admission: Callable[[], None],
+        should_drop_recording_data: Callable[[RecordingDataDropRequest], bool],
+        register_trace: Callable[[str, str], None],
+        register_trace_metadata: Callable[[TraceMetadataRegistrationRequest], None],
+        get_trace_recording: Callable[[TraceRecordingLookupRequest], str | None],
+        shard_count: int = 4,
+    ) -> None:
+        self._shards = [
+            _SpoolShard(
+                chunk_spool=BridgeChunkSpool(root / f"shard-{index:02d}"),
+                shared_slot_handler=shared_slot_handler,
+                completion_worker=completion_worker,
+                acquire_spool_admission=acquire_spool_admission,
+                release_spool_admission=release_spool_admission,
+                should_drop_recording_data=should_drop_recording_data,
+                register_trace=register_trace,
+                register_trace_metadata=register_trace_metadata,
+                get_trace_recording=get_trace_recording,
+                shard_index=index,
+            )
+            for index in range(shard_count)
+        ]
+
+    def enqueue(self, channel: ChannelState, descriptor_payload: dict) -> None:
+        key = channel.producer_id.encode("utf-8", errors="replace")
+        shard = self._shards[zlib.crc32(key) % len(self._shards)]
+        shard.enqueue(channel, descriptor_payload)
+
+    def close(self) -> None:
+        for shard in self._shards:
+            shard.close()
+
+    def cleanup(self) -> None:
+        for shard in self._shards:
+            shard.cleanup()
 
 
 @dataclass
@@ -630,12 +930,22 @@ class Daemon:
         self._closing_recordings: dict[str, RecordingClosingState] = {}
         self._producer_last_sequence_numbers: dict[str, int] = {}
         self._shared_slot_handler = SharedSlotDaemonHandler(self.comm)
-        self._chunk_spool = BridgeChunkSpool(
-            get_daemon_recordings_root_path() / ".bridge_chunk_spool"
-        )
+        self._spool_admission = threading.BoundedSemaphore(DEFAULT_MAX_SPOOLED_CHUNKS)
         self._completion_worker = CompletionWorker(
-            chunk_spool=self._chunk_spool,
-            recording_disk_manager=self.recording_disk_manager
+            recording_disk_manager=self.recording_disk_manager,
+            release_spool_admission=self._spool_admission.release,
+        )
+        self._spool_worker = SpoolWorker(
+            root=get_daemon_recordings_root_path() / ".bridge_chunk_spool",
+            shared_slot_handler=self._shared_slot_handler,
+            completion_worker=self._completion_worker,
+            acquire_spool_admission=self._spool_admission.acquire,
+            release_spool_admission=self._spool_admission.release,
+            should_drop_recording_data=self._should_drop_recording_data,
+            register_trace=self._register_trace,
+            register_trace_metadata=self._register_trace_metadata,
+            get_trace_recording=self._get_trace_recording,
+            shard_count=4,
         )
         self._command_handlers: dict[CommandType, CommandHandler] = {
             CommandType.OPEN_FIXED_SHARED_SLOTS: self._handle_open_fixed_shared_slots,
@@ -693,7 +1003,9 @@ class Daemon:
         except KeyboardInterrupt:
             logger.info("Shutting down daemon...")
         finally:
+            self._spool_worker.close()
             self._completion_worker.close()
+            self._spool_worker.cleanup()
             self._shared_slot_handler.close()
             self.comm.cleanup_daemon()
 
@@ -800,74 +1112,9 @@ class Daemon:
     def _handle_shared_slot_descriptor(
         self, channel: ChannelState, message: MessageEnvelope
     ) -> None:
-        """Copy one producer-owned shared-memory packet and ACK immediately."""
+        """Queue one shared-slot descriptor for sharded spool processing."""
         descriptor_payload = message.payload.get(message.command.value, {})
-        transport_result = self._shared_slot_handler.handle_descriptor(
-            channel,
-            descriptor_payload,
-            self._chunk_spool,
-        )
-        descriptor = transport_result.descriptor
-        chunk_metadata = transport_result.chunk_metadata
-        trace_id = transport_result.trace_id
-        trace_metadata = transport_result.trace_metadata
-
-        recording_id = self._trace_recordings.get(trace_id)
-        if recording_id is None and trace_metadata is not None:
-            recording_id = trace_metadata.recording_id
-
-        if recording_id is None:
-            self._chunk_spool.release(transport_result.chunk_spool_ref)
-            logger.warning(
-                "Shared-slot packet missing recording metadata "
-                "trace_id=%s producer_id=%s sequence_id=%s",
-                trace_id,
-                channel.producer_id,
-                descriptor.sequence_id,
-            )
-            return
-
-        if self._should_drop_recording_data(
-            channel=channel,
-            recording_id=recording_id,
-            trace_id=trace_id,
-            sequence_number=descriptor.sequence_id,
-        ):
-            self._chunk_spool.release(transport_result.chunk_spool_ref)
-            return
-
-        channel.set_trace_id(trace_id)
-
-        if trace_metadata is not None:
-            self._register_trace(recording_id, trace_id)
-            self._register_trace_metadata(
-                trace_id,
-                {
-                    "dataset_id": trace_metadata.dataset_id,
-                    "dataset_name": trace_metadata.dataset_name,
-                    "robot_name": trace_metadata.robot_name,
-                    "robot_id": trace_metadata.robot_id,
-                    "robot_instance": trace_metadata.robot_instance,
-                    "data_type": trace_metadata.data_type.value,
-                    "data_type_name": trace_metadata.data_type_name,
-                },
-            )
-
-        self._completion_worker.enqueue_chunk(
-            CompletionChunkWork(
-                producer_id=channel.producer_id,
-                trace_id=trace_id,
-                recording_id=str(recording_id),
-                chunk_index=chunk_metadata.chunk_index,
-                total_chunks=chunk_metadata.total_chunks,
-                chunk_spool_ref=transport_result.chunk_spool_ref,
-                trace_metadata=trace_metadata,
-                fallback_data_type=(
-                    trace_metadata.data_type if trace_metadata is not None else None
-                ),
-            )
-        )
-        return
+        self._spool_worker.enqueue(channel, descriptor_payload)
 
     def _ensure_result_trace_registered(
         self,
@@ -889,16 +1136,18 @@ class Daemon:
         channel.set_trace_id(trace_id)
         self._register_trace(recording_id, trace_id)
         self._register_trace_metadata(
-            trace_id,
-            {
-                "dataset_id": _str_or_none(metadata.get("dataset_id")),
-                "dataset_name": _str_or_none(metadata.get("dataset_name")),
-                "robot_name": _str_or_none(metadata.get("robot_name")),
-                "robot_id": _str_or_none(metadata.get("robot_id")),
-                "robot_instance": metadata.get("robot_instance"),
-                "data_type": _str_or_none(metadata.get("data_type")),
-                "data_type_name": _str_or_none(metadata.get("data_type_name")),
-            },
+            TraceMetadataRegistrationRequest(
+                trace_id=trace_id,
+                metadata=TraceMetadataSnapshot(
+                    dataset_id=_str_or_none(metadata.get("dataset_id")),
+                    dataset_name=_str_or_none(metadata.get("dataset_name")),
+                    robot_name=_str_or_none(metadata.get("robot_name")),
+                    robot_id=_str_or_none(metadata.get("robot_id")),
+                    robot_instance=metadata.get("robot_instance"),
+                    data_type=_str_or_none(metadata.get("data_type")),
+                    data_type_name=_str_or_none(metadata.get("data_type_name")),
+                ),
+            ),
         )
         return recording_id
 
@@ -1023,7 +1272,7 @@ class Daemon:
         self._recording_unique_traces.setdefault(recording_id, set()).add(trace_id)
 
     def _register_trace_metadata(
-        self, trace_id: str, metadata: dict[str, str | int | None]
+        self, request: TraceMetadataRegistrationRequest
     ) -> None:
         """Register metadata for a trace.
 
@@ -1032,9 +1281,10 @@ class Daemon:
         values. If the new value is different from the existing value, a log
         message will be emitted.
 
-        :param trace_id: The trace ID to register metadata for.
-        :param metadata: A dictionary of metadata to register.
+        :param request: The typed metadata registration request.
         """
+        trace_id = request.trace_id
+        metadata = request.metadata.to_dict()
         existing = self._trace_metadata.get(trace_id)
         if existing is None:
             self._trace_metadata[trace_id] = dict(metadata)
@@ -1066,15 +1316,16 @@ class Daemon:
         if not traces:
             self._recording_traces.pop(recording_id, None)
 
-    def _should_drop_recording_data(
-        self,
-        *,
-        channel: ChannelState,
-        recording_id: str,
-        trace_id: str,
-        sequence_number: int | None,
-    ) -> bool:
+    def _get_trace_recording(self, request: TraceRecordingLookupRequest) -> str | None:
+        """Return the recording currently associated with one trace, if any."""
+        return self._trace_recordings.get(request.trace_id)
+
+    def _should_drop_recording_data(self, request: RecordingDataDropRequest) -> bool:
         """Return True when recording state says this data should be dropped."""
+        channel = request.channel
+        recording_id = request.recording_id
+        trace_id = request.trace_id
+        sequence_number = request.sequence_number
         if recording_id in self._closed_recordings:
             logger.warning(
                 "Dropping data for closed recording_id=%s trace_id=%s",
@@ -1169,26 +1420,30 @@ class Daemon:
         channel.set_trace_id(trace_id)
 
         if self._should_drop_recording_data(
-            channel=channel,
-            recording_id=recording_id,
-            trace_id=trace_id,
-            sequence_number=message.sequence_number,
+            RecordingDataDropRequest(
+                channel=channel,
+                recording_id=recording_id,
+                trace_id=trace_id,
+                sequence_number=message.sequence_number,
+            )
         ):
             return
 
         if recording_id:
             self._register_trace(recording_id, trace_id)
             self._register_trace_metadata(
-                trace_id,
-                {
-                    "dataset_id": data_chunk.dataset_id,
-                    "dataset_name": data_chunk.dataset_name,
-                    "robot_name": data_chunk.robot_name,
-                    "robot_id": data_chunk.robot_id,
-                    "robot_instance": data_chunk.robot_instance,
-                    "data_type": data_chunk.data_type.value,
-                    "data_type_name": data_chunk.data_type_name,
-                },
+                TraceMetadataRegistrationRequest(
+                    trace_id=trace_id,
+                    metadata=TraceMetadataSnapshot(
+                        dataset_id=data_chunk.dataset_id,
+                        dataset_name=data_chunk.dataset_name,
+                        robot_name=data_chunk.robot_name,
+                        robot_id=data_chunk.robot_id,
+                        robot_instance=data_chunk.robot_instance,
+                        data_type=data_chunk.data_type.value,
+                        data_type_name=data_chunk.data_type_name,
+                    ),
+                )
             )
         completed = channel.add_socket_data_chunk(data_chunk)
         if completed is None:

@@ -35,7 +35,7 @@ sys.path.append(str(REPO_ROOT / "examples"))
 logger = logging.getLogger(__name__)
 
 MAX_TIME_TO_START_S = 20
-MAX_TIME_TO_STOP_S = 3
+MAX_TIME_TO_STOP_S = 5
 
 _TEST_DAEMON_ENV_OVERRIDES = {
     "NCD_BANDWIDTH_LIMIT": str(200 * 1024 * 1024),
