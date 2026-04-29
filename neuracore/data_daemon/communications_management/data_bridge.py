@@ -176,7 +176,7 @@ class _CompletionShard:
         self._chunk_spool = chunk_spool
         self._recording_disk_manager = recording_disk_manager
         self._queue: queue.Queue[CompletionChunkWork | FinalTraceWork | None] = (
-            queue.Queue()
+            queue.Queue(maxsize=1)
         )
         self._partials: dict[tuple[str, str], SpoolPartialMessage] = {}
         self._error: Exception | None = None
@@ -189,13 +189,11 @@ class _CompletionShard:
         self._thread.start()
 
     def enqueue(self, work: CompletionChunkWork | FinalTraceWork) -> None:
-        """Queue work for this shard without backpressuring daemon ingest."""
         self._ensure_running()
-        self._queue.put_nowait(work)
+        self._queue.put(work)
 
     def close(self) -> None:
-        """Drain queued work and stop the background thread."""
-        self._queue.put_nowait(None)
+        self._queue.put(None)
         self._thread.join(timeout=10.0)
 
     def _ensure_running(self) -> None:
@@ -819,6 +817,7 @@ class Daemon:
             recording_id = trace_metadata.recording_id
 
         if recording_id is None:
+            self._chunk_spool.release(transport_result.chunk_spool_ref)
             logger.warning(
                 "Shared-slot packet missing recording metadata "
                 "trace_id=%s producer_id=%s sequence_id=%s",
@@ -834,6 +833,7 @@ class Daemon:
             trace_id=trace_id,
             sequence_number=descriptor.sequence_id,
         ):
+            self._chunk_spool.release(transport_result.chunk_spool_ref)
             return
 
         channel.set_trace_id(trace_id)

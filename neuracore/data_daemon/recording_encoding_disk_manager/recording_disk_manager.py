@@ -66,7 +66,7 @@ class RecordingDiskManager:
         )
 
         self.trace_message_queue: asyncio.Queue[CompleteMessage | object] = (
-            asyncio.Queue()
+            asyncio.Queue(maxsize=1)
         )
 
         self.recording_traces: dict[str, dict[str, Any]] = {}
@@ -166,19 +166,13 @@ class RecordingDiskManager:
         self._emitter.on(Emitter.DELETE_TRACE, self._on_delete_trace)
 
     def enqueue(self, complete_message: CompleteMessage) -> None:
-        """Enqueue a completed message for persistence (thread-safe).
-
-        Args:
-            complete_message: Message to persist.
-
-        Returns:
-            None
-        """
         if self._loop_manager is None:
             raise RuntimeError("RecordingDiskManager not started")
-        self._loop_manager.schedule_on_general_loop(
+
+        future = self._loop_manager.schedule_on_general_loop(
             self.trace_message_queue.put(complete_message)
         )
+        future.result()
 
     async def request_stop(self) -> None:
         """Request a graceful stop of the worker tasks.
