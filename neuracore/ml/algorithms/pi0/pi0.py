@@ -43,8 +43,8 @@ from .utils import PI0Config, build_lr_lambda, pad_vector, resize_with_pad_torch
 
 logger = logging.getLogger(__name__)
 
-PROPRIO_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
-ACTION_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
+proprio_normalizer = MeanStdNormalizer  # or MinMaxNormalizer
+action_normalizer = MeanStdNormalizer  # or MinMaxNormalizer
 IMAGE_RESIZE_SHAPE = (224, 224)
 
 
@@ -236,11 +236,11 @@ class Pi0(NeuracoreModel):
         # Only create proprio_normalizer if there are proprioception stats
         # This allows the algorithm to work without proprioception (visual-only)
         self.proprio_normalizer = (
-            PROPRIO_NORMALIZER(name="proprioception", statistics=proprio_stats)
+            proprio_normalizer(name="proprioception", statistics=proprio_stats)
             if proprio_stats
             else None
         )
-        self.action_normalizer = ACTION_NORMALIZER(
+        self.action_normalizer = action_normalizer(
             name="actions", statistics=output_stats
         )
 
