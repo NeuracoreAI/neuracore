@@ -106,6 +106,7 @@ def start_training_run(
     max_delay_s: float = sys.float_info.max,
     allow_duplicates: bool = True,
     name_auto_increment: bool = False,
+    disk_size_gb: int = 500,
 ) -> dict:
     """Start a new training run.
 
@@ -125,6 +126,7 @@ def start_training_run(
         allow_duplicates: Whether to allow duplicate data during synchronization
         name_auto_increment: If True and a job with this name already exists, use
             name_1, name_2, ... instead of failing or duplicating the name.
+        disk_size_gb: Disk size in GB for the training VM (default: 500).
 
     Returns:
         dict: Training job data including job ID and status
@@ -169,6 +171,7 @@ def start_training_run(
         algorithm_config=algorithm_config,
         gpu_type=GPUType(gpu_type),
         num_gpus=num_gpus,
+        disk_size_gb=disk_size_gb,
         synchronization_details=SynchronizationDetails(
             frequency=frequency,
             max_delay_s=max_delay_s,
