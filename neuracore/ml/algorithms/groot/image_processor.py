@@ -76,7 +76,7 @@ class GrootImageProcessor:
         Returns:
             GrootImageProcessor configured for the checkpoint.
         """
-        from .modules import _load_config_json
+        from .utils import _load_config_json
 
         config = _load_config_json(model_path)
 

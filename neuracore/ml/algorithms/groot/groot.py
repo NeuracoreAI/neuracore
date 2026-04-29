@@ -65,8 +65,8 @@ from .modules import (
     TinyVLMBackbone,
     VLMBackbone,
     _add_action_step_positional_encoding,
-    _load_pretrained_state_dict,
 )
+from .utils import _load_pretrained_state_dict
 
 logger = logging.getLogger(__name__)
 
