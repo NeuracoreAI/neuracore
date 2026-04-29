@@ -423,5 +423,3 @@ Oieb
 popleft
 reannounce
 tmpfs
-zerobuffer
-ZEROBUFFER

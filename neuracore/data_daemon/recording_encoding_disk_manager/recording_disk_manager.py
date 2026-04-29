@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import struct
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
+
+from neuracore_types import DataType
 
 from neuracore.data_daemon.config_manager.helpers import calculate_storage_limit
 from neuracore.data_daemon.const import (
@@ -19,9 +23,16 @@ from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
 from neuracore.data_daemon.models import CompleteMessage, parse_data_type
+from neuracore.data_daemon.recording_encoding_disk_manager.core.rgb_trace_spool import (
+    RGBTraceSpool,
+)
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
     StorageBudget,
     StoragePolicy,
+)
+from neuracore.data_daemon.recording_encoding_disk_manager.core.types import (
+    _RGBTraceMessage,
+    _TraceKey,
 )
 
 from .core.trace_filesystem import _TraceFilesystem
@@ -65,7 +76,9 @@ class RecordingDiskManager:
             else get_daemon_recordings_root_path()
         )
 
-        self.trace_message_queue: asyncio.Queue[CompleteMessage | object] = (
+        self.trace_message_queue: asyncio.Queue[
+            CompleteMessage | _RGBTraceMessage | object
+        ] = (
             asyncio.Queue(maxsize=1)
         )
 
@@ -74,6 +87,7 @@ class RecordingDiskManager:
         self._stop_requested = False
 
         self._filesystem: _TraceFilesystem | None = None
+        self._rgb_trace_spool = RGBTraceSpool()
         self._storage_budget: StorageBudget | None = None
         self._controller: _TraceController | None = None
         self._encoder_manager: _EncoderManager | None = None
@@ -169,10 +183,83 @@ class RecordingDiskManager:
         if self._loop_manager is None:
             raise RuntimeError("RecordingDiskManager not started")
 
+        queue_item = self._queue_item_for(complete_message)
         future = self._loop_manager.schedule_on_general_loop(
-            self.trace_message_queue.put(complete_message)
+            self.trace_message_queue.put(queue_item)
         )
         future.result()
+
+    def _queue_item_for(
+        self, complete_message: CompleteMessage
+    ) -> CompleteMessage | _RGBTraceMessage:
+        """Convert one completed message into the queue item RDM should store."""
+        if complete_message.data_type != DataType.RGB_IMAGES:
+            return complete_message
+
+        if self._filesystem is None:
+            return complete_message
+
+        trace_key = _TraceKey(
+            recording_id=str(complete_message.recording_id),
+            data_type=complete_message.data_type,
+            trace_id=str(complete_message.trace_id),
+        )
+        frame_metadata: dict[str, Any] | None = None
+        frame_ref = None
+
+        if complete_message.data:
+            parsed = self._parse_rgb_combined_payload(complete_message.data)
+            if parsed is None:
+                return complete_message
+            frame_metadata, frame_bytes = parsed
+            frame_ref = self._rgb_trace_spool.append_frame(
+                trace_key=trace_key,
+                trace_dir=self._filesystem.trace_dir_for(trace_key),
+                frame_bytes=frame_bytes,
+            )
+
+        return _RGBTraceMessage(
+            trace_key=trace_key,
+            data_type_name=complete_message.data_type_name,
+            robot_instance=complete_message.robot_instance,
+            dataset_id=complete_message.dataset_id,
+            dataset_name=complete_message.dataset_name,
+            robot_name=complete_message.robot_name,
+            robot_id=complete_message.robot_id,
+            frame_metadata=frame_metadata,
+            frame_ref=frame_ref,
+            final_chunk=complete_message.final_chunk,
+        )
+
+    @staticmethod
+    def _parse_rgb_combined_payload(
+        payload: bytes,
+    ) -> tuple[dict[str, Any], bytes] | None:
+        """Parse the existing RGB combined packet into metadata and raw bytes."""
+        if len(payload) < 4:
+            return None
+
+        metadata_len = struct.unpack("<I", payload[:4])[0]
+        if metadata_len <= 0 or metadata_len > len(payload) - 4:
+            return None
+
+        json_end = 4 + metadata_len
+        try:
+            metadata = json.loads(payload[4:json_end].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(metadata, dict):
+            return None
+
+        frame_nbytes = metadata.get("frame_nbytes")
+        if not isinstance(frame_nbytes, int) or frame_nbytes < 0:
+            frame_nbytes = len(payload) - json_end
+
+        frame_end = json_end + frame_nbytes
+        if frame_end > len(payload):
+            return None
+
+        return metadata, payload[json_end:frame_end]
 
     async def request_stop(self) -> None:
         """Request a graceful stop of the worker tasks.

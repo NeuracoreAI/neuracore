@@ -103,6 +103,11 @@ class VideoTrace:
 
         self._handle_frame_bytes(payload)
 
+    def add_frame_record(self, metadata: dict[str, Any], frame_bytes: bytes) -> None:
+        """Consume one already-split frame metadata record and raw frame bytes."""
+        self._handle_metadata(dict(metadata))
+        self._handle_frame_bytes(frame_bytes)
+
     def _try_handle_combined_packet(self, payload: bytes) -> bool:
         """Try to parse payload as combined [4B len][JSON][frame] format.
 

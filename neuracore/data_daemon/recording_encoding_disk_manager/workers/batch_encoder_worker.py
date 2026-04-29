@@ -24,7 +24,7 @@ from neuracore.data_daemon.recording_encoding_disk_manager.encoding.video_trace 
 )
 
 from ..core.trace_filesystem import _TraceFilesystem
-from ..core.types import _BatchJob, _TraceKey
+from ..core.types import _BatchJob, _RGBSpoolJob, _TraceKey
 from ..lifecycle.encoder_manager import _EncoderManager
 
 logger = logging.getLogger(__name__)
@@ -113,7 +113,7 @@ class _BatchEncoderWorker:
         self._finalised_traces.add(trace_key)
         self._trace_last_progress_bytes.pop(trace_key, None)
 
-    async def _on_batch_ready(self, batch_job: _BatchJob) -> None:
+    async def _on_batch_ready(self, batch_job: _BatchJob | _RGBSpoolJob) -> None:
         """Handle BATCH_READY event.
 
         Args:
@@ -131,13 +131,17 @@ class _BatchEncoderWorker:
             self._in_flight_count -= 1
 
     async def _queue_and_process_trace_batches_locked(
-        self, batch_job: _BatchJob
+        self, batch_job: _BatchJob | _RGBSpoolJob
     ) -> None:
         """Queue a batch and process all contiguous batches for the trace in order.
 
         Must be called while holding the trace lock for `batch_job.trace_key`.
         """
         key = batch_job.trace_key
+        if isinstance(batch_job, _RGBSpoolJob):
+            await self._process_rgb_spool_job_locked(batch_job)
+            return
+
         batch_index = self._batch_index(batch_job.batch_path)
 
         if key in self._aborted_traces or key in self._finalised_traces:
@@ -219,6 +223,45 @@ class _BatchEncoderWorker:
             self._trace_next_index[key] = next_index
 
         self._try_finalize_trace_after_ordered_batches(key)
+
+    async def _process_rgb_spool_job_locked(self, batch_job: _RGBSpoolJob) -> None:
+        """Process one finalized RGB spool job into the trace encoder."""
+        key = batch_job.trace_key
+
+        if key in self._aborted_traces or key in self._finalised_traces:
+            await self._remove_rgb_spool_file(batch_job)
+            return
+
+        encoder = self._encoder_manager.safe_get_encoder(key)
+        if encoder is None:
+            await self._remove_rgb_spool_file(batch_job)
+            self._aborted_traces.add(key)
+            return
+
+        is_processed = await self._process_rgb_spool_into_encoder(batch_job, encoder)
+        await self._remove_rgb_spool_file(batch_job)
+
+        if not is_processed:
+            self._aborted_traces.add(key)
+            return
+
+        self._emit_trace_write_progress(key)
+
+        if batch_job.trace_done:
+            self._trace_done_seen.add(key)
+            enc = self._encoder_manager.pop_encoder(key)
+            if enc is not None:
+                self._finalise_trace_encoder(key, enc)
+            self._finalised_traces.add(key)
+            self._trace_done_seen.discard(key)
+            self._trace_last_progress_bytes.pop(key, None)
+
+    @staticmethod
+    async def _remove_rgb_spool_file(batch_job: _RGBSpoolJob) -> None:
+        """Remove the RGB spool file after encoder ingestion completes."""
+        if not batch_job.frames:
+            return
+        await _BatchEncoderWorker._remove_file(batch_job.frames[0].frame_ref.spool_path)
 
     def _decrement_trace_pending(self, key: _TraceKey) -> None:
         pending = self._trace_pending.get(key, 0) - 1
@@ -385,6 +428,49 @@ class _BatchEncoderWorker:
                 return False
             logger.exception(
                 "Failed to process batch for trace %s", batch_job.trace_key
+            )
+            self._encoder_manager.pop_encoder(batch_job.trace_key)
+            self._abort_trace(batch_job.trace_key)
+            return False
+
+    async def _process_rgb_spool_into_encoder(
+        self,
+        batch_job: _RGBSpoolJob,
+        encoder: JsonTrace | VideoTrace,
+    ) -> bool:
+        """Read ordered RGB frame refs from disk and feed them into VideoTrace."""
+        if not isinstance(encoder, VideoTrace):
+            logger.error("RGB spool job received non-video encoder for trace %s", batch_job.trace_key)
+            self._encoder_manager.pop_encoder(batch_job.trace_key)
+            self._abort_trace(batch_job.trace_key)
+            return False
+
+        if not batch_job.frames:
+            return True
+
+        try:
+            def encoding_work() -> None:
+                with batch_job.frames[0].frame_ref.spool_path.open("rb") as handle:
+                    for frame in batch_job.frames:
+                        handle.seek(frame.frame_ref.offset)
+                        payload = handle.read(frame.frame_ref.length)
+                        if len(payload) != frame.frame_ref.length:
+                            raise RuntimeError("Failed to read full RGB frame from spool")
+                        encoder.add_frame_record(frame.metadata, payload)
+
+            await self._loop.run_in_executor(None, encoding_work)
+            return True
+        except Exception as exc:
+            if _is_executor_shutdown_runtime_error(exc):
+                logger.debug(
+                    "RGB spool processing interrupted by executor shutdown for trace %s",
+                    batch_job.trace_key,
+                )
+                self._encoder_manager.pop_encoder(batch_job.trace_key)
+                self._abort_trace(batch_job.trace_key)
+                return False
+            logger.exception(
+                "Failed to process RGB spool for trace %s", batch_job.trace_key
             )
             self._encoder_manager.pop_encoder(batch_job.trace_key)
             self._abort_trace(batch_job.trace_key)
