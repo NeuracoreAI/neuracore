@@ -4,7 +4,6 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Union, cast
 
-import requests
 from neuracore_types import (
     CrossEmbodimentDescription,
     CrossEmbodimentUnion,
@@ -16,6 +15,7 @@ from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_recording import SynchronizedRecording
+from neuracore.core.utils.http_session import get_session
 
 if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset
@@ -208,7 +208,7 @@ class SynchronizedDataset:
         Returns:
             SynchronizedDatasetStatistics containing the calculated statistics.
         """
-        response = requests.post(
+        response = get_session().post(
             f"{API_URL}/org/{self.dataset.org_id}/synchronized-dataset/calculate-dataset-statistics",
             json=SynchronizedDatasetStatistics(
                 synchronized_dataset_id=self.id,

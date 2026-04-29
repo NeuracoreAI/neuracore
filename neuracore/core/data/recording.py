@@ -2,7 +2,6 @@
 
 from typing import TYPE_CHECKING
 
-import requests
 from neuracore_types import CrossEmbodimentUnion, DataType
 from neuracore_types import Recording as RecordingModel
 from neuracore_types import RecordingMetadata, RecordingStatus
@@ -12,6 +11,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.data.synced_recording import SynchronizedRecording
 from neuracore.core.exceptions import AuthenticationError, SynchronizationError
+from neuracore.core.utils.http_session import get_session
 from neuracore.core.utils.robot_data_spec_utils import extract_data_types
 
 if TYPE_CHECKING:
@@ -138,7 +138,7 @@ class Recording:
         auth = get_auth()
         org_id = get_current_org()
         try:
-            response = requests.get(
+            response = get_session().get(
                 f"{API_URL}/org/{org_id}/recording/{self.id}",
                 headers=auth.get_headers(),
             )
@@ -165,7 +165,7 @@ class Recording:
         org_id = get_current_org()
         try:
 
-            response = requests.put(
+            response = get_session().put(
                 f"{API_URL}/org/{org_id}/recording/{self.id}/metadata",
                 headers=auth.get_headers(),
                 json=recording_metadata.model_dump(mode="json"),

@@ -13,6 +13,7 @@ import requests
 from neuracore.api.orgs_fetch import fetch_org_ids
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.config.get_api_key import get_api_key
+from neuracore.core.utils.http_session import get_session
 from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
 
 from .const import API_URL
@@ -56,7 +57,7 @@ class Auth(metaclass=SingletonMetaclass):
 
         # Verify API key with server and get access token
         try:
-            response = requests.post(
+            response = get_session().post(
                 f"{API_URL}/auth/verify-api-key",
                 json={"api_key": api_key},
             )
@@ -133,7 +134,7 @@ class Auth(metaclass=SingletonMetaclass):
         # Placeholder for version validation logic
         from neuracore_types import __version__ as nc_types_version
 
-        response = requests.get(
+        response = get_session().get(
             f"{API_URL}/auth/verify-version",
             params={"version": nc_types_version},
         )

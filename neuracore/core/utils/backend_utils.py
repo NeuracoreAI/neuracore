@@ -8,12 +8,12 @@ synchronized datasets.
 import base64
 import hashlib
 
-import requests
 from neuracore_types import DataType, RecordingDataTrace
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
+from neuracore.core.utils.http_session import get_session
 
 
 def get_active_data_traces(recording_id: str) -> list[RecordingDataTrace]:
@@ -33,7 +33,7 @@ def get_active_data_traces(recording_id: str) -> list[RecordingDataTrace]:
         ConfigError: If there is an error trying to get the current org.
     """
     org_id = get_current_org()
-    response = requests.get(
+    response = get_session().get(
         f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/active",
         headers=get_auth().get_headers(),
     )

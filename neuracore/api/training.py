@@ -8,7 +8,6 @@ import concurrent
 import sys
 from typing import Any, cast
 
-import requests
 from neuracore_types import (
     CrossEmbodimentDescription,
     GPUType,
@@ -17,6 +16,7 @@ from neuracore_types import (
 )
 
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.utils.http_session import get_session
 from neuracore.core.utils.robot_data_spec_utils import (
     merge_cross_embodiment_description,
 )
@@ -76,13 +76,13 @@ def _get_algorithms() -> list[dict]:
     org_id = get_current_org()
     with concurrent.futures.ThreadPoolExecutor() as executor:
         org_alg_req = executor.submit(
-            requests.get,
+            get_session().get,
             f"{API_URL}/org/{org_id}/algorithms",
             headers=auth.get_headers(),
             params={"shared": False},
         )
         shared_alg_req = executor.submit(
-            requests.get,
+            get_session().get,
             f"{API_URL}/org/{org_id}/algorithms",
             headers=auth.get_headers(),
             params={"shared": True},
@@ -183,7 +183,7 @@ def start_training_run(
 
     auth = get_auth()
     org_id = get_current_org()
-    response = requests.post(
+    response = get_session().post(
         f"{API_URL}/org/{org_id}/training/jobs",
         headers=auth.get_headers(),
         json=data.model_dump(mode="json"),
@@ -213,7 +213,7 @@ def resume_training_run(job_id: str, additional_epochs: int) -> dict:
     auth = get_auth()
     org_id = get_current_org()
     try:
-        response = requests.post(
+        response = get_session().post(
             f"{API_URL}/org/{org_id}/training/jobs/{job_id}/resume/{additional_epochs}",
             headers=auth.get_headers(),
         )
@@ -235,7 +235,7 @@ def get_training_jobs() -> list[dict]:
     """
     auth = get_auth()
     org_id = get_current_org()
-    response = requests.get(
+    response = get_session().get(
         f"{API_URL}/org/{org_id}/training/jobs",
         headers=auth.get_headers(),
     )
@@ -317,7 +317,7 @@ def get_training_job_logs(
         params["severity_filter"] = severity_filter
 
     try:
-        response = requests.get(
+        response = get_session().get(
             f"{API_URL}/org/{org_id}/training/jobs/{job_id}/logs",
             headers=auth.get_headers(),
             params=params,
@@ -343,7 +343,7 @@ def delete_training_job(job_id: str) -> None:
     auth = get_auth()
     org_id = get_current_org()
     try:
-        response = requests.delete(
+        response = get_session().delete(
             f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
             headers=auth.get_headers(),
         )

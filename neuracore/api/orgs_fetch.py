@@ -1,14 +1,13 @@
 """Helpers for fetching the current user's organization IDs from the API."""
 
-import requests
-
 from neuracore.core.const import API_URL
+from neuracore.core.utils.http_session import get_session
 
 
 def fetch_org_ids(access_token: str) -> set[str] | None:
     """Return the set of org IDs for the authenticated user."""
     try:
-        response = requests.get(
+        response = get_session().get(
             f"{API_URL}/org-management/my-orgs",
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=10,

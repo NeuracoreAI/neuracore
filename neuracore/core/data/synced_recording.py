@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
-import requests
 import wget
 from neuracore_types import (
     CameraData,
@@ -25,6 +24,7 @@ from PIL import Image
 
 from neuracore.core.data.cache_manager import CacheManager
 from neuracore.core.utils.depth_utils import rgb_to_depth_storage
+from neuracore.core.utils.http_session import get_session
 
 from ..auth import get_auth
 from ..const import API_URL
@@ -104,7 +104,7 @@ class SynchronizedRecording:
             requests.HTTPError: If the API request fails.
         """
         auth = get_auth()
-        response = requests.post(
+        response = get_session().post(
             f"{API_URL}/org/{self.dataset.org_id}/synchronize/synchronize-recording",
             json=SynchronizeRecordingRequest(
                 recording_id=self.id,
@@ -134,7 +134,7 @@ class SynchronizedRecording:
             requests.HTTPError: If the API request fails.
         """
         auth = get_auth()
-        response = requests.get(
+        response = get_session().get(
             f"{API_URL}/org/{self.dataset.org_id}/recording/{self.id}/download_url",
             params={"filepath": f"{camera_type.value}/{camera_id}/lossless.mp4"},
             headers=auth.get_headers(),

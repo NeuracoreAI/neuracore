@@ -5,6 +5,7 @@ from pydantic import BaseModel, ValidationError
 
 from neuracore.core.auth import get_auth
 from neuracore.core.exceptions import AuthenticationError, OrganizationError
+from neuracore.core.utils.http_session import get_session
 
 from .const import API_URL
 
@@ -34,7 +35,7 @@ def list_my_orgs() -> list[Organization]:
     """
     auth = get_auth()
     try:
-        org_response = requests.get(
+        org_response = get_session().get(
             f"{API_URL}/org-management/my-orgs", headers=auth.get_headers()
         )
         org_response.raise_for_status()

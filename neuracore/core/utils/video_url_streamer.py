@@ -14,6 +14,8 @@ import av
 import numpy as np
 import requests
 
+from neuracore.core.utils.http_session import get_session
+
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 256 * 1024  # Multiples of 256KB
@@ -206,7 +208,7 @@ class VideoStreamer:
                 streams, or if decoding fails.
         """
         # Start the streaming request
-        self.response = requests.get(self.video_url, stream=True)
+        self.response = get_session().get(self.video_url, stream=True)
 
         # Check if request was successful
         if self.response.status_code != 200:
