@@ -28,6 +28,7 @@ from .state_store import StateStore
 from .tables import metadata, recordings, traces
 
 logger = logging.getLogger(__name__)
+_DB_POOL_SIZE = 17
 
 
 def _utc_now() -> datetime:
@@ -59,6 +60,8 @@ class SqliteStateStore(StateStore):
         self._engine: AsyncEngine = create_async_engine(
             f"sqlite+aiosqlite:///{db_path}",
             future=True,
+            pool_size=_DB_POOL_SIZE,
+            max_overflow=0,
         )
         self._write_semaphore = asyncio.Semaphore(1)
 
@@ -920,12 +923,10 @@ class SqliteStateStore(StateStore):
                 .scalars()
                 .all()
             )
-        existing_ids = [str(trace_id) for trace_id in existing_rows]
-        if not existing_ids:
-            return []
-
-        now = _utc_now()
-        async with self._write_lock() as conn:
+            existing_ids = [str(trace_id) for trace_id in existing_rows]
+            if not existing_ids:
+                return []
+            now = _utc_now()
             await conn.execute(
                 update(traces)
                 .where(traces.c.trace_id.in_(existing_ids))
