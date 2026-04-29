@@ -59,3 +59,20 @@ algorithms:
       dtype: bfloat16
       discrete_state_input: true
 
+  - name: Groot
+    min_success_rate: 0.0
+    algorithm_config:
+      batch_size: 2
+      epochs: 1
+      output_prediction_horizon: 64
+      lr: 1.0e-4
+      use_pretrained_weights: false
+      use_tiny_vlm: true
+      num_denoising_steps: 1
+      num_dit_layers: 2
+      num_attention_heads: 2
+      attention_head_dim: 16
+      dit_output_dim: 32
+      backbone_embedding_dim: 64
+      gradient_checkpointing: true
+      use_torch_compile: false
