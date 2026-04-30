@@ -265,7 +265,7 @@ def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
     robot = _get_robot(robot_name, instance)
     active_dataset_id = GlobalSingleton()._active_dataset_id
     if active_dataset_id is None:
-        raise RobotError("No active dataset. Call create_dataset() first.")
+        raise RobotError("No active dataset. Call connect_dataset() first.")
     try:
         active_dataset = Dataset.get_by_id(active_dataset_id)
     except DatasetError:

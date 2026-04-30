@@ -94,6 +94,7 @@ def create_dataset(
     description: str | None = None,
     tags: list[str] | None = None,
     shared: bool = False,
+    exist_ok: bool = False,
 ) -> Dataset:
     """Create a new dataset for robot demonstrations.
 
@@ -111,6 +112,30 @@ def create_dataset(
     Raises:
         DatasetError: If dataset creation fails
     """
-    _active_dataset = Dataset.create(name, description, tags, shared)
-    GlobalSingleton()._active_dataset_id = _active_dataset.id
-    return _active_dataset
+    existing = Dataset.get_by_name(name, non_exist_ok=True)
+
+    if existing:
+        if not exist_ok:
+            raise DatasetError(f"Dataset with name '{name}' already exists.")
+
+        return existing
+
+    # Create new dataset
+    dataset = Dataset.create(name, description, tags, shared)
+    return dataset
+
+
+def connect_dataset(dataset: Dataset | str) -> Dataset:
+    """Connect to an existing dataset instance.
+
+    Args:
+        dataset: The dataset instance to connect to
+
+    Returns:
+        Dataset: The connected dataset instance
+    """
+    if isinstance(dataset, str):
+        dataset = get_dataset(name=dataset)
+
+    GlobalSingleton()._active_dataset_id = dataset.id
+    return dataset
