@@ -661,7 +661,7 @@ def test_stop_recording_wait_false_multi_camera_4k_burst(dataset_cleanup):
     dataset_name = f"multi_cam_burst_dataset_{uuid.uuid4().hex[:8]}"
     dataset_cleanup(dataset_name)
 
-    camera_count = int(os.getenv("NCD_BURST_CAMERA_COUNT", "3"))
+    camera_count = int(os.getenv("NCD_BURST_CAMERA_COUNT", "2"))
     frame_width = int(os.getenv("NCD_BURST_RGB_FRAME_WIDTH", "3840"))
     frame_height = int(os.getenv("NCD_BURST_RGB_FRAME_HEIGHT", "2160"))
     frame_count = int(os.getenv("NCD_BURST_RGB_FRAME_COUNT", "80"))

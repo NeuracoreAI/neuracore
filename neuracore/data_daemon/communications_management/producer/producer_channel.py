@@ -506,6 +506,9 @@ class ProducerChannel:
         trace_end_sequence = self.get_last_enqueued_sequence_number()
         self.wait_until_sequence_sent(trace_end_sequence)
 
+        if wait_for_slot_drain and self._shared_slot_transport is not None:
+            self._shared_slot_transport.finish_recording_session()
+
     def _stop_heartbeat_service(self) -> None:
         self._heartbeat_service.stop(join_timeout_s=1.0)
 

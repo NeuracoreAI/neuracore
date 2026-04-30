@@ -3,6 +3,7 @@ and record it to Neuracore."""
 
 import argparse
 import time
+import uuid
 
 import numpy as np
 from common.rollout_utils import rollout_policy
@@ -28,7 +29,7 @@ def main(args):
 
     if record:
         nc.create_dataset(
-            name="My Example Dataset",
+            name=args.get('dataset_name', "Test dataset 3"),
             description="This is an example dataset",
         )
         print("Created Dataset...")
@@ -106,6 +107,13 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to record with neuracore",
         default=False,
+    )
+
+    parser.add_argument(
+        "--dataset_name",
+        type=str,
+        help="The name of the dataset",
+        default=str(uuid.uuid4()),
     )
 
     main(vars(parser.parse_args()))

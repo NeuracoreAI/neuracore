@@ -114,15 +114,21 @@ class DataStream(ABC):
         )
 
     def stop_recording(self, *, wait_for_drain: bool = True) -> None:
-        """Stop recording data and finish the active trace if a producer exists."""
+        """Stop recording data and tear down the active producer, if any."""
         self._recording = False
-        if (
-            isinstance(self._producer_channel, ProducerChannel)
-            and self._producer_channel.trace_id
-        ):
-            self._producer_channel.cleanup_producer_channel(
-                wait_for_slot_drain=wait_for_drain
-            )
+        producer_channel = self._producer_channel
+        self._producer_channel = None
+
+        if not isinstance(producer_channel, ProducerChannel):
+            return
+
+        try:
+            if producer_channel.trace_id:
+                producer_channel.cleanup_producer_channel(
+                    wait_for_slot_drain=wait_for_drain
+                )
+        finally:
+            producer_channel.stop_producer_channel()
 
     def is_recording(self) -> bool:
         """Check if recording is active.
