@@ -17,7 +17,6 @@ from tests.integration.platform.data_daemon.shared.assertions import (
     assert_post_test_storage_state,
     verify_cloud_results,
 )
-from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
@@ -34,7 +33,6 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     log_frames,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
-    MAX_TIME_TO_START_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
     TIMESTAMP_MODE_REAL,
 )
@@ -42,6 +40,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
     set_case_analysis_report,
 )
+from tests.integration.platform.data_daemon.shared.timer import Timer
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +78,7 @@ def test_cancel_recording_produces_no_data(
             " or a saved current organization."
         )
 
+    start_time = time.perf_counter()
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name)
     spec = specs[0]
@@ -89,18 +89,12 @@ def test_cancel_recording_produces_no_data(
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
 
-                with Timer(
-                    MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True
-                ):
+                with Timer("nc.create_dataset"):
                     nc.create_dataset(dataset_name, description="Cancel recording test")
-                with Timer(
-                    MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True
-                ):
+                with Timer("nc.connect_robot"):
                     robot = nc.connect_robot(robot_name, overwrite=False)
 
-                with Timer(
-                    MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
-                ):
+                with Timer("nc.start_recording"):
                     nc.start_recording(robot_name=robot_name)
                 cancelled_recording_id = robot.get_current_recording_id()
                 assert cancelled_recording_id is not None
@@ -108,21 +102,14 @@ def test_cancel_recording_produces_no_data(
                 log_frames(spec, recording_index=0, marker_name="marker_cancel")
 
                 with Timer(
-                    case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
-                    label="nc.cancel_recording",
-                    always_log=True,
-                    assert_limit=False,
+                    "nc.cancel_recording",
+                    max_time=case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
                 ):
                     nc.cancel_recording(robot_name=robot_name)
 
                 time.sleep(5)
 
-                with Timer(
-                    MAX_TIME_TO_START_S,
-                    label="nc.get_dataset",
-                    always_log=True,
-                    assert_limit=False,
-                ):
+                with Timer("nc.get_dataset"):
                     dataset = nc.get_dataset(dataset_name)
                 assert (
                     len(dataset) == 0
@@ -132,6 +119,7 @@ def test_cancel_recording_produces_no_data(
             request=request,
             case=case,
             results=[],
+            test_wall_s=time.perf_counter() - start_time,
         )
 
     assert_post_test_storage_state(case.storage_state_action)
@@ -156,6 +144,7 @@ def test_cancel_then_start_new_recording(
             " or a saved current organization."
         )
 
+    start_time = time.perf_counter()
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name)
     spec = specs[0]
@@ -167,22 +156,16 @@ def test_cancel_then_start_new_recording(
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
 
-                with Timer(
-                    MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True
-                ):
+                with Timer("nc.create_dataset"):
                     nc.create_dataset(
                         dataset_name,
                         description=f"Cancel-then-resume test gap={gap_s}s",
                     )
-                with Timer(
-                    MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True
-                ):
+                with Timer("nc.connect_robot"):
                     robot = nc.connect_robot(robot_name, overwrite=False)
 
                 # --- cancelled recording ---
-                with Timer(
-                    MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
-                ):
+                with Timer("nc.start_recording"):
                     nc.start_recording(robot_name=robot_name)
                 cancelled_recording_id = robot.get_current_recording_id()
                 assert cancelled_recording_id is not None
@@ -190,10 +173,8 @@ def test_cancel_then_start_new_recording(
                 log_frames(spec, recording_index=0, marker_name="marker_cancelled")
 
                 with Timer(
-                    case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
-                    label="nc.cancel_recording",
-                    always_log=True,
-                    assert_limit=False,
+                    "nc.cancel_recording",
+                    max_time=case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
                 ):
                     nc.cancel_recording(robot_name=robot_name)
 
@@ -202,9 +183,7 @@ def test_cancel_then_start_new_recording(
                     time.sleep(gap_s)
 
                 # --- valid recording ---
-                with Timer(
-                    MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
-                ):
+                with Timer("nc.start_recording"):
                     nc.start_recording(robot_name=robot_name)
                 resumed_recording_id = robot.get_current_recording_id()
                 assert resumed_recording_id is not None
@@ -212,10 +191,8 @@ def test_cancel_then_start_new_recording(
                 log_frames(spec, recording_index=0, marker_name="marker_resume")
 
                 with Timer(
-                    case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
-                    label="nc.stop_recording",
-                    always_log=True,
-                    assert_limit=False,
+                    "nc.stop_recording",
+                    max_time=case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
                 ):
                     nc.stop_recording(robot_name=robot_name, wait=True)
 
@@ -247,4 +224,5 @@ def test_cancel_then_start_new_recording(
             request=request,
             case=case,
             results=results,
+            test_wall_s=time.perf_counter() - start_time,
         )

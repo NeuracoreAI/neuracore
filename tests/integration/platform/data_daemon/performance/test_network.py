@@ -30,6 +30,12 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
 )
+from tests.integration.platform.data_daemon.shared.timer import PERF_LOG_LABELS, Timer
+
+# Performance tests assert per-call logging budgets — opt the shared log
+# labels in to assertions for this module only.
+Timer.assert_labels(PERF_LOG_LABELS)
+
 
 # Cloud performance covers both nowait and wait=True because upload/registration
 # progress is asynchronous and both stop-recording modes must remain valid.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from tests.integration.platform.data_daemon.daemon_test_cases import (
@@ -88,6 +90,7 @@ def test_cloud_data_integrity(
             " or a saved current organization."
         )
 
+    start_time = time.perf_counter()
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name)
     results: list[ContextResult] = []
@@ -105,4 +108,5 @@ def test_cloud_data_integrity(
                 request=request,
                 case=case,
                 results=results,
+                test_wall_s=time.perf_counter() - start_time,
             )

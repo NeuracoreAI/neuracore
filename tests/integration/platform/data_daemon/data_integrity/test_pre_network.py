@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from tests.integration.platform.data_daemon.daemon_test_cases import (
@@ -68,6 +70,7 @@ def test_disk_db_data_integrity(
     - asserts no residual processes, files, sockets, or DB artefacts remain
       (isolation post-condition)
     """
+    start_time = time.perf_counter()
     if case.preserve_artifacts_per_test:
         setup_per_test_artifact_dirs(case_id(case))
 
@@ -84,4 +87,9 @@ def test_disk_db_data_integrity(
                 assert_disk_recording_properties(results)
 
         finally:
-            set_case_analysis_report(request=request, case=case, results=results)
+            set_case_analysis_report(
+                request=request,
+                case=case,
+                results=results,
+                test_wall_s=time.perf_counter() - start_time,
+            )

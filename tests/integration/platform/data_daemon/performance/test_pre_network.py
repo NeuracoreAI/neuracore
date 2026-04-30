@@ -25,6 +25,12 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
 )
+from tests.integration.platform.data_daemon.shared.timer import PERF_LOG_LABELS, Timer
+
+# Performance tests assert per-call logging budgets — opt the shared log
+# labels in to assertions for this module only.
+Timer.assert_labels(PERF_LOG_LABELS)
+
 
 _CASES = DataDaemonTestBatch(
     cases=PRE_NETWORK_PERFORMANCE_CASES,

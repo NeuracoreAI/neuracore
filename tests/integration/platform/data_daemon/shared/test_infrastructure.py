@@ -222,11 +222,15 @@ def build_isolation_run_analysis(
     final_cleanup_s: float | None = None,
     status: str = "generated",
     disk_durations: dict[str, float] | None = None,
+    case_id_prefix: str | None = None,
+    test_wall_s: float | None = None,
 ) -> str:
     """Build isolation analysis with daemon shutdown timings.
 
     Delegates to :func:`log_run_analysis` after appending optional
-    shutdown-timing lines to the extra sections block.
+    shutdown-timing lines to the extra sections block. The title shows the
+    overarching test wall time when ``test_wall_s`` is provided; otherwise
+    falls back to the max-context span plus shutdown overhead.
 
     Args:
         case: The test case that ran.
@@ -234,6 +238,9 @@ def build_isolation_run_analysis(
         daemon_shutdown_s: Optional measured daemon shutdown duration in seconds.
         final_cleanup_s: Optional measured total cleanup duration in seconds.
         status: Free-form status string embedded in the report header.
+        test_wall_s: Total elapsed wall time for the entire test, from the
+            first line of the test function to the finally block. When
+            provided, used as ``total_wall_s`` in the session summary.
 
     Returns:
         The formatted analysis report as a multi-line string.
@@ -245,15 +252,34 @@ def build_isolation_run_analysis(
         daemon_lines.append(f"    final cleanup:    {final_cleanup_s:.3f}s")
 
     extra_sections = ["", "  Daemon shutdown:", *daemon_lines] if daemon_lines else None
+
+    display_wall_s = test_wall_s
+    if display_wall_s is None:
+        display_wall_s = (
+            max(ctx.wall_stopped_at for ctx in results)
+            - min(ctx.wall_started_at or 0.0 for ctx in results)
+            if results
+            else 0.0
+        )
+        if daemon_shutdown_s is not None:
+            display_wall_s += daemon_shutdown_s
+        if final_cleanup_s is not None:
+            display_wall_s += final_cleanup_s
+    title_suffix = f"  (wall={display_wall_s:.1f}s)" if (results or test_wall_s) else ""
+
     return log_run_analysis(
         case=case,
         results=results,
-        title=f"Isolation run analysis: {case_id(case)}",
+        title=f"Isolation run analysis: {case_id(case)}{title_suffix}",
         status=status,
         note="Timing diagnostics are informational only.",
         extra_sections=extra_sections,
         include_in_session_summary=True,
         disk_durations=disk_durations,
+        case_id_prefix=case_id_prefix,
+        daemon_shutdown_s=daemon_shutdown_s,
+        final_cleanup_s=final_cleanup_s,
+        test_wall_s=test_wall_s,
     )
 
 
@@ -265,6 +291,8 @@ def set_case_analysis_report(
     daemon_shutdown_s: float | None = None,
     final_cleanup_s: float | None = None,
     disk_durations: dict[str, float] | None = None,
+    case_id_prefix: str | None = None,
+    test_wall_s: float | None = None,
 ) -> None:
     """Attach an isolation analysis report to the pytest node for terminal output.
 
@@ -278,6 +306,8 @@ def set_case_analysis_report(
         results: Per-context result dicts collected during the run.
         daemon_shutdown_s: Optional measured daemon shutdown duration.
         final_cleanup_s: Optional measured total cleanup duration.
+        test_wall_s: Total elapsed wall time from the first line of the test
+            function to the finally block.
     """
     try:
         request.node.run_analysis_report = build_isolation_run_analysis(
@@ -287,6 +317,8 @@ def set_case_analysis_report(
             final_cleanup_s=final_cleanup_s,
             status="generated",
             disk_durations=disk_durations,
+            case_id_prefix=case_id_prefix,
+            test_wall_s=test_wall_s,
         )
     except Exception as exc:  # noqa: BLE001
         request.node.run_analysis_report = "\n".join([
@@ -297,3 +329,67 @@ def set_case_analysis_report(
             "  Timing diagnostics are informational only.",
             "=" * 64,
         ])
+
+
+def build_terminal_summary(
+    session_runs: list[dict[str, object]],
+) -> list[str]:
+    """Build terminal summary lines for session test runs.
+
+    Consolidates session run analysis with wall clock times and infrastructure
+    timings. Wall times are computed from each run's context results, which are
+    already calculated and stored during test execution.
+
+    Args:
+        session_runs: List of session run dicts from SESSION_RUNS, each containing
+            case_id, dataset_name, timer_stats, and context_results.
+
+    Returns:
+        List of formatted summary lines ready for terminal output.
+    """
+    from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (  # noqa: E501
+        _format_timer_stats_line,
+    )
+    from tests.integration.platform.data_daemon.shared.timer import Timer
+
+    if not session_runs:
+        return []
+
+    separator = "=" * 64
+    lines = [
+        "",
+        separator,
+        f"Session summary  ({len(session_runs)} test(s) completed)",
+        separator,
+    ]
+
+    all_labels = sorted({label for run in session_runs for label in run["timer_stats"]})
+    for run in session_runs:
+        total_wall_s = run.get("total_wall_s", 0.0)
+        dataset_suffix = (
+            f"  dataset={run['dataset_name']!r}" if run.get("dataset_name") else ""
+        )
+        lines.append(
+            f"\n  {run['case_id']}  (wall={total_wall_s:.1f}s){dataset_suffix}"
+        )
+        context_results = run.get("context_results", [])
+        if context_results:
+            ctx_parts = [
+                f"ctx[{c['context_index']}]={c['wall_s']:.1f}s" for c in context_results
+            ]
+            lines.append(f"    contexts: {', '.join(ctx_parts)}")
+        for label in all_labels:
+            stats = run["timer_stats"].get(label)
+            if stats is not None:
+                lines.append(_format_timer_stats_line(label, stats))
+            else:
+                lines.append(f"    {label:<42}  ---")
+
+    infra_labels = sorted(label for label in Timer._stats if label not in all_labels)
+    if infra_labels:
+        lines.append("\n  Infrastructure timings:")
+        for label in infra_labels:
+            lines.append(_format_timer_stats_line(label, Timer._stats[label]))
+
+    lines.append(separator)
+    return lines

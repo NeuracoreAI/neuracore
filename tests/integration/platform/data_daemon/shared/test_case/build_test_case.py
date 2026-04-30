@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     )
 
 from neuracore.core.config.config_manager import get_config_manager
-from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     BASE_DATASET_READY_TIMEOUT_S,
     DURATION_MODE_FIXED,
@@ -42,6 +41,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     StorageStateAction,
     TimestampMode,
 )
+from tests.integration.platform.data_daemon.shared.timer import Timer
 
 logger = logging.getLogger(__name__)
 
@@ -399,6 +399,10 @@ def log_run_analysis(
     extra_sections: list[str] | None = None,
     include_in_session_summary: bool = True,
     disk_durations: dict[str, float] | None = None,
+    case_id_prefix: str | None = None,
+    daemon_shutdown_s: float | None = None,
+    final_cleanup_s: float | None = None,
+    test_wall_s: float | None = None,
 ) -> str:
     """Log a detailed analysis of a test run for diagnostics."""
 
@@ -482,8 +486,24 @@ def log_run_analysis(
         lines.extend(extra_sections)
 
     if include_in_session_summary:
+        _case_id = (
+            f"{case_id_prefix} {case_id(case)}" if case_id_prefix else case_id(case)
+        )
+        if test_wall_s is not None:
+            total_wall_s = test_wall_s
+        else:
+            total_wall_s = (
+                max(result.wall_stopped_at for result in results)
+                - min(result.wall_started_at or 0.0 for result in results)
+                if results
+                else 0.0
+            )
+            if daemon_shutdown_s is not None:
+                total_wall_s += daemon_shutdown_s
+            if final_cleanup_s is not None:
+                total_wall_s += final_cleanup_s
         SESSION_RUNS.append({
-            "case_id": case_id(case),
+            "case_id": _case_id,
             "dataset_name": results[0].dataset_name if results else None,
             "timer_stats": {
                 label: dict(Timer._stats[label])
@@ -497,6 +517,7 @@ def log_run_analysis(
                 }
                 for result in results
             ],
+            "total_wall_s": total_wall_s,
             **(
                 {
                     "disk_durations": dict(disk_durations),

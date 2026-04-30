@@ -34,135 +34,9 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_SIGKILL,
     STOP_METHOD_SIGTERM,
 )
+from tests.integration.platform.data_daemon.shared.timer import Timer
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Timing constants
-# ---------------------------------------------------------------------------
-
-MAX_TIME_TO_START_S = 20
-"""Maximum seconds allowed for a daemon-startup or API-handshake operation."""
-
-MAX_TIME_TO_LOG_S = 0.5
-"""Maximum seconds allowed for a single data-logging call."""
-
-LEAST_TIME_TO_STOP_S = 10
-"""Minimum seconds expected for a recording stop."""
-
-HIGH_TIME_TO_DATASET_READY_S = 500
-"""Upper bound on waiting for an online dataset to become ready, in seconds."""
-
-
-# ---------------------------------------------------------------------------
-# Timer
-# ---------------------------------------------------------------------------
-
-
-class Timer:
-    """Context manager that measures wall-clock elapsed time for a block.
-
-    Accumulates per-label statistics (count, total, max) in the class-level
-    ``_stats`` dictionary so that test suites can report aggregate timing at
-    the end of a run.  Optionally asserts that the block completed within
-    ``max_time`` seconds.
-
-    Attributes:
-        _stats: Class-level dict mapping label strings to aggregate timing
-            statistics with keys ``"count"``, ``"total"``, and ``"max"``.
-        max_time: Upper time limit in seconds.
-        label: Human-readable name for this timer.  Pass ``None`` to skip
-            stat accumulation.
-        always_log: When ``True``, log the elapsed time even if below
-            ``max_time``.
-        log_threshold: Log at INFO level when elapsed time meets or exceeds
-            this value.  ``None`` disables.
-        assert_limit: When ``True`` (default), raise ``AssertionError`` if
-            the block exceeds ``max_time``.  Set to ``False`` to log only.
-    """
-
-    _stats: dict[str, dict[str, float]] = {}
-
-    def __init__(
-        self,
-        max_time: float = MAX_TIME_TO_LOG_S,
-        label: str | None = None,
-        always_log: bool = False,
-        log_threshold: float | None = None,
-        assert_limit: bool = True,
-        deadline: float | None = None,
-        timing_tolerance: float | None = None,
-    ) -> None:
-        self.max_time = max_time
-        self.label = label
-        self.always_log = always_log
-        self.log_threshold = log_threshold
-        self.assert_limit = assert_limit
-        self.deadline = deadline
-        self.timing_tolerance = timing_tolerance
-
-    def __enter__(self) -> Timer:
-        self.wall_start = time.time()
-        self.start = time.perf_counter()
-        return self
-
-    def __exit__(self, *args: object) -> bool | None:
-        self.end = time.perf_counter()
-        self.interval = self.end - self.start
-        had_exception = len(args) > 0 and args[0] is not None
-        if self.label:
-            stats = self._stats.setdefault(
-                self.label, {"count": 0.0, "total": 0.0, "max": 0.0}
-            )
-            stats["count"] += 1
-            stats["total"] += self.interval
-            stats["max"] = max(stats["max"], self.interval)
-
-            should_log = self.always_log
-            if self.log_threshold is not None and self.interval >= self.log_threshold:
-                should_log = True
-            if self.interval >= self.max_time:
-                should_log = True
-
-            if should_log:
-                level = (
-                    logging.WARNING if self.interval >= self.max_time else logging.INFO
-                )
-                logger.log(
-                    level,
-                    "Timer %-32s %.3fs (limit=%.3fs)",
-                    self.label,
-                    self.interval,
-                    self.max_time,
-                )
-
-        if had_exception:
-            return False
-
-        if self.assert_limit:
-            if self.deadline is not None and self.timing_tolerance is not None:
-                lateness = self.wall_start - self.deadline
-                assert abs(lateness) <= self.timing_tolerance, (
-                    f"{self.label or 'Function'} logged at wrong moment: "
-                    f"lateness={lateness:+.3f}s, "
-                    f"tolerance=±{self.timing_tolerance:.3f}s"
-                )
-            assert self.interval < self.max_time, (
-                f"{self.label or 'Function'} took too long: "
-                f"{self.interval:.3f}s >= {self.max_time:.3f}s"
-            )
-        return None
-
-    @classmethod
-    def merge_stats(cls, stats: dict[str, dict[str, float]]) -> None:
-        """Merge external timer stats (e.g. from a worker process) into the accumulator."""  # noqa: E501
-        for label, incoming in stats.items():
-            existing = cls._stats.setdefault(
-                label, {"count": 0.0, "total": 0.0, "max": 0.0}
-            )
-            existing["count"] += incoming["count"]
-            existing["total"] += incoming["total"]
-            existing["max"] = max(existing["max"], incoming["max"])
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +117,7 @@ def _wait_and_escalate(candidate_pids: set[int], *, graceful_timeout_s: float) -
         if not pid_is_running(pid):
             continue
         if not wait_for_exit(pid, timeout_s=graceful_timeout_s):
-            with Timer(5.0, label="stop_daemon_escalated", assert_limit=False):
+            with Timer("stop_daemon_escalated"):
                 force_kill(pid)
                 wait_for_exit(pid, timeout_s=5.0)
 
@@ -274,7 +148,7 @@ def stop_daemon(
         graceful_timeout_s: Seconds to wait for graceful exit before escalating
             to SIGKILL.  Ignored when ``method="sigkill"``.
     """
-    with Timer(15.0, label=f"stop_daemon[{method}]", assert_limit=False):
+    with Timer(f"stop_daemon[{method}]"):
         candidate_pids = _collect_candidate_pids()
         _send_initial_stop(method, candidate_pids)
         if method == STOP_METHOD_SIGKILL:

@@ -73,10 +73,10 @@ from tests.integration.platform.data_daemon.shared.disk_helpers import (
     list_recording_ids_on_disk,
     normalize_recording_ids,
 )
-from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
 )
+from tests.integration.platform.data_daemon.shared.timer import Timer
 
 logger = logging.getLogger(__name__)
 
@@ -617,7 +617,7 @@ def wait_for_offline_db_ready(
     }
     target_recording_ids = normalize_recording_ids(expected_recording_ids)
 
-    with Timer(timeout_s, label="daemon.offline_db_ready", always_log=True):
+    with Timer("daemon.offline_db_ready", max_time=timeout_s):
         while time.monotonic() < deadline:
             db_path = get_daemon_db_path()
             if not db_path.exists():

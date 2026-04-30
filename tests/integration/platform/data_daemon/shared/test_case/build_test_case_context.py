@@ -20,10 +20,6 @@ import numpy as np
 
 import neuracore as nc
 from tests.integration.platform.data_daemon.shared.assertions import assert_context_mode
-from tests.integration.platform.data_daemon.shared.process_control import (
-    MAX_TIME_TO_LOG_S,
-    Timer,
-)
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestCase,
     camera_names,
@@ -50,6 +46,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     TIMESTAMP_MODE_REAL,
     TIMESTAMP_MODE_STOCHASTIC,
 )
+from tests.integration.platform.data_daemon.shared.timer import Timer
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +306,6 @@ def log_synchronous_frames(
     Joint and video frames are interleaved in a single loop using a wall-clock
     deadline scheduler, so both streams advance together in time order.
     """
-    timing_tolerance = STOCHASTIC_JITTER_S if use_stochastic_timestamps else None
     recording_wall_start = time.time()
     joint_index = 0
     video_index = 0
@@ -343,37 +339,33 @@ def log_synchronous_frames(
                 timestamp = intended + jitter
             joint_values = generate_joint_values(joint_index, joint_fps, joint_names)
             with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_joint_positions",
+                "nc.log_joint_positions",
                 deadline=joint_deadline if assert_deadline else None,
-                timing_tolerance=timing_tolerance,
+                use_stochastic=use_stochastic_timestamps,
             ):
                 nc.log_joint_positions(
                     joint_values, robot_name=robot_name, timestamp=timestamp
                 )
             with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_joint_velocities",
+                "nc.log_joint_velocities",
                 deadline=joint_deadline if assert_deadline else None,
-                timing_tolerance=timing_tolerance,
+                use_stochastic=use_stochastic_timestamps,
             ):
                 nc.log_joint_velocities(
                     joint_values, robot_name=robot_name, timestamp=timestamp
                 )
             with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_joint_torques",
+                "nc.log_joint_torques",
                 deadline=joint_deadline if assert_deadline else None,
-                timing_tolerance=timing_tolerance,
+                use_stochastic=use_stochastic_timestamps,
             ):
                 nc.log_joint_torques(
                     joint_values, robot_name=robot_name, timestamp=timestamp
                 )
             with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_custom_1d",
+                "nc.log_custom_1d",
                 deadline=joint_deadline if assert_deadline else None,
-                timing_tolerance=timing_tolerance,
+                use_stochastic=use_stochastic_timestamps,
             ):
                 nc.log_custom_1d(
                     marker_name,
@@ -401,10 +393,9 @@ def log_synchronous_frames(
                 )
                 rgb_image = encode_frame_number(frame_code, image_width, image_height)
                 with Timer(
-                    MAX_TIME_TO_LOG_S,
-                    label="nc.log_rgb",
+                    "nc.log_rgb",
                     deadline=video_deadline if assert_deadline else None,
-                    timing_tolerance=timing_tolerance,
+                    use_stochastic=use_stochastic_timestamps,
                 ):
                     nc.log_rgb(
                         camera_name,
@@ -473,9 +464,6 @@ def run_threaded_logging(
             fps = video_fps if is_rgb else joint_fps
             thread_wall_start = time.time()
             jitter = get_jitter(use_stochastic_timestamps)
-            timing_tolerance = (
-                STOCHASTIC_JITTER_S if use_stochastic_timestamps else None
-            )
             for frame_index in range(frame_count):
                 frame_deadline = thread_wall_start + (frame_index / fps)
                 remaining = frame_deadline - time.time()
@@ -502,10 +490,9 @@ def run_threaded_logging(
                             frame_code, image_width, image_height
                         )
                         with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_rgb",
+                            "nc.log_rgb",
                             deadline=frame_deadline if assert_deadline else None,
-                            timing_tolerance=timing_tolerance,
+                            use_stochastic=use_stochastic_timestamps,
                         ):
                             nc.log_rgb(
                                 camera_id,
@@ -520,10 +507,9 @@ def run_threaded_logging(
                     )
                     if role_name == "joint_positions":
                         with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_positions",
+                            "nc.log_joint_positions",
                             deadline=frame_deadline if assert_deadline else None,
-                            timing_tolerance=timing_tolerance,
+                            use_stochastic=use_stochastic_timestamps,
                         ):
                             nc.log_joint_positions(
                                 joint_values,
@@ -532,10 +518,9 @@ def run_threaded_logging(
                             )
                     elif role_name == "joint_velocities":
                         with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_velocities",
+                            "nc.log_joint_velocities",
                             deadline=frame_deadline if assert_deadline else None,
-                            timing_tolerance=timing_tolerance,
+                            use_stochastic=use_stochastic_timestamps,
                         ):
                             nc.log_joint_velocities(
                                 joint_values,
@@ -544,10 +529,9 @@ def run_threaded_logging(
                             )
                     else:
                         with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_torques",
+                            "nc.log_joint_torques",
                             deadline=frame_deadline if assert_deadline else None,
-                            timing_tolerance=timing_tolerance,
+                            use_stochastic=use_stochastic_timestamps,
                         ):
                             nc.log_joint_torques(
                                 joint_values,
@@ -555,10 +539,9 @@ def run_threaded_logging(
                                 timestamp=timestamp,
                             )
                 with Timer(
-                    MAX_TIME_TO_LOG_S,
-                    label="nc.log_custom_1d",
+                    "nc.log_custom_1d",
                     deadline=frame_deadline if assert_deadline else None,
-                    timing_tolerance=timing_tolerance,
+                    use_stochastic=use_stochastic_timestamps,
                 ):
                     nc.log_custom_1d(
                         marker_name,
@@ -646,13 +629,13 @@ def log_frames(
 def _bind_worker_dataset(*, dataset_name: str, create_dataset: bool) -> None:
     """Ensure a worker is bound to the shared dataset before recording."""
     if create_dataset:
-        with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
+        with Timer("nc.create_dataset"):
             nc.create_dataset(dataset_name)
         return
 
     last_error: Exception | None = None
     deadline = time.time() + MAX_TIME_TO_START_S
-    with Timer(MAX_TIME_TO_START_S, label="nc.get_dataset", always_log=True):
+    with Timer("nc.get_dataset"):
         while time.time() < deadline:
             try:
                 nc.get_dataset(dataset_name)
@@ -699,7 +682,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             dataset_name=spec.dataset_name,
             create_dataset=spec.context_index == 0,
         )
-        with Timer(MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True):
+        with Timer("nc.connect_robot"):
             robot = nc.connect_robot(spec.robot_name, overwrite=False)
 
         expected_by_recording: dict[str, RecordingExpectedTimestamps] | None = (
@@ -711,11 +694,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 spec.timestamp_start_s + recording_index * case.duration_sec
             )
 
-            with Timer(
-                MAX_TIME_TO_START_S,
-                label="nc.start_recording",
-                always_log=True,
-            ):
+            with Timer("nc.start_recording"):
                 nc.start_recording(robot_name=spec.robot_name)
             if wall_started_at is None:
                 wall_started_at = time.time()
@@ -775,10 +754,8 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 marker_names = current_marker_names
 
             with Timer(
-                case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
-                label="nc.stop_recording",
-                always_log=True,
-                assert_limit=False,
+                "nc.stop_recording",
+                max_time=case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
             ):
                 nc.stop_recording(robot_name=spec.robot_name, wait=case.wait)
             wall_stopped_at = time.time()

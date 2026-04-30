@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
 
 import pytest
@@ -8,15 +9,11 @@ import pytest
 from tests.integration.platform.data_daemon.shared.assertions import (
     clear_daemon_timer_stats as _clear_daemon_timer_stats,
 )
-from tests.integration.platform.data_daemon.shared.process_control import (
-    Timer,
-    stop_daemon,
-)
+from tests.integration.platform.data_daemon.shared.process_control import stop_daemon
 from tests.integration.platform.data_daemon.shared.profiles import cleanup_test_profiles
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     SESSION_RUNS,
     DataDaemonTestCase,
-    _format_timer_stats_line,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
     ContextResult,
@@ -29,6 +26,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     OFFLINE_RECORDINGS_ROOT,
     apply_storage_state_action,
     build_isolation_run_analysis,
+    build_terminal_summary,
 )
 
 # cspell:ignore terminalreporter exitstatus finalizer NODEIDS exitfirst unparameterized
@@ -101,20 +99,30 @@ def clear_daemon_timer_stats() -> None:
 @pytest.fixture()
 def log_run_analysis_on_teardown(
     request: pytest.FixtureRequest,
-) -> Callable[[DataDaemonTestCase, list[ContextResult]], None]:
+) -> Callable[..., None]:
     """Register case+results to be passed to log_run_analysis at teardown."""
+    fixture_start = time.perf_counter()
     state: dict[str, object] = {}
 
-    def register(case: DataDaemonTestCase, results: list[ContextResult]) -> None:
+    def register(
+        case: DataDaemonTestCase,
+        results: list[ContextResult],
+        *,
+        label_prefix: str | None = None,
+    ) -> None:
         state["case"] = case
         state["results"] = results
+        state["label_prefix"] = label_prefix
 
     def finalizer() -> None:
         if state.get("results"):
             try:
+                test_wall_s = time.perf_counter() - fixture_start
                 request.node.run_analysis_report = build_isolation_run_analysis(
                     case=state["case"],  # type: ignore[arg-type]
                     results=state["results"],  # type: ignore[arg-type]
+                    case_id_prefix=state.get("label_prefix"),  # type: ignore[arg-type]
+                    test_wall_s=test_wall_s,
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -126,38 +134,6 @@ def log_run_analysis_on_teardown(
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     """Print a session summary at the end of the test run."""
     del exitstatus, config
-    if not SESSION_RUNS:
-        return
-
-    separator = "=" * 64
-    lines = [
-        "",
-        separator,
-        f"Session summary  ({len(SESSION_RUNS)} test(s) completed)",
-        separator,
-    ]
-
-    all_labels = sorted({label for run in SESSION_RUNS for label in run["timer_stats"]})
-    for run in SESSION_RUNS:
-        total_wall_s = sum(ctx["wall_s"] for ctx in run["context_results"])
-        dataset_suffix = (
-            f"  dataset={run['dataset_name']!r}" if run.get("dataset_name") else ""
-        )
-        lines.append(
-            f"\n  {run['case_id']}  (wall={total_wall_s:.1f}s){dataset_suffix}"
-        )
-        for label in all_labels:
-            stats = run["timer_stats"].get(label)
-            if stats is not None:
-                lines.append(_format_timer_stats_line(label, stats))
-            else:
-                lines.append(f"    {label:<42}  ---")
-
-    infra_labels = sorted(label for label in Timer._stats if label not in all_labels)
-    if infra_labels:
-        lines.append("\n  Infrastructure timings:")
-        for label in infra_labels:
-            lines.append(_format_timer_stats_line(label, Timer._stats[label]))
-
-    lines.append(separator)
-    terminalreporter.write_line("\n".join(lines))
+    lines = build_terminal_summary(SESSION_RUNS)
+    if lines:
+        terminalreporter.write_line("\n".join(lines))

@@ -53,7 +53,6 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_recordings_finalized,
 )
 from tests.integration.platform.data_daemon.shared.process_control import (
-    Timer,
     _live_daemon_pids,
     get_runner_pids,
 )
@@ -68,6 +67,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     DataDaemonTestCase,
     case_timeout_seconds,
 )
+from tests.integration.platform.data_daemon.shared.timer import Timer
 
 if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
