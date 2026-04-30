@@ -71,8 +71,8 @@ from .utils import _load_pretrained_state_dict
 logger = logging.getLogger(__name__)
 
 # Normalizer types for proprioception and actions
-PROPRIO_NORMALIZER = MeanStdNormalizer
-ACTION_NORMALIZER = MeanStdNormalizer
+proprio_normalizer = MeanStdNormalizer
+action_normalizer = MeanStdNormalizer
 
 
 class Groot(NeuracoreModel):
@@ -356,10 +356,10 @@ class Groot(NeuracoreModel):
             f"max_action_dim={max_action_dim}"
         )
 
-        self.proprio_normalizer = PROPRIO_NORMALIZER(
+        self.proprio_normalizer = proprio_normalizer(
             name="proprioception", statistics=proprio_stats
         )
-        self.action_normalizer = ACTION_NORMALIZER(
+        self.action_normalizer = action_normalizer(
             name="actions", statistics=output_stats
         )
         if use_pretrained_weights:
