@@ -86,7 +86,6 @@ class TraceStatusUpdater:
 
         # Map of recording_id -> TraceUpdateBatch
         self._pending_update_batch: dict[str, TraceUpdateBatch] = {}
-        self._batch_update_tasks: set[asyncio.Task[None]] = set()
 
     async def _get_org_id(self) -> str:
         """Get the current org ID."""
@@ -118,34 +117,14 @@ class TraceStatusUpdater:
             await asyncio.sleep(self.MINIMUM_REQUEST_INTERVAL_COMPLETE_S)
             await update_batch.includes_completed_trace.wait()
 
-        completed_trace_task = asyncio.create_task(_wait_for_batch_has_complete_trace())
-        batch_full_task = asyncio.create_task(update_batch.batch_full.wait())
-        done, pending = await asyncio.wait(
-            (completed_trace_task, batch_full_task),
+        await asyncio.wait(
+            (
+                asyncio.create_task(_wait_for_batch_has_complete_trace()),
+                asyncio.create_task(update_batch.batch_full.wait()),
+            ),
             timeout=self.MINIMUM_REQUEST_INTERVAL_IN_PROGRESS_S,
             return_when=asyncio.FIRST_COMPLETED,
         )
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        for task in done:
-            await task
-
-    async def shutdown(self) -> None:
-        """Cancel and drain any background batch update tasks."""
-        for update_batch in self._pending_update_batch.values():
-            if not update_batch.completed.done():
-                update_batch.completed.set_result(False)
-        self._pending_update_batch.clear()
-        self._in_progress_updates.clear()
-
-        tasks = list(self._batch_update_tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._batch_update_tasks.clear()
 
     async def _send_batch_update_request(
         self, recording_id: str, body: BatchedUpdateTraceRequest
@@ -214,35 +193,20 @@ class TraceStatusUpdater:
             recording_id: The recording ID
             update_batch: The batch of updates to apply
         """
-        try:
-            await self._wait_for_batch_ready(update_batch)
+        await self._wait_for_batch_ready(update_batch)
 
-            if self._pending_update_batch.get(recording_id) is update_batch:
-                self._pending_update_batch.pop(recording_id)
+        if self._pending_update_batch.get(recording_id) is update_batch:
+            self._pending_update_batch.pop(recording_id)
 
-            updates: dict[str, TraceStatusUpdates] = {}
-            for trace_id in update_batch.traces:
-                stacked_update = self._in_progress_updates.pop(
-                    (recording_id, trace_id),
-                    None,
-                )
-                if stacked_update is not None:
-                    updates[trace_id] = stacked_update
+        # Collect the updates into a batch
+        updates: dict[str, TraceStatusUpdates] = {}
+        for trace_id in update_batch.traces:
+            updates[trace_id] = self._in_progress_updates.pop((recording_id, trace_id))
 
-            success = False
-            if updates:
-                success = await self._send_batch_update_request(
-                    recording_id=recording_id,
-                    body=BatchedUpdateTraceRequest(updates=updates),
-                )
-            if not update_batch.completed.done():
-                update_batch.completed.set_result(success)
-        except asyncio.CancelledError:
-            if self._pending_update_batch.get(recording_id) is update_batch:
-                self._pending_update_batch.pop(recording_id, None)
-            if not update_batch.completed.done():
-                update_batch.completed.set_result(False)
-            raise
+        success = await self._send_batch_update_request(
+            recording_id=recording_id, body=BatchedUpdateTraceRequest(updates=updates)
+        )
+        update_batch.completed.set_result(success)
 
     def _record_updates(
         self, recording_id: str, trace_id: str, updates: TraceStatusUpdates
@@ -296,13 +260,11 @@ class TraceStatusUpdater:
 
         self._pending_update_batch[recording_id] = new_batch
 
-        task = asyncio.create_task(
+        asyncio.create_task(
             self._update_backend_trace_record_batch(
                 recording_id=recording_id, update_batch=new_batch
             )
         )
-        self._batch_update_tasks.add(task)
-        task.add_done_callback(self._batch_update_tasks.discard)
 
         return new_batch
 

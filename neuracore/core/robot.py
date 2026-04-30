@@ -303,12 +303,7 @@ class Robot:
                 detail = extract_error_detail(e.response)
             raise RobotError(f"Failed to start recording: {detail or str(e)}")
 
-    def stop_recording(
-        self,
-        recording_id: str,
-        *,
-        wait_for_producer_drain: bool = True,
-    ) -> None:
+    def stop_recording(self, recording_id: str) -> None:
         """Stop an active recording session.
 
         Ends the specified recording session and stops data collection from
@@ -329,9 +324,7 @@ class Robot:
         get_recording_state_manager().recording_stopped(
             robot_id=self.id, instance=self.instance, recording_id=recording_id
         )
-        producer_stop_sequence_numbers = self._stop_all_streams(
-            wait_for_producer_drain=wait_for_producer_drain
-        )
+        producer_stop_sequence_numbers = self._stop_all_streams()
 
         self._get_daemon_recording_context().stop_recording(
             recording_id=recording_id,
@@ -360,31 +353,38 @@ class Robot:
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to stop recording: {str(e)}")
 
-    def _stop_all_streams(
-        self,
-        *,
-        wait_for_producer_drain: bool = True,
-    ) -> dict[str, int]:
+    def _stop_all_streams(self) -> dict[str, int]:
         """Stop recording on all data streams for this robot instance."""
         producer_stop_sequence_numbers: dict[str, int] = {}
-
         for stream_id, stream in self._data_streams.items():
             try:
+                stream.stop_recording()
                 producer_channel = getattr(stream, "_producer_channel", None)
-                stream.stop_recording(wait_for_drain=wait_for_producer_drain)
-
                 if isinstance(producer_channel, ProducerChannel):
                     cutoff_sequence_number = (
                         producer_channel.get_last_enqueued_sequence_number()
                     )
+                    drained = producer_channel.wait_until_sequence_sent(
+                        cutoff_sequence_number
+                    )
+                    if not drained:
+                        sent_sequence_number = (
+                            producer_channel.get_last_sent_sequence_number()
+                        )
+                        logger.warning(
+                            "ProducerChannel %s sender stopped before draining cutoff "
+                            "(requested=%s sent=%s); using sent cutoff",
+                            producer_channel.channel_id,
+                            cutoff_sequence_number,
+                            sent_sequence_number,
+                        )
+                        cutoff_sequence_number = sent_sequence_number
 
                     producer_stop_sequence_numbers[producer_channel.channel_id] = (
                         cutoff_sequence_number
                     )
-
             except Exception:
                 logger.exception("Failed to stop data stream %s", stream_id)
-
         return producer_stop_sequence_numbers
 
     def is_recording(self) -> bool:
@@ -787,6 +787,21 @@ def get_robot(robot_name: str, instance: int) -> Robot:
             f"Robot {robot_name}:{instance} not initialized. Call init() first."
         )
     return _robots[key]
+
+
+def register_existing_robot(
+    robot_name: str,
+    robot_id: str,
+    instance: int,
+    shared: bool = False,
+) -> Robot:
+    """Register an existing server-side robot in the local process."""
+    robot = Robot(robot_name, instance, shared=shared)
+    robot.id = robot_id
+    robot.archived = False
+    _robot_name_id_mapping[robot_name] = robot_id
+    _robots[RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance)] = robot
+    return robot
 
 
 def _update_local_robot_name_cache(robot_id: str, new_robot_name: str) -> None:

@@ -21,8 +21,9 @@ from neuracore.core.streaming.recording_state_manager import get_recording_state
 
 from ..core.auth import get_auth
 from ..core.exceptions import RobotError
-from ..core.robot import Robot, get_robot
+from ..core.robot import Robot, get_robot, get_robot_id_from_name
 from ..core.robot import init as _init_robot
+from ..core.robot import register_existing_robot
 from ..core.robot import update_robot_name as _update_robot_name
 from .globals import GlobalSingleton
 
@@ -99,6 +100,7 @@ def logout() -> None:
     """
     get_auth().logout()
     GlobalSingleton()._active_robot = None
+    GlobalSingleton()._active_dataset = None
     GlobalSingleton()._active_dataset_id = None
     GlobalSingleton()._has_validated_version = False
 
@@ -129,19 +131,20 @@ def set_organization(id_or_name: str) -> None:
     config_manager.save_config()
 
 
-def connect_robot(
+def create_robot(
     robot_name: str,
     instance: int = 0,
     urdf_path: str | None = None,
     mjcf_path: str | None = None,
     overwrite: bool = False,
     shared: bool = False,
+    exist_ok: bool = False,
 ) -> Robot:
-    """Initialize a robot connection and set it as the active robot.
+    """Create a robot in Neuracore without setting it as the active robot.
 
-    Creates or connects to a robot instance, validates version compatibility,
-    and initializes streaming managers for live data and recording state updates.
-    The robot becomes the active robot for subsequent operations.
+    Creates a robot instance and uploads its robot description file when
+    provided. Use `connect_robot()` when the robot should become the active robot
+    for logging, recording, or live streaming.
 
     Upload of a robot description file (URDF or MJCF) is not required,
     but it is recommended for better visualization within Neuracore.
@@ -157,20 +160,103 @@ def connect_robot(
         shared: Whether you want to register the robot as shared/open-source.
             Note that setting shared=True is only available to specific
             members allocated by the Neuracore team.
+        exist_ok: If True, return an existing matching robot instead of raising.
 
     Returns:
-        The initialized and connected robot instance.
+        The initialized robot instance.
+
+    Raises:
+        RobotError: If this robot has already been created locally or in
+            Neuracore.
     """
     validate_version()
-    robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
-    GlobalSingleton()._active_robot = robot
-    if robot.archived is True:
-        warn(
-            f"This robot '{robot.name}' is archived. Was this intentional?",
+
+    try:
+        robot = get_robot(robot_name, instance)
+    except RobotError:
+        pass
+    else:
+        if exist_ok:
+            return robot
+        raise RobotError(
+            f"Robot '{robot_name}' with instance '{instance}' already exists. "
+            "Call connect_robot() to connect to the existing robot."
         )
-    # Initialize push update managers
+
+    try:
+        robot_id = get_robot_id_from_name(robot_name)
+    except RobotError:
+        pass
+    else:
+        if exist_ok:
+            return register_existing_robot(robot_name, robot_id, instance, shared)
+        raise RobotError(
+            f"Robot '{robot_name}' already exists in Neuracore. "
+            "Call connect_robot() to connect to the existing robot."
+        )
+
+    robot = _init_robot(
+        robot_name,
+        instance,
+        urdf_path,
+        mjcf_path,
+        overwrite,
+        shared,
+    )
+
+    if robot.archived:
+        warn(f"This robot '{robot.name}' is archived. Was this intentional?")
+
+    return robot
+
+
+def connect_robot(
+    robot_name: str,
+    instance: int = 0,
+    shared: bool = False,
+) -> Robot:
+    """Connect to a created robot and set it as the active robot.
+
+    Looks up a robot already created with `create_robot()` or already present
+    in Neuracore, validates version compatibility, and initializes streaming
+    managers for live data and recording state updates. The robot becomes the
+    active robot for subsequent operations.
+
+    Args:
+        robot_name: Unique identifier for the robot.
+        instance: Instance number of the robot for multi-instance deployments.
+        shared: Whether you want to register the robot as shared/open-source.
+            Note that setting shared=True is only available to specific
+            members allocated by the Neuracore team.
+
+    Returns:
+        The connected robot instance.
+    """
+    validate_version()
+
+    try:
+        robot = get_robot(robot_name, instance)
+    except RobotError:
+        try:
+            robot_id = get_robot_id_from_name(robot_name)
+        except RobotError as exc:
+            raise RobotError(
+                f"Robot '{robot_name}' with instance '{instance}' has not been "
+                "created. Call create_robot() first."
+            ) from exc
+        robot = register_existing_robot(
+            robot_name=robot_name,
+            robot_id=robot_id,
+            instance=instance,
+            shared=shared,
+        )
+
+    if robot.archived:
+        warn(f"This robot '{robot.name}' is archived. Was this intentional?")
+
+    GlobalSingleton()._active_robot = robot
     if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
+        raise RobotError("Robot not initialized. Call create_robot() first.")
     StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
     get_recording_state_manager()
     return robot

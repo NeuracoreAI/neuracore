@@ -1,8 +1,7 @@
-"""Tests for Daemon -> RecordingDiskManager integration."""
+"""Tests for Daemon → RecordingDiskManager integration."""
 
 from __future__ import annotations
 
-import json
 import struct
 from dataclasses import dataclass
 from datetime import timedelta
@@ -16,9 +15,10 @@ from neuracore.data_daemon.communications_management.data_bridge import (
 )
 from neuracore.data_daemon.communications_management.ring_buffer import RingBuffer
 from neuracore.data_daemon.const import (
+    CHUNK_HEADER_FORMAT,
+    DATA_TYPE_FIELD_SIZE,
     HEARTBEAT_TIMEOUT_SECS,
-    SHARED_RING_RECORD_HEADER_FORMAT,
-    SHARED_RING_RECORD_MAGIC,
+    TRACE_ID_FIELD_SIZE,
 )
 from neuracore.data_daemon.models import CommandType, CompleteMessage, MessageEnvelope
 
@@ -356,68 +356,32 @@ class TestHandleEndTrace:
         assert len(mock_rdm.enqueued) == 0
 
 
-class _FakeSharedFrame:
-    def __init__(self, payload: bytes) -> None:
-        self.data = memoryview(payload)
-
-    def dispose(self) -> None:
-        self.data.release()
-
-
-class _FakeSharedReader:
-    def __init__(self, packets: list[bytes]) -> None:
-        self._packets = list(packets)
-
-    def read_frame(self, timeout: float = 0.0) -> _FakeSharedFrame | None:
-        del timeout
-        if not self._packets:
-            return None
-        return _FakeSharedFrame(self._packets.pop(0))
-
-    def close(self) -> None:
-        return None
-
-
-def _make_shared_ring_reader(*packets: bytes) -> RingBuffer:
-    size = max((len(packet) for packet in packets), default=1)
-    return RingBuffer(
-        size=size,
-        _shared_name="test-shared",
-        _shared_reader=_FakeSharedReader(list(packets)),
-    )
-
-
-def _build_chunk_packet(
+def _write_chunk_to_ring_buffer(
+    ring: RingBuffer,
     trace_id: str,
     data_type: DataType,
     chunk_index: int,
     total_chunks: int,
     data: bytes,
-) -> bytes:
-    """Build one shared-ring packet in the expected format."""
-    metadata = {
-        "trace_id": trace_id,
-        "chunk_index": chunk_index,
-        "total_chunks": total_chunks,
-    }
-    if chunk_index == 0:
-        metadata.update({
-            "recording_id": "rec-123",
-            "data_type": data_type.value,
-            "data_type_name": data_type.value,
-            "robot_instance": 0,
-        })
-    metadata_bytes = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
-    return (
-        struct.pack(
-            SHARED_RING_RECORD_HEADER_FORMAT,
-            SHARED_RING_RECORD_MAGIC,
-            len(metadata_bytes),
-            len(data),
-        )
-        + metadata_bytes
-        + data
+) -> None:
+    """Helper to write a chunk to a ring buffer in the expected format."""
+    trace_id_bytes = trace_id.encode("utf-8")
+    trace_id_field = trace_id_bytes[:TRACE_ID_FIELD_SIZE].ljust(
+        TRACE_ID_FIELD_SIZE, b"\x00"
     )
+    data_type_bytes = data_type.value.encode("utf-8")
+    data_type_field = data_type_bytes[:DATA_TYPE_FIELD_SIZE].ljust(
+        DATA_TYPE_FIELD_SIZE, b"\x00"
+    )
+    header = struct.pack(
+        CHUNK_HEADER_FORMAT,
+        trace_id_field,
+        data_type_field,
+        chunk_index,
+        total_chunks,
+        len(data),
+    )
+    ring.write(header + data)
 
 
 class TestDrainChannelMessages:
@@ -440,25 +404,17 @@ class TestDrainChannelMessages:
         open_msg = MessageEnvelope(
             producer_id="test-producer",
             command=CommandType.OPEN_RING_BUFFER,
-            payload={
-                "open_ring_buffer": {
-                    "size": 4096,
-                    "shared_memory_name": "test-drain-type",
-                }
-            },
+            payload={"open_ring_buffer": {"size": 4096}},
         )
         daemon._handle_open_ring_buffer(channel, open_msg)
 
-        channel.set_ring_buffer(
-            _make_shared_ring_reader(
-                _build_chunk_packet(
-                    trace_id="trace-789",
-                    data_type=DataType.DEPTH_IMAGES,
-                    chunk_index=0,
-                    total_chunks=1,
-                    data=b"image-data",
-                )
-            )
+        _write_chunk_to_ring_buffer(
+            ring=channel.ring_buffer,
+            trace_id="trace-789",
+            data_type=DataType.DEPTH_IMAGES,
+            chunk_index=0,
+            total_chunks=1,
+            data=b"image-data",
         )
 
         daemon._drain_channel_messages()
@@ -482,36 +438,30 @@ class TestDrainChannelMessages:
         open_msg = MessageEnvelope(
             producer_id="test-producer",
             command=CommandType.OPEN_RING_BUFFER,
-            payload={
-                "open_ring_buffer": {
-                    "size": 4096,
-                    "shared_memory_name": "test-drain-multi",
-                }
-            },
+            payload={"open_ring_buffer": {"size": 4096}},
         )
         daemon._handle_open_ring_buffer(channel, open_msg)
 
-        channel.set_ring_buffer(
-            _make_shared_ring_reader(
-                _build_chunk_packet(
-                    trace_id="trace-multi",
-                    data_type=DataType.JOINT_VELOCITIES,
-                    chunk_index=0,
-                    total_chunks=2,
-                    data=b"part1",
-                ),
-                _build_chunk_packet(
-                    trace_id="trace-multi",
-                    data_type=DataType.JOINT_VELOCITIES,
-                    chunk_index=1,
-                    total_chunks=2,
-                    data=b"part2",
-                ),
-            )
+        _write_chunk_to_ring_buffer(
+            ring=channel.ring_buffer,
+            trace_id="trace-multi",
+            data_type=DataType.JOINT_VELOCITIES,
+            chunk_index=0,
+            total_chunks=2,
+            data=b"part1",
         )
 
         daemon._drain_channel_messages()
         assert len(mock_rdm.enqueued) == 0
+
+        _write_chunk_to_ring_buffer(
+            ring=channel.ring_buffer,
+            trace_id="trace-multi",
+            data_type=DataType.JOINT_VELOCITIES,
+            chunk_index=1,
+            total_chunks=2,
+            data=b"part2",
+        )
 
         daemon._drain_channel_messages()
 
@@ -520,45 +470,35 @@ class TestDrainChannelMessages:
         assert msg.trace_id == "trace-multi"
         assert msg.data_type == DataType.JOINT_VELOCITIES
 
-    def test_drain_channel_messages_registers_trace_from_shared_metadata(
-        self, emitter
-    ) -> None:
-        """_drain_channel_messages should register traces from shared metadata."""
+    def test_drain_channel_messages_drops_unregistered_trace(self, emitter) -> None:
+        """_drain_channel_messages should drop messages for unregistered traces."""
         daemon, _, mock_rdm = _create_daemon(emitter)
 
         channel = ChannelState(producer_id="test-producer")
         daemon.channels["test-producer"] = channel
 
-        # Don't register trace up front; shared metadata should register it.
+        # Don't register trace - should be dropped
 
         open_msg = MessageEnvelope(
             producer_id="test-producer",
             command=CommandType.OPEN_RING_BUFFER,
-            payload={
-                "open_ring_buffer": {
-                    "size": 4096,
-                    "shared_memory_name": "test-drain-drop",
-                }
-            },
+            payload={"open_ring_buffer": {"size": 4096}},
         )
         daemon._handle_open_ring_buffer(channel, open_msg)
 
-        channel.set_ring_buffer(
-            _make_shared_ring_reader(
-                _build_chunk_packet(
-                    trace_id="unregistered-trace",
-                    data_type=DataType.DEPTH_IMAGES,
-                    chunk_index=0,
-                    total_chunks=1,
-                    data=b"image-data",
-                )
-            )
+        _write_chunk_to_ring_buffer(
+            ring=channel.ring_buffer,
+            trace_id="unregistered-trace",
+            data_type=DataType.DEPTH_IMAGES,
+            chunk_index=0,
+            total_chunks=1,
+            data=b"image-data",
         )
 
         daemon._drain_channel_messages()
 
-        assert len(mock_rdm.enqueued) == 1
-        assert daemon._trace_recordings["unregistered-trace"] == "rec-123"
+        # Message should be dropped since trace is not registered
+        assert len(mock_rdm.enqueued) == 0
 
 
 class TestDataTypeHandling:

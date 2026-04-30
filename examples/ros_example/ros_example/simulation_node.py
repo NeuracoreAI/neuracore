@@ -64,6 +64,7 @@ class SimulationNode(Node):
         self.action_traj = []
         self.current_action_traj = []
         self.record = True
+        self.dataset = None
 
         # Initialize environment first, before setting up timers
         self.initialize_environment()
@@ -73,9 +74,10 @@ class SimulationNode(Node):
             nc.create_dataset(
                 name=dataset_name, description="ROS2 distributed data collection"
             )
+            self.dataset = nc.connect_dataset(dataset_name)
             self.get_logger().info(f"Created dataset: {dataset_name}")
 
-            nc.start_recording()
+            self.dataset.start_recording()
             self.get_logger().info("Started recording")
 
         # Create all timers in a specific order, with simulation_step last
@@ -128,7 +130,7 @@ class SimulationNode(Node):
                 self.obs, _, _ = self.env.step(np.array(list(action.values())))
             else:
                 if self.record:
-                    nc.stop_recording()
+                    self.dataset.stop_recording()
                     self.get_logger().info("Recording stopped")
 
                 # Increment episode counter
@@ -148,7 +150,7 @@ class SimulationNode(Node):
                 self.current_action_traj = self.action_traj.copy()
 
                 if self.record:
-                    nc.start_recording()
+                    self.dataset.start_recording()
                     self.get_logger().info("Recording Started")
 
         except Exception as e:

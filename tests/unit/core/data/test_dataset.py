@@ -2,6 +2,7 @@
 
 import copy
 import re
+from unittest.mock import MagicMock
 
 import pytest
 import requests_mock
@@ -14,7 +15,7 @@ from neuracore.core.const import API_URL, DEFAULT_RECORDING_CACHE_DIR
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
-from neuracore.core.exceptions import DatasetError
+from neuracore.core.exceptions import DatasetError, RobotError
 
 TEST_ROBOT_ID = "20a621b7-2f9b-4699-a08e-7d080488a5a3"
 
@@ -239,15 +240,56 @@ def test_nc_create_shared_dataset_sets_is_shared(
     assert dataset.is_shared is True
 
 
-def test_nc_create_dataset_sets_global_state(
+def test_nc_create_dataset_errors_when_dataset_exists(
     temp_config_dir,
     mock_data_requests,
     reset_neuracore,
     dataset_response,
     mocked_org_id,
 ):
-    """Test that nc.create_dataset stores the dataset ID in global state."""
     nc.login("test_api_key")
+
+    mock_data_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+        json=dataset_response.model_dump(mode="json"),
+        status_code=200,
+    )
+
+    with pytest.raises(DatasetError, match="already exists"):
+        nc.create_dataset("test_dataset")
+
+
+def test_nc_create_dataset_exist_ok_returns_existing_dataset(
+    temp_config_dir,
+    mock_data_requests,
+    reset_neuracore,
+    dataset_response,
+    mocked_org_id,
+):
+    nc.login("test_api_key")
+
+    mock_data_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+        json=dataset_response.model_dump(mode="json"),
+        status_code=200,
+    )
+
+    dataset = nc.create_dataset("test_dataset", exist_ok=True)
+
+    assert dataset.id == dataset_response.id
+    assert dataset.name == dataset_response.name
+
+
+def test_nc_create_dataset_does_not_set_global_state(
+    temp_config_dir,
+    mock_data_requests,
+    reset_neuracore,
+    dataset_response,
+    mocked_org_id,
+):
+    """Test that nc.create_dataset does not connect the dataset."""
+    nc.login("test_api_key")
+    GlobalSingleton()._active_dataset_id = None
 
     mock_data_requests.post(
         f"{API_URL}/org/{mocked_org_id}/datasets",
@@ -269,8 +311,88 @@ def test_nc_create_dataset_sets_global_state(
 
     dataset = nc.create_dataset("test_dataset")
 
-    # Verify global state has dataset ID
+    assert dataset.id == "dataset_123"
+    assert GlobalSingleton()._active_dataset_id is None
+
+
+def test_nc_get_dataset_does_not_set_global_state(
+    temp_config_dir,
+    mock_data_requests,
+    reset_neuracore,
+    dataset_response,
+    mocked_org_id,
+):
+    nc.login("test_api_key")
+    GlobalSingleton()._active_dataset_id = None
+
+    mock_data_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+        json=dataset_response.model_dump(mode="json"),
+        status_code=200,
+    )
+
+    dataset = nc.get_dataset("test_dataset")
+
+    assert dataset.id == "dataset_123"
+    assert GlobalSingleton()._active_dataset_id is None
+
+
+def test_nc_connect_dataset_sets_global_state(
+    temp_config_dir,
+    mock_data_requests,
+    reset_neuracore,
+    dataset_response,
+    mocked_org_id,
+):
+    nc.login("test_api_key")
+    GlobalSingleton()._active_dataset_id = None
+
+    mock_data_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+        json=dataset_response.model_dump(mode="json"),
+        status_code=200,
+    )
+
+    dataset = nc.connect_dataset("test_dataset")
+
+    assert dataset.id == "dataset_123"
+    assert GlobalSingleton()._active_dataset is dataset
     assert GlobalSingleton()._active_dataset_id == dataset.id
+
+
+def test_connected_dataset_starts_recording(dataset_dict, reset_neuracore):
+    dataset = Dataset(**dataset_dict)
+    robot = MagicMock()
+    robot.shared = False
+    GlobalSingleton()._active_robot = robot
+    nc.connect_dataset(dataset)
+
+    dataset.start_recording()
+
+    robot.start_recording.assert_called_once_with(dataset.id)
+
+
+def test_non_connected_dataset_cannot_start_recording(dataset_dict, reset_neuracore):
+    connected_dataset = Dataset(**dataset_dict)
+    disconnected_dataset = Dataset(**dataset_dict)
+    robot = MagicMock()
+    robot.shared = False
+    GlobalSingleton()._active_robot = robot
+    nc.connect_dataset(connected_dataset)
+
+    with pytest.raises(RobotError, match="active dataset"):
+        disconnected_dataset.start_recording()
+
+    robot.start_recording.assert_not_called()
+
+
+def test_non_connected_dataset_cannot_stop_recording(dataset_dict, reset_neuracore):
+    connected_dataset = Dataset(**dataset_dict)
+    disconnected_dataset = Dataset(**dataset_dict)
+    nc.connect_dataset(connected_dataset)
+
+    with pytest.raises(RobotError, match="active dataset"):
+        disconnected_dataset.stop_recording()
 
 
 class TestDatasetInitialization:

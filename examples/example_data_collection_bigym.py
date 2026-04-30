@@ -33,7 +33,12 @@ DT = 1.0 / FREQUENCY
 
 
 def run_episode(
-    episode_idx: int, record: bool, demo: Demo, env: Any, render: bool
+    episode_idx: int,
+    record: bool,
+    demo: Demo,
+    env: Any,
+    render: bool,
+    dataset: nc.Dataset | None = None,
 ) -> bool:
     """Run one demonstration episode and optionally record it."""
     print(f"\n=== Starting Episode {episode_idx} ===")
@@ -45,7 +50,8 @@ def run_episode(
     try:
         # Start neuracore recording if required
         if record:
-            nc.start_recording()
+            assert dataset is not None
+            dataset.start_recording()
 
         for step in demo._steps:
             # Log current joint positions and velocities
@@ -91,12 +97,13 @@ def run_episode(
     finally:
         # Clean up recording
         if record:
+            assert dataset is not None
             if success:
                 print("Episode successful → finalizing recording...")
-                nc.stop_recording(wait=True)
+                dataset.stop_recording(wait=True)
             else:
                 print("Episode failed → cancelling recording...")
-                nc.cancel_recording()
+                dataset.cancel_recording()
 
     print(f"=== Episode {episode_idx} done | success={success} ===")
     return success
@@ -120,11 +127,14 @@ def main(num_episodes: int, record: bool, recording_name: str, render: bool) -> 
 
     if record:
         # Create a dataset to start recording episodes into
-        nc.create_dataset(
+        created_dataset = nc.create_dataset(
             name=recording_name,
             description="Example Bigym data collection on the ReachTarget environment",
         )
+        dataset = nc.connect_dataset(created_dataset)
         print("Created dataset.")
+    else:
+        dataset = None
 
     # Create ReachTarget Bigym environment
     env = make_env()
@@ -144,6 +154,7 @@ def main(num_episodes: int, record: bool, recording_name: str, render: bool) -> 
                 demo=demos[episode_idx],
                 env=env,
                 render=render,
+                dataset=dataset,
             )
 
             if success:
@@ -153,7 +164,8 @@ def main(num_episodes: int, record: bool, recording_name: str, render: bool) -> 
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
         if record:
-            nc.cancel_recording()
+            assert dataset is not None
+            dataset.cancel_recording()
     finally:
         env.close()
         print(

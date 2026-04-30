@@ -1,12 +1,9 @@
-"""Legacy byte-ring tests.
+"""Ring buffer test suite.
 
-The production ring transport is now shared-only and frame-based, so the
-historical byte-ring suite is intentionally skipped.
+This package contains comprehensive tests for the ring buffer component:
+- L1: Ring Buffer Internal Unit Tests
+- L2: Ring Buffer Module Unit Tests (PartialMessage + ChannelMessageReader)
+- L3: Ring Buffer Interface Integration Tests
+- L4: Critical Path Tests
+- L5: Failure & Error Recovery Tests
 """
-
-import pytest
-
-pytest.skip(
-    "Legacy byte-ring tests are out of scope for shared-only ring transport",
-    allow_module_level=True,
-)

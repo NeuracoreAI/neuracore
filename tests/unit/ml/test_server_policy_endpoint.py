@@ -46,6 +46,7 @@ def _login_and_connect_robot(mock_auth_requests, mocked_org_id: str) -> None:
         json=TEST_ROBOT_PAYLOAD,
         status_code=200,
     )
+    nc.create_robot(TEST_ROBOT_ID)
     nc.connect_robot(TEST_ROBOT_ID)
 
 

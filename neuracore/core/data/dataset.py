@@ -840,19 +840,17 @@ class Dataset:
 
         # Recording is routed through global session state, so this Dataset
         # instance must be the one currently connected via connect_dataset().
-        active_dataset_id = global_state._active_dataset_id
-        if active_dataset_id is None:
-            # set this dataset as the active_dataset
-            global_state._active_dataset_id = self.id
-        if active_dataset_id != self.id:
+        active_dataset = global_state._active_dataset
+        if active_dataset is None:
+            raise RobotError("No active dataset. Call connect_dataset() first.")
+        if active_dataset is not self:
             raise RobotError(
                 "Can only start recording on the active dataset. "
                 "Call connect_dataset() first."
             )
 
-        # Use the active robot when no name is provided, matching the public
-        # nc.start_recording() behavior. If a name is provided, resolve that
-        # exact robot/instance pair from the robot registry instead.
+        # Use the active robot when no name is provided. If a name is provided,
+        # resolve that exact robot/instance pair from the robot registry.
         robot = (
             global_state._active_robot
             if robot_name is None
@@ -903,10 +901,10 @@ class Dataset:
 
         # Cancellation through a Dataset instance should only affect recordings
         # for the dataset currently connected in this session.
-        active_dataset_id = global_state._active_dataset_id
-        if active_dataset_id is None:
+        active_dataset = global_state._active_dataset
+        if active_dataset is None:
             raise RobotError("No active dataset. Call connect_dataset() first.")
-        if active_dataset_id != self.id:
+        if active_dataset is not self:
             raise RobotError(
                 "Can only cancel recordings on the active dataset. "
                 "Call connect_dataset() first."
@@ -961,10 +959,10 @@ class Dataset:
 
         # Stopping through a Dataset instance should only affect recordings for
         # the dataset currently connected in this session.
-        active_dataset_id = global_state._active_dataset_id
-        if active_dataset_id is None:
+        active_dataset = global_state._active_dataset
+        if active_dataset is None:
             raise RobotError("No active dataset. Call connect_dataset() first.")
-        if active_dataset_id != self.id:
+        if active_dataset is not self:
             raise RobotError(
                 "Can only stop recordings on the active dataset. "
                 "Call connect_dataset() first."
@@ -995,7 +993,7 @@ class Dataset:
 
         # Delegate finalization to Robot, which handles backend state and local
         # recording lifecycle cleanup.
-        robot.stop_recording(recording_id, wait_for_producer_drain=wait)
+        robot.stop_recording(recording_id)
 
         if not wait:
             return

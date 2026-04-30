@@ -214,6 +214,7 @@ def _run_import(
             tags=dataconfig.output_dataset.tags,
             shared=args.shared,
         )
+    nc.connect_dataset(dataset)
     logger.info(
         "Output dataset ready: %s (id=%s), shared=%s",
         dataset.name,
@@ -249,13 +250,14 @@ def _run_import(
         logger.warning("Both URDF and MJCF files found. Using URDF file.")
         mjcf_path = None
 
-    robot = nc.connect_robot(
+    robot = nc.create_robot(
         robot_name=robot_config.name,
         urdf_path=urdf_path,
         mjcf_path=mjcf_path,
         overwrite=robot_config.overwrite_existing,
         shared=args.shared,
     )
+    nc.connect_robot(robot_config.name)
     urdf_path = robot.urdf_path
     logger.info(
         "Using robot model: %s (id=%s), shared=%s", robot.name, robot.id, robot.shared

@@ -140,13 +140,15 @@ def _collect_demo_data(
     )
     assert num_cameras >= 1, f"num_cameras must be >= 1, got {num_cameras}"
 
-    nc.connect_robot(
+    nc.create_robot(
         robot_name,
         instance=instance_id,
         urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
         overwrite=False,
     )
+    nc.connect_robot(robot_name, instance=instance_id)
     dataset = nc.create_dataset(dataset_name)
+    dataset = nc.connect_dataset(dataset)
 
     for ep_idx in range(num_episodes):
         logger.info(f"Collecting episode {ep_idx + 1}/{num_episodes}")
@@ -160,7 +162,7 @@ def _collect_demo_data(
             f"{NC_CAM_NAME}_{camera_index}"
             for camera_index in range(1, num_cameras + 1)
         ]
-        nc.start_recording(robot_name=robot_name, instance=instance_id)
+        dataset.start_recording(robot_name=robot_name, instance=instance_id)
         t = time.time()
         for frame_idx, action_dict in enumerate(expanded_action_traj):
             t += 0.02
@@ -198,9 +200,9 @@ def _collect_demo_data(
                 robot_name=robot_name,
                 instance=instance_id,
             )
-        nc.stop_recording(wait=True, robot_name=robot_name, instance=instance_id)
+        dataset.stop_recording(wait=True, robot_name=robot_name, instance=instance_id)
         logger.info(
-            "Episode %s recorded (%s frames)",
+            "Episode %s recorded (%s frames, multiplier=%s, cameras=%s)",
             ep_idx + 1,
             len(expanded_action_traj),
             episode_length_multiplier,

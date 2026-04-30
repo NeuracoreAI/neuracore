@@ -5,8 +5,13 @@ the Neuracore session, including active robot connections, dataset information,
 and validation status.
 """
 
+from typing import TYPE_CHECKING
+
 from neuracore.core.robot import Robot
 from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
+
+if TYPE_CHECKING:
+    from neuracore.core.data.dataset import Dataset
 
 
 class GlobalSingleton(metaclass=SingletonMetaclass):
@@ -24,8 +29,11 @@ class GlobalSingleton(metaclass=SingletonMetaclass):
             for operations when no specific robot is specified.
         _active_dataset_id: ID of the currently active dataset that new
             recordings will be associated with.
+        _active_dataset: Currently connected dataset instance. Dataset-level
+            recording controls require this exact object.
     """
 
     _has_validated_version = False
     _active_robot: Robot | None = None
+    _active_dataset: "Dataset | None" = None
     _active_dataset_id: str | None = None
