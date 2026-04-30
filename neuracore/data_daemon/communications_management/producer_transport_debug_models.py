@@ -71,20 +71,6 @@ class ProducerSharedRingBufferDebugStats:
     shared_ring_open: ProducerTransportTimingStats
     shared_ring_write: ProducerTransportTimingStats
     shared_ring_write_bytes: int
-    slot_count: int = 0
-    free_slot_count: int = 0
-    in_flight_slot_count: int = 0
-    max_in_flight_slot_count: int = 0
-    acked_sequence_count: int = 0
-    ack_timeout_count: int = 0
-    worker_queue_qsize: int = 0
-    worker_queue_maxsize: int = 0
-    worker_thread_alive: bool = False
-    worker_error: str | None = None
-    last_acked_sequence_id: int | None = None
-    last_ack_latency_s: float | None = None
-    max_ack_latency_s: float = 0.0
-    unhealthy_reason: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Serialize to the legacy flat dict shape."""
@@ -100,20 +86,6 @@ class ProducerSharedRingBufferDebugStats:
             "shared_ring_write_total_s": self.shared_ring_write.total_s,
             "shared_ring_write_avg_s": self.shared_ring_write.avg_s,
             "shared_ring_write_max_s": self.shared_ring_write.max_s,
-            "slot_count": self.slot_count,
-            "free_slot_count": self.free_slot_count,
-            "in_flight_slot_count": self.in_flight_slot_count,
-            "max_in_flight_slot_count": self.max_in_flight_slot_count,
-            "acked_sequence_count": self.acked_sequence_count,
-            "ack_timeout_count": self.ack_timeout_count,
-            "worker_queue_qsize": self.worker_queue_qsize,
-            "worker_queue_maxsize": self.worker_queue_maxsize,
-            "worker_thread_alive": self.worker_thread_alive,
-            "worker_error": self.worker_error,
-            "last_acked_sequence_id": self.last_acked_sequence_id,
-            "last_ack_latency_s": self.last_ack_latency_s,
-            "max_ack_latency_s": self.max_ack_latency_s,
-            "unhealthy_reason": self.unhealthy_reason,
         }
 
 

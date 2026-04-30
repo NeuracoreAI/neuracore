@@ -128,12 +128,7 @@ def test_message_envelope_round_trip_bytes() -> None:
     envelope = MessageEnvelope(
         producer_id="producer-abc",
         command=CommandType.OPEN_RING_BUFFER,
-        payload={
-            "open_ring_buffer": {
-                "size": 4096,
-                "shared_memory_name": "test-envelope-round-trip",
-            }
-        },
+        payload={"open_ring_buffer": {"size": 4096}},
     )
 
     parsed = MessageEnvelope.from_bytes(envelope.to_bytes())
@@ -194,7 +189,9 @@ def test_large_payload_chunked_round_trip_over_ipc(
         data_type=DataType.CUSTOM_1D,
     )
 
+    producer.open_ring_buffer(size=128 * 1024)
     producer.start_new_trace()
+    _drain_messages(daemon, daemon_comm, expected=1)
 
     payload = b"x" * 50_000
     producer.send_data(
@@ -210,7 +207,7 @@ def test_large_payload_chunked_round_trip_over_ipc(
     _drain_messages(
         daemon,
         daemon_comm,
-        expected=1,
+        expected=0,
         until=lambda: len(rdm.enqueued) == 1,
     )
 
@@ -246,8 +243,11 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context, emitter) 
         data_type=DataType.CUSTOM_1D,
     )
 
+    producer_a.open_ring_buffer(size=4096)
+    producer_b.open_ring_buffer(size=4096)
     producer_a.start_new_trace()
     producer_b.start_new_trace()
+    _drain_messages(daemon, daemon_comm, expected=2)
 
     payload_a = b"payload-a"
     payload_b = b"payload-b"
@@ -271,7 +271,7 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context, emitter) 
     _drain_messages(
         daemon,
         daemon_comm,
-        expected=2,
+        expected=0,
         until=lambda: len(rdm.enqueued) == 2,
     )
 
@@ -307,12 +307,7 @@ def test_interleaved_chunks_reassemble_per_producer(
             MessageEnvelope(
                 producer_id=producer_id,
                 command=CommandType.OPEN_RING_BUFFER,
-                payload={
-                    "open_ring_buffer": {
-                        "size": 4096,
-                        "shared_memory_name": f"test-open-{producer_id}",
-                    }
-                },
+                payload={"open_ring_buffer": {"size": 4096}},
             ),
         )
 
@@ -436,12 +431,7 @@ def test_unknown_command_logs_warning_and_continues(
         MessageEnvelope(
             producer_id="producer-1",
             command=CommandType.OPEN_RING_BUFFER,
-            payload={
-                "open_ring_buffer": {
-                    "size": 1024,
-                    "shared_memory_name": "test-handle-message",
-                }
-            },
+            payload={"open_ring_buffer": {"size": 1024}},
         )
     )
     assert daemon.channels["producer-1"].ring_buffer is not None
@@ -493,12 +483,7 @@ def test_garbage_messages_are_logged_and_daemon_survives(
         MessageEnvelope(
             producer_id="prod",
             command=CommandType.OPEN_RING_BUFFER,
-            payload={
-                "open_ring_buffer": {
-                    "size": 1024,
-                    "shared_memory_name": "test-process-raw",
-                }
-            },
+            payload={"open_ring_buffer": {"size": 1024}},
         ).to_bytes()
     )
     raw = daemon_comm._consumer_socket.recv()

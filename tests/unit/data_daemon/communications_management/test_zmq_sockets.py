@@ -217,6 +217,9 @@ def test_zmq_commands_and_message_flow(
     producer.open_ring_buffer(size=2048)
 
     assert _wait_for(lambda: producer.channel_id in daemon.channels, timeout=0.5)
+    channel = daemon.channels[producer.channel_id]
+    assert channel.ring_buffer is not None
+    assert channel.ring_buffer.size == 2048
 
     payload = json.dumps({"seq": 1}).encode("utf-8")
     active_trace_id = producer.trace_id

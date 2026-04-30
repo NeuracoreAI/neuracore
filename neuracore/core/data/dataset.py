@@ -995,7 +995,7 @@ class Dataset:
 
         # Delegate finalization to Robot, which handles backend state and local
         # recording lifecycle cleanup.
-        robot.stop_recording(recording_id, wait_for_producer_drain=wait)
+        robot.stop_recording(recording_id)
 
         if not wait:
             return

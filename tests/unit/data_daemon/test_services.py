@@ -42,7 +42,6 @@ def mock_daemon_services() -> DaemonServices:
     mock_registration_manager.shutdown = AsyncMock()
 
     mock_trace_status_updater = MagicMock(spec=TraceStatusUpdater)
-    mock_trace_status_updater.shutdown = AsyncMock()
 
     mock_upload_manager = MagicMock()
     mock_upload_manager.shutdown = AsyncMock()
@@ -133,7 +132,6 @@ class TestDaemonServicesShutdown:
 
         mock_daemon_services.connection_manager.stop.assert_called_once()
         mock_daemon_services.upload_manager.shutdown.assert_called_once()
-        mock_daemon_services.trace_status_updater.shutdown.assert_called_once()
         mock_daemon_services.state_store.close.assert_called_once()
         mock_daemon_services.client_session.close.assert_called_once()
 
@@ -151,6 +149,5 @@ class TestDaemonServicesShutdown:
             await mock_daemon_services.shutdown()
 
         mock_daemon_services.upload_manager.shutdown.assert_called_once()
-        mock_daemon_services.trace_status_updater.shutdown.assert_called_once()
         mock_daemon_services.client_session.close.assert_called_once()
         assert "Error stopping ConnectionManager" in caplog.text

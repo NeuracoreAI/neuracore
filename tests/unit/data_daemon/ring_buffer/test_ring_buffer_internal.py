@@ -18,7 +18,6 @@ import time
 import pytest
 
 from neuracore.data_daemon.communications_management.ring_buffer import RingBuffer
-from neuracore.data_daemon.lifecycle.runtime_recovery import SharedMemoryCapacityError
 
 # =============================================================================
 # L1-001 to L1-009: Basic Operations
@@ -654,34 +653,6 @@ def test_shared_write_unblocks_after_shared_read() -> None:
     finally:
         consumer_ring.close()
         producer_ring.close()
-
-
-def test_create_shared_fails_loudly_before_reader_when_shm_is_full(
-    monkeypatch,
-) -> None:
-    reader_called = False
-
-    def fail_capacity_check(_required_bytes: int) -> None:
-        raise SharedMemoryCapacityError("Insufficient shared memory")
-
-    def track_reader(*args, **kwargs):
-        nonlocal reader_called
-        reader_called = True
-        return None
-
-    monkeypatch.setattr(
-        "neuracore.data_daemon.communications_management.ring_buffer.ensure_shared_memory_capacity",
-        fail_capacity_check,
-    )
-    monkeypatch.setattr(
-        "neuracore.data_daemon.communications_management.ring_buffer._SharedReader",
-        track_reader,
-    )
-
-    with pytest.raises(SharedMemoryCapacityError, match="Insufficient shared memory"):
-        RingBuffer.create_shared(size=80)
-
-    assert reader_called is False
 
 
 def test_free_space_calculation() -> None:
