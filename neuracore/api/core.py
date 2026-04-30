@@ -7,7 +7,6 @@ recording sessions.
 """
 
 import logging
-import time
 from warnings import warn
 
 from neuracore.core.config.config_manager import get_config_manager
@@ -19,11 +18,9 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
-from neuracore.core.utils import backend_utils
 
 from ..core.auth import get_auth
-from ..core.data.dataset import Dataset
-from ..core.exceptions import DatasetError, RobotError
+from ..core.exceptions import RobotError
 from ..core.robot import Robot, get_robot
 from ..core.robot import init as _init_robot
 from ..core.robot import update_robot_name as _update_robot_name
@@ -243,94 +240,6 @@ def is_recording(robot_name: str | None = None, instance: int = 0) -> bool:
     """
     robot = _get_robot(robot_name, instance)
     return robot.is_recording()
-
-
-def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
-    """Start recording data for a specific robot.
-
-    Begins a new recording session for the specified robot, capturing all
-    configured data streams. Requires an active dataset to be set before
-    starting the recording.
-
-    Args:
-        robot_name: Robot identifier. If not provided, uses the currently
-            active robot from the global state.
-        instance: Instance number of the robot for multi-instance scenarios.
-
-    Raises:
-        RobotError: If no robot is active and no robot_name is provided,
-            if a recording is already in progress, or if no active dataset
-            has been set.
-    """
-    robot = _get_robot(robot_name, instance)
-    active_dataset_id = GlobalSingleton()._active_dataset_id
-    if active_dataset_id is None:
-        raise RobotError("No active dataset. Call connect_dataset() first.")
-    try:
-        active_dataset = Dataset.get_by_id(active_dataset_id)
-    except DatasetError:
-        active_dataset = None
-    if active_dataset is not None:
-        if robot.shared and not active_dataset.is_shared:
-            raise RobotError(
-                "Shared robot cannot be used with a non-shared dataset. "
-                "If you requested a shared dataset, creation may have failed "
-                "because you are not authorized to upload shared datasets or "
-                "an existing non-shared dataset with the same name was reused. "
-                f"Active dataset: '{active_dataset.name}' ({active_dataset.id})."
-            )
-        if not robot.shared and active_dataset.is_shared:
-            raise RobotError(
-                "Non-shared robot cannot be used with a shared dataset. "
-                "Shared datasets require shared robots. If you requested a "
-                "shared robot, ensure connect_robot(shared=True) succeeded. "
-                f"Active dataset: '{active_dataset.name}' ({active_dataset.id})."
-            )
-    robot.start_recording(active_dataset_id)
-
-
-def stop_recording(
-    robot_name: str | None = None, instance: int = 0, wait: bool = False
-) -> None:
-    """Stop recording data for a specific robot.
-
-    Ends the current recording session for the specified robot. Optionally
-    waits for all data streams to finish uploading before returning.
-
-    Args:
-        robot_name: Robot identifier. If not provided, uses the currently
-            active robot from the global state.
-        instance: Instance number of the robot for multi-instance scenarios.
-        wait: Whether to block until all data streams have finished uploading
-            to the backend storage.
-
-    Raises:
-        RobotError: If no robot is active and no robot_name is provided.
-    """
-    robot = _get_robot(robot_name, instance)
-    if not robot.is_recording():
-        warn(
-            "No active recordings to stop. "
-            "Your recording may have been stopped by another node."
-        )
-        return
-    recording_id = robot.get_current_recording_id()
-    if not recording_id:
-        raise ValueError("Recording_id is None, no current recording")
-    robot.stop_recording(recording_id, wait_for_producer_drain=wait)
-
-    if not wait:
-        return
-
-    # TODO: We need to instead check that the specific recording is complete
-    is_traces_registered = False
-    while True:
-        data_traces = backend_utils.get_active_data_traces(recording_id)
-        if len(data_traces) > 0:
-            is_traces_registered = True
-        elif len(data_traces) == 0 and is_traces_registered:
-            break
-        time.sleep(0.2)
 
 
 def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:
