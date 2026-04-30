@@ -7,13 +7,21 @@ inference, and remote endpoint deployment — all sharing one training job.
 
 import logging
 import os
+import pprint
 import sys
 import time
 import uuid
 
 import numpy as np
 import pytest
-from neuracore_types import DataType, JointData, RGBCameraData, SynchronizedPoint
+from neuracore_types import (
+    DataType,
+    EmbodimentDescription,
+    JointData,
+    LanguageData,
+    RGBCameraData,
+    SynchronizedPoint,
+)
 
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
@@ -52,24 +60,30 @@ MERGED_DATASET_RECORDING_POLL_SECONDS = 5
 JOINT_NAMES = (
     BimanualViperXTask.LEFT_ARM_JOINT_NAMES + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
 )
+GRIPPER_NAMES = ["left_gripper", "right_gripper"]
+DEPTH_CAM_NAME = "depth_angle"
+POINT_CLOUD_SENSOR_NAME = "point_cloud"
+POSE_SENSOR_NAME = "tcp"
+LANGUAGE_LABEL = "instruction"
 
 
 def _indexed_names(names: list[str] | tuple[str, ...]) -> dict[int, str]:
     return {index: name for index, name in enumerate(names)}
 
 
-INPUT_DATA_SPEC = {
+# Training/Inference robot (VX300s) embodiment descriptions
+INPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
     DataType.RGB_IMAGES: {0: NC_CAM_NAME},
     DataType.JOINT_POSITIONS: _indexed_names(JOINT_NAMES),
+    DataType.LANGUAGE: {0: LANGUAGE_LABEL},
+    DataType.JOINT_VELOCITIES: _indexed_names(JOINT_NAMES),
 }
-OUTPUT_DATA_SPEC = {
+OUTPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
     DataType.JOINT_POSITIONS: _indexed_names(JOINT_NAMES),
 }
 
-INPUT_DATA_TYPES = [
-    DataType.RGB_IMAGES,
-    DataType.JOINT_POSITIONS,
-]
+INPUT_DATA_TYPES = list(INPUT_EMBODIMENT_DESCRIPTION.keys())
+OUTPUT_DATA_TYPES = list(OUTPUT_EMBODIMENT_DESCRIPTION.keys())
 
 # "auto" lets the backend select an appropriate batch size automatically
 CNNMLP_CONFIG = {
@@ -116,6 +130,10 @@ def _make_sync_point(obs) -> SynchronizedPoint:
             DataType.RGB_IMAGES: {
                 NC_CAM_NAME: RGBCameraData(frame=obs.cameras[MJ_CAM_NAME].rgb)
             },
+            DataType.JOINT_VELOCITIES: {
+                name: JointData(value=obs.qvel[name]) for name in JOINT_NAMES
+            },
+            DataType.LANGUAGE: {LANGUAGE_LABEL: LanguageData(text="pick and place")},
         }
     )
 
@@ -156,10 +174,7 @@ def _collect_demo_data(
             for action_dict in action_traj
             for _ in range(episode_length_multiplier)
         ]
-        camera_names = [
-            f"{NC_CAM_NAME}_{camera_index}"
-            for camera_index in range(1, num_cameras + 1)
-        ]
+        [f"{NC_CAM_NAME}_{camera_index}" for camera_index in range(1, num_cameras + 1)]
         nc.start_recording(robot_name=robot_name, instance=instance_id)
         t = time.time()
         for frame_idx, action_dict in enumerate(expanded_action_traj):
@@ -167,33 +182,86 @@ def _collect_demo_data(
             joint_positions = {
                 k: v for k, v in action_dict.items() if "gripper" not in k
             }
+            joint_torques = {
+                name: float(0.01 * ((index + frame_idx) % 5))
+                for index, name in enumerate(JOINT_NAMES)
+            }
+            gripper_open_amounts = {
+                name: float(0.25 + 0.5 * ((frame_idx % 2) == 0))
+                for name in GRIPPER_NAMES
+            }
+            pose = np.array([0.1 + frame_idx * 0.001, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0])
+            img = np.zeros((84, 84, 3), dtype=np.uint8)
+            img.fill(50 + frame_idx % 200)
+            depth = np.full((64, 64), 0.75 + 0.01 * (frame_idx % 10), dtype=np.float32)
+            point_cloud = np.linspace(0.0, 1.0, 96, dtype=np.float16).reshape(
+                32, 3
+            ) + np.float16(frame_idx * 0.001)
+            rgb_points = np.full(
+                (point_cloud.shape[0], 3), 80 + frame_idx % 120, dtype=np.uint8
+            )
             nc.log_joint_positions(
                 joint_positions,
                 timestamp=t,
                 robot_name=robot_name,
                 instance=instance_id,
             )
-            img = np.zeros((480, 640, 3), dtype=np.uint8)
-            img.fill(50 + frame_idx % 200)
-            for camera_name in camera_names:
-                nc.log_rgb(
-                    camera_name,
-                    img,
-                    timestamp=t,
-                    robot_name=robot_name,
-                    instance=instance_id,
-                )
-            nc.log_joint_target_positions(
-                action_dict, timestamp=t, robot_name=robot_name, instance=instance_id
+            nc.log_joint_velocities(
+                joint_positions,
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
             )
-            nc.log_parallel_gripper_target_open_amounts(
-                {"gripper1": 0.5, "gripper2": 0.5},
+            nc.log_joint_torques(
+                joint_torques,
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+            nc.log_parallel_gripper_open_amounts(
+                gripper_open_amounts,
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+            nc.log_pose(
+                POSE_SENSOR_NAME,
+                pose,
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+            nc.log_language(
+                LANGUAGE_LABEL,
+                "pick and place",
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+            nc.log_rgb(
+                NC_CAM_NAME,
+                img,
                 timestamp=t,
                 robot_name=robot_name,
                 instance=instance_id,
             )
             nc.log_parallel_gripper_open_amounts(
                 {"gripper1": 0.5, "gripper2": 0.5},
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+            nc.log_depth(
+                DEPTH_CAM_NAME,
+                depth,
+                timestamp=t,
+                robot_name=robot_name,
+                instance=instance_id,
+            )
+            nc.log_point_cloud(
+                POINT_CLOUD_SENSOR_NAME,
+                point_cloud,
+                rgb_points=rgb_points,
                 timestamp=t,
                 robot_name=robot_name,
                 instance=instance_id,
@@ -287,14 +355,33 @@ def _wait_for_dataset_recording_count(
 
 
 def _run_policy_inference(policy: Policy) -> None:
+    """Run inference via both sync-point and logging-function paths."""
     try:
         env = make_sim_env(seed=42)
         obs = env.reset()
+
+        # Path 1: explicit SynchronizedPoint
+        logger.info("Running sync-point inference (Path 1)")
         predictions = policy.predict(sync_point=_make_sync_point(obs), timeout=30)
+        for data_type in OUTPUT_DATA_TYPES:
+            assert data_type in predictions, (
+                f"Expected {data_type.value} in local "
+                f"server output, got: {list(predictions.keys())}"
+            )
+        logger.info(f"Path 1 passed — output keys: {[k.value for k in predictions]}")
+
+        # Path 2: nc.log_* → get_latest_sync_point internally
+        logger.info("Running logging-function inference (Path 2)")
+        nc.log_joint_positions({name: float(obs.qpos[name]) for name in JOINT_NAMES})
+        nc.log_language(name=LANGUAGE_LABEL, language="pick and place")
+        nc.log_joint_velocities({name: float(obs.qvel[name]) for name in JOINT_NAMES})
+        nc.log_rgb(NC_CAM_NAME, obs.cameras[MJ_CAM_NAME].rgb)
+        predictions = policy.predict(timeout=30)
         assert DataType.JOINT_POSITIONS in predictions, (
             "Expected JOINT_POSITIONS in local "
             f"server output, got: {list(predictions.keys())}"
         )
+        logger.info(f"Path 2 passed — output keys: {[k.value for k in predictions]}")
     finally:
         policy.disconnect()
 
@@ -327,16 +414,24 @@ def test_training_flow():
         # ------------------------------------------------------------------
         # Step 1: Collect demo data
         # ------------------------------------------------------------------
+        logger.info(f"Collecting {COLLECTED_DEMO_EPISODES} demo episodes")
         try:
             collected_dataset = _collect_demo_data(
                 ROBOT_NAME,
                 collected_dataset_name,
                 num_episodes=COLLECTED_DEMO_EPISODES,
             )
+            # stop_recording(wait=True) ensures upload completes, but the
+            # backend indexes recordings asynchronously so len(dataset) may
+            # lag. Poll until the count matches before proceeding.
+            collected_dataset = _wait_for_dataset_recording_count(
+                collected_dataset_name,
+                expected_recordings=COLLECTED_DEMO_EPISODES,
+            )
             collected_recordings = len(collected_dataset)
-            assert collected_recordings == COLLECTED_DEMO_EPISODES, (
-                f"Expected {COLLECTED_DEMO_EPISODES} recordings in collected "
-                f"dataset {collected_dataset_name!r}, got {collected_recordings}"
+            logger.info(
+                f"Step 1 passed — {collected_recordings} recordings"
+                f" in '{collected_dataset_name}'"
             )
         except Exception as e:
             pytest.fail(f"Step 1 (collect demo data) failed: {e}")
@@ -344,10 +439,16 @@ def test_training_flow():
         # ------------------------------------------------------------------
         # Step 2: Merge collected dataset with shared dataset
         # ------------------------------------------------------------------
+        logger.info(f"Merging '{collected_dataset_name}' with '{SHARED_DATASET_NAME}'")
         try:
             shared_dataset = nc.get_dataset(SHARED_DATASET_NAME)
             shared_recordings = len(shared_dataset)
             expected_merged_recordings = collected_recordings + shared_recordings
+            logger.info(
+                f"Shared dataset '{SHARED_DATASET_NAME}' has"
+                f" {shared_recordings} recordings"
+                f" — expecting {expected_merged_recordings} merged"
+            )
 
             merged_dataset = nc.merge_datasets(
                 merged_dataset_name,
@@ -360,13 +461,14 @@ def test_training_flow():
                 merged_dataset_name,
                 expected_recordings=expected_merged_recordings,
             )
-            logger.info(f"Merged dataset: {merged_dataset.id}")
+            logger.info(f"Merged dataset id={merged_dataset.id}")
         except Exception as e:
             pytest.fail(f"Step 2 (merge datasets) failed: {e}")
 
         # ------------------------------------------------------------------
         # Step 3: Train CNNMLP with auto batch sizing
         # ------------------------------------------------------------------
+        logger.info(f"Preparing training inputs for '{training_name}'")
         try:
             dataset = nc.get_dataset(merged_dataset_name)
             robot_ids = dataset.robot_ids
@@ -374,27 +476,34 @@ def test_training_flow():
             assert (
                 len(robot_ids) == 2
             ), f"Expected 2 robots in merged dataset, got {robot_ids}"
+            logger.info(f"Found {len(robot_ids)} robots: {robot_ids}")
             input_cross_embodiment_description = {}
             output_cross_embodiment_description = {}
             for robot_id in robot_ids:
-                embodiment_description = dataset.get_full_embodiment_description(
+                embodiment_description = merged_dataset.get_full_embodiment_description(
                     robot_id
                 )
-                assert (
-                    DataType.JOINT_POSITIONS in embodiment_description
-                ), f"JOINT_POSITIONS missing from robot {robot_id} data spec"
-
+                for data_type in INPUT_DATA_TYPES:
+                    assert data_type in embodiment_description, (
+                        f"{data_type.value} missing from robot {robot_id} "
+                        "embodiment description"
+                    )
                 input_cross_embodiment_description[robot_id] = {
-                    DataType.JOINT_POSITIONS: embodiment_description[
-                        DataType.JOINT_POSITIONS
-                    ],
-                    DataType.RGB_IMAGES: embodiment_description[DataType.RGB_IMAGES],
+                    data_type: embodiment_description[data_type]
+                    for data_type in INPUT_DATA_TYPES
                 }
+                logger.info(
+                    f"Input embodiment for robot {robot_id}:\n"
+                    f"{pprint.pformat(input_cross_embodiment_description[robot_id])}"
+                )
                 output_cross_embodiment_description[robot_id] = {
-                    DataType.JOINT_POSITIONS: embodiment_description[
-                        DataType.JOINT_POSITIONS
-                    ],
+                    data_type: embodiment_description[data_type]
+                    for data_type in OUTPUT_DATA_TYPES
                 }
+                logger.info(
+                    f"Output embodiment for robot {robot_id}:\n"
+                    f"{pprint.pformat(output_cross_embodiment_description[robot_id])}"
+                )
 
             job_data = nc.start_training_run(
                 name=training_name,
@@ -405,9 +514,7 @@ def test_training_flow():
                 num_gpus=NUM_GPUS,
                 frequency=FREQUENCY,
                 input_cross_embodiment_description=input_cross_embodiment_description,
-                output_cross_embodiment_description=(
-                    output_cross_embodiment_description
-                ),
+                output_cross_embodiment_description=output_cross_embodiment_description,
             )
             job_id = job_data["id"]
             logger.info(f"Training job started: {job_id}")
@@ -419,11 +526,13 @@ def test_training_flow():
         # The backend raises 404 (CloudComputeIDNotFoundError) until the GCP
         # VM is registered, so we poll until logs are available.
         # ------------------------------------------------------------------
+        logger.info("Waiting for RUNNING state then retrieving logs")
         try:
             # Wait for RUNNING state
             running_deadline = time.time() + 10 * 60
             while True:
                 job_status = nc.get_training_job_status(job_id)
+                logger.info(f"Job {job_id} status: {job_status} (waiting for RUNNING)")
                 if job_status == "RUNNING":
                     break
                 assert (
@@ -446,14 +555,12 @@ def test_training_flow():
                     if job_status in TERMINAL_STATES or time.time() > logs_deadline:
                         logger.warning(
                             "Logs unavailable before job completed; "
-                            "skipping log assertions"
+                            "Skipping log assertions"
                         )
                         break
                     time.sleep(30)
 
             if logs is not None:
-                # Validate CloudComputeLogs structure:
-                # job_id, logs, total_entries, retrieved_at
                 for field in ("job_id", "logs", "total_entries", "retrieved_at"):
                     assert (
                         field in logs
@@ -463,31 +570,31 @@ def test_training_flow():
                 for entry in logs["logs"]:
                     assert "message" in entry, f"Log entry missing 'message': {entry}"
 
-                # Verify severity filtering is accepted
                 filtered = nc.get_training_job_logs(
                     job_id, max_entries=10, severity_filter="ERROR"
                 )
                 assert "logs" in filtered
-                logger.info(
-                    f"Step 4 passed — {logs['total_entries']} log entries retrieved"
-                )
+                logger.info(f"Retrieved {logs['total_entries']} log entries")
         except Exception as e:
             pytest.fail(f"Step 4 (training logs) failed: {e}")
 
         # ------------------------------------------------------------------
         # Step 5: Wait for training to complete
         # ------------------------------------------------------------------
+        logger.info(f"Waiting for training job {job_id} to complete")
         try:
             final_status = _wait_for_training(job_id)
             assert (
                 final_status == "COMPLETED"
             ), f"Training ended with non-COMPLETED status: {final_status}"
+            logger.info(f"Step 5 passed — job {job_id} COMPLETED")
         except Exception as e:
             pytest.fail(f"Step 5 (training completion) failed: {e}")
 
         # ------------------------------------------------------------------
         # Step 6: Resume training with additional epochs
         # ------------------------------------------------------------------
+        logger.info(f"Resuming training job {job_id} for 1 more epoch")
         try:
             initial_epoch = nc.get_training_job_data(job_id).get("epoch", 0)
             resumed_job = nc.resume_training_run(job_id, additional_epochs=1)
@@ -495,10 +602,7 @@ def test_training_flow():
             assert resumed_job["status"] in {
                 "PENDING",
                 "RUNNING",
-            }, (
-                "Expected PENDING/RUNNING after resume, got: "
-                f"{resumed_job['status']!r}"
-            )
+            }, f"Expected PENDING/RUNNING after resume, got: {resumed_job['status']!r}"
             assert resumed_job.get(
                 "resume_points"
             ), "Expected non-empty resume_points after resume"
@@ -508,7 +612,7 @@ def test_training_flow():
 
             final_resumed_status = _wait_for_training(job_id)
             assert final_resumed_status == "COMPLETED", (
-                f"Resumed training ended with non-COMPLETED status: "
+                "Resumed training ended with non-COMPLETED status: "
                 f"{final_resumed_status}"
             )
             resumed_data = nc.get_training_job_data(job_id)
@@ -520,8 +624,8 @@ def test_training_flow():
                 resumed_data.get("previous_training_time") is not None
             ), "Expected previous_training_time to be set after resume"
             logger.info(
-                "Step 6 passed — resumed job completed at epoch %s",
-                resumed_data.get("epoch"),
+                "Step 6 passed — resumed job completed at epoch"
+                f" {resumed_data.get('epoch')}"
             )
         except Exception as e:
             pytest.fail(f"Step 6 (resume training) failed: {e}")
@@ -529,41 +633,46 @@ def test_training_flow():
         # ------------------------------------------------------------------
         # Step 7: Direct in-process policy inference
         # ------------------------------------------------------------------
+        logger.info("Direct in-process policy inference")
         try:
             nc.connect_robot(MUJOCO_ROBOT_NAME)
             policy = nc.policy(
-                input_embodiment_description=INPUT_DATA_SPEC,
-                output_embodiment_description=OUTPUT_DATA_SPEC,
+                input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+                output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
                 train_run_name=training_name,
             )
             _run_policy_inference(policy)
+            logger.info("Step 7 passed — direct in-process inference succeeded")
         except Exception as e:
             pytest.fail(f"Step 7 (direct policy inference) failed: {e}")
 
         # ------------------------------------------------------------------
         # Step 8: Local server policy inference
         # ------------------------------------------------------------------
+        logger.info("Local server policy inference on port 8181")
         try:
             policy = nc.policy_local_server(
-                input_embodiment_description=INPUT_DATA_SPEC,
-                output_embodiment_description=OUTPUT_DATA_SPEC,
+                input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+                output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
                 train_run_name=training_name,
                 port=8181,
             )
             _run_policy_inference(policy)
+            logger.info("Step 8 passed — local server inference succeeded")
         except Exception as e:
             pytest.fail(f"Step 8 (local server inference) failed: {e}")
 
         # ------------------------------------------------------------------
         # Step 9: Deploy remote endpoint and verify active
         # ------------------------------------------------------------------
+        logger.info("Deploying remote endpoint")
         try:
             endpoint_name = _unique_name("flow_endpoint")
             endpoint_data = nc.deploy_model(
                 job_id=job_id,
                 name=endpoint_name,
-                input_embodiment_description=INPUT_DATA_SPEC,
-                output_embodiment_description=OUTPUT_DATA_SPEC,
+                input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+                output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
                 ttl=60 * 30,
             )
             endpoint_id = endpoint_data["id"]
@@ -571,7 +680,7 @@ def test_training_flow():
             assert (
                 final_endpoint_status == "active"
             ), f"Endpoint did not become active, status: {final_endpoint_status!r}"
-            logger.info(f"Step 9 passed — endpoint {endpoint_id} is active")
+            logger.info(f"Endpoint {endpoint_id} is active")
         except Exception as e:
             pytest.fail(f"Step 9 (remote endpoint deployment) failed: {e}")
 
@@ -620,89 +729,94 @@ def test_training_failure_error_reporting():
     dataset = None
     dataset_name = _unique_name("failure_report_test")
 
+    logger.info(f"Collecting 1 demo episode into '{dataset_name}'")
     try:
         dataset = _collect_demo_data(
             ROBOT_NAME, dataset_name, num_episodes=1, instance_id=1
         )
+        logger.info(f"Collected 1 recording into '{dataset_name}'")
     except Exception as e:
         pytest.fail(f"Data collection failed: {e}")
 
-        # ------------------------------------------------------------------
-        # Build a per-robot data spec from the collected dataset
-        # ------------------------------------------------------------------
-        try:
-            robot_ids = dataset.robot_ids
-            input_cross_embodiment_description: dict = {}
-            output_cross_embodiment_description: dict = {}
-            for robot_id in robot_ids:
-                data_spec = dataset.get_full_embodiment_description(robot_id)
-                filtered = {
-                    data_type: item
-                    for data_type, item in data_spec.items()
-                    if data_type in INPUT_DATA_TYPES
-                }
-                input_cross_embodiment_description[robot_id] = filtered
-                output_cross_embodiment_description[robot_id] = {
-                    DataType.JOINT_POSITIONS: filtered[DataType.JOINT_POSITIONS],
-                }
-        except Exception as e:
-            pytest.fail(f"Building data spec failed: {e}")
+    # ------------------------------------------------------------------
+    # Build a per-robot embodiment description from the collected dataset
+    # ------------------------------------------------------------------
+    logger.info("Building embodiment descriptions from collected dataset")
+    try:
+        robot_ids = dataset.robot_ids
+        logger.info(f"Found {len(robot_ids)} robots: {robot_ids}")
+        input_cross_embodiment_description: dict = {}
+        output_cross_embodiment_description: dict = {}
+        for robot_id in robot_ids:
+            embodiment_description = dataset.get_full_embodiment_description(robot_id)
+            for data_type in INPUT_DATA_TYPES:
+                assert data_type in embodiment_description, (
+                    f"{data_type.value} missing from robot {robot_id} "
+                    "embodiment description"
+                )
+            input_cross_embodiment_description[robot_id] = {
+                data_type: embodiment_description[data_type]
+                for data_type in INPUT_DATA_TYPES
+            }
+            output_cross_embodiment_description[robot_id] = {
+                data_type: embodiment_description[data_type]
+                for data_type in OUTPUT_DATA_TYPES
+            }
+    except Exception as e:
+        pytest.fail(f"Building embodiment description failed: {e}")
 
-        # ------------------------------------------------------------------
-        # Submit a training job that will fail at runtime
-        # ------------------------------------------------------------------
-        try:
-            job_data = nc.start_training_run(
-                name=_unique_name("failure_report_job"),
-                dataset_name=dataset_name,
-                algorithm_name="CNNMLP",
-                algorithm_config=FAILURE_CNNMLP_CONFIG,
-                gpu_type=GPU_TYPE,
-                num_gpus=NUM_GPUS,
-                frequency=FREQUENCY,
-                input_cross_embodiment_description=(input_cross_embodiment_description),
-                output_cross_embodiment_description=(
-                    output_cross_embodiment_description
-                ),
-            )
-            job_id = job_data["id"]
-            logger.info(f"Failure-reporting test job started: {job_id}")
-        except Exception as e:
-            pytest.fail(f"Failed to submit training job: {e}")
+    # ------------------------------------------------------------------
+    # Submit a training job that will fail at runtime
+    # ------------------------------------------------------------------
+    try:
+        job_data = nc.start_training_run(
+            name=_unique_name("failure_report_job"),
+            dataset_name=dataset_name,
+            algorithm_name="CNNMLP",
+            algorithm_config=FAILURE_CNNMLP_CONFIG,
+            gpu_type=GPU_TYPE,
+            num_gpus=NUM_GPUS,
+            frequency=FREQUENCY,
+            input_cross_embodiment_description=(input_cross_embodiment_description),
+            output_cross_embodiment_description=(output_cross_embodiment_description),
+        )
+        job_id = job_data["id"]
+        logger.info(f"Failure-reporting test job started: {job_id}")
+    except Exception as e:
+        pytest.fail(f"Failed to submit training job: {e}")
 
-        # ------------------------------------------------------------------
-        # Wait for the job to reach a terminal state (expect FAILED)
-        # ------------------------------------------------------------------
-        try:
-            final_status = _wait_for_training(job_id, timeout_minutes=30)
-            assert final_status == "FAILED", (
-                f"Expected FAILED status, got: {final_status!r}.  "
-                "The deliberate bad batch_size should have caused a ValueError "
-                "in train.py that maps to a FAILED job."
-            )
-            logger.info(f"Job {job_id} correctly reached FAILED status")
-        except Exception as e:
-            pytest.fail(f"Unexpected error waiting for job failure: {e}")
+    # ------------------------------------------------------------------
+    # Wait for the job to reach a terminal state (expect FAILED)
+    # ------------------------------------------------------------------
+    try:
+        final_status = _wait_for_training(job_id, timeout_minutes=30)
+        assert final_status == "FAILED", (
+            f"Expected FAILED status, got: {final_status!r}.  "
+            "The deliberate bad batch_size should have caused a ValueError "
+            "in train.py that maps to a FAILED job."
+        )
+        logger.info(f"Job {job_id} correctly reached FAILED status")
+    except Exception as e:
+        pytest.fail(f"Unexpected error waiting for job failure: {e}")
 
-        # ------------------------------------------------------------------
-        # Verify error info is surfaced in the job data
-        # ------------------------------------------------------------------
-        try:
-            job_detail = nc.get_training_job_data(job_id)
-            assert "error" in job_detail, (
-                "Job data is missing 'error' field — the server may not have "
-                "received the error report from the training script."
-            )
-            assert job_detail["error"], (
-                "The 'error' field in job data is empty — "
-                "_try_report_error_to_cloud may not have been called."
-            )
-            logger.info(
-                "Error field present in job data: %s",
-                str(job_detail["error"])[:200],
-            )
-        except Exception as e:
-            pytest.fail(f"Failed to verify error info in job data: {e}")
+    # ------------------------------------------------------------------
+    # Verify error info is surfaced in the job data
+    # ------------------------------------------------------------------
+    try:
+        job_detail = nc.get_training_job_data(job_id)
+        assert "error" in job_detail, (
+            "Job data is missing 'error' field — the server may not have "
+            "received the error report from the training script."
+        )
+        assert job_detail["error"], (
+            "The 'error' field in job data is empty — "
+            "_try_report_error_to_cloud may not have been called."
+        )
+        logger.info(
+            f"Error field present in job data: {str(job_detail['error'])[:200]}",
+        )
+    except Exception as e:
+        pytest.fail(f"Failed to verify error info in job data: {e}")
 
     finally:
         if job_id:
