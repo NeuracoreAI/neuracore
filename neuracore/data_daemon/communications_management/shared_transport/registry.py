@@ -315,6 +315,13 @@ class SharedSlotRegistry:
             raise RuntimeError("Shared-slot transport is not ready")
         return shm.buf[offset : offset + length]
 
+    def reset_session(self) -> None:
+        """Reset per-recording shared-slot session state for reuse."""
+        with self._condition:
+            if self._state.closed:
+                raise RuntimeError("Cannot reset a closed shared-slot registry")
+            self._reset_session_locked()
+
     def close(self) -> None:
         """Stop threads and close local handles."""
         with self._condition:
@@ -453,6 +460,24 @@ class SharedSlotRegistry:
         self._state.free_slots = type(self._state.free_slots)(range(self.slot_count))
         self._state.last_credit_return_at = None
         self._state.ready = True
+        self._condition.notify_all()
+
+    def _reset_session_locked(self) -> None:
+        """Clear daemon-session state while preserving channel sequence IDs."""
+        self._close_shared_memory_locked()
+        self._state.shm_name = None
+        self._state.free_slots.clear()
+        self._state.ready = False
+        self._state.healthy = True
+        self._state.in_flight.clear()
+        self._state.max_in_flight_count = 0
+        self._state.acked_sequence_count = 0
+        self._state.ack_timeout_count = 0
+        self._state.last_acked_sequence_id = None
+        self._state.last_ack_latency_s = None
+        self._state.max_ack_latency_s = 0.0
+        self._state.last_credit_return_at = None
+        self._state.unhealthy_reason = None
         self._condition.notify_all()
 
     def _check_for_timeouts_locked(self) -> None:
@@ -626,6 +651,11 @@ class SharedSlotRegistry:
             )
 
     def _close_shared_memory(self) -> None:
+        """Close the local attachment to the daemon-owned shared-memory region."""
+        with self._condition:
+            self._close_shared_memory_locked()
+
+    def _close_shared_memory_locked(self) -> None:
         """Close the local attachment to the daemon-owned shared-memory region."""
         shm = self._state.shm
         if shm is None:

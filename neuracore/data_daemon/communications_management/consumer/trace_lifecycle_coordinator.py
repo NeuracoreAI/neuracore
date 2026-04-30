@@ -80,7 +80,9 @@ class TraceLifecycleCoordinator:
                     robot_name=str_or_none(metadata.get("robot_name")),
                     robot_id=str_or_none(metadata.get("robot_id")),
                     robot_instance=metadata.get("robot_instance"),
-                    data_type=str_or_none(metadata.get("data_type")),
+                    data_type=(
+                        str_or_none(metadata.get("data_type")) or result.data_type.value
+                    ),
                     data_type_name=str_or_none(metadata.get("data_type_name")),
                 ),
             )
@@ -245,14 +247,25 @@ class TraceLifecycleCoordinator:
             try:
                 data_type = DataType(data_type_str)
             except ValueError:
-                raise ValueError(
-                    f"Unknown data_type '{data_type_str}' for trace_id={trace_id}."
+                logger.warning(
+                    "Dropping trace_id=%s for recording_id=%s due to unknown "
+                    "data_type=%r on TRACE_END",
+                    trace_id,
+                    recording_id,
+                    data_type_str,
                 )
+                self._drop_invalid_trace_state(str(recording_id), str(trace_id))
+                return
         else:
             if registered_recording_id is not None:
-                raise ValueError(
-                    f"Missing data_type in metadata for trace_id={trace_id}."
+                logger.warning(
+                    "Dropping trace_id=%s for recording_id=%s because TRACE_END "
+                    "arrived without registered data_type metadata",
+                    trace_id,
+                    recording_id,
                 )
+                self._drop_invalid_trace_state(str(recording_id), str(trace_id))
+                return
             logger.warning(
                 "TRACE_END received for trace_id=%s without registered metadata; "
                 "ignoring finalization",
@@ -387,10 +400,17 @@ class TraceLifecycleCoordinator:
             return None
 
         self._trace_metadata.pop(trace_id)
-        self._pending_trace_ends.pop(trace_id, None)
+        self._pending_trace_ends.pop(trace_id)
         self._final_chunk_enqueued_traces.discard(trace_id)
         self._trace_recordings.remove_trace(recording_id, trace_id)
         return str(recording_id)
+
+    def _drop_invalid_trace_state(self, recording_id: str, trace_id: str) -> None:
+        """Prune trace lifecycle state when metadata is too incomplete to finalize."""
+        self._trace_metadata.pop(trace_id)
+        self._pending_trace_ends.pop(trace_id)
+        self._final_chunk_enqueued_traces.discard(trace_id)
+        self._trace_recordings.remove_trace(recording_id, trace_id)
 
     def _has_reached_sequence_cutoffs(
         self,

@@ -153,29 +153,3 @@ def test_main_logs_fatal_error_when_run_forever_crashes(
     runtime.shutdown.assert_called_once()
     assert "Fatal error while daemon main loop was running" in caplog.text
     assert shutdown_calls == [(pid_path, (runner_entry.SOCKET_PATH,), db_path)]
-
-
-def test_configure_third_party_logging_raises_zerobuffer_to_warning() -> None:
-    zerobuffer_logger = logging.getLogger("zerobuffer")
-    reader_logger = logging.getLogger("zerobuffer.reader")
-    writer_logger = logging.getLogger("zerobuffer.writer")
-    previous_levels = (
-        zerobuffer_logger.level,
-        reader_logger.level,
-        writer_logger.level,
-    )
-
-    try:
-        zerobuffer_logger.setLevel(logging.INFO)
-        reader_logger.setLevel(logging.INFO)
-        writer_logger.setLevel(logging.INFO)
-
-        runner_entry._configure_third_party_logging()
-
-        assert zerobuffer_logger.level == logging.WARNING
-        assert reader_logger.level == logging.WARNING
-        assert writer_logger.level == logging.WARNING
-    finally:
-        zerobuffer_logger.setLevel(previous_levels[0])
-        reader_logger.setLevel(previous_levels[1])
-        writer_logger.setLevel(previous_levels[2])

@@ -375,6 +375,11 @@ class SharedSlotVideoTransport:
         """Mark the shared-slot transport unhealthy after sender failure."""
         self._registry.notify_sender_failure()
 
+    def finish_recording_session(self) -> None:
+        """Reset transport state so the next recording opens a fresh session."""
+        self._registry.reset_session()
+        self._announced = False
+
     def wait_until_drained(self, timeout_s: float = 30.0) -> None:
         """Wait until all queued packets and in-flight credits are settled."""
         deadline = time.monotonic() + timeout_s
