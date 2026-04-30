@@ -25,12 +25,13 @@ from neuracore.data_daemon.models import (
     SharedSlotReadyModel,
 )
 
-from .runtime import (
+from .models import (
     InFlightSlot,
     SharedSlotControlRuntime,
     SharedSlotRegistryConfig,
     SharedSlotRegistryState,
 )
+from .runtime import create_control_socket_path
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ class SharedSlotRegistry:
         self._state = SharedSlotRegistryState()
         self._condition = threading.Condition()
         self._runtime = SharedSlotControlRuntime.build(
+            socket_path=create_control_socket_path(),
             control_listener_target=self._control_listener_loop,
             watchdog_target=self._watchdog_loop,
         )

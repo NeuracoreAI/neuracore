@@ -23,10 +23,10 @@ from neuracore_types import DataType, RobotInstanceIdentifier
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
-from neuracore.data_daemon.communications_management.producer_channel import (
+from neuracore.data_daemon.communications_management.producer.producer_channel import (
     ProducerChannel,
 )
-from neuracore.data_daemon.communications_management.recording_context import (
+from neuracore.data_daemon.communications_management.shared_transport.recording_context import (
     RecordingContext as DaemonRecordingContext,
 )
 

@@ -9,7 +9,6 @@ import queue
 import struct
 import threading
 import time
-from dataclasses import dataclass
 
 from neuracore.data_daemon.const import (
     DEFAULT_VIDEO_ACK_TIMEOUT_SECONDS,
@@ -27,12 +26,10 @@ from neuracore.data_daemon.models import (
     SharedSlotDescriptor,
 )
 
-from .producer_channel_message_sender import ProducerChannelMessageSender
-from .producer_transport_debug_models import (
-    ProducerSharedMemoryDebugStats,
-    ProducerTransportTimingStats,
-)
-from .shared_slot import SharedSlotRegistry
+from ..producer.models import ProducerSharedMemoryDebugStats, ProducerTransportTimingStats
+from ..producer.producer_channel_message_sender import ProducerChannelMessageSender
+from .models import QueuedSharedSlotPacket
+from .registry import SharedSlotRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -51,17 +48,6 @@ def _env_float(name: str, default: float) -> float:
 
 class PacketTooLarge(ValueError):
     """Raised when a packet cannot fit in a single shared slot."""
-
-
-@dataclass
-class QueuedSharedSlotPacket:
-    """One packet awaiting shared-memory copy and descriptor enqueue."""
-
-    producer_id: str
-    sender: ProducerChannelMessageSender
-    metadata_bytes: bytes
-    chunk: bytes | bytearray | memoryview
-    packet_length: int
 
 
 def build_shared_frame_packet(

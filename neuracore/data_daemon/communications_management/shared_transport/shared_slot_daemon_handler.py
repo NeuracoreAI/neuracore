@@ -1,17 +1,16 @@
 """Daemon-side shared-slot transport helpers."""
 
 from __future__ import annotations
-import shutil
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+import zmq
 from multiprocessing import resource_tracker
 from multiprocessing.shared_memory import SharedMemory
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
-import zmq
 
+from neuracore.data_daemon.communications_management.shared_transport.shared_memory_budget import SharedMemoryBudget
 from neuracore.data_daemon.models import (
     CommandType,
     MessageEnvelope,
@@ -20,15 +19,13 @@ from neuracore.data_daemon.models import (
     SharedSlotCreditReturn,
     SharedSlotDescriptor,
     SharedSlotReadyModel,
-    TraceTransportMetadata,
 )
 
-from .bridge_chunk_spool import BridgeChunkSpool, ChunkSpoolRef
+from ..consumer.bridge_chunk_spool import BridgeChunkSpool, ChunkSpoolRef
+from ..consumer.models import ChannelState
 from .communications_manager import CommunicationsManager
+from .models import SharedSlotTransportResult
 from .shared_slot_transport import parse_shared_frame_packet_view
-
-if TYPE_CHECKING:
-    from neuracore.data_daemon.communications_management.data_bridge import ChannelState
 
 logger = logging.getLogger(__name__)
 
@@ -47,18 +44,6 @@ class _AckSenderSocket(Protocol):
 
     def setsockopt(self, option: int, value: int) -> None: ...
 
-
-@dataclass(frozen=True)
-class SharedSlotTransportResult:
-    """Parsed result of one shared-slot descriptor."""
-
-    descriptor: SharedSlotDescriptor
-    chunk_metadata: SharedMemoryChunkMetadata
-    chunk_spool_ref: ChunkSpoolRef
-    trace_id: str
-    trace_metadata: TraceTransportMetadata | None
-
-
 class SharedSlotDaemonHandler:
     """Own daemon-side shared-slot transport mechanics."""
 
@@ -67,6 +52,7 @@ class SharedSlotDaemonHandler:
         self._comm = comm
         self._shared_memory_cache: dict[str, SharedMemory] = {}
         self._ack_sender_sockets: dict[str, _AckSenderSocket] = {}
+        self._shared_memory_budget = SharedMemoryBudget()
 
     def _cleanup_previous_shared_slots(
         self, channel: ChannelState, control_endpoint: str | None = None
@@ -74,6 +60,7 @@ class SharedSlotDaemonHandler:
         """Clean up a producer's previous shared-slot resources, if any."""
         previous_shm_name = channel.shared_slot.shm_name
         previous_endpoint = channel.shared_slot.control_endpoint
+
         if previous_shm_name:
             old = self._shared_memory_cache.pop(previous_shm_name, None)
             if old is not None:
@@ -84,116 +71,104 @@ class SharedSlotDaemonHandler:
                         old.unlink()
                     except FileNotFoundError:
                         pass
+
+            self._shared_memory_budget.release(previous_shm_name)
+
         if previous_endpoint and previous_endpoint != control_endpoint:
             old_socket = self._ack_sender_sockets.pop(previous_endpoint, None)
             if old_socket is not None:
                 old_socket.close(0)
 
-    def _get_safe_slot_count(
-        self,
-        slot_size: int,
-        requested_slot_count: int,
-        ) -> int:
-        usage = shutil.disk_usage("/dev/shm")
-        budget = int(usage.free * 0.75)
-
-        if slot_size > budget:
-            raise RuntimeError(
-                f"Not enough /dev/shm for one shared slot: "
-                f"slot_size={slot_size / (1024**2):.2f}MiB, "
-                f"budget={budget / (1024**2):.2f}MiB, "
-                f"free={usage.free / (1024**2):.2f}MiB, "
-                f"total={usage.total / (1024**2):.2f}MiB"
-            )
-
-        safe_slot_count = budget // slot_size
-        actual_slot_count = max(1, min(requested_slot_count, safe_slot_count))
-
-        logger.info(
-            "Shared slot sizing slot_size=%.2fMiB requested_slot_count=%d "
-            "actual_slot_count=%d shm_free=%.2fMiB shm_total=%.2fMiB",
-            slot_size / (1024**2),
-            requested_slot_count,
-            actual_slot_count,
-            usage.free / (1024**2),
-            usage.total / (1024**2),
-        )
-
-        return actual_slot_count
+        channel.shared_slot.reset()
 
     def handle_open(
         self,
         channel: ChannelState,
         payload: dict,
-        ) -> None:
+    ) -> None:
         """Open daemon-owned fixed shared slots for one channel."""
         request = OpenFixedSharedSlotsModel(**payload)
-
-        slot_count = self._get_safe_slot_count(
-            request.slot_size,
-            request.slot_count,
-        )
-
-        requested_bytes = request.slot_size * slot_count
-
-        logger.info(
-            "Opening shared slots producer_id=%s slot_size=%d requested_slot_count=%d "
-            "actual_slot_count=%d total_shared_memory_bytes=%d",
-            channel.producer_id,
-            request.slot_size,
-            request.slot_count,
-            slot_count,
-            requested_bytes,
-        )
-
-        shm_name = f"neuracore-slots-{uuid.uuid4().hex}-{int(time.time() * 1000)}"
-
-        shm = SharedMemory(
-            name=shm_name,
-            create=True,
-            size=requested_bytes,
-        )
-
-        try:
-            resource_tracker.unregister(
-                getattr(shm, "_name", shm.name), "shared_memory"
-            )
-        except Exception:
-            logger.debug(
-                "Failed to unregister daemon-owned shared memory %s",
-                shm_name,
-                exc_info=True,
-            )
 
         if channel.shared_slot.shm_name is not None:
             self._cleanup_previous_shared_slots(channel, request.control_endpoint)
 
-        self._shared_memory_cache[shm_name] = shm
+        shm_name = f"neuracore-slots-{uuid.uuid4().hex}-{int(time.time() * 1000)}"
 
-        channel.mark_shared_slot_transport_open(
-            control_endpoint=request.control_endpoint,
+        reservation = self._shared_memory_budget.reserve(
             shm_name=shm_name,
+            slot_size=request.slot_size,
+            requested_slot_count=request.slot_count,
         )
 
-        self._send_ready_message(
-            endpoint=request.control_endpoint,
-            ready=SharedSlotReadyModel(
+        shm: SharedMemory | None = None
+
+        try:
+            shm = SharedMemory(
+                name=shm_name,
+                create=True,
+                size=reservation.allocated_bytes,
+            )
+
+            try:
+                resource_tracker.unregister(
+                    getattr(shm, "_name", shm.name),
+                    "shared_memory",
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to unregister daemon-owned shared memory %s",
+                    shm_name,
+                    exc_info=True,
+                )
+
+            self._shared_memory_cache[shm_name] = shm
+
+            channel.mark_shared_slot_transport_open(
+                control_endpoint=request.control_endpoint,
                 shm_name=shm_name,
-                slot_size=request.slot_size,
-                slot_count=slot_count,
-            ),
-        )
+            )
+
+            self._send_ready_message(
+                endpoint=request.control_endpoint,
+                ready=SharedSlotReadyModel(
+                    shm_name=shm_name,
+                    slot_size=request.slot_size,
+                    slot_count=reservation.slot_count,
+                ),
+            )
+
+        except Exception:
+            self._shared_memory_cache.pop(shm_name, None)
+
+            if shm is not None:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    logger.warning(
+                        "Failed to clean up shared memory after open failure %s",
+                        shm_name,
+                        exc_info=True,
+                    )
+
+            self._shared_memory_budget.rollback(shm_name)
+            channel.shared_slot.reset()
+            raise
 
         logger.info(
             "Opened daemon-owned fixed shared slots for producer_id=%s "
-            "slot_size=%d requested_slot_count=%d actual_slot_count=%d "
-            "total_shared_memory_bytes=%d max_in_flight_packets=%d",
+            "shm_name=%s slot_size=%d requested_slot_count=%d "
+            "actual_slot_count=%d total_shared_memory_bytes=%d "
+            "max_in_flight_packets=%d",
             channel.producer_id,
+            shm_name,
             request.slot_size,
             request.slot_count,
-            slot_count,
-            requested_bytes,
-            slot_count,
+            reservation.slot_count,
+            reservation.allocated_bytes,
+            reservation.slot_count,
         )
 
     def handle_descriptor(
@@ -246,6 +221,7 @@ class SharedSlotDaemonHandler:
         shm_name = channel.shared_slot.shm_name
         if shm_name:
             shm = self._shared_memory_cache.pop(shm_name, None)
+
             if shm is not None:
                 try:
                     shm.close()
@@ -258,6 +234,10 @@ class SharedSlotDaemonHandler:
                         shm_name,
                         exc_info=True,
                     )
+                finally:
+                    self._shared_memory_budget.release(shm_name)
+            else:
+                self._shared_memory_budget.release(shm_name)
 
         endpoint = channel.shared_slot.control_endpoint
         if endpoint:
@@ -272,6 +252,8 @@ class SharedSlotDaemonHandler:
                         exc_info=True,
                     )
 
+        channel.shared_slot.reset()
+
     def close(self) -> None:
         """Close all daemon-side shared-slot handles during shutdown."""
         for socket_obj in self._ack_sender_sockets.values():
@@ -281,7 +263,7 @@ class SharedSlotDaemonHandler:
                 logger.warning("Failed to close shared-slot ACK sender", exc_info=True)
         self._ack_sender_sockets.clear()
 
-        for shm in self._shared_memory_cache.values():
+        for shm_name, shm in list(self._shared_memory_cache.items()):
             try:
                 shm.close()
                 shm.unlink()
@@ -289,6 +271,9 @@ class SharedSlotDaemonHandler:
                 pass
             except Exception:
                 logger.warning("Failed to close cached shared memory", exc_info=True)
+            finally:
+                self._shared_memory_budget.release(shm_name)
+
         self._shared_memory_cache.clear()
 
     def _spool_shared_slot_packet(

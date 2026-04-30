@@ -6,27 +6,18 @@ import logging
 import queue
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
 
-from neuracore.data_daemon.communications_management.communications_manager import (
+from neuracore.data_daemon.communications_management.shared_transport.communications_manager import (
     CommunicationsManager,
     MessageEnvelope,
 )
 from neuracore.data_daemon.models import CommandType
 
+from .models import QueuedEnvelope
 from .producer_transport_debug_helper import ProducerTransportDebugHelper
 from .producer_transport_debug_models import ProducerChannelMessageSenderDebugStats
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class QueuedEnvelope:
-    """A socket message plus optional failure callback."""
-
-    envelope: MessageEnvelope
-    on_sent: Callable[[], None] | None = None
-    on_failed_send: Callable[[], None] | None = None
 
 
 class ProducerChannelMessageSender:

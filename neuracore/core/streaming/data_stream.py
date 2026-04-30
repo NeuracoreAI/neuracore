@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 from neuracore_types import CameraData, DataType, NCData
 
-from neuracore.data_daemon.communications_management.producer_channel import (
+from neuracore.data_daemon.communications_management.producer.producer_channel import (
     ProducerChannel,
 )
 

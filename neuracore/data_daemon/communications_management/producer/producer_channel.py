@@ -11,7 +11,7 @@ from collections.abc import Iterator, Sequence
 
 import zmq
 
-from neuracore.data_daemon.communications_management.communications_manager import (
+from neuracore.data_daemon.communications_management.shared_transport.communications_manager import (
     CommunicationsManager,
 )
 from neuracore.data_daemon.const import (
@@ -39,7 +39,7 @@ from .producer_transport_debug_models import (
     ProducerTransportDebugStats,
     ProducerTransportTimingStats,
 )
-from .shared_slot_transport import SharedSlotVideoTransport
+from ..shared_transport.shared_slot_transport import SharedSlotVideoTransport
 
 logger = logging.getLogger(__name__)
 

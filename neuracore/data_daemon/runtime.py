@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from neuracore.core.auth import login
-from neuracore.data_daemon.communications_management.communications_manager import (
+from neuracore.data_daemon.communications_management.shared_transport.communications_manager import (
     CommunicationsManager,
 )
-from neuracore.data_daemon.communications_management.data_bridge import Daemon
+from neuracore.data_daemon.communications_management.consumer.data_bridge import (
+    DataBridge,
+)
 from neuracore.data_daemon.config_manager.config import ConfigManager
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.config_manager.profiles import (
@@ -73,7 +75,7 @@ class DaemonRuntime:
         self._socket_paths = socket_paths
         self._manage_pid = os.environ.get("NEURACORE_DAEMON_MANAGE_PID", "1") != "0"
         self._context: DaemonContext | None = None
-        self._daemon: Daemon | None = None
+        self._daemon: DataBridge | None = None
         self._event_logger: EventLogger | None = None
 
     def _get_recordings_root(self, config: DaemonConfig) -> Path:
@@ -333,7 +335,7 @@ class DaemonRuntime:
 
         logger.debug("[8/8] Creating communications runtime...")
         comm_manager = CommunicationsManager()
-        self._daemon = Daemon(
+        self._daemon = DataBridge(
             recording_disk_manager=recording_disk_manager,
             emitter=emitter,
             comm_manager=comm_manager,
