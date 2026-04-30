@@ -1,7 +1,7 @@
 """Daemon-side shared-slot transport helpers."""
 
 from __future__ import annotations
-
+import shutil
 import logging
 import time
 import uuid
@@ -89,21 +89,72 @@ class SharedSlotDaemonHandler:
             if old_socket is not None:
                 old_socket.close(0)
 
+    def _get_safe_slot_count(
+        self,
+        slot_size: int,
+        requested_slot_count: int,
+        ) -> int:
+        usage = shutil.disk_usage("/dev/shm")
+        budget = int(usage.free * 0.75)
+
+        if slot_size > budget:
+            raise RuntimeError(
+                f"Not enough /dev/shm for one shared slot: "
+                f"slot_size={slot_size / (1024**2):.2f}MiB, "
+                f"budget={budget / (1024**2):.2f}MiB, "
+                f"free={usage.free / (1024**2):.2f}MiB, "
+                f"total={usage.total / (1024**2):.2f}MiB"
+            )
+
+        safe_slot_count = budget // slot_size
+        actual_slot_count = max(1, min(requested_slot_count, safe_slot_count))
+
+        logger.info(
+            "Shared slot sizing slot_size=%.2fMiB requested_slot_count=%d "
+            "actual_slot_count=%d shm_free=%.2fMiB shm_total=%.2fMiB",
+            slot_size / (1024**2),
+            requested_slot_count,
+            actual_slot_count,
+            usage.free / (1024**2),
+            usage.total / (1024**2),
+        )
+
+        return actual_slot_count
+
     def handle_open(
         self,
         channel: ChannelState,
         payload: dict,
-    ) -> None:
+        ) -> None:
         """Open daemon-owned fixed shared slots for one channel."""
         request = OpenFixedSharedSlotsModel(**payload)
+
+        slot_count = self._get_safe_slot_count(
+            request.slot_size,
+            request.slot_count,
+        )
+
+        requested_bytes = request.slot_size * slot_count
+
+        logger.info(
+            "Opening shared slots producer_id=%s slot_size=%d requested_slot_count=%d "
+            "actual_slot_count=%d total_shared_memory_bytes=%d",
+            channel.producer_id,
+            request.slot_size,
+            request.slot_count,
+            slot_count,
+            requested_bytes,
+        )
+
         shm_name = f"neuracore-slots-{uuid.uuid4().hex}-{int(time.time() * 1000)}"
+
         shm = SharedMemory(
             name=shm_name,
             create=True,
-            size=request.slot_size * request.slot_count,
+            size=requested_bytes,
         )
+
         try:
-            # So multiprocessing doesn't think it owns the memory cleanup
             resource_tracker.unregister(
                 getattr(shm, "_name", shm.name), "shared_memory"
             )
@@ -118,27 +169,31 @@ class SharedSlotDaemonHandler:
             self._cleanup_previous_shared_slots(channel, request.control_endpoint)
 
         self._shared_memory_cache[shm_name] = shm
+
         channel.mark_shared_slot_transport_open(
             control_endpoint=request.control_endpoint,
             shm_name=shm_name,
         )
+
         self._send_ready_message(
             endpoint=request.control_endpoint,
             ready=SharedSlotReadyModel(
                 shm_name=shm_name,
                 slot_size=request.slot_size,
-                slot_count=request.slot_count,
+                slot_count=slot_count,
             ),
         )
-        logger.debug(
+
+        logger.info(
             "Opened daemon-owned fixed shared slots for producer_id=%s "
-            "slot_size=%d slot_count=%d "
+            "slot_size=%d requested_slot_count=%d actual_slot_count=%d "
             "total_shared_memory_bytes=%d max_in_flight_packets=%d",
             channel.producer_id,
             request.slot_size,
             request.slot_count,
-            request.slot_size * request.slot_count,
-            request.slot_count,
+            slot_count,
+            requested_bytes,
+            slot_count,
         )
 
     def handle_descriptor(
