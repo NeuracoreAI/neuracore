@@ -31,6 +31,7 @@ def main(args):
             name="My Example Dataset",
             description="This is an example dataset",
         )
+        nc.connect_dataset("My Example Dataset")
         print("Created Dataset...")
 
     try:
