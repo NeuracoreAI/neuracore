@@ -842,7 +842,8 @@ class Dataset:
         # instance must be the one currently connected via connect_dataset().
         active_dataset_id = global_state._active_dataset_id
         if active_dataset_id is None:
-            raise RobotError("No active dataset. Call connect_dataset() first.")
+            # set this dataset as the active_dataset
+            global_state._active_dataset_id = self.id
         if active_dataset_id != self.id:
             raise RobotError(
                 "Can only start recording on the active dataset. "
