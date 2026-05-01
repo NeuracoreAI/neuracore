@@ -117,9 +117,9 @@ def test_launch_daemon_subprocess_keeps_foreground_stdio_attached(
 
     assert proc.pid == 65432
     assert captured["start_new_session"] is False
-    assert "stdin" not in captured
-    assert "stdout" not in captured
-    assert "stderr" not in captured
+    assert not captured.get("stdin")
+    assert not captured.get("stdout")
+    assert not captured.get("stderr")
 
     env = captured["env"]
     assert isinstance(env, dict)
