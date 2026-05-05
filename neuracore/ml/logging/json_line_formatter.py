@@ -32,6 +32,8 @@ class JsonLineLogFormatter(logging.Formatter):
             "severity": severity,
             "message": message,
         }
+        if record.exc_info:
+            event["traceback"] = self.formatException(record.exc_info)
         try:
             return json.dumps(event, ensure_ascii=False)
         except (TypeError, ValueError):
