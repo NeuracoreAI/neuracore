@@ -16,10 +16,25 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import (
 )
 
 
+class _FakeStderr:
+    def __init__(self, content: bytes = b"") -> None:
+        self._content = content
+
+    def read(self) -> bytes:
+        return self._content
+
+
 class _FakePopen:
-    def __init__(self, pid: int = 12345, poll_value: int | None = None) -> None:
+    def __init__(
+        self,
+        pid: int = 12345,
+        poll_value: int | None = None,
+        stderr: _FakeStderr | None = None,
+    ) -> None:
         self.pid = pid
         self._poll_value = poll_value
+        self.returncode = poll_value
+        self.stderr = stderr
 
     def poll(self) -> int | None:
         return self._poll_value
@@ -78,7 +93,7 @@ def test_launch_daemon_subprocess_redirects_stdio_in_background(
     assert captured["start_new_session"] is True
     assert captured["stdin"] is daemon_os_control.subprocess.DEVNULL
     assert captured["stdout"] is daemon_os_control.subprocess.DEVNULL
-    assert captured["stderr"] is daemon_os_control.subprocess.DEVNULL
+    assert captured["stderr"] is daemon_os_control.subprocess.PIPE
     assert captured["close_fds"] is True
     assert captured["cwd"] == str(Path.cwd())
 
@@ -125,6 +140,32 @@ def test_launch_daemon_subprocess_keeps_foreground_stdio_attached(
     assert isinstance(env, dict)
     assert env["NEURACORE_DAEMON_PROFILE"] == "demo"
     assert pid_path.read_text(encoding="utf-8").strip() == "65432"
+
+
+def test_launch_daemon_subprocess_premature_exit_includes_stderr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pid_path = tmp_path / "daemon.pid"
+    db_path = tmp_path / "state.db"
+    fake_socket_path = tmp_path / "management.sock"
+
+    def fake_popen(command: list[str], **kwargs: object) -> _FakePopen:
+        return _FakePopen(
+            pid=99999,
+            poll_value=1,
+            stderr=_FakeStderr(b"ImportError: No module named 'foo'"),
+        )
+
+    monkeypatch.setattr(daemon_os_control.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(daemon_os_control.time, "sleep", lambda _: None)
+    monkeypatch.setattr(daemon_os_control, "SOCKET_PATH", fake_socket_path)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        launch_daemon_subprocess(pid_path=pid_path, db_path=db_path, background=True)
+
+    message = str(exc_info.value)
+    assert "exit code 1" in message
+    assert "ImportError: No module named 'foo'" in message
 
 
 def test_install_signal_handlers_invokes_shutdown() -> None:
