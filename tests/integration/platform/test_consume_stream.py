@@ -82,7 +82,8 @@ def test_get_latest_data_from_multiple_nodes(execution_number: int):
     instance = 0
     nc.login()
     # The main process creates/connects to the robot.
-    nc.connect_robot(robot_name, instance=instance, overwrite=False)
+    nc.create_robot(robot_name, instance=instance)
+    nc.connect_robot(robot_name, instance=instance)
 
     # 2. Launch remote node: Start a separate process to log data.
     ctx = multiprocessing.get_context("spawn")

@@ -8,6 +8,8 @@ import pytest
 import requests_mock
 
 import neuracore as nc
+from neuracore.api.globals import GlobalSingleton
+from neuracore.core import robot as robot_core
 from neuracore.core.config import config_manager
 from neuracore.core.const import API_URL
 from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
@@ -160,14 +162,22 @@ def reset_neuracore():
     original_auth = nc.core.auth._auth
 
     nc.api._active_robot = None
+    nc.api._active_dataset = None
     nc.api._active_dataset_id = None
     nc.api._active_recording_id = None
+    GlobalSingleton()._active_robot = None
+    GlobalSingleton()._active_dataset = None
+    GlobalSingleton()._active_dataset_id = None
+    robot_core._robots.clear()
+    robot_core._robot_name_id_mapping.clear()
 
     nc.core.auth._auth = nc.core.auth.Auth()
 
     yield
 
     nc.core.auth._auth = original_auth
+    robot_core._robots.clear()
+    robot_core._robot_name_id_mapping.clear()
 
 
 @pytest.fixture

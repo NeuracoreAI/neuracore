@@ -51,13 +51,14 @@ nc.connect_robot(
 import time
 
 # Create a dataset for recording
-nc.create_dataset(
+dataset = nc.create_dataset(
     name="My Robot Dataset",
     description="Example dataset with multiple data types"
 )
+dataset = nc.connect_dataset(dataset)
 
 # Start recording
-nc.start_recording()
+dataset.start_recording()
 
 # Log various data types with timestamps
 t = time.time()
@@ -80,7 +81,7 @@ custom_sensor_data = np.array([1.2, 3.4, 5.6])
 nc.log_custom_1d("force_sensor", custom_sensor_data, timestamp=t)
 
 # Stop recording
-nc.stop_recording()
+dataset.stop_recording()
 ```
 
 #### Live Data Streaming Control

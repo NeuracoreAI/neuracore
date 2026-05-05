@@ -103,18 +103,19 @@ nc.connect_robot(
 )
 
 # Create a dataset for recording
-nc.create_dataset(
+dataset = nc.create_dataset(
     name="My Robot Dataset",
     description="Example dataset with multiple data types"
 )
+dataset = nc.connect_dataset(dataset)
 
 # Recording and streaming data
-nc.start_recording()
+dataset.start_recording()
 t = time.time()
 nc.log_joint_positions(positions={'joint1': 0.5, 'joint2': -0.3}, timestamp=t)
 nc.log_rgb(name="top_camera", rgb=image_array, timestamp=t)
 # Stop recording, the dataset is automatically uploaded to the cloud
-nc.stop_recording()
+dataset.stop_recording()
 
 # Kick off cloud training
 job_data = nc.start_training_run(

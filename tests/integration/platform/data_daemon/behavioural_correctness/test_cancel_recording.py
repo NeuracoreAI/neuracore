@@ -92,16 +92,26 @@ def test_cancel_recording_produces_no_data(
                 with Timer(
                     MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True
                 ):
-                    nc.create_dataset(dataset_name, description="Cancel recording test")
+                    dataset = nc.create_dataset(
+                        dataset_name, description="Cancel recording test"
+                    )
+                with Timer(
+                    MAX_TIME_TO_START_S, label="nc.connect_dataset", always_log=True
+                ):
+                    dataset = nc.connect_dataset(dataset)
+                with Timer(
+                    MAX_TIME_TO_START_S, label="nc.create_robot", always_log=True
+                ):
+                    nc.create_robot(robot_name)
                 with Timer(
                     MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True
                 ):
-                    robot = nc.connect_robot(robot_name, overwrite=False)
+                    robot = nc.connect_robot(robot_name)
 
                 with Timer(
                     MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
                 ):
-                    nc.start_recording(robot_name=robot_name)
+                    dataset.start_recording(robot_name=robot_name)
                 cancelled_recording_id = robot.get_current_recording_id()
                 assert cancelled_recording_id is not None
 
@@ -113,7 +123,7 @@ def test_cancel_recording_produces_no_data(
                     always_log=True,
                     assert_limit=False,
                 ):
-                    nc.cancel_recording(robot_name=robot_name)
+                    dataset.cancel_recording(robot_name=robot_name)
 
                 time.sleep(5)
 
@@ -170,20 +180,28 @@ def test_cancel_then_start_new_recording(
                 with Timer(
                     MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True
                 ):
-                    nc.create_dataset(
+                    dataset = nc.create_dataset(
                         dataset_name,
                         description=f"Cancel-then-resume test gap={gap_s}s",
                     )
                 with Timer(
+                    MAX_TIME_TO_START_S, label="nc.connect_dataset", always_log=True
+                ):
+                    dataset = nc.connect_dataset(dataset)
+                with Timer(
+                    MAX_TIME_TO_START_S, label="nc.create_robot", always_log=True
+                ):
+                    nc.create_robot(robot_name)
+                with Timer(
                     MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True
                 ):
-                    robot = nc.connect_robot(robot_name, overwrite=False)
+                    robot = nc.connect_robot(robot_name)
 
                 # --- cancelled recording ---
                 with Timer(
                     MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
                 ):
-                    nc.start_recording(robot_name=robot_name)
+                    dataset.start_recording(robot_name=robot_name)
                 cancelled_recording_id = robot.get_current_recording_id()
                 assert cancelled_recording_id is not None
 
@@ -195,7 +213,7 @@ def test_cancel_then_start_new_recording(
                     always_log=True,
                     assert_limit=False,
                 ):
-                    nc.cancel_recording(robot_name=robot_name)
+                    dataset.cancel_recording(robot_name=robot_name)
 
                 if gap_s > 0:
                     logger.info("Waiting %ds between cancel and next recording", gap_s)
@@ -205,7 +223,7 @@ def test_cancel_then_start_new_recording(
                 with Timer(
                     MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
                 ):
-                    nc.start_recording(robot_name=robot_name)
+                    dataset.start_recording(robot_name=robot_name)
                 resumed_recording_id = robot.get_current_recording_id()
                 assert resumed_recording_id is not None
 
@@ -217,7 +235,7 @@ def test_cancel_then_start_new_recording(
                     always_log=True,
                     assert_limit=False,
                 ):
-                    nc.stop_recording(robot_name=robot_name, wait=True)
+                    dataset.stop_recording(robot_name=robot_name, wait=True)
 
                 results = [
                     ContextResult(

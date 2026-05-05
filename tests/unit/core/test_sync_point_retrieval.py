@@ -253,6 +253,7 @@ def test_log_and_retrieve_sync_point(
         json={"robot_id": "mock_robot_id", "has_urdf": False, "archived": False},
         status_code=200,
     )
+    nc.create_robot("test-robot")
     nc.connect_robot("test-robot")
 
     log_mock_data()

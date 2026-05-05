@@ -25,7 +25,6 @@ from neuracore_types.importer.data_config import (
 )
 from neuracore_types.nc_data import DatasetImportConfig
 
-import neuracore as nc
 from neuracore.core.robot import JointInfo
 from neuracore.importer.core.base import (
     ImportItem,
@@ -216,8 +215,13 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             raise ImportError("Frequency is required for importing episodes.")
         total_steps = self._infer_total_steps(steps)
         base_time = time.time()
+        output_dataset = self.output_dataset
         if not self.dry_run:
-            nc.start_recording(robot_name=self.robot_name, instance=self._worker_id)
+            if output_dataset is None:
+                raise ImportError("Worker dataset was not connected.")
+            output_dataset.start_recording(
+                robot_name=self.robot_name, instance=self._worker_id
+            )
         episode_label = (
             f"{item.split or 'episode'} #{item.index}"
             if item.split is not None
@@ -253,7 +257,8 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                 episode_label=episode_label,
             )
         if not self.dry_run:
-            nc.stop_recording(
+            assert output_dataset is not None
+            output_dataset.stop_recording(
                 robot_name=self.robot_name, instance=self._worker_id, wait=True
             )
         self.logger.info("[%s] Completed %s", worker_label, episode_label)

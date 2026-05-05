@@ -1,7 +1,7 @@
 """Tests for LeRobot importer behavior."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, call
 
 import pytest
 from neuracore_types import DataType, JointPositionInputTypeConfig
@@ -105,6 +105,7 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
     importer.skip_on_error = "step"
     importer.robot_name = "test_robot"
     importer.dry_run = False
+    importer.output_dataset = MagicMock()
     importer.logger = MagicMock()
     importer._error_queue = MagicMock()
     importer._log_worker_error = MagicMock()
@@ -114,10 +115,7 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
     )
     importer._record_step = MagicMock(side_effect=[ValueError("bad step"), None])
 
-    with patch("neuracore.importer.lerobot_importer.nc.start_recording"), patch(
-        "neuracore.importer.lerobot_importer.nc.stop_recording"
-    ) as stop_recording:
-        importer.import_item(ImportItem(index=0))
+    importer.import_item(ImportItem(index=0))
 
     assert importer._record_step.call_count == 2
     importer._error_queue.put.assert_called_once()
@@ -133,7 +131,10 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
         call(0, step=0, total_steps=2, episode_label="123"),
         call(0, step=2, total_steps=2, episode_label="123"),
     ])
-    stop_recording.assert_called_once_with(
+    importer.output_dataset.start_recording.assert_called_once_with(
+        robot_name="test_robot", instance=2
+    )
+    importer.output_dataset.stop_recording.assert_called_once_with(
         robot_name="test_robot", instance=2, wait=True
     )
 
@@ -150,6 +151,7 @@ def test_lerobot_import_item_non_step_mode_re_raises():
     importer.skip_on_error = "episode"
     importer.robot_name = "test_robot"
     importer.dry_run = False
+    importer.output_dataset = MagicMock()
     importer.logger = MagicMock()
     importer._error_queue = MagicMock()
     importer._log_worker_error = MagicMock()
@@ -157,14 +159,15 @@ def test_lerobot_import_item_non_step_mode_re_raises():
     importer._iter_episode_steps = MagicMock(return_value=(iter([{"v": 1}]), 1))
     importer._record_step = MagicMock(side_effect=RuntimeError("explode"))
 
-    with patch("neuracore.importer.lerobot_importer.nc.start_recording"), patch(
-        "neuracore.importer.lerobot_importer.nc.stop_recording"
-    ):
-        with pytest.raises(RuntimeError, match="explode"):
-            importer.import_item(ImportItem(index=0))
+    with pytest.raises(RuntimeError, match="explode"):
+        importer.import_item(ImportItem(index=0))
 
     importer._error_queue.put.assert_not_called()
     importer._log_worker_error.assert_not_called()
+    importer.output_dataset.start_recording.assert_called_once_with(
+        robot_name="test_robot", instance=1
+    )
+    importer.output_dataset.stop_recording.assert_not_called()
 
 
 def test_lerobot_import_item_requires_initialized_worker_dataset():

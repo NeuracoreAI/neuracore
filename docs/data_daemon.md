@@ -87,11 +87,12 @@ import neuracore as nc
 
 def main():
     nc.login()
+    dataset = nc.connect_dataset("My Robot Dataset")
 
     # The daemon starts automatically when needed
-    nc.start_recording()
+    dataset.start_recording()
     # ...
-    nc.stop_recording()
+    dataset.stop_recording()
 ```
 
 Choosing a profile when using auto-start:

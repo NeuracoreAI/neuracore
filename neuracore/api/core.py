@@ -7,7 +7,6 @@ recording sessions.
 """
 
 import logging
-import time
 from warnings import warn
 
 from neuracore.core.config.config_manager import get_config_manager
@@ -19,13 +18,12 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
-from neuracore.core.utils import backend_utils
 
 from ..core.auth import get_auth
-from ..core.data.dataset import Dataset
-from ..core.exceptions import DatasetError, RobotError
-from ..core.robot import Robot, get_robot
+from ..core.exceptions import RobotError
+from ..core.robot import Robot, get_robot, get_robot_id_from_name
 from ..core.robot import init as _init_robot
+from ..core.robot import register_existing_robot
 from ..core.robot import update_robot_name as _update_robot_name
 from .globals import GlobalSingleton
 
@@ -102,6 +100,7 @@ def logout() -> None:
     """
     get_auth().logout()
     GlobalSingleton()._active_robot = None
+    GlobalSingleton()._active_dataset = None
     GlobalSingleton()._active_dataset_id = None
     GlobalSingleton()._has_validated_version = False
 
@@ -132,7 +131,7 @@ def set_organization(id_or_name: str) -> None:
     config_manager.save_config()
 
 
-def connect_robot(
+def create_robot(
     robot_name: str,
     instance: int = 0,
     urdf_path: str | None = None,
@@ -140,11 +139,11 @@ def connect_robot(
     overwrite: bool = False,
     shared: bool = False,
 ) -> Robot:
-    """Initialize a robot connection and set it as the active robot.
+    """Create a robot in Neuracore without setting it as the active robot.
 
-    Creates or connects to a robot instance, validates version compatibility,
-    and initializes streaming managers for live data and recording state updates.
-    The robot becomes the active robot for subsequent operations.
+    Creates a robot instance and uploads its robot description file when
+    provided. Use `connect_robot()` when the robot should become the active robot
+    for logging, recording, or live streaming.
 
     Upload of a robot description file (URDF or MJCF) is not required,
     but it is recommended for better visualization within Neuracore.
@@ -162,18 +161,96 @@ def connect_robot(
             members allocated by the Neuracore team.
 
     Returns:
-        The initialized and connected robot instance.
+        The initialized robot instance.
+
+    Raises:
+        RobotError: If this robot has already been created locally or in
+            Neuracore.
     """
     validate_version()
-    robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
-    GlobalSingleton()._active_robot = robot
-    if robot.archived is True:
-        warn(
-            f"This robot '{robot.name}' is archived. Was this intentional?",
+
+    try:
+        get_robot(robot_name, instance)
+    except RobotError:
+        pass
+    else:
+        raise RobotError(
+            f"Robot '{robot_name}' with instance '{instance}' already exists. "
+            "Call connect_robot() to connect to the existing robot."
         )
-    # Initialize push update managers
+
+    try:
+        get_robot_id_from_name(robot_name)
+    except RobotError:
+        pass
+    else:
+        raise RobotError(
+            f"Robot '{robot_name}' already exists in Neuracore. "
+            "Call connect_robot() to connect to the existing robot."
+        )
+
+    robot = _init_robot(
+        robot_name,
+        instance,
+        urdf_path,
+        mjcf_path,
+        overwrite,
+        shared,
+    )
+
+    if robot.archived:
+        warn(f"This robot '{robot.name}' is archived. Was this intentional?")
+
+    return robot
+
+
+def connect_robot(
+    robot_name: str,
+    instance: int = 0,
+    shared: bool = False,
+) -> Robot:
+    """Connect to a created robot and set it as the active robot.
+
+    Looks up a robot already created with `create_robot()` or already present
+    in Neuracore, validates version compatibility, and initializes streaming
+    managers for live data and recording state updates. The robot becomes the
+    active robot for subsequent operations.
+
+    Args:
+        robot_name: Unique identifier for the robot.
+        instance: Instance number of the robot for multi-instance deployments.
+        shared: Whether you want to register the robot as shared/open-source.
+            Note that setting shared=True is only available to specific
+            members allocated by the Neuracore team.
+
+    Returns:
+        The connected robot instance.
+    """
+    validate_version()
+
+    try:
+        robot = get_robot(robot_name, instance)
+    except RobotError:
+        try:
+            robot_id = get_robot_id_from_name(robot_name)
+        except RobotError as exc:
+            raise RobotError(
+                f"Robot '{robot_name}' with instance '{instance}' has not been "
+                "created. Call create_robot() first."
+            ) from exc
+        robot = register_existing_robot(
+            robot_name=robot_name,
+            robot_id=robot_id,
+            instance=instance,
+            shared=shared,
+        )
+
+    if robot.archived:
+        warn(f"This robot '{robot.name}' is archived. Was this intentional?")
+
+    GlobalSingleton()._active_robot = robot
     if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
+        raise RobotError("Robot not initialized. Call create_robot() first.")
     StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
     get_recording_state_manager()
     return robot
@@ -243,94 +320,6 @@ def is_recording(robot_name: str | None = None, instance: int = 0) -> bool:
     """
     robot = _get_robot(robot_name, instance)
     return robot.is_recording()
-
-
-def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
-    """Start recording data for a specific robot.
-
-    Begins a new recording session for the specified robot, capturing all
-    configured data streams. Requires an active dataset to be set before
-    starting the recording.
-
-    Args:
-        robot_name: Robot identifier. If not provided, uses the currently
-            active robot from the global state.
-        instance: Instance number of the robot for multi-instance scenarios.
-
-    Raises:
-        RobotError: If no robot is active and no robot_name is provided,
-            if a recording is already in progress, or if no active dataset
-            has been set.
-    """
-    robot = _get_robot(robot_name, instance)
-    active_dataset_id = GlobalSingleton()._active_dataset_id
-    if active_dataset_id is None:
-        raise RobotError("No active dataset. Call create_dataset() first.")
-    try:
-        active_dataset = Dataset.get_by_id(active_dataset_id)
-    except DatasetError:
-        active_dataset = None
-    if active_dataset is not None:
-        if robot.shared and not active_dataset.is_shared:
-            raise RobotError(
-                "Shared robot cannot be used with a non-shared dataset. "
-                "If you requested a shared dataset, creation may have failed "
-                "because you are not authorized to upload shared datasets or "
-                "an existing non-shared dataset with the same name was reused. "
-                f"Active dataset: '{active_dataset.name}' ({active_dataset.id})."
-            )
-        if not robot.shared and active_dataset.is_shared:
-            raise RobotError(
-                "Non-shared robot cannot be used with a shared dataset. "
-                "Shared datasets require shared robots. If you requested a "
-                "shared robot, ensure connect_robot(shared=True) succeeded. "
-                f"Active dataset: '{active_dataset.name}' ({active_dataset.id})."
-            )
-    robot.start_recording(active_dataset_id)
-
-
-def stop_recording(
-    robot_name: str | None = None, instance: int = 0, wait: bool = False
-) -> None:
-    """Stop recording data for a specific robot.
-
-    Ends the current recording session for the specified robot. Optionally
-    waits for all data streams to finish uploading before returning.
-
-    Args:
-        robot_name: Robot identifier. If not provided, uses the currently
-            active robot from the global state.
-        instance: Instance number of the robot for multi-instance scenarios.
-        wait: Whether to block until all data streams have finished uploading
-            to the backend storage.
-
-    Raises:
-        RobotError: If no robot is active and no robot_name is provided.
-    """
-    robot = _get_robot(robot_name, instance)
-    if not robot.is_recording():
-        warn(
-            "No active recordings to stop. "
-            "Your recording may have been stopped by another node."
-        )
-        return
-    recording_id = robot.get_current_recording_id()
-    if not recording_id:
-        raise ValueError("Recording_id is None, no current recording")
-    robot.stop_recording(recording_id)
-
-    if not wait:
-        return
-
-    # TODO: We need to instead check that the specific recording is complete
-    is_traces_registered = False
-    while True:
-        data_traces = backend_utils.get_active_data_traces(recording_id)
-        if len(data_traces) > 0:
-            is_traces_registered = True
-        elif len(data_traces) == 0 and is_traces_registered:
-            break
-        time.sleep(0.2)
 
 
 def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:

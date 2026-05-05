@@ -19,9 +19,13 @@ from neuracore_types import (
 from neuracore_types import SynchronizedDataset as SynchronizedDatasetModel
 from tqdm import tqdm
 
+from neuracore.api.globals import GlobalSingleton
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
+from neuracore.core.exceptions import RobotError
+from neuracore.core.robot import get_robot
+from neuracore.core.utils import backend_utils
 
 from ..auth import Auth, get_auth
 from ..const import API_URL, DEFAULT_RECORDING_CACHE_DIR
@@ -820,3 +824,187 @@ class Dataset:
                 name=self.name, description=self.description, tags=self.tags + [tag]
             )
         )
+
+    def start_recording(self, robot_name: str | None = None, instance: int = 0) -> None:
+        """Start recording data to this dataset for a specific robot.
+
+        Args:
+            robot_name: Robot identifier. If not provided, uses the currently
+                active robot from the global state.
+            instance: Instance number of the robot for multi-instance scenarios.
+
+        Raises:
+            RobotError: If this dataset or robot cannot be used for recording.
+        """
+        global_state = GlobalSingleton()
+
+        # Recording is routed through global session state, so this Dataset
+        # instance must be the one currently connected via connect_dataset().
+        active_dataset = global_state._active_dataset
+        if active_dataset is None:
+            raise RobotError("No active dataset. Call connect_dataset() first.")
+        if active_dataset is not self:
+            raise RobotError(
+                "Can only start recording on the active dataset. "
+                "Call connect_dataset() first."
+            )
+
+        # Use the active robot when no name is provided. If a name is provided,
+        # resolve that exact robot/instance pair from the robot registry.
+        robot = (
+            global_state._active_robot
+            if robot_name is None
+            else get_robot(robot_name, instance)
+        )
+        if robot is None:
+            raise RobotError(
+                "No active robot. Call init() first or provide robot_name."
+            )
+
+        # Shared datasets may only receive recordings from shared robots, and
+        # private datasets may only receive recordings from private robots. This
+        # prevents accidentally mixing public/open-source data with private data.
+        if robot.shared and not self.is_shared:
+            raise RobotError(
+                "Shared robot cannot be used with a non-shared dataset. "
+                "If you requested a shared dataset, creation may have failed "
+                "because you are not authorized to upload shared datasets or "
+                "an existing non-shared dataset with the same name was reused. "
+                f"Active dataset: '{self.name}' ({self.id})."
+            )
+        if not robot.shared and self.is_shared:
+            raise RobotError(
+                "Non-shared robot cannot be used with a shared dataset. "
+                "Shared datasets require shared robots. If you requested a "
+                "shared robot, ensure connect_robot(shared=True) succeeded. "
+                f"Active dataset: '{self.name}' ({self.id})."
+            )
+
+        # Dataset-level validation is complete; the Robot owns the lower-level
+        # recording lifecycle and will raise if a recording is already active.
+        robot.start_recording(self.id)
+
+    def cancel_recording(
+        self, robot_name: str | None = None, instance: int = 0
+    ) -> None:
+        """Cancel the current recording for a specific robot without saving any data.
+
+        Args:
+            robot_name: Robot identifier. If not provided, uses the currently
+                active robot from the global state.
+            instance: Instance number of the robot for multi-instance scenarios.
+
+        Raises:
+            RobotError: If no robot is active and no robot_name is provided.
+        """
+        global_state = GlobalSingleton()
+
+        # Cancellation through a Dataset instance should only affect recordings
+        # for the dataset currently connected in this session.
+        active_dataset = global_state._active_dataset
+        if active_dataset is None:
+            raise RobotError("No active dataset. Call connect_dataset() first.")
+        if active_dataset is not self:
+            raise RobotError(
+                "Can only cancel recordings on the active dataset. "
+                "Call connect_dataset() first."
+            )
+
+        # Match start_recording(): default to the active robot for the current
+        # session, or resolve a specific robot/instance when explicitly named.
+        robot = (
+            global_state._active_robot
+            if robot_name is None
+            else get_robot(robot_name, instance)
+        )
+        if robot is None:
+            raise RobotError(
+                "No active robot. Call init() first or provide robot_name."
+            )
+
+        # Cancelling is intentionally idempotent from the caller's perspective:
+        # if this robot has no active recording, there is nothing to cancel.
+        if not robot.is_recording():
+            return
+
+        # The robot tracks the current recording ID internally. If that state is
+        # missing despite is_recording(), avoid calling the backend with an empty ID.
+        recording_id = robot.get_current_recording_id()
+        if not recording_id:
+            return
+
+        # Delegate the backend cancellation and local state cleanup to Robot,
+        # which owns the recording lifecycle below the Dataset API.
+        robot.cancel_recording(recording_id)
+
+    def stop_recording(
+        self, robot_name: str | None = None, instance: int = 0, wait: bool = False
+    ) -> None:
+        """Stop recording data for a specific robot.
+
+        Ends the current recording session for the specified robot. Optionally
+        waits for all data streams to finish uploading before returning.
+
+        Args:
+            robot_name: Robot identifier. If not provided, uses the currently
+                active robot from the global state.
+            instance: Instance number of the robot for multi-instance scenarios.
+            wait: Whether to block until all data streams have finished uploading
+                to the backend storage.
+
+        Raises:
+            RobotError: If no robot is active and no robot_name is provided.
+        """
+        global_state = GlobalSingleton()
+
+        # Stopping through a Dataset instance should only affect recordings for
+        # the dataset currently connected in this session.
+        active_dataset = global_state._active_dataset
+        if active_dataset is None:
+            raise RobotError("No active dataset. Call connect_dataset() first.")
+        if active_dataset is not self:
+            raise RobotError(
+                "Can only stop recordings on the active dataset. "
+                "Call connect_dataset() first."
+            )
+
+        # Match start_recording() and cancel_recording(): default to the active
+        # robot, or resolve a specific robot/instance when explicitly named.
+        robot = (
+            global_state._active_robot
+            if robot_name is None
+            else get_robot(robot_name, instance)
+        )
+        if robot is None:
+            raise RobotError(
+                "No active robot. Call init() first or provide robot_name."
+            )
+
+        # Stopping is a no-op if the robot has no active recording, matching the
+        # public API behavior for recordings stopped by another node.
+        if not robot.is_recording():
+            return
+
+        # The robot tracks the current recording ID internally. Stopping needs a
+        # concrete ID because the lower-level API finalizes that specific session.
+        recording_id = robot.get_current_recording_id()
+        if not recording_id:
+            raise ValueError("Recording_id is None, no current recording")
+
+        # Delegate finalization to Robot, which handles backend state and local
+        # recording lifecycle cleanup.
+        robot.stop_recording(recording_id)
+
+        if not wait:
+            return
+
+        # When requested, block until backend upload traces have appeared and
+        # drained. This preserves the existing wait semantics.
+        is_traces_registered = False
+        while True:
+            data_traces = backend_utils.get_active_data_traces(recording_id)
+            if len(data_traces) > 0:
+                is_traces_registered = True
+            elif len(data_traces) == 0 and is_traces_registered:
+                break
+            time.sleep(0.2)

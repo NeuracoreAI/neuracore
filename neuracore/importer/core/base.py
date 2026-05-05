@@ -42,6 +42,7 @@ from rich.progress import (
 from scipy.spatial.transform import Rotation as R
 
 import neuracore as nc
+from neuracore.core.data.dataset import Dataset
 from neuracore.core.robot import JointInfo
 from neuracore.data_daemon.const import DEFAULT_RECORDING_ROOT_PATH
 from neuracore.importer.core.robot_utils import RobotUtils
@@ -150,6 +151,7 @@ class NeuracoreDatasetImporter(ABC):
         self.ordered_import_configs = self._get_ordered_import_configs()
         self.data_config = dataset_config  # Backwards-compat alias used by callers
         self.output_dataset_name = output_dataset_name
+        self.output_dataset: Dataset | None = None
         self.robot_name = dataset_config.robot.name
         self.frequency = dataset_config.frequency
         self.joint_info = joint_info
@@ -727,7 +729,7 @@ class NeuracoreDatasetImporter(ABC):
         """Log in and connect to Neuracore dataset for the worker."""
         nc.login()
         nc.connect_robot(self.robot_name, instance=worker_id, shared=self.shared)
-        nc.get_dataset(self.output_dataset_name)
+        self.output_dataset = nc.connect_dataset(self.output_dataset_name)
         if self.urdf_path is not None:
             urdf_packages_dir = os.path.dirname(self.urdf_path)
             self.robot_utils = RobotUtils(self.urdf_path, urdf_packages_dir)
@@ -1033,7 +1035,11 @@ class NeuracoreDatasetImporter(ABC):
             self.import_item(item)
         except Exception as exc:  # noqa: BLE001 - keep traceback for summary
             if not self.dry_run:
-                nc.cancel_recording(robot_name=self.robot_name, instance=worker_id)
+                output_dataset = self.output_dataset
+                if output_dataset is not None:
+                    output_dataset.cancel_recording(
+                        robot_name=self.robot_name, instance=worker_id
+                    )
             tb = traceback.format_exc()
             if self.skip_on_error == "episode":
                 error_queue.put(
