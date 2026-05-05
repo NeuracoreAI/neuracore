@@ -6,6 +6,7 @@ and deployment readiness checks. It ensures algorithms are compatible with
 the Neuracore training and inference infrastructure.
 """
 
+import gc
 import logging
 import tempfile
 import time
@@ -260,6 +261,13 @@ def run_validation(
             if skip_endpoint_check:
                 algo_check.successfully_launched_endpoint = True
             else:
+                # The subprocess loads its own copy of the model from the
+                # archive, so the in-process model + optimizers are dead
+                # weight from here on. Free them to keep peak RAM at ~1x
+                # model size instead of ~2x during the endpoint check.
+                del model, optimizers
+                gc.collect()
+
                 policy = None
                 try:
                     input_embodiment_description = {
