@@ -150,6 +150,10 @@ class DataStream(ABC):
         """Return the active producer channel for this stream, if present."""
         return self._producer_channel
 
+    def get_recording_context(self) -> DataRecordingContext | None:
+        """Return the active recording context for this stream, if present."""
+        return self._context
+
     def _send_to_daemon(self, data: bytes) -> None:
         """Send data to the daemon via the producer.
 
@@ -207,14 +211,15 @@ class JsonDataStream(DataStream):
         """
         super().__init__(data_type=data_type, stream_name=data_type_name)
 
-    def log(self, data: NCData) -> None:
+    def log(self, data: NCData, *, send_to_daemon: bool = True) -> None:
         """Log structured data as JSON.
 
         Args:
             data: Data object implementing NCData interface
+            send_to_daemon: Whether to forward the serialized payload to the daemon
         """
         self._latest_data = data
-        if not self.is_recording():
+        if not self.is_recording() or not send_to_daemon:
             return
 
         # Serialize to JSON bytes and send to daemon

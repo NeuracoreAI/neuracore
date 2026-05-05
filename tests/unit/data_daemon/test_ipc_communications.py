@@ -16,7 +16,13 @@ from neuracore.data_daemon.communications_management.producer.producer_channel i
 from neuracore.data_daemon.communications_management.shared_transport import (
     communications_manager as comms_module,
 )
-from neuracore.data_daemon.models import CommandType, DataChunkPayload, MessageEnvelope
+from neuracore.data_daemon.models import (
+    BatchedJointDataItemPayload,
+    BatchedJointDataPayload,
+    CommandType,
+    DataChunkPayload,
+    MessageEnvelope,
+)
 
 CommunicationsManager = comms_module.CommunicationsManager
 
@@ -218,6 +224,74 @@ def test_large_payload_chunked_round_trip_over_ipc(
     assert rdm.enqueued[0].data == payload
 
     producer.stop_producer_channel()
+
+
+def test_batched_joint_data_round_trip_over_ipc(
+    zmq_context: zmq.Context, emitter
+) -> None:
+    daemon_comm = CommunicationsManager(context=zmq_context)
+    daemon_comm.start_consumer()
+    rdm = CaptureRDM()
+    daemon = Daemon(
+        comm_manager=daemon_comm,
+        recording_disk_manager=rdm,
+        emitter=emitter,
+    )
+
+    producer = ProducerChannel(
+        id="producer-joint-batch",
+        context=zmq_context,
+        recording_id="rec-joint-batch",
+        data_type=DataType.JOINT_POSITIONS,
+    )
+
+    payload = BatchedJointDataPayload(
+        recording_id="rec-joint-batch",
+        timestamp=123.456,
+        dataset_id="dataset-1",
+        dataset_name="dataset",
+        robot_name="robot",
+        robot_id="robot-1",
+        robot_instance=2,
+        data_type=DataType.JOINT_POSITIONS,
+        items=[
+            BatchedJointDataItemPayload(
+                trace_id="trace-joint-1",
+                data_type_name="joint1",
+                value=0.1,
+            ),
+            BatchedJointDataItemPayload(
+                trace_id="trace-joint-2",
+                data_type_name="joint2",
+                value=-0.2,
+            ),
+        ],
+    )
+
+    producer.send_batched_joint_data(payload)
+    _drain_messages(
+        daemon,
+        daemon_comm,
+        expected=1,
+        until=lambda: len(rdm.enqueued) == 2,
+    )
+
+    assert len(rdm.enqueued) == 2
+    assert [message.trace_id for message in rdm.enqueued] == [
+        "trace-joint-1",
+        "trace-joint-2",
+    ]
+    assert [message.data_type_name for message in rdm.enqueued] == [
+        "joint1",
+        "joint2",
+    ]
+    assert [message.data for message in rdm.enqueued] == [
+        b'{"timestamp": 123.456, "value": 0.1}',
+        b'{"timestamp": 123.456, "value": -0.2}',
+    ]
+
+    producer.stop_producer_channel()
+    daemon_comm.cleanup_daemon()
     daemon_comm.cleanup_daemon()
 
 

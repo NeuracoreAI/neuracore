@@ -42,6 +42,8 @@ from neuracore.data_daemon.const import (
     SHARED_MEMORY_RECORD_HEADER_FORMAT,
 )
 from neuracore.data_daemon.models import (
+    BatchedJointDataItemPayload,
+    BatchedJointDataPayload,
     CommandType,
     CompleteMessage,
     DataChunkPayload,
@@ -122,6 +124,35 @@ def test_data_chunk_payload_round_trip() -> None:
     restored = DataChunkPayload.from_dict(chunk.to_dict())
 
     assert restored == chunk
+
+
+def test_batched_joint_data_payload_round_trip() -> None:
+    payload = BatchedJointDataPayload(
+        recording_id="rec-1",
+        timestamp=123.456,
+        dataset_id="dataset-1",
+        dataset_name="dataset",
+        robot_name="robot",
+        robot_id="robot-1",
+        robot_instance=3,
+        data_type=DataType.JOINT_POSITIONS,
+        items=[
+            BatchedJointDataItemPayload(
+                trace_id="trace-1",
+                data_type_name="joint1",
+                value=0.1,
+            ),
+            BatchedJointDataItemPayload(
+                trace_id="trace-2",
+                data_type_name="joint2",
+                value=-0.2,
+            ),
+        ],
+    )
+
+    restored = BatchedJointDataPayload.from_dict(payload.to_dict())
+
+    assert restored == payload
 
 
 def test_complete_message_batch_record_round_trip() -> None:
@@ -299,6 +330,44 @@ def _stub_producer_transport(monkeypatch) -> list[MessageEnvelope]:
     )
 
     return messages
+
+
+def test_send_batched_joint_data_enqueues_expected_command(monkeypatch) -> None:
+    messages = _stub_producer_transport(monkeypatch)
+    producer = ProducerChannel(
+        id="producer-joint-batch",
+        recording_id="rec-1",
+        data_type=DataType.JOINT_POSITIONS,
+    )
+
+    payload = BatchedJointDataPayload(
+        recording_id="rec-1",
+        timestamp=123.456,
+        dataset_id="dataset-1",
+        dataset_name="dataset",
+        robot_name="robot",
+        robot_id="robot-1",
+        robot_instance=0,
+        data_type=DataType.JOINT_POSITIONS,
+        items=[
+            BatchedJointDataItemPayload(
+                trace_id="trace-1",
+                data_type_name="joint1",
+                value=0.25,
+            )
+        ],
+    )
+
+    try:
+        producer.send_batched_joint_data(payload)
+        _wait_for_envelopes(messages, expected=1)
+    finally:
+        producer.stop_producer_channel()
+
+    assert len(messages) == 1
+    envelope = messages[0]
+    assert envelope.command == CommandType.BATCHED_JOINT_DATA
+    assert envelope.payload[CommandType.BATCHED_JOINT_DATA.value] == payload.to_dict()
 
 
 def test_producer_open_fixed_shared_slots_sends_payload(monkeypatch) -> None:

@@ -7,6 +7,7 @@ All logging functions support optional robot identification and timestamping.
 
 import logging
 import time
+from dataclasses import dataclass
 from warnings import filterwarnings, warn
 
 import numpy as np
@@ -43,6 +44,10 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
 )
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.depth_utils import MAX_DEPTH
+from neuracore.data_daemon.models import (
+    BatchedJointDataItemPayload,
+    BatchedJointDataPayload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +59,24 @@ class ExperimentalPointCloudWarning(UserWarning):
 
 
 filterwarnings("once", category=ExperimentalPointCloudWarning)
+
+
+@dataclass(frozen=True)
+class JointStreamBinding:
+    """Resolved per-joint stream metadata and stream instance."""
+
+    stream_id: str
+    storage_name: str
+    stream: JsonDataStream
+
+
+@dataclass(frozen=True)
+class LoggedJointData:
+    """Result of logging one joint sample into the local stream graph."""
+
+    binding: JointStreamBinding
+    data: JointData
+    trace_id: str | None
 
 
 def _publish_json_to_p2p(
@@ -165,32 +188,81 @@ def _log_single_joint_data(
     if dry_run:
         return
 
+    _log_joint_data_point(
+        data_type=data_type,
+        name=name,
+        value=value,
+        robot=robot,
+        timestamp=timestamp,
+        send_to_daemon=True,
+    )
+
+
+def _get_or_create_joint_stream(
+    data_type: DataType,
+    name: str,
+    robot: Robot,
+) -> JointStreamBinding:
+    """Return the stream id, storage name, and JsonDataStream for one joint."""
     storage_name = validate_safe_name(name)
     str_id = f"{data_type.value}:{name}"
     joint_stream = robot.get_data_stream(str_id)
     if joint_stream is None:
         joint_stream = JsonDataStream(data_type=data_type, data_type_name=storage_name)
         robot.add_data_stream(str_id, joint_stream)
+    assert isinstance(
+        joint_stream, JsonDataStream
+    ), "Expected stream to be instance of JSONDataStream"
+    return JointStreamBinding(
+        stream_id=str_id,
+        storage_name=storage_name,
+        stream=joint_stream,
+    )
 
+
+def _log_joint_data_point(
+    *,
+    data_type: DataType,
+    name: str,
+    value: float,
+    robot: Robot,
+    timestamp: float,
+    send_to_daemon: bool,
+) -> LoggedJointData:
+    """Log one joint sample into the local stream graph and live publishers."""
+    joint_stream_binding = _get_or_create_joint_stream(data_type, name, robot)
+    joint_stream = joint_stream_binding.stream
     start_stream(robot, joint_stream)
 
     data = JointData(
         timestamp=timestamp,
         value=value,
     )
-    assert isinstance(
-        joint_stream, JsonDataStream
-    ), "Expected stream to be instance of JSONDataStream"
-    joint_stream.log(data=data)
+    joint_stream.log(data=data, send_to_daemon=send_to_daemon)
+
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
 
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
-    ).get_json_source(str_id, data_type, sensor_key=str_id).publish(
-        data.model_dump(mode="json")
+    ).get_json_source(
+        joint_stream_binding.stream_id,
+        data_type,
+        sensor_key=joint_stream_binding.stream_id,
+    ).publish(data.model_dump(mode="json"))
+    _publish_json_to_p2p(robot, joint_stream_binding.stream_id, data_type, data)
+
+    producer_channel = joint_stream.get_producer_channel()
+    trace_id = (
+        producer_channel.trace_id
+        if producer_channel is not None and joint_stream.get_recording_context() is not None
+        else None
     )
-    _publish_json_to_p2p(robot, str_id, data_type, data)
+    return LoggedJointData(
+        binding=joint_stream_binding,
+        data=data,
+        trace_id=trace_id,
+    )
 
 
 def _log_group_of_joint_data(
@@ -228,8 +300,53 @@ def _log_group_of_joint_data(
         return
 
     robot = _get_robot(robot_name, instance)
+    batched_items: list[BatchedJointDataItemPayload] = []
+    batch_transport_stream: JsonDataStream | None = None
+
     for key, value in joint_data.items():
-        _log_single_joint_data(data_type, key, value, robot, timestamp, dry_run)
+        logged_joint_data = _log_joint_data_point(
+            data_type=data_type,
+            name=key,
+            value=value,
+            robot=robot,
+            timestamp=timestamp,
+            send_to_daemon=False,
+        )
+        joint_stream_binding = logged_joint_data.binding
+        joint_stream = joint_stream_binding.stream
+
+        if logged_joint_data.trace_id is not None:
+            if batch_transport_stream is None:
+                batch_transport_stream = joint_stream
+            batched_items.append(
+                BatchedJointDataItemPayload(
+                    trace_id=logged_joint_data.trace_id,
+                    data_type_name=joint_stream_binding.storage_name,
+                    value=value,
+                )
+            )
+
+    if batch_transport_stream is None or not batched_items:
+        return
+
+    batch_context = batch_transport_stream.get_recording_context()
+    batch_transport_channel = batch_transport_stream.get_producer_channel()
+    if batch_context is None or batch_transport_channel is None:
+        return
+
+    batch_transport_channel.send_batched_joint_data(
+        BatchedJointDataPayload(
+            recording_id=batch_context.recording_id,
+            timestamp=timestamp,
+            dataset_id=batch_context.dataset_id,
+            dataset_name=batch_context.dataset_name,
+            robot_name=batch_context.robot_name,
+            robot_id=batch_context.robot_id,
+            robot_instance=batch_context.robot_instance,
+            data_type=data_type,
+            items=batched_items,
+        )
+    )
 
 
 def _validate_extrinsics_intrinsics(

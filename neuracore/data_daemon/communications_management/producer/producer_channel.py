@@ -19,6 +19,7 @@ from neuracore.data_daemon.const import (
     DEFAULT_VIDEO_SLOT_SIZE,
 )
 from neuracore.data_daemon.models import (
+    BatchedJointDataPayload,
     CommandType,
     DataChunkPayload,
     DataType,
@@ -303,6 +304,13 @@ class ProducerChannel:
         self._send(
             CommandType.DATA_CHUNK,
             {"data_chunk": payload.to_dict()},
+        )
+
+    def send_batched_joint_data(self, payload: BatchedJointDataPayload) -> None:
+        """Send one explicit batched joint payload over the producer socket."""
+        self._send(
+            CommandType.BATCHED_JOINT_DATA,
+            {CommandType.BATCHED_JOINT_DATA.value: payload.to_dict()},
         )
 
     def send_data(

@@ -8,12 +8,14 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
+import json
 
 from neuracore_types import DataType
 
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path, utc_now
 from neuracore.data_daemon.models import (
+    BatchedJointDataPayload,
     CommandType,
     CompleteMessage,
     DataChunkPayload,
@@ -106,6 +108,7 @@ class DataBridge:
             CommandType.OPEN_FIXED_SHARED_SLOTS: self._handle_open_fixed_shared_slots,
             CommandType.SHARED_SLOT_DESCRIPTOR: self._handle_shared_slot_descriptor,
             CommandType.DATA_CHUNK: self._handle_write_data_chunk,
+            CommandType.BATCHED_JOINT_DATA: self._handle_batched_joint_data,
             CommandType.HEARTBEAT: self._handle_heartbeat,
             CommandType.TRACE_END: self._handle_end_trace,
         }
@@ -459,6 +462,66 @@ class DataBridge:
             data=completed.payload,
             recording_id=recording_id,
         )
+
+    def _handle_batched_joint_data(
+        self, channel: ChannelState, message: MessageEnvelope
+    ) -> None:
+        """Handle one batched joint transport message from a producer."""
+        batch_payload_dict = message.payload.get(CommandType.BATCHED_JOINT_DATA.value)
+        if batch_payload_dict is None:
+            batch_payload_dict = message.payload
+
+        batch_payload = BatchedJointDataPayload.from_dict(batch_payload_dict)
+        if not batch_payload.items:
+            logger.warning("BATCHED_JOINT_DATA received without items")
+            return
+
+        recording_id = batch_payload.recording_id
+        if not recording_id:
+            logger.warning(
+                "BATCHED_JOINT_DATA missing recording_id producer_id=%s",
+                channel.producer_id,
+            )
+            return
+
+        first_trace_id = batch_payload.items[0].trace_id
+        if self._should_drop_recording_data(
+            RecordingDataDropRequest(
+                channel=channel,
+                recording_id=recording_id,
+                trace_id=first_trace_id,
+                sequence_number=message.sequence_number,
+            )
+        ):
+            return
+
+        for item in batch_payload.items:
+            self._trace_lifecycle.register_trace(recording_id, item.trace_id)
+            self._trace_lifecycle.register_trace_metadata(
+                TraceMetadataRegistrationRequest(
+                    trace_id=item.trace_id,
+                    metadata=TraceMetadataSnapshot(
+                        dataset_id=batch_payload.dataset_id,
+                        dataset_name=batch_payload.dataset_name,
+                        robot_name=batch_payload.robot_name,
+                        robot_id=batch_payload.robot_id,
+                        robot_instance=batch_payload.robot_instance,
+                        data_type=batch_payload.data_type.value,
+                        data_type_name=item.data_type_name,
+                    ),
+                )
+            )
+            joint_bytes = json.dumps({
+                "timestamp": batch_payload.timestamp,
+                "value": item.value,
+            }).encode("utf-8")
+            self._on_complete_message(
+                channel=channel,
+                trace_id=item.trace_id,
+                data_type=batch_payload.data_type,
+                data=joint_bytes,
+                recording_id=recording_id,
+            )
 
     def _handle_end_trace(
         self,
