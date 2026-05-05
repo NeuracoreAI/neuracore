@@ -50,7 +50,6 @@ def run_episode(
     try:
         # Start neuracore recording if required
         if record:
-            assert dataset is not None
             dataset.start_recording()
 
         for step in demo._steps:
@@ -97,7 +96,6 @@ def run_episode(
     finally:
         # Clean up recording
         if record:
-            assert dataset is not None
             if success:
                 print("Episode successful → finalizing recording...")
                 dataset.stop_recording(wait=True)
@@ -163,8 +161,7 @@ def main(num_episodes: int, record: bool, recording_name: str, render: bool) -> 
 
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
-        if record:
-            assert dataset is not None
+        if dataset is not None:
             dataset.cancel_recording()
     finally:
         env.close()

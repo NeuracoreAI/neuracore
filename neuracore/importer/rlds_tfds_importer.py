@@ -216,10 +216,12 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         total_steps = self._infer_total_steps(steps)
         base_time = time.time()
         output_dataset = self.output_dataset
+        recording_dataset = None
         if not self.dry_run:
             if output_dataset is None:
                 raise ImportError("Worker dataset was not connected.")
-            output_dataset.start_recording(
+            recording_dataset = output_dataset
+            recording_dataset.start_recording(
                 robot_name=self.robot_name, instance=self._worker_id
             )
         episode_label = (
@@ -256,9 +258,8 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                 total_steps=total_steps,
                 episode_label=episode_label,
             )
-        if not self.dry_run:
-            assert output_dataset is not None
-            output_dataset.stop_recording(
+        if recording_dataset is not None:
+            recording_dataset.stop_recording(
                 robot_name=self.robot_name, instance=self._worker_id, wait=True
             )
         self.logger.info("[%s] Completed %s", worker_label, episode_label)

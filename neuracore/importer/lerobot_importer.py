@@ -147,10 +147,12 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             self.num_episodes,
         )
         output_dataset = self.output_dataset
+        recording_dataset = None
         if not self.dry_run:
             if output_dataset is None:
                 raise ImportError("Worker dataset was not connected.")
-            output_dataset.start_recording(
+            recording_dataset = output_dataset
+            recording_dataset.start_recording(
                 robot_name=self.robot_name, instance=self._worker_id
             )
         step_iter, total_steps = self._iter_episode_steps(self._dataset, episode_id)
@@ -184,9 +186,8 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 total_steps=total_steps,
                 episode_label=str(episode_id),
             )
-        if not self.dry_run:
-            assert output_dataset is not None
-            output_dataset.stop_recording(
+        if recording_dataset is not None:
+            recording_dataset.stop_recording(
                 robot_name=self.robot_name, instance=self._worker_id, wait=True
             )
         self.logger.info("[%s] Completed episode %s", worker_label, episode_id)
